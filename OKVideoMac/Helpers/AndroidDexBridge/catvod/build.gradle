@@ -1,0 +1,35 @@
+plugins {
+    id "com.android.library"
+}
+
+android {
+    namespace = "com.github.catvod.crawler"
+    compileSdk = 35
+
+    defaultConfig {
+        minSdk = 24
+        targetSdk = 35
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    api "androidx.annotation:annotation:1.9.1"
+    api "org.brotli:dec:0.1.2"
+    api "com.squareup.okhttp3:okhttp:5.1.0"
+    api "com.squareup.okhttp3:okhttp-dnsoverhttps:5.1.0"
+    api "com.squareup.okhttp3:logging-interceptor:5.1.0"
+    api "com.google.code.gson:gson:2.13.1"
+    api "com.google.guava:guava:33.4.8-android"
+    api "com.googlecode.juniversalchardet:juniversalchardet:1.0.3"
+    api "com.orhanobut:logger:2.2.0"
+    api "androidx.preference:preference:1.2.1"
+    api "com.github.thegrizzlylabs:sardine-android:0.9"
+    api "com.hierynomus:smbj:0.14.0"
+    api "androidx.startup:startup-runtime:1.2.0"
+    api "com.google.zxing:core:3.5.3"
+}

@@ -1,0 +1,25 @@
+{
+  "sites": [
+    {
+      "key": "string",
+      "name": "String ext",
+      "type": 3,
+      "api": "./fixture.js",
+      "ext": "text"
+    },
+    {
+      "key": "object",
+      "name": "Object ext",
+      "type": 3,
+      "api": "./fixture.js",
+      "ext": {"token": "fixture"}
+    },
+    {
+      "key": "array",
+      "name": "Array ext",
+      "type": 3,
+      "api": "./fixture.js",
+      "ext": [1, true, null]
+    }
+  ]
+}

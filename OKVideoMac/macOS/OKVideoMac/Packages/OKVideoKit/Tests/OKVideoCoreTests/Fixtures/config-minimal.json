@@ -1,0 +1,11 @@
+{
+  "sites": [
+    {
+      "key": "fixture",
+      "name": "合法测试站点",
+      "type": 1,
+      "api": "https://example.invalid/api"
+    }
+  ]
+}
+

@@ -1,0 +1,17 @@
+{
+  "sites": [
+    {
+      "key": "same",
+      "name": "First",
+      "type": 1,
+      "api": "https://example.invalid/one"
+    },
+    {
+      "key": "same",
+      "name": "Second",
+      "type": 1,
+      "api": "https://example.invalid/two"
+    }
+  ]
+}
+

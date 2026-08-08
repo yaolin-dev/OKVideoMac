@@ -1,0 +1,13 @@
+.DS_Store
+.swiftpm/
+.build/
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+*.profraw
+OKVideoMac/Reference/FongMiTV/
+OKVideoMac/Releases/**/*.zip
+OKVideoMac/macOS/OKVideoMac/Vendor/Build/
+OKVideoMac/macOS/OKVideoMac/Artifacts/
+OKVideoMac/macOS/OKVideoMac/.xcodegen/

@@ -1,0 +1,53 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace = "com.okvideomac.dexbridge"
+    compileSdk = 35
+
+    defaultConfig {
+        applicationId = "com.okvideomac.dexbridge"
+        minSdk = 24
+        // Guard packages used by TVBox/FongMi discover the current Activity
+        // through ActivityThread.mActivities. Android blocks that legacy
+        // reflection for apps targeting API 28+, which leaves their account
+        // dialogs with a null Context. Keep compiling with the current SDK,
+        // but declare the compatibility level expected by those packages.
+        targetSdk = 27
+        versionCode = 26
+        versionName = "0.3.14"
+    }
+
+    buildTypes {
+        release {
+            // Keep the existing signing identity so install -r upgrades the
+            // bridge without deleting the user's cloud-drive login data.
+            signingConfig signingConfigs.debug
+            debuggable false
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    packaging {
+        resources {
+            excludes += "/META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        }
+    }
+
+    // This helper is bundled inside the macOS app and installed only into its
+    // private emulator. It is not distributed through Google Play, so the
+    // store-only target-SDK lint rule does not apply.
+    lint {
+        disable += "ExpiredTargetSdkVersion"
+    }
+}
+
+dependencies {
+    implementation project(":catvod")
+}

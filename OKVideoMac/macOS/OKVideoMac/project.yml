@@ -1,0 +1,184 @@
+name: OKVideoMac
+options:
+  minimumXcodeGenVersion: 2.38.0
+  developmentLanguage: zh-Hans
+  deploymentTarget:
+    macOS: "12.0"
+  createIntermediateGroups: true
+
+packages:
+  OKVideoKit:
+    path: Packages/OKVideoKit
+
+settings:
+  base:
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: true
+    MACOSX_DEPLOYMENT_TARGET: "12.0"
+    SWIFT_VERSION: "5.7"
+    CLANG_ENABLE_MODULES: true
+    MARKETING_VERSION: 0.3.20
+    CURRENT_PROJECT_VERSION: 32
+
+targets:
+  OKVideoMac:
+    type: application
+    platform: macOS
+    deploymentTarget: "12.0"
+    sources:
+      - path: App
+      - path: Features
+      - path: Engines
+      - path: Player
+      - path: Resources
+        buildPhase: resources
+      - path: ../../LICENSE
+        buildPhase: resources
+      - path: ../../NOTICE.md
+        buildPhase: resources
+      - path: Docs/THIRD_PARTY_LICENSES.md
+        buildPhase: resources
+      - path: Docs/LEGAL_AND_SECURITY.md
+        buildPhase: resources
+    info:
+      path: Supporting/Info.plist
+      properties:
+        CFBundleDisplayName: OK影视 Mac
+        CFBundleName: OKVideoMac
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSApplicationCategoryType: public.app-category.entertainment
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        NSHumanReadableCopyright: "Copyright © 2026 OKVideoMac contributors"
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: FongMi Configuration
+            CFBundleTypeRole: Editor
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - public.json
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: com.okvideomac.configuration
+            UTTypeDescription: FongMi Configuration
+            UTTypeConformsTo:
+              - public.json
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - json
+    entitlements:
+      path: Supporting/OKVideoMac.entitlements
+    postBuildScripts:
+      - name: Embed Android Java/Dex bridge
+        script: |
+          BRIDGE_APK="${SRCROOT}/../../Helpers/AndroidDexBridge/app/build/outputs/apk/release/app-release.apk"
+          if [[ -f "${BRIDGE_APK}" ]]; then
+            RESOURCES_DIR="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
+            mkdir -p "${RESOURCES_DIR}"
+            cp "${BRIDGE_APK}" "${RESOURCES_DIR}/AndroidDexBridge-release.apk"
+          fi
+      - name: Embed optional libmpv runtime
+        script: |
+          BUILD_ROOT="${OKVIDEOMAC_BUILD_ROOT:-/Volumes/XcodeDev/OKVideoMacBuild}"
+          MPV_ROOT="${BUILD_ROOT}/libmpv"
+          if [[ ! -d "${MPV_ROOT}" ]]; then
+            MPV_ROOT="${SRCROOT}/Vendor/Build/libmpv"
+          fi
+          MPV_SOURCE="$(find "${MPV_ROOT}" -name 'libmpv*.dylib' -type f | head -n 1)"
+          MPV_BRIDGE="${MPV_ROOT}/lib/libOKMPVBridge.dylib"
+          if [[ -n "${MPV_SOURCE}" && -f "${MPV_BRIDGE}" ]]; then
+            FRAMEWORKS_DIR="${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}"
+            LICENSES_DIR="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/Licenses"
+            mkdir -p "${FRAMEWORKS_DIR}"
+            mkdir -p "${LICENSES_DIR}"
+            cp "${MPV_SOURCE}" "${FRAMEWORKS_DIR}/libmpv.dylib"
+            cp "${MPV_BRIDGE}" "${FRAMEWORKS_DIR}/libOKMPVBridge.dylib"
+            cp "${MPV_ROOT}/licenses/"* "${LICENSES_DIR}/"
+          fi
+      - name: Embed optional QuickJS runtime
+        script: |
+          BUILD_ROOT="${OKVIDEOMAC_BUILD_ROOT:-/Volumes/XcodeDev/OKVideoMacBuild}"
+          QUICKJS_ROOT="${BUILD_ROOT}/QuickJS"
+          if [[ ! -d "${QUICKJS_ROOT}" ]]; then
+            QUICKJS_ROOT="${SRCROOT}/Vendor/Build/QuickJS"
+          fi
+          QUICKJS_SOURCE="${QUICKJS_ROOT}/lib/libOKQuickJS.dylib"
+          if [[ -f "${QUICKJS_SOURCE}" ]]; then
+            FRAMEWORKS_DIR="${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}"
+            LICENSES_DIR="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/Licenses"
+            QUICKJS_DESTINATION="${FRAMEWORKS_DIR}/libOKQuickJS.dylib"
+            SIGN_IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY:--}"
+            if [[ -z "${SIGN_IDENTITY}" ]]; then
+              SIGN_IDENTITY="-"
+            fi
+            mkdir -p "${FRAMEWORKS_DIR}"
+            mkdir -p "${LICENSES_DIR}"
+            rm -f "${QUICKJS_DESTINATION}"
+            cp "${QUICKJS_SOURCE}" "${QUICKJS_DESTINATION}"
+            /usr/bin/codesign --force --sign "${SIGN_IDENTITY}" --timestamp=none "${QUICKJS_DESTINATION}"
+            cp "${QUICKJS_ROOT}/LICENSE" "${LICENSES_DIR}/QuickJS-MIT.txt"
+          fi
+      - name: Embed optional Node runtime
+        script: |
+          NODE_SOURCE="${OKVIDEOMAC_NODE_RUNTIME:-/opt/homebrew/opt/node@22-direct/bin/node}"
+          NODE_ROOT="$(cd "$(dirname "${NODE_SOURCE}")/.." 2>/dev/null && pwd || true)"
+          if [[ -x "${NODE_SOURCE}" ]]; then
+            RESOURCES_DIR="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
+            NODE_DIR="${RESOURCES_DIR}/NodeRuntime"
+            LICENSES_DIR="${RESOURCES_DIR}/Licenses"
+            SIGN_IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY:--}"
+            if [[ -z "${SIGN_IDENTITY}" ]]; then
+              SIGN_IDENTITY="-"
+            fi
+            mkdir -p "${NODE_DIR}" "${LICENSES_DIR}"
+            cp "${NODE_SOURCE}" "${NODE_DIR}/node"
+            chmod 755 "${NODE_DIR}/node"
+            /usr/bin/codesign --force --sign "${SIGN_IDENTITY}" --timestamp=none "${NODE_DIR}/node"
+            if [[ -f "${NODE_ROOT}/LICENSE" ]]; then
+              cp "${NODE_ROOT}/LICENSE" "${LICENSES_DIR}/Node.js-LICENSE.txt"
+            fi
+          fi
+    dependencies:
+      - package: OKVideoKit
+        product: OKVideoCore
+      - package: OKVideoKit
+        product: OKVideoPersistence
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.okvideomac.OKVideoMac
+        PRODUCT_NAME: OKVideoMac
+        GENERATE_INFOPLIST_FILE: false
+        CODE_SIGN_STYLE: Automatic
+      configs:
+        Debug:
+          ENABLE_HARDENED_RUNTIME: false
+        Release:
+          ENABLE_HARDENED_RUNTIME: true
+
+  OKVideoMacTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "12.0"
+    sources:
+      - path: Tests
+    dependencies:
+      - target: OKVideoMac
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.okvideomac.OKVideoMacTests
+        GENERATE_INFOPLIST_FILE: true
+
+schemes:
+  OKVideoMac:
+    build:
+      targets:
+        OKVideoMac: all
+        OKVideoMacTests: [test]
+    test:
+      gatherCoverageData: true
+      targets:
+        - OKVideoMacTests
+    run:
+      config: Debug
+    archive:
+      config: Release

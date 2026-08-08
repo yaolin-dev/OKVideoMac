@@ -1,0 +1,53 @@
+"About %@" = "关于 %@";
+"Settings…" = "设置…";
+"Services" = "服务";
+"Hide %@" = "隐藏 %@";
+"Hide Others" = "隐藏其他应用";
+"Show All" = "全部显示";
+"Quit %@" = "退出 %@";
+"Quit and Keep Windows" = "退出并保留窗口";
+
+"File" = "文件";
+"New Window" = "新建窗口";
+"Close" = "关闭窗口";
+"Close All" = "全部关闭";
+
+"Edit" = "编辑";
+"Undo" = "撤销";
+"Redo" = "重做";
+"Cut" = "剪切";
+"Copy" = "复制";
+"Paste" = "粘贴";
+"Delete" = "删除";
+"Select All" = "全选";
+"AutoFill" = "自动填充";
+"Start Dictation" = "开始听写";
+"Emoji & Symbols" = "表情与符号";
+
+"View" = "显示";
+"Show Tab Bar" = "显示标签页栏";
+"Hide Tab Bar" = "隐藏标签页栏";
+"Show All Tabs" = "显示所有标签页";
+"Enter Full Screen" = "进入全屏幕";
+"Exit Full Screen" = "退出全屏幕";
+
+"Window" = "窗口";
+"Minimize" = "最小化";
+"Minimize All" = "全部最小化";
+"Zoom" = "缩放";
+"Zoom All" = "全部缩放";
+"Tile Window to Left of Screen" = "将窗口平铺到屏幕左侧";
+"Move Window to Left Side of Screen" = "将窗口移到屏幕左侧";
+"Tile Window to Right of Screen" = "将窗口平铺到屏幕右侧";
+"Move Window to Right Side of Screen" = "将窗口移到屏幕右侧";
+"Replace Tiled Window" = "替换平铺窗口";
+"Remove Window from Set" = "从窗口组中移除";
+"Bring All to Front" = "前置全部窗口";
+"Arrange in Front" = "前置排列";
+"Show Previous Tab" = "显示上一个标签页";
+"Show Next Tab" = "显示下一个标签页";
+"Move Tab to New Window" = "将标签页移到新窗口";
+"Merge All Windows" = "合并所有窗口";
+
+"Help" = "帮助";
+"%@ Help" = "%@ 帮助";
