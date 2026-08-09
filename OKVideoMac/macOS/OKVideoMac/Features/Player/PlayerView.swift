@@ -82,7 +82,7 @@ struct PlayerView: View {
                         utilityPanel(activeUtilityPanel)
                     }
                 }
-                .padding(.trailing, 26)
+                .padding(.trailing, 18)
                 .padding(.bottom, 82)
                 .transition(
                     .opacity.combined(with: .move(edge: .bottom))
@@ -541,28 +541,33 @@ struct PlayerView: View {
                 .frame(height: 2)
             }
 
-            HStack(spacing: 12) {
-                HStack(spacing: 10) {
-                    volumeControls
-                    Text(
-                        "\(formatTime(displayedPosition)) / "
-                            + formatTime(state.playerSnapshot.duration)
-                    )
-                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                    .foregroundColor(.white.opacity(0.94))
-                    .shadow(color: .black.opacity(0.48), radius: 2, y: 1)
-                    .lineLimit(1)
-                }
-                .frame(minWidth: 230, alignment: .leading)
+            ZStack {
+                HStack(spacing: 12) {
+                    HStack(spacing: 10) {
+                        volumeControls
+                        Text(
+                            "\(formatTime(displayedPosition)) / "
+                                + formatTime(state.playerSnapshot.duration)
+                        )
+                        .font(
+                            .system(size: 12, weight: .semibold)
+                            .monospacedDigit()
+                        )
+                        .foregroundColor(.white.opacity(0.94))
+                        .shadow(color: .black.opacity(0.48), radius: 2, y: 1)
+                        .lineLimit(1)
+                    }
+                    .frame(minWidth: 230, alignment: .leading)
 
-                Spacer(minLength: 8)
+                    Spacer(minLength: 8)
+                    utilityControls
+                }
+
                 transportControls
-                Spacer(minLength: 8)
-                utilityControls
             }
         }
         .foregroundColor(.white)
-        .frame(maxWidth: 1_520)
+        .frame(maxWidth: .infinity)
         .padding(.horizontal, 2)
         .padding(.top, 1)
         .environment(\.colorScheme, .dark)
