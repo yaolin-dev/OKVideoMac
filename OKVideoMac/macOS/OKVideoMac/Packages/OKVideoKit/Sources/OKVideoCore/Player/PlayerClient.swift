@@ -49,6 +49,8 @@ public struct PlayerSnapshot: Equatable {
     public var isMuted: Bool
     public var speed: Double
     public var tracks: [MediaTrack]
+    public var videoWidth: Int
+    public var videoHeight: Int
 
     public init(
         status: PlayerStatus = .idle,
@@ -59,7 +61,9 @@ public struct PlayerSnapshot: Equatable {
         volume: Double = 100,
         isMuted: Bool = false,
         speed: Double = 1,
-        tracks: [MediaTrack] = []
+        tracks: [MediaTrack] = [],
+        videoWidth: Int = 0,
+        videoHeight: Int = 0
     ) {
         self.status = status
         self.position = position
@@ -70,6 +74,8 @@ public struct PlayerSnapshot: Equatable {
         self.isMuted = isMuted
         self.speed = speed
         self.tracks = tracks
+        self.videoWidth = max(0, videoWidth)
+        self.videoHeight = max(0, videoHeight)
     }
 }
 

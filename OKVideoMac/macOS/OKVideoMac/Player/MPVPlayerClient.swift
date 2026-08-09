@@ -158,6 +158,8 @@ final class MPVPlayerClient: PlayerClient {
                     self.snapshot.duration = 0
                     self.snapshot.bufferedPercent = 0
                     self.snapshot.networkSpeedBytesPerSecond = 0
+                    self.snapshot.videoWidth = 0
+                    self.snapshot.videoHeight = 0
                     self.snapshot.status = .loading
                     self.emitSnapshot()
                     try self.command(
@@ -752,7 +754,9 @@ final class MPVPlayerClient: PlayerClient {
             (9, "idle-active", NativeFormat.flag),
             (10, "track-list", 0),
             (11, "cache-speed", NativeFormat.int64),
-            (12, "eof-reached", NativeFormat.flag)
+            (12, "eof-reached", NativeFormat.flag),
+            (13, "dwidth", NativeFormat.int64),
+            (14, "dheight", NativeFormat.int64)
         ]
         for (identifier, name, format) in observations {
             try name.withCString { pointer in
@@ -914,6 +918,10 @@ final class MPVPlayerClient: PlayerClient {
             snapshot.isMuted = event.flagValue != 0
         case "speed":
             snapshot.speed = event.doubleValue
+        case "dwidth":
+            snapshot.videoWidth = max(0, Int(event.int64Value))
+        case "dheight":
+            snapshot.videoHeight = max(0, Int(event.int64Value))
         case "idle-active":
             if event.flagValue != 0, !isReplacingMedia {
                 switch snapshot.status {

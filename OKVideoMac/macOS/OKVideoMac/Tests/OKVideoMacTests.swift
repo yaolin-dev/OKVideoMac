@@ -1030,6 +1030,7 @@ final class OKVideoMacTests: XCTestCase {
         toolbar.isVisible = true
         window.titleVisibility = .visible
         window.titlebarAppearsTransparent = false
+        let originalContentAspectRatio = window.contentAspectRatio
 
         let coordinator = PlayerWindowConfigurator.Coordinator(onRestore: {})
         coordinator.attach(to: window)
@@ -1038,6 +1039,20 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))
         XCTAssertFalse(toolbar.isVisible)
         XCTAssertEqual(window.titleVisibility, .hidden)
+
+        coordinator.configure(
+            isLivePlayback: false,
+            controlsVisible: false,
+            title: "琅琊榜 · 第 23 集",
+            videoAspectRatio: 16.0 / 9.0
+        )
+        await drainMainQueue()
+        XCTAssertTrue(window.standardWindowButton(.closeButton)?.isHidden ?? false)
+        XCTAssertEqual(
+            window.contentAspectRatio.width / window.contentAspectRatio.height,
+            16.0 / 9.0,
+            accuracy: 0.001
+        )
 
         coordinator.configure(
             isLivePlayback: true,
@@ -1073,6 +1088,7 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(toolbar.isVisible)
         XCTAssertEqual(window.titleVisibility, .visible)
         XCTAssertFalse(window.titlebarAppearsTransparent)
+        XCTAssertEqual(window.contentAspectRatio, originalContentAspectRatio)
     }
 
     @MainActor

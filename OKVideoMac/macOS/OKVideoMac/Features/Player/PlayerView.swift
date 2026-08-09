@@ -71,10 +71,30 @@ struct PlayerView: View {
                 .environment(\.colorScheme, .dark)
             }
 
+            if !state.isLivePlayback,
+               controlsVisible,
+               let activeUtilityPanel {
+                VStack {
+                    Spacer(minLength: 24)
+                    HStack {
+                        Spacer(minLength: 24)
+                        utilityPanel(activeUtilityPanel)
+                    }
+                }
+                .padding(.trailing, 26)
+                .padding(.bottom, 82)
+                .transition(
+                    .opacity.combined(with: .move(edge: .bottom))
+                )
+                .zIndex(50)
+                .environment(\.colorScheme, .dark)
+            }
+
             PlayerWindowConfigurator(
                 isLivePlayback: state.isLivePlayback,
                 controlsVisible: controlsVisible,
                 title: playbackDisplayTitle,
+                videoAspectRatio: playerVideoAspectRatio,
                 onRestore: onWindowChromeRestored
             )
                 .frame(width: 0, height: 0)
@@ -349,6 +369,23 @@ struct PlayerView: View {
         return contentTitle
     }
 
+    private var playerVideoAspectRatio: Double? {
+        if let override = state.playerAspectRatio {
+            let parts = override.split(separator: ":")
+            if parts.count == 2,
+               let width = Double(parts[0]),
+               let height = Double(parts[1]),
+               width > 0,
+               height > 0 {
+                return width / height
+            }
+        }
+        let width = state.playerSnapshot.videoWidth
+        let height = state.playerSnapshot.videoHeight
+        guard width > 0, height > 0 else { return nil }
+        return Double(width) / Double(height)
+    }
+
     private func episodePanelDisplayName(
         _ presentation: EpisodePresentation
     ) -> String {
@@ -472,16 +509,18 @@ struct PlayerView: View {
                 }
             }
             .foregroundColor(.white)
-            .padding(.horizontal, 28)
-            .padding(.vertical, 24)
-            .background(.ultraThinMaterial)
-            .background(Color.black.opacity(0.34))
-            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .padding(.horizontal, 22)
+            .padding(.vertical, 18)
+            .frame(maxWidth: 500)
+            .background(
+                Color.black.opacity(0.22),
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            )
             .overlay {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.white.opacity(0.07), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.white.opacity(0.045), lineWidth: 1)
             }
-            .shadow(color: .black.opacity(0.24), radius: 18, y: 7)
+            .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
         }
     }
 
@@ -529,17 +568,6 @@ struct PlayerView: View {
         .frame(maxWidth: 1_520)
         .padding(.horizontal, 2)
         .padding(.top, 1)
-        .overlay(alignment: .bottomTrailing) {
-            if let activeUtilityPanel {
-                utilityPanel(activeUtilityPanel)
-                    .padding(.trailing, 6)
-                    .padding(.bottom, 54)
-                    .transition(
-                        .opacity.combined(with: .move(edge: .bottom))
-                    )
-                    .zIndex(20)
-            }
-        }
         .environment(\.colorScheme, .dark)
         .contentShape(Rectangle())
         .onHover { inside in
@@ -806,18 +834,19 @@ struct PlayerView: View {
                 if presentations.isEmpty {
                     panelEmptyState("暂无分集")
                 } else {
-                    ScrollView {
-                        LazyVGrid(
-                            columns: [
-                                GridItem(
-                                    .adaptive(minimum: 82, maximum: 118),
-                                    spacing: 8
-                                )
-                            ],
-                            alignment: .leading,
-                            spacing: 8
-                        ) {
-                            ForEach(presentations) { presentation in
+                    ScrollViewReader { proxy in
+                        ScrollView(.vertical, showsIndicators: true) {
+                            LazyVGrid(
+                                columns: [
+                                    GridItem(
+                                        .adaptive(minimum: 82, maximum: 118),
+                                        spacing: 8
+                                    )
+                                ],
+                                alignment: .leading,
+                                spacing: 8
+                            ) {
+                                ForEach(presentations) { presentation in
                                 let selected = presentation.id
                                     == state.currentPlayerEpisodeID
                                 Button {
@@ -865,6 +894,16 @@ struct PlayerView: View {
                                 .buttonStyle(.plain)
                                 .disabled(selected)
                                 .help(presentation.originalName)
+                                .id(presentation.id)
+                                }
+                            }
+                        }
+                        .onAppear {
+                            guard let selected = state.currentPlayerEpisodeID else {
+                                return
+                            }
+                            DispatchQueue.main.async {
+                                proxy.scrollTo(selected, anchor: .center)
                             }
                         }
                     }
@@ -1870,6 +1909,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
     let isLivePlayback: Bool
     let controlsVisible: Bool
     let title: String
+    let videoAspectRatio: Double?
     let onRestore: () -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -1883,7 +1923,8 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             context.coordinator.configure(
                 isLivePlayback: isLivePlayback,
                 controlsVisible: controlsVisible,
-                title: title
+                title: title,
+                videoAspectRatio: videoAspectRatio
             )
         }
         return view
@@ -1898,7 +1939,8 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
         context.coordinator.configure(
             isLivePlayback: isLivePlayback,
             controlsVisible: controlsVisible,
-            title: title
+            title: title,
+            videoAspectRatio: videoAspectRatio
         )
     }
 
@@ -1914,6 +1956,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             let isLivePlayback: Bool
             let controlsVisible: Bool
             let title: String
+            let videoAspectRatio: Double?
         }
 
         private weak var window: NSWindow?
@@ -1926,6 +1969,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
         private var acceptsMouseMovedEvents = false
         private var titlebarSeparatorStyle: NSTitlebarSeparatorStyle = .automatic
         private var windowTitle = ""
+        private var contentAspectRatio = NSSize(width: 0, height: 0)
         private var closeButtonWasHidden = false
         private var miniaturizeButtonWasHidden = false
         private var zoomButtonWasHidden = false
@@ -1959,6 +2003,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             acceptsMouseMovedEvents = newWindow.acceptsMouseMovedEvents
             titlebarSeparatorStyle = newWindow.titlebarSeparatorStyle
             windowTitle = newWindow.title
+            contentAspectRatio = newWindow.contentAspectRatio
             closeButtonWasHidden = newWindow.standardWindowButton(
                 .closeButton
             )?.isHidden ?? false
@@ -1972,20 +2017,23 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             configure(
                 isLivePlayback: false,
                 controlsVisible: true,
-                title: newWindow.title
+                title: newWindow.title,
+                videoAspectRatio: nil
             )
         }
 
         func configure(
             isLivePlayback: Bool,
             controlsVisible: Bool,
-            title: String
+            title: String,
+            videoAspectRatio: Double? = nil
         ) {
             guard let window else { return }
             let configuration = AppliedConfiguration(
                 isLivePlayback: isLivePlayback,
                 controlsVisible: controlsVisible,
-                title: title
+                title: title,
+                videoAspectRatio: videoAspectRatio
             )
             guard configuration != desiredConfiguration else { return }
             desiredConfiguration = configuration
@@ -2028,12 +2076,17 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                     window.titlebarAppearsTransparent = true
                     window.titleVisibility = .hidden
                     window.isMovableByWindowBackground = true
-                    if configuration.isLivePlayback {
+                    if !configuration.controlsVisible {
                         setStandardWindowButtonsHidden(true, on: window)
                     } else {
                         restoreStandardWindowButtonVisibility(on: window)
                     }
                 }
+            }
+            if let ratio = configuration.videoAspectRatio,
+               ratio.isFinite,
+               ratio > 0 {
+                window.contentAspectRatio = NSSize(width: ratio, height: 1)
             }
             appliedConfiguration = configuration
             Self.markWindowForRefresh(window)
@@ -2052,6 +2105,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             let savedAcceptsMouseMovedEvents = acceptsMouseMovedEvents
             let savedTitlebarSeparatorStyle = titlebarSeparatorStyle
             let savedWindowTitle = windowTitle
+            let savedContentAspectRatio = contentAspectRatio
             let savedCloseButtonWasHidden = closeButtonWasHidden
             let savedMiniaturizeButtonWasHidden = miniaturizeButtonWasHidden
             let savedZoomButtonWasHidden = zoomButtonWasHidden
@@ -2087,6 +2141,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                 window.acceptsMouseMovedEvents = savedAcceptsMouseMovedEvents
                 window.titlebarSeparatorStyle = savedTitlebarSeparatorStyle
                 window.title = savedWindowTitle
+                window.contentAspectRatio = savedContentAspectRatio
                 window.standardWindowButton(.closeButton)?.isHidden =
                     savedCloseButtonWasHidden
                 window.standardWindowButton(.miniaturizeButton)?.isHidden =
