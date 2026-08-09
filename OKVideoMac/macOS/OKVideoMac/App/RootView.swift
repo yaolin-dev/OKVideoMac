@@ -51,11 +51,11 @@ struct RootView: View {
             if let detail = state.selectedDetail {
                 DetailView(detail: detail)
                     .environmentObject(state)
-                    .frame(minWidth: 720, minHeight: 520)
+                    .frame(minWidth: 820, minHeight: 600)
             } else if let summary = state.pendingDetailSummary {
                 DetailLoadingView(summary: summary)
                     .environmentObject(state)
-                    .frame(minWidth: 720, minHeight: 520)
+                    .frame(minWidth: 820, minHeight: 600)
             }
         }
         .overlay {

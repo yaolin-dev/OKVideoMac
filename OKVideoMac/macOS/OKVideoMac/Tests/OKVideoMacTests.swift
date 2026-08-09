@@ -5,6 +5,114 @@ import OKVideoPersistence
 @testable import OKVideoMac
 
 final class OKVideoMacTests: XCTestCase {
+    func testEpisodeNameParserUsesRealSeasonAndEpisodeNumber() {
+        let episode = PlayEpisode(
+            name: "[1.3GB]Nirvana.in.Fire.S01E14.2015.2160p.mkv",
+            url: "https://media.example.invalid/episode-14.mkv"
+        )
+
+        let presentation = EpisodeNameParser.presentation(for: episode)
+
+        XCTAssertEqual(presentation.seasonNumber, 1)
+        XCTAssertEqual(presentation.episodeNumber, 14)
+        XCTAssertEqual(presentation.displayName, "第 1 季 · 第 14 集")
+    }
+
+    func testEpisodeNameParserDoesNotInferNumberFromSourcePosition() {
+        let episodes = [
+            PlayEpisode(name: "S01E14", url: "episode-14"),
+            PlayEpisode(name: "幕后制作", url: "behind-the-scenes"),
+            PlayEpisode(name: "S01E15", url: "episode-15")
+        ]
+
+        let values = EpisodeListPresentation.presentations(
+            from: episodes,
+            query: "",
+            sortOrder: .sourceOrder
+        )
+
+        XCTAssertEqual(values.map(\.episodeNumber), [14, nil, 15])
+        XCTAssertEqual(values[1].displayName, "幕后制作")
+        XCTAssertFalse(values[1].displayName.contains("第 2 集"))
+    }
+
+    func testEpisodeNameParserRecognizesFilenameSuffixAndPreservesSpecials() {
+        let numbered = EpisodeNameParser.presentation(
+            for: PlayEpisode(name: "琅琊榜_23.mp4", url: "episode-23")
+        )
+        let special = EpisodeNameParser.presentation(
+            for: PlayEpisode(name: "琅琊榜.SP01.花絮.mkv", url: "special")
+        )
+
+        XCTAssertEqual(numbered.episodeNumber, 23)
+        XCTAssertEqual(numbered.displayName, "第 23 集")
+        XCTAssertNil(special.episodeNumber)
+        XCTAssertTrue(special.isSpecial)
+        XCTAssertEqual(special.displayName, "琅琊榜.SP01.花絮")
+    }
+
+    func testEpisodeNameParserDoesNotTreatOrdinaryTrailingNumberAsEpisode() {
+        let presentation = EpisodeNameParser.presentation(
+            for: PlayEpisode(name: "Mader - Pa's Kitchen 1", url: "track")
+        )
+
+        XCTAssertNil(presentation.episodeNumber)
+        XCTAssertEqual(presentation.displayName, "Mader - Pa's Kitchen 1")
+    }
+
+    func testEpisodeNameParserDoesNotTreatFilenameYearAsEpisode() {
+        let presentation = EpisodeNameParser.presentation(
+            for: PlayEpisode(name: "The.Movie.2026.mp4", url: "movie")
+        )
+
+        XCTAssertNil(presentation.episodeNumber)
+        XCTAssertEqual(presentation.displayName, "The.Movie.2026")
+    }
+
+    func testEpisodeNameParserPreservesNamedSpecialEvenWithEpisodeCode() {
+        let presentation = EpisodeNameParser.presentation(
+            for: PlayEpisode(name: "S01E14 特别篇.mkv", url: "special")
+        )
+
+        XCTAssertNil(presentation.episodeNumber)
+        XCTAssertTrue(presentation.isSpecial)
+        XCTAssertEqual(presentation.displayName, "S01E14 特别篇")
+    }
+
+    func testEpisodeSortingKeepsUnknownResourcesInSourceOrder() {
+        let episodes = [
+            PlayEpisode(name: "E15", url: "15"),
+            PlayEpisode(name: "预告片", url: "preview"),
+            PlayEpisode(name: "E14", url: "14"),
+            PlayEpisode(name: "幕后花絮", url: "behind")
+        ]
+
+        let sorted = EpisodeListPresentation.presentations(
+            from: episodes,
+            query: "",
+            sortOrder: .episodeAscending
+        )
+
+        XCTAssertEqual(sorted.map(\.episodeNumber), [14, 15, nil, nil])
+        XCTAssertEqual(Array(sorted.suffix(2).map(\.originalName)), ["预告片", "幕后花絮"])
+    }
+
+    func testEpisodeRangesUseActualEpisodeNumbers() {
+        let episodes = (14...54).map {
+            PlayEpisode(name: "E\($0)", url: "episode-\($0)")
+        }
+        let values = EpisodeListPresentation.presentations(
+            from: episodes,
+            query: "",
+            sortOrder: .sourceOrder
+        )
+
+        let ranges = EpisodeListPresentation.rangeOptions(from: values)
+
+        XCTAssertEqual(ranges.first?.title, "14–33 集")
+        XCTAssertFalse(ranges.first?.title.contains("1–20") ?? true)
+    }
+
     func testPlayerSeekPolicyKeepsProgressTargetInMediaBounds() {
         XCTAssertEqual(
             PlayerSeekPolicy.target(requested: 90, duration: 120),

@@ -2,6 +2,20 @@ import XCTest
 @testable import OKVideoCore
 
 final class SiteProviderTests: XCTestCase {
+    func testPlayListParserNeverInventsEpisodeNumbersFromArrayPosition() {
+        let sources = PlayListParser.parse(
+            sourceNames: "主线路",
+            sourceEpisodes: "https://media.example.invalid/S01E14.mkv#https://media.example.invalid/behind-the-scenes.mkv"
+        )
+
+        XCTAssertEqual(sources.first?.episodes.map(\.name), [
+            "S01E14.mkv",
+            "behind-the-scenes.mkv"
+        ])
+        XCTAssertFalse(sources.first?.episodes[0].name.contains("第 1 集") ?? true)
+        XCTAssertFalse(sources.first?.episodes[1].name.contains("第 2 集") ?? true)
+    }
+
     func testJSONHomeCategoryAndDetailMapping() async throws {
         let client = RecordingHTTPClient { request in
             let query = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? []

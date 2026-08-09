@@ -562,22 +562,38 @@ public enum PlayListParser {
                 name = "线路 \(index + 1)"
             }
             let rawGroup = index < episodeGroups.count ? episodeGroups[index] : ""
-            let episodes = rawGroup.components(separatedBy: "#").enumerated().compactMap {
-                episodeIndex, raw -> PlayEpisode? in
+            let episodes = rawGroup.components(separatedBy: "#").compactMap {
+                raw -> PlayEpisode? in
                 guard !raw.isEmpty else { return nil }
                 if let separator = raw.firstIndex(of: "$") {
                     let episodeName = String(raw[..<separator])
                     let url = String(raw[raw.index(after: separator)...])
                     guard !url.isEmpty else { return nil }
                     return PlayEpisode(
-                        name: episodeName.isEmpty ? "第 \(episodeIndex + 1) 集" : episodeName,
+                        name: episodeName.isEmpty ? fallbackName(from: url) : episodeName,
                         url: url
                     )
                 }
-                return PlayEpisode(name: "第 \(episodeIndex + 1) 集", url: raw)
+                return PlayEpisode(name: fallbackName(from: raw), url: raw)
             }
             return episodes.isEmpty ? nil : PlaySource(name: name, episodes: episodes)
         }
+    }
+
+    private static func fallbackName(from reference: String) -> String {
+        let decoded = reference.removingPercentEncoding ?? reference
+        if let components = URLComponents(string: decoded),
+           let url = components.url,
+           !url.lastPathComponent.isEmpty {
+            return url.lastPathComponent
+        }
+        let withoutQuery = decoded.components(separatedBy: "?").first ?? decoded
+        let withoutFragment = withoutQuery.components(separatedBy: "#").first ?? withoutQuery
+        if let last = withoutFragment.split(separator: "/").last, !last.isEmpty {
+            return String(last)
+        }
+        let trimmed = withoutFragment.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "未命名资源" : trimmed
     }
 }
 
