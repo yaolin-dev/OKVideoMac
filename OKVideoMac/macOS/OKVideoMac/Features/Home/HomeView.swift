@@ -12,63 +12,20 @@ struct HomeView: View {
             if state.isHomeSearchPresented {
                 SearchView()
             } else {
-                VStack(spacing: 0) {
-                    homeSearchBar
-                    Divider()
-                    homeContent
-                }
+                homeContent
             }
         }
         .navigationTitle("首页")
         .background(AppSurfacePalette.background.ignoresSafeArea())
-    }
-
-    private var homeSearchBar: some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
-                TextField("搜索所有已启用站点", text: $state.searchKeyword)
-                    .textFieldStyle(.plain)
-                    .focused($isSearchFieldFocused)
-                    .onSubmit(performSearch)
-                if !state.searchKeyword.isEmpty {
-                    Button {
-                        state.searchKeyword = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("清空")
+        .toolbar {
+            ToolbarItemGroup {
+                if !state.isHomeSearchPresented,
+                   state.activeConfiguration != nil,
+                   !state.visibleSites.isEmpty {
+                    homeToolbarControls
                 }
             }
-            .padding(.horizontal, 11)
-            .frame(maxWidth: 520, minHeight: 34)
-            .background(Color(nsColor: .textBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.secondary.opacity(0.22))
-            }
-
-            Button("搜索", action: performSearch)
-                .buttonStyle(.borderedProminent)
-                .disabled(
-                    state.activeConfiguration == nil
-                        || state.searchKeyword
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                            .isEmpty
-                )
-
-            Text("跨站搜索")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Spacer()
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(AppSurfacePalette.background)
     }
 
     @ViewBuilder
@@ -89,11 +46,7 @@ struct HomeView: View {
                     message: "当前配置没有可用站点，或所有站点都被隐藏。"
                 )
         } else {
-                VStack(spacing: 0) {
-                    sitePicker
-                    Divider()
-                    content
-                }
+            content
         }
     }
 
@@ -107,9 +60,10 @@ struct HomeView: View {
         state.searchFromHome(keyword)
     }
 
-    private var sitePicker: some View {
-        HStack {
-            Text("站点")
+    @ViewBuilder
+    private var homeToolbarControls: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "network")
                 .foregroundColor(.secondary)
             Picker(
                 "站点",
@@ -119,40 +73,46 @@ struct HomeView: View {
                 )
             ) {
                 ForEach(state.visibleSites) { site in
-                    Text(siteLabel(site)).tag(site.key)
+                    Text(
+                        HomeSitePresentation.displayName(
+                            siteName: site.name,
+                            capability: state.siteCapability(for: site.key)
+                        )
+                    )
+                    .tag(site.key)
                 }
             }
             .labelsHidden()
-            .frame(maxWidth: 260)
-            Spacer()
-            Text("\(state.visibleSites.count) 个站点 · \(state.supportedSites.count) 个当前可运行")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            if let count = state.siteHome?.recommendations.count {
-                Text("\(count) 项")
-                    .foregroundColor(.secondary)
-            }
+            .frame(width: 210)
         }
-        .padding()
-    }
+        .help("选择内容站点，共 \(state.visibleSites.count) 个")
 
-    private func siteLabel(_ site: SiteConfiguration) -> String {
-        switch state.siteCapability(for: site.key) {
-        case .javaScriptSpider:
-            return "\(site.name) · JavaScript"
-        case .javaDexSpider:
-            return "\(site.name) · Java/Dex"
-        case .standardXML:
-            return "\(site.name) · XML"
-        case .standardJSON:
-            return "\(site.name) · JSON"
-        case .base64JSON:
-            return "\(site.name) · T4"
-        case .unsupportedSpider:
-            return "\(site.name) · Java/Dex（暂未实现）"
-        case .none:
-            return "\(site.name) · 未知"
+        TextField("搜索全部站点", text: $state.searchKeyword)
+            .textFieldStyle(.roundedBorder)
+            .focused($isSearchFieldFocused)
+            .onSubmit(performSearch)
+            .frame(minWidth: 190, idealWidth: 280, maxWidth: 360)
+
+        Button(action: performSearch) {
+            Label("搜索", systemImage: "magnifyingglass")
         }
+        .disabled(
+            state.searchKeyword
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty
+        )
+
+        if state.isLoading || state.isHomeLoading {
+            ProgressView()
+                .controlSize(.small)
+        }
+
+        Button {
+            Task { await state.refreshHome() }
+        } label: {
+            Label("刷新", systemImage: "arrow.clockwise")
+        }
+        .disabled(state.currentSite == nil)
     }
 
     @ViewBuilder
@@ -161,8 +121,8 @@ struct HomeView: View {
            state.siteCapability(for: key) == .unsupportedSpider {
             EmptyStateView(
                 systemImage: "shippingbox",
-                title: "该站点需要 Java/Dex Spider",
-                message: "站点已完整保留并显示，但当前原生 Mac 版本尚未实现 Android 的 Java/Dex 运行时。请选择标有“JavaScript”的站点。"
+                title: "该站点暂不可用",
+                message: "当前 Mac 版本暂时无法运行这个站点，请从工具栏选择其他站点。"
             )
         } else if let home = state.siteHome {
             if home.recommendations.isEmpty && home.categories.isEmpty {
@@ -184,7 +144,11 @@ struct HomeView: View {
                                             filterSelection = [:]
                                             state.clearCategory()
                                         }
-                                        .buttonStyle(.bordered)
+                                        .buttonStyle(
+                                            HomeCategoryButtonStyle(
+                                                isSelected: state.selectedCategoryID == nil
+                                            )
+                                        )
                                         ForEach(home.categories) { category in
                                             Button(category.name) {
                                                 filterSelection = Dictionary(
@@ -202,11 +166,10 @@ struct HomeView: View {
                                                     )
                                                 }
                                             }
-                                            .buttonStyle(.bordered)
-                                            .tint(
-                                                state.selectedCategoryID == category.id
-                                                    ? .accentColor
-                                                    : .secondary
+                                            .buttonStyle(
+                                                HomeCategoryButtonStyle(
+                                                    isSelected: state.selectedCategoryID == category.id
+                                                )
                                             )
                                         }
                                     }
@@ -313,5 +276,48 @@ struct HomeView: View {
                 }
             }
         }
+    }
+}
+
+enum HomeSitePresentation {
+    static func displayName(
+        siteName: String,
+        capability: SiteCapability?
+    ) -> String {
+        capability == .unsupportedSpider
+            ? "\(siteName)（暂不可用）"
+            : siteName
+    }
+}
+
+private struct HomeCategoryButtonStyle: ButtonStyle {
+    let isSelected: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
+            .foregroundColor(isSelected ? .white : .primary)
+            .padding(.horizontal, 13)
+            .padding(.vertical, 6)
+            .background(
+                isSelected
+                    ? Color.accentColor
+                    : Color(nsColor: .controlBackgroundColor)
+            )
+            .clipShape(Capsule())
+            .overlay {
+                Capsule()
+                    .stroke(
+                        isSelected
+                            ? Color.accentColor
+                            : Color.secondary.opacity(0.18),
+                        lineWidth: 1
+                    )
+            }
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .animation(
+                .easeOut(duration: 0.12),
+                value: configuration.isPressed
+            )
     }
 }

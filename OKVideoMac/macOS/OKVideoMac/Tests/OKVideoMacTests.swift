@@ -1139,6 +1139,30 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testHomeSiteNamesHideExecutionBackendDetails() {
+        XCTAssertEqual(
+            HomeSitePresentation.displayName(
+                siteName: "豆瓣首页",
+                capability: .javaScriptSpider
+            ),
+            "豆瓣首页"
+        )
+        XCTAssertEqual(
+            HomeSitePresentation.displayName(
+                siteName: "影视站点",
+                capability: .javaDexSpider
+            ),
+            "影视站点"
+        )
+        XCTAssertEqual(
+            HomeSitePresentation.displayName(
+                siteName: "等待迁移",
+                capability: .unsupportedSpider
+            ),
+            "等待迁移（暂不可用）"
+        )
+    }
+
     private func videoSummary(id: String) -> VideoSummary {
         VideoSummary(
             siteKey: "fixture",

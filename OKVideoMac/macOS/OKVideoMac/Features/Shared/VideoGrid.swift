@@ -12,30 +12,87 @@ struct VideoGrid: View {
     var body: some View {
         LazyVGrid(columns: columns, alignment: .leading, spacing: 20) {
             ForEach(items) { item in
-                Button {
+                VideoCard(item: item) {
                     onSelect(item)
-                } label: {
-                    VStack(alignment: .leading, spacing: 7) {
-                        VideoPosterView(item: item)
-                        Text(item.title)
-                            .font(.headline)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                        if let remarks = VideoCardMetadata.secondaryText(
-                            from: item.remarks
-                        ) {
-                            Text(remarks)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
-                        }
-                    }
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("\(item.title)，来源 \(item.siteName)")
             }
         }
+    }
+}
+
+private struct VideoCard: View {
+    let item: VideoSummary
+    let onSelect: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            VStack(alignment: .leading, spacing: 7) {
+                VideoPosterView(item: item)
+                    .overlay {
+                        if isHovering {
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(Color.accentColor.opacity(0.72), lineWidth: 1.5)
+                        }
+                    }
+
+                Text(item.title)
+                    .font(.headline)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: 38,
+                        alignment: .topLeading
+                    )
+
+                Text(
+                    secondaryText ?? " "
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .opacity(
+                    secondaryText == nil ? 0 : 1
+                )
+                .accessibilityHidden(secondaryText == nil)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .padding(8)
+            .background {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(
+                        isHovering
+                            ? Color(nsColor: .controlBackgroundColor)
+                            : Color.clear
+                    )
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(
+                        isHovering
+                            ? Color.secondary.opacity(0.18)
+                            : Color.clear,
+                        lineWidth: 1
+                    )
+            }
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(isHovering ? 1.018 : 1)
+        .shadow(
+            color: .black.opacity(isHovering ? 0.18 : 0),
+            radius: isHovering ? 10 : 0,
+            y: isHovering ? 5 : 0
+        )
+        .zIndex(isHovering ? 1 : 0)
+        .animation(.easeOut(duration: 0.16), value: isHovering)
+        .onHover { isHovering = $0 }
+        .help(item.title)
+        .accessibilityLabel("\(item.title)，来源 \(item.siteName)")
+    }
+
+    private var secondaryText: String? {
+        VideoCardMetadata.secondaryText(from: item.remarks)
     }
 }
 
@@ -96,11 +153,14 @@ struct VideoPosterView: View {
                     from: item.remarks
                 ) {
                     Text(rating)
-                        .font(.headline.weight(.bold))
+                        .font(.caption.weight(.bold))
                         .monospacedDigit()
                         .foregroundColor(.white)
-                        .shadow(color: .black, radius: 2)
-                        .padding(8)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .background(Color.black.opacity(0.72))
+                        .clipShape(Capsule())
+                        .padding(7)
                         .accessibilityLabel("评分 \(rating)")
                 }
             }
