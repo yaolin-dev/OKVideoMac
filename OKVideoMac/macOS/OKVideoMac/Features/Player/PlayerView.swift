@@ -14,11 +14,12 @@ struct PlayerView: View {
     @State private var pendingVolume: Double?
     @State private var isVolumeEditing = false
     @State private var volumeCommandTask: Task<Void, Never>?
+    @State private var activeUtilityPanel: PlayerUtilityPanel?
     let onWindowChromeRestored: () -> Void
 
     private let speeds: [Double] = [0.5, 0.75, 1, 1.25, 1.5, 2]
-    private let utilityIconSize: CGFloat = 22
-    private let utilityButtonSize: CGFloat = 44
+    private let utilityIconSize: CGFloat = 18
+    private let utilityButtonSize: CGFloat = 36
 
     var body: some View {
         ZStack {
@@ -54,24 +55,26 @@ struct PlayerView: View {
 
             if state.isLivePlayback {
                 livePlayerOverlay
+                    .environment(\.colorScheme, .dark)
             } else {
                 VStack(spacing: 0) {
                     floatingHeader
                     Spacer(minLength: 24)
                     floatingControls
                 }
-                .padding(.horizontal, 28)
-                .padding(.top, 14)
-                .padding(.bottom, 32)
+                .padding(.horizontal, 18)
+                .padding(.top, 12)
+                .padding(.bottom, 12)
                 .opacity(controlsVisible ? 1 : 0)
                 .offset(y: controlsVisible ? 0 : 12)
                 .allowsHitTesting(controlsVisible)
+                .environment(\.colorScheme, .dark)
             }
 
             PlayerWindowConfigurator(
                 isLivePlayback: state.isLivePlayback,
                 controlsVisible: controlsVisible,
-                title: state.currentPlaybackTitle,
+                title: playbackDisplayTitle,
                 onRestore: onWindowChromeRestored
             )
                 .frame(width: 0, height: 0)
@@ -80,15 +83,27 @@ struct PlayerView: View {
         .background(Color.black)
         .onAppear {
             revealControls()
+            Task {
+                await state.setPlayerControlsVisibleForSubtitleLayout(true)
+            }
         }
         .onDisappear {
             hideControlsTask?.cancel()
             volumeCommandTask?.cancel()
             volumeCommandTask = nil
             pendingVolume = nil
+            activeUtilityPanel = nil
+            Task {
+                await state.setPlayerControlsVisibleForSubtitleLayout(false)
+            }
         }
         .onChange(of: state.playerSnapshot.status) { _ in
             revealControls()
+        }
+        .onChange(of: controlsVisible) { visible in
+            Task {
+                await state.setPlayerControlsVisibleForSubtitleLayout(visible)
+            }
         }
         .animation(
             .easeInOut(duration: 0.22),
@@ -125,13 +140,13 @@ struct PlayerView: View {
             LinearGradient(
                 colors: [
                     Color.black.opacity(0),
-                    Color.black.opacity(0.18),
-                    Color.black.opacity(0.62)
+                    Color.black.opacity(0.08),
+                    Color.black.opacity(0.32)
                 ],
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .frame(height: 200)
+            .frame(height: 160)
         }
         .ignoresSafeArea()
         .allowsHitTesting(false)
@@ -247,14 +262,14 @@ struct PlayerView: View {
         .padding(.horizontal, 26)
         .padding(.vertical, 22)
         .frame(width: 560)
-        .background(Color.black.opacity(0.58))
+        .background(Color.black.opacity(0.28))
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(Color.white.opacity(0.08), lineWidth: 1)
         }
-        .shadow(color: .black.opacity(0.28), radius: 18, y: 8)
+        .shadow(color: .black.opacity(0.18), radius: 12, y: 5)
         .onHover { inside in
             controlsHovering = inside
             inside ? keepControlsVisible() : scheduleControlsHide()
@@ -313,15 +328,45 @@ struct PlayerView: View {
         .joined(separator: " · ")
     }
 
+    private var playbackDisplayTitle: String {
+        let contentTitle = state.currentPlaybackContentTitle?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let episode = state.currentPlaybackEpisode else {
+            return contentTitle?.isEmpty == false
+                ? contentTitle!
+                : state.currentPlaybackTitle
+        }
+
+        let presentation = EpisodeNameParser.presentation(for: episode)
+        guard let contentTitle, !contentTitle.isEmpty else {
+            return presentation.displayName
+        }
+        if presentation.seasonNumber != nil
+            || presentation.episodeNumber != nil
+            || presentation.isSpecial {
+            return "\(contentTitle) · \(presentation.displayName)"
+        }
+        return contentTitle
+    }
+
+    private func episodePanelDisplayName(
+        _ presentation: EpisodePresentation
+    ) -> String {
+        if let number = presentation.episodeNumber {
+            return "第 \(number) 集"
+        }
+        return presentation.displayName
+    }
+
     private var floatingHeader: some View {
         ZStack {
-            Text(state.currentPlaybackTitle)
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundColor(.white.opacity(0.96))
+            Text(playbackDisplayTitle)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(.white.opacity(0.92))
                 .lineLimit(1)
-                .frame(maxWidth: 820)
+                .frame(maxWidth: 760)
                 .truncationMode(.tail)
-                .shadow(color: .black.opacity(0.78), radius: 4, y: 1)
+                .shadow(color: .black.opacity(0.82), radius: 4, y: 1)
 
             HStack(spacing: 12) {
                 if state.playbackResolutionState != .playing {
@@ -342,6 +387,12 @@ struct PlayerView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(.white.opacity(0.96))
+                .background(.ultraThinMaterial, in: Circle())
+                .background(Color.black.opacity(0.16), in: Circle())
+                .overlay {
+                    Circle()
+                        .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                }
                 .help("退出播放")
             }
         }
@@ -372,7 +423,11 @@ struct PlayerView: View {
         .foregroundColor(.white.opacity(0.88))
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(Color.black.opacity(0.42))
+        .background(.ultraThinMaterial, in: Capsule())
+        .background(Color.black.opacity(0.20), in: Capsule())
+        .overlay {
+            Capsule().stroke(Color.white.opacity(0.06), lineWidth: 1)
+        }
         .clipShape(Capsule())
     }
 
@@ -419,25 +474,21 @@ struct PlayerView: View {
             .foregroundColor(.white)
             .padding(.horizontal, 28)
             .padding(.vertical, 24)
-            .background(Color.black.opacity(0.74))
+            .background(.ultraThinMaterial)
+            .background(Color.black.opacity(0.34))
             .clipShape(RoundedRectangle(cornerRadius: 16))
-            .shadow(color: .black.opacity(0.42), radius: 24, y: 10)
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.white.opacity(0.07), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.24), radius: 18, y: 7)
         }
     }
 
     private var floatingControls: some View {
-        VStack(spacing: 5) {
-            HStack(spacing: 14) {
-                volumeControls
-                    .frame(width: 142, alignment: .leading)
-
-                Spacer(minLength: 0)
-                transportControls
-                Spacer(minLength: 0)
-                utilityControls
-            }
-
+        VStack(spacing: 2) {
             progressControls
+                .padding(.horizontal, 3)
 
             if case .buffering = state.playerSnapshot.status {
                 ProgressView(
@@ -446,26 +497,49 @@ struct PlayerView: View {
                 )
                 .tint(playerAccentColor)
                 .controlSize(.mini)
+                .frame(height: 2)
+            }
+
+            HStack(spacing: 12) {
+                controlCapsule(horizontalPadding: 10) {
+                    HStack(spacing: 10) {
+                        volumeControls
+                        Text(
+                            "\(formatTime(displayedPosition)) / "
+                                + formatTime(state.playerSnapshot.duration)
+                        )
+                        .font(.system(size: 12).monospacedDigit())
+                        .foregroundColor(.white.opacity(0.82))
+                        .lineLimit(1)
+                    }
+                }
+                .frame(minWidth: 230, alignment: .leading)
+
+                Spacer(minLength: 8)
+                controlCapsule(horizontalPadding: 8) {
+                    transportControls
+                }
+                Spacer(minLength: 8)
+                controlCapsule(horizontalPadding: 7) {
+                    utilityControls
+                }
             }
         }
         .foregroundColor(.white)
-        .frame(maxWidth: 1_100)
-        .padding(.horizontal, 16)
-        .padding(.top, 9)
-        .padding(.bottom, 8)
-        .background {
-            ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color.black.opacity(0.30))
+        .frame(maxWidth: 1_520)
+        .padding(.horizontal, 2)
+        .padding(.top, 1)
+        .overlay(alignment: .bottomTrailing) {
+            if let activeUtilityPanel {
+                utilityPanel(activeUtilityPanel)
+                    .padding(.trailing, 6)
+                    .padding(.bottom, 54)
+                    .transition(
+                        .opacity.combined(with: .move(edge: .bottom))
+                    )
+                    .zIndex(20)
             }
         }
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.white.opacity(0.07), lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.30), radius: 18, y: 8)
         .environment(\.colorScheme, .dark)
         .contentShape(Rectangle())
         .onHover { inside in
@@ -474,36 +548,44 @@ struct PlayerView: View {
         }
     }
 
-    private var progressControls: some View {
-        HStack(spacing: 10) {
-            Text(formatTime(displayedPosition))
-                .monospacedDigit()
-                .frame(width: 46, alignment: .leading)
-
-            Slider(
-                value: Binding(
-                    get: { displayedPosition },
-                    set: { scrubPosition = $0 }
-                ),
-                in: 0...max(state.playerSnapshot.duration, 1),
-                onEditingChanged: { editing in
-                    if editing {
-                        keepControlsVisible()
-                    } else {
-                        commitScrubPosition()
-                        scheduleControlsHide()
-                    }
+    private func controlCapsule<Content: View>(
+        horizontalPadding: CGFloat,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        content()
+            .padding(.horizontal, horizontalPadding)
+            .padding(.vertical, 3)
+            .background {
+                ZStack {
+                    Capsule().fill(.ultraThinMaterial)
+                    Capsule().fill(Color.black.opacity(0.10))
                 }
-            )
-            .tint(playerAccentColor)
-            .controlSize(.small)
+            }
+            .overlay {
+                Capsule().stroke(Color.white.opacity(0.035), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.08), radius: 6, y: 2)
+    }
 
-            Text(formatTime(state.playerSnapshot.duration))
-                .monospacedDigit()
-                .frame(width: 46, alignment: .trailing)
-        }
-        .font(.system(size: 12).monospacedDigit())
-        .foregroundColor(.white.opacity(0.90))
+    private var progressControls: some View {
+        Slider(
+            value: Binding(
+                get: { displayedPosition },
+                set: { scrubPosition = $0 }
+            ),
+            in: 0...max(state.playerSnapshot.duration, 1),
+            onEditingChanged: { editing in
+                if editing {
+                    keepControlsVisible()
+                } else {
+                    commitScrubPosition()
+                    scheduleControlsHide()
+                }
+            }
+        )
+        .tint(playerAccentColor)
+        .controlSize(.mini)
+        .frame(height: 12)
     }
 
     private func commitScrubPosition() {
@@ -521,7 +603,7 @@ struct PlayerView: View {
     }
 
     private var volumeControls: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 7) {
             playerIconButton(
                 systemImage: state.playerSnapshot.isMuted
                     ? "speaker.slash.fill"
@@ -550,8 +632,8 @@ struct PlayerView: View {
                 }
             )
             .tint(.white)
-            .controlSize(.small)
-            .frame(width: 88)
+            .controlSize(.mini)
+            .frame(width: 76)
         }
     }
 
@@ -589,7 +671,7 @@ struct PlayerView: View {
     }
 
     private var transportControls: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 6) {
             playerIconButton(
                 systemImage: "backward.end.fill",
                 help: "上一集",
@@ -609,11 +691,11 @@ struct PlayerView: View {
                 Task { await state.togglePlayPause() }
             } label: {
                 Image(systemName: isPaused ? "play.fill" : "pause.fill")
-                    .font(.system(size: 24, weight: .semibold))
-                    .frame(width: 54, height: 54)
-                    .background(Color.white.opacity(0.96))
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 40, height: 40)
+                    .background(Color.white.opacity(0.90))
                     .clipShape(Circle())
-                    .shadow(color: .black.opacity(0.24), radius: 8, y: 3)
+                    .shadow(color: .black.opacity(0.18), radius: 5, y: 2)
             }
             .buttonStyle(.plain)
             .foregroundColor(Color.black.opacity(0.86))
@@ -638,22 +720,570 @@ struct PlayerView: View {
     }
 
     private var utilityControls: some View {
-        HStack(spacing: 12) {
-            episodeMenu
-            trackMenu(
-                systemImage: "waveform",
-                title: "音轨",
-                type: .audio,
-                emptyMessage: "没有可选音轨"
+        HStack(spacing: 3) {
+            utilityPanelButton(
+                systemImage: "list.bullet",
+                panel: .episodes,
+                help: "选择剧集"
             )
-            subtitleMenu
-            playbackOptionsMenu
+            utilityPanelButton(
+                systemImage: "waveform",
+                panel: .audio,
+                help: "音轨"
+            )
+            utilityPanelButton(
+                systemImage: "captions.bubble",
+                panel: .subtitles,
+                help: state.playerSubtitlesEnabled ? "字幕已开启" : "字幕已关闭"
+            )
+            utilityPanelButton(
+                systemImage: "gearshape",
+                panel: .settings,
+                help: "播放设置"
+            )
 
             playerIconButton(
                 systemImage: "arrow.up.left.and.arrow.down.right",
                 help: "全屏"
             ) {
                 toggleFullScreen()
+            }
+        }
+    }
+
+    private func utilityPanelButton(
+        systemImage: String,
+        panel: PlayerUtilityPanel,
+        help: String
+    ) -> some View {
+        let isActive = activeUtilityPanel == panel
+        return Button {
+            withAnimation(.easeInOut(duration: 0.16)) {
+                activeUtilityPanel = isActive ? nil : panel
+            }
+            keepControlsVisible()
+        } label: {
+            Image(systemName: systemImage)
+                .symbolRenderingMode(.monochrome)
+                .font(.system(size: utilityIconSize, weight: .regular))
+                .foregroundStyle(Color.white.opacity(isActive ? 1 : 0.88))
+                .frame(width: utilityButtonSize, height: utilityButtonSize)
+                .background(
+                    isActive ? playerAccentColor.opacity(0.48) : .clear,
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    @ViewBuilder
+    private func utilityPanel(_ panel: PlayerUtilityPanel) -> some View {
+        switch panel {
+        case .episodes:
+            episodePanel
+        case .audio:
+            audioTrackPanel
+        case .subtitles:
+            subtitlePanel
+        case .settings:
+            playbackSettingsPanel
+        }
+    }
+
+    private var episodePanel: some View {
+        let presentations = state.playerEpisodes.enumerated().map {
+            EpisodeNameParser.presentation(for: $0.element, sourceIndex: $0.offset)
+        }
+        return playerPanel(width: 500) {
+            VStack(alignment: .leading, spacing: 12) {
+                panelHeader(
+                    title: "选集",
+                    detail: "共 \(presentations.count) 集"
+                )
+
+                if presentations.isEmpty {
+                    panelEmptyState("暂无分集")
+                } else {
+                    ScrollView {
+                        LazyVGrid(
+                            columns: [
+                                GridItem(
+                                    .adaptive(minimum: 82, maximum: 118),
+                                    spacing: 8
+                                )
+                            ],
+                            alignment: .leading,
+                            spacing: 8
+                        ) {
+                            ForEach(presentations) { presentation in
+                                let selected = presentation.id
+                                    == state.currentPlayerEpisodeID
+                                Button {
+                                    activeUtilityPanel = nil
+                                    Task {
+                                        await state.playPlayerEpisode(
+                                            presentation.episode
+                                        )
+                                    }
+                                } label: {
+                                    VStack(spacing: 4) {
+                                        Text(
+                                            episodePanelDisplayName(
+                                                presentation
+                                            )
+                                        )
+                                            .font(.system(size: 13, weight: .medium))
+                                            .lineLimit(1)
+                                        if selected {
+                                            Image(systemName: "checkmark")
+                                                .font(.caption2.bold())
+                                        }
+                                    }
+                                    .foregroundColor(.white.opacity(selected ? 1 : 0.88))
+                                    .frame(maxWidth: .infinity, minHeight: 46)
+                                    .background(
+                                        selected
+                                            ? playerAccentColor.opacity(0.58)
+                                            : Color.white.opacity(0.055),
+                                        in: RoundedRectangle(
+                                            cornerRadius: 8,
+                                            style: .continuous
+                                        )
+                                    )
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .stroke(
+                                                Color.white.opacity(
+                                                    selected ? 0.16 : 0.055
+                                                ),
+                                                lineWidth: 1
+                                            )
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(selected)
+                                .help(presentation.originalName)
+                            }
+                        }
+                    }
+                    .frame(
+                        height: min(
+                            286,
+                            max(
+                                54,
+                                CGFloat(
+                                    ceil(Double(presentations.count) / 5.0)
+                                ) * 54
+                            )
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    private var audioTrackPanel: some View {
+        let tracks = state.playerSnapshot.tracks.filter { $0.type == .audio }
+        return playerPanel(width: 340) {
+            VStack(alignment: .leading, spacing: 10) {
+                panelHeader(title: "音轨", detail: "\(tracks.count) 条")
+                if tracks.isEmpty {
+                    panelEmptyState("没有可选音轨")
+                } else {
+                    ScrollView {
+                        VStack(spacing: 5) {
+                            ForEach(tracks) { track in
+                                panelSelectionButton(
+                                    title: trackLabel(track),
+                                    selected: track.isSelected
+                                ) {
+                                    Task { await state.selectPlayerTrack(track) }
+                                }
+                            }
+                        }
+                    }
+                    .frame(
+                        height: min(
+                            260,
+                            max(44, CGFloat(tracks.count) * 39)
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    private var subtitlePanel: some View {
+        let tracks = state.playerSnapshot.tracks.filter {
+            $0.type == .subtitle
+        }
+        return playerPanel(width: 360) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        panelHeader(title: "字幕", detail: "\(tracks.count) 条")
+                        Spacer()
+                        Toggle(
+                            "",
+                            isOn: Binding(
+                                get: { state.playerSubtitlesEnabled },
+                                set: { enabled in
+                                    guard enabled != state.playerSubtitlesEnabled else {
+                                        return
+                                    }
+                                    Task { await state.togglePlayerSubtitles() }
+                                }
+                            )
+                        )
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .disabled(tracks.isEmpty)
+                    }
+
+                    if tracks.isEmpty {
+                        panelEmptyState("没有内嵌字幕")
+                    } else {
+                        VStack(spacing: 5) {
+                            ForEach(tracks) { track in
+                                panelSelectionButton(
+                                    title: trackLabel(track),
+                                    selected: state.selectedPlayerSubtitleTrackID
+                                        == track.id
+                                ) {
+                                    Task { await state.selectPlayerTrack(track) }
+                                }
+                            }
+                        }
+                    }
+
+                    panelDivider
+                    Text("字幕设置")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.white.opacity(0.58))
+                    panelStepperRow(
+                        title: "大小",
+                        value: "\(Int(state.playerSubtitleScale * 100))%",
+                        decrease: {
+                            Task { await state.adjustPlayerSubtitleScale(by: -0.1) }
+                        },
+                        increase: {
+                            Task { await state.adjustPlayerSubtitleScale(by: 0.1) }
+                        }
+                    )
+                    panelStepperRow(
+                        title: "位置",
+                        value: "\(Int(state.playerSubtitlePosition))",
+                        decrease: {
+                            Task { await state.adjustPlayerSubtitlePosition(by: -5) }
+                        },
+                        increase: {
+                            Task { await state.adjustPlayerSubtitlePosition(by: 5) }
+                        }
+                    )
+                    panelStepperRow(
+                        title: "描边",
+                        value: String(format: "%.1f", state.playerSubtitleBorderSize),
+                        decrease: {
+                            Task { await state.adjustPlayerSubtitleBorderSize(by: -0.5) }
+                        },
+                        increase: {
+                            Task { await state.adjustPlayerSubtitleBorderSize(by: 0.5) }
+                        }
+                    )
+                    panelStepperRow(
+                        title: "延迟",
+                        value: String(format: "%.1f 秒", state.playerSubtitleDelay),
+                        decrease: {
+                            Task { await state.adjustPlayerSubtitleDelay(by: -0.5) }
+                        },
+                        increase: {
+                            Task { await state.adjustPlayerSubtitleDelay(by: 0.5) }
+                        }
+                    )
+
+                    panelDivider
+                    HStack(spacing: 8) {
+                        panelActionButton("恢复默认") {
+                            Task { await state.resetPlayerSubtitleSettings() }
+                        }
+                        panelActionButton("加载外部字幕…") {
+                            chooseSubtitle()
+                        }
+                    }
+                }
+            }
+            .frame(height: 420)
+        }
+    }
+
+    private var playbackSettingsPanel: some View {
+        playerPanel(width: 370) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    panelHeader(title: "播放设置", detail: nil)
+
+                    HStack {
+                        Text("自动播放下一集")
+                        Spacer()
+                        Toggle(
+                            "",
+                            isOn: Binding(
+                                get: { state.autoPlayNextEpisode },
+                                set: { enabled in
+                                    Task {
+                                        await state.setAutoPlayNextEpisode(enabled)
+                                    }
+                                }
+                            )
+                        )
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                    }
+
+                    if state.playbackQualities.count > 1 {
+                        panelDivider
+                        panelOptionGrid(
+                            title: "清晰度",
+                            values: state.playbackQualities.map { $0.name },
+                            selected: state.selectedPlaybackQualityName
+                        ) { selectedName in
+                            guard let quality = state.playbackQualities.first(
+                                where: { $0.name == selectedName }
+                            ) else { return }
+                            Task { await state.switchPlaybackQuality(quality) }
+                        }
+                    }
+
+                    panelDivider
+                    panelOptionGrid(
+                        title: "播放速度",
+                        values: speeds.map(formatPlaybackSpeed),
+                        selected: formatPlaybackSpeed(state.playerSnapshot.speed)
+                    ) { selectedSpeed in
+                        guard let index = speeds.map(formatPlaybackSpeed)
+                            .firstIndex(of: selectedSpeed) else { return }
+                        Task { await state.setPlayerSpeed(speeds[index]) }
+                    }
+
+                    panelOptionGrid(
+                        title: "画面比例",
+                        values: ["自动", "16:9", "4:3", "2.35:1"],
+                        selected: state.playerAspectRatio ?? "自动"
+                    ) { ratio in
+                        Task {
+                            await state.setPlayerAspectRatio(
+                                ratio == "自动" ? nil : ratio
+                            )
+                        }
+                    }
+
+                    HStack {
+                        Text("硬件解码")
+                        Spacer()
+                        Toggle(
+                            "",
+                            isOn: Binding(
+                                get: { state.playerHardwareDecoding },
+                                set: { _ in
+                                    Task { await state.togglePlayerHardwareDecoding() }
+                                }
+                            )
+                        )
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                    }
+
+                    panelStepperRow(
+                        title: "音频延迟",
+                        value: String(format: "%.1f 秒", state.playerAudioDelay),
+                        decrease: {
+                            Task { await state.adjustPlayerAudioDelay(by: -0.1) }
+                        },
+                        increase: {
+                            Task { await state.adjustPlayerAudioDelay(by: 0.1) }
+                        }
+                    )
+
+                    panelDivider
+                    panelActionButton("保存截图…") {
+                        chooseScreenshotLocation()
+                    }
+                }
+            }
+            .frame(height: 430)
+        }
+    }
+
+    private func playerPanel<Content: View>(
+        width: CGFloat,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        content()
+            .padding(14)
+            .frame(width: width)
+            .background {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color.black.opacity(0.38))
+                }
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.white.opacity(0.07), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.25), radius: 16, y: 6)
+            .environment(\.colorScheme, .dark)
+            .onHover { inside in
+                controlsHovering = inside
+                inside ? keepControlsVisible() : scheduleControlsHide()
+            }
+    }
+
+    private func panelHeader(title: String, detail: String?) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.system(size: 15, weight: .semibold))
+            if let detail {
+                Text("· \(detail)")
+                    .font(.system(size: 13))
+                    .foregroundColor(.white.opacity(0.58))
+            }
+        }
+        .foregroundColor(.white.opacity(0.92))
+    }
+
+    private func panelEmptyState(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 13))
+            .foregroundColor(.white.opacity(0.54))
+            .frame(maxWidth: .infinity, minHeight: 56)
+    }
+
+    private func panelSelectionButton(
+        title: String,
+        selected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 9) {
+                Image(systemName: selected ? "checkmark" : "circle")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(
+                        selected ? playerAccentColor : .white.opacity(0.22)
+                    )
+                    .frame(width: 14)
+                Text(title)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .font(.system(size: 13))
+            .foregroundColor(.white.opacity(selected ? 0.96 : 0.78))
+            .padding(.horizontal, 10)
+            .frame(height: 34)
+            .background(
+                selected ? Color.white.opacity(0.075) : .clear,
+                in: RoundedRectangle(cornerRadius: 7)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var panelDivider: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.08))
+            .frame(height: 1)
+    }
+
+    private func panelStepperRow(
+        title: String,
+        value: String,
+        decrease: @escaping () -> Void,
+        increase: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .foregroundColor(.white.opacity(0.76))
+            Spacer()
+            Text(value)
+                .foregroundColor(.white.opacity(0.56))
+                .monospacedDigit()
+            panelIconAction("minus", action: decrease)
+            panelIconAction("plus", action: increase)
+        }
+        .font(.system(size: 13))
+    }
+
+    private func panelIconAction(
+        _ systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.caption.bold())
+                .frame(width: 28, height: 26)
+                .background(
+                    Color.white.opacity(0.07),
+                    in: RoundedRectangle(cornerRadius: 6)
+                )
+        }
+        .buttonStyle(.plain)
+        .foregroundColor(.white.opacity(0.82))
+    }
+
+    private func panelActionButton(
+        _ title: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.white.opacity(0.82))
+                .padding(.horizontal, 10)
+                .frame(height: 30)
+                .background(
+                    Color.white.opacity(0.07),
+                    in: RoundedRectangle(cornerRadius: 7)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func panelOptionGrid(
+        title: String,
+        values: [String],
+        selected: String?,
+        action: @escaping (String) -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundColor(.white.opacity(0.58))
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 66), spacing: 6)],
+                spacing: 6
+            ) {
+                ForEach(values, id: \.self) { value in
+                    let isSelected = selected == value
+                    Button(value) { action(value) }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.white.opacity(isSelected ? 1 : 0.76))
+                        .frame(maxWidth: .infinity, minHeight: 28)
+                        .background(
+                            isSelected
+                                ? playerAccentColor.opacity(0.46)
+                                : Color.white.opacity(0.055),
+                            in: RoundedRectangle(cornerRadius: 6)
+                        )
+                }
             }
         }
     }
@@ -800,6 +1430,7 @@ struct PlayerView: View {
                     guard shouldAutoHideControls else { return }
                     withAnimation(.easeInOut(duration: 0.22)) {
                         controlsVisible = false
+                        activeUtilityPanel = nil
                     }
                     NSCursor.setHiddenUntilMouseMoves(true)
                 }
@@ -1091,6 +1722,13 @@ struct PlayerView: View {
             Task { await state.savePlayerScreenshot(to: url) }
         }
     }
+}
+
+private enum PlayerUtilityPanel: Equatable {
+    case episodes
+    case audio
+    case subtitles
+    case settings
 }
 
 private extension View {

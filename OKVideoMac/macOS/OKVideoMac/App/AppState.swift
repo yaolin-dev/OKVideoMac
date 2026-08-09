@@ -339,6 +339,7 @@ final class AppState: ObservableObject {
     private var isClosingPlayer = false
     private var prefersPlayerSubtitlesEnabled = false
     private var preferredPlayerSubtitleTrack: PlayerSubtitleTrackPreference?
+    private var playerControlsVisibleForSubtitleLayout = false
     private var playerStartedInFullScreen = false
     private var lastAutomaticConfigurationRefreshAttemptAt: Date?
     private var configurationRefreshTask: Task<Bool, Never>?
@@ -2542,11 +2543,32 @@ final class AppState: ObservableObject {
     func adjustPlayerSubtitlePosition(by offset: Double) async {
         let value = min(max(playerSubtitlePosition + offset, 0), 100)
         do {
-            try await environment?.player.setSubtitlePosition(value)
             playerSubtitlePosition = value
+            try await environment?.player.setSubtitlePosition(
+                effectivePlayerSubtitlePosition
+            )
         } catch {
             show(error, title: "字幕位置设置失败")
         }
+    }
+
+    func setPlayerControlsVisibleForSubtitleLayout(_ visible: Bool) async {
+        guard playerControlsVisibleForSubtitleLayout != visible else { return }
+        playerControlsVisibleForSubtitleLayout = visible
+        do {
+            try await environment?.player.setSubtitlePosition(
+                effectivePlayerSubtitlePosition
+            )
+        } catch {
+            // This is a temporary presentation adjustment. A failure should
+            // not interrupt playback or overwrite the user's saved setting.
+        }
+    }
+
+    private var effectivePlayerSubtitlePosition: Double {
+        playerControlsVisibleForSubtitleLayout
+            ? min(playerSubtitlePosition, 82)
+            : playerSubtitlePosition
     }
 
     func adjustPlayerSubtitleBorderSize(by offset: Double) async {
@@ -2563,11 +2585,13 @@ final class AppState: ObservableObject {
         do {
             try await environment?.player.setSubtitleDelay(0)
             try await environment?.player.setSubtitleScale(1)
-            try await environment?.player.setSubtitlePosition(100)
+            playerSubtitlePosition = 100
+            try await environment?.player.setSubtitlePosition(
+                effectivePlayerSubtitlePosition
+            )
             try await environment?.player.setSubtitleBorderSize(3)
             playerSubtitleDelay = 0
             playerSubtitleScale = 1
-            playerSubtitlePosition = 100
             playerSubtitleBorderSize = 3
         } catch {
             show(error, title: "字幕设置重置失败")
@@ -2807,6 +2831,15 @@ final class AppState: ObservableObject {
             return pendingPlayback.episode.name
         }
         return livePlaybackDisplayTitle
+    }
+
+    var currentPlaybackContentTitle: String? {
+        activePlayback?.detail.summary.title
+            ?? pendingPlayback?.detail.summary.title
+    }
+
+    var currentPlaybackEpisode: PlayEpisode? {
+        activePlayback?.episode ?? pendingPlayback?.episode
     }
 
     var isLivePlayback: Bool {
