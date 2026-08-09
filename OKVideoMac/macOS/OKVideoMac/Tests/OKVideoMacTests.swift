@@ -1017,6 +1017,15 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testPlayerWindowMutationsAreDeferredDuringLiveResize() {
+        XCTAssertFalse(
+            PlayerWindowMutationPolicy.canApply(isInLiveResize: true)
+        )
+        XCTAssertTrue(
+            PlayerWindowMutationPolicy.canApply(isInLiveResize: false)
+        )
+    }
+
     @MainActor
     func testPlayerWindowChromeRestoresWithoutClobberingWindowState() async {
         let window = NSWindow(

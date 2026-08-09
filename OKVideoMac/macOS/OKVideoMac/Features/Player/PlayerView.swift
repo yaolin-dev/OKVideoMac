@@ -1982,6 +1982,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
         private var appliedConfiguration: AppliedConfiguration?
         private var pendingWindowRefresh: DispatchWorkItem?
         private var fullScreenObservers: [NSObjectProtocol] = []
+        private var liveResizeObserver: NSObjectProtocol?
         var onRestore: () -> Void
         var onFullScreenChange: (Bool) -> Void
 
@@ -2002,6 +2003,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             restore()
             window = newWindow
             observeFullScreenChanges(for: newWindow)
+            observeLiveResizeEnd(for: newWindow)
             DispatchQueue.main.async { [weak self, weak newWindow] in
                 guard let self,
                       let newWindow,
@@ -2068,6 +2070,15 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                   desiredConfiguration == configuration else {
                 return
             }
+            // AppKit owns the window frame throughout a live resize. Mutating
+            // titlebar style, contentAspectRatio or display state from a
+            // SwiftUI update while that transaction is active can re-enter
+            // NSWindow's private resize path and terminate with SIGTRAP.
+            // Keep the desired configuration and apply it once AppKit posts
+            // didEndLiveResize instead.
+            guard PlayerWindowMutationPolicy.canApply(
+                isInLiveResize: window.inLiveResize
+            ) else { return }
 
             window.toolbar?.isVisible = false
             window.backgroundColor = .black
@@ -2106,7 +2117,13 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             if let ratio = configuration.videoAspectRatio,
                ratio.isFinite,
                ratio > 0 {
-                window.contentAspectRatio = NSSize(width: ratio, height: 1)
+                let targetAspectRatio = NSSize(width: ratio, height: 1)
+                if !Self.aspectRatiosMatch(
+                    window.contentAspectRatio,
+                    targetAspectRatio
+                ) {
+                    window.contentAspectRatio = targetAspectRatio
+                }
             }
             appliedConfiguration = configuration
             Self.markWindowForRefresh(window)
@@ -2117,6 +2134,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             pendingWindowRefresh?.cancel()
             pendingWindowRefresh = nil
             removeFullScreenObservers()
+            removeLiveResizeObserver()
             let savedHadFullSizeContentView = hadFullSizeContentView
             let savedTitlebarAppearsTransparent = titlebarAppearsTransparent
             let savedTitleVisibility = titleVisibility
@@ -2232,14 +2250,59 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             fullScreenObservers.removeAll()
         }
 
+        private func observeLiveResizeEnd(for window: NSWindow) {
+            removeLiveResizeObserver()
+            liveResizeObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didEndLiveResizeNotification,
+                object: window,
+                queue: .main
+            ) { [weak self, weak window] _ in
+                guard let self,
+                      let window,
+                      self.window === window,
+                      let configuration = self.desiredConfiguration,
+                      configuration != self.appliedConfiguration else {
+                    return
+                }
+                self.scheduleWindowConfiguration(configuration, for: window)
+            }
+        }
+
+        private func removeLiveResizeObserver() {
+            guard let liveResizeObserver else { return }
+            NotificationCenter.default.removeObserver(liveResizeObserver)
+            self.liveResizeObserver = nil
+        }
+
+        private static func aspectRatiosMatch(
+            _ lhs: NSSize,
+            _ rhs: NSSize
+        ) -> Bool {
+            guard lhs.width > 0,
+                  lhs.height > 0,
+                  rhs.width > 0,
+                  rhs.height > 0 else { return false }
+            return abs(
+                lhs.width / lhs.height - rhs.width / rhs.height
+            ) < 0.0001
+        }
+
         private static func markWindowForRefresh(_ window: NSWindow?) {
-            guard let window, let contentView = window.contentView else { return }
+            guard let window,
+                  !window.inLiveResize,
+                  let contentView = window.contentView else { return }
             contentView.needsLayout = true
             contentView.needsDisplay = true
             contentView.superview?.needsLayout = true
             contentView.superview?.needsDisplay = true
             window.invalidateCursorRects(for: contentView)
         }
+    }
+}
+
+enum PlayerWindowMutationPolicy {
+    static func canApply(isInLiveResize: Bool) -> Bool {
+        !isInLiveResize
     }
 }
 
