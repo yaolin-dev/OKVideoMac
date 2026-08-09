@@ -40,22 +40,14 @@ private struct VideoCard: View {
                     .font(.headline)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
-                    .frame(
-                        maxWidth: .infinity,
-                        minHeight: 38,
-                        alignment: .topLeading
-                    )
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
 
-                Text(
-                    secondaryText ?? " "
-                )
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .lineLimit(1)
-                .opacity(
-                    secondaryText == nil ? 0 : 1
-                )
-                .accessibilityHidden(secondaryText == nil)
+                if let secondaryText {
+                    Text(secondaryText)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
             }
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .padding(8)
