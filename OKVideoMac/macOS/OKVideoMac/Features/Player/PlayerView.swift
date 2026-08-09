@@ -16,6 +16,7 @@ struct PlayerView: View {
     @State private var volumeCommandTask: Task<Void, Never>?
     @State private var activeUtilityPanel: PlayerUtilityPanel?
     @State private var isWindowFullScreen = false
+    @State private var isProgressHovering = false
     let onWindowChromeRestored: () -> Void
 
     private let speeds: [Double] = [0.5, 0.75, 1, 1.25, 1.5, 2]
@@ -597,6 +598,20 @@ struct PlayerView: View {
         .tint(playerAccentColor)
         .controlSize(.mini)
         .frame(height: 12)
+        .scaleEffect(x: 1, y: isProgressHovering ? 1.55 : 1)
+        .shadow(
+            color: playerAccentColor.opacity(isProgressHovering ? 0.42 : 0),
+            radius: isProgressHovering ? 5 : 0
+        )
+        .animation(
+            .easeOut(duration: 0.16),
+            value: isProgressHovering
+        )
+        .contentShape(Rectangle().inset(by: -5))
+        .onHover { inside in
+            isProgressHovering = inside
+            inside ? keepControlsVisible() : scheduleControlsHide()
+        }
     }
 
     private func commitScrubPosition() {
