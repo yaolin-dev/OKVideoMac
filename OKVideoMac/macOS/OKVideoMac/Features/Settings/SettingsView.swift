@@ -386,6 +386,79 @@ struct SettingsView: View {
                 }
             }
 
+            SettingsSectionTitle("Android 兼容模块")
+            SettingsCard {
+                SettingsControlRow(
+                    icon: androidRuntimeIcon,
+                    color: androidRuntimeColor,
+                    title: state.androidRuntimeStatus.title,
+                    subtitle: state.androidRuntimeStatus.detail
+                ) {
+                    HStack(spacing: 8) {
+                        if state.isAndroidRuntimeBusy {
+                            if let progress = state.androidRuntimeStatus.progress {
+                                VStack(alignment: .trailing, spacing: 3) {
+                                    ProgressView(value: progress, total: 1)
+                                        .progressViewStyle(.linear)
+                                        .frame(width: 100)
+                                    Text("\(Int(progress * 100))%")
+                                        .font(.caption2.monospacedDigit())
+                                        .foregroundColor(.secondary)
+                                }
+                            } else {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                        }
+
+                        Button("检查") {
+                            Task { await state.refreshAndroidRuntimeStatus() }
+                        }
+                        .disabled(state.isAndroidRuntimeBusy)
+
+                        Button("修复") {
+                            Task { await state.repairAndroidRuntime() }
+                        }
+                        .disabled(
+                            state.isAndroidRuntimeBusy
+                                || state.androidRuntimeStatus.phase == .unavailable
+                        )
+
+                        if state.androidRuntimeStatus.isRunning {
+                            Button("停止", role: .destructive) {
+                                Task { await state.stopAndroidRuntime() }
+                            }
+                            .disabled(state.isAndroidRuntimeBusy)
+                        } else {
+                            Button("启动") {
+                                Task { await state.startAndroidRuntime() }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(
+                                state.isAndroidRuntimeBusy
+                                    || state.androidRuntimeStatus.phase == .unavailable
+                            )
+                        }
+                    }
+                }
+
+                SettingsDivider()
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(
+                        "该模块仅用于 Java/Dex 点播站点，普通播放和 JS 站点不需要它。",
+                        systemImage: "info.circle"
+                    )
+                    Text(
+                        "应用会复用现有的 OKVideoDexBridge 模拟器数据；"
+                            + "退出 OK影视时不会强制关闭，需要时可在此手动停止。"
+                    )
+                    .foregroundColor(.secondary)
+                }
+                .font(.caption)
+                .padding(16)
+            }
+
             SettingsSectionTitle("安全与范围")
             SettingsCard {
                 VStack(alignment: .leading, spacing: 8) {
@@ -398,6 +471,27 @@ struct SettingsView: View {
                 }
                 .padding(18)
             }
+        }
+        .task {
+            await state.refreshAndroidRuntimeStatus()
+        }
+    }
+
+    private var androidRuntimeIcon: String {
+        switch state.androidRuntimeStatus.phase {
+        case .running: return "checkmark.circle.fill"
+        case .starting, .checking, .stopping: return "hourglass"
+        case .failed, .unavailable: return "exclamationmark.triangle.fill"
+        case .stopped: return "power"
+        }
+    }
+
+    private var androidRuntimeColor: Color {
+        switch state.androidRuntimeStatus.phase {
+        case .running: return .green
+        case .starting, .checking, .stopping: return .orange
+        case .failed, .unavailable: return .red
+        case .stopped: return .secondary
         }
     }
 

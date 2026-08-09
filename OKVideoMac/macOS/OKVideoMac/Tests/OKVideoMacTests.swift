@@ -1629,6 +1629,33 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             "http://127.0.0.1:18988/spider/fixture/4/proxy/media?id=1"
         )
     }
+
+    func testApplicationAppearanceNamesCoverAllThemeChoices() {
+        XCTAssertNil(AppAppearanceController.appearanceName(for: .system))
+        XCTAssertEqual(
+            AppAppearanceController.appearanceName(for: .light),
+            .aqua
+        )
+        XCTAssertEqual(
+            AppAppearanceController.appearanceName(for: .dark),
+            .darkAqua
+        )
+    }
+
+    func testAndroidRuntimeStatusExposesManualControlStates() {
+        XCTAssertEqual(AndroidRuntimeStatus.stopped.phase, .stopped)
+        XCTAssertFalse(AndroidRuntimeStatus.stopped.isRunning)
+        XCTAssertEqual(AndroidRuntimeStatus.running.phase, .running)
+        XCTAssertTrue(AndroidRuntimeStatus.running.isRunning)
+
+        let starting = AndroidRuntimeStatus.starting(
+            "等待 Android 系统完成开机",
+            progress: 0.56
+        )
+        XCTAssertEqual(starting.phase, .starting)
+        XCTAssertEqual(starting.progress, 0.56)
+        XCTAssertTrue(starting.detail.contains("Android"))
+    }
 }
 
 private struct NodeProviderStubHTTPClient: HTTPClient {

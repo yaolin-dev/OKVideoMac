@@ -14,8 +14,13 @@ struct OKVideoMacApp: App {
             RootView()
                 .environmentObject(state)
                 .environment(\.imageRepository, state.imageRepository)
-                .preferredColorScheme(state.appTheme.colorScheme)
                 .frame(minWidth: 900, minHeight: 600)
+                .onAppear {
+                    AppAppearanceController.apply(state.appTheme)
+                }
+                .onChange(of: state.appTheme) { theme in
+                    AppAppearanceController.apply(theme)
+                }
                 .task {
                     await state.start()
                 }
@@ -270,12 +275,19 @@ final class MainMenuChineseLocalizer {
     }
 }
 
-private extension AppTheme {
-    var colorScheme: ColorScheme? {
-        switch self {
+enum AppAppearanceController {
+    static func appearanceName(for theme: AppTheme) -> NSAppearance.Name? {
+        switch theme {
         case .system: return nil
-        case .light: return .light
-        case .dark: return .dark
+        case .light: return .aqua
+        case .dark: return .darkAqua
+        }
+    }
+
+    @MainActor
+    static func apply(_ theme: AppTheme) {
+        NSApplication.shared.appearance = appearanceName(for: theme).flatMap {
+            NSAppearance(named: $0)
         }
     }
 }

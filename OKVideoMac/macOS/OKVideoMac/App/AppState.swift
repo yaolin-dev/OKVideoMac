@@ -313,6 +313,8 @@ final class AppState: ObservableObject {
     @Published var cloudAuthorizationPrompt: CloudAuthorizationPrompt?
     @Published var cloudAuthorizationInput = ""
     @Published private(set) var nodeWebPresentation: NodeWebPresentation?
+    @Published private(set) var androidRuntimeStatus: AndroidRuntimeStatus = .checking
+    @Published private(set) var isAndroidRuntimeBusy = false
 
     private let environment: AppEnvironment?
     private var providers: [String: SiteProvider] = [:]
@@ -2691,6 +2693,85 @@ final class AppState: ObservableObject {
             forInfoDictionaryKey: "CFBundleVersion"
         ) as? String ?? "1"
         return "\(version) (\(build))"
+    }
+
+    func refreshAndroidRuntimeStatus() async {
+        guard let environment else {
+            androidRuntimeStatus = .unavailable("应用运行环境未完成初始化")
+            return
+        }
+        androidRuntimeStatus = await environment.androidDexBridge.runtimeStatus()
+    }
+
+    func startAndroidRuntime() async {
+        guard let environment, !isAndroidRuntimeBusy else { return }
+        isAndroidRuntimeBusy = true
+        androidRuntimeStatus = .starting(
+            "准备启动 Android 兼容模块",
+            progress: 0
+        )
+        let progressTask = monitorAndroidRuntimeProgress(
+            environment.androidDexBridge
+        )
+        defer {
+            progressTask.cancel()
+            isAndroidRuntimeBusy = false
+        }
+        do {
+            androidRuntimeStatus = try await environment.androidDexBridge
+                .startRuntime()
+        } catch {
+            let message = LogRedactor.text(error.localizedDescription)
+            androidRuntimeStatus = .failed(message)
+            show(error, title: "Android 兼容模块启动失败")
+        }
+    }
+
+    func stopAndroidRuntime() async {
+        guard let environment, !isAndroidRuntimeBusy else { return }
+        isAndroidRuntimeBusy = true
+        androidRuntimeStatus = .stopping
+        androidRuntimeStatus = await environment.androidDexBridge.stopRuntime()
+        isAndroidRuntimeBusy = false
+    }
+
+    func repairAndroidRuntime() async {
+        guard let environment, !isAndroidRuntimeBusy else { return }
+        isAndroidRuntimeBusy = true
+        androidRuntimeStatus = .starting(
+            "准备重建端口映射并重新安装 Bridge",
+            progress: 0
+        )
+        let progressTask = monitorAndroidRuntimeProgress(
+            environment.androidDexBridge
+        )
+        defer {
+            progressTask.cancel()
+            isAndroidRuntimeBusy = false
+        }
+        do {
+            androidRuntimeStatus = try await environment.androidDexBridge
+                .repairRuntime()
+        } catch {
+            let message = LogRedactor.text(error.localizedDescription)
+            androidRuntimeStatus = .failed(message)
+            show(error, title: "Android 兼容模块修复失败")
+        }
+    }
+
+    private func monitorAndroidRuntimeProgress(
+        _ bridge: AndroidDexBridgeClient
+    ) -> Task<Void, Never> {
+        Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                let status = await bridge.runtimeStatus()
+                guard !Task.isCancelled else { return }
+                if status.phase == .starting || status.phase == .stopping {
+                    self?.androidRuntimeStatus = status
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
     }
 
     var playerStatusDescription: String {

@@ -550,6 +550,83 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
     }
 }
 
+enum AndroidRuntimePhase: Equatable {
+    case checking
+    case unavailable
+    case stopped
+    case starting
+    case running
+    case stopping
+    case failed
+}
+
+struct AndroidRuntimeStatus: Equatable {
+    let phase: AndroidRuntimePhase
+    let title: String
+    let detail: String
+    let progress: Double?
+
+    var isRunning: Bool { phase == .running }
+
+    static let checking = AndroidRuntimeStatus(
+        phase: .checking,
+        title: "正在检查",
+        detail: "正在检查 Android 兼容模块的运行状态",
+        progress: nil
+    )
+
+    static func unavailable(_ detail: String) -> AndroidRuntimeStatus {
+        AndroidRuntimeStatus(
+            phase: .unavailable,
+            title: "依赖不完整",
+            detail: detail,
+            progress: nil
+        )
+    }
+
+    static let stopped = AndroidRuntimeStatus(
+        phase: .stopped,
+        title: "已停止",
+        detail: "使用 Java/Dex 点播站点前请手动启动",
+        progress: nil
+    )
+
+    static func starting(
+        _ detail: String = "首次启动可能需要 1–4 分钟",
+        progress: Double = 0
+    ) -> AndroidRuntimeStatus {
+        AndroidRuntimeStatus(
+            phase: .starting,
+            title: "正在启动",
+            detail: detail,
+            progress: min(max(progress, 0), 1)
+        )
+    }
+
+    static let running = AndroidRuntimeStatus(
+        phase: .running,
+        title: "已运行",
+        detail: "Android Bridge 已就绪，Java/Dex 站点可以使用",
+        progress: 1
+    )
+
+    static let stopping = AndroidRuntimeStatus(
+        phase: .stopping,
+        title: "正在停止",
+        detail: "正在关闭 Android 模拟器",
+        progress: nil
+    )
+
+    static func failed(_ detail: String) -> AndroidRuntimeStatus {
+        AndroidRuntimeStatus(
+            phase: .failed,
+            title: "操作失败",
+            detail: detail,
+            progress: nil
+        )
+    }
+}
+
 final class AndroidDexBridgeClient {
     private struct Request: Encodable {
         let siteKey: String
@@ -583,6 +660,25 @@ final class AndroidDexBridgeClient {
         configuration.httpMaximumConnectionsPerHost = 20
         configuration.connectionProxyDictionary = [:]
         session = URLSession(configuration: configuration)
+    }
+
+    func runtimeStatus() async -> AndroidRuntimeStatus {
+        await runtime.status()
+    }
+
+    func startRuntime() async throws -> AndroidRuntimeStatus {
+        try await runtime.start()
+        return await runtime.status()
+    }
+
+    func stopRuntime() async -> AndroidRuntimeStatus {
+        await runtime.stop()
+        return await runtime.status()
+    }
+
+    func repairRuntime() async throws -> AndroidRuntimeStatus {
+        try await runtime.repair()
+        return await runtime.status()
     }
 
     func hostReachableProxyURL(_ rawURL: String) -> String {
@@ -960,6 +1056,9 @@ actor AndroidDexBridgeRuntime {
             "Library/Application Support/OKVideoMac/AndroidPlatformTools/adb"
         )
     private let avdHome = URL(fileURLWithPath: "/Volumes/XcodeDev/AndroidAVD")
+    private var avdDirectory: URL {
+        avdHome.appendingPathComponent("OKVideoDexBridge.avd")
+    }
     private let runtimeDirectory = URL(
         fileURLWithPath: "/Volumes/XcodeDev/OKVideoMacBuild/AndroidRuntimeApp",
         isDirectory: true
@@ -971,12 +1070,82 @@ actor AndroidDexBridgeRuntime {
     private var acceptsNewerBridge = false
     private var lastNetworkCheck: Date?
     private var readinessTask: Task<Void, Error>?
+    private var operationStatus: AndroidRuntimeStatus?
 
     private var adbExecutable: URL {
         if FileManager.default.isExecutableFile(atPath: compatibilityADB.path) {
             return compatibilityADB
         }
         return sdkRoot.appendingPathComponent("platform-tools/adb")
+    }
+
+    func status() async -> AndroidRuntimeStatus {
+        if let operationStatus {
+            return operationStatus
+        }
+        if await isHealthy(acceptVersionMismatch: true) {
+            ready = true
+            acceptsNewerBridge = true
+            lastNetworkCheck = Date()
+            return .running
+        }
+
+        ready = false
+        let adb = adbExecutable
+        let emulator = sdkRoot.appendingPathComponent("emulator/emulator")
+        guard FileManager.default.isExecutableFile(atPath: adb.path) else {
+            return .unavailable("ADB 不可用：\(adb.path)")
+        }
+        guard FileManager.default.isExecutableFile(atPath: emulator.path) else {
+            return .unavailable("Android Emulator 不可用：\(emulator.path)")
+        }
+        let configuration = avdDirectory.appendingPathComponent("config.ini")
+        guard FileManager.default.fileExists(atPath: configuration.path) else {
+            return .unavailable("缺少 OKVideoDexBridge 模拟器：\(avdHome.path)")
+        }
+        if (try? run(adb, ["-s", device, "get-state"])) != nil
+            || emulatorProcess?.isRunning == true {
+            return .starting("模拟器已启动，Bridge 服务尚未就绪", progress: 0.55)
+        }
+        return .stopped
+    }
+
+    func start() async throws {
+        try await ensureReady()
+    }
+
+    func repair() async throws {
+        ready = false
+        acceptsNewerBridge = false
+        lastNetworkCheck = nil
+        readinessTask?.cancel()
+        readinessTask = nil
+        try await prepareRuntime(forceInstall: true)
+    }
+
+    func stop() async {
+        operationStatus = .stopping
+        defer { operationStatus = nil }
+        readinessTask?.cancel()
+        readinessTask = nil
+        ready = false
+        acceptsNewerBridge = false
+        lastNetworkCheck = nil
+
+        let adb = adbExecutable
+        if FileManager.default.isExecutableFile(atPath: adb.path) {
+            _ = try? run(adb, ["-s", device, "emu", "kill"])
+            for _ in 0..<20 {
+                if (try? run(adb, ["-s", device, "get-state"])) == nil {
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
+        if emulatorProcess?.isRunning == true {
+            emulatorProcess?.terminate()
+        }
+        emulatorProcess = nil
     }
 
     func ensureReady() async throws {
@@ -1046,7 +1215,12 @@ actor AndroidDexBridgeRuntime {
         try await prepareRuntime()
     }
 
-    private func prepareRuntime() async throws {
+    private func prepareRuntime(forceInstall: Bool = false) async throws {
+        operationStatus = .starting(
+            "步骤 1/7：检查 Android 运行依赖",
+            progress: 0.03
+        )
+        defer { operationStatus = nil }
         let adb = adbExecutable
         let emulator = sdkRoot.appendingPathComponent("emulator/emulator")
         guard FileManager.default.isExecutableFile(atPath: adb.path),
@@ -1057,9 +1231,21 @@ actor AndroidDexBridgeRuntime {
         }
 
         if (try? run(adb, ["-s", device, "get-state"])) == nil {
+            operationStatus = .starting(
+                "步骤 2/7：启动 Android 模拟器",
+                progress: 0.10
+            )
             try launchEmulator(emulator)
         }
+        operationStatus = .starting(
+            "步骤 3/7：等待 Android 系统完成开机",
+            progress: 0.16
+        )
         try await waitForBoot(adb)
+        operationStatus = .starting(
+            "步骤 4/7：检查 Bridge 版本与端口",
+            progress: 0.56
+        )
         let installedVersionCode = installedBridgeVersionCode(adb)
         let hasNewerBridge = installedVersionCode.map {
             $0 > Self.bridgeVersionCode
@@ -1073,6 +1259,10 @@ actor AndroidDexBridgeRuntime {
         }
         try configurePortForwards(adb)
 
+        operationStatus = .starting(
+            "步骤 5/7：检查并修复模拟器网络",
+            progress: 0.66
+        )
         let networkWasRepaired: Bool
         if let lastNetworkCheck,
            Date().timeIntervalSince(lastNetworkCheck)
@@ -1081,7 +1271,7 @@ actor AndroidDexBridgeRuntime {
         } else {
             networkWasRepaired = try await ensureEmulatorNetwork(adb)
         }
-        if !networkWasRepaired,
+        if !forceInstall, !networkWasRepaired,
            await isHealthy(acceptVersionMismatch: hasNewerBridge) {
             ready = true
             acceptsNewerBridge = hasNewerBridge
@@ -1089,6 +1279,10 @@ actor AndroidDexBridgeRuntime {
             return
         }
 
+        operationStatus = .starting(
+            "步骤 6/7：安装并启动 Android Bridge",
+            progress: 0.84
+        )
         let apk = try bridgeAPK()
         _ = try run(adb, ["-s", device, "install", "-r", apk.path])
         _ = try run(
@@ -1098,7 +1292,11 @@ actor AndroidDexBridgeRuntime {
                 "-n", "com.okvideomac.dexbridge/.BridgeActivity"
             ]
         )
-        for _ in 0..<30 {
+        for attempt in 0..<30 {
+            operationStatus = .starting(
+                "步骤 7/7：等待 Bridge 健康检查",
+                progress: 0.92 + (Double(attempt) / 30 * 0.07)
+            )
             if await isHealthy() {
                 ready = true
                 acceptsNewerBridge = false
