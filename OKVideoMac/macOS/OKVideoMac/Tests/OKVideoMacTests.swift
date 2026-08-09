@@ -1163,6 +1163,117 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testSearchResultPresentationCanMergeAndSeparateDuplicateTitles() {
+        let values = [
+            VideoSummary(
+                siteKey: "a",
+                siteName: "A",
+                videoID: "1",
+                title: "揭秘日",
+                year: "2026"
+            ),
+            VideoSummary(
+                siteKey: "b",
+                siteName: "B",
+                videoID: "2",
+                title: "揭秘日",
+                year: "2026"
+            )
+        ]
+
+        let merged = SearchResultPresentation.clusters(
+            from: values,
+            keyword: "揭秘日",
+            mergesDuplicates: true,
+            sortOrder: .relevance
+        )
+        let separated = SearchResultPresentation.clusters(
+            from: values,
+            keyword: "揭秘日",
+            mergesDuplicates: false,
+            sortOrder: .relevance
+        )
+
+        XCTAssertEqual(merged.count, 1)
+        XCTAssertEqual(merged.first?.sources.count, 2)
+        XCTAssertEqual(separated.count, 2)
+        XCTAssertTrue(separated.allSatisfy { $0.sources.count == 1 })
+    }
+
+    func testSearchResultPresentationSortsExactKeywordFirst() {
+        let values = [
+            VideoSummary(
+                siteKey: "a",
+                siteName: "A",
+                videoID: "1",
+                title: "中华揭秘之寻味新疆"
+            ),
+            VideoSummary(
+                siteKey: "b",
+                siteName: "B",
+                videoID: "2",
+                title: "揭秘日"
+            ),
+            VideoSummary(
+                siteKey: "c",
+                siteName: "C",
+                videoID: "3",
+                title: "揭秘日（臻彩）"
+            )
+        ]
+
+        let clusters = SearchResultPresentation.clusters(
+            from: values,
+            keyword: "揭秘日",
+            mergesDuplicates: true,
+            sortOrder: .relevance
+        )
+
+        XCTAssertEqual(clusters.map(\.title), ["揭秘日", "揭秘日（臻彩）", "中华揭秘之寻味新疆"])
+    }
+
+    func testSearchResultPresentationSortsBySourceCountAndYear() {
+        let values = [
+            VideoSummary(
+                siteKey: "a",
+                siteName: "A",
+                videoID: "1",
+                title: "甲",
+                year: "2024"
+            ),
+            VideoSummary(
+                siteKey: "b",
+                siteName: "B",
+                videoID: "2",
+                title: "甲",
+                year: "2024"
+            ),
+            VideoSummary(
+                siteKey: "c",
+                siteName: "C",
+                videoID: "3",
+                title: "乙",
+                year: "2026"
+            )
+        ]
+
+        let bySources = SearchResultPresentation.clusters(
+            from: values,
+            keyword: "",
+            mergesDuplicates: true,
+            sortOrder: .sourceCount
+        )
+        let byYear = SearchResultPresentation.clusters(
+            from: values,
+            keyword: "",
+            mergesDuplicates: true,
+            sortOrder: .newest
+        )
+
+        XCTAssertEqual(bySources.first?.title, "甲")
+        XCTAssertEqual(byYear.first?.title, "乙")
+    }
+
     private func videoSummary(id: String) -> VideoSummary {
         VideoSummary(
             siteKey: "fixture",

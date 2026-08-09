@@ -3,13 +3,11 @@ import OKVideoCore
 
 struct SearchView: View {
     @EnvironmentObject private var state: AppState
+    @State private var sortOrder: SearchResultSortOrder = .relevance
+    @State private var mergesDuplicateTitles = true
 
     var body: some View {
         VStack(spacing: 0) {
-            searchBar
-
-            Divider()
-
             if let folder = state.currentSearchFolder {
                 SearchFolderBrowser(
                     page: folder,
@@ -35,71 +33,56 @@ struct SearchView: View {
                 searchResults
             }
         }
-        .navigationTitle("首页")
+        .navigationTitle("搜索结果")
         .background(AppSurfacePalette.background.ignoresSafeArea())
+        .toolbar {
+            ToolbarItemGroup {
+                searchToolbar
+            }
+        }
         .onDisappear {
             state.cancelSearch()
         }
     }
 
-    private var searchBar: some View {
-        HStack(spacing: 10) {
-            Button {
-                state.returnFromSearchToHome()
-            } label: {
-                Label("返回首页", systemImage: "chevron.left")
-            }
-            .buttonStyle(.bordered)
-
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
-                TextField("搜索所有已启用站点", text: $state.searchKeyword)
-                    .textFieldStyle(.plain)
-                    .onSubmit { state.search(state.searchKeyword) }
-                if !state.searchKeyword.isEmpty {
-                    Button {
-                        state.searchKeyword = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("清空")
-                }
-            }
-            .padding(.horizontal, 11)
-            .frame(maxWidth: 520, minHeight: 34)
-            .background(Color(nsColor: .textBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.secondary.opacity(0.22))
-            }
-
-            Button("搜索") {
-                state.search(state.searchKeyword)
-            }
-            .buttonStyle(.borderedProminent)
-            .keyboardShortcut(.return, modifiers: [])
-            Button("取消") {
-                state.cancelSearch()
-            }
-            .disabled(!state.isSearching)
-
-            if state.isSearching {
-                ProgressView()
-                    .controlSize(.small)
-                Text(
-                    "\(state.searchCompletedSiteCount)/"
-                        + "\(state.searchTotalSiteCount) 站"
-                )
-                .font(.caption.monospacedDigit())
-                .foregroundColor(.secondary)
-            }
+    @ViewBuilder
+    private var searchToolbar: some View {
+        Button {
+            state.returnFromSearchToHome()
+        } label: {
+            Label("返回首页", systemImage: "chevron.left")
         }
-        .padding()
-        .background(AppSurfacePalette.background)
+        .help("返回首页")
+
+        TextField("搜索全部站点", text: $state.searchKeyword)
+            .textFieldStyle(.roundedBorder)
+            .onSubmit { state.search(state.searchKeyword) }
+            .frame(minWidth: 240, idealWidth: 420, maxWidth: 560)
+
+        Button {
+            state.search(state.searchKeyword)
+        } label: {
+            Label("搜索", systemImage: "magnifyingglass")
+        }
+        .disabled(
+            state.searchKeyword
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty
+        )
+
+        if state.isSearching {
+            Button {
+                state.cancelSearch()
+            } label: {
+                Label("停止", systemImage: "stop.fill")
+            }
+            .help("停止当前搜索")
+
+            SearchProgressIndicator(
+                completed: state.searchCompletedSiteCount,
+                total: state.searchTotalSiteCount
+            )
+        }
     }
 
     private var searchResults: some View {
@@ -115,13 +98,25 @@ struct SearchView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    SearchResultToolbar(
+                        title: selectedResultTitle,
+                        resultCount: presentedClusters.count,
+                        rawResultCount: visibleRawResults.count,
+                        completedSiteCount: state.searchCompletedSiteCount,
+                        totalSiteCount: state.searchTotalSiteCount,
+                        resultSiteCount: state.searchSiteOptions.count,
+                        isSearching: state.isSearching,
+                        sortOrder: $sortOrder,
+                        mergesDuplicateTitles: $mergesDuplicateTitles
+                    )
+
                     if !state.searchFailures.isEmpty {
                         SearchFailureSummary(
                             failures: state.searchFailures
                         )
                     }
                     SearchClusterGrid(
-                        clusters: state.visibleSearchClusters
+                        clusters: presentedClusters
                     ) { summary in
                         state.openSearchResult(summary)
                     }
@@ -133,6 +128,30 @@ struct SearchView: View {
             .background(AppSurfacePalette.background)
         }
         .background(AppSurfacePalette.background)
+    }
+
+    private var visibleRawResults: [VideoSummary] {
+        guard let selectedSiteKey = state.selectedSearchSiteKey else {
+            return state.searchResults
+        }
+        return state.searchResults.filter { $0.siteKey == selectedSiteKey }
+    }
+
+    private var presentedClusters: [SearchResultCluster] {
+        SearchResultPresentation.clusters(
+            from: visibleRawResults,
+            keyword: state.searchKeyword,
+            mergesDuplicates: mergesDuplicateTitles,
+            sortOrder: sortOrder
+        )
+    }
+
+    private var selectedResultTitle: String {
+        guard let key = state.selectedSearchSiteKey,
+              let option = state.searchSiteOptions.first(where: { $0.key == key }) else {
+            return "全部结果"
+        }
+        return option.name
     }
 
     private var emptyStateTitle: String {
@@ -168,7 +187,7 @@ private struct SearchSiteSidebar: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("搜索来源")
                     .font(.headline)
-                Text("\(options.count) 个站点")
+                Text("\(options.count) 个站点有结果")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -239,6 +258,80 @@ private struct SearchSiteSidebar: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct SearchProgressIndicator: View {
+    let completed: Int
+    let total: Int
+
+    private var progress: Double {
+        guard total > 0 else { return 0 }
+        return min(1, Double(completed) / Double(total))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("正在搜索 \(completed) / \(total)")
+                .font(.caption2.monospacedDigit())
+                .foregroundColor(.secondary)
+            ProgressView(value: progress)
+                .progressViewStyle(.linear)
+        }
+        .frame(width: 132)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("搜索进度")
+        .accessibilityValue("已完成 \(completed) / \(total) 个站点")
+    }
+}
+
+private struct SearchResultToolbar: View {
+    let title: String
+    let resultCount: Int
+    let rawResultCount: Int
+    let completedSiteCount: Int
+    let totalSiteCount: Int
+    let resultSiteCount: Int
+    let isSearching: Bool
+    @Binding var sortOrder: SearchResultSortOrder
+    @Binding var mergesDuplicateTitles: Bool
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.title3.weight(.semibold))
+                Text(summary)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer(minLength: 12)
+
+            Toggle("合并重复影片", isOn: $mergesDuplicateTitles)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .help("将片名和年份相同的跨站结果合并为一张卡片")
+
+            Picker("排序", selection: $sortOrder) {
+                ForEach(SearchResultSortOrder.allCases) { option in
+                    Text(option.title).tag(option)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(width: 132)
+        }
+        .padding(.horizontal, 2)
+    }
+
+    private var summary: String {
+        let resultSummary = mergesDuplicateTitles
+            ? "\(resultCount) 部影片 · \(rawResultCount) 条来源结果"
+            : "\(rawResultCount) 条结果"
+        if isSearching {
+            return "\(resultSummary) · 已搜索 \(completedSiteCount) / \(totalSiteCount) 个站点"
+        }
+        return "\(resultSummary) · \(resultSiteCount) 个站点有结果"
     }
 }
 
@@ -401,9 +494,7 @@ private struct SearchFailureSummary: View {
     let failures: [SearchFailure]
 
     var body: some View {
-        DisclosureGroup(
-            "\(failures.count) 个站点失败，其他结果仍可使用"
-        ) {
+        DisclosureGroup {
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(
                     Array(failures.enumerated()),
@@ -419,10 +510,145 @@ private struct SearchFailureSummary: View {
                     }
                 }
             }
-            .padding(.top, 6)
+            .padding(.top, 8)
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundColor(.orange)
+                Text("\(failures.count) 个站点未响应")
+                    .fontWeight(.medium)
+                Text("其他结果仍可使用")
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text("查看详情")
+                    .foregroundColor(.secondary)
+            }
         }
         .font(.caption)
-        .foregroundColor(.orange)
+        .foregroundColor(.primary)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.07))
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(Color.orange.opacity(0.2), lineWidth: 1)
+        }
+    }
+}
+
+enum SearchResultSortOrder: String, CaseIterable, Identifiable {
+    case relevance
+    case sourceCount
+    case newest
+    case title
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .relevance: return "相关度排序"
+        case .sourceCount: return "来源数量"
+        case .newest: return "年份最新"
+        case .title: return "片名排序"
+        }
+    }
+}
+
+enum SearchResultPresentation {
+    static func clusters(
+        from items: [VideoSummary],
+        keyword: String,
+        mergesDuplicates: Bool,
+        sortOrder: SearchResultSortOrder
+    ) -> [SearchResultCluster] {
+        let clusters = mergesDuplicates
+            ? SearchResultAggregator.cluster(items)
+            : items.map { item in
+                SearchResultCluster(
+                    id: item.id,
+                    title: item.title,
+                    year: normalizedYear(item.year),
+                    sources: [item]
+                )
+            }
+
+        return clusters.enumerated().sorted { lhs, rhs in
+            orderedBefore(
+                lhs: lhs,
+                rhs: rhs,
+                keyword: keyword,
+                sortOrder: sortOrder
+            )
+        }.map(\.element)
+    }
+
+    private static func orderedBefore(
+        lhs: (offset: Int, element: SearchResultCluster),
+        rhs: (offset: Int, element: SearchResultCluster),
+        keyword: String,
+        sortOrder: SearchResultSortOrder
+    ) -> Bool {
+        switch sortOrder {
+        case .relevance:
+            let leftScore = relevanceScore(lhs.element.title, keyword: keyword)
+            let rightScore = relevanceScore(rhs.element.title, keyword: keyword)
+            return leftScore == rightScore
+                ? lhs.offset < rhs.offset
+                : leftScore > rightScore
+        case .sourceCount:
+            return lhs.element.sources.count == rhs.element.sources.count
+                ? lhs.offset < rhs.offset
+                : lhs.element.sources.count > rhs.element.sources.count
+        case .newest:
+            let leftYear = yearValue(lhs.element.year)
+            let rightYear = yearValue(rhs.element.year)
+            return leftYear == rightYear
+                ? lhs.offset < rhs.offset
+                : leftYear > rightYear
+        case .title:
+            let comparison = lhs.element.title.localizedStandardCompare(
+                rhs.element.title
+            )
+            return comparison == .orderedSame
+                ? lhs.offset < rhs.offset
+                : comparison == .orderedAscending
+        }
+    }
+
+    private static func relevanceScore(_ title: String, keyword: String) -> Int {
+        let foldedTitle = folded(title)
+        let foldedKeyword = folded(keyword)
+        guard !foldedKeyword.isEmpty else { return 0 }
+        if foldedTitle == foldedKeyword { return 3 }
+        if foldedTitle.hasPrefix(foldedKeyword) { return 2 }
+        if foldedTitle.contains(foldedKeyword) { return 1 }
+        return 0
+    }
+
+    private static func folded(_ value: String) -> String {
+        value
+            .folding(
+                options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+                locale: .current
+            )
+            .precomposedStringWithCanonicalMapping
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func yearValue(_ year: String?) -> Int {
+        guard let year else { return Int.min }
+        let digits = year.filter(\.isNumber)
+        return Int(digits.prefix(4)) ?? Int.min
+    }
+
+    private static func normalizedYear(_ year: String?) -> String? {
+        guard let value = year?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
     }
 }
 
