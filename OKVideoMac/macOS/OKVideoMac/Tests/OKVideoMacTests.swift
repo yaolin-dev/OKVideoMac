@@ -51,6 +51,23 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(special.displayName, "琅琊榜.SP01.花絮")
     }
 
+    func testEpisodeNameParserPrefersFileNumberOverSeriesEpisodeCount() {
+        let fifth = EpisodeNameParser.presentation(
+            for: PlayEpisode(
+                name: "[1.6GB]05.mp4【[国产剧]你好，旧时光.全30集.国语中字.2017.4K】",
+                url: "episode-05"
+            )
+        )
+        let aggregateOnly = EpisodeNameParser.presentation(
+            for: PlayEpisode(name: "你好，旧时光 全30集", url: "series-summary")
+        )
+
+        XCTAssertEqual(fifth.episodeNumber, 5)
+        XCTAssertEqual(fifth.displayName, "第 5 集")
+        XCTAssertNil(aggregateOnly.episodeNumber)
+        XCTAssertEqual(aggregateOnly.displayName, "你好，旧时光 全30集")
+    }
+
     func testEpisodeNameParserDoesNotTreatOrdinaryTrailingNumberAsEpisode() {
         let presentation = EpisodeNameParser.presentation(
             for: PlayEpisode(name: "Mader - Pa's Kitchen 1", url: "track")

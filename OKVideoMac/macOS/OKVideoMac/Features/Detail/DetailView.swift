@@ -626,7 +626,7 @@ enum EpisodeNameParser {
         let compact = compactName(nameCandidate)
         let isMediaFilename = firstMatch(
             in: nameCandidate,
-            pattern: #"(?i)\.(?:mkv|mp4|m4v|mov|avi|ts|m2ts|flv|webm)(?:$|[?#])"#
+            pattern: #"(?i)\.(?:mkv|mp4|m4v|mov|avi|ts|m2ts|flv|webm)(?:$|[?#\s【\[])"#
         ) != nil
 
         if let special = specialName(in: compact) {
@@ -657,9 +657,28 @@ enum EpisodeNameParser {
             )
         }
 
+        // Some providers append the series description after the real file name,
+        // for example: "05.mp4【你好，旧时光.全30集】".  Read the number
+        // immediately before the media extension before considering descriptive
+        // text such as "全30集", otherwise every item is mislabeled as episode 30.
+        if isMediaFilename, let values = captures(
+            in: compact,
+            pattern: #"(?i)(?:^|[/\\._\-\]\s])(\d{1,4})(?=\.(?:mkv|mp4|m4v|mov|avi|ts|m2ts|flv|webm)(?:$|[?#\s【\[]))"#,
+            captureCount: 1
+        ), let number = Int(values[0]), (1...999).contains(number) {
+            return regularPresentation(
+                episode: episode,
+                compact: compact,
+                original: original,
+                number: number,
+                displayName: "第 \(number) 集",
+                sourceIndex: sourceIndex
+            )
+        }
+
         if let values = captures(
             in: compact,
-            pattern: #"第?\s*(\d{1,4})\s*(集|话)"#,
+            pattern: #"(?:^|[^全共\d])第?\s*(\d{1,4})\s*(集|话)"#,
             captureCount: 2
         ), let number = Int(values[0]) {
             let unit = values[1] == "话" ? "话" : "集"

@@ -457,12 +457,14 @@ struct CloudAuthorizationView: View {
 
 private struct SidebarView: View {
     @EnvironmentObject private var state: AppState
+    @Environment(\.colorScheme) private var colorScheme
 
-    private let selectionColor = Color(
-        red: 0.34,
-        green: 0.35,
-        blue: 0.56
-    )
+    private var selectionColor: Color {
+        if colorScheme == .dark {
+            return Color(red: 0.38, green: 0.40, blue: 0.72)
+        }
+        return Color(red: 0.29, green: 0.31, blue: 0.58)
+    }
 
     var body: some View {
         ScrollView {
@@ -488,7 +490,7 @@ private struct SidebarView: View {
                 Image(systemName: section.systemImage)
                     .font(.system(size: 17, weight: .medium))
                     .frame(width: 23)
-                    .foregroundColor(isSelected ? .white : selectionColor)
+                    .foregroundColor(isSelected ? .white : .secondary)
                 Text(section.rawValue)
                     .font(.system(size: 15, weight: .medium))
                     .foregroundColor(isSelected ? .white : .primary)

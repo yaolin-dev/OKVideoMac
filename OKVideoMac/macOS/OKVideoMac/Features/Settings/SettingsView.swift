@@ -36,17 +36,6 @@ struct SettingsView: View {
 
     private var settingsSidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("设置")
-                    .font(.title2.bold())
-                Text("OK影视 Mac")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .padding(.horizontal, 14)
-            .padding(.top, 16)
-            .padding(.bottom, 12)
-
             ScrollView {
                 LazyVStack(spacing: 7) {
                     ForEach(SettingsPane.allCases) { pane in
@@ -54,6 +43,7 @@ struct SettingsView: View {
                     }
                 }
                 .padding(.horizontal, 10)
+                .padding(.top, 10)
                 .padding(.bottom, 16)
             }
         }
