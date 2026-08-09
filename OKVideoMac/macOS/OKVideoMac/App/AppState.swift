@@ -339,7 +339,6 @@ final class AppState: ObservableObject {
     private var isClosingPlayer = false
     private var prefersPlayerSubtitlesEnabled = false
     private var preferredPlayerSubtitleTrack: PlayerSubtitleTrackPreference?
-    private var playerControlsVisibleForSubtitleLayout = false
     private var playerStartedInFullScreen = false
     private var lastAutomaticConfigurationRefreshAttemptAt: Date?
     private var configurationRefreshTask: Task<Bool, Never>?
@@ -1241,10 +1240,22 @@ final class AppState: ObservableObject {
         }
         let siteName = visibleSites.first { $0.key == item.siteKey }?.name
             ?? item.siteKey
+        let preparationID = presentHistoryPlaybackShell(
+            item,
+            siteName: siteName
+        )
         guard let provider = providers[item.siteKey] else {
-            if await replayCachedHistory(item, siteName: siteName) {
+            if await replayCachedHistory(
+                item,
+                siteName: siteName,
+                owningSessionID: preparationID
+            ) {
                 return
             }
+            guard isCurrentHistoryPreparation(preparationID) else { return }
+            playerSnapshot.status = .failed("来源暂时不可用")
+            playbackResolutionState = .failed
+            playbackFailureSummary = "来源 \(siteName) 在当前配置中不可用，无法恢复播放"
             show(
                 AppError.site("来源 \(siteName) 在当前配置中不可用，无法恢复播放"),
                 title: "历史播放失败"
@@ -1253,8 +1264,10 @@ final class AppState: ObservableObject {
         }
 
         isLoading = true
+        defer { isLoading = false }
         do {
             let detail = try await provider.detail(id: item.videoID)
+            guard isCurrentHistoryPreparation(preparationID) else { return }
             isLoading = false
 
             guard let selection = Self.historyPlaybackSelection(
@@ -1282,6 +1295,7 @@ final class AppState: ObservableObject {
         }
 
         if let episodeReference = item.episodeReference?.nonEmpty {
+            guard isCurrentHistoryPreparation(preparationID) else { return }
             isLoading = false
             let context = Self.historyPlaybackContext(
                 record: item,
@@ -1296,10 +1310,15 @@ final class AppState: ObservableObject {
             return
         }
 
-        if await replayCachedHistory(item, siteName: siteName) {
+        if await replayCachedHistory(
+            item,
+            siteName: siteName,
+            owningSessionID: preparationID
+        ) {
             isLoading = false
             return
         }
+        guard isCurrentHistoryPreparation(preparationID) else { return }
 
         do {
             let page = try await provider.search(
@@ -1312,6 +1331,7 @@ final class AppState: ObservableObject {
                 record: item
             ) {
                 let detail = try await provider.detail(id: summary.videoID)
+                guard isCurrentHistoryPreparation(preparationID) else { return }
                 if let selection = Self.historyPlaybackSelection(
                     in: detail,
                     record: item
@@ -1330,7 +1350,11 @@ final class AppState: ObservableObject {
             // message below instead of a second provider decoding error.
         }
 
+        guard isCurrentHistoryPreparation(preparationID) else { return }
         isLoading = false
+        playerSnapshot.status = .failed("历史记录恢复失败")
+        playbackResolutionState = .failed
+        playbackFailureSummary = "该来源暂时无法重新获取详情"
         show(
             AppError.playback(
                 "该来源暂时无法重新获取详情，旧记录中的临时播放地址也已失效。"
@@ -1342,7 +1366,8 @@ final class AppState: ObservableObject {
 
     private func replayCachedHistory(
         _ item: HistoryRecord,
-        siteName: String
+        siteName: String,
+        owningSessionID: UUID? = nil
     ) async -> Bool {
         guard let environment,
               let replay = Self.replayableHistoryPlayback(
@@ -1365,6 +1390,10 @@ final class AppState: ObservableObject {
         )) == true else {
             return false
         }
+        if let owningSessionID,
+           !isCurrentHistoryPreparation(owningSessionID) {
+            return false
+        }
         do {
             try await loadResolvedPlayback(
                 replay.media,
@@ -1378,6 +1407,50 @@ final class AppState: ObservableObject {
         } catch {
             return false
         }
+    }
+
+    private func presentHistoryPlaybackShell(
+        _ item: HistoryRecord,
+        siteName: String
+    ) -> UUID {
+        let preparationID = UUID()
+        playbackSessionID = preparationID
+        playbackQualitySwitchSessionID = UUID()
+        playbackQualities = []
+        selectedPlaybackQualityID = nil
+        isSwitchingPlaybackQuality = false
+        activePlayback = nil
+        livePlaybackChannel = nil
+        livePlaybackStream = nil
+        livePlaybackSourceID = nil
+        selectedDetail = nil
+        pendingDetailSummary = nil
+
+        let context = Self.historyPlaybackContext(
+            record: item,
+            siteName: siteName,
+            episodeURL: "history-pending://\(preparationID.uuidString.lowercased())"
+        )
+        pendingPlayback = PendingCloudPlayback(
+            detail: context.detail,
+            source: context.source,
+            episode: context.episode
+        )
+        playbackResolutionState = .restoringHistory
+        currentPlaybackAttempt = nil
+        playbackFailureSummary = nil
+        playerSnapshot = PlayerSnapshot(
+            status: .loading,
+            volume: playerSnapshot.volume,
+            isMuted: playerSnapshot.isMuted,
+            speed: playerSnapshot.speed
+        )
+        presentPlayer()
+        return preparationID
+    }
+
+    private func isCurrentHistoryPreparation(_ preparationID: UUID) -> Bool {
+        isPlayerPresented && playbackSessionID == preparationID
     }
 
     func dismissDetail() {
@@ -2543,32 +2616,11 @@ final class AppState: ObservableObject {
     func adjustPlayerSubtitlePosition(by offset: Double) async {
         let value = min(max(playerSubtitlePosition + offset, 0), 100)
         do {
+            try await environment?.player.setSubtitlePosition(value)
             playerSubtitlePosition = value
-            try await environment?.player.setSubtitlePosition(
-                effectivePlayerSubtitlePosition
-            )
         } catch {
             show(error, title: "字幕位置设置失败")
         }
-    }
-
-    func setPlayerControlsVisibleForSubtitleLayout(_ visible: Bool) async {
-        guard playerControlsVisibleForSubtitleLayout != visible else { return }
-        playerControlsVisibleForSubtitleLayout = visible
-        do {
-            try await environment?.player.setSubtitlePosition(
-                effectivePlayerSubtitlePosition
-            )
-        } catch {
-            // This is a temporary presentation adjustment. A failure should
-            // not interrupt playback or overwrite the user's saved setting.
-        }
-    }
-
-    private var effectivePlayerSubtitlePosition: Double {
-        playerControlsVisibleForSubtitleLayout
-            ? min(playerSubtitlePosition, 82)
-            : playerSubtitlePosition
     }
 
     func adjustPlayerSubtitleBorderSize(by offset: Double) async {
@@ -2585,13 +2637,11 @@ final class AppState: ObservableObject {
         do {
             try await environment?.player.setSubtitleDelay(0)
             try await environment?.player.setSubtitleScale(1)
-            playerSubtitlePosition = 100
-            try await environment?.player.setSubtitlePosition(
-                effectivePlayerSubtitlePosition
-            )
+            try await environment?.player.setSubtitlePosition(100)
             try await environment?.player.setSubtitleBorderSize(3)
             playerSubtitleDelay = 0
             playerSubtitleScale = 1
+            playerSubtitlePosition = 100
             playerSubtitleBorderSize = 3
         } catch {
             show(error, title: "字幕设置重置失败")
@@ -2875,6 +2925,7 @@ final class AppState: ObservableObject {
         }
         switch playbackResolutionState {
         case .idle: return playerStatusDescription
+        case .restoringHistory: return "正在恢复历史记录"
         case .resolving: return "正在获取或解析播放地址"
         case .validating: return "正在验证媒体线路"
         case .loading: return "播放器正在连接媒体"
@@ -3831,8 +3882,9 @@ final class AppState: ObservableObject {
 
     private func dismissPlayerSurfaceAndRestoreWindow() async {
         isPlayerPresented = false
-        // Let SwiftUI dismantle the render surface and restore its window
-        // configurator before a possible full-screen transition begins.
+        // Let SwiftUI hide the player chrome and restore its window
+        // configurator before a possible full-screen transition begins. The
+        // render surface intentionally stays mounted for the next playback.
         await Task.yield()
         await restoreWindowAfterPlayer()
     }

@@ -17,6 +17,10 @@ struct RootView: View {
             AppSurfacePalette.background
                 .ignoresSafeArea()
 
+            persistentPlayerSurface
+                .opacity(state.isPlayerPresented ? 1 : 0)
+                .accessibilityHidden(true)
+
             browsingContent
                 .opacity(state.isPlayerPresented ? 0 : 1)
                 .allowsHitTesting(!state.isPlayerPresented)
@@ -77,6 +81,20 @@ struct RootView: View {
                 Task { await state.closePlayer() }
             }
         }
+    }
+
+    @ViewBuilder
+    private var persistentPlayerSurface: some View {
+        ZStack {
+            Color.black
+            if let player = state.embeddedPlayer {
+                MPVRenderView(player: player) { error in
+                    state.reportPlayerRenderError(error)
+                }
+            }
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
     }
 
     @ViewBuilder

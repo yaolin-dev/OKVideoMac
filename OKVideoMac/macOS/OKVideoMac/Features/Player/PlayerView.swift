@@ -25,15 +25,7 @@ struct PlayerView: View {
 
     var body: some View {
         ZStack {
-            Color.black
-                .ignoresSafeArea()
-
-            if let player = state.embeddedPlayer {
-                MPVRenderView(player: player) { error in
-                    state.reportPlayerRenderError(error)
-                }
-                .ignoresSafeArea()
-            } else {
+            if state.embeddedPlayer == nil {
                 unavailablePlayer
             }
 
@@ -103,12 +95,9 @@ struct PlayerView: View {
                 .frame(width: 0, height: 0)
         }
         .frame(minWidth: 800, minHeight: 520)
-        .background(Color.black)
+        .background(Color.clear)
         .onAppear {
             revealControls()
-            Task {
-                await state.setPlayerControlsVisibleForSubtitleLayout(true)
-            }
         }
         .onDisappear {
             hideControlsTask?.cancel()
@@ -116,17 +105,9 @@ struct PlayerView: View {
             volumeCommandTask = nil
             pendingVolume = nil
             activeUtilityPanel = nil
-            Task {
-                await state.setPlayerControlsVisibleForSubtitleLayout(false)
-            }
         }
         .onChange(of: state.playerSnapshot.status) { _ in
             revealControls()
-        }
-        .onChange(of: controlsVisible) { visible in
-            Task {
-                await state.setPlayerControlsVisibleForSubtitleLayout(visible)
-            }
         }
         .animation(
             .easeInOut(duration: 0.22),
@@ -1397,7 +1378,7 @@ struct PlayerView: View {
             return true
         }
         switch state.playbackResolutionState {
-        case .resolving, .validating, .loading, .retrying:
+        case .restoringHistory, .resolving, .validating, .loading, .retrying:
             return true
         case .idle, .playing, .exhausted, .failed:
             break

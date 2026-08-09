@@ -2,6 +2,7 @@ import Foundation
 
 public enum PlaybackResolutionState: Equatable {
     case idle
+    case restoringHistory
     case resolving
     case validating
     case loading
