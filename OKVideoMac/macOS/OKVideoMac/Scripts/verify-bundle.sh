@@ -41,8 +41,8 @@ if [[ ! -f "$BRIDGE_APK" ]]; then
   echo "Bundled Android Release bridge is missing." >&2
   exit 1
 fi
-if [[ "$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")" != "0.3.26" ]] ||
-   [[ "$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist")" != "38" ]]; then
+if [[ "$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")" != "0.3.27" ]] ||
+   [[ "$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist")" != "39" ]]; then
   echo "The app has unexpected formal-release version metadata." >&2
   exit 1
 fi

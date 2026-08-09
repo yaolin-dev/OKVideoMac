@@ -23,7 +23,7 @@ struct SettingsView: View {
 
             HSplitView {
                 settingsSidebar
-                    .frame(minWidth: 230, idealWidth: 250, maxWidth: 280)
+                    .frame(minWidth: 190, idealWidth: 210, maxWidth: 230)
                 detailContent
                     .frame(minWidth: 590)
             }
@@ -43,17 +43,17 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            .padding(.horizontal, 18)
-            .padding(.top, 20)
-            .padding(.bottom, 14)
+            .padding(.horizontal, 14)
+            .padding(.top, 16)
+            .padding(.bottom, 12)
 
             ScrollView {
-                LazyVStack(spacing: 9) {
+                LazyVStack(spacing: 7) {
                     ForEach(SettingsPane.allCases) { pane in
                         settingsSidebarButton(pane)
                     }
                 }
-                .padding(.horizontal, 12)
+                .padding(.horizontal, 10)
                 .padding(.bottom, 16)
             }
         }
@@ -65,21 +65,21 @@ struct SettingsView: View {
         return Button {
             state.selectedSettingsPane = pane
         } label: {
-            HStack(spacing: 12) {
+            HStack(spacing: 10) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .fill(pane.color)
                     Image(systemName: pane.systemImage)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(.white)
                 }
-                .frame(width: 34, height: 34)
+                .frame(width: 30, height: 30)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(pane.title)
-                        .font(.headline)
+                        .font(.body.weight(.semibold))
                     Text(pane.subtitle)
-                        .font(.caption)
+                        .font(.caption2)
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                 }
@@ -92,10 +92,10 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
             .background(
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
                     .fill(
                         isSelected
                             ? Color.primary.opacity(0.11)
@@ -103,7 +103,7 @@ struct SettingsView: View {
                     )
             )
             .overlay {
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
                     .stroke(
                         isSelected
                             ? Color.primary.opacity(0.12)
@@ -156,12 +156,15 @@ struct SettingsView: View {
                             }
                         )
                     ) {
-                        ForEach(AppTheme.allCases) { theme in
+                        ForEach(
+                            [AppTheme.light, .dark, .system]
+                        ) { theme in
                             Text(theme.rawValue).tag(theme)
                         }
                     }
                     .labelsHidden()
-                    .frame(width: 150)
+                    .pickerStyle(.segmented)
+                    .frame(width: 270)
                 }
             }
 
@@ -194,17 +197,28 @@ struct SettingsView: View {
                     title: "历史保留",
                     subtitle: "自动清理超过期限的观看记录"
                 ) {
-                    Stepper(
-                        "\(state.historyRetentionDays) 天",
-                        value: Binding(
+                    Picker(
+                        "历史保留",
+                        selection: Binding(
                             get: { state.historyRetentionDays },
                             set: { value in
                                 Task { await state.setHistoryRetentionDays(value) }
                             }
-                        ),
-                        in: 1...3_650
-                    )
-                    .frame(width: 150)
+                        )
+                    ) {
+                        ForEach(
+                            HistoryRetentionPresets.options(
+                                including: state.historyRetentionDays
+                            ),
+                            id: \.self
+                        ) { days in
+                            Text(HistoryRetentionPresets.title(for: days))
+                                .tag(days)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 128)
                 }
             }
         }
@@ -677,6 +691,26 @@ private extension SettingsPane {
     }
 }
 
+enum HistoryRetentionPresets {
+    static let standardDays = [30, 60, 90, 180, 365, 3_650]
+
+    static func options(including currentDays: Int) -> [Int] {
+        guard !standardDays.contains(currentDays) else { return standardDays }
+        return (standardDays + [currentDays]).sorted()
+    }
+
+    static func title(for days: Int) -> String {
+        switch days {
+        case 365:
+            return "1 年"
+        case 3_650:
+            return "10 年"
+        default:
+            return "\(days) 天"
+        }
+    }
+}
+
 private struct SettingsPage<Content: View>: View {
     let title: String
     let subtitle: String
@@ -706,8 +740,8 @@ private struct SettingsPage<Content: View>: View {
                 content
             }
             .padding(24)
-            .frame(maxWidth: 900, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .frame(maxWidth: 840, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .top)
         }
         .background(.thinMaterial)
     }

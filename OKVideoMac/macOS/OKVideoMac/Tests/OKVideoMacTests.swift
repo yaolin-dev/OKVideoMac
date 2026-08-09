@@ -1345,6 +1345,19 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testHistoryRetentionMenuKeepsStandardAndExistingValues() {
+        XCTAssertEqual(
+            HistoryRetentionPresets.standardDays,
+            [30, 60, 90, 180, 365, 3_650]
+        )
+        XCTAssertEqual(
+            HistoryRetentionPresets.options(including: 45),
+            [30, 45, 60, 90, 180, 365, 3_650]
+        )
+        XCTAssertEqual(HistoryRetentionPresets.title(for: 365), "1 年")
+        XCTAssertEqual(HistoryRetentionPresets.title(for: 3_650), "10 年")
+    }
+
     func testSearchResultPresentationSortsExactKeywordFirst() {
         let values = [
             VideoSummary(
