@@ -1154,6 +1154,79 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     @MainActor
+    func testHistoryPlaybackSelectionPrefersDurableReferenceAfterRename() {
+        let detail = VideoDetail(
+            summary: VideoSummary(
+                siteKey: "fixture",
+                siteName: "Fixture",
+                videoID: "video-1",
+                title: "Fixture Video"
+            ),
+            playSources: [
+                PlaySource(
+                    name: "刷新后的线路名",
+                    episodes: [
+                        PlayEpisode(name: "第 1 集", url: "durable-token"),
+                        PlayEpisode(name: "第 2 集", url: "episode-2")
+                    ]
+                )
+            ]
+        )
+        let record = HistoryRecord(
+            siteKey: "fixture",
+            videoID: "video-1",
+            title: "Fixture Video",
+            sourceName: "旧线路名",
+            episodeName: "[2.4GB]Fixture.Show.S01E01.2026.mkv",
+            episodeReference: "durable-token",
+            position: 180
+        )
+
+        let selection = AppState.historyPlaybackSelection(
+            in: detail,
+            record: record
+        )
+
+        XCTAssertEqual(selection?.source.name, "刷新后的线路名")
+        XCTAssertEqual(selection?.episode.name, "第 1 集")
+    }
+
+    @MainActor
+    func testHistoryPlaybackSelectionUsesExplicitEpisodeIdentityOnly() {
+        let detail = VideoDetail(
+            summary: VideoSummary(
+                siteKey: "fixture",
+                siteName: "Fixture",
+                videoID: "video-1",
+                title: "Fixture Video"
+            ),
+            playSources: [
+                PlaySource(
+                    name: "线路一",
+                    episodes: [
+                        PlayEpisode(name: "第 23 集", url: "new-token")
+                    ]
+                )
+            ]
+        )
+        let record = HistoryRecord(
+            siteKey: "fixture",
+            videoID: "video-1",
+            title: "Fixture Video",
+            sourceName: "线路一",
+            episodeName: "Show.S01E23.old-name.mkv",
+            episodeReference: "expired-token"
+        )
+
+        let selection = AppState.historyPlaybackSelection(
+            in: detail,
+            record: record
+        )
+
+        XCTAssertEqual(selection?.episode.url, "new-token")
+    }
+
+    @MainActor
     func testHistoryCachedPlaybackRejectsRedactedSignedURL() {
         let redacted = HistoryRecord(
             siteKey: "fixture",

@@ -1270,24 +1270,22 @@ final class AppState: ObservableObject {
             guard isCurrentHistoryPreparation(preparationID) else { return }
             isLoading = false
 
-            guard let selection = Self.historyPlaybackSelection(
+            if let selection = Self.historyPlaybackSelection(
                 in: detail,
                 record: item
-            ) else {
-                selectedDetail = detail
-                show(
-                    AppError.playback("历史中的线路或分集已被站点移除，请重新选择分集"),
-                    title: "无法恢复原分集"
+            ) {
+                await startPlayback(
+                    detail: detail,
+                    source: selection.source,
+                    episode: selection.episode
                 )
                 return
             }
 
-            await startPlayback(
-                detail: detail,
-                source: selection.source,
-                episode: selection.episode
-            )
-            return
+            // A provider may refresh the same episode with a shortened display
+            // name or a renamed route. Do not claim that the episode was
+            // removed while the durable history reference can still rebuild a
+            // valid playback URL below.
         } catch {
             // Search/cloud providers often expose session-scoped video IDs.
             // Continue with the durable episode reference or cached media
@@ -3103,6 +3101,28 @@ final class AppState: ObservableObject {
             matchingSources = detail.playSources
         }
 
+        let remainingSources = detail.playSources.filter {
+            !matchingSources.contains($0)
+        }
+        let orderedSources = matchingSources + remainingSources
+
+        // Cloud and scripted providers commonly rewrite the visible filename
+        // while retaining the same opaque episode token. The token is the
+        // strongest identity and must take precedence over display text.
+        if let episodeReference = record.episodeReference?.nonEmpty {
+            let normalizedReference = episodeReference.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            for source in orderedSources {
+                if let episode = source.episodes.first(where: {
+                    $0.url.trimmingCharacters(in: .whitespacesAndNewlines)
+                        == normalizedReference
+                }) {
+                    return (source, episode)
+                }
+            }
+        }
+
         if let episodeName = record.episodeName?.nonEmpty {
             for source in matchingSources {
                 if let episode = source.episodes.first(where: {
@@ -3116,7 +3136,7 @@ final class AppState: ObservableObject {
             }
 
             // A source may be renamed while episode names remain stable.
-            for source in detail.playSources where !matchingSources.contains(source) {
+            for source in remainingSources {
                 if let episode = source.episodes.first(where: {
                     $0.name.compare(
                         episodeName,
@@ -3124,6 +3144,33 @@ final class AppState: ObservableObject {
                     ) == .orderedSame
                 }) {
                     return (source, episode)
+                }
+            }
+
+            // Only use numbers explicitly encoded by both names. This never
+            // infers an episode from its list position, so specials and lists
+            // that do not begin at episode one remain safe.
+            let recordedPresentation = EpisodeNameParser.presentation(
+                for: PlayEpisode(name: episodeName, url: "history-identity")
+            )
+            if let recordedEpisode = recordedPresentation.episodeNumber {
+                for source in orderedSources {
+                    if let episode = source.episodes.first(where: { candidate in
+                        let presentation = EpisodeNameParser.presentation(
+                            for: candidate
+                        )
+                        guard presentation.episodeNumber == recordedEpisode,
+                              !presentation.isSpecial else {
+                            return false
+                        }
+                        if let recordedSeason = recordedPresentation.seasonNumber {
+                            return presentation.seasonNumber == nil
+                                || presentation.seasonNumber == recordedSeason
+                        }
+                        return true
+                    }) {
+                        return (source, episode)
+                    }
                 }
             }
         }

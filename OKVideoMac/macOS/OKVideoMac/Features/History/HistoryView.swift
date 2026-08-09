@@ -111,10 +111,30 @@ struct HistoryView: View {
     }
 
     private func historyContent(_ item: HistoryRecord) -> some View {
-        HStack(spacing: 18) {
+        HStack(spacing: 14) {
+            RemoteImage(url: item.posterURL) { image in
+                image
+                    .resizable()
+                    .scaledToFill()
+            } placeholder: {
+                ZStack {
+                    Color.secondary.opacity(0.10)
+                    Image(systemName: "film")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .frame(width: 48, height: 68)
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            }
+
             VStack(alignment: .leading, spacing: 6) {
                 Text(item.title)
                     .font(.headline)
+                    .lineLimit(1)
                 Text(
                     [item.sourceName, item.episodeName]
                         .compactMap { $0 }
@@ -122,6 +142,7 @@ struct HistoryView: View {
                 )
                 .font(.caption)
                 .foregroundColor(.secondary)
+                .lineLimit(1)
                 if item.duration > 0 {
                     HistoryProgressBar(
                         progress: item.position / item.duration

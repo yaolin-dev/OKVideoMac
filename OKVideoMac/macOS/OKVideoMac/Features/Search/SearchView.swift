@@ -361,6 +361,7 @@ private struct SearchResultToolbar: View {
 
 private struct SearchFolderBrowser: View {
     @EnvironmentObject private var state: AppState
+    @State private var isBackHovered = false
     let page: SearchFolderPage
     let path: [SearchFolderPage]
     private let folderScrollCoordinateSpace = "search-folder-scroll"
@@ -371,11 +372,29 @@ private struct SearchFolderBrowser: View {
                 Button {
                     state.navigateBackSearchFolder()
                 } label: {
-                    Label(
-                        path.count > 1 ? "上一级" : "返回搜索结果",
-                        systemImage: "chevron.left"
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(path.count > 1 ? "上一级" : "返回搜索结果")
+                            .font(.callout.weight(.medium))
+                    }
+                    .foregroundStyle(
+                        isBackHovered ? Color.accentColor : Color.secondary
                     )
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(
+                                Color.primary.opacity(isBackHovered ? 0.07 : 0)
+                            )
+                    }
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .onHover { isBackHovered = $0 }
+                .animation(.easeOut(duration: 0.14), value: isBackHovered)
+                .help(path.count > 1 ? "返回上一级目录" : "返回全部搜索结果")
 
                 Divider()
                     .frame(height: 18)
