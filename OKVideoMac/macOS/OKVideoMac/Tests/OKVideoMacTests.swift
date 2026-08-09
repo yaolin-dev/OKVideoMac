@@ -1308,6 +1308,43 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(separated.allSatisfy { $0.sources.count == 1 })
     }
 
+    func testMergedSearchClusterRequiresExplicitSourceSelection() {
+        let sourceA = VideoSummary(
+            siteKey: "a",
+            siteName: "来源 A",
+            videoID: "1",
+            title: "群体"
+        )
+        let sourceB = VideoSummary(
+            siteKey: "b",
+            siteName: "来源 B",
+            videoID: "2",
+            title: "群体"
+        )
+        let single = SearchResultCluster(
+            id: "single",
+            title: "群体",
+            year: nil,
+            sources: [sourceA]
+        )
+        let multiple = SearchResultCluster(
+            id: "multiple",
+            title: "群体",
+            year: nil,
+            sources: [sourceA, sourceB]
+        )
+
+        XCTAssertFalse(SearchClusterOpenPolicy.requiresSourceSelection(single))
+        XCTAssertTrue(SearchClusterOpenPolicy.requiresSourceSelection(multiple))
+    }
+
+    func testSearchMergePreferenceUsesStablePersistentKey() {
+        XCTAssertEqual(
+            SearchDisplayPreferences.mergesDuplicateTitlesKey,
+            "search.mergesDuplicateTitles"
+        )
+    }
+
     func testSearchResultPresentationSortsExactKeywordFirst() {
         let values = [
             VideoSummary(

@@ -4,7 +4,9 @@ import OKVideoCore
 struct SearchView: View {
     @EnvironmentObject private var state: AppState
     @State private var sortOrder: SearchResultSortOrder = .relevance
-    @State private var mergesDuplicateTitles = true
+    @AppStorage(SearchDisplayPreferences.mergesDuplicateTitlesKey)
+    private var mergesDuplicateTitles = true
+    @State private var sourceSelectionCluster: SearchResultCluster?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -43,6 +45,17 @@ struct SearchView: View {
         .onDisappear {
             state.cancelSearch()
         }
+        .overlay {
+            if let cluster = sourceSelectionCluster {
+                SearchSourcePicker(
+                    cluster: cluster,
+                    onSelect: openSearchSource,
+                    onDismiss: { sourceSelectionCluster = nil }
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            }
+        }
+        .animation(.easeOut(duration: 0.14), value: sourceSelectionCluster?.id)
     }
 
     @ViewBuilder
@@ -117,7 +130,13 @@ struct SearchView: View {
                     }
                     SearchClusterGrid(
                         clusters: presentedClusters
-                    ) { summary in
+                    ) { cluster in
+                        if SearchClusterOpenPolicy.requiresSourceSelection(cluster) {
+                            sourceSelectionCluster = cluster
+                        } else if let summary = cluster.primary {
+                            state.openSearchResult(summary)
+                        }
+                    } onSelectSource: { summary in
                         state.openSearchResult(summary)
                     }
                 }
@@ -152,6 +171,11 @@ struct SearchView: View {
             return "全部结果"
         }
         return option.name
+    }
+
+    private func openSearchSource(_ summary: VideoSummary) {
+        sourceSelectionCluster = nil
+        state.openSearchResult(summary)
     }
 
     private var emptyStateTitle: String {
@@ -555,6 +579,16 @@ enum SearchResultSortOrder: String, CaseIterable, Identifiable {
     }
 }
 
+enum SearchDisplayPreferences {
+    static let mergesDuplicateTitlesKey = "search.mergesDuplicateTitles"
+}
+
+enum SearchClusterOpenPolicy {
+    static func requiresSourceSelection(_ cluster: SearchResultCluster) -> Bool {
+        cluster.sources.count > 1
+    }
+}
+
 enum SearchResultPresentation {
     static func clusters(
         from items: [VideoSummary],
@@ -654,7 +688,8 @@ enum SearchResultPresentation {
 
 private struct SearchClusterGrid: View {
     let clusters: [SearchResultCluster]
-    let onSelect: (VideoSummary) -> Void
+    let onSelectCluster: (SearchResultCluster) -> Void
+    let onSelectSource: (VideoSummary) -> Void
 
     private let columns = [
         GridItem(.adaptive(minimum: 140, maximum: 190), spacing: 18)
@@ -663,7 +698,11 @@ private struct SearchClusterGrid: View {
     var body: some View {
         LazyVGrid(columns: columns, alignment: .leading, spacing: 20) {
             ForEach(clusters) { cluster in
-                SearchClusterCell(cluster: cluster, onSelect: onSelect)
+                SearchClusterCell(
+                    cluster: cluster,
+                    onSelectCluster: onSelectCluster,
+                    onSelectSource: onSelectSource
+                )
             }
         }
     }
@@ -671,13 +710,14 @@ private struct SearchClusterGrid: View {
 
 private struct SearchClusterCell: View {
     let cluster: SearchResultCluster
-    let onSelect: (VideoSummary) -> Void
+    let onSelectCluster: (SearchResultCluster) -> Void
+    let onSelectSource: (VideoSummary) -> Void
 
     @ViewBuilder
     var body: some View {
         if let primary = cluster.primary {
             Button {
-                onSelect(primary)
+                onSelectCluster(cluster)
             } label: {
                 clusterLabel(primary: primary)
             }
@@ -685,7 +725,7 @@ private struct SearchClusterCell: View {
             .contextMenu {
                 ForEach(cluster.sources) { source in
                     Button("从 \(source.siteName) 打开") {
-                        onSelect(source)
+                        onSelectSource(source)
                     }
                 }
             }
@@ -718,5 +758,146 @@ private struct SearchClusterCell: View {
         cluster.sources.count == 1
             ? primary.siteName
             : "\(cluster.sources.count) 个来源"
+    }
+}
+
+private struct SearchSourcePicker: View {
+    let cluster: SearchResultCluster
+    let onSelect: (VideoSummary) -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.2)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onDismiss)
+
+            VStack(spacing: 0) {
+                header
+
+                Divider()
+
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(cluster.sources) { source in
+                            sourceButton(source)
+                        }
+                    }
+                    .padding(16)
+                }
+            }
+            .frame(width: 520, height: pickerHeight)
+            .background(.regularMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.22), radius: 26, y: 10)
+        }
+        .accessibilityAddTraits(.isModal)
+    }
+
+    private var header: some View {
+        HStack(spacing: 13) {
+            if let primary = cluster.primary {
+                VideoPosterView(item: primary)
+                    .frame(width: 58, height: 82)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("选择来源")
+                    .font(.title3.weight(.semibold))
+                Text(cluster.title)
+                    .font(.headline)
+                    .lineLimit(2)
+                Text("找到 \(cluster.sources.count) 个来源，请选择一个进入详情")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer(minLength: 12)
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 28, height: 28)
+                    .background(Color.secondary.opacity(0.1), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help("关闭来源选择")
+            .accessibilityLabel("关闭来源选择")
+        }
+        .padding(16)
+    }
+
+    private func sourceButton(_ source: VideoSummary) -> some View {
+        Button {
+            onSelect(source)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "network")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(.accentColor)
+                    .frame(width: 34, height: 34)
+                    .background(Color.accentColor.opacity(0.1), in: Circle())
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(source.siteName)
+                        .font(.callout.weight(.semibold))
+                        .lineLimit(1)
+                    if let description = sourceDescription(source) {
+                        Text(description)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+
+                Spacer(minLength: 10)
+
+                Text("进入详情")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.78))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.secondary.opacity(0.12), lineWidth: 1)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("从 \(source.siteName) 打开 \(source.title)")
+    }
+
+    private var pickerHeight: CGFloat {
+        let rowsHeight = CGFloat(min(cluster.sources.count, 6)) * 64
+        return min(540, max(300, 116 + rowsHeight))
+    }
+
+    private func sourceDescription(_ source: VideoSummary) -> String? {
+        [source.year, source.categoryName, source.remarks]
+            .compactMap { value in
+                let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed?.isEmpty == false ? trimmed : nil
+            }
+            .prefix(2)
+            .joined(separator: " · ")
+            .nonEmpty
+    }
+}
+
+private extension String {
+    var nonEmpty: String? {
+        isEmpty ? nil : self
     }
 }
