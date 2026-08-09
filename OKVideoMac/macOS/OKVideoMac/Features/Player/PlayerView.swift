@@ -15,11 +15,12 @@ struct PlayerView: View {
     @State private var isVolumeEditing = false
     @State private var volumeCommandTask: Task<Void, Never>?
     @State private var activeUtilityPanel: PlayerUtilityPanel?
+    @State private var isWindowFullScreen = false
     let onWindowChromeRestored: () -> Void
 
     private let speeds: [Double] = [0.5, 0.75, 1, 1.25, 1.5, 2]
-    private let utilityIconSize: CGFloat = 18
-    private let utilityButtonSize: CGFloat = 36
+    private let utilityIconSize: CGFloat = 19
+    private let utilityButtonSize: CGFloat = 38
 
     var body: some View {
         ZStack {
@@ -95,7 +96,8 @@ struct PlayerView: View {
                 controlsVisible: controlsVisible,
                 title: playbackDisplayTitle,
                 videoAspectRatio: playerVideoAspectRatio,
-                onRestore: onWindowChromeRestored
+                onRestore: onWindowChromeRestored,
+                onFullScreenChange: { isWindowFullScreen = $0 }
             )
                 .frame(width: 0, height: 0)
         }
@@ -160,8 +162,8 @@ struct PlayerView: View {
             LinearGradient(
                 colors: [
                     Color.black.opacity(0),
-                    Color.black.opacity(0.08),
-                    Color.black.opacity(0.32)
+                    Color.black.opacity(0.03),
+                    Color.black.opacity(0.14)
                 ],
                 startPoint: .top,
                 endPoint: .bottom
@@ -540,28 +542,23 @@ struct PlayerView: View {
             }
 
             HStack(spacing: 12) {
-                controlCapsule(horizontalPadding: 10) {
-                    HStack(spacing: 10) {
-                        volumeControls
-                        Text(
-                            "\(formatTime(displayedPosition)) / "
-                                + formatTime(state.playerSnapshot.duration)
-                        )
-                        .font(.system(size: 12).monospacedDigit())
-                        .foregroundColor(.white.opacity(0.82))
-                        .lineLimit(1)
-                    }
+                HStack(spacing: 10) {
+                    volumeControls
+                    Text(
+                        "\(formatTime(displayedPosition)) / "
+                            + formatTime(state.playerSnapshot.duration)
+                    )
+                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                    .foregroundColor(.white.opacity(0.94))
+                    .shadow(color: .black.opacity(0.48), radius: 2, y: 1)
+                    .lineLimit(1)
                 }
                 .frame(minWidth: 230, alignment: .leading)
 
                 Spacer(minLength: 8)
-                controlCapsule(horizontalPadding: 8) {
-                    transportControls
-                }
+                transportControls
                 Spacer(minLength: 8)
-                controlCapsule(horizontalPadding: 7) {
-                    utilityControls
-                }
+                utilityControls
             }
         }
         .foregroundColor(.white)
@@ -574,25 +571,6 @@ struct PlayerView: View {
             controlsHovering = inside
             inside ? keepControlsVisible() : scheduleControlsHide()
         }
-    }
-
-    private func controlCapsule<Content: View>(
-        horizontalPadding: CGFloat,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        content()
-            .padding(.horizontal, horizontalPadding)
-            .padding(.vertical, 3)
-            .background {
-                ZStack {
-                    Capsule().fill(.ultraThinMaterial)
-                    Capsule().fill(Color.black.opacity(0.10))
-                }
-            }
-            .overlay {
-                Capsule().stroke(Color.white.opacity(0.035), lineWidth: 1)
-            }
-            .shadow(color: .black.opacity(0.08), radius: 6, y: 2)
     }
 
     private var progressControls: some View {
@@ -719,11 +697,12 @@ struct PlayerView: View {
                 Task { await state.togglePlayPause() }
             } label: {
                 Image(systemName: isPaused ? "play.fill" : "pause.fill")
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(.system(size: 19, weight: .bold))
                     .frame(width: 40, height: 40)
-                    .background(Color.white.opacity(0.90))
+                    .background(Color.white.opacity(0.96))
                     .clipShape(Circle())
                     .shadow(color: .black.opacity(0.18), radius: 5, y: 2)
+                    .modifier(PlayerControlHoverEffect())
             }
             .buttonStyle(.plain)
             .foregroundColor(Color.black.opacity(0.86))
@@ -771,8 +750,10 @@ struct PlayerView: View {
             )
 
             playerIconButton(
-                systemImage: "arrow.up.left.and.arrow.down.right",
-                help: "全屏"
+                systemImage: isWindowFullScreen
+                    ? "arrow.down.right.and.arrow.up.left"
+                    : "arrow.up.left.and.arrow.down.right",
+                help: isWindowFullScreen ? "退出全屏" : "进入全屏"
             ) {
                 toggleFullScreen()
             }
@@ -793,14 +774,11 @@ struct PlayerView: View {
         } label: {
             Image(systemName: systemImage)
                 .symbolRenderingMode(.monochrome)
-                .font(.system(size: utilityIconSize, weight: .regular))
-                .foregroundStyle(Color.white.opacity(isActive ? 1 : 0.88))
+                .font(.system(size: utilityIconSize, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(isActive ? 1 : 0.96))
                 .frame(width: utilityButtonSize, height: utilityButtonSize)
-                .background(
-                    isActive ? playerAccentColor.opacity(0.48) : .clear,
-                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                )
                 .contentShape(Rectangle())
+                .modifier(PlayerControlHoverEffect())
         }
         .buttonStyle(.plain)
         .help(help)
@@ -1364,10 +1342,11 @@ struct PlayerView: View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .symbolRenderingMode(.monochrome)
-                .font(.system(size: utilityIconSize, weight: .regular))
+                .font(.system(size: utilityIconSize, weight: .semibold))
                 .foregroundStyle(Color.white)
                 .frame(width: utilityButtonSize, height: utilityButtonSize)
                 .contentShape(Circle())
+                .modifier(PlayerControlHoverEffect(enabled: !disabled))
         }
         .buttonStyle(.plain)
         .opacity(disabled ? 0.30 : 1)
@@ -1378,10 +1357,11 @@ struct PlayerView: View {
     private func utilityMenuIcon(_ systemImage: String) -> some View {
         Image(systemName: systemImage)
             .symbolRenderingMode(.monochrome)
-            .font(.system(size: utilityIconSize, weight: .regular))
+            .font(.system(size: utilityIconSize, weight: .semibold))
             .foregroundStyle(Color.white)
             .frame(width: utilityButtonSize, height: utilityButtonSize)
             .contentShape(Rectangle())
+            .modifier(PlayerControlHoverEffect())
     }
 
     private var isFailed: Bool {
@@ -1911,9 +1891,13 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
     let title: String
     let videoAspectRatio: Double?
     let onRestore: () -> Void
+    let onFullScreenChange: (Bool) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onRestore: onRestore)
+        Coordinator(
+            onRestore: onRestore,
+            onFullScreenChange: onFullScreenChange
+        )
     }
 
     func makeNSView(context: Context) -> WindowConfigurationView {
@@ -1935,6 +1919,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
         context: Context
     ) {
         context.coordinator.onRestore = onRestore
+        context.coordinator.onFullScreenChange = onFullScreenChange
         context.coordinator.attach(to: nsView.window)
         context.coordinator.configure(
             isLivePlayback: isLivePlayback,
@@ -1976,10 +1961,16 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
         private var desiredConfiguration: AppliedConfiguration?
         private var appliedConfiguration: AppliedConfiguration?
         private var pendingWindowRefresh: DispatchWorkItem?
+        private var fullScreenObservers: [NSObjectProtocol] = []
         var onRestore: () -> Void
+        var onFullScreenChange: (Bool) -> Void
 
-        init(onRestore: @escaping () -> Void) {
+        init(
+            onRestore: @escaping () -> Void,
+            onFullScreenChange: @escaping (Bool) -> Void = { _ in }
+        ) {
             self.onRestore = onRestore
+            self.onFullScreenChange = onFullScreenChange
         }
 
         func attach(to newWindow: NSWindow?) {
@@ -1990,6 +1981,15 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             guard window !== newWindow else { return }
             restore()
             window = newWindow
+            observeFullScreenChanges(for: newWindow)
+            DispatchQueue.main.async { [weak self, weak newWindow] in
+                guard let self,
+                      let newWindow,
+                      self.window === newWindow else { return }
+                self.onFullScreenChange(
+                    newWindow.styleMask.contains(.fullScreen)
+                )
+            }
             desiredConfiguration = nil
             appliedConfiguration = nil
             hadFullSizeContentView = newWindow.styleMask.contains(
@@ -2096,6 +2096,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             guard let window else { return }
             pendingWindowRefresh?.cancel()
             pendingWindowRefresh = nil
+            removeFullScreenObservers()
             let savedHadFullSizeContentView = hadFullSizeContentView
             let savedTitlebarAppearsTransparent = titlebarAppearsTransparent
             let savedTitleVisibility = titleVisibility
@@ -2181,6 +2182,36 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             window.standardWindowButton(.zoomButton)?.isHidden = zoomButtonWasHidden
         }
 
+        private func observeFullScreenChanges(for window: NSWindow) {
+            removeFullScreenObservers()
+            let center = NotificationCenter.default
+            for name in [
+                NSWindow.didEnterFullScreenNotification,
+                NSWindow.didExitFullScreenNotification
+            ] {
+                fullScreenObservers.append(
+                    center.addObserver(
+                        forName: name,
+                        object: window,
+                        queue: .main
+                    ) { [weak self, weak window] _ in
+                        guard let self,
+                              let window,
+                              self.window === window else { return }
+                        self.onFullScreenChange(
+                            window.styleMask.contains(.fullScreen)
+                        )
+                    }
+                )
+            }
+        }
+
+        private func removeFullScreenObservers() {
+            let center = NotificationCenter.default
+            fullScreenObservers.forEach(center.removeObserver)
+            fullScreenObservers.removeAll()
+        }
+
         private static func markWindowForRefresh(_ window: NSWindow?) {
             guard let window, let contentView = window.contentView else { return }
             contentView.needsLayout = true
@@ -2189,6 +2220,36 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             contentView.superview?.needsDisplay = true
             window.invalidateCursorRects(for: contentView)
         }
+    }
+}
+
+private struct PlayerControlHoverEffect: ViewModifier {
+    @State private var isHovering = false
+    let enabled: Bool
+
+    init(enabled: Bool = true) {
+        self.enabled = enabled
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                Color.white.opacity(enabled && isHovering ? 0.14 : 0),
+                in: Circle()
+            )
+            .scaleEffect(enabled && isHovering ? 1.09 : 1)
+            .shadow(
+                color: .black.opacity(0.46),
+                radius: enabled && isHovering ? 3 : 2,
+                y: 1
+            )
+            .animation(
+                .easeOut(duration: 0.13),
+                value: isHovering
+            )
+            .onHover { inside in
+                isHovering = enabled && inside
+            }
     }
 }
 
