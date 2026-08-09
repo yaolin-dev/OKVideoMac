@@ -34,20 +34,21 @@ struct RootView: View {
         }
         .toolbar {
             ToolbarItemGroup {
-                if state.isLoading || state.isHomeLoading {
-                    ProgressView()
-                        .controlSize(.small)
+                if state.selectedSection == .home {
+                    if state.isLoading || state.isHomeLoading {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    Button {
+                        Task { await state.refreshHome() }
+                    } label: {
+                        Label("刷新", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(
+                        state.isHomeSearchPresented
+                            || state.currentSite == nil
+                    )
                 }
-                Button {
-                    Task { await state.refreshHome() }
-                } label: {
-                    Label("刷新", systemImage: "arrow.clockwise")
-                }
-                .disabled(
-                    state.selectedSection != .home
-                        || state.isHomeSearchPresented
-                        || state.currentSite == nil
-                )
             }
         }
         .alert(item: $state.presentedError) { error in

@@ -1146,6 +1146,18 @@ enum PlayerInteractionRatePolicy {
     }
 }
 
+enum PlayerSurfaceTrackingPolicy {
+    // Do not subscribe to mouseEntered. When the live overlay hides under a
+    // stationary pointer, AppKit considers the underlying surface entered;
+    // treating that synthetic transition as movement made the overlay reopen
+    // forever. Only physical pointer movement should reveal it.
+    static let options: NSTrackingArea.Options = [
+        .activeInKeyWindow,
+        .inVisibleRect,
+        .mouseMoved
+    ]
+}
+
 private struct PlayerSurfaceInteractionView: NSViewRepresentable {
     let onMove: () -> Void
     let onDoubleClick: () -> Void
@@ -1179,21 +1191,12 @@ private final class PlayerSurfaceInteractionNSView: NSView {
         }
         let area = NSTrackingArea(
             rect: bounds,
-            options: [
-                .activeInKeyWindow,
-                .inVisibleRect,
-                .mouseEnteredAndExited,
-                .mouseMoved
-            ],
+            options: PlayerSurfaceTrackingPolicy.options,
             owner: self,
             userInfo: nil
         )
         addTrackingArea(area)
         tracking = area
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        forwardMove(force: true)
     }
 
     override func mouseMoved(with event: NSEvent) {

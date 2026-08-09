@@ -20,6 +20,26 @@ struct LiveView: View {
             }
         }
         .navigationTitle("直播")
+        .searchable(
+            text: $searchText,
+            placement: .toolbar,
+            prompt: "搜索频道"
+        )
+        .toolbar {
+            ToolbarItemGroup {
+                if let source = selectedSource,
+                   let playlist = state.loadedLivePlaylists[source.id] {
+                    liveToolbarControls(
+                        groups: playlist.groups.filter { $0.password == nil },
+                        channelCount: playlist.groups
+                            .filter { $0.password == nil }
+                            .reduce(0) { $0 + $1.channels.count },
+                        sourceID: source.id,
+                        sourceName: source.name
+                    )
+                }
+            }
+        }
         .background(AppSurfacePalette.background.ignoresSafeArea())
         .task {
             selectFirstSourceIfNeeded()
@@ -85,13 +105,18 @@ struct LiveView: View {
             sourceName: sourceName
         )
         return VStack(spacing: 0) {
-            channelToolbar(
-                groups: visibleGroups,
-                channelCount: visibleGroups.reduce(0) { $0 + $1.channels.count },
-                sourceID: sourceID,
-                sourceName: sourceName
-            )
-            Divider()
+            if let failure = state.epgFailures[sourceID] {
+                Label(
+                    "EPG 暂不可用：\(failure)",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.caption)
+                .foregroundColor(.orange)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
+                .background(Color.orange.opacity(0.07))
+            }
 
             if channels.isEmpty {
                 EmptyStateView(
@@ -140,130 +165,81 @@ struct LiveView: View {
         }
     }
 
-    private func channelToolbar(
+    @ViewBuilder
+    private func liveToolbarControls(
         groups: [LiveGroup],
         channelCount: Int,
         sourceID: UUID,
         sourceName: String
     ) -> some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 12) {
-                Menu {
-                    ForEach(state.liveSources) { source in
-                        Button {
-                            selectedSourceID = source.id
-                        } label: {
-                            groupMenuLabel(
-                                source.name,
-                                selected: source.id == selectedSourceID
-                            )
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(sourceName)
-                                .font(.headline)
-                                .lineLimit(1)
-                            Text("\(channelCount) 个频道")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        if state.liveSources.count > 1 {
-                            Image(systemName: "chevron.down")
-                                .font(.caption.bold())
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-                .menuStyle(.borderlessButton)
-                .disabled(state.liveSources.count < 2)
-
-                Spacer(minLength: 12)
-
+        Menu {
+            ForEach(state.liveSources) { source in
                 Button {
-                    showsFavoritesOnly.toggle()
+                    selectedSourceID = source.id
                 } label: {
-                    Label(
-                        "收藏",
-                        systemImage: showsFavoritesOnly ? "star.fill" : "star"
+                    groupMenuLabel(
+                        source.name,
+                        selected: source.id == selectedSourceID
                     )
                 }
-                .buttonStyle(.bordered)
-                .tint(showsFavoritesOnly ? .yellow : .accentColor)
-
-                Menu {
-                    Button {
-                        selectedGroupName = nil
-                    } label: {
-                        groupMenuLabel("全部频道", selected: selectedGroupName == nil)
-                    }
-                    Divider()
-                    ForEach(groups) { group in
-                        Button {
-                            selectedGroupName = group.name
-                        } label: {
-                            groupMenuLabel(
-                                "\(group.name)（\(group.channels.count)）",
-                                selected: selectedGroupName == group.name
-                            )
-                        }
-                    }
-                } label: {
-                    Label(selectedGroupName ?? "全部频道", systemImage: "tray.full")
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-
-                Button {
-                    Task { await state.refreshLiveSource(sourceID) }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .frame(width: 22, height: 22)
-                }
-                .disabled(selectedSource?.sourceKind != .remote || state.isLoading)
-                .help("刷新当前直播源")
-
-                HStack(spacing: 7) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundColor(.secondary)
-                    TextField("搜索频道", text: $searchText)
-                        .textFieldStyle(.plain)
-                    if !searchText.isEmpty {
-                        Button {
-                            searchText = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 10)
-                .frame(width: 220, height: 30)
-                .background(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(Color(nsColor: .textBackgroundColor))
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .stroke(Color.secondary.opacity(0.22))
-                }
             }
-
-            if let failure = state.epgFailures[sourceID] {
-                Label(
-                    "EPG 暂不可用：\(failure)",
-                    systemImage: "exclamationmark.triangle"
-                )
-                    .font(.caption)
-                    .foregroundColor(.orange)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        } label: {
+            Label {
+                Text("\(sourceName) · \(channelCount)")
+                    .lineLimit(1)
+            } icon: {
+                Image(systemName: "dot.radiowaves.left.and.right")
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 12)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .disabled(state.liveSources.count < 2)
+        .help("当前直播源：\(sourceName)，共 \(channelCount) 个频道")
+
+        Menu {
+            Button {
+                selectedGroupName = nil
+            } label: {
+                groupMenuLabel("全部频道", selected: selectedGroupName == nil)
+            }
+            Divider()
+            ForEach(groups) { group in
+                Button {
+                    selectedGroupName = group.name
+                } label: {
+                    groupMenuLabel(
+                        "\(group.name)（\(group.channels.count)）",
+                        selected: selectedGroupName == group.name
+                    )
+                }
+            }
+        } label: {
+            Label(selectedGroupName ?? "全部频道", systemImage: "rectangle.3.group")
+        }
+        .help("筛选频道分组")
+
+        Button {
+            showsFavoritesOnly.toggle()
+        } label: {
+            Label(
+                "仅看收藏",
+                systemImage: showsFavoritesOnly ? "star.fill" : "star"
+            )
+        }
+        .tint(showsFavoritesOnly ? .yellow : .accentColor)
+        .help(showsFavoritesOnly ? "显示全部频道" : "仅显示收藏频道")
+
+        if state.isLoading {
+            ProgressView()
+                .controlSize(.small)
+                .help("正在刷新直播源")
+        } else {
+            Button {
+                Task { await state.refreshLiveSource(sourceID) }
+            } label: {
+                Label("刷新直播源", systemImage: "arrow.clockwise")
+            }
+            .disabled(selectedSource?.sourceKind != .remote)
+            .help("刷新当前直播源")
+        }
     }
 
     @ViewBuilder
@@ -329,21 +305,15 @@ private struct LiveChannelCard: View {
             ZStack {
                 channelArtwork
 
-                VStack {
-                    HStack(alignment: .top) {
-                        if let number = channel.number, !number.isEmpty {
-                            badge(number, prominent: false)
-                        }
-                        Spacer()
-                        favoriteButton
+                HStack(alignment: .top) {
+                    if let number = channel.number, !number.isEmpty {
+                        badge(number)
                     }
                     Spacer()
-                    HStack {
-                        Spacer()
-                        badge(channel.groupName, prominent: true)
-                    }
+                    favoriteButton
                 }
-                .padding(10)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .padding(8)
             }
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -388,10 +358,12 @@ private struct LiveChannelCard: View {
                 }
             }
 
-            Text(programmeSummary)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .lineLimit(1)
+            if let programmeSummary {
+                Text(programmeSummary)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
 
             if let nextProgramme {
                 Text("接下来：\(nextProgramme)")
@@ -424,15 +396,23 @@ private struct LiveChannelCard: View {
 
     private var channelArtwork: some View {
         ZStack {
-            Color(nsColor: .controlBackgroundColor)
-
             LinearGradient(
                 colors: [
-                    Color.accentColor.opacity(0.14),
-                    Color.accentColor.opacity(0.035)
+                    Color(red: 0.13, green: 0.15, blue: 0.21),
+                    Color(red: 0.055, green: 0.065, blue: 0.095)
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
+            )
+
+            RadialGradient(
+                colors: [
+                    Color.accentColor.opacity(0.22),
+                    Color.clear
+                ],
+                center: .topLeading,
+                startRadius: 0,
+                endRadius: 240
             )
 
             RemoteImageCandidates(
@@ -442,7 +422,7 @@ private struct LiveChannelCard: View {
                     .resizable()
                     .scaledToFit()
                     .padding(22)
-                    .shadow(color: Color.black.opacity(0.08), radius: 2, y: 1)
+                    .shadow(color: Color.black.opacity(0.34), radius: 4, y: 2)
             } placeholder: {
                 VStack(spacing: 7) {
                     Image(systemName: "tv")
@@ -451,7 +431,7 @@ private struct LiveChannelCard: View {
                         .font(.caption.weight(.semibold))
                         .lineLimit(1)
                 }
-                .foregroundColor(Color.accentColor.opacity(0.78))
+                .foregroundColor(.white.opacity(0.78))
                 .padding(.horizontal, 18)
             }
         }
@@ -462,11 +442,15 @@ private struct LiveChannelCard: View {
             toggleFavorite()
         } label: {
             Image(systemName: isFavorite ? "star.fill" : "star")
-                .font(.system(size: 13, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(isFavorite ? .yellow : .white)
-                .frame(width: 28, height: 28)
-                .background(Color.black.opacity(0.52))
+                .frame(width: 24, height: 24)
+                .background(Color.black.opacity(0.44))
                 .clipShape(Circle())
+                .overlay {
+                    Circle()
+                        .stroke(Color.white.opacity(0.14), lineWidth: 0.5)
+                }
         }
         .buttonStyle(.plain)
         .help(isFavorite ? "取消收藏" : "收藏频道")
@@ -498,10 +482,11 @@ private struct LiveChannelCard: View {
         state.isLiveFavorite(sourceName: sourceName, channel: channel)
     }
 
-    private var programmeSummary: String {
+    private var programmeSummary: String? {
         if let current = currentAndNext.current {
             return "正在播放：\(current.title)"
         }
+        guard channel.streams.count > 1 else { return nil }
         let format = channel.streams.first?.format?.uppercased() ?? "直播"
         return "\(format) · \(channel.streams.count) 条线路"
     }
@@ -515,14 +500,14 @@ private struct LiveChannelCard: View {
             .currentAndNext(for: channel, at: Date()) ?? (nil, nil)
     }
 
-    private func badge(_ text: String, prominent: Bool) -> some View {
+    private func badge(_ text: String) -> some View {
         Text(text)
             .font(.caption2.weight(.semibold))
             .foregroundColor(.white)
             .lineLimit(1)
             .padding(.horizontal, 7)
             .padding(.vertical, 4)
-            .background(Color.black.opacity(prominent ? 0.66 : 0.48))
+            .background(Color.black.opacity(0.48))
             .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
     }
 

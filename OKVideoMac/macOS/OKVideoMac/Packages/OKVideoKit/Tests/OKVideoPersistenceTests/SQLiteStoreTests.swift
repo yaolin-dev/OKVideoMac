@@ -60,6 +60,25 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(values.first?.title, "Updated")
     }
 
+    func testFavoriteDeletionSupportsSingleItemAndClearAll() async throws {
+        let store = try makeStore()
+        try await store.saveFavorite(
+            FavoriteRecord(siteKey: "fixture", videoID: "1", title: "First")
+        )
+        try await store.saveFavorite(
+            FavoriteRecord(siteKey: "fixture", videoID: "2", title: "Second")
+        )
+
+        try await store.deleteFavorite(siteKey: "fixture", videoID: "1")
+        var values = try await store.favorites()
+        XCTAssertEqual(values.map(\.videoID), ["2"])
+
+        let deleted = try await store.deleteAllFavorites()
+        values = try await store.favorites()
+        XCTAssertEqual(deleted, 1)
+        XCTAssertTrue(values.isEmpty)
+    }
+
     func testLiveSourcesArePersistedSeparatelyFromVODConfigurations() async throws {
         let store = try makeStore()
         let configuration = StoredConfiguration(
@@ -169,6 +188,38 @@ final class SQLiteStoreTests: XCTestCase {
         let remaining = try await store.history()
         XCTAssertEqual(deleted, 1)
         XCTAssertEqual(remaining.map(\.configurationID), [second])
+    }
+
+    func testHistoryDeletionTargetsOnlySelectedRecord() async throws {
+        let store = try makeStore()
+        let configurationID = UUID()
+        try await store.saveHistory(
+            HistoryRecord(
+                configurationID: configurationID,
+                siteKey: "fixture",
+                videoID: "first",
+                title: "First"
+            ),
+            incognito: false
+        )
+        try await store.saveHistory(
+            HistoryRecord(
+                configurationID: configurationID,
+                siteKey: "fixture",
+                videoID: "second",
+                title: "Second"
+            ),
+            incognito: false
+        )
+
+        let deleted = try await store.deleteHistory(
+            configurationID: configurationID,
+            siteKey: "fixture",
+            videoID: "first"
+        )
+        let remaining = try await store.history()
+        XCTAssertEqual(deleted, 1)
+        XCTAssertEqual(remaining.map(\.videoID), ["second"])
     }
 
     func testSettingsRoundTripAndDelete() async throws {

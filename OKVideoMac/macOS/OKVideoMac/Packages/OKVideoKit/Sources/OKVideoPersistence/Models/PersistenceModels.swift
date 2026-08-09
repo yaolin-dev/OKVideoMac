@@ -167,11 +167,19 @@ public protocol FavoritesRepository {
     func saveFavorite(_ favorite: FavoriteRecord) async throws
     func favorites() async throws -> [FavoriteRecord]
     func deleteFavorite(siteKey: String, videoID: String) async throws
+    @discardableResult
+    func deleteAllFavorites() async throws -> Int
 }
 
 public protocol HistoryRepository {
     func saveHistory(_ history: HistoryRecord, incognito: Bool) async throws
     func history() async throws -> [HistoryRecord]
+    @discardableResult
+    func deleteHistory(
+        configurationID: UUID?,
+        siteKey: String,
+        videoID: String
+    ) async throws -> Int
     @discardableResult
     func deleteHistory(configurationID: UUID) async throws -> Int
     @discardableResult

@@ -276,6 +276,12 @@ public actor SQLiteStore:
         )
     }
 
+    @discardableResult
+    public func deleteAllFavorites() throws -> Int {
+        try connection.execute("DELETE FROM favorites")
+        return connection.lastChangedRowCount()
+    }
+
     public func saveHistory(_ history: HistoryRecord, incognito: Bool) throws {
         guard !incognito else { return }
         try connection.execute(
@@ -343,6 +349,26 @@ public actor SQLiteStore:
             )
         }
         return values
+    }
+
+    @discardableResult
+    public func deleteHistory(
+        configurationID: UUID?,
+        siteKey: String,
+        videoID: String
+    ) throws -> Int {
+        try connection.execute(
+            """
+            DELETE FROM history
+            WHERE configuration_id = ? AND site_key = ? AND video_id = ?
+            """,
+            bindings: [
+                .text(configurationID?.uuidString.lowercased() ?? ""),
+                .text(siteKey),
+                .text(videoID)
+            ]
+        )
+        return connection.lastChangedRowCount()
     }
 
     @discardableResult

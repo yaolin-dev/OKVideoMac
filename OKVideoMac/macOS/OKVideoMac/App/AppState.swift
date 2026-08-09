@@ -1544,6 +1544,31 @@ final class AppState: ObservableObject {
         }
     }
 
+    func deleteFavorites(ids: Set<FavoriteRecord.ID>) async {
+        guard let environment, !ids.isEmpty else { return }
+        do {
+            for favorite in favorites where ids.contains(favorite.id) {
+                try await environment.database.deleteFavorite(
+                    siteKey: favorite.siteKey,
+                    videoID: favorite.videoID
+                )
+            }
+            favorites = try await environment.database.favorites()
+        } catch {
+            show(error, title: "删除收藏失败")
+        }
+    }
+
+    func clearFavorites() async {
+        guard let environment else { return }
+        do {
+            _ = try await environment.database.deleteAllFavorites()
+            favorites = try await environment.database.favorites()
+        } catch {
+            show(error, title: "清空收藏失败")
+        }
+    }
+
     func startPlayback(
         detail: VideoDetail,
         source: PlaySource,
@@ -2011,6 +2036,22 @@ final class AppState: ObservableObject {
             try await reloadHistory()
         } catch {
             show(error, title: "清理历史失败")
+        }
+    }
+
+    func deleteHistory(ids: Set<HistoryRecord.ID>) async {
+        guard let environment, !ids.isEmpty else { return }
+        do {
+            for record in history where ids.contains(record.id) {
+                _ = try await environment.database.deleteHistory(
+                    configurationID: record.configurationID,
+                    siteKey: record.siteKey,
+                    videoID: record.videoID
+                )
+            }
+            try await reloadHistory()
+        } catch {
+            show(error, title: "删除历史失败")
         }
     }
 

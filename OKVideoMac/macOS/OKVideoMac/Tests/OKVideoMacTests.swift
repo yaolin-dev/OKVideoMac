@@ -883,6 +883,15 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testPlayerSurfaceDoesNotRevealControlsOnSyntheticMouseEntry() {
+        XCTAssertTrue(
+            PlayerSurfaceTrackingPolicy.options.contains(.mouseMoved)
+        )
+        XCTAssertFalse(
+            PlayerSurfaceTrackingPolicy.options.contains(.mouseEnteredAndExited)
+        )
+    }
+
     @MainActor
     func testPlayerWindowChromeRestoresWithoutClobberingWindowState() async {
         let window = NSWindow(
