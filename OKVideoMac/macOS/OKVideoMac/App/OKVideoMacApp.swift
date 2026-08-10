@@ -17,6 +17,7 @@ struct OKVideoMacApp: App {
                 .environment(\.imageRepository, state.imageRepository)
                 .frame(minWidth: 900, minHeight: 600)
                 .onAppear {
+                    appDelegate.install(appState: state)
                     AppAppearanceController.apply(state.appTheme)
                 }
                 .onChange(of: state.appTheme) { theme in
@@ -68,8 +69,23 @@ struct OKVideoMacApp: App {
     }
 }
 
+@MainActor
 final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
+    private enum TerminationState {
+        case idle
+        case waiting
+        case completed
+    }
+
     private let mainMenuLocalizer = MainMenuChineseLocalizer()
+    private weak var appState: AppState?
+    private var terminationState = TerminationState.idle
+    private var terminationTask: Task<Void, Never>?
+    private var terminationTimeoutTask: Task<Void, Never>?
+
+    func install(appState: AppState) {
+        self.appState = appState
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         mainMenuLocalizer.start()
@@ -83,6 +99,51 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
         _ sender: NSApplication
     ) -> Bool {
         true
+    }
+
+    func applicationShouldTerminate(
+        _ sender: NSApplication
+    ) -> NSApplication.TerminateReply {
+        switch terminationState {
+        case .completed:
+            return .terminateNow
+        case .waiting:
+            return .terminateLater
+        case .idle:
+            guard let appState else { return .terminateNow }
+            terminationState = .waiting
+            terminationTask = Task { @MainActor [weak self, weak appState] in
+                await appState?.shutdown()
+                guard !Task.isCancelled else { return }
+                self?.finishTerminationAfterShutdown()
+            }
+            terminationTimeoutTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard !Task.isCancelled else { return }
+                self?.finishTerminationAfterTimeout()
+            }
+            return .terminateLater
+        }
+    }
+
+    private func finishTerminationAfterShutdown() {
+        guard terminationState == .waiting else { return }
+        terminationTimeoutTask?.cancel()
+        terminationTimeoutTask = nil
+        replyToTerminationRequest()
+    }
+
+    private func finishTerminationAfterTimeout() {
+        guard terminationState == .waiting else { return }
+        terminationTask?.cancel()
+        terminationTask = nil
+        replyToTerminationRequest()
+    }
+
+    private func replyToTerminationRequest() {
+        guard terminationState == .waiting else { return }
+        terminationState = .completed
+        NSApp.reply(toApplicationShouldTerminate: true)
     }
 }
 

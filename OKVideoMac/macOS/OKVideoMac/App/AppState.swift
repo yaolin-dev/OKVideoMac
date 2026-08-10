@@ -359,6 +359,9 @@ final class AppState: ObservableObject {
     private var lastHistorySaveAt = Date.distantPast
     private var pendingHistoryWrite: PlaybackHistoryWrite?
     private var historyPersistenceTask: Task<Void, Never>?
+    private var shutdownTask: Task<Void, Never>?
+    private var isShutdownRequested = false
+    private var hasCompletedShutdown = false
     private var shouldResumeAfterWake = false
     private var isClosingPlayer = false
     private var prefersPlayerSubtitlesEnabled = false
@@ -1676,7 +1679,9 @@ final class AppState: ObservableObject {
         source: PlaySource,
         episode: PlayEpisode
     ) async {
-        guard let environment, let provider = providers[detail.summary.siteKey] else { return }
+        guard !isShutdownRequested,
+              let environment,
+              let provider = providers[detail.summary.siteKey] else { return }
         let sessionID = UUID()
         playbackSessionID = sessionID
         activePlayerRequestID = sessionID
@@ -2006,7 +2011,7 @@ final class AppState: ObservableObject {
         stream: LiveStream,
         sourceID: UUID
     ) async {
-        guard let environment else { return }
+        guard !isShutdownRequested, let environment else { return }
         let sessionID = UUID()
         playbackSessionID = sessionID
         activePlayerRequestID = sessionID
@@ -2224,18 +2229,40 @@ final class AppState: ObservableObject {
     }
 
     func shutdown() async {
-        await finishScheduledHistoryPersistence()
-        if activePlayback != nil {
-            try? await savePlaybackHistory(
-                position: playerSnapshot.position,
-                duration: playerSnapshot.duration
-            )
+        if hasCompletedShutdown {
+            return
         }
+        if let shutdownTask {
+            await shutdownTask.value
+            return
+        }
+
+        isShutdownRequested = true
+        playbackSessionID = UUID()
+        activePlayerRequestID = UUID()
+        playbackQualitySwitchSessionID = UUID()
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = nil
         playerEventTask?.cancel()
         playerEventTask = nil
-        await environment?.player.shutdown()
+
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.finishScheduledHistoryPersistence()
+            if self.activePlayback != nil {
+                try? await self.savePlaybackHistory(
+                    position: self.playerSnapshot.position,
+                    duration: self.playerSnapshot.duration
+                )
+            }
+            await self.environment?.player.shutdown()
+            self.pendingPlayback = nil
+            self.pendingCloudPlayback = nil
+            self.pendingHistoryWrite = nil
+        }
+        shutdownTask = task
+        await task.value
+        hasCompletedShutdown = true
     }
 
     func persistPlaybackProgress() async {
@@ -2269,6 +2296,7 @@ final class AppState: ObservableObject {
     }
 
     func closePlayer() async {
+        guard !isShutdownRequested else { return }
         guard !isClosingPlayer else { return }
         guard isPlayerPresented
                 || activePlayback != nil
@@ -2410,7 +2438,8 @@ final class AppState: ObservableObject {
     }
 
     func switchPlaybackQuality(_ quality: PlaybackQuality) async {
-        guard let environment,
+        guard !isShutdownRequested,
+              let environment,
               let playback = activePlayback,
               var playbackResult = playback.playbackResult,
               playbackResult.qualities.contains(quality),
@@ -3706,7 +3735,9 @@ final class AppState: ObservableObject {
     }
 
     private func startPlayerEventLoop() {
-        guard playerEventTask == nil, let player = environment?.player else { return }
+        guard !isShutdownRequested,
+              playerEventTask == nil,
+              let player = environment?.player else { return }
         playerEventTask = Task { [weak self] in
             for await event in player.events {
                 guard let self else { return }
