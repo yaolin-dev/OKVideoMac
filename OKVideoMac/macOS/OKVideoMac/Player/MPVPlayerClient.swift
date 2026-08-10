@@ -25,6 +25,7 @@ enum MPVPlaybackEndPolicy {
 
 final class MPVPlayerClient: PlayerClient {
     let events: AsyncStream<PlayerEvent>
+    let renderOwnerID = UUID()
 
     private enum LifecycleState {
         case running
@@ -412,10 +413,12 @@ final class MPVPlayerClient: PlayerClient {
             return
         }
 
+        let renderOwnerID = renderOwnerID.uuidString
         await MainActor.run {
             NotificationCenter.default.post(
                 name: .mpvPlayerWillShutdown,
-                object: self
+                object: nil,
+                userInfo: ["renderOwnerID": renderOwnerID]
             )
         }
         await waitForRenderContextsToDetach()

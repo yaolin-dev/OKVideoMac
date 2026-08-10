@@ -1,6 +1,6 @@
 import Foundation
 
-public enum PlayerStatus: Equatable {
+public enum PlayerStatus: Equatable, Sendable {
     case idle
     case loading
     case playing
@@ -11,13 +11,13 @@ public enum PlayerStatus: Equatable {
     case failed(String)
 }
 
-public enum MediaTrackType: String, Codable {
+public enum MediaTrackType: String, Codable, Sendable {
     case video
     case audio
     case subtitle
 }
 
-public struct MediaTrack: Codable, Equatable, Identifiable {
+public struct MediaTrack: Codable, Equatable, Identifiable, Sendable {
     public var id: Int
     public var type: MediaTrackType
     public var title: String
@@ -39,7 +39,7 @@ public struct MediaTrack: Codable, Equatable, Identifiable {
     }
 }
 
-public struct PlayerSnapshot: Equatable {
+public struct PlayerSnapshot: Equatable, Sendable {
     public var status: PlayerStatus
     public var position: TimeInterval
     public var duration: TimeInterval
@@ -79,7 +79,7 @@ public struct PlayerSnapshot: Equatable {
     }
 }
 
-public enum PlayerEvent: Equatable {
+public enum PlayerEvent: Equatable, Sendable {
     case snapshot(PlayerSnapshot, requestID: UUID?)
     case fileLoaded(requestID: UUID?)
     case ended(requestID: UUID?)

@@ -124,6 +124,7 @@ private let mpvRenderUpdateCallback: MPVRenderUpdateCallback = { rawContext in
 
 final class MPVOpenGLView: NSOpenGLView {
     private let player: MPVPlayerClient
+    private let renderOwnerID: String
     private let onError: (Error) -> Void
     private var renderContext: OpaquePointer?
     private var callbackBox: MPVRenderCallbackBox?
@@ -134,6 +135,7 @@ final class MPVOpenGLView: NSOpenGLView {
         onError: @escaping (Error) -> Void
     ) {
         self.player = player
+        renderOwnerID = player.renderOwnerID.uuidString
         self.onError = onError
         let attributes: [NSOpenGLPixelFormatAttribute] = [
             99,     // NSOpenGLPFAOpenGLProfile
@@ -153,7 +155,7 @@ final class MPVOpenGLView: NSOpenGLView {
             self,
             selector: #selector(playerWillShutdown(_:)),
             name: .mpvPlayerWillShutdown,
-            object: player
+            object: nil
         )
     }
 
@@ -259,6 +261,8 @@ final class MPVOpenGLView: NSOpenGLView {
     }
 
     @objc private func playerWillShutdown(_ notification: Notification) {
+        guard notification.userInfo?["renderOwnerID"] as? String
+                == renderOwnerID else { return }
         tearDown()
     }
 
