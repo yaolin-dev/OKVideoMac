@@ -74,7 +74,7 @@ actor ImageRepository {
     private nonisolated let memoryCache = ImageMemoryCache()
     private let cacheDirectory: URL
     private let httpClient: HTTPClient
-    private var inFlight: [URL: Task<NSImage, Error>] = [:]
+    private var inFlight: [URL: Task<Data, Error>] = [:]
 
     init(cacheDirectory: URL, httpClient: HTTPClient) throws {
         self.cacheDirectory = cacheDirectory
@@ -105,10 +105,15 @@ actor ImageRepository {
             return image
         }
         if let task = inFlight[url] {
-            return try await task.value
+            let data = try await task.value
+            return try storeDownloadedImage(
+                from: data,
+                for: url,
+                at: diskURL
+            )
         }
 
-        let task = Task<NSImage, Error> {
+        let task = Task<Data, Error> {
             let imageRequest = InlineImageRequest.parse(url)
             let response = try await httpClient.send(
                 HTTPRequest(
@@ -119,19 +124,34 @@ actor ImageRepository {
                     retryPolicy: HTTPRetryPolicy(maximumRetries: 1)
                 )
             )
-            guard let image = NSImage(data: response.body) else {
-                throw AppError.decoding("海报不是有效图片")
-            }
-            try response.body.write(to: diskURL, options: [.atomic])
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: diskURL.path
-            )
-            return image
+            return response.body
         }
         inFlight[url] = task
         defer { inFlight[url] = nil }
-        let image = try await task.value
+        let data = try await task.value
+        return try storeDownloadedImage(
+            from: data,
+            for: url,
+            at: diskURL
+        )
+    }
+
+    private func storeDownloadedImage(
+        from data: Data,
+        for url: URL,
+        at diskURL: URL
+    ) throws -> NSImage {
+        if let cached = cachedImage(for: url) {
+            return cached
+        }
+        guard let image = NSImage(data: data) else {
+            throw AppError.decoding("海报不是有效图片")
+        }
+        try data.write(to: diskURL, options: [.atomic])
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: diskURL.path
+        )
         memoryCache.insert(image, for: url)
         return image
     }
