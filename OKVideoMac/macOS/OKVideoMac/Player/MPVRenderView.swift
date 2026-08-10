@@ -94,7 +94,15 @@ private final class MPVRenderCallbackBox {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             if self.view?.window?.inLiveResize != true {
-                self.view?.needsDisplay = true
+                // libmpv's update callback is a wake-up signal: consume it
+                // promptly on the OpenGL render thread instead of waiting for
+                // AppKit to eventually call draw(_:). A detail sheet can be
+                // dismissed while this persistent surface is still becoming
+                // visible; AppKit may coalesce that first needsDisplay without
+                // drawing. If renderUpdate is deferred until draw, libmpv can
+                // then wait for an acknowledgement and video advances only on
+                // unrelated UI redraws while audio continues normally.
+                self.view?.consumeRenderUpdateAndRequestDisplay()
             }
             if self.updateGate.finishScheduling() {
                 self.scheduleDisplay()
@@ -121,6 +129,8 @@ private let mpvRenderUpdateCallback: MPVRenderUpdateCallback = { rawContext in
         .takeUnretainedValue()
     box.requestDisplay()
 }
+
+private let mpvRenderUpdateFrame: UInt64 = 1 << 0
 
 final class MPVOpenGLView: NSOpenGLView {
     private let player: MPVPlayerClient
@@ -202,6 +212,10 @@ final class MPVOpenGLView: NSOpenGLView {
         super.viewDidEndLiveResize()
         callbackBox?.setDisplaySuspended(false)
         needsDisplay = true
+        // A callback received while live resize was suspended was deliberately
+        // ignored. Consume any pending render update now so libmpv can resume
+        // issuing frame notifications without requiring another AppKit redraw.
+        callbackBox?.requestDisplay()
     }
 
     /// Window chrome changes (notably toggling `fullSizeContentView`) can move
@@ -225,7 +239,6 @@ final class MPVOpenGLView: NSOpenGLView {
         let backingBounds = convertToBacking(bounds)
         let width = max(1, Int32(backingBounds.width.rounded()))
         let height = max(1, Int32(backingBounds.height.rounded()))
-        _ = player.renderUpdate(renderContext)
         do {
             try player.render(
                 renderContext,
@@ -238,6 +251,21 @@ final class MPVOpenGLView: NSOpenGLView {
             player.reportSwap(renderContext)
         } catch {
             report(error)
+        }
+    }
+
+    /// Acknowledges libmpv's render wake-up before asking AppKit to draw.
+    ///
+    /// All mpv render functions for the OpenGL backend must run with the same
+    /// OpenGL context current. The callback itself can arrive on an arbitrary
+    /// native thread, so `MPVRenderCallbackBox` always invokes this method on
+    /// the main render thread rather than calling into libmpv directly.
+    fileprivate func consumeRenderUpdateAndRequestDisplay() {
+        guard let renderContext, let openGLContext else { return }
+        openGLContext.makeCurrentContext()
+        let flags = player.renderUpdate(renderContext)
+        if flags & mpvRenderUpdateFrame != 0 {
+            needsDisplay = true
         }
     }
 
