@@ -442,6 +442,37 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testOnlyNewestPlaybackRequestCanCommitEvents() {
+        let requestA = UUID()
+        let requestB = UUID()
+        let requestC = UUID()
+
+        XCTAssertFalse(
+            PlaybackRequestOwnershipPolicy.accepts(
+                requestID: requestA,
+                activeRequestID: requestC
+            )
+        )
+        XCTAssertFalse(
+            PlaybackRequestOwnershipPolicy.accepts(
+                requestID: requestB,
+                activeRequestID: requestC
+            )
+        )
+        XCTAssertTrue(
+            PlaybackRequestOwnershipPolicy.accepts(
+                requestID: requestC,
+                activeRequestID: requestC
+            )
+        )
+        XCTAssertFalse(
+            PlaybackRequestOwnershipPolicy.accepts(
+                requestID: nil,
+                activeRequestID: requestC
+            )
+        )
+    }
+
     func testSystemMenuTitlesAreTranslatedToChinese() {
         XCTAssertEqual(MainMenuChineseLocalization.title(for: "File"), "文件")
         XCTAssertEqual(MainMenuChineseLocalization.title(for: "Edit"), "编辑")

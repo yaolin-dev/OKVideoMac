@@ -52,6 +52,7 @@ final class MPVPlayerClient: PlayerClient {
     private var client: OpaquePointer?
     private var snapshot = PlayerSnapshot()
     private var isShutdown = false
+    private var currentRequestID: UUID?
     private var isReplacingMedia = false
     private var didEmitEndedForCurrentMedia = false
     private var pendingStartPosition: TimeInterval?
@@ -125,7 +126,8 @@ final class MPVPlayerClient: PlayerClient {
 
     func load(
         _ media: ResolvedMedia,
-        startPosition: TimeInterval?
+        startPosition: TimeInterval?,
+        requestID: UUID
     ) async throws {
         try validate(media: media)
         try await waitForRenderContext()
@@ -145,6 +147,7 @@ final class MPVPlayerClient: PlayerClient {
                         throwing: AppError.playback("播放请求已被新的请求替换")
                     )
                 }
+                self.currentRequestID = requestID
                 self.pendingLoad = (identifier, continuation)
                 do {
                     try self.applyHTTPHeaders(media.headers, client: client)
@@ -785,7 +788,12 @@ final class MPVPlayerClient: PlayerClient {
                 )
             }
             if result < 0 {
-                continuation.yield(.error(library.errorString(for: result)))
+                continuation.yield(
+                    .error(
+                        library.errorString(for: result),
+                        requestID: currentRequestID
+                    )
+                )
                 break
             }
             guard event.eventID != NativeEvent.none else { break }
@@ -848,7 +856,7 @@ final class MPVPlayerClient: PlayerClient {
             refreshTracks(client: client)
             emitSnapshot()
             completeLoad(.success(()))
-            continuation.yield(.fileLoaded)
+            continuation.yield(.fileLoaded(requestID: currentRequestID))
         case NativeEvent.endFile:
             if isReplacingMedia {
                 guard event.endFileReason != 2 else { return }
@@ -875,12 +883,19 @@ final class MPVPlayerClient: PlayerClient {
                 let message = library.errorString(for: event.error)
                 snapshot.status = .failed(message)
                 emitSnapshot()
-                continuation.yield(.error(message))
+                continuation.yield(
+                    .error(message, requestID: currentRequestID)
+                )
             }
         case NativeEvent.propertyChange:
             processProperty(event)
         case NativeEvent.queueOverflow:
-            continuation.yield(.error("libmpv 事件队列溢出"))
+            continuation.yield(
+                .error(
+                    "libmpv 事件队列溢出",
+                    requestID: currentRequestID
+                )
+            )
         case NativeEvent.shutdown:
             snapshot.status = .stopped
             emitSnapshot()
@@ -958,7 +973,9 @@ final class MPVPlayerClient: PlayerClient {
         guard snapshot != lastEmittedSnapshot else { return }
         lastEmittedSnapshot = snapshot
         lastTimelineEmissionUptime = DispatchTime.now().uptimeNanoseconds
-        continuation.yield(.snapshot(snapshot))
+        continuation.yield(
+            .snapshot(snapshot, requestID: currentRequestID)
+        )
     }
 
     private func emitEndedIfNeeded() {
@@ -969,7 +986,7 @@ final class MPVPlayerClient: PlayerClient {
             snapshot.position = max(snapshot.position, snapshot.duration)
         }
         emitSnapshot()
-        continuation.yield(.ended)
+        continuation.yield(.ended(requestID: currentRequestID))
     }
 
     private func emitTimelineSnapshot() {

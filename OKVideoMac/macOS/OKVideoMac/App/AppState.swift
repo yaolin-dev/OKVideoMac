@@ -165,6 +165,15 @@ enum PlayerEpisodeAdvancePolicy {
     }
 }
 
+enum PlaybackRequestOwnershipPolicy {
+    static func accepts(
+        requestID: UUID?,
+        activeRequestID: UUID
+    ) -> Bool {
+        requestID == activeRequestID
+    }
+}
+
 struct PlayerSubtitleTrackPreference: Equatable {
     let id: Int
     let title: String
@@ -345,6 +354,7 @@ final class AppState: ObservableObject {
     private var pendingCloudPlayback: PendingCloudPlayback?
     private var pendingNodeOperation: PendingNodeOperation?
     private var playbackSessionID = UUID()
+    private var activePlayerRequestID = UUID()
     private var playbackQualitySwitchSessionID = UUID()
     private var lastHistorySaveAt = Date.distantPast
     private var pendingHistoryWrite: PlaybackHistoryWrite?
@@ -1406,13 +1416,16 @@ final class AppState: ObservableObject {
            !isCurrentHistoryPreparation(owningSessionID) {
             return false
         }
+        let sessionID = owningSessionID ?? playbackSessionID
         do {
             try await loadResolvedPlayback(
                 replay.media,
                 detail: replay.detail,
                 source: replay.source,
-                episode: replay.episode
+                episode: replay.episode,
+                sessionID: sessionID
             )
+            guard playbackSessionID == sessionID else { return false }
             playbackResolutionState = .playing
             playbackFailureSummary = nil
             return true
@@ -1427,6 +1440,7 @@ final class AppState: ObservableObject {
     ) -> UUID {
         let preparationID = UUID()
         playbackSessionID = preparationID
+        activePlayerRequestID = preparationID
         playbackQualitySwitchSessionID = UUID()
         playbackQualities = []
         selectedPlaybackQualityID = nil
@@ -1665,6 +1679,7 @@ final class AppState: ObservableObject {
         guard let environment, let provider = providers[detail.summary.siteKey] else { return }
         let sessionID = UUID()
         playbackSessionID = sessionID
+        activePlayerRequestID = sessionID
         playbackQualitySwitchSessionID = UUID()
         playbackQualities = []
         selectedPlaybackQualityID = nil
@@ -1699,6 +1714,7 @@ final class AppState: ObservableObject {
         )
         presentPlayer()
         await environment.player.stop()
+        guard playbackSessionID == sessionID else { return }
 
         do {
             guard detail.playSources.contains(where: { $0.id == source.id }) else {
@@ -1750,7 +1766,11 @@ final class AppState: ObservableObject {
                         flag: candidateSource.name,
                         episodeURL: candidateEpisode.url
                     )
+                    guard playbackSessionID == sessionID else {
+                        throw CancellationError()
+                    }
                 } catch let authorization as NodeWebAuthorizationRequired {
+                    guard playbackSessionID == sessionID else { return }
                     presentNodeConfiguration(
                         authorization,
                         pending: .playback(
@@ -1763,6 +1783,7 @@ final class AppState: ObservableObject {
                     )
                     return
                 } catch let authorization as AndroidBridgeUIRequired {
+                    guard playbackSessionID == sessionID else { return }
                     await presentCloudAuthorization(
                         authorization.state,
                         pending: PendingCloudPlayback(
@@ -1773,6 +1794,7 @@ final class AppState: ObservableObject {
                     )
                     return
                 } catch {
+                    guard playbackSessionID == sessionID else { return }
                     failures.append(
                         "\(candidateSource.name)：\(error.localizedDescription)"
                     )
@@ -1806,7 +1828,8 @@ final class AppState: ObservableObject {
                             detail: detail,
                             source: source,
                             episode: episode,
-                            playbackResult: result
+                            playbackResult: result,
+                            sessionID: sessionID
                         )
                     }
                 )
@@ -1984,6 +2007,9 @@ final class AppState: ObservableObject {
         sourceID: UUID
     ) async {
         guard let environment else { return }
+        let sessionID = UUID()
+        playbackSessionID = sessionID
+        activePlayerRequestID = sessionID
         do {
             let media = ResolvedMedia(
                 url: stream.url,
@@ -2003,8 +2029,14 @@ final class AppState: ObservableObject {
             selectedPlaybackQualityID = nil
             isSwitchingPlaybackQuality = false
             presentPlayer()
-            try await environment.player.load(media, startPosition: nil)
+            try await environment.player.load(
+                media,
+                startPosition: nil,
+                requestID: sessionID
+            )
+            guard playbackSessionID == sessionID else { return }
         } catch {
+            guard playbackSessionID == sessionID else { return }
             livePlaybackChannel = nil
             livePlaybackStream = nil
             livePlaybackSourceID = nil
@@ -2247,6 +2279,7 @@ final class AppState: ObservableObject {
         isClosingPlayer = true
         defer { isClosingPlayer = false }
         playbackSessionID = UUID()
+        activePlayerRequestID = UUID()
         playbackQualitySwitchSessionID = UUID()
         // Capture the final position before stop resets the player snapshot.
         await persistPlaybackProgress()
@@ -2463,9 +2496,11 @@ final class AppState: ObservableObject {
             }
 
             replacementStarted = true
+            activePlayerRequestID = switchSessionID
             try await environment.player.load(
                 resolvedMedia,
-                startPosition: previousPosition
+                startPosition: previousPosition,
+                requestID: switchSessionID
             )
             guard playbackQualitySwitchSessionID == switchSessionID,
                   playbackSessionID == owningPlaybackSessionID else {
@@ -2473,6 +2508,10 @@ final class AppState: ObservableObject {
             }
             if wasPaused {
                 try await environment.player.pause()
+                guard playbackQualitySwitchSessionID == switchSessionID,
+                      playbackSessionID == owningPlaybackSessionID else {
+                    throw CancellationError()
+                }
             }
             activePlayback = ActivePlaybackContext(
                 detail: playback.detail,
@@ -2493,6 +2532,10 @@ final class AppState: ObservableObject {
         } catch is CancellationError {
             return
         } catch {
+            guard playbackQualitySwitchSessionID == switchSessionID,
+                  playbackSessionID == owningPlaybackSessionID else {
+                return
+            }
             currentPlaybackAttempt = nil
             var restoreError: Error?
             if replacementStarted,
@@ -2501,10 +2544,19 @@ final class AppState: ObservableObject {
                 do {
                     try await environment.player.load(
                         previousMedia,
-                        startPosition: previousPosition
+                        startPosition: previousPosition,
+                        requestID: switchSessionID
                     )
+                    guard playbackQualitySwitchSessionID == switchSessionID,
+                          playbackSessionID == owningPlaybackSessionID else {
+                        throw CancellationError()
+                    }
                     if wasPaused {
                         try await environment.player.pause()
+                        guard playbackQualitySwitchSessionID == switchSessionID,
+                              playbackSessionID == owningPlaybackSessionID else {
+                            throw CancellationError()
+                        }
                     }
                 } catch {
                     restoreError = error
@@ -3659,7 +3711,13 @@ final class AppState: ObservableObject {
             for await event in player.events {
                 guard let self else { return }
                 switch event {
-                case .snapshot(let snapshot):
+                case .snapshot(let snapshot, let requestID):
+                    guard PlaybackRequestOwnershipPolicy.accepts(
+                        requestID: requestID,
+                        activeRequestID: self.activePlayerRequestID
+                    ) else {
+                        continue
+                    }
                     if self.playerSnapshot != snapshot {
                         self.playerSnapshot = snapshot
                     }
@@ -3696,9 +3754,23 @@ final class AppState: ObservableObject {
                             duration: snapshot.duration
                         )
                     }
-                case .fileLoaded:
-                    await self.applyPlayerSubtitlePreference()
-                case .ended:
+                case .fileLoaded(let requestID):
+                    guard PlaybackRequestOwnershipPolicy.accepts(
+                        requestID: requestID,
+                        activeRequestID: self.activePlayerRequestID
+                    ) else {
+                        continue
+                    }
+                    await self.applyPlayerSubtitlePreference(
+                        requestID: requestID
+                    )
+                case .ended(let requestID):
+                    guard PlaybackRequestOwnershipPolicy.accepts(
+                        requestID: requestID,
+                        activeRequestID: self.activePlayerRequestID
+                    ) else {
+                        continue
+                    }
                     let endedSessionID = self.playbackSessionID
                     if self.activePlayback != nil {
                         try? await self.savePlaybackHistory(
@@ -3709,7 +3781,13 @@ final class AppState: ObservableObject {
                     await self.advanceAfterNaturalEnd(
                         endedSessionID: endedSessionID
                     )
-                case .error(let message):
+                case .error(let message, let requestID):
+                    guard PlaybackRequestOwnershipPolicy.accepts(
+                        requestID: requestID,
+                        activeRequestID: self.activePlayerRequestID
+                    ) else {
+                        continue
+                    }
                     self.show(AppError.playback(message), title: "播放器错误")
                 }
             }
@@ -3735,7 +3813,11 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func applyPlayerSubtitlePreference() async {
+    private func applyPlayerSubtitlePreference(requestID: UUID?) async {
+        guard PlaybackRequestOwnershipPolicy.accepts(
+            requestID: requestID,
+            activeRequestID: activePlayerRequestID
+        ) else { return }
         let tracks = playerSnapshot.tracks.filter { $0.type == .subtitle }
         guard !tracks.isEmpty else {
             playerSubtitlesEnabled = false
@@ -3752,6 +3834,10 @@ final class AppState: ObservableObject {
 
         guard prefersPlayerSubtitlesEnabled, let track else {
             try? await environment?.player.selectTrack(id: -1, type: .subtitle)
+            guard PlaybackRequestOwnershipPolicy.accepts(
+                requestID: requestID,
+                activeRequestID: activePlayerRequestID
+            ) else { return }
             playerSubtitlesEnabled = false
             return
         }
@@ -3760,11 +3846,19 @@ final class AppState: ObservableObject {
                 id: track.id,
                 type: .subtitle
             )
+            guard PlaybackRequestOwnershipPolicy.accepts(
+                requestID: requestID,
+                activeRequestID: activePlayerRequestID
+            ) else { return }
             playerSubtitlesEnabled = true
             preferredPlayerSubtitleTrack = PlayerSubtitleTrackPreference(
                 track: track
             )
         } catch {
+            guard PlaybackRequestOwnershipPolicy.accepts(
+                requestID: requestID,
+                activeRequestID: activePlayerRequestID
+            ) else { return }
             playerSubtitlesEnabled = false
             show(error, title: "恢复字幕设置失败")
         }
@@ -3796,10 +3890,14 @@ final class AppState: ObservableObject {
         detail: VideoDetail,
         source: PlaySource,
         episode: PlayEpisode,
-        playbackResult: SitePlaybackResult? = nil
+        playbackResult: SitePlaybackResult? = nil,
+        sessionID: UUID
     ) async throws {
         guard let environment else {
             throw AppError.playback("播放器环境不可用")
+        }
+        guard playbackSessionID == sessionID else {
+            throw CancellationError()
         }
         let existing = history.first {
             $0.siteKey == detail.summary.siteKey
@@ -3827,12 +3925,23 @@ final class AppState: ObservableObject {
         livePlaybackSourceID = nil
         selectedDetail = nil
         presentPlayer()
-        try await environment.player.load(media, startPosition: startPosition)
+        activePlayerRequestID = sessionID
+        try await environment.player.load(
+            media,
+            startPosition: startPosition,
+            requestID: sessionID
+        )
+        guard playbackSessionID == sessionID else {
+            throw CancellationError()
+        }
         // A natural EOF can leave libmpv's pause/keep-open state latched while
         // the next episode is being resolved. Reassert autoplay only after the
         // replacement file has finished loading so automatic episode advance
         // cannot remain frozen on its first frame.
         try await environment.player.play()
+        guard playbackSessionID == sessionID else {
+            throw CancellationError()
+        }
         activePlayback = playback
         pendingPlayback = nil
         playbackQualities = playbackResult?.qualities ?? []

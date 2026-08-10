@@ -80,16 +80,20 @@ public struct PlayerSnapshot: Equatable {
 }
 
 public enum PlayerEvent: Equatable {
-    case snapshot(PlayerSnapshot)
-    case fileLoaded
-    case ended
-    case error(String)
+    case snapshot(PlayerSnapshot, requestID: UUID?)
+    case fileLoaded(requestID: UUID?)
+    case ended(requestID: UUID?)
+    case error(String, requestID: UUID?)
 }
 
 public protocol PlayerClient: AnyObject {
     var events: AsyncStream<PlayerEvent> { get }
 
-    func load(_ media: ResolvedMedia, startPosition: TimeInterval?) async throws
+    func load(
+        _ media: ResolvedMedia,
+        startPosition: TimeInterval?,
+        requestID: UUID
+    ) async throws
     func play() async throws
     func pause() async throws
     func stop() async
@@ -123,8 +127,12 @@ public final class UnavailablePlayerClient: PlayerClient {
 
     private let reason: String
 
-    public func load(_ media: ResolvedMedia, startPosition: TimeInterval?) async throws {
-        continuation.yield(.error(reason))
+    public func load(
+        _ media: ResolvedMedia,
+        startPosition: TimeInterval?,
+        requestID: UUID
+    ) async throws {
+        continuation.yield(.error(reason, requestID: requestID))
         throw AppError.unsupported(reason)
     }
     public func play() async throws { throw AppError.unsupported("libmpv 尚未可用") }
