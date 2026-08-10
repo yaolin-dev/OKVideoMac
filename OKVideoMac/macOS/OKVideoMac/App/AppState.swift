@@ -265,10 +265,12 @@ private enum PendingNodeOperation {
     case playback(PendingCloudPlayback)
 }
 
+private enum AppStateTiming {
+    static let automaticConfigurationRefreshInterval: TimeInterval = 30 * 60
+}
+
 @MainActor
 final class AppState: ObservableObject {
-    static let automaticConfigurationRefreshInterval: TimeInterval = 30 * 60
-
     let navigation = AppNavigationState()
     var selectedSection: AppSection {
         get { navigation.selectedSection }
@@ -506,7 +508,7 @@ final class AppState: ObservableObject {
         sourceKind: StoredConfigurationSourceKind,
         lastAttemptAt: Date?,
         now: Date,
-        interval: TimeInterval = automaticConfigurationRefreshInterval
+        interval: TimeInterval = AppStateTiming.automaticConfigurationRefreshInterval
     ) -> Bool {
         guard sourceKind == .remote else { return false }
         guard let lastAttemptAt else { return true }
