@@ -358,9 +358,17 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(policy?["NSAllowsArbitraryLoads"] as? Bool, true)
     }
 
-    func testBundledMPVClientInitializes() throws {
+    func testBundledMPVClientInitializesAndShutsDownIdempotently() async throws {
         let client = try MPVPlayerClient()
         XCTAssertTrue(client.runtimeDescription.contains("libmpv"))
+        await client.shutdown()
+        await client.shutdown()
+        do {
+            try await client.play()
+            XCTFail("播放器 shutdown 后不应再接受命令")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("已关闭"))
+        }
     }
 
     func testMPVSubtitleTrackTypeMapsToAppSubtitleType() {

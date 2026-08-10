@@ -3,6 +3,12 @@ import Darwin
 import OpenGL
 import SwiftUI
 
+extension Notification.Name {
+    static let mpvPlayerWillShutdown = Notification.Name(
+        "com.okvideomac.player.will-shutdown"
+    )
+}
+
 /// Collapses render callbacks while a frame is already waiting on the main
 /// thread. libmpv may produce callbacks faster than AppKit can draw a 4K
 /// surface; queueing every callback makes buttons and sliders wait behind an
@@ -143,6 +149,12 @@ final class MPVOpenGLView: NSOpenGLView {
         let format = NSOpenGLPixelFormat(attributes: attributes)
         super.init(frame: .zero, pixelFormat: format)!
         wantsBestResolutionOpenGLSurface = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(playerWillShutdown(_:)),
+            name: .mpvPlayerWillShutdown,
+            object: player
+        )
     }
 
     @available(*, unavailable)
@@ -242,6 +254,11 @@ final class MPVOpenGLView: NSOpenGLView {
     }
 
     deinit {
+        NotificationCenter.default.removeObserver(self)
+        tearDown()
+    }
+
+    @objc private func playerWillShutdown(_ notification: Notification) {
         tearDown()
     }
 

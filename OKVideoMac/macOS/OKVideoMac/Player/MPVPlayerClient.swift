@@ -26,6 +26,12 @@ enum MPVPlaybackEndPolicy {
 final class MPVPlayerClient: PlayerClient {
     let events: AsyncStream<PlayerEvent>
 
+    private enum LifecycleState {
+        case running
+        case shuttingDown
+        case shutdown
+    }
+
     private enum NativeFormat {
         static let string: Int32 = 1
         static let flag: Int32 = 3
@@ -47,11 +53,15 @@ final class MPVPlayerClient: PlayerClient {
         label: "com.okvideomac.player.libmpv",
         qos: .userInitiated
     )
+    private let queueKey = DispatchSpecificKey<UInt8>()
+    private let queueValue: UInt8 = 1
     private let lifecycleLock = NSLock()
     private let continuation: AsyncStream<PlayerEvent>.Continuation
     private var client: OpaquePointer?
     private var snapshot = PlayerSnapshot()
-    private var isShutdown = false
+    private var lifecycleState = LifecycleState.running
+    private var shutdownWaiters: [CheckedContinuation<Void, Never>] = []
+    private var renderDetachWaiters: [CheckedContinuation<Void, Never>] = []
     private var currentRequestID: UUID?
     private var isReplacingMedia = false
     private var didEmitEndedForCurrentMedia = false
@@ -76,6 +86,7 @@ final class MPVPlayerClient: PlayerClient {
         }
         continuation = captured
         library = try MPVLibrary(bundle: bundle)
+        queue.setSpecific(key: queueKey, value: queueValue)
         guard let created = library.create() else {
             throw AppError.playback("无法创建 libmpv 客户端")
         }
@@ -115,12 +126,28 @@ final class MPVPlayerClient: PlayerClient {
     }
 
     deinit {
+        let fallbackClient: OpaquePointer?
         lifecycleLock.lock()
-        if let client {
-            library.wakeup(client)
-            library.destroy(client)
+        if lifecycleState != .shutdown, renderContextCount == 0 {
+            lifecycleState = .shutdown
+            fallbackClient = client
+            client = nil
+        } else {
+            fallbackClient = nil
         }
         lifecycleLock.unlock()
+
+        if let fallbackClient {
+            let destroyCore = {
+                self.library.wakeup(fallbackClient)
+                self.library.destroy(fallbackClient)
+            }
+            if DispatchQueue.getSpecific(key: queueKey) == queueValue {
+                destroyCore()
+            } else {
+                queue.sync(execute: destroyCore)
+            }
+        }
         continuation.finish()
     }
 
@@ -134,7 +161,7 @@ final class MPVPlayerClient: PlayerClient {
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<Void, Error>) in
             queue.async {
-                guard !self.isShutdown, let client = self.client else {
+                guard self.isRunning, let client = self.client else {
                     continuation.resume(
                         throwing: AppError.playback("libmpv 已关闭")
                     )
@@ -219,13 +246,13 @@ final class MPVPlayerClient: PlayerClient {
     }
 
     func seek(to position: TimeInterval) async throws {
-        guard let target = PlayerSeekPolicy.target(
-            requested: position,
-            duration: snapshot.duration
-        ) else {
-            throw AppError.playback("跳转位置无效")
-        }
         try await perform { client in
+            guard let target = PlayerSeekPolicy.target(
+                requested: position,
+                duration: self.snapshot.duration
+            ) else {
+                throw AppError.playback("跳转位置无效")
+            }
             try "time-pos".withCString { namePointer in
                 try self.library.checked(
                     self.library.setPropertyDouble(client, namePointer, target),
@@ -380,24 +407,32 @@ final class MPVPlayerClient: PlayerClient {
     }
 
     func shutdown() async {
-        await withCheckedContinuation { continuation in
+        guard beginShutdown() else {
+            await waitForShutdownCompletion()
+            return
+        }
+
+        await MainActor.run {
+            NotificationCenter.default.post(
+                name: .mpvPlayerWillShutdown,
+                object: self
+            )
+        }
+        await waitForRenderContextsToDetach()
+
+        await withCheckedContinuation { completion in
             queue.async {
-                guard !self.isShutdown else {
-                    continuation.resume()
-                    return
-                }
-                self.isShutdown = true
-                self.lifecycleLock.lock()
+                self.completeLoad(.failure(CancellationError()))
                 if let client = self.client {
-                    self.completeLoad(.failure(CancellationError()))
                     _ = try? self.command(["stop"], client: client)
                     self.library.wakeup(client)
                     self.library.destroy(client)
                     self.client = nil
                 }
-                self.lifecycleLock.unlock()
+                self.currentRequestID = nil
                 self.continuation.finish()
-                continuation.resume()
+                self.markShutdownComplete()
+                completion.resume()
             }
         }
     }
@@ -408,7 +443,7 @@ final class MPVPlayerClient: PlayerClient {
     ) throws -> OpaquePointer {
         lifecycleLock.lock()
         defer { lifecycleLock.unlock() }
-        guard let client, !isShutdown else {
+        guard let client, lifecycleState == .running else {
             throw AppError.playback("libmpv 已关闭")
         }
         var renderContext: OpaquePointer?
@@ -466,9 +501,17 @@ final class MPVPlayerClient: PlayerClient {
     func destroyRenderContext(_ renderContext: OpaquePointer) {
         library.renderSetUpdateCallback(renderContext, nil, nil)
         library.renderDestroy(renderContext)
+        let waiters: [CheckedContinuation<Void, Never>]
         lifecycleLock.lock()
         renderContextCount = max(0, renderContextCount - 1)
+        if renderContextCount == 0 {
+            waiters = renderDetachWaiters
+            renderDetachWaiters.removeAll()
+        } else {
+            waiters = []
+        }
         lifecycleLock.unlock()
+        waiters.forEach { $0.resume() }
     }
 
     var runtimeDescription: String {
@@ -535,7 +578,7 @@ final class MPVPlayerClient: PlayerClient {
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<Result, Error>) in
             queue.async {
-                guard !self.isShutdown, let client = self.client else {
+                guard self.isRunning, let client = self.client else {
                     continuation.resume(
                         throwing: AppError.playback("libmpv 已关闭")
                     )
@@ -730,6 +773,9 @@ final class MPVPlayerClient: PlayerClient {
     private func waitForRenderContext() async throws {
         for _ in 0..<100 {
             try Task.checkCancellation()
+            guard isRunning else {
+                throw AppError.playback("libmpv 已关闭")
+            }
             if hasActiveRenderContext() {
                 return
             }
@@ -741,7 +787,7 @@ final class MPVPlayerClient: PlayerClient {
     private func hasActiveRenderContext() -> Bool {
         lifecycleLock.lock()
         defer { lifecycleLock.unlock() }
-        return renderContextCount > 0 && !isShutdown
+        return renderContextCount > 0 && lifecycleState == .running
     }
 
     private func installPropertyObservers(client: OpaquePointer) throws {
@@ -772,13 +818,13 @@ final class MPVPlayerClient: PlayerClient {
     }
 
     private func pollEvents() {
-        guard !isShutdown, let client else { return }
+        guard isRunning, let client else { return }
         // Drain a bounded batch instead of reading only one event every 16 ms.
         // A seek or volume drag can produce several property notifications at
         // once; the old one-at-a-time loop let native events and UI commands
         // queue behind each other.
         var processedCount = 0
-        while processedCount < 64, !isShutdown {
+        while processedCount < 64, isRunning {
             var event = NativeMPVEvent()
             let result = withUnsafeMutablePointer(to: &event) { eventPointer in
                 library.waitEvent(
@@ -800,7 +846,7 @@ final class MPVPlayerClient: PlayerClient {
             process(event)
             processedCount += 1
         }
-        guard !isShutdown else { return }
+        guard isRunning else { return }
         let delay: DispatchTimeInterval = processedCount == 64
             ? .milliseconds(0)
             : .milliseconds(16)
@@ -1007,9 +1053,59 @@ final class MPVPlayerClient: PlayerClient {
         ) { [weak self] in
             guard let self else { return }
             self.timelineEmissionScheduled = false
-            guard !self.isShutdown else { return }
+            guard self.isRunning else { return }
             self.emitSnapshot()
         }
+    }
+
+    private var isRunning: Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        return lifecycleState == .running
+    }
+
+    private func beginShutdown() -> Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard lifecycleState == .running else { return false }
+        lifecycleState = .shuttingDown
+        return true
+    }
+
+    private func waitForRenderContextsToDetach() async {
+        await withCheckedContinuation { continuation in
+            lifecycleLock.lock()
+            if renderContextCount == 0 {
+                lifecycleLock.unlock()
+                continuation.resume()
+            } else {
+                renderDetachWaiters.append(continuation)
+                lifecycleLock.unlock()
+            }
+        }
+    }
+
+    private func waitForShutdownCompletion() async {
+        await withCheckedContinuation { continuation in
+            lifecycleLock.lock()
+            if lifecycleState == .shutdown {
+                lifecycleLock.unlock()
+                continuation.resume()
+            } else {
+                shutdownWaiters.append(continuation)
+                lifecycleLock.unlock()
+            }
+        }
+    }
+
+    private func markShutdownComplete() {
+        let waiters: [CheckedContinuation<Void, Never>]
+        lifecycleLock.lock()
+        lifecycleState = .shutdown
+        waiters = shutdownWaiters
+        shutdownWaiters.removeAll()
+        lifecycleLock.unlock()
+        waiters.forEach { $0.resume() }
     }
 
     static func isTimelineProperty(_ name: String) -> Bool {
