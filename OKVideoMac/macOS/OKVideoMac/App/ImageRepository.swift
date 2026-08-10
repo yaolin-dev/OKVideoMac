@@ -49,6 +49,64 @@ struct InlineImageRequest: Equatable {
     }
 }
 
+@MainActor
+enum DecodedImageCacheCost {
+    static let unknownRepresentationCost = 1 * 1_024 * 1_024
+    private static let maximumSafeCost = Int.max / 4
+
+    static func cost(for image: NSImage) -> Int {
+        var total = 0
+        var foundBitmapRepresentation = false
+
+        for case let representation as NSBitmapImageRep in image.representations {
+            foundBitmapRepresentation = true
+            let representationCost = cost(
+                bytesPerRow: representation.bytesPerRow,
+                pixelsWide: representation.pixelsWide,
+                pixelsHigh: representation.pixelsHigh
+            )
+            total = addingSafely(total, representationCost)
+        }
+
+        return foundBitmapRepresentation && total > 0
+            ? total
+            : unknownRepresentationCost
+    }
+
+    static func cost(
+        bytesPerRow: Int,
+        pixelsWide: Int,
+        pixelsHigh: Int
+    ) -> Int {
+        guard pixelsHigh > 0 else {
+            return unknownRepresentationCost
+        }
+        if bytesPerRow > 0 {
+            return multiplyingSafely(bytesPerRow, pixelsHigh)
+        }
+        guard pixelsWide > 0 else {
+            return unknownRepresentationCost
+        }
+        return multiplyingSafely(
+            multiplyingSafely(pixelsWide, pixelsHigh),
+            4
+        )
+    }
+
+    private static func multiplyingSafely(_ lhs: Int, _ rhs: Int) -> Int {
+        guard lhs > 0, rhs > 0 else {
+            return unknownRepresentationCost
+        }
+        let (result, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        return overflow ? maximumSafeCost : min(result, maximumSafeCost)
+    }
+
+    private static func addingSafely(_ lhs: Int, _ rhs: Int) -> Int {
+        let (result, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? maximumSafeCost : min(result, maximumSafeCost)
+    }
+}
+
 private final class ImageMemoryCache {
     private let storage = NSCache<NSURL, NSImage>()
 
@@ -57,14 +115,21 @@ private final class ImageMemoryCache {
         storage.totalCostLimit = 128 * 1_024 * 1_024
     }
 
+    @MainActor
     func image(for url: URL) -> NSImage? {
         storage.object(forKey: url as NSURL)
     }
 
-    func insert(_ image: NSImage, for url: URL, cost: Int = 0) {
-        storage.setObject(image, forKey: url as NSURL, cost: cost)
+    @MainActor
+    func insert(_ image: NSImage, for url: URL) {
+        storage.setObject(
+            image,
+            forKey: url as NSURL,
+            cost: DecodedImageCacheCost.cost(for: image)
+        )
     }
 
+    @MainActor
     func removeAll() {
         storage.removeAllObjects()
     }
@@ -226,11 +291,7 @@ final class ImageRepository: Sendable {
         if loaded.origin == .network {
             try await dataRepository.persistValidatedData(loaded.data, for: url)
         }
-        memoryCache.insert(
-            image,
-            for: url,
-            cost: loaded.origin == .disk ? loaded.data.count : 0
-        )
+        memoryCache.insert(image, for: url)
     }
 
     @MainActor

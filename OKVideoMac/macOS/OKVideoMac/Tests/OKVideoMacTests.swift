@@ -7,6 +7,74 @@ import OKVideoPersistence
 
 final class OKVideoMacTests: XCTestCase {
     @MainActor
+    func testDecodedImageCacheCostUsesBitmapBackingSize() throws {
+        let representation = try makeBitmapRepresentation(width: 20, height: 30)
+        let image = NSImage(size: NSSize(width: 10, height: 15))
+        image.addRepresentation(representation)
+
+        XCTAssertEqual(
+            DecodedImageCacheCost.cost(for: image),
+            representation.bytesPerRow * representation.pixelsHigh
+        )
+    }
+
+    @MainActor
+    func testDecodedImageCacheCostScalesWithPixelDimensions() throws {
+        let small = NSImage(size: NSSize(width: 10, height: 10))
+        small.addRepresentation(try makeBitmapRepresentation(width: 20, height: 20))
+        let large = NSImage(size: NSSize(width: 10, height: 10))
+        large.addRepresentation(try makeBitmapRepresentation(width: 200, height: 300))
+
+        XCTAssertGreaterThan(
+            DecodedImageCacheCost.cost(for: large),
+            DecodedImageCacheCost.cost(for: small)
+        )
+    }
+
+    @MainActor
+    func testDecodedImageCacheCostUsesPixelFallbackAndHandlesInvalidDimensions() {
+        XCTAssertEqual(
+            DecodedImageCacheCost.cost(
+                bytesPerRow: 0,
+                pixelsWide: 200,
+                pixelsHigh: 300
+            ),
+            200 * 300 * 4
+        )
+        XCTAssertEqual(
+            DecodedImageCacheCost.cost(
+                bytesPerRow: 0,
+                pixelsWide: 0,
+                pixelsHigh: 300
+            ),
+            DecodedImageCacheCost.unknownRepresentationCost
+        )
+        XCTAssertGreaterThan(
+            DecodedImageCacheCost.cost(
+                bytesPerRow: Int.max,
+                pixelsWide: Int.max,
+                pixelsHigh: Int.max
+            ),
+            0
+        )
+    }
+
+    @MainActor
+    func testDecodedImageCacheCostExceedsCompressedDataSize() throws {
+        let image = NSImage(size: NSSize(width: 64, height: 64))
+        let representation = try makeBitmapRepresentation(width: 512, height: 512)
+        image.addRepresentation(representation)
+        let compressedData = try XCTUnwrap(
+            representation.representation(using: .png, properties: [:])
+        )
+
+        XCTAssertGreaterThan(
+            DecodedImageCacheCost.cost(for: image),
+            compressedData.count
+        )
+    }
+
+    @MainActor
     func testSectionNavigationDoesNotInvalidateWholeAppState() {
         let state = AppState.bootstrap()
         var appStateUpdateCount = 0
@@ -226,6 +294,27 @@ final class OKVideoMacTests: XCTestCase {
         NSBezierPath(rect: NSRect(x: 0, y: 0, width: 2, height: 2)).fill()
         image.unlockFocus()
         return try XCTUnwrap(image.tiffRepresentation)
+    }
+
+    @MainActor
+    private func makeBitmapRepresentation(
+        width: Int,
+        height: Int
+    ) throws -> NSBitmapImageRep {
+        try XCTUnwrap(
+            NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: width,
+                pixelsHigh: height,
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: width * 4,
+                bitsPerPixel: 32
+            )
+        )
     }
 
     @MainActor
