@@ -414,6 +414,86 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(aggregateOnly.displayName, "你好，旧时光 全30集")
     }
 
+    func testEpisodeListPrefersProgressingEPFieldOverSharedSeriesCount() {
+        let sharedDescription = "【029069-何以笙箫默 (36集) 钟汉良＆唐嫣】"
+        let episodes = [
+            PlayEpisode(
+                name: "[1.6GB]何以笙箫默 My Sunshine EP01.1080P.WEB-DL.mp4\(sharedDescription)",
+                url: "episode-01"
+            ),
+            PlayEpisode(
+                name: "[1.6GB]何以笙箫默 My Sunshine EP02.1080P.WEB-DL.mp4\(sharedDescription)",
+                url: "episode-02"
+            ),
+            PlayEpisode(
+                name: "[1.7GB]何以笙箫默 My Sunshine EP03.1080P.WEB-DL.mp4\(sharedDescription)",
+                url: "episode-03"
+            ),
+            PlayEpisode(
+                name: "[3.8GB]何以笙箫默 You Are My Sunshine.1080P电影.mp4\(sharedDescription)",
+                url: "movie"
+            )
+        ]
+
+        let values = EpisodeListPresentation.presentations(
+            from: episodes,
+            query: "",
+            sortOrder: .sourceOrder
+        )
+
+        XCTAssertEqual(values.map(\.episodeNumber), [1, 2, 3, nil])
+        XCTAssertEqual(values.map(\.displayName).prefix(3), [
+            "第 1 集", "第 2 集", "第 3 集"
+        ])
+        XCTAssertFalse(values[3].displayName.contains("第 36 集"))
+    }
+
+    func testEpisodeListInfersProgressingFilenameFieldAroundNumericNoise() {
+        let episodes = [1, 2, 3, 4].map { number in
+            PlayEpisode(
+                name: "[1.\(number)GB]Show.2026.1080p.\(String(format: "%02d", number))-4K.H265.mp4【全36集】",
+                url: "episode-\(number)"
+            )
+        }
+
+        let values = EpisodeListPresentation.presentations(
+            from: episodes,
+            query: "",
+            sortOrder: .sourceOrder
+        )
+
+        XCTAssertEqual(values.map(\.episodeNumber), [1, 2, 3, 4])
+    }
+
+    func testEpisodeListRecognizesStableDescendingFilenameSequence() {
+        let episodes = [12, 11, 10, 9].map { number in
+            PlayEpisode(
+                name: "[900MB]\(String(format: "%02d", number)).4K.SDR.60fps.mp4【剧集 2026】",
+                url: "episode-\(number)"
+            )
+        }
+
+        let values = EpisodeListPresentation.presentations(
+            from: episodes,
+            query: "",
+            sortOrder: .sourceOrder
+        )
+
+        XCTAssertEqual(values.map(\.episodeNumber), [12, 11, 10, 9])
+    }
+
+    func testSingleFilenameStillUsesLocalEpisodeFallback() {
+        let parsed = EpisodeNameParser.presentation(
+            for: PlayEpisode(
+                name: "[1.6GB]05.mp4【剧名 2026 全36集 4K】",
+                url: "episode-05"
+            )
+        )
+
+        XCTAssertEqual(parsed.episodeNumber, 5)
+        XCTAssertEqual(parsed.displayName, "第 5 集")
+    }
+
     func testEpisodeNameParserDoesNotTreatOrdinaryTrailingNumberAsEpisode() {
         let presentation = EpisodeNameParser.presentation(
             for: PlayEpisode(name: "Mader - Pa's Kitchen 1", url: "track")

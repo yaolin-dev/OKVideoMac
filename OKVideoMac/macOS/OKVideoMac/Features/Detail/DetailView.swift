@@ -565,6 +565,20 @@ struct EpisodeRangeOption: Identifiable, Equatable {
     let episodeIDs: Set<String>
 }
 
+private struct EpisodeSequenceCandidate: Hashable {
+    enum Key: Hashable {
+        case seasonEpisode(Int)
+        case episodeCode
+        case explicitUnit
+        case bareUnit
+        case numericSlot(Int)
+    }
+
+    let key: Key
+    let number: Int
+    let seasonNumber: Int?
+}
+
 private struct EpisodeRangePicker: View {
     let options: [EpisodeRangeOption]
     @Binding var selectedID: String?
@@ -747,6 +761,21 @@ enum EpisodeNameParser {
 
         if let values = captures(
             in: compact,
+            pattern: #"(?i)(?:^|[^A-Z])(?:EP|E)[ ._-]*(\d{1,4})(?:[^0-9]|$)"#,
+            captureCount: 1
+        ), let number = Int(values[0]) {
+            return regularPresentation(
+                episode: episode,
+                compact: compact,
+                original: original,
+                number: number,
+                displayName: "第 \(number) 集",
+                sourceIndex: sourceIndex
+            )
+        }
+
+        if let values = captures(
+            in: compact,
             pattern: #"(?:^|[^全共\d])第?\s*(\d{1,4})\s*(集|话)"#,
             captureCount: 2
         ), let number = Int(values[0]) {
@@ -757,21 +786,6 @@ enum EpisodeNameParser {
                 original: original,
                 number: number,
                 displayName: "第 \(number) \(unit)",
-                sourceIndex: sourceIndex
-            )
-        }
-
-        if let values = captures(
-            in: compact,
-            pattern: #"(?i)(?:^|[^A-Z])(?:EP|E)[ ._-]*(\d{1,4})(?:[^0-9]|$)"#,
-            captureCount: 1
-        ), let number = Int(values[0]) {
-            return regularPresentation(
-                episode: episode,
-                compact: compact,
-                original: original,
-                number: number,
-                displayName: "第 \(number) 集",
                 sourceIndex: sourceIndex
             )
         }
@@ -849,6 +863,146 @@ enum EpisodeNameParser {
         return trimmed.isEmpty ? "未命名资源" : trimmed
     }
 
+    fileprivate static func sequenceCandidates(
+        for episode: PlayEpisode
+    ) -> [EpisodeSequenceCandidate] {
+        let original = episode.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nameCandidate = original.isEmpty ? episode.url : original
+        let compact = compactName(nameCandidate)
+        guard specialName(in: compact) == nil else { return [] }
+
+        var candidates: [EpisodeSequenceCandidate] = []
+        if let values = captures(
+            in: compact,
+            pattern: #"(?i)(?:^|[^A-Z0-9])S(\d{1,2})[ ._-]*E(\d{1,4})(?:[^0-9]|$)"#,
+            captureCount: 2
+        ), let season = Int(values[0]), let number = Int(values[1]),
+           isPlausibleEpisodeNumber(number) {
+            candidates.append(
+                EpisodeSequenceCandidate(
+                    key: .seasonEpisode(season),
+                    number: number,
+                    seasonNumber: season
+                )
+            )
+        }
+
+        if let values = captures(
+            in: compact,
+            pattern: #"(?i)(?:^|[^A-Z0-9])(?:EP|E)[ ._-]*(\d{1,4})(?:[^0-9]|$)"#,
+            captureCount: 1
+        ), let number = Int(values[0]), isPlausibleEpisodeNumber(number) {
+            candidates.append(
+                EpisodeSequenceCandidate(
+                    key: .episodeCode,
+                    number: number,
+                    seasonNumber: nil
+                )
+            )
+        }
+
+        let unitPattern = #"(?:^|[^全共\d])(第)?\s*(\d{1,4})\s*(集|话)"#
+        if let regex = try? NSRegularExpression(pattern: unitPattern) {
+            let text = compact as NSString
+            let matches = regex.matches(
+                in: compact,
+                range: NSRange(location: 0, length: text.length)
+            )
+            for match in matches {
+                let prefixRange = match.range(at: 1)
+                let numberRange = match.range(at: 2)
+                guard numberRange.location != NSNotFound,
+                      let number = Int(text.substring(with: numberRange)),
+                      isPlausibleEpisodeNumber(number) else {
+                    continue
+                }
+                candidates.append(
+                    EpisodeSequenceCandidate(
+                        key: prefixRange.location == NSNotFound
+                            ? .bareUnit
+                            : .explicitUnit,
+                        number: number,
+                        seasonNumber: nil
+                    )
+                )
+            }
+        }
+
+        let stem = filenameStem(from: compact)
+        if let regex = try? NSRegularExpression(pattern: #"\d{1,4}"#) {
+            let text = stem as NSString
+            let matches = regex.matches(
+                in: stem,
+                range: NSRange(location: 0, length: text.length)
+            )
+            var slot = 0
+            for match in matches {
+                guard let number = Int(text.substring(with: match.range)),
+                      isPlausibleEpisodeNumber(number),
+                      isGenericEpisodeToken(in: text, range: match.range) else {
+                    continue
+                }
+                candidates.append(
+                    EpisodeSequenceCandidate(
+                        key: .numericSlot(slot),
+                        number: number,
+                        seasonNumber: nil
+                    )
+                )
+                slot += 1
+            }
+        }
+
+        var unique: [EpisodeSequenceCandidate.Key: EpisodeSequenceCandidate] = [:]
+        for candidate in candidates where unique[candidate.key] == nil {
+            unique[candidate.key] = candidate
+        }
+        return Array(unique.values)
+    }
+
+    private static func filenameStem(from compact: String) -> String {
+        guard let match = firstMatch(
+            in: compact,
+            pattern: #"(?i)\.(?:mkv|mp4|m4v|mov|avi|ts|m2ts|flv|webm)(?:$|[?#\s【\[])"#
+        ) else {
+            return compact
+        }
+        let text = compact as NSString
+        return text.substring(to: match.range.location)
+    }
+
+    private static func isPlausibleEpisodeNumber(_ number: Int) -> Bool {
+        (1...999).contains(number)
+    }
+
+    private static func isGenericEpisodeToken(
+        in text: NSString,
+        range: NSRange
+    ) -> Bool {
+        let before = range.location > 0
+            ? text.substring(with: NSRange(location: range.location - 1, length: 1))
+            : ""
+        let afterLocation = NSMaxRange(range)
+        let after = afterLocation < text.length
+            ? text.substring(with: NSRange(location: afterLocation, length: 1))
+            : ""
+        let beforeTwo = range.location > 1
+            ? text.substring(with: NSRange(location: range.location - 2, length: 2))
+            : before
+
+        if before.range(of: #"[A-Za-z]"#, options: .regularExpression) != nil
+            || after.range(of: #"[A-Za-z]"#, options: .regularExpression) != nil {
+            return false
+        }
+        if beforeTwo.range(
+            of: #"(?i)(?:H\.|X)$"#,
+            options: .regularExpression
+        ) != nil {
+            return false
+        }
+        return true
+    }
+
     private static func regularPresentation(
         episode: PlayEpisode,
         compact: String,
@@ -912,14 +1066,51 @@ enum EpisodeNameParser {
 }
 
 enum EpisodeListPresentation {
+    private struct SequenceInference {
+        let key: EpisodeSequenceCandidate.Key
+        let candidatesByIndex: [Int: EpisodeSequenceCandidate]
+        let score: Int
+    }
+
     static func presentations(
         from episodes: [PlayEpisode],
         query: String,
         sortOrder: EpisodeSortOrder
     ) -> [EpisodePresentation] {
         let keyword = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidatesByIndex = episodes.map(EpisodeNameParser.sequenceCandidates)
+        let inference = sequenceInference(
+            episodeCount: episodes.count,
+            candidatesByIndex: candidatesByIndex
+        )
+        let repeatedBareUnitNumbers = repeatedNumbers(
+            for: .bareUnit,
+            candidatesByIndex: candidatesByIndex
+        )
         var values = episodes.enumerated().map { index, episode in
-            EpisodeNameParser.presentation(for: episode, sourceIndex: index)
+            let parsed = EpisodeNameParser.presentation(
+                for: episode,
+                sourceIndex: index
+            )
+            guard !parsed.isSpecial else { return parsed }
+
+            if let inference,
+               let candidate = inference.candidatesByIndex[index] {
+                return presentation(
+                    replacing: parsed,
+                    with: candidate
+                )
+            }
+
+            if let number = parsed.episodeNumber,
+               repeatedBareUnitNumbers.contains(number),
+               candidatesByIndex[index].contains(where: {
+                   $0.key == .bareUnit && $0.number == number
+               }) {
+                return presentationWithoutEpisodeNumber(parsed)
+            }
+
+            return parsed
         }
         if values.count == 1, let only = values.first {
             values[0] = EpisodePresentation(
@@ -951,6 +1142,133 @@ enum EpisodeListPresentation {
                 compare(lhs, rhs, ascending: false)
             }
         }
+    }
+
+    private static func sequenceInference(
+        episodeCount: Int,
+        candidatesByIndex: [[EpisodeSequenceCandidate]]
+    ) -> SequenceInference? {
+        guard episodeCount > 1 else { return nil }
+        var occurrences: [EpisodeSequenceCandidate.Key: [Int: EpisodeSequenceCandidate]] = [:]
+        for (index, candidates) in candidatesByIndex.enumerated() {
+            for candidate in candidates {
+                occurrences[candidate.key, default: [:]][index] = candidate
+            }
+        }
+
+        let minimumCoverage = episodeCount == 2
+            ? 2
+            : max(3, Int(ceil(Double(episodeCount) * 0.5)))
+        return occurrences.compactMap { key, byIndex -> SequenceInference? in
+            let ordered = byIndex.sorted { $0.key < $1.key }
+            guard ordered.count >= minimumCoverage else { return nil }
+
+            let numbers = ordered.map { $0.value.number }
+            let differences = zip(numbers, numbers.dropFirst()).map { $1 - $0 }
+            guard let firstDifference = differences.first(where: { $0 != 0 }) else {
+                return nil
+            }
+            let direction = firstDifference > 0 ? 1 : -1
+            guard differences.allSatisfy({ difference in
+                difference != 0 && (difference > 0 ? 1 : -1) == direction
+            }) else {
+                return nil
+            }
+
+            let steps = differences.map { abs($0) }
+            if ordered.count == 2 {
+                guard steps[0] <= 10 else { return nil }
+            } else {
+                let consecutiveCount = steps.filter { $0 == 1 }.count
+                guard consecutiveCount * 2 >= steps.count else { return nil }
+            }
+
+            guard let minimum = numbers.min(), let maximum = numbers.max(),
+                  maximum - minimum <= max(100, episodeCount * 3) else {
+                return nil
+            }
+
+            let consecutiveCount = steps.filter { $0 == 1 }.count
+            let gapPenalty = steps.reduce(0) { $0 + max(0, $1 - 1) }
+            let score = ordered.count * 100
+                + consecutiveCount * 30
+                + priority(for: key)
+                - min(gapPenalty, 100)
+            return SequenceInference(
+                key: key,
+                candidatesByIndex: byIndex,
+                score: score
+            )
+        }
+        .max { lhs, rhs in
+            if lhs.score == rhs.score {
+                return priority(for: lhs.key) < priority(for: rhs.key)
+            }
+            return lhs.score < rhs.score
+        }
+    }
+
+    private static func repeatedNumbers(
+        for key: EpisodeSequenceCandidate.Key,
+        candidatesByIndex: [[EpisodeSequenceCandidate]]
+    ) -> Set<Int> {
+        let values = candidatesByIndex.flatMap { candidates in
+            candidates.filter { $0.key == key }.map(\.number)
+        }
+        let counts = Dictionary(values.map { ($0, 1) }, uniquingKeysWith: +)
+        return Set(counts.compactMap { $0.value > 1 ? $0.key : nil })
+    }
+
+    private static func priority(
+        for key: EpisodeSequenceCandidate.Key
+    ) -> Int {
+        switch key {
+        case .seasonEpisode:
+            return 50
+        case .episodeCode:
+            return 40
+        case .explicitUnit:
+            return 30
+        case .bareUnit:
+            return 10
+        case .numericSlot:
+            return 0
+        }
+    }
+
+    private static func presentation(
+        replacing original: EpisodePresentation,
+        with candidate: EpisodeSequenceCandidate
+    ) -> EpisodePresentation {
+        let displayName: String
+        if let season = candidate.seasonNumber {
+            displayName = "第 \(season) 季 · 第 \(candidate.number) 集"
+        } else {
+            displayName = "第 \(candidate.number) 集"
+        }
+        return EpisodePresentation(
+            episode: original.episode,
+            displayName: displayName,
+            originalName: original.originalName,
+            seasonNumber: candidate.seasonNumber,
+            episodeNumber: candidate.number,
+            isSpecial: false,
+            sourceIndex: original.sourceIndex
+        )
+    }
+
+    private static func presentationWithoutEpisodeNumber(
+        _ original: EpisodePresentation
+    ) -> EpisodePresentation {
+        EpisodePresentation(
+            episode: original.episode,
+            displayName: EpisodeNameParser.compactName(original.originalName),
+            originalName: original.originalName,
+            seasonNumber: nil,
+            episodeNumber: nil,
+            isSpecial: false,
+            sourceIndex: original.sourceIndex
+        )
     }
 
     static func rangeOptions(

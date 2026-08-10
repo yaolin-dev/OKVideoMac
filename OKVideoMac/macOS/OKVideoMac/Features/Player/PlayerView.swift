@@ -342,7 +342,12 @@ struct PlayerView: View {
                 : state.currentPlaybackTitle
         }
 
-        let presentation = EpisodeNameParser.presentation(for: episode)
+        let presentation = EpisodeListPresentation.presentations(
+            from: state.playerEpisodes,
+            query: "",
+            sortOrder: .sourceOrder
+        ).first(where: { $0.id == episode.id })
+            ?? EpisodeNameParser.presentation(for: episode)
         guard let contentTitle, !contentTitle.isEmpty else {
             return presentation.displayName
         }
@@ -839,9 +844,11 @@ struct PlayerView: View {
     }
 
     private var episodePanel: some View {
-        let presentations = state.playerEpisodes.enumerated().map {
-            EpisodeNameParser.presentation(for: $0.element, sourceIndex: $0.offset)
-        }
+        let presentations = EpisodeListPresentation.presentations(
+            from: state.playerEpisodes,
+            query: "",
+            sortOrder: .sourceOrder
+        )
         return playerPanel(width: 500) {
             VStack(alignment: .leading, spacing: 12) {
                 panelHeader(
