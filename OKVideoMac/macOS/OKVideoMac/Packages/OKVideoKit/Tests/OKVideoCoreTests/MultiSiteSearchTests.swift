@@ -219,6 +219,43 @@ final class MultiSiteSearchTests: XCTestCase {
         XCTAssertEqual(events.last, .completed)
     }
 
+    func testTimeoutDoesNotWaitForProviderThatIgnoresCancellation() async {
+        let uncooperative = UncooperativeSearchFixtureProvider()
+        let fast = SearchFixtureProvider(
+            site: SiteConfiguration(
+                key: "fast-after-timeout",
+                name: "Fast After Timeout",
+                type: 1,
+                api: "https://example.invalid"
+            ),
+            result: .success([])
+        )
+
+        let startedAt = Date()
+        var events: [MultiSiteSearchEvent] = []
+        for await event in MultiSiteSearch(
+            maximumConcurrency: 1,
+            siteTimeout: 0.05
+        ).search(
+            providers: [uncooperative, fast],
+            keyword: "fixture"
+        ) {
+            events.append(event)
+        }
+
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 0.3)
+        XCTAssertTrue(events.contains { event in
+            guard case .failure(let failure) = event else { return false }
+            return failure.siteKey == uncooperative.site.key
+                && failure.message.contains("搜索超时")
+        })
+        XCTAssertTrue(events.contains(.results(
+            siteKey: fast.site.key,
+            items: []
+        )))
+        XCTAssertEqual(events.last, .completed)
+    }
+
     func testJavaDexSearchUsesBridgeLengthTimeout() async {
         let dex = SearchFixtureProvider(
             site: SiteConfiguration(
@@ -402,6 +439,49 @@ private struct CancellableSearchFixtureProvider: SiteProvider {
             throw error
         }
         return VideoPage(items: [], pagination: Pagination(page: page, pageCount: 1))
+    }
+
+    func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
+        throw AppError.site("unused")
+    }
+}
+
+private struct UncooperativeSearchFixtureProvider: SiteProvider {
+    let site = SiteConfiguration(
+        key: "uncooperative",
+        name: "Uncooperative",
+        type: 1,
+        api: "https://example.invalid"
+    )
+    let capability: SiteCapability = .standardJSON
+
+    func home() async throws -> SiteHome {
+        SiteHome(categories: [], recommendations: [])
+    }
+
+    func category(
+        id: String,
+        page: Int,
+        filters: [String: String]
+    ) async throws -> VideoPage {
+        VideoPage(items: [], pagination: Pagination(page: page, pageCount: 0))
+    }
+
+    func detail(id: String) async throws -> VideoDetail {
+        throw AppError.site("unused")
+    }
+
+    func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+                continuation.resume(
+                    returning: VideoPage(
+                        items: [],
+                        pagination: Pagination(page: page, pageCount: 1)
+                    )
+                )
+            }
+        }
     }
 
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {

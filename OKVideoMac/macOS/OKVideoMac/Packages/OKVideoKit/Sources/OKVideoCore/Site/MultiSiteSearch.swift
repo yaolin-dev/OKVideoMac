@@ -18,6 +18,39 @@ public enum MultiSiteSearchEvent: Equatable, Sendable {
     case completed
 }
 
+private enum SiteSearchOutcome: Sendable {
+    case results([VideoSummary])
+    case failure(String)
+    case cancelled
+}
+
+private actor FirstSiteSearchOutcome {
+    private var bufferedOutcome: SiteSearchOutcome?
+    private var waiter: CheckedContinuation<SiteSearchOutcome, Never>?
+    private var isResolved = false
+
+    func wait() async -> SiteSearchOutcome {
+        if let bufferedOutcome {
+            self.bufferedOutcome = nil
+            return bufferedOutcome
+        }
+        return await withCheckedContinuation { continuation in
+            waiter = continuation
+        }
+    }
+
+    func resolve(_ outcome: SiteSearchOutcome) {
+        guard !isResolved else { return }
+        isResolved = true
+        if let waiter {
+            self.waiter = nil
+            waiter.resume(returning: outcome)
+        } else {
+            bufferedOutcome = outcome
+        }
+    }
+}
+
 public struct MultiSiteSearch {
     public let maximumConcurrency: Int
     public let siteTimeout: TimeInterval
@@ -97,21 +130,22 @@ public struct MultiSiteSearch {
         keyword: String,
         quick: Bool
     ) async -> MultiSiteSearchEvent {
-        do {
-            let items = try await searchWithTimeout(
-                provider: provider,
-                keyword: keyword,
-                quick: quick,
-                timeout: Self.effectiveSiteTimeout(
-                    base: siteTimeout,
-                    capability: provider.capability
-                )
+        let outcome = await searchWithTimeout(
+            provider: provider,
+            keyword: keyword,
+            quick: quick,
+            timeout: Self.effectiveSiteTimeout(
+                base: siteTimeout,
+                capability: provider.capability
             )
+        )
+        switch outcome {
+        case .results(let items):
             return .results(
                 siteKey: provider.site.key,
                 items: items
             )
-        } catch is CancellationError {
+        case .cancelled:
             return .failure(
                 SearchFailure(
                     siteKey: provider.site.key,
@@ -119,12 +153,12 @@ public struct MultiSiteSearch {
                     message: "已取消"
                 )
             )
-        } catch {
+        case .failure(let message):
             return .failure(
                 SearchFailure(
                     siteKey: provider.site.key,
                     siteName: provider.site.name,
-                    message: error.localizedDescription
+                    message: message
                 )
             )
         }
@@ -155,9 +189,12 @@ public struct MultiSiteSearch {
         keyword: String,
         quick: Bool,
         timeout: TimeInterval
-    ) async throws -> [VideoSummary] {
-        try await withThrowingTaskGroup(of: [VideoSummary].self) { group in
-            group.addTask {
+    ) async -> SiteSearchOutcome {
+        guard !Task.isCancelled else { return .cancelled }
+
+        let firstOutcome = FirstSiteSearchOutcome()
+        let providerTask = Task {
+            do {
                 var pageNumber = 1
                 var collected: [VideoSummary] = []
                 var seen = Set<String>()
@@ -193,22 +230,39 @@ public struct MultiSiteSearch {
                     pageNumber += 1
                 }
 
-                return collected
+                await firstOutcome.resolve(.results(collected))
+            } catch is CancellationError {
+                await firstOutcome.resolve(.cancelled)
+            } catch {
+                await firstOutcome.resolve(.failure(error.localizedDescription))
             }
-            group.addTask {
+        }
+        let timeoutTask = Task {
+            do {
                 let nanoseconds = UInt64(
                     min(timeout, 300) * 1_000_000_000
                 )
                 try await Task.sleep(nanoseconds: nanoseconds)
-                throw AppError.site(
-                    "搜索超时（\(Int(timeout)) 秒）"
+                await firstOutcome.resolve(
+                    .failure("搜索超时（\(Int(timeout)) 秒）")
                 )
+            } catch {
+                // The winning provider result or parent cancellation stops
+                // this timer. It must not overwrite the first outcome.
             }
-            defer { group.cancelAll() }
-            guard let result = try await group.next() else {
-                throw CancellationError()
-            }
-            return result
         }
+
+        let outcome = await withTaskCancellationHandler {
+            await firstOutcome.wait()
+        } onCancel: {
+            providerTask.cancel()
+            timeoutTask.cancel()
+            Task {
+                await firstOutcome.resolve(.cancelled)
+            }
+        }
+        providerTask.cancel()
+        timeoutTask.cancel()
+        return outcome
     }
 }
