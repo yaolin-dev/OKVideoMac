@@ -833,9 +833,23 @@ enum EpisodeNameParser {
 
     static func compactName(_ rawValue: String) -> String {
         var value = rawValue.removingPercentEncoding ?? rawValue
-        if let components = URLComponents(string: value),
-           let url = components.url,
-           !url.lastPathComponent.isEmpty {
+        if let mediaMatch = firstMatch(
+            in: value,
+            pattern: #"(?i)\.(?:mkv|mp4|m4v|mov|avi|ts|m2ts|flv|webm|m3u8)(?=$|[?#\s【\[])"#
+        ) {
+            // Cloud-drive providers append the containing folder after the
+            // real file name, for example "S01E01.mkv【Show/4K HDR】".
+            // Taking lastPathComponent from the whole label mistakes that
+            // descriptive slash for a URL path and discards the episode code.
+            // Limit path compaction to the actual media-file portion first.
+            let text = value as NSString
+            value = text.substring(to: NSMaxRange(mediaMatch.range))
+            if let last = value.split(separator: "/").last, !last.isEmpty {
+                value = String(last)
+            }
+        } else if let components = URLComponents(string: value),
+                  let url = components.url,
+                  !url.lastPathComponent.isEmpty {
             value = url.lastPathComponent
         } else {
             value = value.components(separatedBy: "?").first ?? value

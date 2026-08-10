@@ -616,6 +616,28 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(aggregateOnly.displayName, "你好，旧时光 全30集")
     }
 
+    func testEpisodeNameParserIgnoresSlashInAppendedFolderDescription() {
+        let standard = EpisodeNameParser.presentation(
+            for: PlayEpisode(
+                name: "[703.4MB]S01E01.mp4【L - 凛冬下的罪恶/4K】",
+                url: "standard-episode-01"
+            )
+        )
+        let hdr = EpisodeNameParser.presentation(
+            for: PlayEpisode(
+                name: "[1.4GB]HDR.10bit.DDP5.1.S01E02.mkv【L - 凛冬下的罪恶/4K高码率 [HDR]】",
+                url: "hdr-episode-02"
+            )
+        )
+
+        XCTAssertEqual(standard.seasonNumber, 1)
+        XCTAssertEqual(standard.episodeNumber, 1)
+        XCTAssertEqual(standard.displayName, "第 1 季 · 第 1 集")
+        XCTAssertEqual(hdr.seasonNumber, 1)
+        XCTAssertEqual(hdr.episodeNumber, 2)
+        XCTAssertEqual(hdr.displayName, "第 1 季 · 第 2 集")
+    }
+
     func testEpisodeListPrefersProgressingEPFieldOverSharedSeriesCount() {
         let sharedDescription = "【029069-何以笙箫默 (36集) 钟汉良＆唐嫣】"
         let episodes = [
