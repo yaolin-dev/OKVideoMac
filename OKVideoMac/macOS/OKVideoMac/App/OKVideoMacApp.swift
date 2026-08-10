@@ -264,6 +264,7 @@ enum MainMenuChineseLocalization {
     }
 }
 
+@MainActor
 final class MainMenuChineseLocalizer {
     private var observers: [NSObjectProtocol] = []
     private var pendingMenus: [ObjectIdentifier: NSMenu] = [:]
@@ -289,7 +290,9 @@ final class MainMenuChineseLocalizer {
                 queue: .main
             ) { [weak self] notification in
                 guard let menu = notification.object as? NSMenu else { return }
-                self?.scheduleLocalization(of: menu)
+                MainActor.assumeIsolated {
+                    self?.scheduleLocalization(of: menu)
+                }
             }
         }
         DispatchQueue.main.async { [weak self] in

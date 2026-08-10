@@ -1976,6 +1976,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
         coordinator.restore()
     }
 
+    @MainActor
     final class Coordinator {
         private struct AppliedConfiguration: Equatable {
             let isLivePlayback: Bool
@@ -2269,18 +2270,20 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                         object: window,
                         queue: .main
                     ) { [weak self, weak window] _ in
-                        guard let self,
-                              let window,
-                              self.window === window else { return }
-                        self.onFullScreenChange(
-                            window.styleMask.contains(.fullScreen)
-                        )
-                        if !window.styleMask.contains(.fullScreen),
-                           let configuration = self.desiredConfiguration {
-                            self.scheduleWindowConfiguration(
-                                configuration,
-                                for: window
+                        MainActor.assumeIsolated {
+                            guard let self,
+                                  let window,
+                                  self.window === window else { return }
+                            self.onFullScreenChange(
+                                window.styleMask.contains(.fullScreen)
                             )
+                            if !window.styleMask.contains(.fullScreen),
+                               let configuration = self.desiredConfiguration {
+                                self.scheduleWindowConfiguration(
+                                    configuration,
+                                    for: window
+                                )
+                            }
                         }
                     }
                 )
@@ -2300,14 +2303,16 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                 object: window,
                 queue: .main
             ) { [weak self, weak window] _ in
-                guard let self,
-                      let window,
-                      self.window === window,
-                      let configuration = self.desiredConfiguration,
-                      configuration != self.appliedConfiguration else {
-                    return
+                MainActor.assumeIsolated {
+                    guard let self,
+                          let window,
+                          self.window === window,
+                          let configuration = self.desiredConfiguration,
+                          configuration != self.appliedConfiguration else {
+                        return
+                    }
+                    self.scheduleWindowConfiguration(configuration, for: window)
                 }
-                self.scheduleWindowConfiguration(configuration, for: window)
             }
         }
 
