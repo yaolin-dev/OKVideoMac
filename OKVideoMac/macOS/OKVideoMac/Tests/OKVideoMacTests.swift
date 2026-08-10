@@ -26,6 +26,7 @@ final class OKVideoMacTests: XCTestCase {
         withExtendedLifetime((appStateObservation, navigationObservation)) {}
     }
 
+    @MainActor
     func testImageRepositoryExposesMemoryHitWithoutActorHop() async throws {
         let cacheDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -46,7 +47,7 @@ final class OKVideoMacTests: XCTestCase {
                 body: imageData
             )
         }
-        let repository = try ImageRepository(
+        let repository = try makeImageRepository(
             cacheDirectory: cacheDirectory,
             httpClient: client
         )
@@ -56,6 +57,188 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(repository.cachedImage(for: url) === loaded)
         try await repository.clear()
         XCTAssertNil(repository.cachedImage(for: url))
+    }
+
+    @MainActor
+    func testImageRepositoryDeduplicatesDataAndImageCreation() async throws {
+        let cacheDirectory = temporaryImageCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let imageData = try makeTestImageData()
+        let url = try XCTUnwrap(URL(string: "https://images.example.invalid/shared"))
+        let client = ImageRepositoryHTTPClientProbe(
+            body: imageData,
+            delayNanoseconds: 100_000_000
+        )
+        let repository = try makeImageRepository(
+            cacheDirectory: cacheDirectory,
+            httpClient: client
+        )
+
+        let tasks = (0..<10).map { _ in
+            Task { @MainActor in
+                ObjectIdentifier(try await repository.image(for: url))
+            }
+        }
+        var identifiers: [ObjectIdentifier] = []
+        for task in tasks {
+            identifiers.append(try await task.value)
+        }
+
+        let requestCount = await client.requestCount()
+        XCTAssertEqual(requestCount, 1)
+        XCTAssertEqual(Set(identifiers).count, 1)
+    }
+
+    @MainActor
+    func testImageRepositoryUsesMemoryCacheAfterFirstLoad() async throws {
+        let cacheDirectory = temporaryImageCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let url = try XCTUnwrap(URL(string: "https://images.example.invalid/memory"))
+        let client = ImageRepositoryHTTPClientProbe(body: try makeTestImageData())
+        let repository = try makeImageRepository(
+            cacheDirectory: cacheDirectory,
+            httpClient: client
+        )
+
+        let first = try await repository.image(for: url)
+        let second = try await repository.image(for: url)
+
+        XCTAssertTrue(first === second)
+        let requestCount = await client.requestCount()
+        XCTAssertEqual(requestCount, 1)
+    }
+
+    @MainActor
+    func testImageRepositoryRestoresImageFromDiskCache() async throws {
+        let cacheDirectory = temporaryImageCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let url = try XCTUnwrap(URL(string: "https://images.example.invalid/disk"))
+        let firstClient = ImageRepositoryHTTPClientProbe(body: try makeTestImageData())
+        let firstRepository = try makeImageRepository(
+            cacheDirectory: cacheDirectory,
+            httpClient: firstClient
+        )
+        _ = try await firstRepository.image(for: url)
+
+        let secondClient = ImageRepositoryHTTPClientProbe(
+            error: HTTPClientError.statusCode(500)
+        )
+        let secondRepository = try makeImageRepository(
+            cacheDirectory: cacheDirectory,
+            httpClient: secondClient
+        )
+        _ = try await secondRepository.image(for: url)
+
+        let firstRequestCount = await firstClient.requestCount()
+        let secondRequestCount = await secondClient.requestCount()
+        XCTAssertEqual(firstRequestCount, 1)
+        XCTAssertEqual(secondRequestCount, 0)
+    }
+
+    @MainActor
+    func testImageRepositoryRejectsInvalidDataWithoutCaching() async throws {
+        let cacheDirectory = temporaryImageCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let url = try XCTUnwrap(URL(string: "https://images.example.invalid/invalid"))
+        let client = ImageRepositoryHTTPClientProbe(body: Data("not-image".utf8))
+        let repository = try makeImageRepository(
+            cacheDirectory: cacheDirectory,
+            httpClient: client
+        )
+
+        do {
+            _ = try await repository.image(for: url)
+            XCTFail("无效图片应该解码失败")
+        } catch {
+            XCTAssertNil(repository.cachedImage(for: url))
+            XCTAssertTrue(
+                try FileManager.default.contentsOfDirectory(atPath: cacheDirectory.path).isEmpty
+            )
+        }
+    }
+
+    @MainActor
+    func testImageRepositoryHTTPFailureDoesNotPolluteCaches() async throws {
+        let cacheDirectory = temporaryImageCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let url = try XCTUnwrap(URL(string: "https://images.example.invalid/failure"))
+        let client = ImageRepositoryHTTPClientProbe(
+            error: HTTPClientError.statusCode(503)
+        )
+        let repository = try makeImageRepository(
+            cacheDirectory: cacheDirectory,
+            httpClient: client
+        )
+
+        do {
+            _ = try await repository.image(for: url)
+            XCTFail("HTTP 失败不应返回图片")
+        } catch {
+            XCTAssertNil(repository.cachedImage(for: url))
+            XCTAssertTrue(
+                try FileManager.default.contentsOfDirectory(atPath: cacheDirectory.path).isEmpty
+            )
+            let requestCount = await client.requestCount()
+            XCTAssertEqual(requestCount, 1)
+        }
+    }
+
+    @MainActor
+    func testImageRepositoryCancellationDoesNotCancelSharedLoad() async throws {
+        let cacheDirectory = temporaryImageCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let url = try XCTUnwrap(URL(string: "https://images.example.invalid/cancel"))
+        let client = ImageRepositoryHTTPClientProbe(
+            body: try makeTestImageData(),
+            delayNanoseconds: 150_000_000
+        )
+        let repository = try makeImageRepository(
+            cacheDirectory: cacheDirectory,
+            httpClient: client
+        )
+        let cancelledWaiter = Task { @MainActor in
+            try await repository.image(for: url)
+        }
+        let activeWaiter = Task { @MainActor in
+            try await repository.image(for: url)
+        }
+
+        cancelledWaiter.cancel()
+        _ = try? await cancelledWaiter.value
+        let loaded = try await activeWaiter.value
+
+        XCTAssertTrue(repository.cachedImage(for: url) === loaded)
+        let requestCount = await client.requestCount()
+        XCTAssertEqual(requestCount, 1)
+    }
+
+    @MainActor
+    private func temporaryImageCacheDirectory() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    }
+
+    @MainActor
+    private func makeTestImageData() throws -> Data {
+        let image = NSImage(size: NSSize(width: 2, height: 2))
+        image.lockFocus()
+        NSColor.systemIndigo.setFill()
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: 2, height: 2)).fill()
+        image.unlockFocus()
+        return try XCTUnwrap(image.tiffRepresentation)
+    }
+
+    @MainActor
+    private func makeImageRepository<Client: HTTPClient>(
+        cacheDirectory: URL,
+        httpClient: Client
+    ) throws -> ImageRepository {
+        ImageRepository(
+            dataRepository: try ImageDataRepository(
+                cacheDirectory: cacheDirectory,
+                httpClient: httpClient
+            )
+        )
     }
 
     func testEpisodeNameParserUsesRealSeasonAndEpisodeNumber() {
@@ -1987,5 +2170,44 @@ private struct NodeProviderStubHTTPClient: HTTPClient {
 
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         try handler(request)
+    }
+}
+
+private actor ImageRepositoryHTTPClientProbe: HTTPClient {
+    private let body: Data?
+    private let error: HTTPClientError?
+    private let delayNanoseconds: UInt64
+    private var count = 0
+
+    init(body: Data, delayNanoseconds: UInt64 = 0) {
+        self.body = body
+        self.error = nil
+        self.delayNanoseconds = delayNanoseconds
+    }
+
+    init(error: HTTPClientError, delayNanoseconds: UInt64 = 0) {
+        self.body = nil
+        self.error = error
+        self.delayNanoseconds = delayNanoseconds
+    }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        count += 1
+        if delayNanoseconds > 0 {
+            try await Task.sleep(nanoseconds: delayNanoseconds)
+        }
+        if let error {
+            throw error
+        }
+        return HTTPResponse(
+            url: request.url,
+            statusCode: 200,
+            headers: ["Content-Type": "image/tiff"],
+            body: body ?? Data()
+        )
+    }
+
+    func requestCount() -> Int {
+        count
     }
 }

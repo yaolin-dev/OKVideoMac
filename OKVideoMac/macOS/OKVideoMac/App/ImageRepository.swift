@@ -49,7 +49,7 @@ struct InlineImageRequest: Equatable {
     }
 }
 
-private final class ImageMemoryCache: @unchecked Sendable {
+private final class ImageMemoryCache {
     private let storage = NSCache<NSURL, NSImage>()
 
     init() {
@@ -70,8 +70,17 @@ private final class ImageMemoryCache: @unchecked Sendable {
     }
 }
 
-actor ImageRepository {
-    private nonisolated let memoryCache = ImageMemoryCache()
+private enum ImageDataOrigin: Equatable, Sendable {
+    case disk
+    case network
+}
+
+private struct LoadedImageData: Sendable {
+    let data: Data
+    let origin: ImageDataOrigin
+}
+
+actor ImageDataRepository {
     private let cacheDirectory: URL
     private let httpClient: HTTPClient
     private var inFlight: [URL: Task<Data, Error>] = [:]
@@ -90,27 +99,20 @@ actor ImageRepository {
         )
     }
 
-    nonisolated func cachedImage(for url: URL) -> NSImage? {
-        memoryCache.image(for: url)
+    fileprivate func data(for url: URL) async throws -> LoadedImageData {
+        let diskURL = cacheDirectory.appendingPathComponent(cacheKey(for: url))
+        if let data = try? Data(contentsOf: diskURL) {
+            return LoadedImageData(data: data, origin: .disk)
+        }
+        return LoadedImageData(
+            data: try await downloadedData(for: url),
+            origin: .network
+        )
     }
 
-    func image(for url: URL) async throws -> NSImage {
-        if let cached = cachedImage(for: url) {
-            return cached
-        }
-        let diskURL = cacheDirectory.appendingPathComponent(cacheKey(for: url))
-        if let data = try? Data(contentsOf: diskURL),
-           let image = NSImage(data: data) {
-            memoryCache.insert(image, for: url, cost: data.count)
-            return image
-        }
+    func downloadedData(for url: URL) async throws -> Data {
         if let task = inFlight[url] {
-            let data = try await task.value
-            return try storeDownloadedImage(
-                from: data,
-                for: url,
-                at: diskURL
-            )
+            return try await task.value
         }
 
         let task = Task<Data, Error> {
@@ -128,36 +130,19 @@ actor ImageRepository {
         }
         inFlight[url] = task
         defer { inFlight[url] = nil }
-        let data = try await task.value
-        return try storeDownloadedImage(
-            from: data,
-            for: url,
-            at: diskURL
-        )
+        return try await task.value
     }
 
-    private func storeDownloadedImage(
-        from data: Data,
-        for url: URL,
-        at diskURL: URL
-    ) throws -> NSImage {
-        if let cached = cachedImage(for: url) {
-            return cached
-        }
-        guard let image = NSImage(data: data) else {
-            throw AppError.decoding("海报不是有效图片")
-        }
+    func persistValidatedData(_ data: Data, for url: URL) throws {
+        let diskURL = cacheDirectory.appendingPathComponent(cacheKey(for: url))
         try data.write(to: diskURL, options: [.atomic])
         try? FileManager.default.setAttributes(
             [.posixPermissions: 0o600],
             ofItemAtPath: diskURL.path
         )
-        memoryCache.insert(image, for: url)
-        return image
     }
 
     func clear() throws {
-        memoryCache.removeAll()
         let files = try FileManager.default.contentsOfDirectory(
             at: cacheDirectory,
             includingPropertiesForKeys: nil
@@ -170,6 +155,90 @@ actor ImageRepository {
     private func cacheKey(for url: URL) -> String {
         let digest = SHA256.hash(data: Data(url.absoluteString.utf8))
         return digest.map { String(format: "%02x", $0) }.joined() + ".image"
+    }
+}
+
+final class ImageRepository: Sendable {
+    private let dataRepository: ImageDataRepository
+    @MainActor private let memoryCache = ImageMemoryCache()
+    @MainActor private var inFlightImages: [URL: Task<Void, Error>] = [:]
+
+    init(dataRepository: ImageDataRepository) {
+        self.dataRepository = dataRepository
+    }
+
+    @MainActor
+    func cachedImage(for url: URL) -> NSImage? {
+        memoryCache.image(for: url)
+    }
+
+    @MainActor
+    func image(for url: URL) async throws -> NSImage {
+        if let cached = cachedImage(for: url) {
+            return cached
+        }
+        if let task = inFlightImages[url] {
+            try await task.value
+            return try cachedImageAfterLoad(for: url)
+        }
+
+        let task = Task { @MainActor in
+            try await loadAndCacheImage(for: url)
+        }
+        inFlightImages[url] = task
+        defer { inFlightImages[url] = nil }
+        try await task.value
+        return try cachedImageAfterLoad(for: url)
+    }
+
+    @MainActor
+    func clear() async throws {
+        memoryCache.removeAll()
+        try await dataRepository.clear()
+    }
+
+    @MainActor
+    private func loadAndCacheImage(for url: URL) async throws {
+        if cachedImage(for: url) != nil {
+            return
+        }
+
+        var loaded = try await dataRepository.data(for: url)
+        if cachedImage(for: url) != nil {
+            return
+        }
+
+        var image = NSImage(data: loaded.data)
+        if image == nil, loaded.origin == .disk {
+            loaded = LoadedImageData(
+                data: try await dataRepository.downloadedData(for: url),
+                origin: .network
+            )
+            if cachedImage(for: url) != nil {
+                return
+            }
+            image = NSImage(data: loaded.data)
+        }
+
+        guard let image else {
+            throw AppError.decoding("海报不是有效图片")
+        }
+        if loaded.origin == .network {
+            try await dataRepository.persistValidatedData(loaded.data, for: url)
+        }
+        memoryCache.insert(
+            image,
+            for: url,
+            cost: loaded.origin == .disk ? loaded.data.count : 0
+        )
+    }
+
+    @MainActor
+    private func cachedImageAfterLoad(for url: URL) throws -> NSImage {
+        guard let image = cachedImage(for: url) else {
+            throw AppError.decoding("海报不是有效图片")
+        }
+        return image
     }
 }
 

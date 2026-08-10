@@ -58,12 +58,14 @@ struct AppEnvironment {
             ),
             androidDexBridge: AndroidDexBridgeClient(),
             player: player,
-            imageRepository: try ImageRepository(
-                cacheDirectory: directories.caches.appendingPathComponent(
-                    "Posters",
-                    isDirectory: true
-                ),
-                httpClient: imageHTTPClient
+            imageRepository: ImageRepository(
+                dataRepository: try ImageDataRepository(
+                    cacheDirectory: directories.caches.appendingPathComponent(
+                        "Posters",
+                        isDirectory: true
+                    ),
+                    httpClient: imageHTTPClient
+                )
             )
         )
     }
