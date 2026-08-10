@@ -93,6 +93,42 @@ struct SearchSiteOption: Identifiable, Equatable {
     let resultCount: Int
 }
 
+struct HomeContentIdentity: Equatable, Sendable {
+    let configurationID: UUID
+    let siteKey: String
+}
+
+enum HomeContentPublicationPolicy {
+    static func shouldDiscard(
+        currentIdentity: HomeContentIdentity?,
+        targetIdentity: HomeContentIdentity?
+    ) -> Bool {
+        guard let currentIdentity else { return false }
+        return currentIdentity != targetIdentity
+    }
+
+    static func shouldPublish(
+        currentHome: SiteHome?,
+        currentIdentity: HomeContentIdentity?,
+        incomingHome: SiteHome,
+        incomingIdentity: HomeContentIdentity
+    ) -> Bool {
+        currentIdentity != incomingIdentity || currentHome != incomingHome
+    }
+}
+
+enum HomeAutomaticRefreshPolicy {
+    static func allowsRefresh(
+        hasCompletedStartup: Bool,
+        selectedSection: AppSection,
+        isHomeSearchPresented: Bool
+    ) -> Bool {
+        hasCompletedStartup
+            && selectedSection == .home
+            && !isHomeSearchPresented
+    }
+}
+
 struct SearchFolderPage: Identifiable, Equatable {
     let id: UUID
     let folder: VideoSummary
@@ -347,6 +383,7 @@ final class AppState: ObservableObject {
     private var searchSessionID = UUID()
     private var detailLoadSessionID = UUID()
     private var homeLoadSessionID = UUID()
+    private var homeContentIdentity: HomeContentIdentity?
     private var categoryLoadSessionID = UUID()
     private var playerEventTask: Task<Void, Never>?
     private var cloudAuthorizationPollTask: Task<Void, Never>?
@@ -571,7 +608,14 @@ final class AppState: ObservableObject {
                 self.categoryLoadSessionID = UUID()
                 self.activeConfiguration = loaded.configuration
                 self.rebuildProviders()
-                self.siteHome = nil
+                if !self.supportedSites.contains(where: {
+                    $0.key == self.selectedSiteKey
+                }) {
+                    self.selectedSiteKey = self.supportedSites.first?.key
+                }
+                self.discardHomeContentIfNeeded(
+                    for: self.currentHomeContentIdentity
+                )
                 self.selectedCategoryID = nil
                 self.categoryPage = nil
                 self.categoryPaginationError = nil
@@ -635,7 +679,7 @@ final class AppState: ObservableObject {
         isHomeLoading = true
         homeLoadErrorMessage = nil
         selectedSiteKey = key
-        siteHome = nil
+        discardHomeContentIfNeeded(for: currentHomeContentIdentity)
         selectedCategoryID = nil
         categoryPage = nil
         await persistSelectedSitePreference(key)
@@ -725,7 +769,8 @@ final class AppState: ObservableObject {
         }
         guard let key = selectedSiteKey,
               let provider = providers[key],
-              provider.capability != .unsupportedSpider else {
+              provider.capability != .unsupportedSpider,
+              let contentIdentity = currentHomeContentIdentity else {
             isHomeLoading = false
             return
         }
@@ -736,10 +781,11 @@ final class AppState: ObservableObject {
         do {
             let loaded = try await provider.home()
             guard homeLoadSessionID == sessionID,
-                  selectedSiteKey == key else {
+                  selectedSiteKey == key,
+                  currentHomeContentIdentity == contentIdentity else {
                 return
             }
-            siteHome = loaded
+            publishHomeContent(loaded, identity: contentIdentity)
             homeLoadErrorMessage = nil
             await cacheSiteHome(loaded, siteKey: key)
         } catch {
@@ -763,7 +809,11 @@ final class AppState: ObservableObject {
     /// returns to the foreground. Only reload the site when the remote config
     /// actually changed; otherwise keep the current home content undisturbed.
     func refreshHomeConfigurationIfNeeded() async {
-        guard selectedSection == .home, !isHomeSearchPresented else { return }
+        guard HomeAutomaticRefreshPolicy.allowsRefresh(
+            hasCompletedStartup: hasCompletedStartup,
+            selectedSection: selectedSection,
+            isHomeSearchPresented: isHomeSearchPresented
+        ) else { return }
         let changed = await refreshActiveConfigurationIfNeeded()
         guard changed,
               selectedSection == .home,
@@ -3386,6 +3436,7 @@ final class AppState: ObservableObject {
             activeConfiguration = nil
             providers = [:]
             selectedSiteKey = nil
+            discardHomeContentIfNeeded(for: nil)
             return
         }
         lastAutomaticConfigurationRefreshAttemptAt = record.updatedAt
@@ -3478,12 +3529,12 @@ final class AppState: ObservableObject {
     ) async {
         homeLoadSessionID = UUID()
         categoryLoadSessionID = UUID()
-        siteHome = nil
         selectedCategoryID = nil
         categoryPage = nil
         categoryPaginationError = nil
         homeLoadErrorMessage = nil
         await restoreSelectedSitePreference()
+        discardHomeContentIfNeeded(for: currentHomeContentIdentity)
         await restoreCachedSiteHome()
         guard loadInBackground else {
             isHomeLoading = false
@@ -3515,6 +3566,7 @@ final class AppState: ObservableObject {
         guard let environment,
               let configurationID = activeConfigurationRecord?.id,
               let siteKey = selectedSiteKey,
+              let contentIdentity = currentHomeContentIdentity,
               let value = try? await environment.database.setting(
                 forKey: homeCacheSettingKey(
                     configurationID: configurationID,
@@ -3526,7 +3578,45 @@ final class AppState: ObservableObject {
               let cached = try? JSONDecoder().decode(SiteHome.self, from: data) else {
             return
         }
-        siteHome = cached
+        publishHomeContent(cached, identity: contentIdentity)
+    }
+
+    private var currentHomeContentIdentity: HomeContentIdentity? {
+        guard let configurationID = activeConfigurationRecord?.id,
+              let siteKey = selectedSiteKey else {
+            return nil
+        }
+        return HomeContentIdentity(
+            configurationID: configurationID,
+            siteKey: siteKey
+        )
+    }
+
+    private func discardHomeContentIfNeeded(
+        for targetIdentity: HomeContentIdentity?
+    ) {
+        guard HomeContentPublicationPolicy.shouldDiscard(
+            currentIdentity: homeContentIdentity,
+            targetIdentity: targetIdentity
+        ) else { return }
+        if siteHome != nil {
+            siteHome = nil
+        }
+        homeContentIdentity = nil
+    }
+
+    private func publishHomeContent(
+        _ home: SiteHome,
+        identity: HomeContentIdentity
+    ) {
+        guard HomeContentPublicationPolicy.shouldPublish(
+            currentHome: siteHome,
+            currentIdentity: homeContentIdentity,
+            incomingHome: home,
+            incomingIdentity: identity
+        ) else { return }
+        homeContentIdentity = identity
+        siteHome = home
     }
 
     private func cacheSiteHome(_ home: SiteHome, siteKey: String) async {

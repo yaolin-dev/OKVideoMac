@@ -94,6 +94,116 @@ final class OKVideoMacTests: XCTestCase {
         withExtendedLifetime((appStateObservation, navigationObservation)) {}
     }
 
+    func testHomeContentPolicyPreservesSameConfigurationAndSite() {
+        let identity = HomeContentIdentity(
+            configurationID: UUID(),
+            siteKey: "site-a"
+        )
+
+        XCTAssertFalse(
+            HomeContentPublicationPolicy.shouldDiscard(
+                currentIdentity: identity,
+                targetIdentity: identity
+            )
+        )
+    }
+
+    func testHomeContentPolicyDiscardsContentWhenSiteChanges() {
+        let configurationID = UUID()
+        let current = HomeContentIdentity(
+            configurationID: configurationID,
+            siteKey: "site-a"
+        )
+        let target = HomeContentIdentity(
+            configurationID: configurationID,
+            siteKey: "site-b"
+        )
+
+        XCTAssertTrue(
+            HomeContentPublicationPolicy.shouldDiscard(
+                currentIdentity: current,
+                targetIdentity: target
+            )
+        )
+    }
+
+    func testHomeContentPolicyDiscardsContentWhenConfigurationChanges() {
+        let current = HomeContentIdentity(
+            configurationID: UUID(),
+            siteKey: "shared-key"
+        )
+        let target = HomeContentIdentity(
+            configurationID: UUID(),
+            siteKey: "shared-key"
+        )
+
+        XCTAssertTrue(
+            HomeContentPublicationPolicy.shouldDiscard(
+                currentIdentity: current,
+                targetIdentity: target
+            )
+        )
+    }
+
+    func testHomeContentPolicySkipsPublishingEqualSnapshot() {
+        let identity = HomeContentIdentity(
+            configurationID: UUID(),
+            siteKey: "site-a"
+        )
+        let home = SiteHome(
+            categories: [VideoCategory(id: "movie", name: "电影")],
+            recommendations: []
+        )
+
+        XCTAssertFalse(
+            HomeContentPublicationPolicy.shouldPublish(
+                currentHome: home,
+                currentIdentity: identity,
+                incomingHome: home,
+                incomingIdentity: identity
+            )
+        )
+        XCTAssertTrue(
+            HomeContentPublicationPolicy.shouldPublish(
+                currentHome: nil,
+                currentIdentity: nil,
+                incomingHome: home,
+                incomingIdentity: identity
+            )
+        )
+    }
+
+    func testAutomaticHomeRefreshWaitsForStartupCompletion() {
+        XCTAssertFalse(
+            HomeAutomaticRefreshPolicy.allowsRefresh(
+                hasCompletedStartup: false,
+                selectedSection: .home,
+                isHomeSearchPresented: false
+            )
+        )
+        XCTAssertTrue(
+            HomeAutomaticRefreshPolicy.allowsRefresh(
+                hasCompletedStartup: true,
+                selectedSection: .home,
+                isHomeSearchPresented: false
+            )
+        )
+        XCTAssertFalse(
+            HomeAutomaticRefreshPolicy.allowsRefresh(
+                hasCompletedStartup: true,
+                selectedSection: .live,
+                isHomeSearchPresented: false
+            )
+        )
+        XCTAssertFalse(
+            HomeAutomaticRefreshPolicy.allowsRefresh(
+                hasCompletedStartup: true,
+                selectedSection: .home,
+                isHomeSearchPresented: true
+            )
+        )
+    }
+
     @MainActor
     func testImageRepositoryExposesMemoryHitWithoutActorHop() async throws {
         let cacheDirectory = FileManager.default.temporaryDirectory
