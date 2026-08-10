@@ -226,6 +226,8 @@ struct DetailView: View {
                             )
                         }
                     }
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 8)
                 }
 
                 episodeControls
@@ -250,64 +252,45 @@ struct DetailView: View {
 
     @ViewBuilder
     private var episodeControls: some View {
-        if let source = selectedSource {
-            if source.episodes.count == 1, let episode = source.episodes.first {
-                HStack {
-                    Text(EpisodeNameParser.presentation(for: episode).displayName)
-                        .font(.callout)
+        if let source = selectedSource, source.episodes.count > 1 {
+            HStack(spacing: 10) {
+                HStack(spacing: 7) {
+                    Image(systemName: "magnifyingglass")
                         .foregroundColor(.secondary)
-                        .lineLimit(1)
-                    Spacer()
-                    Button {
-                        play(source: source, episode: episode)
-                    } label: {
-                        Label("立即播放", systemImage: "play.fill")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .help(episode.name)
+                    TextField("搜索集数或原始名称", text: $episodeSearchKeyword)
+                        .textFieldStyle(.plain)
                 }
-            } else {
-                HStack(spacing: 10) {
-                    HStack(spacing: 7) {
-                        Image(systemName: "magnifyingglass")
-                            .foregroundColor(.secondary)
-                        TextField("搜索集数或原始名称", text: $episodeSearchKeyword)
-                            .textFieldStyle(.plain)
-                    }
-                    .padding(.horizontal, 10)
-                    .frame(maxWidth: 360, minHeight: 30)
-                    .background(Color(nsColor: .textBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .stroke(Color.secondary.opacity(0.18))
-                    }
-
-                    Spacer(minLength: 8)
-
-                    Picker("排序", selection: $episodeSortOrder) {
-                        ForEach(EpisodeSortOrder.allCases) { option in
-                            Text(option.title).tag(option)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .frame(width: 126)
-                    .disabled(!canSortEpisodes)
-                    .help(
-                        canSortEpisodes
-                            ? "只使用真实识别到的集数排序"
-                            : "当前线路没有足够的可靠集数信息"
-                    )
+                .padding(.horizontal, 10)
+                .frame(maxWidth: 360, minHeight: 30)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(Color.secondary.opacity(0.18))
                 }
+
+                Spacer(minLength: 8)
+
+                Picker("排序", selection: $episodeSortOrder) {
+                    ForEach(EpisodeSortOrder.allCases) { option in
+                        Text(option.title).tag(option)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 126)
+                .disabled(!canSortEpisodes)
+                .help(
+                    canSortEpisodes
+                        ? "只使用真实识别到的集数排序"
+                        : "当前线路没有足够的可靠集数信息"
+                )
             }
         }
     }
 
     @ViewBuilder
     private var episodeContent: some View {
-        if selectedSource?.episodes.count == 1 {
-            Spacer()
-        } else if filteredPresentations.isEmpty {
+        if filteredPresentations.isEmpty {
             EmptyStateView(
                 systemImage: "magnifyingglass",
                 title: "没有匹配的分集",
@@ -326,7 +309,9 @@ struct DetailView: View {
 
                     if !otherPresentations.isEmpty {
                         EpisodeSection(
-                            title: regularPresentations.isEmpty ? "播放资源" : "其他资源",
+                            title: isSingleEpisode
+                                ? "播放"
+                                : regularPresentations.isEmpty ? "播放资源" : "其他资源",
                             episodes: otherPresentations,
                             onPlay: playSelectedEpisode
                         )
@@ -342,6 +327,10 @@ struct DetailView: View {
             return detail.playSources.first
         }
         return detail.playSources[selectedSourceIndex]
+    }
+
+    private var isSingleEpisode: Bool {
+        selectedSource?.episodes.count == 1
     }
 
     private var allPresentations: [EpisodePresentation] {
@@ -476,6 +465,9 @@ private struct DetailExpandButton: View {
             .buttonStyle(.plain)
             .font(.caption)
             .foregroundColor(.accentColor)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .appInteractiveHover(cornerRadius: 6)
     }
 }
 
@@ -483,6 +475,19 @@ private struct DetailSourceButtonStyle: ButtonStyle {
     let isSelected: Bool
 
     func makeBody(configuration: Configuration) -> some View {
+        DetailSourceButtonBody(
+            configuration: configuration,
+            isSelected: isSelected
+        )
+    }
+}
+
+private struct DetailSourceButtonBody: View {
+    let configuration: ButtonStyle.Configuration
+    let isSelected: Bool
+    @State private var isHovering = false
+
+    var body: some View {
         configuration.label
             .font(.callout.weight(isSelected ? .semibold : .regular))
             .lineLimit(1)
@@ -492,15 +497,34 @@ private struct DetailSourceButtonStyle: ButtonStyle {
             .background(
                 isSelected
                     ? Color.accentColor.opacity(configuration.isPressed ? 0.78 : 1)
-                    : Color.secondary.opacity(configuration.isPressed ? 0.16 : 0.09),
+                    : isHovering
+                        ? Color(nsColor: .controlBackgroundColor)
+                        : Color.secondary.opacity(configuration.isPressed ? 0.16 : 0.09),
                 in: Capsule()
             )
             .overlay {
-                if !isSelected {
-                    Capsule()
-                        .stroke(Color.secondary.opacity(0.16), lineWidth: 1)
-                }
+                Capsule()
+                    .stroke(
+                        isHovering
+                            ? (isSelected
+                                ? Color.white.opacity(0.18)
+                                : Color.secondary.opacity(0.18))
+                            : Color.secondary.opacity(isSelected ? 0 : 0.16),
+                        lineWidth: 1
+                    )
             }
+            .scaleEffect(
+                configuration.isPressed ? 0.98 : (isHovering ? 1.018 : 1)
+            )
+            .shadow(
+                color: Color.black.opacity(isHovering ? 0.18 : 0),
+                radius: isHovering ? 10 : 0,
+                y: isHovering ? 5 : 0
+            )
+            .zIndex(isHovering ? 1 : 0)
+            .animation(.easeOut(duration: 0.16), value: isHovering)
+            .animation(.easeOut(duration: 0.10), value: configuration.isPressed)
+            .onHover { isHovering = $0 }
     }
 }
 
@@ -570,6 +594,7 @@ private struct EpisodeRangePicker: View {
             isSelected ? Color.accentColor : Color.secondary.opacity(0.09),
             in: Capsule()
         )
+        .appInteractiveHover(cornerRadius: 14, selected: isSelected)
     }
 }
 
@@ -607,12 +632,56 @@ private struct EpisodeSection: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(DetailEpisodeButtonStyle())
                     .help(presentation.originalName)
                     .accessibilityLabel("播放 \(presentation.displayName)")
                 }
             }
         }
+    }
+}
+
+private struct DetailEpisodeButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        DetailEpisodeButtonBody(configuration: configuration)
+    }
+}
+
+private struct DetailEpisodeButtonBody: View {
+    let configuration: ButtonStyle.Configuration
+    @State private var isHovering = false
+
+    var body: some View {
+        configuration.label
+            .font(.body)
+            .padding(.horizontal, 10)
+            .frame(minHeight: 31)
+            .foregroundColor(.primary)
+            .background(
+                Color(nsColor: .controlBackgroundColor),
+                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(
+                        isHovering
+                            ? Color.secondary.opacity(0.18)
+                            : Color.secondary.opacity(0.16),
+                        lineWidth: 1
+                    )
+            }
+            .scaleEffect(
+                configuration.isPressed ? 0.98 : (isHovering ? 1.018 : 1)
+            )
+            .shadow(
+                color: Color.black.opacity(isHovering ? 0.18 : 0),
+                radius: isHovering ? 10 : 0,
+                y: isHovering ? 5 : 0
+            )
+            .zIndex(isHovering ? 1 : 0)
+            .animation(.easeOut(duration: 0.16), value: isHovering)
+            .animation(.easeOut(duration: 0.09), value: configuration.isPressed)
+            .onHover { isHovering = $0 }
     }
 }
 
@@ -851,6 +920,17 @@ enum EpisodeListPresentation {
         let keyword = query.trimmingCharacters(in: .whitespacesAndNewlines)
         var values = episodes.enumerated().map { index, episode in
             EpisodeNameParser.presentation(for: episode, sourceIndex: index)
+        }
+        if values.count == 1, let only = values.first {
+            values[0] = EpisodePresentation(
+                episode: only.episode,
+                displayName: "正片",
+                originalName: only.originalName,
+                seasonNumber: nil,
+                episodeNumber: nil,
+                isSpecial: false,
+                sourceIndex: only.sourceIndex
+            )
         }
         if !keyword.isEmpty {
             values = values.filter {

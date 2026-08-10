@@ -87,6 +87,7 @@ struct HistoryView: View {
                 .padding(.vertical, 14)
             }
             .buttonStyle(.plain)
+            .appInteractiveHover(cornerRadius: 10, selected: selectedIDs.contains(item.id))
             .contextMenu {
                 Button(role: .destructive) {
                     pendingDeletion = .items([item.id])
@@ -103,6 +104,7 @@ struct HistoryView: View {
                         .frame(width: 30, height: 30)
                 }
                 .buttonStyle(.plain)
+                .appInteractiveHover(cornerRadius: 8, destructive: true)
                 .foregroundStyle(.secondary)
                 .help("删除这条历史")
                 .padding(.trailing, 14)

@@ -8,6 +8,63 @@ enum AppSurfacePalette {
     }
 }
 
+/// A shared, low-presence hover treatment for the browsing interface. It does
+/// not replace selected, destructive, or disabled states; it only adds the
+/// small amount of motion and contrast needed to make an interactive surface
+/// feel responsive on macOS.
+struct AppInteractiveHoverModifier: ViewModifier {
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovering = false
+
+    let cornerRadius: CGFloat
+    let selected: Bool
+    let destructive: Bool
+
+    func body(content: Content) -> some View {
+        let active = isEnabled && isHovering
+        content
+            .background {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(
+                        destructive
+                            ? Color.red.opacity(active ? 0.10 : 0)
+                            : Color.primary.opacity(active ? (selected ? 0.08 : 0.065) : 0)
+                    )
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .stroke(
+                        Color.primary.opacity(active ? 0.075 : 0),
+                        lineWidth: 1
+                    )
+            }
+            .scaleEffect(active ? 1.018 : 1)
+            .shadow(
+                color: Color.black.opacity(active ? 0.10 : 0),
+                radius: active ? 7 : 0,
+                y: active ? 3 : 0
+            )
+            .animation(.easeOut(duration: 0.14), value: active)
+            .onHover { isHovering = isEnabled && $0 }
+    }
+}
+
+extension View {
+    func appInteractiveHover(
+        cornerRadius: CGFloat = 9,
+        selected: Bool = false,
+        destructive: Bool = false
+    ) -> some View {
+        modifier(
+            AppInteractiveHoverModifier(
+                cornerRadius: cornerRadius,
+                selected: selected,
+                destructive: destructive
+            )
+        )
+    }
+}
+
 struct RootView: View {
     @EnvironmentObject private var state: AppState
     @State private var sidebarLayoutRevision = 0
@@ -475,6 +532,7 @@ struct CloudAuthorizationView: View {
 
 private struct SidebarView: View {
     @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var navigation: AppNavigationState
     @Environment(\.colorScheme) private var colorScheme
 
     private var selectionColor: Color {
@@ -500,7 +558,7 @@ private struct SidebarView: View {
     }
 
     private func sidebarButton(_ section: AppSection) -> some View {
-        let isSelected = state.selectedSection == section
+        let isSelected = navigation.selectedSection == section
         return Button {
             state.selectSection(section)
         } label: {
@@ -524,6 +582,7 @@ private struct SidebarView: View {
             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
+        .appInteractiveHover(cornerRadius: 8, selected: isSelected)
         .accessibilityLabel(section.rawValue)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
@@ -541,15 +600,14 @@ private struct SidebarColumnWidthModifier: ViewModifier {
 }
 
 private struct SectionContentView: View {
-    @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var navigation: AppNavigationState
+    @StateObject private var liveSession = LiveBrowserSession()
 
     var body: some View {
         Group {
-            switch state.selectedSection {
-            case .home:
-                HomeView()
-            case .live:
-                LiveView()
+            switch navigation.selectedSection {
+            case .home, .live:
+                HomeLiveSectionContainer(liveSession: liveSession)
             case .favorites:
                 FavoritesView()
             case .history:
@@ -560,5 +618,47 @@ private struct SectionContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppSurfacePalette.background.ignoresSafeArea())
+    }
+}
+
+/// Home and live are the two largest browsing trees. Keeping them mounted
+/// avoids tearing down dozens of live cards while simultaneously constructing
+/// the poster grid. The navigation store is intentionally observed only here,
+/// so changing sections does not invalidate either content subtree.
+private struct HomeLiveSectionContainer: View {
+    @EnvironmentObject private var navigation: AppNavigationState
+    @ObservedObject var liveSession: LiveBrowserSession
+
+    private var showsHome: Bool {
+        navigation.selectedSection == .home
+    }
+
+    var body: some View {
+        ZStack {
+            HomeView()
+                .opacity(showsHome ? 1 : 0)
+                .allowsHitTesting(showsHome)
+                .accessibilityHidden(!showsHome)
+                .zIndex(showsHome ? 1 : 0)
+
+            LiveView(session: liveSession)
+                .opacity(showsHome ? 0 : 1)
+                .allowsHitTesting(!showsHome)
+                .accessibilityHidden(showsHome)
+                .zIndex(showsHome ? 0 : 1)
+        }
+        .navigationTitle(navigation.selectedSection.rawValue)
+        .toolbar {
+            ToolbarItem {
+                if showsHome {
+                    HomeToolbarView()
+                } else {
+                    LiveToolbarView(session: liveSession)
+                }
+            }
+        }
+        .transaction { transaction in
+            transaction.disablesAnimations = true
+        }
     }
 }

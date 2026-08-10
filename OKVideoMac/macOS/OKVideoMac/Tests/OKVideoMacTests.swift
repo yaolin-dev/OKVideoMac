@@ -1,10 +1,63 @@
 import AppKit
+import Combine
 import XCTest
 import OKVideoCore
 import OKVideoPersistence
 @testable import OKVideoMac
 
 final class OKVideoMacTests: XCTestCase {
+    @MainActor
+    func testSectionNavigationDoesNotInvalidateWholeAppState() {
+        let state = AppState.bootstrap()
+        var appStateUpdateCount = 0
+        var navigationUpdateCount = 0
+        let appStateObservation = state.objectWillChange.sink {
+            appStateUpdateCount += 1
+        }
+        let navigationObservation = state.navigation.objectWillChange.sink {
+            navigationUpdateCount += 1
+        }
+
+        state.selectSection(.live)
+
+        XCTAssertEqual(state.selectedSection, .live)
+        XCTAssertEqual(appStateUpdateCount, 0)
+        XCTAssertEqual(navigationUpdateCount, 1)
+        withExtendedLifetime((appStateObservation, navigationObservation)) {}
+    }
+
+    func testImageRepositoryExposesMemoryHitWithoutActorHop() async throws {
+        let cacheDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+
+        let sourceImage = NSImage(size: NSSize(width: 2, height: 2))
+        sourceImage.lockFocus()
+        NSColor.systemIndigo.setFill()
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: 2, height: 2)).fill()
+        sourceImage.unlockFocus()
+        let imageData = try XCTUnwrap(sourceImage.tiffRepresentation)
+        let url = try XCTUnwrap(URL(string: "https://images.example.invalid/poster"))
+        let client = NodeProviderStubHTTPClient { request in
+            HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "image/tiff"],
+                body: imageData
+            )
+        }
+        let repository = try ImageRepository(
+            cacheDirectory: cacheDirectory,
+            httpClient: client
+        )
+
+        let loaded = try await repository.image(for: url)
+
+        XCTAssertTrue(repository.cachedImage(for: url) === loaded)
+        try await repository.clear()
+        XCTAssertNil(repository.cachedImage(for: url))
+    }
+
     func testEpisodeNameParserUsesRealSeasonAndEpisodeNumber() {
         let episode = PlayEpisode(
             name: "[1.3GB]Nirvana.in.Fire.S01E14.2015.2160p.mkv",
@@ -34,6 +87,27 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(values.map(\.episodeNumber), [14, nil, 15])
         XCTAssertEqual(values[1].displayName, "幕后制作")
         XCTAssertFalse(values[1].displayName.contains("第 2 集"))
+    }
+
+    func testSingleEpisodeUsesFeatureLabelAndPreservesOriginalName() {
+        let values = EpisodeListPresentation.presentations(
+            from: [
+                PlayEpisode(
+                    name: "后来的我们.1080p.HD中字.mp4【后来的我们】",
+                    url: "https://media.example.invalid/movie.mp4"
+                )
+            ],
+            query: "",
+            sortOrder: .sourceOrder
+        )
+
+        XCTAssertEqual(values.count, 1)
+        XCTAssertEqual(values[0].displayName, "正片")
+        XCTAssertEqual(
+            values[0].originalName,
+            "后来的我们.1080p.HD中字.mp4【后来的我们】"
+        )
+        XCTAssertNil(values[0].episodeNumber)
     }
 
     func testEpisodeNameParserRecognizesFilenameSuffixAndPreservesSpecials() {
@@ -170,6 +244,19 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(gate.finishScheduling())
         XCTAssertFalse(gate.finishScheduling())
         XCTAssertTrue(gate.requestUpdate())
+    }
+
+    func testRenderUpdateGateDropsFramesDuringLiveWindowResize() {
+        let gate = PlayerDisplayUpdateGate()
+        XCTAssertTrue(gate.requestUpdate())
+
+        gate.setSuspended(true)
+        XCTAssertFalse(gate.requestUpdate())
+        XCTAssertFalse(gate.finishScheduling())
+
+        gate.setSuspended(false)
+        XCTAssertTrue(gate.requestUpdate())
+        XCTAssertFalse(gate.finishScheduling())
     }
 
     func testAutomaticEpisodeAdvanceOnlyReturnsAnExistingNextEpisode() {
@@ -1026,6 +1113,24 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testPlayerWindowAspectPolicyRemovesLetterboxingWithinScreenBounds() {
+        let size = PlayerWindowAspectPolicy.contentSize(
+            current: NSSize(width: 1_936, height: 1_248),
+            aspectRatio: 16.0 / 9.0,
+            minimum: NSSize(width: 800, height: 520),
+            maximum: NSSize(width: 1_936, height: 1_248)
+        )
+
+        XCTAssertNotNil(size)
+        XCTAssertEqual(size?.width ?? 0, 1_936, accuracy: 0.001)
+        XCTAssertEqual(size?.height ?? 0, 1_089, accuracy: 0.001)
+        XCTAssertEqual(
+            (size?.width ?? 0) / (size?.height ?? 1),
+            16.0 / 9.0,
+            accuracy: 0.001
+        )
+    }
+
     @MainActor
     func testPlayerWindowChromeRestoresWithoutClobberingWindowState() async {
         let window = NSWindow(
@@ -1039,6 +1144,7 @@ final class OKVideoMacTests: XCTestCase {
         toolbar.isVisible = true
         window.titleVisibility = .visible
         window.titlebarAppearsTransparent = false
+        let originalWindowFrame = window.frame
         let originalContentAspectRatio = window.contentAspectRatio
 
         let coordinator = PlayerWindowConfigurator.Coordinator(onRestore: {})
@@ -1061,6 +1167,13 @@ final class OKVideoMacTests: XCTestCase {
             window.contentAspectRatio.width / window.contentAspectRatio.height,
             16.0 / 9.0,
             accuracy: 0.001
+        )
+        let playbackContentRect = window.contentRect(forFrameRect: window.frame)
+        XCTAssertEqual(
+            playbackContentRect.width / playbackContentRect.height,
+            16.0 / 9.0,
+            // NSWindow rounds the converted frame to backing pixels.
+            accuracy: 0.005
         )
 
         coordinator.configure(
@@ -1086,6 +1199,11 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(window.titleVisibility, .hidden)
         XCTAssertTrue(window.standardWindowButton(.closeButton)?.isHidden ?? false)
 
+        window.setFrame(
+            NSRect(x: 40, y: 60, width: 1_120, height: 630),
+            display: false
+        )
+
         // AppKit can update unrelated style-mask bits while entering or
         // leaving full screen. Restoring player chrome must preserve them.
         window.styleMask.insert(.miniaturizable)
@@ -1097,6 +1215,7 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(toolbar.isVisible)
         XCTAssertEqual(window.titleVisibility, .visible)
         XCTAssertFalse(window.titlebarAppearsTransparent)
+        XCTAssertEqual(window.frame, originalWindowFrame)
         XCTAssertEqual(window.contentAspectRatio, originalContentAspectRatio)
     }
 
@@ -1770,6 +1889,57 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(starting.phase, .starting)
         XCTAssertEqual(starting.progress, 0.56)
         XCTAssertTrue(starting.detail.contains("Android"))
+    }
+
+    func testPlayerProgressHoverFractionClampsToTrackBounds() {
+        XCTAssertEqual(
+            PlayerProgressHoverPolicy.fraction(x: -20, width: 200),
+            0
+        )
+        XCTAssertEqual(
+            PlayerProgressHoverPolicy.fraction(x: 50, width: 200),
+            0.25
+        )
+        XCTAssertEqual(
+            PlayerProgressHoverPolicy.fraction(x: 260, width: 200),
+            1
+        )
+        XCTAssertNil(
+            PlayerProgressHoverPolicy.fraction(x: 10, width: 0)
+        )
+    }
+
+    func testPlayerProgressHoverTimeUsesMediaDuration() {
+        XCTAssertEqual(
+            PlayerProgressHoverPolicy.time(fraction: 0.5, duration: 4_048),
+            2_024
+        )
+        XCTAssertEqual(
+            PlayerProgressHoverPolicy.time(fraction: 2, duration: 100),
+            100
+        )
+        XCTAssertNil(
+            PlayerProgressHoverPolicy.time(fraction: 0.5, duration: 0)
+        )
+    }
+
+    func testPlayerProgressHoverTooltipStaysInsideTrack() {
+        XCTAssertEqual(
+            PlayerProgressHoverPolicy.tooltipCenterX(
+                fraction: 0,
+                width: 200,
+                tooltipWidth: 58
+            ),
+            29
+        )
+        XCTAssertEqual(
+            PlayerProgressHoverPolicy.tooltipCenterX(
+                fraction: 1,
+                width: 200,
+                tooltipWidth: 58
+            ),
+            171
+        )
     }
 }
 

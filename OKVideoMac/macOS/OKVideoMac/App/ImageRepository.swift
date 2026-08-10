@@ -49,8 +49,29 @@ struct InlineImageRequest: Equatable {
     }
 }
 
+private final class ImageMemoryCache: @unchecked Sendable {
+    private let storage = NSCache<NSURL, NSImage>()
+
+    init() {
+        storage.countLimit = 300
+        storage.totalCostLimit = 128 * 1_024 * 1_024
+    }
+
+    func image(for url: URL) -> NSImage? {
+        storage.object(forKey: url as NSURL)
+    }
+
+    func insert(_ image: NSImage, for url: URL, cost: Int = 0) {
+        storage.setObject(image, forKey: url as NSURL, cost: cost)
+    }
+
+    func removeAll() {
+        storage.removeAllObjects()
+    }
+}
+
 actor ImageRepository {
-    private let memoryCache = NSCache<NSURL, NSImage>()
+    private nonisolated let memoryCache = ImageMemoryCache()
     private let cacheDirectory: URL
     private let httpClient: HTTPClient
     private var inFlight: [URL: Task<NSImage, Error>] = [:]
@@ -58,8 +79,6 @@ actor ImageRepository {
     init(cacheDirectory: URL, httpClient: HTTPClient) throws {
         self.cacheDirectory = cacheDirectory
         self.httpClient = httpClient
-        memoryCache.countLimit = 300
-        memoryCache.totalCostLimit = 128 * 1_024 * 1_024
         try FileManager.default.createDirectory(
             at: cacheDirectory,
             withIntermediateDirectories: true,
@@ -71,14 +90,18 @@ actor ImageRepository {
         )
     }
 
+    nonisolated func cachedImage(for url: URL) -> NSImage? {
+        memoryCache.image(for: url)
+    }
+
     func image(for url: URL) async throws -> NSImage {
-        if let cached = memoryCache.object(forKey: url as NSURL) {
+        if let cached = cachedImage(for: url) {
             return cached
         }
         let diskURL = cacheDirectory.appendingPathComponent(cacheKey(for: url))
         if let data = try? Data(contentsOf: diskURL),
            let image = NSImage(data: data) {
-            memoryCache.setObject(image, forKey: url as NSURL, cost: data.count)
+            memoryCache.insert(image, for: url, cost: data.count)
             return image
         }
         if let task = inFlight[url] {
@@ -109,12 +132,12 @@ actor ImageRepository {
         inFlight[url] = task
         defer { inFlight[url] = nil }
         let image = try await task.value
-        memoryCache.setObject(image, forKey: url as NSURL)
+        memoryCache.insert(image, for: url)
         return image
     }
 
     func clear() throws {
-        memoryCache.removeAllObjects()
+        memoryCache.removeAll()
         let files = try FileManager.default.contentsOfDirectory(
             at: cacheDirectory,
             includingPropertiesForKeys: nil
@@ -162,7 +185,7 @@ struct RemoteImage<Content: View, Placeholder: View>: View {
 
     var body: some View {
         Group {
-            if let image {
+            if let image = displayedImage {
                 content(Image(nsImage: image))
             } else if loadFailed {
                 Image(systemName: "photo")
@@ -176,6 +199,10 @@ struct RemoteImage<Content: View, Placeholder: View>: View {
             image = nil
             loadFailed = false
             guard let url, let repository else { return }
+            if let cached = repository.cachedImage(for: url) {
+                image = cached
+                return
+            }
             do {
                 let loaded = try await repository.image(for: url)
                 guard !Task.isCancelled, self.url == url else { return }
@@ -185,6 +212,10 @@ struct RemoteImage<Content: View, Placeholder: View>: View {
                 loadFailed = true
             }
         }
+    }
+
+    private var displayedImage: NSImage? {
+        image ?? url.flatMap { repository?.cachedImage(for: $0) }
     }
 }
 
@@ -208,7 +239,7 @@ struct RemoteImageCandidates<Content: View, Placeholder: View>: View {
 
     var body: some View {
         Group {
-            if let image {
+            if let image = displayedImage {
                 content(Image(nsImage: image))
             } else {
                 placeholder()
@@ -217,6 +248,12 @@ struct RemoteImageCandidates<Content: View, Placeholder: View>: View {
         .task(id: urls) {
             image = nil
             guard let repository else { return }
+            if let cached = urls.lazy.compactMap({
+                repository.cachedImage(for: $0)
+            }).first {
+                image = cached
+                return
+            }
             for candidate in urls {
                 guard !Task.isCancelled else { return }
                 guard let loaded = try? await repository.image(for: candidate) else {
@@ -227,5 +264,9 @@ struct RemoteImageCandidates<Content: View, Placeholder: View>: View {
                 return
             }
         }
+    }
+
+    private var displayedImage: NSImage? {
+        image ?? urls.lazy.compactMap { repository?.cachedImage(for: $0) }.first
     }
 }

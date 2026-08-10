@@ -163,3 +163,76 @@ public struct XMLTVGuide: Codable, Equatable {
         return (nil, nil)
     }
 }
+
+/// A read-optimized view of an XMLTV guide.
+///
+/// Building the index is linearithmic in the size of the guide, while channel
+/// lookups avoid repeatedly scanning and sorting the complete programme list.
+public struct XMLTVScheduleIndex {
+    private let programmesByChannelID: [String: [EPGProgramme]]
+    private let channelIDByDisplayName: [String: String]
+
+    public init(guide: XMLTVGuide) {
+        programmesByChannelID = Dictionary(grouping: guide.programmes, by: \.channelID)
+            .mapValues { programmes in
+                programmes.sorted { $0.start < $1.start }
+            }
+
+        var channelIDs: [String: String] = [:]
+        channelIDs.reserveCapacity(guide.channels.count)
+        for channel in guide.channels {
+            let displayName = Self.normalized(channel.displayName)
+            if channelIDs[displayName] == nil {
+                channelIDs[displayName] = channel.id
+            }
+        }
+        channelIDByDisplayName = channelIDs
+    }
+
+    public func currentAndNext(
+        for channel: LiveChannel,
+        at date: Date
+    ) -> (current: EPGProgramme?, next: EPGProgramme?) {
+        let candidates = [channel.tvgID, channel.tvgName, channel.name]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        for candidate in candidates {
+            if let programmes = programmesByChannelID[candidate] {
+                return Self.currentAndNext(in: programmes, at: date)
+            }
+            if let channelID = channelIDByDisplayName[Self.normalized(candidate)],
+               let programmes = programmesByChannelID[channelID] {
+                return Self.currentAndNext(in: programmes, at: date)
+            }
+        }
+        return (nil, nil)
+    }
+
+    private static func currentAndNext(
+        in programmes: [EPGProgramme],
+        at date: Date
+    ) -> (current: EPGProgramme?, next: EPGProgramme?) {
+        var lowerBound = 0
+        var upperBound = programmes.count
+        while lowerBound < upperBound {
+            let midpoint = lowerBound + (upperBound - lowerBound) / 2
+            if programmes[midpoint].start <= date {
+                lowerBound = midpoint + 1
+            } else {
+                upperBound = midpoint
+            }
+        }
+
+        let next = lowerBound < programmes.count ? programmes[lowerBound] : nil
+        let current = programmes[..<lowerBound].last { date < $0.end }
+        return (current, next)
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value.folding(
+            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+            locale: .current
+        )
+    }
+}

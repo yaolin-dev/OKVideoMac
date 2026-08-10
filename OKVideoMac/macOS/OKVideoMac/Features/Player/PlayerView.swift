@@ -17,6 +17,7 @@ struct PlayerView: View {
     @State private var activeUtilityPanel: PlayerUtilityPanel?
     @State private var isWindowFullScreen = false
     @State private var isProgressHovering = false
+    @State private var progressHoverFraction: Double?
     let onWindowChromeRestored: () -> Void
 
     private let speeds: [Double] = [0.5, 0.75, 1, 1.25, 1.5, 2]
@@ -496,15 +497,7 @@ struct PlayerView: View {
             .padding(.horizontal, 22)
             .padding(.vertical, 18)
             .frame(maxWidth: 500)
-            .background(
-                Color.black.opacity(0.22),
-                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Color.white.opacity(0.045), lineWidth: 1)
-            }
-            .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+            .shadow(color: .black.opacity(0.72), radius: 3, y: 1)
         }
     }
 
@@ -589,10 +582,56 @@ struct PlayerView: View {
             value: isProgressHovering
         )
         .contentShape(Rectangle().inset(by: -5))
-        .onHover { inside in
-            isProgressHovering = inside
-            inside ? keepControlsVisible() : scheduleControlsHide()
+        .background {
+            ProgressHoverTrackingView { fraction in
+                progressHoverFraction = fraction
+                isProgressHovering = fraction != nil
+                if fraction != nil {
+                    keepControlsVisible()
+                } else {
+                    scheduleControlsHide()
+                }
+            }
         }
+        .overlay {
+            GeometryReader { geometry in
+                if let fraction = progressHoverFraction,
+                   let time = PlayerProgressHoverPolicy.time(
+                       fraction: fraction,
+                       duration: state.playerSnapshot.duration
+                   ) {
+                    Text(formatTime(time))
+                        .font(
+                            .system(size: 11, weight: .semibold)
+                                .monospacedDigit()
+                        )
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 8)
+                        .frame(height: 25)
+                        .background(Color.black.opacity(0.68))
+                        .background(.ultraThinMaterial)
+                        .clipShape(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                        }
+                        .shadow(color: .black.opacity(0.32), radius: 6, y: 2)
+                        .position(
+                            x: PlayerProgressHoverPolicy.tooltipCenterX(
+                                fraction: fraction,
+                                width: geometry.size.width,
+                                tooltipWidth: 58
+                            ),
+                            y: -13
+                        )
+                        .transition(.opacity.combined(with: .scale(scale: 0.94)))
+                }
+            }
+            .allowsHitTesting(false)
+        }
+        .animation(.easeOut(duration: 0.12), value: progressHoverFraction != nil)
     }
 
     private func commitScrubPosition() {
@@ -1955,6 +1994,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
         private var acceptsMouseMovedEvents = false
         private var titlebarSeparatorStyle: NSTitlebarSeparatorStyle = .automatic
         private var windowTitle = ""
+        private var windowFrame = NSRect.zero
         private var contentAspectRatio = NSSize(width: 0, height: 0)
         private var closeButtonWasHidden = false
         private var miniaturizeButtonWasHidden = false
@@ -2006,6 +2046,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             acceptsMouseMovedEvents = newWindow.acceptsMouseMovedEvents
             titlebarSeparatorStyle = newWindow.titlebarSeparatorStyle
             windowTitle = newWindow.title
+            windowFrame = newWindow.frame
             contentAspectRatio = newWindow.contentAspectRatio
             closeButtonWasHidden = newWindow.standardWindowButton(
                 .closeButton
@@ -2105,6 +2146,10 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                 ) {
                     window.contentAspectRatio = targetAspectRatio
                 }
+                Self.resizeWindowToMatchVideo(
+                    aspectRatio: ratio,
+                    window: window
+                )
             }
             appliedConfiguration = configuration
             Self.markWindowForRefresh(window)
@@ -2125,6 +2170,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             let savedAcceptsMouseMovedEvents = acceptsMouseMovedEvents
             let savedTitlebarSeparatorStyle = titlebarSeparatorStyle
             let savedWindowTitle = windowTitle
+            let savedWindowFrame = windowFrame
             let savedContentAspectRatio = contentAspectRatio
             let savedCloseButtonWasHidden = closeButtonWasHidden
             let savedMiniaturizeButtonWasHidden = miniaturizeButtonWasHidden
@@ -2161,7 +2207,16 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                 window.acceptsMouseMovedEvents = savedAcceptsMouseMovedEvents
                 window.titlebarSeparatorStyle = savedTitlebarSeparatorStyle
                 window.title = savedWindowTitle
+                // Applying a video's aspect ratio changes the actual NSWindow
+                // frame as soon as the user resizes it. Clearing that constraint
+                // alone leaves the browsing UI in the video's shape, so restore
+                // the complete pre-playback frame after removing the constraint.
                 window.contentAspectRatio = savedContentAspectRatio
+                if !window.styleMask.contains(.fullScreen),
+                   !window.inLiveResize,
+                   !savedWindowFrame.isEmpty {
+                    window.setFrame(savedWindowFrame, display: false)
+                }
                 window.standardWindowButton(.closeButton)?.isHidden =
                     savedCloseButtonWasHidden
                 window.standardWindowButton(.miniaturizeButton)?.isHidden =
@@ -2220,6 +2275,13 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                         self.onFullScreenChange(
                             window.styleMask.contains(.fullScreen)
                         )
+                        if !window.styleMask.contains(.fullScreen),
+                           let configuration = self.desiredConfiguration {
+                            self.scheduleWindowConfiguration(
+                                configuration,
+                                for: window
+                            )
+                        }
                     }
                 )
             }
@@ -2268,6 +2330,52 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             ) < 0.0001
         }
 
+        private static func resizeWindowToMatchVideo(
+            aspectRatio: Double,
+            window: NSWindow
+        ) {
+            guard !window.styleMask.contains(.fullScreen),
+                  !window.inLiveResize else { return }
+            let contentRect = window.contentRect(forFrameRect: window.frame)
+            guard !aspectRatiosMatch(
+                contentRect.size,
+                NSSize(width: aspectRatio, height: 1)
+            ) else { return }
+
+            let visibleFrame = window.screen?.visibleFrame
+            let chromeWidth = max(0, window.frame.width - contentRect.width)
+            let chromeHeight = max(0, window.frame.height - contentRect.height)
+            let maximumContentSize = NSSize(
+                width: max(1, (visibleFrame?.width ?? .greatestFiniteMagnitude) - chromeWidth),
+                height: max(1, (visibleFrame?.height ?? .greatestFiniteMagnitude) - chromeHeight)
+            )
+            guard let targetContentSize = PlayerWindowAspectPolicy.contentSize(
+                current: contentRect.size,
+                aspectRatio: aspectRatio,
+                minimum: window.contentMinSize,
+                maximum: maximumContentSize
+            ) else { return }
+
+            var targetFrame = window.frameRect(
+                forContentRect: NSRect(origin: .zero, size: targetContentSize)
+            )
+            targetFrame.origin = NSPoint(
+                x: window.frame.midX - targetFrame.width / 2,
+                y: window.frame.midY - targetFrame.height / 2
+            )
+            if let visibleFrame {
+                targetFrame.origin.x = min(
+                    max(targetFrame.origin.x, visibleFrame.minX),
+                    visibleFrame.maxX - targetFrame.width
+                )
+                targetFrame.origin.y = min(
+                    max(targetFrame.origin.y, visibleFrame.minY),
+                    visibleFrame.maxY - targetFrame.height
+                )
+            }
+            window.setFrame(targetFrame, display: false)
+        }
+
         private static func markWindowForRefresh(_ window: NSWindow?) {
             guard let window,
                   !window.inLiveResize,
@@ -2277,6 +2385,27 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             contentView.superview?.needsLayout = true
             contentView.superview?.needsDisplay = true
             window.invalidateCursorRects(for: contentView)
+            // The style-mask and aspect-ratio mutations above are committed by
+            // AppKit after this callback returns. Refresh on the next main-loop
+            // turn so SwiftUI lays out against the final content rect, then
+            // explicitly update the OpenGL drawable. Without this pass the old
+            // framebuffer size can survive until the next manual window resize.
+            DispatchQueue.main.async { [weak window] in
+                guard let window,
+                      !window.inLiveResize,
+                      let contentView = window.contentView else { return }
+                contentView.needsLayout = true
+                contentView.layoutSubtreeIfNeeded()
+                synchronizePlayerSurfaces(in: contentView)
+                contentView.needsDisplay = true
+            }
+        }
+
+        private static func synchronizePlayerSurfaces(in view: NSView) {
+            if let renderView = view as? MPVOpenGLView {
+                renderView.synchronizeDrawableAfterWindowLayout()
+            }
+            view.subviews.forEach(synchronizePlayerSurfaces(in:))
         }
     }
 }
@@ -2284,6 +2413,148 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
 enum PlayerWindowMutationPolicy {
     static func canApply(isInLiveResize: Bool) -> Bool {
         !isInLiveResize
+    }
+}
+
+enum PlayerWindowAspectPolicy {
+    static func contentSize(
+        current: NSSize,
+        aspectRatio: Double,
+        minimum: NSSize = .zero,
+        maximum: NSSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+    ) -> NSSize? {
+        guard current.width.isFinite,
+              current.height.isFinite,
+              current.width > 0,
+              current.height > 0,
+              aspectRatio.isFinite,
+              aspectRatio > 0 else { return nil }
+
+        let ratio = CGFloat(aspectRatio)
+        let boundedMaximumWidth = min(
+            maximum.width,
+            maximum.height * ratio
+        )
+        guard boundedMaximumWidth.isFinite,
+              boundedMaximumWidth > 0 else { return nil }
+        let requiredMinimumWidth = max(
+            minimum.width,
+            minimum.height * ratio
+        )
+        let lowerWidth = min(requiredMinimumWidth, boundedMaximumWidth)
+
+        func candidate(width proposedWidth: CGFloat) -> NSSize {
+            let width = min(
+                max(proposedWidth, lowerWidth),
+                boundedMaximumWidth
+            )
+            return NSSize(width: width, height: width / ratio)
+        }
+
+        let preservingWidth = candidate(width: current.width)
+        let preservingHeight = candidate(width: current.height * ratio)
+        func changeScore(_ size: NSSize) -> CGFloat {
+            abs(size.width - current.width) / current.width
+                + abs(size.height - current.height) / current.height
+        }
+        return changeScore(preservingWidth) <= changeScore(preservingHeight)
+            ? preservingWidth
+            : preservingHeight
+    }
+}
+
+enum PlayerProgressHoverPolicy {
+    static func fraction(x: CGFloat, width: CGFloat) -> Double? {
+        guard width.isFinite, width > 0, x.isFinite else { return nil }
+        return min(1, max(0, Double(x / width)))
+    }
+
+    static func time(fraction: Double, duration: TimeInterval) -> TimeInterval? {
+        guard fraction.isFinite,
+              duration.isFinite,
+              duration > 0 else { return nil }
+        return min(1, max(0, fraction)) * duration
+    }
+
+    static func tooltipCenterX(
+        fraction: Double,
+        width: CGFloat,
+        tooltipWidth: CGFloat
+    ) -> CGFloat {
+        guard width.isFinite, width > 0 else { return 0 }
+        let half = min(max(tooltipWidth / 2, 0), width / 2)
+        let raw = CGFloat(min(1, max(0, fraction))) * width
+        return min(max(raw, half), width - half)
+    }
+}
+
+private struct ProgressHoverTrackingView: NSViewRepresentable {
+    let onFractionChange: (Double?) -> Void
+
+    func makeNSView(context: Context) -> ProgressHoverTrackingNSView {
+        let view = ProgressHoverTrackingNSView()
+        view.onFractionChange = onFractionChange
+        return view
+    }
+
+    func updateNSView(
+        _ nsView: ProgressHoverTrackingNSView,
+        context: Context
+    ) {
+        nsView.onFractionChange = onFractionChange
+    }
+}
+
+private final class ProgressHoverTrackingNSView: NSView {
+    var onFractionChange: ((Double?) -> Void)?
+    private var trackingAreaReference: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingAreaReference {
+            removeTrackingArea(trackingAreaReference)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [
+                .activeInKeyWindow,
+                .inVisibleRect,
+                .mouseEnteredAndExited,
+                .mouseMoved
+            ],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingAreaReference = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        publishFraction(for: event)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        publishFraction(for: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onFractionChange?(nil)
+    }
+
+    // The tracking view observes pointer motion, while the native Slider below
+    // remains responsible for clicks and drag gestures.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    private func publishFraction(for event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        onFractionChange?(
+            PlayerProgressHoverPolicy.fraction(x: point.x, width: bounds.width)
+        )
     }
 }
 

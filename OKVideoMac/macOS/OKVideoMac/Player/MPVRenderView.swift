@@ -11,11 +11,13 @@ final class PlayerDisplayUpdateGate {
     private let lock = NSLock()
     private var isUpdateScheduled = false
     private var needsFollowUpUpdate = false
+    private var isSuspended = false
 
     /// Returns true only when the caller should schedule a new display block.
     func requestUpdate() -> Bool {
         lock.lock()
         defer { lock.unlock() }
+        guard !isSuspended else { return false }
         if isUpdateScheduled {
             needsFollowUpUpdate = true
             return false
@@ -38,6 +40,19 @@ final class PlayerDisplayUpdateGate {
         }
         isUpdateScheduled = false
         return false
+    }
+
+    /// AppKit already owns display-region bookkeeping during a live window
+    /// resize. Suspending mpv invalidations avoids racing that private region
+    /// transaction; the view requests one fresh frame when resizing ends.
+    func setSuspended(_ suspended: Bool) {
+        lock.lock()
+        isSuspended = suspended
+        if suspended {
+            isUpdateScheduled = false
+            needsFollowUpUpdate = false
+        }
+        lock.unlock()
     }
 }
 
@@ -65,10 +80,16 @@ private final class MPVRenderCallbackBox {
         scheduleDisplay()
     }
 
+    func setDisplaySuspended(_ suspended: Bool) {
+        updateGate.setSuspended(suspended)
+    }
+
     private func scheduleDisplay() {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.view?.needsDisplay = true
+            if self.view?.window?.inLiveResize != true {
+                self.view?.needsDisplay = true
+            }
             if self.updateGate.finishScheduling() {
                 self.scheduleDisplay()
             }
@@ -154,7 +175,30 @@ final class MPVOpenGLView: NSOpenGLView {
 
     override func reshape() {
         super.reshape()
+        guard window?.inLiveResize != true else { return }
         needsDisplay = true
+    }
+
+    override func viewWillStartLiveResize() {
+        super.viewWillStartLiveResize()
+        callbackBox?.setDisplaySuspended(true)
+    }
+
+    override func viewDidEndLiveResize() {
+        super.viewDidEndLiveResize()
+        callbackBox?.setDisplaySuspended(false)
+        needsDisplay = true
+    }
+
+    /// Window chrome changes (notably toggling `fullSizeContentView`) can move
+    /// an NSOpenGLView without producing the same drawable update as an
+    /// ordinary user resize. Keep the OpenGL drawable in lockstep with the
+    /// final AppKit layout instead of waiting for a full-screen round trip.
+    func synchronizeDrawableAfterWindowLayout() {
+        guard window?.inLiveResize != true else { return }
+        openGLContext?.update()
+        needsDisplay = true
+        callbackBox?.requestDisplay()
     }
 
     override func draw(_ dirtyRect: NSRect) {

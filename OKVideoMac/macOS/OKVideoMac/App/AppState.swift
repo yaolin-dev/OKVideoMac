@@ -23,6 +23,15 @@ enum AppSection: String, CaseIterable, Identifiable {
     }
 }
 
+/// Keeps high-frequency page navigation separate from the much larger app
+/// content model. Publishing section changes through `AppState` used to
+/// invalidate every view holding that environment object, including all live
+/// channel cards, immediately before those cards were removed from screen.
+@MainActor
+final class AppNavigationState: ObservableObject {
+    @Published var selectedSection: AppSection = .home
+}
+
 enum SettingsPane: String, CaseIterable, Identifiable {
     case general
     case configurations
@@ -251,7 +260,11 @@ private enum PendingNodeOperation {
 final class AppState: ObservableObject {
     static let automaticConfigurationRefreshInterval: TimeInterval = 30 * 60
 
-    @Published var selectedSection: AppSection = .home
+    let navigation = AppNavigationState()
+    var selectedSection: AppSection {
+        get { navigation.selectedSection }
+        set { navigation.selectedSection = newValue }
+    }
     @Published private(set) var isHomeSearchPresented = false
     @Published var selectedSettingsPane: SettingsPane = .general
     @Published private(set) var configurations: [StoredConfiguration] = []
@@ -278,6 +291,7 @@ final class AppState: ObservableObject {
     @Published private(set) var liveSources: [StoredLiveSource] = []
     @Published private(set) var loadedLivePlaylists: [UUID: LivePlaylist] = [:]
     @Published private(set) var loadedEPGGuides: [UUID: XMLTVGuide] = [:]
+    private var loadedEPGScheduleIndexes: [UUID: XMLTVScheduleIndex] = [:]
     @Published private(set) var epgFailures: [UUID: String] = [:]
     @Published private(set) var livePlaybackChannel: LiveChannel?
     @Published private(set) var livePlaybackStream: LiveStream?
@@ -1530,7 +1544,7 @@ final class AppState: ObservableObject {
     }
 
     func selectSection(_ section: AppSection) {
-        if section == .home {
+        if section == .home, isHomeSearchPresented {
             returnFromSearchToHome()
         } else if isHomeSearchPresented {
             cancelSearch()
@@ -1942,6 +1956,7 @@ final class AppState: ObservableObject {
             liveSources = try await environment.database.liveSources()
             loadedLivePlaylists[id] = loaded.playlist
             loadedEPGGuides[id] = nil
+            loadedEPGScheduleIndexes[id] = nil
             epgFailures[id] = nil
             await loadEPG(for: updated, playlist: loaded.playlist)
         } catch {
@@ -1956,6 +1971,7 @@ final class AppState: ObservableObject {
             liveSources = try await environment.database.liveSources()
             loadedLivePlaylists[id] = nil
             loadedEPGGuides[id] = nil
+            loadedEPGScheduleIndexes[id] = nil
             epgFailures[id] = nil
         } catch {
             show(error, title: "删除直播源失败")
@@ -2910,11 +2926,19 @@ final class AppState: ObservableObject {
         next: EPGProgramme?
     ) {
         guard let channel = livePlaybackChannel,
-              let sourceID = livePlaybackSourceID,
-              let guide = loadedEPGGuides[sourceID] else {
+              let sourceID = livePlaybackSourceID else {
             return (nil, nil)
         }
-        return guide.currentAndNext(for: channel, at: Date())
+        return liveProgrammes(for: channel, sourceID: sourceID, at: Date())
+    }
+
+    func liveProgrammes(
+        for channel: LiveChannel,
+        sourceID: UUID,
+        at date: Date
+    ) -> (current: EPGProgramme?, next: EPGProgramme?) {
+        loadedEPGScheduleIndexes[sourceID]?
+            .currentAndNext(for: channel, at: date) ?? (nil, nil)
     }
 
     var playbackStageDescription: String {
@@ -3550,16 +3574,20 @@ final class AppState: ObservableObject {
     ) async {
         guard let environment, let epgURL = playlist.epgURL else {
             loadedEPGGuides[source.id] = nil
+            loadedEPGScheduleIndexes[source.id] = nil
             epgFailures[source.id] = nil
             return
         }
         do {
-            loadedEPGGuides[source.id] = try await environment.epgService.guide(
+            let guide = try await environment.epgService.guide(
                 for: epgURL
             )
+            loadedEPGScheduleIndexes[source.id] = XMLTVScheduleIndex(guide: guide)
+            loadedEPGGuides[source.id] = guide
             epgFailures[source.id] = nil
         } catch {
             loadedEPGGuides[source.id] = nil
+            loadedEPGScheduleIndexes[source.id] = nil
             epgFailures[source.id] = error.localizedDescription
         }
     }
@@ -3800,6 +3828,11 @@ final class AppState: ObservableObject {
         selectedDetail = nil
         presentPlayer()
         try await environment.player.load(media, startPosition: startPosition)
+        // A natural EOF can leave libmpv's pause/keep-open state latched while
+        // the next episode is being resolved. Reassert autoplay only after the
+        // replacement file has finished loading so automatic episode advance
+        // cannot remain frozen on its first frame.
+        try await environment.player.play()
         activePlayback = playback
         pendingPlayback = nil
         playbackQualities = playbackResult?.qualities ?? []

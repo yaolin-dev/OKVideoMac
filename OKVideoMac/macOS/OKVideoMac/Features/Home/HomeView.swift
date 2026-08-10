@@ -4,7 +4,6 @@ import OKVideoCore
 struct HomeView: View {
     @EnvironmentObject private var state: AppState
     @State private var filterSelection: [String: String] = [:]
-    @FocusState private var isSearchFieldFocused: Bool
     private let categoryScrollCoordinateSpace = "home-category-scroll"
 
     var body: some View {
@@ -15,17 +14,7 @@ struct HomeView: View {
                 homeContent
             }
         }
-        .navigationTitle("首页")
         .background(AppSurfacePalette.background.ignoresSafeArea())
-        .toolbar {
-            ToolbarItemGroup {
-                if !state.isHomeSearchPresented,
-                   state.activeConfiguration != nil,
-                   !state.visibleSites.isEmpty {
-                    homeToolbarControls
-                }
-            }
-        }
     }
 
     @ViewBuilder
@@ -48,71 +37,6 @@ struct HomeView: View {
         } else {
             content
         }
-    }
-
-    private func performSearch() {
-        let keyword = state.searchKeyword
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !keyword.isEmpty else {
-            isSearchFieldFocused = true
-            return
-        }
-        state.searchFromHome(keyword)
-    }
-
-    @ViewBuilder
-    private var homeToolbarControls: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "network")
-                .foregroundColor(.secondary)
-            Picker(
-                "站点",
-                selection: Binding(
-                    get: { state.selectedSiteKey ?? "" },
-                    set: { key in Task { await state.selectSite(key) } }
-                )
-            ) {
-                ForEach(state.visibleSites) { site in
-                    Text(
-                        HomeSitePresentation.displayName(
-                            siteName: site.name,
-                            capability: state.siteCapability(for: site.key)
-                        )
-                    )
-                    .tag(site.key)
-                }
-            }
-            .labelsHidden()
-            .frame(width: 210)
-        }
-        .help("选择内容站点，共 \(state.visibleSites.count) 个")
-
-        TextField("搜索全部站点", text: $state.searchKeyword)
-            .textFieldStyle(.roundedBorder)
-            .focused($isSearchFieldFocused)
-            .onSubmit(performSearch)
-            .frame(minWidth: 190, idealWidth: 280, maxWidth: 360)
-
-        Button(action: performSearch) {
-            Label("搜索", systemImage: "magnifyingglass")
-        }
-        .disabled(
-            state.searchKeyword
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .isEmpty
-        )
-
-        if state.isLoading || state.isHomeLoading {
-            ProgressView()
-                .controlSize(.small)
-        }
-
-        Button {
-            Task { await state.refreshHome() }
-        } label: {
-            Label("刷新", systemImage: "arrow.clockwise")
-        }
-        .disabled(state.currentSite == nil)
     }
 
     @ViewBuilder
@@ -173,6 +97,8 @@ struct HomeView: View {
                                             )
                                         }
                                     }
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 8)
                                 }
                             }
                             if let category = selectedCategory {
@@ -279,6 +205,83 @@ struct HomeView: View {
     }
 }
 
+struct HomeToolbarView: View {
+    @EnvironmentObject private var state: AppState
+    @FocusState private var isSearchFieldFocused: Bool
+
+    var body: some View {
+        if !state.isHomeSearchPresented,
+           state.activeConfiguration != nil,
+           !state.visibleSites.isEmpty {
+            HStack(spacing: 10) {
+                HStack(spacing: 6) {
+                    Image(systemName: "network")
+                        .foregroundColor(.secondary)
+                    Picker(
+                        "站点",
+                        selection: Binding(
+                            get: { state.selectedSiteKey ?? "" },
+                            set: { key in
+                                Task { await state.selectSite(key) }
+                            }
+                        )
+                    ) {
+                        ForEach(state.visibleSites) { site in
+                            Text(
+                                HomeSitePresentation.displayName(
+                                    siteName: site.name,
+                                    capability: state.siteCapability(for: site.key)
+                                )
+                            )
+                            .tag(site.key)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 210)
+                }
+                .help("选择内容站点，共 \(state.visibleSites.count) 个")
+
+                TextField("搜索全部站点", text: $state.searchKeyword)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($isSearchFieldFocused)
+                    .onSubmit(performSearch)
+                    .frame(minWidth: 190, idealWidth: 280, maxWidth: 360)
+
+                Button(action: performSearch) {
+                    Label("搜索", systemImage: "magnifyingglass")
+                }
+                .disabled(
+                    state.searchKeyword
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .isEmpty
+                )
+
+                if state.isLoading || state.isHomeLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+
+                Button {
+                    Task { await state.refreshHome() }
+                } label: {
+                    Label("刷新", systemImage: "arrow.clockwise")
+                }
+                .disabled(state.currentSite == nil)
+            }
+        }
+    }
+
+    private func performSearch() {
+        let keyword = state.searchKeyword
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !keyword.isEmpty else {
+            isSearchFieldFocused = true
+            return
+        }
+        state.searchFromHome(keyword)
+    }
+}
+
 enum HomeSitePresentation {
     static func displayName(
         siteName: String,
@@ -294,6 +297,20 @@ private struct HomeCategoryButtonStyle: ButtonStyle {
     let isSelected: Bool
 
     func makeBody(configuration: Configuration) -> some View {
+        HomeCategoryButtonBody(
+            configuration: configuration,
+            isSelected: isSelected
+        )
+    }
+}
+
+private struct HomeCategoryButtonBody: View {
+    let configuration: ButtonStyle.Configuration
+    let isSelected: Bool
+    @State private var isHovering = false
+
+    var body: some View {
+        let highlighted = isHovering && !configuration.isPressed
         configuration.label
             .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
             .foregroundColor(isSelected ? .white : .primary)
@@ -302,22 +319,38 @@ private struct HomeCategoryButtonStyle: ButtonStyle {
             .background(
                 isSelected
                     ? Color.accentColor
-                    : Color(nsColor: .controlBackgroundColor)
+                        .opacity(configuration.isPressed ? 0.78 : 1)
+                    : highlighted
+                        ? Color.accentColor.opacity(0.075)
+                        : Color(nsColor: .controlBackgroundColor).opacity(0.86)
             )
             .clipShape(Capsule())
             .overlay {
                 Capsule()
                     .stroke(
-                        isSelected
-                            ? Color.accentColor
-                            : Color.secondary.opacity(0.18),
+                        highlighted
+                            ? Color.accentColor.opacity(0.30)
+                            : isSelected
+                                ? Color.white.opacity(isHovering ? 0.18 : 0)
+                                : Color.secondary.opacity(0.18),
                         lineWidth: 1
                     )
             }
-            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .scaleEffect(
+                configuration.isPressed ? 0.97 : (isHovering ? 1.012 : 1)
+            )
+            .shadow(
+                color: isSelected
+                    ? Color.accentColor.opacity(isHovering ? 0.12 : 0)
+                    : Color.black.opacity(isHovering ? 0.055 : 0),
+                radius: isHovering ? 4 : 0,
+                y: isHovering ? 1 : 0
+            )
             .animation(
                 .easeOut(duration: 0.12),
                 value: configuration.isPressed
             )
+            .animation(.easeOut(duration: 0.13), value: isHovering)
+            .onHover { isHovering = $0 }
     }
 }

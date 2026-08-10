@@ -3,12 +3,22 @@ import OKVideoCore
 import OKVideoPersistence
 import SwiftUI
 
+@MainActor
+final class LiveBrowserSession: ObservableObject {
+    @Published var selectedSourceID: UUID?
+    @Published var searchText = ""
+    @Published var selectedGroupName: String?
+    @Published var showsFavoritesOnly = false
+
+    /// Deliberately not published: changing sections must not invalidate the
+    /// mounted live grid. It only gates source-loading side effects.
+    var isActive = false
+}
+
 struct LiveView: View {
     @EnvironmentObject private var state: AppState
-    @State private var selectedSourceID: UUID?
-    @State private var searchText = ""
-    @State private var selectedGroupName: String?
-    @State private var showsFavoritesOnly = false
+    @EnvironmentObject private var navigation: AppNavigationState
+    @ObservedObject var session: LiveBrowserSession
 
     var body: some View {
         Group {
@@ -19,40 +29,31 @@ struct LiveView: View {
                     .frame(minWidth: 520)
             }
         }
-        .navigationTitle("直播")
-        .searchable(
-            text: $searchText,
-            placement: .toolbar,
-            prompt: "搜索频道"
-        )
-        .toolbar {
-            ToolbarItemGroup {
-                if let source = selectedSource,
-                   let playlist = state.loadedLivePlaylists[source.id] {
-                    liveToolbarControls(
-                        groups: playlist.groups.filter { $0.password == nil },
-                        channelCount: playlist.groups
-                            .filter { $0.password == nil }
-                            .reduce(0) { $0 + $1.channels.count },
-                        sourceID: source.id,
-                        sourceName: source.name
-                    )
-                }
-            }
-        }
         .background(AppSurfacePalette.background.ignoresSafeArea())
-        .task {
-            selectFirstSourceIfNeeded()
-            await loadSelectedIfNeeded()
+        .onAppear {
+            updateActivation(for: navigation.selectedSection)
         }
-        .onChange(of: selectedSourceID) { _ in
-            searchText = ""
-            selectedGroupName = nil
-            showsFavoritesOnly = false
+        .onDisappear {
+            session.isActive = false
+        }
+        .onChange(of: navigation.selectedSection) { section in
+            updateActivation(for: section)
+        }
+        .onChange(of: session.selectedSourceID) { _ in
+            session.searchText = ""
+            session.selectedGroupName = nil
+            session.showsFavoritesOnly = false
+            guard session.isActive else { return }
             Task { await loadSelectedIfNeeded() }
         }
         .onChange(of: state.liveSources) { _ in
+            let previousSourceID = session.selectedSourceID
             selectFirstSourceIfNeeded()
+            guard session.isActive,
+                  previousSourceID == session.selectedSourceID else {
+                return
+            }
+            Task { await loadSelectedIfNeeded() }
         }
     }
 
@@ -104,6 +105,7 @@ struct LiveView: View {
             visibleGroups.flatMap(\.channels),
             sourceName: sourceName
         )
+        let programmeDate = Date()
         return VStack(spacing: 0) {
             if let failure = state.epgFailures[sourceID] {
                 Label(
@@ -120,9 +122,9 @@ struct LiveView: View {
 
             if channels.isEmpty {
                 EmptyStateView(
-                    systemImage: showsFavoritesOnly ? "star" : "magnifyingglass",
-                    title: showsFavoritesOnly ? "还没有收藏频道" : "没有匹配的频道",
-                    message: showsFavoritesOnly
+                    systemImage: session.showsFavoritesOnly ? "star" : "magnifyingglass",
+                    title: session.showsFavoritesOnly ? "还没有收藏频道" : "没有匹配的频道",
+                    message: session.showsFavoritesOnly
                         ? "点击频道卡片右上角的星标即可收藏。"
                         : "请更换分组或搜索关键词。"
                 )
@@ -140,10 +142,17 @@ struct LiveView: View {
                         spacing: 20
                     ) {
                         ForEach(channels) { channel in
+                            let programmes = state.liveProgrammes(
+                                for: channel,
+                                sourceID: sourceID,
+                                at: programmeDate
+                            )
                             LiveChannelCard(
                                 channel: channel,
                                 sourceID: sourceID,
-                                sourceName: sourceName
+                                sourceName: sourceName,
+                                currentEPGProgramme: programmes.current,
+                                nextEPGProgramme: programmes.next
                             )
                             .environmentObject(state)
                         }
@@ -165,21 +174,102 @@ struct LiveView: View {
         }
     }
 
-    @ViewBuilder
-    private func liveToolbarControls(
-        groups: [LiveGroup],
+    private var selectedSource: StoredLiveSource? {
+        guard let selectedSourceID = session.selectedSourceID else { return nil }
+        return state.liveSources.first { $0.id == selectedSourceID }
+    }
+
+    private func filteredChannels(
+        _ channels: [LiveChannel],
+        sourceName: String
+    ) -> [LiveChannel] {
+        let query = session.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return channels.filter { channel in
+            let groupMatches = session.selectedGroupName == nil
+                || channel.groupName == session.selectedGroupName
+            let favoriteMatches = !session.showsFavoritesOnly
+                || state.isLiveFavorite(sourceName: sourceName, channel: channel)
+            let queryMatches = query.isEmpty
+                || channel.name.localizedCaseInsensitiveContains(query)
+                || channel.groupName.localizedCaseInsensitiveContains(query)
+                || (channel.tvgName?.localizedCaseInsensitiveContains(query) ?? false)
+                || (channel.number?.localizedCaseInsensitiveContains(query) ?? false)
+            return groupMatches && favoriteMatches && queryMatches
+        }
+    }
+
+    private func selectFirstSourceIfNeeded() {
+        if let selectedSourceID = session.selectedSourceID,
+           state.liveSources.contains(where: { $0.id == selectedSourceID }) {
+            return
+        }
+        session.selectedSourceID = state.liveSources.first?.id
+    }
+
+    private func updateActivation(for section: AppSection) {
+        session.isActive = section == .live
+        guard session.isActive else { return }
+
+        let previousSourceID = session.selectedSourceID
+        selectFirstSourceIfNeeded()
+        if previousSourceID == session.selectedSourceID {
+            Task { await loadSelectedIfNeeded() }
+        }
+    }
+
+    private func loadSelectedIfNeeded() async {
+        guard let source = selectedSource,
+              state.loadedLivePlaylists[source.id] == nil else {
+            return
+        }
+        await state.loadLiveSource(source)
+    }
+}
+
+struct LiveToolbarView: View {
+    @EnvironmentObject private var state: AppState
+    @ObservedObject var session: LiveBrowserSession
+
+    var body: some View {
+        Group {
+            if let source = selectedSource,
+               let playlist = state.loadedLivePlaylists[source.id] {
+                let groups = playlist.groups.filter { $0.password == nil }
+                let channelCount = groups.reduce(0) {
+                    $0 + $1.channels.count
+                }
+                HStack(spacing: 10) {
+                    sourceMenu(
+                        channelCount: channelCount,
+                        sourceName: source.name
+                    )
+                    groupMenu(groups)
+                    favoritesButton
+                    refreshControl(sourceID: source.id)
+                    TextField("搜索频道", text: $session.searchText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 220)
+                }
+            } else if state.isLoading {
+                ProgressView()
+                    .controlSize(.small)
+                    .help("正在加载直播源")
+            }
+        }
+    }
+
+    private func sourceMenu(
         channelCount: Int,
-        sourceID: UUID,
         sourceName: String
     ) -> some View {
         Menu {
             ForEach(state.liveSources) { source in
                 Button {
-                    selectedSourceID = source.id
+                    session.selectedSourceID = source.id
                 } label: {
-                    groupMenuLabel(
+                    menuLabel(
                         source.name,
-                        selected: source.id == selectedSourceID
+                        selected: source.id == session.selectedSourceID
                     )
                 }
             }
@@ -193,40 +283,53 @@ struct LiveView: View {
         }
         .disabled(state.liveSources.count < 2)
         .help("当前直播源：\(sourceName)，共 \(channelCount) 个频道")
+    }
 
+    private func groupMenu(_ groups: [LiveGroup]) -> some View {
         Menu {
             Button {
-                selectedGroupName = nil
+                session.selectedGroupName = nil
             } label: {
-                groupMenuLabel("全部频道", selected: selectedGroupName == nil)
+                menuLabel(
+                    "全部频道",
+                    selected: session.selectedGroupName == nil
+                )
             }
             Divider()
             ForEach(groups) { group in
                 Button {
-                    selectedGroupName = group.name
+                    session.selectedGroupName = group.name
                 } label: {
-                    groupMenuLabel(
+                    menuLabel(
                         "\(group.name)（\(group.channels.count)）",
-                        selected: selectedGroupName == group.name
+                        selected: session.selectedGroupName == group.name
                     )
                 }
             }
         } label: {
-            Label(selectedGroupName ?? "全部频道", systemImage: "rectangle.3.group")
+            Label(
+                session.selectedGroupName ?? "全部频道",
+                systemImage: "rectangle.3.group"
+            )
         }
         .help("筛选频道分组")
+    }
 
+    private var favoritesButton: some View {
         Button {
-            showsFavoritesOnly.toggle()
+            session.showsFavoritesOnly.toggle()
         } label: {
             Label(
                 "仅看收藏",
-                systemImage: showsFavoritesOnly ? "star.fill" : "star"
+                systemImage: session.showsFavoritesOnly ? "star.fill" : "star"
             )
         }
-        .tint(showsFavoritesOnly ? .yellow : .accentColor)
-        .help(showsFavoritesOnly ? "显示全部频道" : "仅显示收藏频道")
+        .tint(session.showsFavoritesOnly ? .yellow : .accentColor)
+        .help(session.showsFavoritesOnly ? "显示全部频道" : "仅显示收藏频道")
+    }
 
+    @ViewBuilder
+    private func refreshControl(sourceID: UUID) -> some View {
         if state.isLoading {
             ProgressView()
                 .controlSize(.small)
@@ -243,7 +346,7 @@ struct LiveView: View {
     }
 
     @ViewBuilder
-    private func groupMenuLabel(_ title: String, selected: Bool) -> some View {
+    private func menuLabel(_ title: String, selected: Bool) -> some View {
         if selected {
             Label(title, systemImage: "checkmark")
         } else {
@@ -252,35 +355,18 @@ struct LiveView: View {
     }
 
     private var selectedSource: StoredLiveSource? {
-        guard let selectedSourceID else { return nil }
+        guard let selectedSourceID = session.selectedSourceID else {
+            return nil
+        }
         return state.liveSources.first { $0.id == selectedSourceID }
     }
 
-    private func filteredChannels(
-        _ channels: [LiveChannel],
-        sourceName: String
-    ) -> [LiveChannel] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return channels.filter { channel in
-            let groupMatches = selectedGroupName == nil
-                || channel.groupName == selectedGroupName
-            let favoriteMatches = !showsFavoritesOnly
-                || state.isLiveFavorite(sourceName: sourceName, channel: channel)
-            let queryMatches = query.isEmpty
-                || channel.name.localizedCaseInsensitiveContains(query)
-                || channel.groupName.localizedCaseInsensitiveContains(query)
-                || (channel.tvgName?.localizedCaseInsensitiveContains(query) ?? false)
-                || (channel.number?.localizedCaseInsensitiveContains(query) ?? false)
-            return groupMatches && favoriteMatches && queryMatches
-        }
-    }
-
     private func selectFirstSourceIfNeeded() {
-        if let selectedSourceID,
+        if let selectedSourceID = session.selectedSourceID,
            state.liveSources.contains(where: { $0.id == selectedSourceID }) {
             return
         }
-        selectedSourceID = state.liveSources.first?.id
+        session.selectedSourceID = state.liveSources.first?.id
     }
 
     private func loadSelectedIfNeeded() async {
@@ -294,9 +380,12 @@ struct LiveView: View {
 
 private struct LiveChannelCard: View {
     @EnvironmentObject private var state: AppState
+    @Environment(\.colorScheme) private var colorScheme
     let channel: LiveChannel
     let sourceID: UUID
     let sourceName: String
+    let currentEPGProgramme: EPGProgramme?
+    let nextEPGProgramme: EPGProgramme?
 
     @State private var isHovering = false
 
@@ -319,17 +408,12 @@ private struct LiveChannelCard: View {
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(
-                        isHovering
-                            ? Color.accentColor.opacity(0.9)
-                            : Color.primary.opacity(0.10),
-                        lineWidth: isHovering ? 2 : 1
-                    )
+                    .stroke(Color.primary.opacity(0.10), lineWidth: 1)
             }
             .shadow(
-                color: Color.black.opacity(isHovering ? 0.22 : 0.10),
-                radius: isHovering ? 10 : 4,
-                y: isHovering ? 5 : 2
+                color: Color.black.opacity(0.10),
+                radius: 4,
+                y: 2
             )
             .contentShape(Rectangle())
             .onTapGesture {
@@ -373,6 +457,28 @@ private struct LiveChannelCard: View {
             }
         }
         .contentShape(Rectangle())
+        .background {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(Color.accentColor.opacity(isHovering ? 0.055 : 0))
+                .padding(-6)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(
+                    Color.accentColor.opacity(isHovering ? 0.30 : 0),
+                    lineWidth: 1
+                )
+                .padding(-6)
+        }
+        .scaleEffect(isHovering ? 1.015 : 1)
+        .offset(y: isHovering ? -1 : 0)
+        .shadow(
+            color: Color.black.opacity(isHovering ? 0.11 : 0),
+            radius: isHovering ? 8 : 0,
+            y: isHovering ? 4 : 0
+        )
+        .zIndex(isHovering ? 1 : 0)
+        .animation(.easeOut(duration: 0.14), value: isHovering)
         .onHover { isHovering = $0 }
         .contextMenu {
             ForEach(channel.streams) { stream in
@@ -397,10 +503,7 @@ private struct LiveChannelCard: View {
     private var channelArtwork: some View {
         ZStack {
             LinearGradient(
-                colors: [
-                    Color(red: 0.13, green: 0.15, blue: 0.21),
-                    Color(red: 0.055, green: 0.065, blue: 0.095)
-                ],
+                colors: channelArtworkBackgroundColors,
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
@@ -431,10 +534,27 @@ private struct LiveChannelCard: View {
                         .font(.caption.weight(.semibold))
                         .lineLimit(1)
                 }
-                .foregroundColor(.white.opacity(0.78))
+                .foregroundColor(
+                    colorScheme == .dark
+                        ? Color.white.opacity(0.82)
+                        : Color.primary.opacity(0.72)
+                )
                 .padding(.horizontal, 18)
             }
         }
+    }
+
+    private var channelArtworkBackgroundColors: [Color] {
+        if colorScheme == .dark {
+            return [
+                Color(red: 0.22, green: 0.24, blue: 0.29),
+                Color(red: 0.13, green: 0.15, blue: 0.19)
+            ]
+        }
+        return [
+            Color(red: 0.94, green: 0.95, blue: 0.97),
+            Color(red: 0.82, green: 0.85, blue: 0.90)
+        ]
     }
 
     private var favoriteButton: some View {
@@ -483,7 +603,7 @@ private struct LiveChannelCard: View {
     }
 
     private var programmeSummary: String? {
-        if let current = currentAndNext.current {
+        if let current = currentEPGProgramme {
             return "正在播放：\(current.title)"
         }
         guard channel.streams.count > 1 else { return nil }
@@ -492,12 +612,7 @@ private struct LiveChannelCard: View {
     }
 
     private var nextProgramme: String? {
-        currentAndNext.next?.title
-    }
-
-    private var currentAndNext: (current: EPGProgramme?, next: EPGProgramme?) {
-        state.loadedEPGGuides[sourceID]?
-            .currentAndNext(for: channel, at: Date()) ?? (nil, nil)
+        nextEPGProgramme?.title
     }
 
     private func badge(_ text: String) -> some View {

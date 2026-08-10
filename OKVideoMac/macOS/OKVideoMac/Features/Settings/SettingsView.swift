@@ -103,6 +103,7 @@ struct SettingsView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .appInteractiveHover(cornerRadius: 11, selected: isSelected)
     }
 
     @ViewBuilder

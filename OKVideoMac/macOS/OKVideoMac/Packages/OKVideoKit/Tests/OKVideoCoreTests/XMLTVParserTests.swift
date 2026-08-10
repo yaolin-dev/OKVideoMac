@@ -30,6 +30,17 @@ final class XMLTVParserTests: XCTestCase {
         let currentAndNext = guide.currentAndNext(channelID: "fixture", at: date)
         XCTAssertEqual(currentAndNext.current?.title, "Public Fixture")
         XCTAssertEqual(currentAndNext.next?.title, "Next Fixture")
+
+        let channel = LiveChannel(
+            groupName: "Fixture",
+            name: "Fixture",
+            tvgName: "fixture",
+            streams: []
+        )
+        let indexed = XMLTVScheduleIndex(guide: guide)
+            .currentAndNext(for: channel, at: date)
+        XCTAssertEqual(indexed.current?.title, "Public Fixture")
+        XCTAssertEqual(indexed.next?.title, "Next Fixture")
     }
 
     func testInvalidProgrammeDoesNotDiscardValidEntries() throws {

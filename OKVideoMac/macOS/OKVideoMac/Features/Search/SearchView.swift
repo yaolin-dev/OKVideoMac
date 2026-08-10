@@ -282,6 +282,7 @@ private struct SearchSiteSidebar: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .appInteractiveHover(cornerRadius: 9, selected: isSelected)
     }
 }
 
@@ -528,6 +529,7 @@ private struct SearchFolderGrid: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .appInteractiveHover(cornerRadius: 10)
             }
         }
     }
@@ -741,6 +743,7 @@ private struct SearchClusterCell: View {
                 clusterLabel(primary: primary)
             }
             .buttonStyle(.plain)
+            .appInteractiveHover(cornerRadius: 10)
             .contextMenu {
                 ForEach(cluster.sources) { source in
                     Button("从 \(source.siteName) 打开") {
@@ -846,6 +849,7 @@ private struct SearchSourcePicker: View {
                     .background(Color.secondary.opacity(0.1), in: Circle())
             }
             .buttonStyle(.plain)
+            .appInteractiveHover(cornerRadius: 14)
             .help("关闭来源选择")
             .accessibilityLabel("关闭来源选择")
         }
@@ -895,6 +899,7 @@ private struct SearchSourcePicker: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .appInteractiveHover(cornerRadius: 10)
         .accessibilityLabel("从 \(source.siteName) 打开 \(source.title)")
     }
 

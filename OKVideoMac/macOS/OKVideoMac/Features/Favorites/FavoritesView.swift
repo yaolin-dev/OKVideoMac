@@ -101,6 +101,7 @@ struct FavoritesView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .appInteractiveHover(cornerRadius: 10, selected: selectedIDs.contains(favorite.id))
             .contextMenu {
                 Button(role: .destructive) {
                     pendingDeletion = .items([favorite.id])
@@ -117,6 +118,7 @@ struct FavoritesView: View {
                         .frame(width: 30, height: 30)
                 }
                 .buttonStyle(.plain)
+                .appInteractiveHover(cornerRadius: 8, destructive: true)
                 .foregroundStyle(.secondary)
                 .help("删除这条收藏")
             }

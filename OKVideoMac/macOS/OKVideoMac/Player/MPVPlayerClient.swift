@@ -806,6 +806,15 @@ final class MPVPlayerClient: PlayerClient {
         case NativeEvent.fileLoaded:
             guard let client else { return }
             isReplacingMedia = false
+            // `keep-open=yes` can preserve a paused EOF state across a
+            // loadfile/replace transition. Clear it at the native boundary;
+            // AppState performs a second autoplay handshake after load returns.
+            try? "pause".withCString { namePointer in
+                try library.checked(
+                    library.setPropertyFlag(client, namePointer, 0),
+                    operation: "开始播放新媒体"
+                )
+            }
             snapshot.status = .playing
             if let position = pendingStartPosition {
                 try? "time-pos".withCString { pointer in

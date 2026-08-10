@@ -13,6 +13,7 @@ struct OKVideoMacApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(state)
+                .environmentObject(state.navigation)
                 .environment(\.imageRepository, state.imageRepository)
                 .frame(minWidth: 900, minHeight: 600)
                 .onAppear {
@@ -61,6 +62,7 @@ struct OKVideoMacApp: App {
         Settings {
             SettingsView()
                 .environmentObject(state)
+                .environmentObject(state.navigation)
                 .frame(width: 980, height: 650)
         }
     }
