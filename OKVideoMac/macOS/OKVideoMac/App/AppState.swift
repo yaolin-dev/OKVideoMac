@@ -1684,6 +1684,12 @@ final class AppState: ObservableObject {
         guard !isShutdownRequested,
               let environment,
               let provider = providers[detail.summary.siteKey] else { return }
+        // Detail is presented above SearchView, so opening the player does not
+        // reliably trigger SearchView.onDisappear. Stop the aggregate search
+        // explicitly before cloud URL resolution starts; otherwise its site
+        // requests and result clustering compete with the player's cold-start
+        // proxy traffic. Keep the accumulated results for a fast return.
+        cancelSearch()
         let sessionID = UUID()
         playbackSessionID = sessionID
         activePlayerRequestID = sessionID

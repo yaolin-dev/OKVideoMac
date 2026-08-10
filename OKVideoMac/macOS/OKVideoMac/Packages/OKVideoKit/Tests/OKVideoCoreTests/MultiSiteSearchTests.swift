@@ -317,6 +317,33 @@ final class MultiSiteSearchTests: XCTestCase {
 
         XCTAssertEqual(completedKeys, ["fast", "queued", "slow"])
     }
+
+    func testCancellingConsumerCancelsInFlightProviderSearch() async throws {
+        let recorder = SearchCancellationRecorder()
+        let provider = CancellableSearchFixtureProvider(recorder: recorder)
+        let stream = MultiSiteSearch(
+            maximumConcurrency: 1,
+            siteTimeout: 5
+        ).search(providers: [provider], keyword: "fixture")
+        let consumer = Task {
+            for await _ in stream {}
+        }
+
+        for _ in 0..<100 where !(await recorder.started) {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let didStart = await recorder.started
+        XCTAssertTrue(didStart)
+
+        consumer.cancel()
+        await consumer.value
+
+        for _ in 0..<100 where !(await recorder.cancelled) {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let didCancel = await recorder.cancelled
+        XCTAssertTrue(didCancel)
+    }
 }
 
 private actor SearchPageRecorder {
@@ -324,6 +351,61 @@ private actor SearchPageRecorder {
 
     func record(_ page: Int) {
         pages.append(page)
+    }
+}
+
+private actor SearchCancellationRecorder {
+    private(set) var started = false
+    private(set) var cancelled = false
+
+    func markStarted() {
+        started = true
+    }
+
+    func markCancelled() {
+        cancelled = true
+    }
+}
+
+private struct CancellableSearchFixtureProvider: SiteProvider {
+    let recorder: SearchCancellationRecorder
+    let site = SiteConfiguration(
+        key: "cancellable",
+        name: "Cancellable",
+        type: 1,
+        api: "https://example.invalid"
+    )
+    let capability: SiteCapability = .standardJSON
+
+    func home() async throws -> SiteHome {
+        SiteHome(categories: [], recommendations: [])
+    }
+
+    func category(
+        id: String,
+        page: Int,
+        filters: [String: String]
+    ) async throws -> VideoPage {
+        VideoPage(items: [], pagination: Pagination(page: page, pageCount: 0))
+    }
+
+    func detail(id: String) async throws -> VideoDetail {
+        throw AppError.site("unused")
+    }
+
+    func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
+        await recorder.markStarted()
+        do {
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+        } catch {
+            await recorder.markCancelled()
+            throw error
+        }
+        return VideoPage(items: [], pagination: Pagination(page: page, pageCount: 1))
+    }
+
+    func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
+        throw AppError.site("unused")
     }
 }
 
