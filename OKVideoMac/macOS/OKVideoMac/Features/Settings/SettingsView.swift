@@ -113,6 +113,9 @@ struct SettingsView: View {
             generalSettings
         case .configurations:
             configurationSettings
+        case .search:
+            SearchSettingsPane()
+                .environmentObject(state)
         case .liveSources:
             LiveSourceSettingsPane()
                 .environmentObject(state)
@@ -546,6 +549,125 @@ struct SettingsView: View {
     }
 }
 
+private struct SearchSettingsPane: View {
+    @EnvironmentObject private var state: AppState
+    @State private var mode: SearchSiteScopeMode = .all
+    @State private var selectedKeys: Set<String> = []
+    @State private var filterText = ""
+    @State private var isSaving = false
+
+    private var draft: SearchSiteScope {
+        SearchSiteScope(mode: mode, selectedSiteKeys: selectedKeys)
+    }
+
+    private var hasValidSelection: Bool {
+        mode == .all || !SearchSiteScopePolicy.effectiveSiteKeys(
+            scope: draft,
+            options: state.searchScopeSiteOptions
+        ).isEmpty
+    }
+
+    var body: some View {
+        SettingsPage(
+            title: "搜索",
+            subtitle: "管理当前点播配置默认搜索的站点范围"
+        ) {
+            SettingsSectionTitle("当前配置")
+            SettingsCard {
+                SettingsControlRow(
+                    icon: "doc.badge.gearshape",
+                    color: .indigo,
+                    title: state.activeConfigurationRecord?.name ?? "未设置点播配置",
+                    subtitle: state.activeConfigurationRecord == nil
+                        ? "请先导入并启用一个点播配置"
+                        : "搜索范围按配置分别保存，互不影响"
+                ) {
+                    Text(state.searchScopeSummary)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            SettingsSectionTitle("默认搜索范围")
+            SettingsCard {
+                VStack(alignment: .leading, spacing: 14) {
+                    SearchScopeEditorContent(
+                        options: state.searchScopeSiteOptions,
+                        mode: $mode,
+                        selectedKeys: $selectedKeys,
+                        filterText: $filterText
+                    )
+                    .frame(minHeight: 360, idealHeight: 440)
+
+                    Divider()
+
+                    HStack {
+                        Text(
+                            state.isSearching
+                                ? "保存后从下一次搜索生效，当前搜索范围保持不变。"
+                                : "首页和搜索页都会使用此默认范围。"
+                        )
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        Spacer()
+                        if !hasValidSelection {
+                            Text("至少选择一个可用站点")
+                                .font(.caption)
+                                .foregroundColor(.red)
+                        }
+                        Button("恢复全部站点") {
+                            mode = .all
+                            selectedKeys = []
+                        }
+                        Button("保存") {
+                            isSaving = true
+                            Task {
+                                _ = await state.saveSearchSiteScope(draft)
+                                isSaving = false
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(
+                            state.activeConfigurationRecord == nil
+                                || !hasValidSelection
+                                || isSaving
+                                || draft == state.searchSiteScope
+                        )
+                    }
+                }
+                .padding(16)
+            }
+
+            SettingsSectionTitle("说明")
+            SettingsCard {
+                VStack(alignment: .leading, spacing: 7) {
+                    Label(
+                        "搜索范围决定会向哪些站点发起请求。",
+                        systemImage: "network"
+                    )
+                    Label(
+                        "搜索结果页的“结果来源”只过滤已有结果，不产生新的网络请求。",
+                        systemImage: "line.3.horizontal.decrease.circle"
+                    )
+                }
+                .foregroundColor(.secondary)
+                .padding(18)
+            }
+        }
+        .task(id: state.activeConfigurationRecord?.id) {
+            restoreDraft()
+        }
+        .onChange(of: state.searchSiteScope) { _ in
+            restoreDraft()
+        }
+    }
+
+    private func restoreDraft() {
+        mode = state.searchSiteScope.mode
+        selectedKeys = state.searchSiteScope.selectedSiteKeys
+        filterText = ""
+    }
+}
+
 private struct LiveSourceSettingsPane: View {
     @EnvironmentObject private var state: AppState
     @State private var showingImport = false
@@ -735,6 +857,7 @@ private extension SettingsPane {
         switch self {
         case .general: return "通用"
         case .configurations: return "点播配置"
+        case .search: return "搜索"
         case .liveSources: return "直播源"
         case .playback: return "视频"
         case .cache: return "缓存"
@@ -746,6 +869,7 @@ private extension SettingsPane {
         switch self {
         case .general: return "外观与基础设置"
         case .configurations: return "导入与切换片源"
+        case .search: return "选择默认搜索站点"
         case .liveSources: return "导入与管理直播源"
         case .playback: return "播放器与播放设置"
         case .cache: return "缓存与历史管理"
@@ -757,6 +881,7 @@ private extension SettingsPane {
         switch self {
         case .general: return "gearshape.fill"
         case .configurations: return "doc.badge.gearshape"
+        case .search: return "magnifyingglass.circle.fill"
         case .liveSources: return "dot.radiowaves.left.and.right"
         case .playback: return "play.rectangle.fill"
         case .cache: return "externaldrive.fill"
@@ -768,6 +893,7 @@ private extension SettingsPane {
         switch self {
         case .general: return .blue
         case .configurations: return .indigo
+        case .search: return .purple
         case .liveSources: return .teal
         case .playback: return .pink
         case .cache: return .orange

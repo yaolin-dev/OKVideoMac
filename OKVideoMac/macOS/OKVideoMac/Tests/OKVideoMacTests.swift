@@ -6,6 +6,98 @@ import OKVideoPersistence
 @testable import OKVideoMac
 
 final class OKVideoMacTests: XCTestCase {
+    func testSearchSiteScopeSettingRoundTrip() throws {
+        let scope = SearchSiteScope(
+            mode: .custom,
+            selectedSiteKeys: ["site-c", "site-a"]
+        )
+
+        XCTAssertEqual(SearchSiteScope(setting: scope.settingValue), scope)
+    }
+
+    func testSearchSiteScopeDefaultsToEverySearchableSite() {
+        let options = [
+            SearchScopeSiteOption(key: "a", name: "A", unavailableReason: nil),
+            SearchScopeSiteOption(key: "b", name: "B", unavailableReason: nil),
+            SearchScopeSiteOption(
+                key: "disabled",
+                name: "Disabled",
+                unavailableReason: "站点声明不支持搜索"
+            )
+        ]
+
+        XCTAssertEqual(
+            SearchSiteScopePolicy.effectiveSiteKeys(scope: .all, options: options),
+            ["a", "b"]
+        )
+    }
+
+    func testCustomSearchSiteScopeOnlySelectsRequestedAvailableSites() {
+        let options = [
+            SearchScopeSiteOption(key: "a", name: "A", unavailableReason: nil),
+            SearchScopeSiteOption(key: "b", name: "B", unavailableReason: nil),
+            SearchScopeSiteOption(key: "c", name: "C", unavailableReason: nil)
+        ]
+        let scope = SearchSiteScope(
+            mode: .custom,
+            selectedSiteKeys: ["a", "c", "missing"]
+        )
+
+        XCTAssertEqual(
+            SearchSiteScopePolicy.effectiveSiteKeys(scope: scope, options: options),
+            ["a", "c"]
+        )
+    }
+
+    func testCustomSearchScopeDoesNotFallBackWhenAllSelectionsAreUnavailable() {
+        let options = [
+            SearchScopeSiteOption(
+                key: "a",
+                name: "A",
+                unavailableReason: "当前运行环境不支持"
+            ),
+            SearchScopeSiteOption(key: "b", name: "B", unavailableReason: nil)
+        ]
+        let scope = SearchSiteScope(mode: .custom, selectedSiteKeys: ["a"])
+
+        XCTAssertTrue(
+            SearchSiteScopePolicy.effectiveSiteKeys(scope: scope, options: options).isEmpty
+        )
+    }
+
+    func testAllSearchScopeAutomaticallyIncludesNewSites() {
+        let original = [
+            SearchScopeSiteOption(key: "a", name: "A", unavailableReason: nil)
+        ]
+        let refreshed = original + [
+            SearchScopeSiteOption(key: "new", name: "New", unavailableReason: nil)
+        ]
+
+        XCTAssertEqual(
+            SearchSiteScopePolicy.effectiveSiteKeys(scope: .all, options: original),
+            ["a"]
+        )
+        XCTAssertEqual(
+            SearchSiteScopePolicy.effectiveSiteKeys(scope: .all, options: refreshed),
+            ["a", "new"]
+        )
+    }
+
+    @MainActor
+    func testSearchScopeSettingKeysAreIsolatedByConfiguration() {
+        let first = UUID()
+        let second = UUID()
+
+        XCTAssertNotEqual(
+            AppState.searchScopeSettingKey(for: first),
+            AppState.searchScopeSettingKey(for: second)
+        )
+        XCTAssertTrue(
+            AppState.searchScopeSettingKey(for: first)
+                .hasSuffix(first.uuidString.lowercased())
+        )
+    }
+
     @MainActor
     func testDecodedImageCacheCostUsesBitmapBackingSize() throws {
         let representation = try makeBitmapRepresentation(width: 20, height: 30)

@@ -35,6 +35,7 @@ final class AppNavigationState: ObservableObject {
 enum SettingsPane: String, CaseIterable, Identifiable {
     case general
     case configurations
+    case search
     case liveSources
     case playback
     case cache
@@ -91,6 +92,75 @@ struct SearchSiteOption: Identifiable, Equatable {
     let key: String
     let name: String
     let resultCount: Int
+}
+
+enum SearchSiteScopeMode: String, CaseIterable, Identifiable, Sendable {
+    case all
+    case custom
+
+    var id: String { rawValue }
+}
+
+struct SearchSiteScope: Equatable, Sendable {
+    var mode: SearchSiteScopeMode
+    var selectedSiteKeys: Set<String>
+
+    static let all = SearchSiteScope(mode: .all)
+
+    init(mode: SearchSiteScopeMode, selectedSiteKeys: Set<String> = []) {
+        self.mode = mode
+        self.selectedSiteKeys = selectedSiteKeys
+    }
+
+    init?(setting: JSONValue) {
+        guard case .object(let object) = setting,
+              let rawMode = object["mode"]?.stringValue,
+              let mode = SearchSiteScopeMode(rawValue: rawMode) else {
+            return nil
+        }
+        let keys: Set<String>
+        if case .array(let values)? = object["selectedSiteKeys"] {
+            keys = Set(values.compactMap(\.stringValue))
+        } else {
+            keys = []
+        }
+        self.init(mode: mode, selectedSiteKeys: keys)
+    }
+
+    var settingValue: JSONValue {
+        .object([
+            "mode": .string(mode.rawValue),
+            "selectedSiteKeys": .array(
+                selectedSiteKeys.sorted().map(JSONValue.string)
+            )
+        ])
+    }
+}
+
+struct SearchScopeSiteOption: Identifiable, Equatable, Sendable {
+    var id: String { key }
+    let key: String
+    let name: String
+    let unavailableReason: String?
+
+    var isSearchable: Bool { unavailableReason == nil }
+}
+
+enum SearchSiteScopePolicy {
+    static func effectiveSiteKeys(
+        scope: SearchSiteScope,
+        options: [SearchScopeSiteOption]
+    ) -> Set<String> {
+        let searchableKeys = Set(
+            options.lazy.filter(\.isSearchable).map(\.key)
+        )
+        switch scope.mode {
+        case .all:
+            return searchableKeys
+        case .custom:
+            return searchableKeys.intersection(scope.selectedSiteKeys)
+        }
+    }
 }
 
 struct HomeContentIdentity: Equatable, Sendable {
@@ -331,6 +401,8 @@ final class AppState: ObservableObject {
     @Published private(set) var searchCompletedSiteCount = 0
     @Published private(set) var searchTotalSiteCount = 0
     @Published private(set) var isSearching = false
+    @Published private(set) var searchSiteScope: SearchSiteScope = .all
+    @Published private(set) var activeSearchSiteKeys: Set<String> = []
     @Published private(set) var selectedSearchSiteKey: String?
     @Published private(set) var searchFolderPath: [SearchFolderPage] = []
     @Published private(set) var favorites: [FavoriteRecord] = []
@@ -509,6 +581,7 @@ final class AppState: ObservableObject {
                 isActive: true
             )
             try await environment.database.saveConfiguration(record)
+            resetSearchForConfigurationChange()
             configurations = try await environment.database.configurations()
             configurationRefreshSessionID = UUID()
             configurationRefreshTask?.cancel()
@@ -518,6 +591,7 @@ final class AppState: ObservableObject {
             activeConfiguration = loaded.configuration
             rebuildProviders()
             selectedSiteKey = supportedSites.first?.key
+            await loadSearchSiteScope()
             await prepareActiveConfigurationHome()
             try await reloadHistory()
             return true
@@ -641,11 +715,13 @@ final class AppState: ObservableObject {
         guard let environment else { return }
         do {
             try await environment.database.activateConfiguration(id: id)
+            resetSearchForConfigurationChange()
             configurations = try await environment.database.configurations()
             activeConfigurationRecord = try await environment.database.activeConfiguration()
             selectedSiteKey = nil
             try await prepareActiveNodeConfigurationIfNeeded()
             try loadActiveConfigurationContent()
+            await loadSearchSiteScope()
             await prepareActiveConfigurationHome()
             try await reloadHistory()
         } catch {
@@ -655,14 +731,19 @@ final class AppState: ObservableObject {
 
     func deleteConfiguration(_ id: UUID) async {
         guard let environment else { return }
+        let deletingActiveConfiguration = activeConfigurationRecord?.id == id
         do {
             try await environment.database.deleteConfiguration(id: id)
+            if deletingActiveConfiguration {
+                resetSearchForConfigurationChange()
+            }
             configurations = try await environment.database.configurations()
             if activeConfigurationRecord?.id == id {
                 activeConfigurationRecord = try await environment.database.activeConfiguration()
                 selectedSiteKey = nil
                 try await prepareActiveNodeConfigurationIfNeeded()
                 try loadActiveConfigurationContent()
+                await loadSearchSiteScope()
                 await prepareActiveConfigurationHome()
                 try await reloadHistory()
             }
@@ -1550,6 +1631,7 @@ final class AppState: ObservableObject {
         searchCompletedSiteCount = 0
         searchTotalSiteCount = 0
         isSearching = false
+        activeSearchSiteKeys = []
         selectedSearchSiteKey = nil
         searchFolderPath = []
         // Preserve meaningful punctuation exactly as FongMi does. NFC
@@ -1561,9 +1643,23 @@ final class AppState: ObservableObject {
         searchKeyword = trimmed
         guard !trimmed.isEmpty else { return }
 
-        let searchableProviders = supportedSites.compactMap {
-            providers[$0.key]
-        }.filter { $0.site.searchable == 1 }
+        let selectedKeys = SearchSiteScopePolicy.effectiveSiteKeys(
+            scope: searchSiteScope,
+            options: searchScopeSiteOptions
+        )
+        if searchSiteScope.mode == .custom, selectedKeys.isEmpty {
+            show(
+                AppError.configuration("当前自定义搜索范围没有可用站点，请重新选择。"),
+                title: "搜索范围不可用"
+            )
+            return
+        }
+        let searchableProviders: [SiteProvider] = supportedSites.compactMap { site in
+            guard selectedKeys.contains(site.key),
+                  site.searchable == 1 else { return nil }
+            return providers[site.key]
+        }
+        activeSearchSiteKeys = Set(searchableProviders.map { $0.site.key })
         searchTotalSiteCount = searchableProviders.count
         isSearching = !searchableProviders.isEmpty
         let stream = MultiSiteSearch().search(
@@ -1629,6 +1725,42 @@ final class AppState: ObservableObject {
         isSearching = false
     }
 
+    func saveSearchSiteScope(_ scope: SearchSiteScope) async -> Bool {
+        guard let environment,
+              let configurationID = activeConfigurationRecord?.id else {
+            show(
+                AppError.configuration("请先导入并启用一个点播配置。"),
+                title: "无法保存搜索范围"
+            )
+            return false
+        }
+        let effectiveKeys = SearchSiteScopePolicy.effectiveSiteKeys(
+            scope: scope,
+            options: searchScopeSiteOptions
+        )
+        if scope.mode == .custom, effectiveKeys.isEmpty {
+            show(
+                AppError.configuration("自定义搜索范围至少需要一个当前可用站点。"),
+                title: "无法保存搜索范围"
+            )
+            return false
+        }
+        do {
+            try await environment.database.setSetting(
+                scope.settingValue,
+                forKey: Self.searchScopeSettingKey(for: configurationID)
+            )
+            guard activeConfigurationRecord?.id == configurationID else {
+                return true
+            }
+            searchSiteScope = scope
+            return true
+        } catch {
+            show(error, title: "无法保存搜索范围")
+            return false
+        }
+    }
+
     func selectSearchSite(_ key: String?) {
         selectedSearchSiteKey = key
     }
@@ -1662,6 +1794,44 @@ final class AppState: ObservableObject {
             )
         }
         return options
+    }
+
+    var searchScopeSiteOptions: [SearchScopeSiteOption] {
+        (activeConfiguration?.sites ?? []).map { site in
+            let reason: String?
+            if site.hide != 0 {
+                reason = "配置中已隐藏"
+            } else if site.searchable != 1 {
+                reason = "站点声明不支持搜索"
+            } else if providers[site.key]?.capability == .unsupportedSpider
+                        || providers[site.key] == nil {
+                reason = "当前运行环境不支持"
+            } else {
+                reason = nil
+            }
+            return SearchScopeSiteOption(
+                key: site.key,
+                name: site.name,
+                unavailableReason: reason
+            )
+        }
+    }
+
+    var effectiveSearchSiteKeys: Set<String> {
+        SearchSiteScopePolicy.effectiveSiteKeys(
+            scope: searchSiteScope,
+            options: searchScopeSiteOptions
+        )
+    }
+
+    var searchScopeSummary: String {
+        let total = searchScopeSiteOptions.filter(\.isSearchable).count
+        switch searchSiteScope.mode {
+        case .all:
+            return "范围：全部 \(total)"
+        case .custom:
+            return "范围：已选 \(effectiveSearchSiteKeys.count)/\(total)"
+        }
     }
 
     var visibleSearchClusters: [SearchResultCluster] {
@@ -3502,6 +3672,36 @@ final class AppState: ObservableObject {
         "home.selectedSite.\(configurationID.uuidString.lowercased())"
     }
 
+    static func searchScopeSettingKey(for configurationID: UUID) -> String {
+        "search.scope.\(configurationID.uuidString.lowercased())"
+    }
+
+    private func loadSearchSiteScope() async {
+        guard let environment,
+              let configurationID = activeConfigurationRecord?.id else {
+            searchSiteScope = .all
+            return
+        }
+        let value = try? await environment.database.setting(
+            forKey: Self.searchScopeSettingKey(for: configurationID)
+        )
+        guard activeConfigurationRecord?.id == configurationID else { return }
+        searchSiteScope = value.flatMap(SearchSiteScope.init(setting:)) ?? .all
+    }
+
+    private func resetSearchForConfigurationChange() {
+        cancelSearch()
+        searchResults = []
+        searchClusters = []
+        searchFailures = []
+        searchCompletedSiteCount = 0
+        searchTotalSiteCount = 0
+        activeSearchSiteKeys = []
+        selectedSearchSiteKey = nil
+        searchFolderPath = []
+        searchSiteScope = .all
+    }
+
     private func homeCacheSettingKey(
         configurationID: UUID,
         siteKey: String
@@ -3818,6 +4018,7 @@ final class AppState: ObservableObject {
         ), case .array(let identifiers) = value {
             favoriteLiveChannelIDs = Set(identifiers.compactMap(\.stringValue))
         }
+        await loadSearchSiteScope()
     }
 
     private func liveFavoriteID(sourceName: String, channel: LiveChannel) -> String {

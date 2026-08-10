@@ -7,6 +7,7 @@ struct SearchView: View {
     @AppStorage(SearchDisplayPreferences.mergesDuplicateTitlesKey)
     private var mergesDuplicateTitles = true
     @State private var sourceSelectionCluster: SearchResultCluster?
+    @State private var showingSearchScope = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -67,10 +68,21 @@ struct SearchView: View {
         }
         .help("返回首页")
 
-        TextField("搜索全部站点", text: $state.searchKeyword)
+        TextField("搜索影视内容", text: $state.searchKeyword)
             .textFieldStyle(.roundedBorder)
             .onSubmit { state.search(state.searchKeyword) }
             .frame(minWidth: 240, idealWidth: 420, maxWidth: 560)
+
+        Button {
+            showingSearchScope.toggle()
+        } label: {
+            Label(state.searchScopeSummary, systemImage: "checklist")
+        }
+        .help("选择本次搜索使用的站点")
+        .popover(isPresented: $showingSearchScope, arrowEdge: .bottom) {
+            SearchScopePopover()
+                .environmentObject(state)
+        }
 
         Button {
             state.search(state.searchKeyword)
@@ -187,14 +199,14 @@ struct SearchView: View {
 
     private var emptyStateMessage: String {
         if state.searchKeyword.isEmpty {
-            return "输入关键词后将并发搜索当前配置中已启用的站点。"
+            return "输入关键词后将并发搜索当前范围内已启用的站点。"
         }
         if state.isSearching {
             return "已完成 \(state.searchCompletedSiteCount)/"
                 + "\(state.searchTotalSiteCount) 个站点，结果会增量显示。"
         }
         return state.searchFailures.isEmpty
-            ? "所有已启用站点均未返回匹配内容。"
+            ? "当前搜索范围内没有站点返回匹配内容。"
             : "\(state.searchFailures.count) 个站点搜索失败，"
                 + "其余站点没有返回结果。"
     }
@@ -209,7 +221,7 @@ private struct SearchSiteSidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("搜索来源")
+                Text("结果来源")
                     .font(.headline)
                 Text("\(options.count) 个站点有结果")
                     .font(.caption)
@@ -307,6 +319,211 @@ private struct SearchProgressIndicator: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("搜索进度")
         .accessibilityValue("已完成 \(completed) / \(total) 个站点")
+    }
+}
+
+struct SearchScopeEditorContent: View {
+    let options: [SearchScopeSiteOption]
+    @Binding var mode: SearchSiteScopeMode
+    @Binding var selectedKeys: Set<String>
+    @Binding var filterText: String
+
+    private var searchableKeys: Set<String> {
+        Set(options.lazy.filter(\.isSearchable).map(\.key))
+    }
+
+    private var filteredOptions: [SearchScopeSiteOption] {
+        let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return options }
+        return options.filter {
+            $0.name.localizedCaseInsensitiveContains(query)
+                || $0.key.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private var modeSelection: Binding<SearchSiteScopeMode> {
+        Binding(
+            get: { mode },
+            set: { newMode in
+                if newMode == .custom,
+                   selectedKeys.intersection(searchableKeys).isEmpty {
+                    selectedKeys.formUnion(searchableKeys)
+                }
+                mode = newMode
+            }
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Picker("搜索范围", selection: modeSelection) {
+                Text("全部站点").tag(SearchSiteScopeMode.all)
+                Text("自定义").tag(SearchSiteScopeMode.custom)
+            }
+            .pickerStyle(.segmented)
+
+            if mode == .custom {
+                HStack(spacing: 8) {
+                    Button("全选") {
+                        selectedKeys.formUnion(searchableKeys)
+                    }
+                    Button("清空") {
+                        selectedKeys.subtract(searchableKeys)
+                    }
+                    Button("反选") {
+                        let selected = selectedKeys.intersection(searchableKeys)
+                        selectedKeys.subtract(searchableKeys)
+                        selectedKeys.formUnion(searchableKeys.subtracting(selected))
+                    }
+                    Spacer()
+                    Text("已选 \(selectedKeys.intersection(searchableKeys).count) / \(searchableKeys.count)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundColor(.secondary)
+                }
+                .controlSize(.small)
+            } else {
+                Text("配置新增可搜索站点后会自动加入范围。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            TextField("筛选站点名称", text: $filterText)
+                .textFieldStyle(.roundedBorder)
+
+            Divider()
+
+            ScrollView {
+                LazyVStack(spacing: 5) {
+                    ForEach(filteredOptions) { option in
+                        siteRow(option)
+                    }
+                }
+            }
+        }
+    }
+
+    private func siteRow(_ option: SearchScopeSiteOption) -> some View {
+        let isSelected = mode == .all
+            ? option.isSearchable
+            : selectedKeys.contains(option.key)
+        return Button {
+            guard mode == .custom, option.isSearchable else { return }
+            if selectedKeys.contains(option.key) {
+                selectedKeys.remove(option.key)
+            } else {
+                selectedKeys.insert(option.key)
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .foregroundColor(
+                        option.isSearchable
+                            ? (isSelected ? .accentColor : .secondary)
+                            : .secondary.opacity(0.55)
+                    )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(option.name)
+                        .font(.callout.weight(.medium))
+                    if let reason = option.unavailableReason {
+                        Text(reason)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                Spacer()
+                Text(option.key)
+                    .font(.caption2.monospaced())
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(isSelected ? 0.07 : 0.025))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(mode == .all || !option.isSearchable)
+        .appInteractiveHover(cornerRadius: 8, selected: isSelected)
+    }
+}
+
+private struct SearchScopePopover: View {
+    @EnvironmentObject private var state: AppState
+    @Environment(\.dismiss) private var dismiss
+    @State private var mode: SearchSiteScopeMode
+    @State private var selectedKeys: Set<String>
+    @State private var filterText = ""
+    @State private var isSaving = false
+
+    init(scope: SearchSiteScope = .all) {
+        _mode = State(initialValue: scope.mode)
+        _selectedKeys = State(initialValue: scope.selectedSiteKeys)
+    }
+
+    private var draft: SearchSiteScope {
+        SearchSiteScope(mode: mode, selectedSiteKeys: selectedKeys)
+    }
+
+    private var hasValidSelection: Bool {
+        mode == .all || !SearchSiteScopePolicy.effectiveSiteKeys(
+            scope: draft,
+            options: state.searchScopeSiteOptions
+        ).isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("搜索范围")
+                    .font(.headline)
+                Text("只会请求这里选中的站点；结果来源筛选不会发起新搜索。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            SearchScopeEditorContent(
+                options: state.searchScopeSiteOptions,
+                mode: $mode,
+                selectedKeys: $selectedKeys,
+                filterText: $filterText
+            )
+
+            Divider()
+
+            HStack {
+                Button("取消") { dismiss() }
+                Spacer()
+                if !hasValidSelection {
+                    Text("至少选择一个可用站点")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+                Button(state.isSearching ? "保存并重新搜索" : "保存") {
+                    let shouldRestart = state.isSearching
+                    isSaving = true
+                    Task {
+                        let saved = await state.saveSearchSiteScope(draft)
+                        isSaving = false
+                        guard saved else { return }
+                        dismiss()
+                        if shouldRestart {
+                            state.search(state.searchKeyword)
+                        }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!hasValidSelection || isSaving || draft == state.searchSiteScope)
+            }
+        }
+        .padding(16)
+        .frame(width: 440, height: 520)
+        .onAppear {
+            mode = state.searchSiteScope.mode
+            selectedKeys = state.searchSiteScope.selectedSiteKeys
+        }
     }
 }
 
