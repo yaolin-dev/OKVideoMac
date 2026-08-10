@@ -360,6 +360,20 @@ private struct PendingCloudPlayback {
     var episode: PlayEpisode
 }
 
+private struct PlayerEpisodePresentationCacheKey: Equatable {
+    let videoID: String
+    let sourceID: String
+    let episodeCount: Int
+    let firstEpisodeID: String?
+    let lastEpisodeID: String?
+}
+
+private struct PlayerEpisodePresentationCache {
+    let key: PlayerEpisodePresentationCacheKey
+    let values: [EpisodePresentation]
+    let valuesByEpisodeID: [String: EpisodePresentation]
+}
+
 private enum PendingNodeOperation {
     case category(
         siteKey: String,
@@ -462,6 +476,7 @@ final class AppState: ObservableObject {
     private var cloudAuthorizationSessionID = UUID()
     private var activePlayback: ActivePlaybackContext?
     private var pendingPlayback: PendingCloudPlayback?
+    private var playerEpisodePresentationCache: PlayerEpisodePresentationCache?
     private var pendingCloudPlayback: PendingCloudPlayback?
     private var pendingNodeOperation: PendingNodeOperation?
     private var playbackSessionID = UUID()
@@ -3296,8 +3311,60 @@ final class AppState: ObservableObject {
         activePlayback?.source.episodes ?? pendingPlayback?.source.episodes ?? []
     }
 
+    var playerEpisodePresentations: [EpisodePresentation] {
+        episodePresentationCache()?.values ?? []
+    }
+
+    var currentPlayerEpisodePresentation: EpisodePresentation? {
+        guard let episodeID = currentPlayerEpisodeID else { return nil }
+        return episodePresentationCache()?.valuesByEpisodeID[episodeID]
+    }
+
     var currentPlayerEpisodeID: String? {
         activePlayback?.episode.id ?? pendingPlayback?.episode.id
+    }
+
+    private func episodePresentationCache() -> PlayerEpisodePresentationCache? {
+        let detail: VideoDetail
+        let source: PlaySource
+        if let activePlayback {
+            detail = activePlayback.detail
+            source = activePlayback.source
+        } else if let pendingPlayback {
+            detail = pendingPlayback.detail
+            source = pendingPlayback.source
+        } else {
+            playerEpisodePresentationCache = nil
+            return nil
+        }
+
+        let key = PlayerEpisodePresentationCacheKey(
+            videoID: detail.summary.id,
+            sourceID: source.id,
+            episodeCount: source.episodes.count,
+            firstEpisodeID: source.episodes.first?.id,
+            lastEpisodeID: source.episodes.last?.id
+        )
+        if let cache = playerEpisodePresentationCache,
+           cache.key == key {
+            return cache
+        }
+
+        let values = EpisodeListPresentation.presentations(
+            from: source.episodes,
+            query: "",
+            sortOrder: .sourceOrder
+        )
+        let cache = PlayerEpisodePresentationCache(
+            key: key,
+            values: values,
+            valuesByEpisodeID: Dictionary(
+                values.map { ($0.id, $0) },
+                uniquingKeysWith: { current, _ in current }
+            )
+        )
+        playerEpisodePresentationCache = cache
+        return cache
     }
 
     nonisolated static func orderedPlaybackSources(
