@@ -294,6 +294,23 @@ final class MultiSiteSearchTests: XCTestCase {
         })
     }
 
+    func testJavaScriptSearchUsesGenericTimeout() {
+        XCTAssertEqual(
+            MultiSiteSearch.effectiveSiteTimeout(
+                base: 30,
+                capability: .javaScriptSpider
+            ),
+            30
+        )
+        XCTAssertEqual(
+            MultiSiteSearch.effectiveSiteTimeout(
+                base: 30,
+                capability: .javaDexSpider
+            ),
+            75
+        )
+    }
+
     func testSearchCollectsMultiplePagesWhenJavaScriptSourceOmitsPageCount() async {
         let recorder = SearchPageRecorder()
         let provider = PagedSearchFixtureProvider(recorder: recorder)

@@ -173,11 +173,12 @@ public struct MultiSiteSearch {
         base: TimeInterval,
         capability: SiteCapability
     ) -> TimeInterval {
-        // The Android bridge allows up to roughly 70 seconds for a Spider
-        // invocation. Cancelling Java/Dex searches at the generic 30-second
-        // limit discards valid late responses from cloud/guard providers.
+        // The Android bridge allows up to roughly 70 seconds for a Java/Dex
+        // invocation. Keep that exception local to the bridge: JavaScript
+        // and local Node providers use the generic timeout so a hung HTTP
+        // search cannot leave aggregate progress parked for 75 seconds.
         switch capability {
-        case .javaDexSpider, .javaScriptSpider:
+        case .javaDexSpider:
             return max(base, 75)
         default:
             return base
