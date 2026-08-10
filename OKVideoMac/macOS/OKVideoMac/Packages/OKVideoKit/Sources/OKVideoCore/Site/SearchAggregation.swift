@@ -1,6 +1,6 @@
 import Foundation
 
-public struct SearchResultCluster: Equatable, Identifiable {
+public struct SearchResultCluster: Equatable, Identifiable, Sendable {
     public var id: String
     public var title: String
     public var year: String?

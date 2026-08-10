@@ -167,7 +167,7 @@ public struct ConfigurationValidator {
     }
 }
 
-public enum ConfigurationSource: Equatable {
+public enum ConfigurationSource: Equatable, Sendable {
     case remote(URL)
     case localFile(URL)
     case pasted(text: String, baseURL: URL?)
@@ -192,7 +192,7 @@ public enum ConfigurationSource: Equatable {
     }
 }
 
-public struct LoadedConfiguration: Equatable {
+public struct LoadedConfiguration: Equatable, Sendable {
     public let source: ConfigurationSource
     public let baseURL: URL?
     public let rawData: Data

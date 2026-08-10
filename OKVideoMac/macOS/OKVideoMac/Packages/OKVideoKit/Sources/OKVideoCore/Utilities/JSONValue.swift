@@ -1,6 +1,6 @@
 import Foundation
 
-public enum JSONValue: Codable, Equatable {
+public enum JSONValue: Codable, Equatable, Sendable {
     case null
     case bool(Bool)
     case integer(Int64)
@@ -64,7 +64,7 @@ public enum JSONValue: Codable, Equatable {
     }
 }
 
-public struct AnyCodingKey: CodingKey, Hashable {
+public struct AnyCodingKey: CodingKey, Hashable, Sendable {
     public let stringValue: String
     public let intValue: Int?
 

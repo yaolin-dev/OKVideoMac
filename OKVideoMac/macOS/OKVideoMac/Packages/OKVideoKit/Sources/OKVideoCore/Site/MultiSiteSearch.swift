@@ -1,6 +1,6 @@
 import Foundation
 
-public struct SearchFailure: Equatable {
+public struct SearchFailure: Equatable, Sendable {
     public var siteKey: String
     public var siteName: String
     public var message: String
@@ -12,7 +12,7 @@ public struct SearchFailure: Equatable {
     }
 }
 
-public enum MultiSiteSearchEvent: Equatable {
+public enum MultiSiteSearchEvent: Equatable, Sendable {
     case results(siteKey: String, items: [VideoSummary])
     case failure(SearchFailure)
     case completed

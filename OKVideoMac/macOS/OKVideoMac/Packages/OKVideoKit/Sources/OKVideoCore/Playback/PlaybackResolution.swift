@@ -1,6 +1,6 @@
 import Foundation
 
-public enum PlaybackResolutionState: Equatable {
+public enum PlaybackResolutionState: Equatable, Sendable {
     case idle
     case restoringHistory
     case resolving
@@ -12,7 +12,7 @@ public enum PlaybackResolutionState: Equatable {
     case failed
 }
 
-public struct PlaybackCandidate: Equatable {
+public struct PlaybackCandidate: Equatable, Sendable {
     public var siteKey: String
     public var siteName: String
     public var sourceName: String
@@ -34,7 +34,7 @@ public struct PlaybackCandidate: Equatable {
     }
 }
 
-public struct PlaybackResolutionRequest: Equatable {
+public struct PlaybackResolutionRequest: Equatable, Sendable {
     public var candidates: [PlaybackCandidate]
     public var parsers: [ParseConfiguration]
     public var maximumAttempts: Int
@@ -50,7 +50,7 @@ public struct PlaybackResolutionRequest: Equatable {
     }
 }
 
-public struct ResolvedMedia: Equatable {
+public struct ResolvedMedia: Equatable, Sendable {
     public var url: URL
     public var headers: HTTPHeaders
     public var format: String?
@@ -81,7 +81,7 @@ public struct ResolvedMedia: Equatable {
     }
 }
 
-public struct PlaybackAttempt: Equatable {
+public struct PlaybackAttempt: Equatable, Sendable {
     public var siteName: String
     public var sourceName: String
     public var episodeName: String
@@ -106,7 +106,7 @@ public struct PlaybackAttempt: Equatable {
     }
 }
 
-public enum PlaybackResolutionEvent: Equatable {
+public enum PlaybackResolutionEvent: Equatable, Sendable {
     case state(PlaybackResolutionState)
     case attempting(PlaybackAttempt)
     case attemptFailed(PlaybackAttempt, message: String)
@@ -115,7 +115,7 @@ public enum PlaybackResolutionEvent: Equatable {
     case cancelled
 }
 
-public struct ParsedMedia: Equatable {
+public struct ParsedMedia: Equatable, Sendable {
     public var url: URL
     public var headers: HTTPHeaders
     public var format: String?

@@ -1,6 +1,6 @@
 import Foundation
 
-public enum AppError: Error, Equatable, LocalizedError {
+public enum AppError: Error, Equatable, LocalizedError, Sendable {
     case configuration(String)
     case network(String)
     case decoding(String)
@@ -33,4 +33,3 @@ public enum AppError: Error, Equatable, LocalizedError {
         }
     }
 }
-

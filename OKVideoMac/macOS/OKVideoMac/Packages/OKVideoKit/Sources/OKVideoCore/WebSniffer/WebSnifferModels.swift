@@ -1,6 +1,6 @@
 import Foundation
 
-public struct WebSniffRequest: Equatable {
+public struct WebSniffRequest: Equatable, Sendable {
     public var siteKey: String
     public var url: URL
     public var headers: HTTPHeaders
@@ -28,7 +28,7 @@ public struct WebSniffRequest: Equatable {
     }
 }
 
-public struct SniffedMedia: Equatable {
+public struct SniffedMedia: Equatable, Sendable {
     public var url: URL
     public var headers: HTTPHeaders
     public var sourcePageURL: URL

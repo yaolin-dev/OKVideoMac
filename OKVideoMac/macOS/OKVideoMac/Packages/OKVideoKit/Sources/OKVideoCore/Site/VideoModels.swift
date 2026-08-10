@@ -1,6 +1,6 @@
 import Foundation
 
-public struct VideoCategory: Codable, Equatable, Hashable, Identifiable {
+public struct VideoCategory: Codable, Equatable, Hashable, Identifiable, Sendable {
     public var id: String
     public var name: String
     public var filters: [VideoFilter]
@@ -12,7 +12,7 @@ public struct VideoCategory: Codable, Equatable, Hashable, Identifiable {
     }
 }
 
-public struct VideoFilter: Codable, Equatable, Hashable, Identifiable {
+public struct VideoFilter: Codable, Equatable, Hashable, Identifiable, Sendable {
     public var id: String
     public var name: String
     public var options: [VideoFilterOption]
@@ -24,7 +24,7 @@ public struct VideoFilter: Codable, Equatable, Hashable, Identifiable {
     }
 }
 
-public struct VideoFilterOption: Codable, Equatable, Hashable, Identifiable {
+public struct VideoFilterOption: Codable, Equatable, Hashable, Identifiable, Sendable {
     public var id: String { value }
     public var name: String
     public var value: String
@@ -35,7 +35,7 @@ public struct VideoFilterOption: Codable, Equatable, Hashable, Identifiable {
     }
 }
 
-public struct VideoSummary: Codable, Equatable, Hashable, Identifiable {
+public struct VideoSummary: Codable, Equatable, Hashable, Identifiable, Sendable {
     public var id: String { "\(siteKey)::\(videoID)" }
     public var siteKey: String
     public var siteName: String
@@ -78,7 +78,7 @@ public struct VideoSummary: Codable, Equatable, Hashable, Identifiable {
     }
 }
 
-public struct VideoDetail: Codable, Equatable {
+public struct VideoDetail: Codable, Equatable, Sendable {
     public var summary: VideoSummary
     public var area: String?
     public var director: String?
@@ -109,12 +109,12 @@ public struct VideoDetail: Codable, Equatable {
 /// account-management spiders also use detail requests as commands and return
 /// a placeholder item after completing the side effect. Keeping that outcome
 /// distinct prevents those cards from being decoded as broken videos.
-public enum SiteSelectionResult: Equatable {
+public enum SiteSelectionResult: Equatable, Sendable {
     case detail(VideoDetail)
     case action(JSONValue)
 }
 
-public struct PlaySource: Codable, Equatable, Hashable, Identifiable {
+public struct PlaySource: Codable, Equatable, Hashable, Identifiable, Sendable {
     public var id: String { name }
     public var name: String
     public var episodes: [PlayEpisode]
@@ -125,7 +125,7 @@ public struct PlaySource: Codable, Equatable, Hashable, Identifiable {
     }
 }
 
-public struct PlayEpisode: Codable, Equatable, Hashable, Identifiable {
+public struct PlayEpisode: Codable, Equatable, Hashable, Identifiable, Sendable {
     public var id: String { "\(name)::\(url)" }
     public var name: String
     public var url: String
@@ -136,7 +136,7 @@ public struct PlayEpisode: Codable, Equatable, Hashable, Identifiable {
     }
 }
 
-public struct Pagination: Codable, Equatable {
+public struct Pagination: Codable, Equatable, Sendable {
     public var page: Int
     public var pageCount: Int?
     public var hasMore: Bool
@@ -148,7 +148,7 @@ public struct Pagination: Codable, Equatable {
     }
 }
 
-public struct VideoPage: Equatable {
+public struct VideoPage: Equatable, Sendable {
     public var items: [VideoSummary]
     public var pagination: Pagination
 
@@ -158,7 +158,7 @@ public struct VideoPage: Equatable {
     }
 }
 
-public struct SiteHome: Codable, Equatable {
+public struct SiteHome: Codable, Equatable, Sendable {
     public var categories: [VideoCategory]
     public var recommendations: [VideoSummary]
 
@@ -168,7 +168,7 @@ public struct SiteHome: Codable, Equatable {
     }
 }
 
-public struct PlaybackQuality: Equatable, Hashable, Identifiable {
+public struct PlaybackQuality: Equatable, Hashable, Identifiable, Sendable {
     public var name: String
     public var url: String
 
@@ -180,7 +180,7 @@ public struct PlaybackQuality: Equatable, Hashable, Identifiable {
     }
 }
 
-public struct SitePlaybackResult: Equatable {
+public struct SitePlaybackResult: Equatable, Sendable {
     public var url: String
     public var needsParsing: Bool
     public var playURL: String?
@@ -211,7 +211,7 @@ public struct SitePlaybackResult: Equatable {
     }
 }
 
-public enum SiteCapability: String, Codable {
+public enum SiteCapability: String, Codable, Sendable {
     case standardXML
     case standardJSON
     case base64JSON

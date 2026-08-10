@@ -1,6 +1,6 @@
 import Foundation
 
-public enum LiveSourceInput: Equatable {
+public enum LiveSourceInput: Equatable, Sendable {
     case remote(URL)
     case localFile(URL)
     case pasted(text: String, baseURL: URL?)
@@ -17,7 +17,7 @@ public enum LiveSourceInput: Equatable {
     }
 }
 
-public struct LoadedLiveSource: Equatable {
+public struct LoadedLiveSource: Equatable, Sendable {
     public let source: LiveSourceInput
     public let baseURL: URL?
     public let rawData: Data

@@ -1,6 +1,6 @@
 import Foundation
 
-public enum SpiderMethod: String, Codable, CaseIterable {
+public enum SpiderMethod: String, Codable, CaseIterable, Sendable {
     case initialize = "init"
     case home
     case homeVideo = "homeVod"
@@ -16,7 +16,7 @@ public enum SpiderMethod: String, Codable, CaseIterable {
     case destroy
 }
 
-public struct SpiderInvocation: Equatable {
+public struct SpiderInvocation: Equatable, Sendable {
     public var method: SpiderMethod
     public var arguments: [JSONValue]
 
@@ -26,7 +26,7 @@ public struct SpiderInvocation: Equatable {
     }
 }
 
-public struct SpiderRuntimeLimits: Equatable {
+public struct SpiderRuntimeLimits: Equatable, Sendable {
     public var maximumMemoryBytes: Int
     public var executionTimeout: TimeInterval
 
@@ -41,7 +41,7 @@ public struct SpiderRuntimeLimits: Equatable {
     public static let standard = SpiderRuntimeLimits()
 }
 
-public struct SpiderNetworkRequest: Equatable {
+public struct SpiderNetworkRequest: Equatable, Sendable {
     public var url: URL
     public var method: HTTPMethod
     public var headers: HTTPHeaders
@@ -60,7 +60,7 @@ public struct SpiderNetworkRequest: Equatable {
     }
 }
 
-public struct SpiderNetworkResponse: Equatable {
+public struct SpiderNetworkResponse: Equatable, Sendable {
     public var statusCode: Int
     public var headers: HTTPHeaders
     public var body: Data
@@ -266,4 +266,3 @@ public actor SpiderEngine {
         }
     }
 }
-

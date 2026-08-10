@@ -1,13 +1,13 @@
 import Foundation
 import OKVideoCore
 
-public enum StoredConfigurationSourceKind: String, Codable {
+public enum StoredConfigurationSourceKind: String, Codable, Sendable {
     case remote
     case localFile
     case pasted
 }
 
-public struct StoredConfiguration: Equatable, Identifiable {
+public struct StoredConfiguration: Equatable, Identifiable, Sendable {
     public var id: UUID
     public var name: String
     public var sourceKind: StoredConfigurationSourceKind
@@ -38,13 +38,13 @@ public struct StoredConfiguration: Equatable, Identifiable {
     }
 }
 
-public enum StoredLiveSourceKind: String, Codable {
+public enum StoredLiveSourceKind: String, Codable, Sendable {
     case remote
     case localFile
     case pasted
 }
 
-public struct StoredLiveSource: Equatable, Identifiable {
+public struct StoredLiveSource: Equatable, Identifiable, Sendable {
     public var id: UUID
     public var name: String
     public var sourceKind: StoredLiveSourceKind
@@ -72,7 +72,7 @@ public struct StoredLiveSource: Equatable, Identifiable {
     }
 }
 
-public struct FavoriteRecord: Codable, Equatable, Identifiable {
+public struct FavoriteRecord: Codable, Equatable, Identifiable, Sendable {
     public var id: String { "\(siteKey)::\(videoID)" }
     public var siteKey: String
     public var videoID: String
@@ -98,7 +98,7 @@ public struct FavoriteRecord: Codable, Equatable, Identifiable {
     }
 }
 
-public struct HistoryRecord: Codable, Equatable, Identifiable {
+public struct HistoryRecord: Codable, Equatable, Identifiable, Sendable {
     public var id: String {
         "\(configurationID?.uuidString.lowercased() ?? "legacy")::\(siteKey)::\(videoID)"
     }

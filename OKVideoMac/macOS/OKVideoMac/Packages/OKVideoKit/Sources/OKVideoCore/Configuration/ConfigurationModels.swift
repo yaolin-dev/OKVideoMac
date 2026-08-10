@@ -1,6 +1,6 @@
 import Foundation
 
-public struct FongMiConfiguration: Codable, Equatable {
+public struct FongMiConfiguration: Codable, Equatable, Sendable {
     public var spider: String?
     public var wallpaper: String?
     public var logo: String?
@@ -95,7 +95,7 @@ public struct FongMiConfiguration: Codable, Equatable {
     }
 }
 
-public struct SiteConfiguration: Codable, Equatable, Identifiable {
+public struct SiteConfiguration: Codable, Equatable, Identifiable, Sendable {
     public var id: String { key }
 
     public var key: String
@@ -202,7 +202,7 @@ public struct SiteConfiguration: Codable, Equatable, Identifiable {
     }
 }
 
-public struct ParseConfiguration: Codable, Equatable, Identifiable {
+public struct ParseConfiguration: Codable, Equatable, Identifiable, Sendable {
     public var id: String { name }
 
     public var name: String
@@ -252,7 +252,7 @@ public struct ParseConfiguration: Codable, Equatable, Identifiable {
     }
 }
 
-public struct LiveConfiguration: Codable, Equatable, Identifiable {
+public struct LiveConfiguration: Codable, Equatable, Identifiable, Sendable {
     public var id: String { name }
 
     public var name: String
@@ -359,7 +359,7 @@ public struct LiveConfiguration: Codable, Equatable, Identifiable {
     }
 }
 
-public struct LiveGroupConfiguration: Codable, Equatable {
+public struct LiveGroupConfiguration: Codable, Equatable, Sendable {
     public var name: String
     public var pass: String?
     public var channels: [LiveChannelConfiguration]
@@ -377,7 +377,7 @@ public struct LiveGroupConfiguration: Codable, Equatable {
     }
 }
 
-public struct LiveChannelConfiguration: Codable, Equatable {
+public struct LiveChannelConfiguration: Codable, Equatable, Sendable {
     public var name: String
     public var urls: [String]
     public var number: String?
@@ -451,7 +451,7 @@ public struct LiveChannelConfiguration: Codable, Equatable {
     }
 }
 
-public struct StyleConfiguration: Codable, Equatable {
+public struct StyleConfiguration: Codable, Equatable, Sendable {
     public var type: String?
     public var ratio: Double?
 
@@ -461,7 +461,7 @@ public struct StyleConfiguration: Codable, Equatable {
     }
 }
 
-public struct DohConfiguration: Codable, Equatable {
+public struct DohConfiguration: Codable, Equatable, Sendable {
     public var name: String
     public var url: String
     public var ips: [String]
@@ -491,7 +491,7 @@ public struct DohConfiguration: Codable, Equatable {
     }
 }
 
-public struct ProxyConfiguration: Codable, Equatable {
+public struct ProxyConfiguration: Codable, Equatable, Sendable {
     public var name: String
     public var urls: [String]
     public var hosts: [String]
@@ -532,7 +532,7 @@ public struct ProxyConfiguration: Codable, Equatable {
     }
 }
 
-public struct NetworkRuleConfiguration: Codable, Equatable {
+public struct NetworkRuleConfiguration: Codable, Equatable, Sendable {
     public var name: String?
     public var hosts: [String]
     public var regex: [String]
@@ -580,7 +580,7 @@ public struct NetworkRuleConfiguration: Codable, Equatable {
     }
 }
 
-public struct HeaderRuleConfiguration: Codable, Equatable {
+public struct HeaderRuleConfiguration: Codable, Equatable, Sendable {
     public var host: String
     public var header: JSONValue?
     public var extra: [String: JSONValue]

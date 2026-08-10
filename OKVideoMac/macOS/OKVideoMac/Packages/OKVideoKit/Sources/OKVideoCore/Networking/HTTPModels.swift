@@ -1,7 +1,7 @@
 import Foundation
 import CoreFoundation
 
-public enum HTTPMethod: String, Codable {
+public enum HTTPMethod: String, Codable, Sendable {
     case get = "GET"
     case post = "POST"
     case put = "PUT"
@@ -17,7 +17,7 @@ public enum HTTPMethod: String, Codable {
     }
 }
 
-public struct HTTPHeaders: Equatable, ExpressibleByDictionaryLiteral {
+public struct HTTPHeaders: Equatable, ExpressibleByDictionaryLiteral, Sendable {
     private var storage: [String: String]
 
     public init(_ values: [String: String] = [:]) {
@@ -57,7 +57,7 @@ public struct HTTPHeaders: Equatable, ExpressibleByDictionaryLiteral {
     }
 }
 
-public struct HTTPRetryPolicy: Equatable {
+public struct HTTPRetryPolicy: Equatable, Sendable {
     public var maximumRetries: Int
     public var initialDelay: TimeInterval
     public var multiplier: Double
@@ -76,7 +76,7 @@ public struct HTTPRetryPolicy: Equatable {
     public static let standard = HTTPRetryPolicy()
 }
 
-public struct HTTPRequest: Equatable {
+public struct HTTPRequest: Equatable, Sendable {
     public var url: URL
     public var method: HTTPMethod
     public var headers: HTTPHeaders
@@ -144,7 +144,7 @@ public struct HTTPRequest: Equatable {
     }
 }
 
-public struct HTTPResponse: Equatable {
+public struct HTTPResponse: Equatable, Sendable {
     public let url: URL
     public let statusCode: Int
     public let headers: HTTPHeaders
@@ -193,7 +193,7 @@ public struct HTTPResponse: Equatable {
     }
 }
 
-public enum HTTPClientError: Error, Equatable, LocalizedError {
+public enum HTTPClientError: Error, Equatable, LocalizedError, Sendable {
     case invalidScheme(String?)
     case statusCode(Int)
     case responseTooLarge(limit: Int, actual: Int)

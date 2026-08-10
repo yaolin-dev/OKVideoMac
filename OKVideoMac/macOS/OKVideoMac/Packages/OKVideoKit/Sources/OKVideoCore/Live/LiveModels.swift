@@ -1,12 +1,12 @@
 import Foundation
 
-public enum LiveSourceFormat: String, Codable {
+public enum LiveSourceFormat: String, Codable, Sendable {
     case m3u
     case text
     case json
 }
 
-public struct LivePlaylist: Equatable {
+public struct LivePlaylist: Equatable, Sendable {
     public var format: LiveSourceFormat
     public var groups: [LiveGroup]
     public var epgURL: URL?
@@ -35,7 +35,7 @@ public struct LivePlaylist: Equatable {
     }
 }
 
-public struct LiveGroup: Codable, Equatable, Identifiable {
+public struct LiveGroup: Codable, Equatable, Identifiable, Sendable {
     public var id: String { name }
     public var name: String
     public var password: String?
@@ -48,7 +48,7 @@ public struct LiveGroup: Codable, Equatable, Identifiable {
     }
 }
 
-public struct LiveChannel: Codable, Equatable, Identifiable {
+public struct LiveChannel: Codable, Equatable, Identifiable, Sendable {
     public var id: String { "\(groupName)::\(name)" }
     public var groupName: String
     public var name: String
@@ -77,7 +77,7 @@ public struct LiveChannel: Codable, Equatable, Identifiable {
     }
 }
 
-public struct LiveStream: Codable, Equatable, Identifiable {
+public struct LiveStream: Codable, Equatable, Identifiable, Sendable {
     public var id: String { url.absoluteString }
     public var name: String
     public var url: URL
@@ -100,7 +100,7 @@ public struct LiveStream: Codable, Equatable, Identifiable {
     }
 }
 
-public struct EPGChannel: Codable, Equatable, Identifiable {
+public struct EPGChannel: Codable, Equatable, Identifiable, Sendable {
     public var id: String
     public var displayName: String
 
@@ -110,7 +110,7 @@ public struct EPGChannel: Codable, Equatable, Identifiable {
     }
 }
 
-public struct EPGProgramme: Codable, Equatable, Identifiable {
+public struct EPGProgramme: Codable, Equatable, Identifiable, Sendable {
     public var id: String { "\(channelID)::\(start.timeIntervalSince1970)::\(title)" }
     public var channelID: String
     public var title: String
@@ -125,7 +125,7 @@ public struct EPGProgramme: Codable, Equatable, Identifiable {
     }
 }
 
-public struct XMLTVGuide: Codable, Equatable {
+public struct XMLTVGuide: Codable, Equatable, Sendable {
     public var channels: [EPGChannel]
     public var programmes: [EPGProgramme]
 
@@ -168,7 +168,7 @@ public struct XMLTVGuide: Codable, Equatable {
 ///
 /// Building the index is linearithmic in the size of the guide, while channel
 /// lookups avoid repeatedly scanning and sorting the complete programme list.
-public struct XMLTVScheduleIndex {
+public struct XMLTVScheduleIndex: Sendable {
     private let programmesByChannelID: [String: [EPGProgramme]]
     private let channelIDByDisplayName: [String: String]
 
