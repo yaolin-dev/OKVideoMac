@@ -18,6 +18,9 @@ struct PlayerView: View {
     @State private var isWindowFullScreen = false
     @State private var isProgressHovering = false
     @State private var progressHoverFraction: Double?
+    @State private var lastLiveChannelID: String?
+    @State private var isLiveSwitchLoadingDelayElapsed = true
+    @State private var liveSwitchLoadingDelayTask: Task<Void, Never>?
     let onWindowChromeRestored: () -> Void
 
     private let speeds: [Double] = [0.5, 0.75, 1, 1.25, 1.5, 2]
@@ -98,10 +101,13 @@ struct PlayerView: View {
         .frame(minWidth: 800, minHeight: 520)
         .background(Color.clear)
         .onAppear {
+            lastLiveChannelID = state.livePlaybackChannel?.id
             revealControls()
         }
         .onDisappear {
             hideControlsTask?.cancel()
+            liveSwitchLoadingDelayTask?.cancel()
+            liveSwitchLoadingDelayTask = nil
             volumeCommandTask?.cancel()
             volumeCommandTask = nil
             pendingVolume = nil
@@ -109,6 +115,9 @@ struct PlayerView: View {
         }
         .onChange(of: state.playerSnapshot.status) { _ in
             revealControls()
+        }
+        .onChange(of: state.livePlaybackChannel?.id) { channelID in
+            handleLiveChannelChange(channelID)
         }
         .animation(
             .easeInOut(duration: 0.22),
@@ -1455,6 +1464,13 @@ struct PlayerView: View {
         if isFailed {
             return true
         }
+        if state.isLivePlayback,
+           !isLiveSwitchLoadingDelayElapsed,
+           LiveSwitchLoadingIndicatorPolicy.isTransient(
+               status: state.playerSnapshot.status
+           ) {
+            return false
+        }
         switch state.playbackResolutionState {
         case .restoringHistory, .resolving, .validating, .loading, .retrying:
             return true
@@ -1466,6 +1482,36 @@ struct PlayerView: View {
             return true
         default:
             return false
+        }
+    }
+
+    private func handleLiveChannelChange(_ channelID: String?) {
+        defer { lastLiveChannelID = channelID }
+        guard state.isLivePlayback,
+              let previousChannelID = lastLiveChannelID,
+              let channelID,
+              previousChannelID != channelID else {
+            return
+        }
+
+        liveSwitchLoadingDelayTask?.cancel()
+        isLiveSwitchLoadingDelayElapsed = false
+        liveSwitchLoadingDelayTask = Task { @MainActor in
+            do {
+                try await Task.sleep(
+                    nanoseconds: LiveSwitchLoadingIndicatorPolicy
+                        .delayNanoseconds
+                )
+                try Task.checkCancellation()
+                guard state.isLivePlayback,
+                      state.livePlaybackChannel?.id == channelID else {
+                    return
+                }
+                isLiveSwitchLoadingDelayElapsed = true
+                liveSwitchLoadingDelayTask = nil
+            } catch {
+                return
+            }
         }
     }
 
@@ -1858,6 +1904,19 @@ enum PlayerControlVisibilityPolicy {
         // movement should reveal the overlay again.
         if isLivePlayback { return true }
         return !controlsHovering && isPlaying
+    }
+}
+
+enum LiveSwitchLoadingIndicatorPolicy {
+    static let delayNanoseconds: UInt64 = 280_000_000
+
+    static func isTransient(status: PlayerStatus) -> Bool {
+        switch status {
+        case .loading, .buffering:
+            return true
+        default:
+            return false
+        }
     }
 }
 

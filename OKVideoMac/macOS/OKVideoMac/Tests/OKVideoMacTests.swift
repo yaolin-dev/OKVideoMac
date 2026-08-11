@@ -6,6 +6,27 @@ import OKVideoPersistence
 @testable import OKVideoMac
 
 final class OKVideoMacTests: XCTestCase {
+    func testLiveSwitchLoadingIndicatorDelaysOnlyTransientStates() {
+        XCTAssertEqual(
+            LiveSwitchLoadingIndicatorPolicy.delayNanoseconds,
+            280_000_000
+        )
+        XCTAssertTrue(
+            LiveSwitchLoadingIndicatorPolicy.isTransient(status: .loading)
+        )
+        XCTAssertTrue(
+            LiveSwitchLoadingIndicatorPolicy.isTransient(status: .buffering)
+        )
+        XCTAssertFalse(
+            LiveSwitchLoadingIndicatorPolicy.isTransient(status: .playing)
+        )
+        XCTAssertFalse(
+            LiveSwitchLoadingIndicatorPolicy.isTransient(
+                status: .failed("连接失败")
+            )
+        )
+    }
+
     func testLiveChannelNavigationMovesAndWrapsInVisibleOrder() throws {
         let channels = try [
             makeLiveChannel(name: "CCTV-1", streamPath: "cctv1"),
