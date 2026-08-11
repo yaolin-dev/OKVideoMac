@@ -6,6 +6,70 @@ import OKVideoPersistence
 @testable import OKVideoMac
 
 final class OKVideoMacTests: XCTestCase {
+    func testPlayerTeardownModeUsesEnvironmentThenDefaults() {
+        let suiteName = "OKVideoMacTests.PlayerTeardownMode.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertEqual(
+            PlayerTeardownMode.configured(
+                environment: [:],
+                defaults: defaults
+            ),
+            .warmStop
+        )
+
+        defaults.set(
+            PlayerTeardownMode.fullDestroy.rawValue,
+            forKey: PlayerTeardownMode.defaultsKey
+        )
+        XCTAssertEqual(
+            PlayerTeardownMode.configured(
+                environment: [:],
+                defaults: defaults
+            ),
+            .fullDestroy
+        )
+
+        XCTAssertEqual(
+            PlayerTeardownMode.configured(
+                environment: [
+                    PlayerTeardownMode.environmentKey:
+                        PlayerTeardownMode.warmStop.rawValue
+                ],
+                defaults: defaults
+            ),
+            .warmStop
+        )
+    }
+
+    @MainActor
+    func testPlayerLifecycleControllerPreservesOrRecreatesNativeClient()
+        async throws {
+        let warm = PlayerLifecycleController(mode: .warmStop)
+        guard let warmPlayer = warm.renderPlayer else {
+            throw XCTSkip("libmpv is unavailable in this test environment")
+        }
+        let warmID = warmPlayer.renderOwnerID
+        await warm.closeAfterPlayback(requestID: UUID())
+        XCTAssertEqual(warm.renderPlayer?.renderOwnerID, warmID)
+        await warm.shutdown()
+
+        let full = PlayerLifecycleController(mode: .fullDestroy)
+        guard let original = full.renderPlayer else {
+            throw XCTSkip("libmpv is unavailable in this test environment")
+        }
+        let originalID = original.renderOwnerID
+        await full.closeAfterPlayback(requestID: UUID())
+        XCTAssertNil(full.renderPlayer)
+
+        let replacement = try await full.prepareForPlayback(
+            requestID: UUID()
+        )
+        XCTAssertNotEqual(replacement.renderOwnerID, originalID)
+        await full.shutdown()
+    }
+
     func testLiveSwitchLoadingIndicatorDelaysOnlyTransientStates() {
         XCTAssertEqual(
             LiveSwitchLoadingIndicatorPolicy.delayNanoseconds,

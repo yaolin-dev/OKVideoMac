@@ -148,6 +148,7 @@ struct RootView: View {
                 MPVRenderView(player: player) { error in
                     state.reportPlayerRenderError(error)
                 }
+                .id(player.renderOwnerID)
             }
         }
         .ignoresSafeArea()

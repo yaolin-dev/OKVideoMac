@@ -1,6 +1,206 @@
 import Foundation
 import OKVideoCore
 
+enum PlayerTeardownMode: String, CaseIterable, Sendable {
+    case warmStop
+    case fullDestroy
+
+    static let defaultsKey = "experiment.playerTeardownMode"
+    static let environmentKey = "OKVIDEOMAC_PLAYER_TEARDOWN_MODE"
+
+    static func configured(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        defaults: UserDefaults = .standard
+    ) -> PlayerTeardownMode {
+        if let raw = environment[environmentKey],
+           let mode = PlayerTeardownMode(rawValue: raw) {
+            return mode
+        }
+        if let raw = defaults.string(forKey: defaultsKey),
+           let mode = PlayerTeardownMode(rawValue: raw) {
+            return mode
+        }
+        return .warmStop
+    }
+}
+
+enum PlayerExperimentLogger {
+    static func lifecycle(
+        _ message: String,
+        playerID: UUID?,
+        requestID: UUID? = nil,
+        mode: PlayerTeardownMode
+    ) {
+        write(
+            category: "MPV-LIFECYCLE",
+            message: message,
+            playerID: playerID,
+            requestID: requestID,
+            mode: mode
+        )
+    }
+
+    static func performance(
+        _ message: String,
+        playerID: UUID?,
+        requestID: UUID?,
+        mode: PlayerTeardownMode
+    ) {
+        write(
+            category: "MPV-PERF",
+            message: message,
+            playerID: playerID,
+            requestID: requestID,
+            mode: mode
+        )
+    }
+
+    private static func write(
+        category: String,
+        message: String,
+        playerID: UUID?,
+        requestID: UUID?,
+        mode: PlayerTeardownMode
+    ) {
+        let timestamp = String(
+            format: "%.3f",
+            Date().timeIntervalSince1970
+        )
+        let player = playerID?.uuidString ?? "none"
+        let request = requestID?.uuidString ?? "none"
+        let line = "[\(category)] timestamp=\(timestamp)"
+            + " player=\(player)"
+            + " request=\(request)"
+            + " mode=\(mode.rawValue) \(message)"
+        NSLog("%@", line)
+    }
+}
+
+final class PlayerStartupTraceStore {
+    static let shared = PlayerStartupTraceStore()
+
+    private struct Trace {
+        let requestID: UUID
+        let mode: PlayerTeardownMode
+        let t0: TimeInterval
+        var playerID: UUID?
+        var t1: TimeInterval?
+        var t2: TimeInterval?
+        var t3: TimeInterval?
+    }
+
+    private let lock = NSLock()
+    private var traces: [UUID: Trace] = [:]
+    private var requestByPlayerID: [UUID: UUID] = [:]
+
+    func begin(requestID: UUID, mode: PlayerTeardownMode) {
+        lock.lock()
+        traces[requestID] = Trace(
+            requestID: requestID,
+            mode: mode,
+            t0: ProcessInfo.processInfo.systemUptime
+        )
+        lock.unlock()
+    }
+
+    func markClientReady(requestID: UUID, playerID: UUID) {
+        let now = ProcessInfo.processInfo.systemUptime
+        lock.lock()
+        guard var trace = traces[requestID] else {
+            lock.unlock()
+            return
+        }
+        trace.playerID = playerID
+        trace.t1 = now
+        traces[requestID] = trace
+        requestByPlayerID[playerID] = requestID
+        lock.unlock()
+    }
+
+    func markLoadfileIssued(requestID: UUID, playerID: UUID) {
+        let now = ProcessInfo.processInfo.systemUptime
+        lock.lock()
+        guard var trace = traces[requestID] else {
+            lock.unlock()
+            return
+        }
+        trace.playerID = playerID
+        trace.t2 = now
+        traces[requestID] = trace
+        requestByPlayerID[playerID] = requestID
+        lock.unlock()
+    }
+
+    func markFileLoaded(requestID: UUID, playerID: UUID) {
+        let now = ProcessInfo.processInfo.systemUptime
+        lock.lock()
+        guard var trace = traces[requestID] else {
+            lock.unlock()
+            return
+        }
+        trace.playerID = playerID
+        trace.t3 = now
+        traces[requestID] = trace
+        requestByPlayerID[playerID] = requestID
+        lock.unlock()
+    }
+
+    func markFirstFrame(playerID: UUID) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let completed: Trace?
+        lock.lock()
+        if let requestID = requestByPlayerID[playerID],
+           let trace = traces[requestID],
+           trace.t3 != nil {
+            completed = trace
+            traces[requestID] = nil
+            requestByPlayerID[playerID] = nil
+        } else {
+            completed = nil
+        }
+        lock.unlock()
+
+        guard let trace = completed,
+              let t1 = trace.t1,
+              let t2 = trace.t2,
+              let t3 = trace.t3 else { return }
+        let clientInit = milliseconds(t1 - trace.t0)
+        let loadToFileLoaded = milliseconds(t3 - t2)
+        let fileLoadedToFirstFrame = milliseconds(now - t3)
+        let total = milliseconds(now - trace.t0)
+        PlayerExperimentLogger.performance(
+            "Player startup: client_init_ms=\(clientInit)"
+                + " loadfile_to_file_loaded_ms=\(loadToFileLoaded)"
+                + " file_loaded_to_first_frame_ms=\(fileLoadedToFirstFrame)"
+                + " total_click_to_first_frame_ms=\(total)",
+            playerID: playerID,
+            requestID: trace.requestID,
+            mode: trace.mode
+        )
+    }
+
+    func cancel(playerID: UUID) {
+        lock.lock()
+        if let requestID = requestByPlayerID.removeValue(forKey: playerID) {
+            traces[requestID] = nil
+        }
+        lock.unlock()
+    }
+
+    func cancel(requestID: UUID) {
+        lock.lock()
+        if let playerID = traces.removeValue(forKey: requestID)?.playerID,
+           requestByPlayerID[playerID] == requestID {
+            requestByPlayerID[playerID] = nil
+        }
+        lock.unlock()
+    }
+
+    private func milliseconds(_ interval: TimeInterval) -> Int {
+        max(0, Int((interval * 1_000).rounded()))
+    }
+}
+
 enum PlayerSeekPolicy {
     static func target(
         requested: TimeInterval,
@@ -26,6 +226,7 @@ enum MPVPlaybackEndPolicy {
 final class MPVPlayerClient: PlayerClient {
     let events: AsyncStream<PlayerEvent>
     let renderOwnerID = UUID()
+    let teardownMode: PlayerTeardownMode
 
     private enum LifecycleState {
         case running
@@ -78,7 +279,11 @@ final class MPVPlayerClient: PlayerClient {
     private var timelineEmissionScheduled = false
     private let timelineEmissionIntervalNanoseconds: UInt64 = 100_000_000
 
-    init(bundle: Bundle = .main) throws {
+    init(
+        bundle: Bundle = .main,
+        teardownMode: PlayerTeardownMode = .warmStop
+    ) throws {
+        self.teardownMode = teardownMode
         var captured: AsyncStream<PlayerEvent>.Continuation!
         // Keep the bridge bounded even if the main actor is briefly busy with
         // a menu, window transition, or a slow database operation.
@@ -88,6 +293,11 @@ final class MPVPlayerClient: PlayerClient {
         continuation = captured
         library = try MPVLibrary(bundle: bundle)
         queue.setSpecific(key: queueKey, value: queueValue)
+        PlayerExperimentLogger.lifecycle(
+            "create client",
+            playerID: renderOwnerID,
+            mode: teardownMode
+        )
         guard let created = library.create() else {
             throw AppError.playback("无法创建 libmpv 客户端")
         }
@@ -112,6 +322,11 @@ final class MPVPlayerClient: PlayerClient {
             try library.checked(
                 library.initialize(created),
                 operation: "初始化 libmpv"
+            )
+            PlayerExperimentLogger.lifecycle(
+                "initialize",
+                playerID: renderOwnerID,
+                mode: teardownMode
             )
             try installPropertyObservers(client: created)
         } catch {
@@ -193,11 +408,18 @@ final class MPVPlayerClient: PlayerClient {
                     self.snapshot.videoHeight = 0
                     self.snapshot.status = .loading
                     self.emitSnapshot()
+                    PlayerStartupTraceStore.shared.markLoadfileIssued(
+                        requestID: requestID,
+                        playerID: self.renderOwnerID
+                    )
                     try self.command(
                         ["loadfile", media.url.absoluteString, "replace"],
                         client: client
                     )
                 } catch {
+                    PlayerStartupTraceStore.shared.cancel(
+                        requestID: requestID
+                    )
                     self.snapshot.status = .failed(error.localizedDescription)
                     self.emitSnapshot()
                     self.completeLoad(.failure(error))
@@ -238,12 +460,24 @@ final class MPVPlayerClient: PlayerClient {
     }
 
     func stop() async {
+        PlayerExperimentLogger.lifecycle(
+            "stop begin",
+            playerID: renderOwnerID,
+            requestID: nil,
+            mode: teardownMode
+        )
         try? await perform { client in
             self.completeLoad(.failure(CancellationError()))
             try self.command(["stop"], client: client)
             self.snapshot.status = .stopped
             self.emitSnapshot()
         }
+        PlayerExperimentLogger.lifecycle(
+            "stop end",
+            playerID: renderOwnerID,
+            requestID: nil,
+            mode: teardownMode
+        )
     }
 
     func seek(to position: TimeInterval) async throws {
@@ -430,6 +664,12 @@ final class MPVPlayerClient: PlayerClient {
                     _ = try? self.command(["stop"], client: client)
                     self.library.wakeup(client)
                     self.library.destroy(client)
+                    PlayerExperimentLogger.lifecycle(
+                        "mpv client destroyed",
+                        playerID: self.renderOwnerID,
+                        requestID: self.currentRequestID,
+                        mode: self.teardownMode
+                    )
                     self.client = nil
                 }
                 self.currentRequestID = nil
@@ -463,6 +703,12 @@ final class MPVPlayerClient: PlayerClient {
             throw AppError.playback("mpv 未返回 Render Context")
         }
         renderContextCount += 1
+        PlayerExperimentLogger.lifecycle(
+            "create render context",
+            playerID: renderOwnerID,
+            requestID: nil,
+            mode: teardownMode
+        )
         return renderContext
     }
 
@@ -499,11 +745,20 @@ final class MPVPlayerClient: PlayerClient {
 
     func reportSwap(_ renderContext: OpaquePointer) {
         library.renderReportSwap(renderContext)
+        PlayerStartupTraceStore.shared.markFirstFrame(
+            playerID: renderOwnerID
+        )
     }
 
     func destroyRenderContext(_ renderContext: OpaquePointer) {
         library.renderSetUpdateCallback(renderContext, nil, nil)
         library.renderDestroy(renderContext)
+        PlayerExperimentLogger.lifecycle(
+            "render context freed",
+            playerID: renderOwnerID,
+            requestID: nil,
+            mode: teardownMode
+        )
         let waiters: [CheckedContinuation<Void, Never>]
         lifecycleLock.lock()
         renderContextCount = max(0, renderContextCount - 1)
@@ -862,6 +1117,12 @@ final class MPVPlayerClient: PlayerClient {
         switch event.eventID {
         case NativeEvent.fileLoaded:
             guard let client else { return }
+            if let currentRequestID {
+                PlayerStartupTraceStore.shared.markFileLoaded(
+                    requestID: currentRequestID,
+                    playerID: renderOwnerID
+                )
+            }
             isReplacingMedia = false
             // `keep-open=yes` can preserve a paused EOF state across a
             // loadfile/replace transition. Clear it at the native boundary;
@@ -1178,5 +1439,302 @@ final class MPVPlayerClient: PlayerClient {
             )
         }
         snapshot.tracks = tracks
+    }
+}
+
+/// Experimental owner that can either retain the native player after stop or
+/// fully destroy and recreate it. AppState is main-actor isolated, so all
+/// lifecycle transitions are serialized here as well. The native client still
+/// owns its dedicated libmpv queue and performs its own render-detach barrier.
+@MainActor
+final class PlayerLifecycleController {
+    let events: AsyncStream<PlayerEvent>
+    let mode: PlayerTeardownMode
+
+    var onRenderClientChanged: ((MPVPlayerClient?) -> Void)?
+
+    private let continuation: AsyncStream<PlayerEvent>.Continuation
+    private var currentClient: PlayerClient?
+    private var eventForwardingTask: Task<Void, Never>?
+    private var teardownTask: Task<Void, Never>?
+    private var isShuttingDown = false
+
+    private var rememberedVolume: Double = 100
+    private var rememberedMuted = false
+    private var rememberedSpeed: Double = 1
+    private var rememberedSubtitleDelay: TimeInterval = 0
+    private var rememberedSubtitleScale: Double = 1
+    private var rememberedSubtitlePosition: Double = 100
+    private var rememberedSubtitleBorderSize: Double = 3
+    private var rememberedAudioDelay: TimeInterval = 0
+    private var rememberedAspectRatio: String?
+    private var rememberedHardwareDecoding = true
+
+    init(mode: PlayerTeardownMode = .configured()) {
+        self.mode = mode
+        var captured: AsyncStream<PlayerEvent>.Continuation!
+        events = AsyncStream(bufferingPolicy: .bufferingNewest(64)) {
+            captured = $0
+        }
+        continuation = captured
+
+        do {
+            let player = try MPVPlayerClient(teardownMode: mode)
+            currentClient = player
+            startForwardingEvents(from: player)
+        } catch {
+            let unavailable = UnavailablePlayerClient(
+                reason: "libmpv 不可用：\(LogRedactor.text(error.localizedDescription))"
+            )
+            currentClient = unavailable
+            startForwardingEvents(from: unavailable)
+        }
+        PlayerExperimentLogger.lifecycle(
+            "experiment mode configured",
+            playerID: renderPlayer?.renderOwnerID,
+            mode: mode
+        )
+    }
+
+    var renderPlayer: MPVPlayerClient? {
+        currentClient as? MPVPlayerClient
+    }
+
+    var runtimeDescription: String {
+        renderPlayer?.runtimeDescription ?? "libmpv 不可用"
+    }
+
+    @discardableResult
+    func prepareForPlayback(requestID: UUID) async throws -> MPVPlayerClient {
+        if let teardownTask {
+            await teardownTask.value
+        }
+        guard !isShuttingDown else {
+            throw AppError.playback("播放器正在关闭")
+        }
+        if let player = renderPlayer {
+            PlayerStartupTraceStore.shared.markClientReady(
+                requestID: requestID,
+                playerID: player.renderOwnerID
+            )
+            return player
+        }
+
+        PlayerExperimentLogger.lifecycle(
+            "recreate begin",
+            playerID: nil,
+            requestID: requestID,
+            mode: mode
+        )
+        let player = try MPVPlayerClient(teardownMode: mode)
+        do {
+            try await applyRememberedSettings(to: player)
+        } catch {
+            await player.shutdown()
+            throw error
+        }
+        currentClient = player
+        startForwardingEvents(from: player)
+        onRenderClientChanged?(player)
+        PlayerStartupTraceStore.shared.markClientReady(
+            requestID: requestID,
+            playerID: player.renderOwnerID
+        )
+        PlayerExperimentLogger.lifecycle(
+            "recreate ready",
+            playerID: player.renderOwnerID,
+            requestID: requestID,
+            mode: mode
+        )
+        return player
+    }
+
+    func closeAfterPlayback(requestID: UUID?) async {
+        await stop()
+        guard mode == .fullDestroy else { return }
+        await fullDestroy(requestID: requestID)
+    }
+
+    func fullDestroy(requestID: UUID?) async {
+        if let teardownTask {
+            await teardownTask.value
+            return
+        }
+        guard let player = currentClient else { return }
+        let playerID = (player as? MPVPlayerClient)?.renderOwnerID
+        PlayerExperimentLogger.lifecycle(
+            "full destroy begin",
+            playerID: playerID,
+            requestID: requestID,
+            mode: mode
+        )
+        eventForwardingTask?.cancel()
+        eventForwardingTask = nil
+        let task = Task { @MainActor [weak self, player] in
+            await player.shutdown()
+            guard let self else { return }
+            if self.currentClient === player {
+                self.currentClient = nil
+                self.onRenderClientChanged?(nil)
+            }
+            if let playerID {
+                PlayerStartupTraceStore.shared.cancel(playerID: playerID)
+            }
+            PlayerExperimentLogger.lifecycle(
+                "full destroy end",
+                playerID: playerID,
+                requestID: requestID,
+                mode: self.mode
+            )
+        }
+        teardownTask = task
+        await task.value
+        teardownTask = nil
+    }
+
+    func load(
+        _ media: ResolvedMedia,
+        startPosition: TimeInterval?,
+        requestID: UUID
+    ) async throws {
+        let player = try await prepareForPlayback(requestID: requestID)
+        try await player.load(
+            media,
+            startPosition: startPosition,
+            requestID: requestID
+        )
+    }
+
+    func play() async throws {
+        try await requireClient().play()
+    }
+
+    func pause() async throws {
+        try await requireClient().pause()
+    }
+
+    func stop() async {
+        await currentClient?.stop()
+    }
+
+    func seek(to position: TimeInterval) async throws {
+        try await requireClient().seek(to: position)
+    }
+
+    func setVolume(_ volume: Double) async throws {
+        rememberedVolume = volume
+        try await requireClient().setVolume(volume)
+    }
+
+    func setMuted(_ muted: Bool) async throws {
+        rememberedMuted = muted
+        try await requireClient().setMuted(muted)
+    }
+
+    func setSpeed(_ speed: Double) async throws {
+        rememberedSpeed = speed
+        try await requireClient().setSpeed(speed)
+    }
+
+    func selectTrack(id: Int, type: MediaTrackType) async throws {
+        try await requireClient().selectTrack(id: id, type: type)
+    }
+
+    func addSubtitle(url: URL) async throws {
+        try await requireClient().addSubtitle(url: url)
+    }
+
+    func setSubtitleDelay(_ delay: TimeInterval) async throws {
+        rememberedSubtitleDelay = delay
+        try await requireClient().setSubtitleDelay(delay)
+    }
+
+    func setSubtitleScale(_ scale: Double) async throws {
+        rememberedSubtitleScale = scale
+        try await requireClient().setSubtitleScale(scale)
+    }
+
+    func setSubtitlePosition(_ position: Double) async throws {
+        rememberedSubtitlePosition = position
+        try await requireClient().setSubtitlePosition(position)
+    }
+
+    func setSubtitleBorderSize(_ size: Double) async throws {
+        rememberedSubtitleBorderSize = size
+        try await requireClient().setSubtitleBorderSize(size)
+    }
+
+    func setAudioDelay(_ delay: TimeInterval) async throws {
+        rememberedAudioDelay = delay
+        try await requireClient().setAudioDelay(delay)
+    }
+
+    func setAspectRatio(_ ratio: String?) async throws {
+        rememberedAspectRatio = ratio
+        try await requireClient().setAspectRatio(ratio)
+    }
+
+    func setHardwareDecoding(enabled: Bool) async throws {
+        rememberedHardwareDecoding = enabled
+        try await requireClient().setHardwareDecoding(enabled: enabled)
+    }
+
+    func screenshot(to url: URL) async throws {
+        try await requireClient().screenshot(to: url)
+    }
+
+    func shutdown() async {
+        guard !isShuttingDown else {
+            if let teardownTask {
+                await teardownTask.value
+            }
+            return
+        }
+        isShuttingDown = true
+        if let teardownTask {
+            await teardownTask.value
+        }
+        eventForwardingTask?.cancel()
+        eventForwardingTask = nil
+        if let player = currentClient {
+            await player.shutdown()
+        }
+        currentClient = nil
+        onRenderClientChanged?(nil)
+        continuation.finish()
+    }
+
+    private func requireClient() throws -> PlayerClient {
+        guard let currentClient else {
+            throw AppError.playback("播放器尚未创建")
+        }
+        return currentClient
+    }
+
+    private func startForwardingEvents(from player: PlayerClient) {
+        eventForwardingTask?.cancel()
+        eventForwardingTask = Task { [weak self, player] in
+            for await event in player.events {
+                guard !Task.isCancelled else { return }
+                self?.continuation.yield(event)
+            }
+        }
+    }
+
+    private func applyRememberedSettings(
+        to player: MPVPlayerClient
+    ) async throws {
+        try await player.setVolume(rememberedVolume)
+        try await player.setMuted(rememberedMuted)
+        try await player.setSpeed(rememberedSpeed)
+        try await player.setSubtitleDelay(rememberedSubtitleDelay)
+        try await player.setSubtitleScale(rememberedSubtitleScale)
+        try await player.setSubtitlePosition(rememberedSubtitlePosition)
+        try await player.setSubtitleBorderSize(rememberedSubtitleBorderSize)
+        try await player.setAudioDelay(rememberedAudioDelay)
+        try await player.setAspectRatio(rememberedAspectRatio)
+        try await player.setHardwareDecoding(
+            enabled: rememberedHardwareDecoding
+        )
     }
 }

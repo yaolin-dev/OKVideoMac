@@ -477,6 +477,7 @@ final class AppState: ObservableObject {
     @Published private(set) var appTheme: AppTheme = .system
     @Published private(set) var favoriteLiveChannelIDs: Set<String> = []
     @Published private(set) var playerSnapshot = PlayerSnapshot()
+    @Published private(set) var playerRenderClient: MPVPlayerClient?
     @Published private(set) var playerSubtitlesEnabled = false
     @Published private(set) var selectedPlayerSubtitleTrackID: Int?
     @Published private(set) var playerSubtitleDelay: TimeInterval = 0
@@ -565,7 +566,11 @@ final class AppState: ObservableObject {
         startupError: UserFacingError? = nil
     ) {
         self.environment = environment
+        playerRenderClient = environment?.player.renderPlayer
         presentedError = startupError
+        environment?.player.onRenderClientChanged = { [weak self] player in
+            self?.playerRenderClient = player
+        }
     }
 
     func start() async {
@@ -1969,6 +1974,10 @@ final class AppState: ObservableObject {
         // proxy traffic. Keep the accumulated results for a fast return.
         cancelSearch()
         let sessionID = UUID()
+        PlayerStartupTraceStore.shared.begin(
+            requestID: sessionID,
+            mode: environment.player.mode
+        )
         playbackSessionID = sessionID
         activePlayerRequestID = sessionID
         playbackQualitySwitchSessionID = UUID()
@@ -2004,6 +2013,17 @@ final class AppState: ObservableObject {
             isMuted: playerSnapshot.isMuted,
             speed: playerSnapshot.speed
         )
+        do {
+            try await environment.player.prepareForPlayback(
+                requestID: sessionID
+            )
+        } catch {
+            PlayerStartupTraceStore.shared.cancel(requestID: sessionID)
+            guard playbackSessionID == sessionID else { return }
+            show(error, title: "播放器初始化失败")
+            return
+        }
+        guard playbackSessionID == sessionID else { return }
         presentPlayer()
         await environment.player.stop()
         guard playbackSessionID == sessionID else { return }
@@ -2318,9 +2338,17 @@ final class AppState: ObservableObject {
             )
         }
         let sessionID = UUID()
+        PlayerStartupTraceStore.shared.begin(
+            requestID: sessionID,
+            mode: environment.player.mode
+        )
         playbackSessionID = sessionID
         activePlayerRequestID = sessionID
         do {
+            try await environment.player.prepareForPlayback(
+                requestID: sessionID
+            )
+            guard playbackSessionID == sessionID else { return }
             let media = ResolvedMedia(
                 url: stream.url,
                 headers: HTTPHeaders(stream.headers),
@@ -2346,6 +2374,7 @@ final class AppState: ObservableObject {
             )
             guard playbackSessionID == sessionID else { return }
         } catch {
+            PlayerStartupTraceStore.shared.cancel(requestID: sessionID)
             guard playbackSessionID == sessionID else { return }
             livePlaybackChannel = nil
             livePlaybackStream = nil
@@ -2636,6 +2665,7 @@ final class AppState: ObservableObject {
         }
         isClosingPlayer = true
         defer { isClosingPlayer = false }
+        let closingRequestID = activePlayerRequestID
         playbackSessionID = UUID()
         activePlayerRequestID = UUID()
         playbackQualitySwitchSessionID = UUID()
@@ -2652,7 +2682,9 @@ final class AppState: ObservableObject {
         playbackQualities = []
         selectedPlaybackQualityID = nil
         isSwitchingPlaybackQuality = false
-        await environment?.player.stop()
+        await environment?.player.closeAfterPlayback(
+            requestID: closingRequestID
+        )
         await dismissPlayerSurfaceAndRestoreWindow()
         playbackResolutionState = .idle
         currentPlaybackAttempt = nil
@@ -3292,11 +3324,11 @@ final class AppState: ObservableObject {
     }
 
     var embeddedPlayer: MPVPlayerClient? {
-        environment?.player as? MPVPlayerClient
+        playerRenderClient
     }
 
     var playerRuntimeDescription: String {
-        embeddedPlayer?.runtimeDescription ?? "libmpv 不可用"
+        environment?.player.runtimeDescription ?? "libmpv 不可用"
     }
 
     var currentPlaybackTitle: String {

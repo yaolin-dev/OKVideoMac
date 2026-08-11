@@ -13,9 +13,10 @@ struct AppEnvironment {
     let spiderRuntimeFactory: SpiderRuntimeFactory?
     let nodeBundleRuntime: NodeBundleRuntimeService
     let androidDexBridge: AndroidDexBridgeClient
-    let player: PlayerClient
+    let player: PlayerLifecycleController
     let imageRepository: ImageRepository
 
+    @MainActor
     static func live() throws -> AppEnvironment {
         let directories = try AppDirectories()
         let httpClient = URLSessionHTTPClient()
@@ -28,14 +29,9 @@ struct AppEnvironment {
         )
         let databaseURL = directories.database.appendingPathComponent("OKVideoMac.sqlite3")
         let databaseResult = try SQLiteStore.openRecovering(databaseURL: databaseURL)
-        let player: PlayerClient
-        do {
-            player = try MPVPlayerClient()
-        } catch {
-            player = UnavailablePlayerClient(
-                reason: "libmpv 不可用：\(LogRedactor.text(error.localizedDescription))"
-            )
-        }
+        let player = PlayerLifecycleController(
+            mode: PlayerTeardownMode.configured()
+        )
         return AppEnvironment(
             directories: directories,
             httpClient: httpClient,
