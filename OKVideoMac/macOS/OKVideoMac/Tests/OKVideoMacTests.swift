@@ -2087,6 +2087,36 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     @MainActor
+    func testPlayerWindowRestoreSkipsMutationsAfterWindowWillClose() async {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        var didRestore = false
+        let coordinator = PlayerWindowConfigurator.Coordinator(onRestore: {
+            didRestore = true
+        })
+        coordinator.attach(to: window)
+        await drainMainQueue()
+
+        let closingFrame = NSRect(x: 80, y: 90, width: 1_120, height: 630)
+        window.setFrame(closingFrame, display: false)
+        NotificationCenter.default.post(
+            name: NSWindow.willCloseNotification,
+            object: window
+        )
+
+        coordinator.restore()
+        await drainMainQueue()
+
+        XCTAssertTrue(didRestore)
+        XCTAssertEqual(window.frame, closingFrame)
+        XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))
+    }
+
+    @MainActor
     private func drainMainQueue() async {
         await withCheckedContinuation { continuation in
             DispatchQueue.main.async {

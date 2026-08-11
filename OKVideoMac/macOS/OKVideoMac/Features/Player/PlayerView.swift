@@ -2079,6 +2079,11 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
 
     @MainActor
     final class Coordinator {
+        @MainActor
+        private final class WindowLifetime {
+            var isClosing = false
+        }
+
         private struct AppliedConfiguration: Equatable {
             let isLivePlayback: Bool
             let controlsVisible: Bool
@@ -2106,6 +2111,8 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
         private var pendingWindowRefresh: DispatchWorkItem?
         private var fullScreenObservers: [NSObjectProtocol] = []
         private var liveResizeObserver: NSObjectProtocol?
+        private var windowWillCloseObserver: NSObjectProtocol?
+        private var windowLifetime: WindowLifetime?
         var onRestore: () -> Void
         var onFullScreenChange: (Bool) -> Void
 
@@ -2125,8 +2132,11 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             guard window !== newWindow else { return }
             restore()
             window = newWindow
+            let lifetime = WindowLifetime()
+            windowLifetime = lifetime
             observeFullScreenChanges(for: newWindow)
             observeLiveResizeEnd(for: newWindow)
+            observeWindowWillClose(for: newWindow, lifetime: lifetime)
             DispatchQueue.main.async { [weak self, weak newWindow] in
                 guard let self,
                       let newWindow,
@@ -2191,6 +2201,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             to window: NSWindow
         ) {
             guard self.window === window,
+                  windowLifetime?.isClosing != true,
                   desiredConfiguration == configuration else {
                 return
             }
@@ -2254,7 +2265,10 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                 )
             }
             appliedConfiguration = configuration
-            Self.markWindowForRefresh(window)
+            Self.markWindowForRefresh(
+                window,
+                lifetime: windowLifetime
+            )
         }
 
         func restore() {
@@ -2277,9 +2291,13 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             let savedCloseButtonWasHidden = closeButtonWasHidden
             let savedMiniaturizeButtonWasHidden = miniaturizeButtonWasHidden
             let savedZoomButtonWasHidden = zoomButtonWasHidden
+            let lifetime = windowLifetime
+            let willCloseObserver = windowWillCloseObserver
             desiredConfiguration = nil
             appliedConfiguration = nil
             self.window = nil
+            windowLifetime = nil
+            windowWillCloseObserver = nil
 
             // NSViewRepresentable update/dismantle callbacks can run inside a
             // SwiftUI layout transaction. Forcing synchronous layout or display
@@ -2287,7 +2305,23 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             // swift_beginAccess crashes. Mark the window dirty on the next run
             // loop instead and let AppKit own the display cycle.
             DispatchQueue.main.async { [weak window, onRestore] in
+                defer {
+                    if let willCloseObserver {
+                        NotificationCenter.default.removeObserver(
+                            willCloseObserver
+                        )
+                    }
+                }
                 guard let window else {
+                    onRestore()
+                    return
+                }
+                // NSWindow posts willClose while AppKit owns a private frame
+                // and snapshot transaction. Any style/frame/layout mutation
+                // during that transaction can trap inside
+                // _adjustNeedsDisplayRegionForNewFrame. The window is going
+                // away, so there is nothing useful to restore in that case.
+                guard lifetime?.isClosing != true else {
                     onRestore()
                     return
                 }
@@ -2325,7 +2359,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                     savedMiniaturizeButtonWasHidden
                 window.standardWindowButton(.zoomButton)?.isHidden =
                     savedZoomButtonWasHidden
-                Self.markWindowForRefresh(window)
+                Self.markWindowForRefresh(window, lifetime: lifetime)
                 onRestore()
             }
         }
@@ -2423,6 +2457,26 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             self.liveResizeObserver = nil
         }
 
+        private func observeWindowWillClose(
+            for window: NSWindow,
+            lifetime: WindowLifetime
+        ) {
+            if let windowWillCloseObserver {
+                NotificationCenter.default.removeObserver(
+                    windowWillCloseObserver
+                )
+            }
+            windowWillCloseObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification,
+                object: window,
+                queue: .main
+            ) { [weak lifetime] _ in
+                MainActor.assumeIsolated {
+                    lifetime?.isClosing = true
+                }
+            }
+        }
+
         private static func aspectRatiosMatch(
             _ lhs: NSSize,
             _ rhs: NSSize
@@ -2482,8 +2536,12 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             window.setFrame(targetFrame, display: false)
         }
 
-        private static func markWindowForRefresh(_ window: NSWindow?) {
+        private static func markWindowForRefresh(
+            _ window: NSWindow?,
+            lifetime: WindowLifetime?
+        ) {
             guard let window,
+                  lifetime?.isClosing != true,
                   !window.inLiveResize,
                   let contentView = window.contentView else { return }
             contentView.needsLayout = true
@@ -2498,6 +2556,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             // framebuffer size can survive until the next manual window resize.
             DispatchQueue.main.async { [weak window] in
                 guard let window,
+                      lifetime?.isClosing != true,
                       !window.inLiveResize,
                       let contentView = window.contentView else { return }
                 contentView.needsLayout = true
