@@ -230,11 +230,12 @@ final class MPVOpenGLView: NSOpenGLView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        guard let renderContext, let openGLContext else {
-            NSColor.black.setFill()
-            dirtyRect.fill()
-            return
-        }
+        // AppKit can deliver one final layer-backed draw after this view has
+        // detached from its drawable. At that point NSGraphicsContext has no
+        // current CGContext, so even a fallback NSColor fill traps. A nil mpv
+        // context means teardown owns the surface and there is nothing left
+        // for this view to draw.
+        guard let renderContext, let openGLContext else { return }
         openGLContext.makeCurrentContext()
         let backingBounds = convertToBacking(bounds)
         let width = max(1, Int32(backingBounds.width.rounded()))
@@ -271,6 +272,13 @@ final class MPVOpenGLView: NSOpenGLView {
 
     func tearDown() {
         guard let renderContext else { return }
+        // Fence both queued libmpv wake-ups and AppKit draws before freeing the
+        // native render context. `draw(_:)` may still be called once by the
+        // backing layer, but it will observe nil and return without touching
+        // an already-detached NSGraphicsContext.
+        callbackBox?.setDisplaySuspended(true)
+        needsDisplay = false
+        self.renderContext = nil
         openGLContext?.makeCurrentContext()
         player.setRenderUpdateCallback(
             renderContext: renderContext,
@@ -278,7 +286,6 @@ final class MPVOpenGLView: NSOpenGLView {
             context: nil
         )
         player.destroyRenderContext(renderContext)
-        self.renderContext = nil
         callbackBox = nil
         NSOpenGLContext.clearCurrentContext()
     }
