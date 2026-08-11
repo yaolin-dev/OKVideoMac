@@ -6,6 +6,64 @@ import OKVideoPersistence
 @testable import OKVideoMac
 
 final class OKVideoMacTests: XCTestCase {
+    func testLiveChannelNavigationMovesAndWrapsInVisibleOrder() throws {
+        let channels = try [
+            makeLiveChannel(name: "CCTV-1", streamPath: "cctv1"),
+            makeLiveChannel(name: "CCTV-2", streamPath: "cctv2"),
+            makeLiveChannel(name: "CCTV-3", streamPath: "cctv3")
+        ]
+
+        XCTAssertEqual(
+            LiveChannelNavigationPolicy.adjacentChannel(
+                in: channels,
+                currentChannelID: channels[1].id,
+                offset: -1
+            )?.id,
+            channels[0].id
+        )
+        XCTAssertEqual(
+            LiveChannelNavigationPolicy.adjacentChannel(
+                in: channels,
+                currentChannelID: channels[2].id,
+                offset: 1
+            )?.id,
+            channels[0].id
+        )
+        XCTAssertEqual(
+            LiveChannelNavigationPolicy.adjacentChannel(
+                in: channels,
+                currentChannelID: channels[0].id,
+                offset: -1
+            )?.id,
+            channels[2].id
+        )
+    }
+
+    func testLiveChannelNavigationNormalizesDuplicateAndUnavailableChannels() throws {
+        let current = try makeLiveChannel(name: "CCTV-1", streamPath: "cctv1")
+        let duplicate = try makeLiveChannel(name: "CCTV-1", streamPath: "backup")
+        let unavailable = LiveChannel(
+            groupName: "央视频道",
+            name: "CCTV-2",
+            streams: []
+        )
+        let appended = try makeLiveChannel(name: "CCTV-3", streamPath: "cctv3")
+
+        let normalized = LiveChannelNavigationPolicy.normalizedChannels(
+            [current, duplicate, unavailable],
+            including: appended
+        )
+
+        XCTAssertEqual(normalized.map(\.id), [current.id, appended.id])
+        XCTAssertNil(
+            LiveChannelNavigationPolicy.adjacentChannel(
+                in: [current],
+                currentChannelID: current.id,
+                offset: 1
+            )
+        )
+    }
+
     func testSearchSiteScopeSettingRoundTrip() throws {
         let scope = SearchSiteScope(
             mode: .custom,
@@ -13,6 +71,18 @@ final class OKVideoMacTests: XCTestCase {
         )
 
         XCTAssertEqual(SearchSiteScope(setting: scope.settingValue), scope)
+    }
+
+    private func makeLiveChannel(
+        name: String,
+        streamPath: String
+    ) throws -> LiveChannel {
+        let url = try XCTUnwrap(URL(string: "https://example.com/\(streamPath).m3u8"))
+        return LiveChannel(
+            groupName: "央视频道",
+            name: name,
+            streams: [LiveStream(name: "默认", url: url, format: "hls")]
+        )
     }
 
     func testSearchSiteScopeDefaultsToEverySearchableSite() {

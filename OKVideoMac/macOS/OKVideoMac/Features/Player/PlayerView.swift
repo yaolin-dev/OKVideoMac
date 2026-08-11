@@ -225,10 +225,10 @@ struct PlayerView: View {
     }
 
     private var liveChannelInfoCard: some View {
-        HStack(spacing: 24) {
+        HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 7) {
                 Text(state.livePlaybackDisplayTitle)
-                    .font(.system(size: 25, weight: .bold))
+                    .font(.system(size: 22, weight: .bold))
                     .lineLimit(1)
 
                 Text(liveStreamSummary)
@@ -256,17 +256,17 @@ struct PlayerView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Image(systemName: "tv")
-                .font(.system(size: 30, weight: .medium))
-                .frame(width: 70, height: 70)
+                .font(.system(size: 22, weight: .medium))
+                .frame(width: 48, height: 48)
                 .overlay {
                     Circle()
-                        .stroke(Color.white.opacity(0.72), lineWidth: 4)
+                        .stroke(Color.white.opacity(0.64), lineWidth: 2.5)
                 }
         }
         .foregroundColor(.white)
-        .padding(.horizontal, 26)
-        .padding(.vertical, 22)
-        .frame(width: 560)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .frame(width: 430)
         .background(Color.black.opacity(0.28))
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -282,7 +282,19 @@ struct PlayerView: View {
     }
 
     private var livePrimaryControls: some View {
-        HStack(spacing: 24) {
+        HStack(spacing: 12) {
+            liveChannelNavigationButton(
+                offset: -1,
+                systemImage: "chevron.up",
+                help: "上一个频道（↑）"
+            )
+
+            liveChannelNavigationButton(
+                offset: 1,
+                systemImage: "chevron.down",
+                help: "下一个频道（↓）"
+            )
+
             Button {
                 Task { await state.togglePlayPause() }
             } label: {
@@ -312,11 +324,39 @@ struct PlayerView: View {
                 .font(.system(size: 18, weight: .semibold))
         }
         .foregroundColor(.white.opacity(0.94))
-        .padding(.horizontal, 2)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.black.opacity(0.28))
+        .background(.ultraThinMaterial)
+        .clipShape(Capsule())
+        .overlay {
+            Capsule()
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        }
         .onHover { inside in
             controlsHovering = inside
             inside ? keepControlsVisible() : scheduleControlsHide()
         }
+    }
+
+    private func liveChannelNavigationButton(
+        offset: Int,
+        systemImage: String,
+        help: String
+    ) -> some View {
+        Button {
+            Task { await state.switchLiveChannel(by: offset) }
+        } label: {
+            Image(systemName: systemImage)
+                .font(.system(size: 18, weight: .bold))
+                .frame(width: 38, height: 38)
+                .background(Color.white.opacity(0.10))
+                .clipShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!state.canSwitchLiveChannel)
+        .opacity(state.canSwitchLiveChannel ? 1 : 0.38)
+        .help(help)
     }
 
     private var liveStreamSummary: String {

@@ -389,6 +389,47 @@ private enum AppStateTiming {
     static let automaticConfigurationRefreshInterval: TimeInterval = 30 * 60
 }
 
+enum LiveChannelNavigationPolicy {
+    static func normalizedChannels(
+        _ channels: [LiveChannel],
+        including currentChannel: LiveChannel
+    ) -> [LiveChannel] {
+        var seenIDs = Set<String>()
+        var values = channels.filter { channel in
+            !channel.streams.isEmpty && seenIDs.insert(channel.id).inserted
+        }
+        if !currentChannel.streams.isEmpty,
+           seenIDs.insert(currentChannel.id).inserted {
+            values.append(currentChannel)
+        }
+        return values
+    }
+
+    static func adjacentChannel(
+        in channels: [LiveChannel],
+        currentChannelID: String,
+        offset: Int
+    ) -> LiveChannel? {
+        guard channels.count > 1,
+              offset != 0,
+              let currentIndex = channels.firstIndex(where: {
+                  $0.id == currentChannelID
+              }) else {
+            return nil
+        }
+        let normalizedOffset = offset % channels.count
+        let targetIndex = (
+            currentIndex + normalizedOffset + channels.count
+        ) % channels.count
+        return channels[targetIndex]
+    }
+}
+
+private struct LivePlaybackNavigationContext {
+    let sourceID: UUID
+    let channels: [LiveChannel]
+}
+
 @MainActor
 final class AppState: ObservableObject {
     let navigation = AppNavigationState()
@@ -476,6 +517,7 @@ final class AppState: ObservableObject {
     private var cloudAuthorizationSessionID = UUID()
     private var activePlayback: ActivePlaybackContext?
     private var pendingPlayback: PendingCloudPlayback?
+    private var livePlaybackNavigationContext: LivePlaybackNavigationContext?
     private var playerEpisodePresentationCache: PlayerEpisodePresentationCache?
     private var pendingCloudPlayback: PendingCloudPlayback?
     private var pendingNodeOperation: PendingNodeOperation?
@@ -1600,6 +1642,7 @@ final class AppState: ObservableObject {
         livePlaybackChannel = nil
         livePlaybackStream = nil
         livePlaybackSourceID = nil
+        livePlaybackNavigationContext = nil
         selectedDetail = nil
         pendingDetailSummary = nil
 
@@ -1940,6 +1983,7 @@ final class AppState: ObservableObject {
         livePlaybackChannel = nil
         livePlaybackStream = nil
         livePlaybackSourceID = nil
+        livePlaybackNavigationContext = nil
         activePlayback = nil
         detailLoadSessionID = UUID()
         selectedDetail = nil
@@ -2252,9 +2296,27 @@ final class AppState: ObservableObject {
     func playLive(
         channel: LiveChannel,
         stream: LiveStream,
-        sourceID: UUID
+        sourceID: UUID,
+        navigationChannels: [LiveChannel]? = nil
     ) async {
         guard !isShutdownRequested, let environment else { return }
+        if let navigationChannels {
+            livePlaybackNavigationContext = LivePlaybackNavigationContext(
+                sourceID: sourceID,
+                channels: LiveChannelNavigationPolicy.normalizedChannels(
+                    navigationChannels,
+                    including: channel
+                )
+            )
+        } else if livePlaybackNavigationContext?.sourceID != sourceID
+                    || livePlaybackNavigationContext?.channels.contains(
+                        where: { $0.id == channel.id }
+                    ) != true {
+            livePlaybackNavigationContext = LivePlaybackNavigationContext(
+                sourceID: sourceID,
+                channels: [channel]
+            )
+        }
         let sessionID = UUID()
         playbackSessionID = sessionID
         activePlayerRequestID = sessionID
@@ -2288,9 +2350,33 @@ final class AppState: ObservableObject {
             livePlaybackChannel = nil
             livePlaybackStream = nil
             livePlaybackSourceID = nil
+            livePlaybackNavigationContext = nil
             await dismissPlayerSurfaceAndRestoreWindow()
             show(error, title: "直播播放失败")
         }
+    }
+
+    func switchLiveChannel(by offset: Int) async {
+        guard !isShutdownRequested,
+              isPlayerPresented,
+              let currentChannel = livePlaybackChannel,
+              let sourceID = livePlaybackSourceID,
+              let context = livePlaybackNavigationContext,
+              context.sourceID == sourceID,
+              let targetChannel = LiveChannelNavigationPolicy.adjacentChannel(
+                  in: context.channels,
+                  currentChannelID: currentChannel.id,
+                  offset: offset
+              ),
+              let targetStream = targetChannel.streams.first else {
+            return
+        }
+        await playLive(
+            channel: targetChannel,
+            stream: targetStream,
+            sourceID: sourceID,
+            navigationChannels: context.channels
+        )
     }
 
     func isLiveFavorite(sourceName: String, channel: LiveChannel) -> Bool {
@@ -2484,6 +2570,7 @@ final class AppState: ObservableObject {
         playbackSessionID = UUID()
         activePlayerRequestID = UUID()
         playbackQualitySwitchSessionID = UUID()
+        livePlaybackNavigationContext = nil
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = nil
         playerEventTask?.cancel()
@@ -2561,6 +2648,7 @@ final class AppState: ObservableObject {
         livePlaybackChannel = nil
         livePlaybackStream = nil
         livePlaybackSourceID = nil
+        livePlaybackNavigationContext = nil
         playbackQualities = []
         selectedPlaybackQualityID = nil
         isSwitchingPlaybackQuality = false
@@ -3232,6 +3320,18 @@ final class AppState: ObservableObject {
 
     var isLivePlayback: Bool {
         livePlaybackChannel != nil
+    }
+
+    var canSwitchLiveChannel: Bool {
+        guard isPlayerPresented,
+              let currentChannel = livePlaybackChannel,
+              let sourceID = livePlaybackSourceID,
+              let context = livePlaybackNavigationContext,
+              context.sourceID == sourceID,
+              context.channels.count > 1 else {
+            return false
+        }
+        return context.channels.contains { $0.id == currentChannel.id }
     }
 
     var livePlaybackDisplayTitle: String {
@@ -4320,6 +4420,7 @@ final class AppState: ObservableObject {
         livePlaybackChannel = nil
         livePlaybackStream = nil
         livePlaybackSourceID = nil
+        livePlaybackNavigationContext = nil
         selectedDetail = nil
         presentPlayer()
         activePlayerRequestID = sessionID

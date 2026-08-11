@@ -399,6 +399,17 @@ struct AppCommands: Commands {
                 .keyboardShortcut(.rightArrow, modifiers: [])
                 .disabled(!state.isPlayerPresented)
             Divider()
+            Button("上一个直播频道") {
+                Task { await state.switchLiveChannel(by: -1) }
+            }
+                .keyboardShortcut(.upArrow, modifiers: [])
+                .disabled(!state.canSwitchLiveChannel)
+            Button("下一个直播频道") {
+                Task { await state.switchLiveChannel(by: 1) }
+            }
+                .keyboardShortcut(.downArrow, modifiers: [])
+                .disabled(!state.canSwitchLiveChannel)
+            Divider()
             Button("进入/退出全屏") {
                 (NSApp.keyWindow ?? NSApp.mainWindow)?.toggleFullScreen(nil)
             }

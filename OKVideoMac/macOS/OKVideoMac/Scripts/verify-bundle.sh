@@ -42,7 +42,7 @@ if [[ ! -f "$BRIDGE_APK" ]]; then
   exit 1
 fi
 if [[ "$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")" != "0.3.39" ]] ||
-   [[ "$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist")" != "58" ]]; then
+   [[ "$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist")" != "59" ]]; then
   echo "The app has unexpected formal-release version metadata." >&2
   exit 1
 fi

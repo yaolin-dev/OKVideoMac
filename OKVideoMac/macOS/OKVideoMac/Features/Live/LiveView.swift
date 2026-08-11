@@ -149,6 +149,7 @@ struct LiveView: View {
                             )
                             LiveChannelCard(
                                 channel: channel,
+                                navigationChannels: channels,
                                 sourceID: sourceID,
                                 sourceName: sourceName,
                                 currentEPGProgramme: programmes.current,
@@ -382,6 +383,7 @@ private struct LiveChannelCard: View {
     @EnvironmentObject private var state: AppState
     @Environment(\.colorScheme) private var colorScheme
     let channel: LiveChannel
+    let navigationChannels: [LiveChannel]
     let sourceID: UUID
     let sourceName: String
     let currentEPGProgramme: EPGProgramme?
@@ -632,7 +634,8 @@ private struct LiveChannelCard: View {
             await state.playLive(
                 channel: channel,
                 stream: stream,
-                sourceID: sourceID
+                sourceID: sourceID,
+                navigationChannels: navigationChannels
             )
         }
     }
