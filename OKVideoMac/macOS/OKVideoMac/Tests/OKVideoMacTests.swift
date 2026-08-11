@@ -79,23 +79,47 @@ final class OKVideoMacTests: XCTestCase {
         await full.shutdown()
     }
 
-    func testLiveSwitchLoadingIndicatorDelaysOnlyTransientStates() {
-        XCTAssertEqual(
-            LiveSwitchLoadingIndicatorPolicy.delayNanoseconds,
-            280_000_000
+    func testLiveSwitchKeepsPreviousFrameFreeOfLoadingOverlays() {
+        XCTAssertTrue(
+            LiveSwitchLoadingIndicatorPolicy.shouldKeepPreviousFrameClean(
+                isLivePlayback: true,
+                holdsPreviousFrame: true,
+                status: .loading
+            )
         )
         XCTAssertTrue(
-            LiveSwitchLoadingIndicatorPolicy.isTransient(status: .loading)
-        )
-        XCTAssertTrue(
-            LiveSwitchLoadingIndicatorPolicy.isTransient(status: .buffering)
-        )
-        XCTAssertFalse(
-            LiveSwitchLoadingIndicatorPolicy.isTransient(status: .playing)
+            LiveSwitchLoadingIndicatorPolicy.shouldKeepPreviousFrameClean(
+                isLivePlayback: true,
+                holdsPreviousFrame: true,
+                status: .buffering
+            )
         )
         XCTAssertFalse(
-            LiveSwitchLoadingIndicatorPolicy.isTransient(
+            LiveSwitchLoadingIndicatorPolicy.shouldKeepPreviousFrameClean(
+                isLivePlayback: true,
+                holdsPreviousFrame: true,
+                status: .playing
+            )
+        )
+        XCTAssertFalse(
+            LiveSwitchLoadingIndicatorPolicy.shouldKeepPreviousFrameClean(
+                isLivePlayback: true,
+                holdsPreviousFrame: true,
                 status: .failed("连接失败")
+            )
+        )
+        XCTAssertFalse(
+            LiveSwitchLoadingIndicatorPolicy.shouldKeepPreviousFrameClean(
+                isLivePlayback: true,
+                holdsPreviousFrame: false,
+                status: .loading
+            )
+        )
+        XCTAssertFalse(
+            LiveSwitchLoadingIndicatorPolicy.shouldKeepPreviousFrameClean(
+                isLivePlayback: false,
+                holdsPreviousFrame: true,
+                status: .loading
             )
         )
     }

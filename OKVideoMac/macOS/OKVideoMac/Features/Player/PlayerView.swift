@@ -19,8 +19,7 @@ struct PlayerView: View {
     @State private var isProgressHovering = false
     @State private var progressHoverFraction: Double?
     @State private var lastLiveChannelID: String?
-    @State private var isLiveSwitchLoadingDelayElapsed = true
-    @State private var liveSwitchLoadingDelayTask: Task<Void, Never>?
+    @State private var holdsPreviousLiveFrame = false
     let onWindowChromeRestored: () -> Void
 
     private let speeds: [Double] = [0.5, 0.75, 1, 1.25, 1.5, 2]
@@ -114,8 +113,6 @@ struct PlayerView: View {
         }
         .onDisappear {
             hideControlsTask?.cancel()
-            liveSwitchLoadingDelayTask?.cancel()
-            liveSwitchLoadingDelayTask = nil
             volumeCommandTask?.cancel()
             volumeCommandTask = nil
             pendingVolume = nil
@@ -1472,11 +1469,11 @@ struct PlayerView: View {
         if isFailed {
             return true
         }
-        if state.isLivePlayback,
-           !isLiveSwitchLoadingDelayElapsed,
-           LiveSwitchLoadingIndicatorPolicy.isTransient(
-               status: state.playerSnapshot.status
-           ) {
+        if LiveSwitchLoadingIndicatorPolicy.shouldKeepPreviousFrameClean(
+            isLivePlayback: state.isLivePlayback,
+            holdsPreviousFrame: holdsPreviousLiveFrame,
+            status: state.playerSnapshot.status
+        ) {
             return false
         }
         switch state.playbackResolutionState {
@@ -1501,26 +1498,12 @@ struct PlayerView: View {
               previousChannelID != channelID else {
             return
         }
-
-        liveSwitchLoadingDelayTask?.cancel()
-        isLiveSwitchLoadingDelayElapsed = false
-        liveSwitchLoadingDelayTask = Task { @MainActor in
-            do {
-                try await Task.sleep(
-                    nanoseconds: LiveSwitchLoadingIndicatorPolicy
-                        .delayNanoseconds
-                )
-                try Task.checkCancellation()
-                guard state.isLivePlayback,
-                      state.livePlaybackChannel?.id == channelID else {
-                    return
-                }
-                isLiveSwitchLoadingDelayElapsed = true
-                liveSwitchLoadingDelayTask = nil
-            } catch {
-                return
-            }
-        }
+        // libmpv keeps the previous frame while replacing a live stream. Do
+        // not cover that useful frame with a loading spinner. This remains in
+        // effect for later buffering in the same live session as well, so the
+        // picture behaves like a television freeze-frame until rendering
+        // resumes. Failures are still surfaced by `isFailed` above.
+        holdsPreviousLiveFrame = true
     }
 
     private var displayedPosition: Double {
@@ -1916,9 +1899,12 @@ enum PlayerControlVisibilityPolicy {
 }
 
 enum LiveSwitchLoadingIndicatorPolicy {
-    static let delayNanoseconds: UInt64 = 280_000_000
-
-    static func isTransient(status: PlayerStatus) -> Bool {
+    static func shouldKeepPreviousFrameClean(
+        isLivePlayback: Bool,
+        holdsPreviousFrame: Bool,
+        status: PlayerStatus
+    ) -> Bool {
+        guard isLivePlayback, holdsPreviousFrame else { return false }
         switch status {
         case .loading, .buffering:
             return true
