@@ -5,7 +5,10 @@ enum PlayerTeardownMode: String, CaseIterable, Sendable {
     case warmStop
     case fullDestroy
 
-    static let defaultsKey = "experiment.playerTeardownMode"
+    /// Internal rollback switch. The production default is fullDestroy; an
+    /// explicit warmStop override can be used if a deployment exposes a
+    /// lifecycle regression.
+    static let defaultsKey = "player.teardownMode"
     static let environmentKey = "OKVIDEOMAC_PLAYER_TEARDOWN_MODE"
 
     static func configured(
@@ -20,7 +23,7 @@ enum PlayerTeardownMode: String, CaseIterable, Sendable {
            let mode = PlayerTeardownMode(rawValue: raw) {
             return mode
         }
-        return .warmStop
+        return .fullDestroy
     }
 }
 
@@ -1442,8 +1445,8 @@ final class MPVPlayerClient: PlayerClient {
     }
 }
 
-/// Experimental owner that can either retain the native player after stop or
-/// fully destroy and recreate it. AppState is main-actor isolated, so all
+/// Owns the native player and applies the configured close policy. AppState is
+/// main-actor isolated, so all
 /// lifecycle transitions are serialized here as well. The native client still
 /// owns its dedicated libmpv queue and performs its own render-detach barrier.
 @MainActor
@@ -1490,7 +1493,7 @@ final class PlayerLifecycleController {
             startForwardingEvents(from: unavailable)
         }
         PlayerExperimentLogger.lifecycle(
-            "experiment mode configured",
+            "teardown mode configured",
             playerID: renderPlayer?.renderOwnerID,
             mode: mode
         )

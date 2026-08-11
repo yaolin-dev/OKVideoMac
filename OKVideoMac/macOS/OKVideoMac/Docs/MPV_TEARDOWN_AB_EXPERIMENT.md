@@ -145,7 +145,7 @@ B 组关闭后基本回到冷启动附近：末轮 196 MB，相对 166 MB 冷启
 3. 仅在 memory pressure 时销毁会长期保留约 0.5 GB 高水位，不符合本轮观察到的收益，优先级低于前两项。
 4. 主动清理部分 cache 不是本轮变量，且无法解释 render/allocator 的全部驻留，需另立实验。
 
-实验代码默认仍为 `warmStop`；只有 UserDefaults `experiment.playerTeardownMode=fullDestroy` 或对应环境变量启用 B 模式，因此结果可随时回退且没有直接替换正式逻辑。
+实验完成时，代码默认仍为 `warmStop`，因此该轮结果没有直接替换正式逻辑。
 
 ## 10. 可复现性说明
 
@@ -154,3 +154,7 @@ B 组关闭后基本回到冷启动附近：末轮 196 MB，相对 166 MB 冷启
 - 每轮均使用正常 UI 播放和关闭，并在 +5/+30/+60 秒采样。
 - 所有生命周期日志带时间戳、mode、player ID、request ID，并记录 T0–T4。
 - Release 包构建、签名及 bundle 校验通过；测试套件通过。
+
+## 11. 后续落地状态
+
+根据本报告的实测结果，后续实现将 `fullDestroy` 提升为正式默认关闭策略；集数切换、清晰度切换等播放器内部操作仍复用当前实例。`warmStop` 没有删除，可通过 UserDefaults `player.teardownMode=warmStop` 或环境变量 `OKVIDEOMAC_PLAYER_TEARDOWN_MODE=warmStop` 快速回退。

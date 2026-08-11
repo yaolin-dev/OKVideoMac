@@ -16,11 +16,11 @@ final class OKVideoMacTests: XCTestCase {
                 environment: [:],
                 defaults: defaults
             ),
-            .warmStop
+            .fullDestroy
         )
 
         defaults.set(
-            PlayerTeardownMode.fullDestroy.rawValue,
+            PlayerTeardownMode.warmStop.rawValue,
             forKey: PlayerTeardownMode.defaultsKey
         )
         XCTAssertEqual(
@@ -28,18 +28,27 @@ final class OKVideoMacTests: XCTestCase {
                 environment: [:],
                 defaults: defaults
             ),
-            .fullDestroy
+            .warmStop
         )
 
         XCTAssertEqual(
             PlayerTeardownMode.configured(
                 environment: [
                     PlayerTeardownMode.environmentKey:
-                        PlayerTeardownMode.warmStop.rawValue
+                        PlayerTeardownMode.fullDestroy.rawValue
                 ],
                 defaults: defaults
             ),
-            .warmStop
+            .fullDestroy
+        )
+
+        defaults.set("invalid", forKey: PlayerTeardownMode.defaultsKey)
+        XCTAssertEqual(
+            PlayerTeardownMode.configured(
+                environment: [:],
+                defaults: defaults
+            ),
+            .fullDestroy
         )
     }
 

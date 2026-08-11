@@ -4603,7 +4603,8 @@ final class AppState: ObservableObject {
         isPlayerPresented = false
         // Let SwiftUI hide the player chrome and restore its window
         // configurator before a possible full-screen transition begins. The
-        // render surface intentionally stays mounted for the next playback.
+        // surface container stays mounted; fullDestroy removes the native
+        // render view until the next playback recreates a client.
         await Task.yield()
         await restoreWindowAfterPlayer()
     }
