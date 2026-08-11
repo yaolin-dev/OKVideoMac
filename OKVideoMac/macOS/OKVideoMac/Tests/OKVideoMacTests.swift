@@ -182,6 +182,49 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testDeletedLiveChannelIdentifiersArePersistentAndSourceScoped()
+        throws {
+        let sourceA = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        let sourceB = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
+        let channel = try makeLiveChannel(
+            name: "失效频道",
+            streamPath: "offline"
+        )
+        let identifier = LiveChannelDeletionPolicy.identifier(
+            sourceID: sourceA,
+            channelID: channel.id
+        )
+        let values: Set<String> = [identifier]
+
+        XCTAssertTrue(
+            LiveChannelDeletionPolicy.contains(
+                values,
+                sourceID: sourceA,
+                channelID: channel.id
+            )
+        )
+        XCTAssertFalse(
+            LiveChannelDeletionPolicy.contains(
+                values,
+                sourceID: sourceB,
+                channelID: channel.id
+            )
+        )
+        XCTAssertEqual(
+            LiveChannelDeletionPolicy.removingSource(
+                sourceB,
+                from: values
+            ),
+            values
+        )
+        XCTAssertTrue(
+            LiveChannelDeletionPolicy.removingSource(
+                sourceA,
+                from: values
+            ).isEmpty
+        )
+    }
+
     func testSearchSiteScopeSettingRoundTrip() throws {
         let scope = SearchSiteScope(
             mode: .custom,

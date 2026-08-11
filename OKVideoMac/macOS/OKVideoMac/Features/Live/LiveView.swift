@@ -103,6 +103,7 @@ struct LiveView: View {
         let hiddenCount = playlist.groups.count - visibleGroups.count
         let channels = filteredChannels(
             visibleGroups.flatMap(\.channels),
+            sourceID: sourceID,
             sourceName: sourceName
         )
         let programmeDate = Date()
@@ -182,10 +183,15 @@ struct LiveView: View {
 
     private func filteredChannels(
         _ channels: [LiveChannel],
+        sourceID: UUID,
         sourceName: String
     ) -> [LiveChannel] {
         let query = session.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         return channels.filter { channel in
+            let isDeleted = state.isLiveChannelDeleted(
+                sourceID: sourceID,
+                channel: channel
+            )
             let groupMatches = session.selectedGroupName == nil
                 || channel.groupName == session.selectedGroupName
             let favoriteMatches = !session.showsFavoritesOnly
@@ -195,7 +201,10 @@ struct LiveView: View {
                 || channel.groupName.localizedCaseInsensitiveContains(query)
                 || (channel.tvgName?.localizedCaseInsensitiveContains(query) ?? false)
                 || (channel.number?.localizedCaseInsensitiveContains(query) ?? false)
-            return groupMatches && favoriteMatches && queryMatches
+            return !isDeleted
+                && groupMatches
+                && favoriteMatches
+                && queryMatches
         }
     }
 
@@ -236,9 +245,14 @@ struct LiveToolbarView: View {
             if let source = selectedSource,
                let playlist = state.loadedLivePlaylists[source.id] {
                 let groups = playlist.groups.filter { $0.password == nil }
-                let channelCount = groups.reduce(0) {
-                    $0 + $1.channels.count
+                let allChannels = groups.flatMap(\.channels)
+                let deletedChannels = allChannels.filter {
+                    state.isLiveChannelDeleted(
+                        sourceID: source.id,
+                        channel: $0
+                    )
                 }
+                let channelCount = allChannels.count - deletedChannels.count
                 HStack(spacing: 10) {
                     sourceMenu(
                         channelCount: channelCount,
@@ -246,6 +260,12 @@ struct LiveToolbarView: View {
                     )
                     groupMenu(groups)
                     favoritesButton
+                    if !deletedChannels.isEmpty {
+                        deletedChannelsMenu(
+                            deletedChannels,
+                            sourceID: source.id
+                        )
+                    }
                     refreshControl(sourceID: source.id)
                     TextField("搜索频道", text: $session.searchText)
                         .textFieldStyle(.roundedBorder)
@@ -329,6 +349,45 @@ struct LiveToolbarView: View {
         .help(session.showsFavoritesOnly ? "显示全部频道" : "仅显示收藏频道")
     }
 
+    private func deletedChannelsMenu(
+        _ channels: [LiveChannel],
+        sourceID: UUID
+    ) -> some View {
+        Menu {
+            ForEach(channels) { channel in
+                Button {
+                    Task {
+                        await state.restoreDeletedLiveChannel(
+                            sourceID: sourceID,
+                            channel: channel
+                        )
+                    }
+                } label: {
+                    Label(
+                        "恢复 \(channel.name)",
+                        systemImage: "arrow.uturn.backward"
+                    )
+                }
+            }
+            Divider()
+            Button {
+                Task {
+                    await state.restoreAllDeletedLiveChannels(
+                        sourceID: sourceID
+                    )
+                }
+            } label: {
+                Label("全部恢复", systemImage: "arrow.counterclockwise")
+            }
+        } label: {
+            Label(
+                "已删除 \(channels.count)",
+                systemImage: "trash"
+            )
+        }
+        .help("查看或恢复已删除的频道")
+    }
+
     @ViewBuilder
     private func refreshControl(sourceID: UUID) -> some View {
         if state.isLoading {
@@ -390,6 +449,7 @@ private struct LiveChannelCard: View {
     let nextEPGProgramme: EPGProgramme?
 
     @State private var isHovering = false
+    @State private var showsDeleteConfirmation = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -499,6 +559,26 @@ private struct LiveChannelCard: View {
                     systemImage: isFavorite ? "star.slash" : "star"
                 )
             }
+            Divider()
+            Button(role: .destructive) {
+                showsDeleteConfirmation = true
+            } label: {
+                Label("删除频道…", systemImage: "trash")
+            }
+        }
+        .confirmationDialog(
+            "删除“\(channel.name)”？",
+            isPresented: $showsDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("删除频道", role: .destructive) {
+                deleteChannel()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(
+                "频道只会从本机的“\(sourceName)”中移除，刷新直播源也不会重新出现；之后可以从工具栏的“已删除频道”恢复。"
+            )
         }
     }
 
@@ -643,6 +723,16 @@ private struct LiveChannelCard: View {
     private func toggleFavorite() {
         Task {
             await state.toggleLiveFavorite(
+                sourceName: sourceName,
+                channel: channel
+            )
+        }
+    }
+
+    private func deleteChannel() {
+        Task {
+            await state.deleteLiveChannel(
+                sourceID: sourceID,
                 sourceName: sourceName,
                 channel: channel
             )

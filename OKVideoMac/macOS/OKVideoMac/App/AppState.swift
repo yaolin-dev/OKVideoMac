@@ -389,6 +389,11 @@ private enum AppStateTiming {
     static let automaticConfigurationRefreshInterval: TimeInterval = 30 * 60
 }
 
+private enum LiveSettingsKey {
+    static let favoriteChannels = "live.favoriteChannels"
+    static let deletedChannels = "live.deletedChannels"
+}
+
 enum LiveChannelNavigationPolicy {
     static func normalizedChannels(
         _ channels: [LiveChannel],
@@ -422,6 +427,30 @@ enum LiveChannelNavigationPolicy {
             currentIndex + normalizedOffset + channels.count
         ) % channels.count
         return channels[targetIndex]
+    }
+}
+
+enum LiveChannelDeletionPolicy {
+    static func identifier(sourceID: UUID, channelID: String) -> String {
+        "\(sourceID.uuidString)::\(channelID)"
+    }
+
+    static func contains(
+        _ identifiers: Set<String>,
+        sourceID: UUID,
+        channelID: String
+    ) -> Bool {
+        identifiers.contains(
+            identifier(sourceID: sourceID, channelID: channelID)
+        )
+    }
+
+    static func removingSource(
+        _ sourceID: UUID,
+        from identifiers: Set<String>
+    ) -> Set<String> {
+        let prefix = "\(sourceID.uuidString)::"
+        return identifiers.filter { !$0.hasPrefix(prefix) }
     }
 }
 
@@ -476,6 +505,7 @@ final class AppState: ObservableObject {
     @Published private(set) var historyRetentionDays = 60
     @Published private(set) var appTheme: AppTheme = .system
     @Published private(set) var favoriteLiveChannelIDs: Set<String> = []
+    @Published private(set) var deletedLiveChannelIDs: Set<String> = []
     @Published private(set) var playerSnapshot = PlayerSnapshot()
     @Published private(set) var playerRenderClient: MPVPlayerClient?
     @Published private(set) var playerSubtitlesEnabled = false
@@ -2308,6 +2338,20 @@ final class AppState: ObservableObject {
             loadedEPGGuides[id] = nil
             loadedEPGScheduleIndexes[id] = nil
             epgFailures[id] = nil
+            let previousDeletedIDs = deletedLiveChannelIDs
+            deletedLiveChannelIDs = LiveChannelDeletionPolicy.removingSource(
+                id,
+                from: deletedLiveChannelIDs
+            )
+            if deletedLiveChannelIDs != previousDeletedIDs {
+                do {
+                    try await persistDeletedLiveChannels()
+                } catch {
+                    // The source has already been deleted successfully. Keep
+                    // the in-memory cleanup and avoid reporting the source
+                    // deletion itself as failed because of stale-ID cleanup.
+                }
+            }
         } catch {
             show(error, title: "删除直播源失败")
         }
@@ -2412,8 +2456,82 @@ final class AppState: ObservableObject {
         favoriteLiveChannelIDs.contains(liveFavoriteID(sourceName: sourceName, channel: channel))
     }
 
+    func isLiveChannelDeleted(
+        sourceID: UUID,
+        channel: LiveChannel
+    ) -> Bool {
+        LiveChannelDeletionPolicy.contains(
+            deletedLiveChannelIDs,
+            sourceID: sourceID,
+            channelID: channel.id
+        )
+    }
+
+    func deleteLiveChannel(
+        sourceID: UUID,
+        sourceName: String,
+        channel: LiveChannel
+    ) async {
+        guard environment != nil else { return }
+        let previousDeletedIDs = deletedLiveChannelIDs
+        let previousFavoriteIDs = favoriteLiveChannelIDs
+        deletedLiveChannelIDs.insert(
+            LiveChannelDeletionPolicy.identifier(
+                sourceID: sourceID,
+                channelID: channel.id
+            )
+        )
+        favoriteLiveChannelIDs.remove(
+            liveFavoriteID(sourceName: sourceName, channel: channel)
+        )
+        do {
+            try await persistDeletedLiveChannels()
+            if favoriteLiveChannelIDs != previousFavoriteIDs {
+                try await persistFavoriteLiveChannels()
+            }
+        } catch {
+            deletedLiveChannelIDs = previousDeletedIDs
+            favoriteLiveChannelIDs = previousFavoriteIDs
+            try? await persistDeletedLiveChannels()
+            try? await persistFavoriteLiveChannels()
+            show(error, title: "无法删除直播频道")
+        }
+    }
+
+    func restoreDeletedLiveChannel(
+        sourceID: UUID,
+        channel: LiveChannel
+    ) async {
+        let identifier = LiveChannelDeletionPolicy.identifier(
+            sourceID: sourceID,
+            channelID: channel.id
+        )
+        guard deletedLiveChannelIDs.remove(identifier) != nil else { return }
+        do {
+            try await persistDeletedLiveChannels()
+        } catch {
+            deletedLiveChannelIDs.insert(identifier)
+            show(error, title: "无法恢复直播频道")
+        }
+    }
+
+    func restoreAllDeletedLiveChannels(sourceID: UUID) async {
+        let previousDeletedIDs = deletedLiveChannelIDs
+        deletedLiveChannelIDs = LiveChannelDeletionPolicy.removingSource(
+            sourceID,
+            from: deletedLiveChannelIDs
+        )
+        guard deletedLiveChannelIDs != previousDeletedIDs else { return }
+        do {
+            try await persistDeletedLiveChannels()
+        } catch {
+            deletedLiveChannelIDs = previousDeletedIDs
+            show(error, title: "无法恢复直播频道")
+        }
+    }
+
     func toggleLiveFavorite(sourceName: String, channel: LiveChannel) async {
-        guard let environment else { return }
+        guard environment != nil else { return }
         let id = liveFavoriteID(sourceName: sourceName, channel: channel)
         if favoriteLiveChannelIDs.contains(id) {
             favoriteLiveChannelIDs.remove(id)
@@ -2421,10 +2539,7 @@ final class AppState: ObservableObject {
             favoriteLiveChannelIDs.insert(id)
         }
         do {
-            try await environment.database.setSetting(
-                .array(favoriteLiveChannelIDs.sorted().map(JSONValue.string)),
-                forKey: "live.favoriteChannels"
-            )
+            try await persistFavoriteLiveChannels()
         } catch {
             show(error, title: "无法保存直播收藏")
         }
@@ -4213,11 +4328,32 @@ final class AppState: ObservableObject {
             selectedPlayerSubtitleTrackID = preference.id
         }
         if let value = try await environment.database.setting(
-            forKey: "live.favoriteChannels"
+            forKey: LiveSettingsKey.favoriteChannels
         ), case .array(let identifiers) = value {
             favoriteLiveChannelIDs = Set(identifiers.compactMap(\.stringValue))
         }
+        if let value = try await environment.database.setting(
+            forKey: LiveSettingsKey.deletedChannels
+        ), case .array(let identifiers) = value {
+            deletedLiveChannelIDs = Set(identifiers.compactMap(\.stringValue))
+        }
         await loadSearchSiteScope()
+    }
+
+    private func persistFavoriteLiveChannels() async throws {
+        guard let environment else { return }
+        try await environment.database.setSetting(
+            .array(favoriteLiveChannelIDs.sorted().map(JSONValue.string)),
+            forKey: LiveSettingsKey.favoriteChannels
+        )
+    }
+
+    private func persistDeletedLiveChannels() async throws {
+        guard let environment else { return }
+        try await environment.database.setSetting(
+            .array(deletedLiveChannelIDs.sorted().map(JSONValue.string)),
+            forKey: LiveSettingsKey.deletedChannels
+        )
     }
 
     private func liveFavoriteID(sourceName: String, channel: LiveChannel) -> String {
