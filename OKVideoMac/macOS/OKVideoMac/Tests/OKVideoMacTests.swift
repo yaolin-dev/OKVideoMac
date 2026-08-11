@@ -990,6 +990,27 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertFalse(gate.finishScheduling())
     }
 
+    func testUnavailablePlayerPlaceholderDoesNotOverlapStatusOverlay() {
+        XCTAssertTrue(
+            PlayerUnavailablePlaceholderPolicy.shouldShow(
+                hasEmbeddedPlayer: false,
+                showsStatusOverlay: false
+            )
+        )
+        XCTAssertFalse(
+            PlayerUnavailablePlaceholderPolicy.shouldShow(
+                hasEmbeddedPlayer: false,
+                showsStatusOverlay: true
+            )
+        )
+        XCTAssertFalse(
+            PlayerUnavailablePlaceholderPolicy.shouldShow(
+                hasEmbeddedPlayer: true,
+                showsStatusOverlay: false
+            )
+        )
+    }
+
     func testAutomaticEpisodeAdvanceOnlyReturnsAnExistingNextEpisode() {
         let episodes = [
             PlayEpisode(name: "第1集", url: "episode-1"),

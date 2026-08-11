@@ -29,7 +29,15 @@ struct PlayerView: View {
 
     var body: some View {
         ZStack {
-            if state.embeddedPlayer == nil {
+            // fullDestroy intentionally leaves no embedded client between
+            // sessions. While the next client is being recreated, the normal
+            // playback status overlay already explains that transient state;
+            // stacking the permanent-unavailable placeholder underneath it
+            // makes both labels unreadable.
+            if PlayerUnavailablePlaceholderPolicy.shouldShow(
+                hasEmbeddedPlayer: state.embeddedPlayer != nil,
+                showsStatusOverlay: shouldShowStatusOverlay
+            ) {
                 unavailablePlayer
             }
 
@@ -1917,6 +1925,15 @@ enum LiveSwitchLoadingIndicatorPolicy {
         default:
             return false
         }
+    }
+}
+
+enum PlayerUnavailablePlaceholderPolicy {
+    static func shouldShow(
+        hasEmbeddedPlayer: Bool,
+        showsStatusOverlay: Bool
+    ) -> Bool {
+        !hasEmbeddedPlayer && !showsStatusOverlay
     }
 }
 
