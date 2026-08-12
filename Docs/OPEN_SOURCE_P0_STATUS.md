@@ -17,11 +17,22 @@ are grouped below only for reporting the remaining work.
 | App icon rights | No author/license evidence | Unresolved | Old asset replaced; retained no-input ImageGen source, prompt, master, hashes and processing record | **CLOSED — VERIFIED OWNED** |
 | Binary/source release mapping | No immutable mapping | Mapping document exists | Deterministic generator, source index, outer manifest and SHA256SUMS implemented; public upload still required | **CLOSED technically; publication pending** |
 
+## Phase 2D release gates
+
+SPDX 2.3 and CycloneDX 1.6 SBOMs now cover the exact 28-Mach-O App
+inventory and 89 Android components. Bundle verification rejects inventory or
+Gradle-lock drift. The guarded LGPL replacement/ad-hoc re-sign/startup path was
+executed successfully and is marked **Needs legal review**.
+
+The host has zero valid Developer ID identities and no configured notary
+profile. Developer ID signing, notarization, staple and Gatekeeper acceptance
+were therefore not executed and are not inferred from ad-hoc success.
+
 ## Remaining P0 count
 
 The remaining release blockers after the Phase 2B implementation are:
 
-1. upload the generated immutable binary/source set to the same persistent
+1. upload the generated immutable binary/source/SBOM set to the same persistent
    release location;
 2. reproducible exact provenance for FFmpeg/native dylibs;
 3. counsel review of the documented juniversalchardet/GPL DEX combination.

@@ -32,8 +32,12 @@ Release packaging copies this material into
   commit `5fdff00a602dc56e8ba756174daef20edab024f2`, under `GPL-3.0-only`.
 - Node.js is an official Node 22.23.0 darwin-arm64 binary input that is re-signed
   during packaging; Node's distribution LICENSE covers its bundled notices.
-- An exact-version license/source proof for `xpp3:1.1.3.3` and a rights chain
-  for the App icon are not available. The release remains **Blocked**.
+- Exact-version license/source proof for `xpp3:1.1.3.3` was not recoverable;
+  the artifact is now excluded from the Release APK rather than distributed
+  under an assumed license. The superseded icon was replaced by an independently
+  generated asset with retained source, prompt and hashes. The release remains
+  **Blocked** for the explicitly open publication, native-provenance and MPL/GPL
+  legal-review P0s.
 
 ## Corresponding source
 
@@ -68,7 +72,10 @@ Before every new release, the maintainer must:
    27 stable nested Mach-O files and the embedded APK. Verify the main
    executable through the final outer App signature; it cannot self-report a
    stable hash because signing that outer container rewrites the executable.
-8. Reassess `OPEN_SOURCE_P0_STATUS.md`. Do not publish while any P0 remains.
+8. Generate SPDX 2.3 and CycloneDX 1.6 SBOMs and require exact equality between
+   the 28-Mach-O inventory and the macOS SBOM, and between the Gradle lock and
+   Android SBOM.
+9. Reassess `OPEN_SOURCE_P0_STATUS.md`. Do not publish while any P0 remains.
 
 Never upgrade or replace a third-party binary without synchronizing its source
 lock, license, notices, change record, binary mapping, and final output hashes.

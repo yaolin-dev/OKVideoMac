@@ -100,6 +100,8 @@ EXECUTABLE="$APP_DESTINATION/Contents/MacOS/OKVideoMac"
 MPV_BRIDGE="$LIBMPV_ROOT/lib/libOKMPVBridge.dylib"
 LEGAL_SOURCE_DIR="$SOURCE_ROOT/THIRD_PARTY_LICENSES"
 LEGAL_ROOT="$APP_DESTINATION/Contents/Resources/Legal"
+SBOM_DIR="$LEGAL_ROOT/Compliance/SBOM"
+GRADLE_LOCK="$SOURCE_ROOT/Helpers/AndroidDexBridge/app/gradle.lockfile"
 
 legal_source_files=(
   "$SOURCE_ROOT/LICENSE"
@@ -117,6 +119,9 @@ legal_source_files=(
   "$REPOSITORY_ROOT/Docs/APP_ICON_PROVENANCE.md"
   "$REPOSITORY_ROOT/Docs/MPL_GPL_COMBINATION_REVIEW.md"
   "$REPOSITORY_ROOT/Docs/NATIVE_REPRODUCIBLE_PROVENANCE.md"
+  "$REPOSITORY_ROOT/Docs/LGPL_LIBRARY_REPLACEMENT.md"
+  "$REPOSITORY_ROOT/Docs/SBOM_RELEASE_PROCESS.md"
+  "$REPOSITORY_ROOT/Docs/THIRD_PARTY_LICENSE_REAUDIT_PHASE2.md"
   "$REPOSITORY_ROOT/Docs/SOURCE_RELEASE_PROCESS.md"
   "$REPOSITORY_ROOT/Docs/XPP3_1_1_3_3_REMEDIATION.md"
   "$REPOSITORY_ROOT/ThirdParty/native-lock.json"
@@ -249,6 +254,12 @@ cp "$REPOSITORY_ROOT/Docs/APP_ICON_PROVENANCE.md" \
 cp "$REPOSITORY_ROOT/Docs/MPL_GPL_COMBINATION_REVIEW.md" \
   "$LEGAL_ROOT/Compliance/"
 cp "$REPOSITORY_ROOT/Docs/NATIVE_REPRODUCIBLE_PROVENANCE.md" \
+  "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/Docs/LGPL_LIBRARY_REPLACEMENT.md" \
+  "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/Docs/SBOM_RELEASE_PROCESS.md" \
+  "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/Docs/THIRD_PARTY_LICENSE_REAUDIT_PHASE2.md" \
   "$LEGAL_ROOT/Compliance/"
 cp "$REPOSITORY_ROOT/Docs/SOURCE_RELEASE_PROCESS.md" \
   "$LEGAL_ROOT/Compliance/"
@@ -384,6 +395,22 @@ done
 sign_code "$NODE_RUNTIME" "$NODE_ENTITLEMENTS"
 sign_code "$EXECUTABLE" "$APP_ENTITLEMENTS"
 
+# Generate the release SBOMs after nested-code signatures are final. The main
+# executable intentionally has no SBOM hash because signing the outer bundle
+# rewrites its embedded signature; all other Mach-O and APK artifacts are
+# hash-bound. verify_sbom.py enforces exact inventory equality.
+mkdir -p "$SBOM_DIR"
+PYTHONDONTWRITEBYTECODE=1 python3 \
+  "$REPOSITORY_ROOT/Tools/SourceAudit/generate_sbom.py" \
+  --app "$APP_DESTINATION" \
+  --gradle-lock "$GRADLE_LOCK" \
+  --output-dir "$SBOM_DIR"
+PYTHONDONTWRITEBYTECODE=1 python3 \
+  "$REPOSITORY_ROOT/Tools/SourceAudit/verify_sbom.py" \
+  --app "$APP_DESTINATION" \
+  --gradle-lock "$GRADLE_LOCK" \
+  --sbom-dir "$SBOM_DIR"
+
 # Record hashes only after every nested Mach-O has its final signature. The
 # main executable is deliberately excluded: signing the outer App rewrites its
 # embedded signature, while the manifest itself must already be sealed as an
@@ -441,6 +468,10 @@ fi
   --commit HEAD \
   --apk "$ANDROID_BRIDGE_APK" \
   --binary "$ARCHIVE" \
+  --sbom "$SBOM_DIR/OKVideoMac-macOS.spdx.json" \
+  --sbom "$SBOM_DIR/OKVideoMac-macOS.cdx.json" \
+  --sbom "$SBOM_DIR/OKVideoMac-Android.spdx.json" \
+  --sbom "$SBOM_DIR/OKVideoMac-Android.cdx.json" \
   --offline
 
 echo "Packaged app: $APP_DESTINATION"

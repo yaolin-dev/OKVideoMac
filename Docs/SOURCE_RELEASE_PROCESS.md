@@ -12,6 +12,8 @@ For 0.3.41 (Build 62), the generated set is:
 - `OKVideoMac-0.3.41-build62-SOURCE_RELEASE_INDEX.json`
 - `OKVideoMac-0.3.41-build62-SOURCE_RELEASE_MANIFEST.json`
 - `OKVideoMac-0.3.41-build62-SHA256SUMS`
+- `OKVideoMac-0.3.41-macOS-arm64.zip` (copied beside the final manifest)
+- `OKVideoMac-0.3.41-AndroidDexBridge-release.apk`
 
 The project archive is a deterministic `git archive` of the fixed commit. It
 contains OKVideoMac, OKVideoKit, Xcode/XcodeGen configuration, Android bridge
@@ -32,12 +34,20 @@ does not disguise exceptions: the missing original zlib 1.3.2 distfile and
 historical clang-11 input used by MacPorts libc++ remain explicit in the
 manifest and keep native provenance incomplete.
 
+For release 0.3.41 (62), the manifest records Xcode 16.2 and macOS SDK 15.2 as
+the actual Phase 2 package builder. Xcode 14.2 remains the older supported
+macOS 12 baseline, but is not reported as the tool that produced this audited
+binary.
+
 The licenses archive contains the project license/notices, every retained
 third-party license, APK notices, change notices, and provenance documents.
 `SOURCE_RELEASE_INDEX.json` records the source-side mapping and is safe to
 embed in the signed App. After the App ZIP is final, rerun with `--binary` to
 create the outer `SOURCE_RELEASE_MANIFEST.json` and `SHA256SUMS`; these bind the
 immutable binary and all source archives without creating a circular App hash.
+The generator copies the verified binary ZIP and APK into the same release
+directory and includes both in `SHA256SUMS`, so that directory is independently
+verifiable without relying on paths elsewhere on the build machine.
 Finalization fails unless the ZIP contains a byte-identical embedded source
 index and the same APK supplied to the manifest, preventing a same-version
 older binary from being attached to a newer source set.

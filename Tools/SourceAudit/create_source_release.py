@@ -153,7 +153,16 @@ def deterministic_tar_from_tree(source: Path, output: Path, prefix: str) -> None
 def deterministic_git_archive(repo: Path, commit: str, output: Path, prefix: str) -> None:
     temporary = output.with_suffix(output.suffix + ".tmp")
     process = subprocess.Popen(
-        ["git", "archive", "--format=tar", f"--prefix={prefix.rstrip('/')}/", commit],
+        [
+            "git",
+            "archive",
+            "--format=tar",
+            f"--prefix={prefix.rstrip('/')}/",
+            commit,
+            "--",
+            ".",
+            ":(exclude)AGENTS.md",
+        ],
         cwd=repo,
         stdout=subprocess.PIPE,
     )
@@ -315,6 +324,9 @@ def make_source_release(args: argparse.Namespace) -> None:
             "ThirdParty/juniversalchardet-1.0.3-covered-files.txt",
             "Docs/MPL_GPL_COMBINATION_REVIEW.md",
             "Docs/NATIVE_REPRODUCIBLE_PROVENANCE.md",
+            "Docs/LGPL_LIBRARY_REPLACEMENT.md",
+            "Docs/SBOM_RELEASE_PROCESS.md",
+            "Docs/THIRD_PARTY_LICENSE_REAUDIT_PHASE2.md",
             "OKVideoMac/Helpers/AndroidDexBridge/FONGMI_CATVOD_CHANGES.md",
             "OKVideoMac/Helpers/AndroidDexBridge/THIRD_PARTY_NOTICES.md",
             "OKVideoMac/Helpers/AndroidDexBridge/app/gradle.lockfile",
@@ -325,6 +337,7 @@ def make_source_release(args: argparse.Namespace) -> None:
             "OKVideoMac/macOS/OKVideoMac/Scripts/build-libmpv-repro.sh",
             "OKVideoMac/macOS/OKVideoMac/Scripts/build-third-party-native.sh",
             "OKVideoMac/macOS/OKVideoMac/Scripts/create-repro-experiment-app.sh",
+            "OKVideoMac/macOS/OKVideoMac/Scripts/test-lgpl-replacement.sh",
             "OKVideoMac/macOS/OKVideoMac/Scripts/build-quickjs.sh",
             "OKVideoMac/macOS/OKVideoMac/Scripts/build-android-dex-bridge.sh",
         ):
@@ -345,6 +358,9 @@ def make_source_release(args: argparse.Namespace) -> None:
             "Docs/BINARY_SOURCE_MAPPING.md",
             "Docs/MPL_GPL_COMBINATION_REVIEW.md",
             "Docs/NATIVE_REPRODUCIBLE_PROVENANCE.md",
+            "Docs/LGPL_LIBRARY_REPLACEMENT.md",
+            "Docs/SBOM_RELEASE_PROCESS.md",
+            "Docs/THIRD_PARTY_LICENSE_REAUDIT_PHASE2.md",
             "Docs/SOURCE_PROVENANCE_MANIFEST.md",
             "Docs/SOURCE_RELEASE_PROCESS.md",
             "Docs/XPP3_1_1_3_3_REMEDIATION.md",
@@ -399,7 +415,8 @@ def make_source_release(args: argparse.Namespace) -> None:
         "build_environment": {
             "architecture": "arm64",
             "macos_deployment_target": "12.0",
-            "xcode": "14.2",
+            "xcode": "16.2 (actual release builder; 14.2 remains the supported macOS 12 baseline)",
+            "macos_sdk": "15.2",
             "gradle": "8.9",
             "android_gradle_plugin": "8.7.3",
             "java": "17",
@@ -454,20 +471,31 @@ def make_source_release(args: argparse.Namespace) -> None:
     }
     output_artifacts = [project_archive, third_party_archive, licenses_archive, index_path]
     if args.binary:
-        binary = Path(args.binary).expanduser().resolve()
-        if not binary.is_file():
-            fail(f"Binary release artifact does not exist: {binary}")
-        if f"-{version}-" not in binary.name:
-            fail(f"Binary filename does not match release version {version}: {binary.name}")
+        binary_input = Path(args.binary).expanduser().resolve()
+        if not binary_input.is_file():
+            fail(f"Binary release artifact does not exist: {binary_input}")
+        if f"-{version}-" not in binary_input.name:
+            fail(f"Binary filename does not match release version {version}: {binary_input.name}")
         bound_apk = Path(args.apk).expanduser().resolve() if args.apk else None
-        verify_binary_binding(binary, index_path, bound_apk)
+        verify_binary_binding(binary_input, index_path, bound_apk)
+        binary = output / binary_input.name
+        if binary_input != binary:
+            temporary_binary = binary.with_suffix(binary.suffix + ".tmp")
+            shutil.copy2(binary_input, temporary_binary)
+            os.replace(temporary_binary, binary)
         manifest["binary"] = {"filename": binary.name, "sha256": sha256(binary)}
         output_artifacts.insert(0, binary)
     if args.apk:
-        apk = Path(args.apk).expanduser().resolve()
-        if not apk.is_file():
-            fail(f"APK artifact does not exist: {apk}")
+        apk_input = Path(args.apk).expanduser().resolve()
+        if not apk_input.is_file():
+            fail(f"APK artifact does not exist: {apk_input}")
+        apk = output / f"OKVideoMac-{version}-AndroidDexBridge-release.apk"
+        if apk_input != apk:
+            temporary_apk = apk.with_suffix(apk.suffix + ".tmp")
+            shutil.copy2(apk_input, temporary_apk)
+            os.replace(temporary_apk, apk)
         manifest["apk"] = {"filename": apk.name, "sha256": sha256(apk)}
+        output_artifacts.append(apk)
     if args.sbom:
         sboms = []
         for value in args.sbom:

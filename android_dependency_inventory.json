@@ -2,7 +2,7 @@
   "schema_version": "1.0",
   "generated_at": "2026-08-03T00:00:00+08:00",
   "audit_scope": {
-    "repository_root": "/Users/linyao/Documents/ok影视 mac 版本",
+    "repository_root": ".",
     "policy": "只读分析；仅新增本报告与Markdown报告",
     "initial_git_status": "No commits yet on main; .gitignore and OKVideoMac/ were already untracked, so no HEAD business-code baseline exists",
     "active_macos_product": "OKVideoMac/macOS/OKVideoMac",

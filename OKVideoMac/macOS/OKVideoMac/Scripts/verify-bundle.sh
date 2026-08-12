@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_FILE="$SCRIPT_DIR/../OKVideoMac.xcodeproj/project.pbxproj"
+REPOSITORY_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+GRADLE_LOCK="$REPOSITORY_ROOT/OKVideoMac/Helpers/AndroidDexBridge/app/gradle.lockfile"
 
 if [[ "$#" -ne 1 ]]; then
   echo "Usage: $0 /path/to/OKVideoMac.app" >&2
@@ -159,11 +161,18 @@ required_legal_files=(
   "$LEGAL_ROOT/Compliance/APP_ICON_PROVENANCE.md"
   "$LEGAL_ROOT/Compliance/MPL_GPL_COMBINATION_REVIEW.md"
   "$LEGAL_ROOT/Compliance/NATIVE_REPRODUCIBLE_PROVENANCE.md"
+  "$LEGAL_ROOT/Compliance/LGPL_LIBRARY_REPLACEMENT.md"
+  "$LEGAL_ROOT/Compliance/SBOM_RELEASE_PROCESS.md"
+  "$LEGAL_ROOT/Compliance/THIRD_PARTY_LICENSE_REAUDIT_PHASE2.md"
   "$LEGAL_ROOT/Compliance/NATIVE_DEPENDENCY_LOCK.json"
   "$LEGAL_ROOT/Compliance/SOURCE_RELEASE_PROCESS.md"
   "$LEGAL_ROOT/Compliance/XPP3_1_1_3_3_REMEDIATION.md"
   "$LEGAL_ROOT/Compliance/SOURCE_RELEASE_INDEX.json"
   "$LEGAL_ROOT/Compliance/BUILD_OUTPUT_SHA256.txt"
+  "$LEGAL_ROOT/Compliance/SBOM/OKVideoMac-macOS.spdx.json"
+  "$LEGAL_ROOT/Compliance/SBOM/OKVideoMac-macOS.cdx.json"
+  "$LEGAL_ROOT/Compliance/SBOM/OKVideoMac-Android.spdx.json"
+  "$LEGAL_ROOT/Compliance/SBOM/OKVideoMac-Android.cdx.json"
 )
 for required_legal_file in "${required_legal_files[@]}"; do
   if [[ ! -f "$required_legal_file" ]]; then
@@ -171,6 +180,11 @@ for required_legal_file in "${required_legal_files[@]}"; do
     exit 1
   fi
 done
+PYTHONDONTWRITEBYTECODE=1 python3 \
+  "$REPOSITORY_ROOT/Tools/SourceAudit/verify_sbom.py" \
+  --app "$APP" \
+  --gradle-lock "$GRADLE_LOCK" \
+  --sbom-dir "$LEGAL_ROOT/Compliance/SBOM"
 if ! grep -Fq 'AndroidDexBridge-release.apk' \
   "$LEGAL_ROOT/THIRD_PARTY_NOTICES.md" ||
    ! grep -Fq 'xpp3:xpp3:1.1.3.3' \
