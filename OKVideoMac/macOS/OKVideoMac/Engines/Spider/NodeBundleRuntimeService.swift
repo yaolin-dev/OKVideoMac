@@ -2,6 +2,397 @@ import CryptoKit
 import Foundation
 import OKVideoCore
 
+enum NodeDiagnosticCategory: String, Codable, Equatable, Sendable {
+    case transport
+    case trust
+    case cache
+    case runtime
+    case spiderSite = "spider/site"
+}
+
+enum NodeDiagnosticSeverity: String, Codable, Equatable, Sendable {
+    case debug
+    case info
+    case warning
+    case error
+}
+
+enum NodeDiagnosticCode: String, Codable, Equatable, Sendable {
+    case bundleRequest = "NODE_BUNDLE_REQUEST"
+    case bundleResponse = "NODE_BUNDLE_RESPONSE"
+    case transportTimeout = "NODE_TRANSPORT_TIMEOUT"
+    case transportReset = "NODE_TRANSPORT_RESET"
+    case transportRefused = "NODE_TRANSPORT_REFUSED"
+    case transportHTTPStatus = "NODE_TRANSPORT_HTTP_STATUS"
+    case transportRedirectFailed = "NODE_TRANSPORT_REDIRECT_FAILED"
+    case transportUnavailable = "NODE_TRANSPORT_UNAVAILABLE"
+    case trustMissingPin = "NODE_TRUST_MISSING_SHA256"
+    case trustSHA256Mismatch = "NODE_TRUST_SHA256_MISMATCH"
+    case trustIntegrityRejected = "NODE_TRUST_INTEGRITY_REJECTED"
+    case trustHashChanged = "NODE_TRUST_HASH_CHANGED"
+    case trustAccepted = "NODE_TRUST_ACCEPTED"
+    case cacheMissing = "NODE_CACHE_MISSING"
+    case cacheInvalidMetadata = "NODE_CACHE_INVALID_METADATA"
+    case cacheCorrupt = "NODE_CACHE_CORRUPT"
+    case cacheLegacyDetected = "NODE_CACHE_LEGACY_DETECTED"
+    case cacheLegacyMD5Mismatch = "NODE_CACHE_LEGACY_MD5_MISMATCH"
+    case cacheMigrationSucceeded = "NODE_CACHE_MIGRATION_SUCCEEDED"
+    case cacheMigrationFailed = "NODE_CACHE_MIGRATION_FAILED"
+    case runtimeLaunchStarted = "NODE_RUNTIME_LAUNCH_STARTED"
+    case runtimeLaunchFailed = "NODE_RUNTIME_LAUNCH_FAILED"
+    case runtimeReady = "NODE_RUNTIME_READY"
+    case runtimeHealthFailed = "NODE_RUNTIME_HEALTH_FAILED"
+    case runtimeExited = "NODE_RUNTIME_EXITED"
+    case runtimeRestartScheduled = "NODE_RUNTIME_RESTART_SCHEDULED"
+    case runtimeRestartExhausted = "NODE_RUNTIME_RESTART_EXHAUSTED"
+    case runtimeEndpointInvalidated = "NODE_RUNTIME_ENDPOINT_INVALIDATED"
+    case runtimeUnavailable = "NODE_RUNTIME_UNAVAILABLE"
+    case spiderRequestFailed = "NODE_SPIDER_REQUEST_FAILED"
+    case spiderOutput = "NODE_SPIDER_OUTPUT"
+}
+
+enum NodeTrustDiagnosticState: String, Codable, Equatable, Sendable {
+    case httpsTransport
+    case publisherPinned
+    case legacyTOFU
+    case untrusted
+    case hashChanged
+}
+
+struct NodeRedirectDiagnostic: Codable, Equatable, Sendable {
+    let statusCode: Int
+    let sourceURL: String
+    let destinationURL: String
+    let crossedScheme: Bool
+    let crossedHost: Bool
+    let downgradedHTTPS: Bool
+
+    init(_ hop: HTTPRedirectHop) {
+        statusCode = hop.statusCode
+        sourceURL = LogRedactor.url(hop.sourceURL)
+        destinationURL = LogRedactor.url(hop.destinationURL)
+        crossedScheme = hop.crossesScheme
+        crossedHost = hop.crossesHost
+        downgradedHTTPS = hop.downgradesHTTPS
+    }
+}
+
+struct NodeDiagnosticEvent: Codable, Equatable, Sendable {
+    let timestamp: Date
+    let category: NodeDiagnosticCategory
+    let severity: NodeDiagnosticSeverity
+    let code: NodeDiagnosticCode
+    let message: String
+    let sourceID: String?
+    let siteKey: String?
+    let operation: String?
+    let cacheKey: String?
+    let originalURL: String?
+    let finalURL: String?
+    let redirects: [NodeRedirectDiagnostic]
+    let httpStatus: Int?
+    let contentType: String?
+    let contentLength: Int?
+    let durationMilliseconds: Int?
+    let downgradedHTTPS: Bool?
+    let crossedScheme: Bool?
+    let crossedHost: Bool?
+    let trustState: NodeTrustDiagnosticState?
+    let nodePID: Int32?
+    let localPort: Int?
+
+    init(
+        timestamp: Date = Date(),
+        category: NodeDiagnosticCategory,
+        severity: NodeDiagnosticSeverity,
+        code: NodeDiagnosticCode,
+        message: String,
+        sourceID: String? = nil,
+        siteKey: String? = nil,
+        operation: String? = nil,
+        cacheKey: String? = nil,
+        originalURL: URL? = nil,
+        finalURL: URL? = nil,
+        responseDiagnostics: HTTPResponseDiagnostics? = nil,
+        httpStatus: Int? = nil,
+        contentType: String? = nil,
+        contentLength: Int? = nil,
+        trustState: NodeTrustDiagnosticState? = nil,
+        nodePID: Int32? = nil,
+        localPort: Int? = nil
+    ) {
+        self.timestamp = timestamp
+        self.category = category
+        self.severity = severity
+        self.code = code
+        self.message = LogRedactor.text(message)
+        self.sourceID = sourceID.map(LogRedactor.text)
+        self.siteKey = siteKey.map(LogRedactor.text)
+        self.operation = operation.map(LogRedactor.text)
+        self.cacheKey = cacheKey
+        let diagnostics = responseDiagnostics
+        self.originalURL = (diagnostics?.originalURL ?? originalURL).map(LogRedactor.url)
+        self.finalURL = (diagnostics?.finalURL ?? finalURL).map(LogRedactor.url)
+        redirects = diagnostics?.redirects.map(NodeRedirectDiagnostic.init) ?? []
+        self.httpStatus = diagnostics?.statusCode ?? httpStatus
+        self.contentType = (diagnostics?.contentType ?? contentType).map(LogRedactor.text)
+        self.contentLength = diagnostics?.contentLength ?? contentLength
+        durationMilliseconds = diagnostics.map { Int(($0.duration * 1_000).rounded()) }
+        downgradedHTTPS = diagnostics?.redirectedFromHTTPSIntoHTTP
+        crossedScheme = diagnostics?.crossedScheme
+        crossedHost = diagnostics?.crossedHost
+        self.trustState = trustState
+        self.nodePID = nodePID
+        self.localPort = localPort
+    }
+}
+
+struct NodeDiagnosticClassification: Equatable, Sendable {
+    let category: NodeDiagnosticCategory
+    let code: NodeDiagnosticCode
+}
+
+enum NodeDiagnosticContext: Equatable, Sendable {
+    case bundleTransport
+    case runtime
+    case spiderSite
+}
+
+enum NodeDiagnosticClassifier {
+    static func classify(
+        _ error: Error,
+        context: NodeDiagnosticContext
+    ) -> NodeDiagnosticClassification {
+        if let nodeError = error as? NodeBundleRuntimeError {
+            return nodeError.diagnosticClassification
+        }
+        if context == .spiderSite {
+            return NodeDiagnosticClassification(
+                category: .spiderSite,
+                code: .spiderRequestFailed
+            )
+        }
+        if let httpError = error as? HTTPClientError {
+            switch httpError {
+            case .timeout:
+                return .init(category: .transport, code: .transportTimeout)
+            case .statusCode:
+                return .init(category: .transport, code: .transportHTTPStatus)
+            case .tooManyRedirects:
+                return .init(category: .transport, code: .transportRedirectFailed)
+            case .transport(let message):
+                let lowercased = message.lowercased()
+                if lowercased.contains("econnreset")
+                    || lowercased.contains("connection reset") {
+                    return .init(category: .transport, code: .transportReset)
+                }
+                if lowercased.contains("refused") || lowercased.contains("econnrefused") {
+                    return .init(category: .transport, code: .transportRefused)
+                }
+                return .init(category: .transport, code: .transportUnavailable)
+            default:
+                return .init(category: .transport, code: .transportUnavailable)
+            }
+        }
+        return NodeDiagnosticClassification(
+            category: context == .runtime ? .runtime : .transport,
+            code: context == .runtime ? .runtimeUnavailable : .transportUnavailable
+        )
+    }
+}
+
+final class NodeDiagnosticLogWriter: @unchecked Sendable {
+    private let lock = NSLock()
+    private let logURL: URL
+    private let maximumBytes: Int
+    private let retainedFileCount: Int
+    private var handle: FileHandle?
+    private var pendingNodeOutput = Data()
+
+    init(logURL: URL, maximumBytes: Int, retainedFileCount: Int) {
+        self.logURL = logURL
+        self.maximumBytes = max(1_024, maximumBytes)
+        self.retainedFileCount = max(1, retainedFileCount)
+        prepareFileIfPossible()
+    }
+
+    func write(_ event: NodeDiagnosticEvent) {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        guard var data = try? encoder.encode(event) else { return }
+        data.append(0x0A)
+        append(data)
+    }
+
+    func writeNodeOutput(_ data: Data) {
+        lock.lock()
+        pendingNodeOutput.append(data)
+        var lines: [Data] = []
+        while let newline = pendingNodeOutput.firstIndex(of: 0x0A) {
+            lines.append(pendingNodeOutput.prefix(upTo: newline))
+            pendingNodeOutput.removeSubrange(...newline)
+        }
+        lock.unlock()
+        for line in lines {
+            writeNodeLine(line)
+        }
+    }
+
+    func flushNodeOutput() {
+        lock.lock()
+        let remaining = pendingNodeOutput
+        pendingNodeOutput.removeAll(keepingCapacity: false)
+        lock.unlock()
+        if !remaining.isEmpty { writeNodeLine(remaining) }
+    }
+
+    func close() {
+        flushNodeOutput()
+        lock.lock()
+        try? handle?.synchronize()
+        try? handle?.close()
+        handle = nil
+        lock.unlock()
+    }
+
+    private func writeNodeLine(_ data: Data) {
+        let raw = String(decoding: data, as: UTF8.self)
+        let sanitized = String(LogRedactor.text(raw).prefix(64 * 1_024))
+        write(
+            NodeDiagnosticEvent(
+                category: .spiderSite,
+                severity: .info,
+                code: .spiderOutput,
+                message: sanitized
+            )
+        )
+    }
+
+    private func append(_ data: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard ensureHandle(), let handle else { return }
+        let currentSize = (try? handle.offset()) ?? 0
+        if currentSize > 0, currentSize + UInt64(data.count) > UInt64(maximumBytes) {
+            rotateLocked()
+        }
+        guard ensureHandle(), let activeHandle = self.handle else { return }
+        try? activeHandle.write(contentsOf: data)
+    }
+
+    private func prepareFileIfPossible() {
+        lock.lock()
+        defer { lock.unlock() }
+        let directory = logURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: directory.path
+        )
+        purgeLegacyUnsanitizedLogsIfNeeded(in: directory)
+        _ = ensureHandle()
+    }
+
+    private func purgeLegacyUnsanitizedLogsIfNeeded(in directory: URL) {
+        let marker = directory.appendingPathComponent("diagnostics-v2.marker")
+        guard !FileManager.default.fileExists(atPath: marker.path) else { return }
+        let manager = FileManager.default
+        try? manager.removeItem(at: logURL)
+        for index in 1...retainedFileCount {
+            try? manager.removeItem(at: rotatedURL(index))
+        }
+        _ = manager.createFile(
+            atPath: marker.path,
+            contents: Data("sanitized-jsonl\n".utf8),
+            attributes: [.posixPermissions: 0o600]
+        )
+        try? manager.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: marker.path
+        )
+    }
+
+    @discardableResult
+    private func ensureHandle() -> Bool {
+        if handle != nil { return true }
+        if !FileManager.default.fileExists(atPath: logURL.path) {
+            FileManager.default.createFile(
+                atPath: logURL.path,
+                contents: nil,
+                attributes: [.posixPermissions: 0o600]
+            )
+        }
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: logURL.path
+        )
+        guard let opened = try? FileHandle(forWritingTo: logURL) else { return false }
+        _ = try? opened.seekToEnd()
+        handle = opened
+        return true
+    }
+
+    private func rotateLocked() {
+        try? handle?.close()
+        handle = nil
+        let manager = FileManager.default
+        let oldest = rotatedURL(retainedFileCount)
+        try? manager.removeItem(at: oldest)
+        if retainedFileCount > 1 {
+            for index in stride(from: retainedFileCount - 1, through: 1, by: -1) {
+                let source = rotatedURL(index)
+                let destination = rotatedURL(index + 1)
+                if manager.fileExists(atPath: source.path) {
+                    try? manager.moveItem(at: source, to: destination)
+                }
+            }
+        }
+        if manager.fileExists(atPath: logURL.path) {
+            try? manager.moveItem(at: logURL, to: rotatedURL(1))
+        }
+        _ = ensureHandle()
+    }
+
+    private func rotatedURL(_ index: Int) -> URL {
+        URL(fileURLWithPath: logURL.path + ".\(index)")
+    }
+}
+
+final class NodePortCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var capturedPort: Int?
+
+    var port: Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        return capturedPort
+    }
+
+    func append(_ data: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        buffer.append(data)
+        if buffer.count > 256 * 1_024 {
+            buffer = Data(buffer.suffix(256 * 1_024))
+        }
+        let text = String(decoding: buffer, as: UTF8.self)
+        let pattern = #"http://127\.0\.0\.1:(\d+)"#
+        guard let expression = try? NSRegularExpression(pattern: pattern),
+              let match = expression.matches(
+                in: text,
+                range: NSRange(text.startIndex..., in: text)
+              ).last,
+              let range = Range(match.range(at: 1), in: text) else { return }
+        capturedPort = Int(text[range])
+    }
+}
+
 enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
     case downloadFailed(resource: String, detail: String)
     case missingTrustedSHA256(finalURL: URL)
@@ -57,6 +448,33 @@ enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
             return true
         default:
             return false
+        }
+    }
+
+    var diagnosticClassification: NodeDiagnosticClassification {
+        switch self {
+        case .downloadFailed:
+            return .init(category: .transport, code: .transportUnavailable)
+        case .missingTrustedSHA256:
+            return .init(category: .trust, code: .trustMissingPin)
+        case .sha256Mismatch:
+            return .init(category: .trust, code: .trustSHA256Mismatch)
+        case .integrityRejected:
+            return .init(category: .trust, code: .trustIntegrityRejected)
+        case .legacyCacheUnavailable:
+            return .init(category: .cache, code: .cacheMissing)
+        case .legacyMD5Mismatch:
+            return .init(category: .cache, code: .cacheLegacyMD5Mismatch)
+        case .legacyMigrationFailed:
+            return .init(category: .cache, code: .cacheMigrationFailed)
+        case .invalidCacheMetadata:
+            return .init(category: .cache, code: .cacheInvalidMetadata)
+        case .bundledNodeMissing, .invalidNodeEnvironment, .nodeLaunchFailed:
+            return .init(category: .runtime, code: .runtimeLaunchFailed)
+        case .nodeExitedUnexpectedly:
+            return .init(category: .runtime, code: .runtimeExited)
+        case .endpointUnavailable:
+            return .init(category: .runtime, code: .runtimeUnavailable)
         }
     }
 }
@@ -198,6 +616,16 @@ enum NodeBundleTrustState: String, Codable, Equatable, Sendable {
     case legacyTOFU
 }
 
+private extension NodeBundleTrustState {
+    var diagnosticState: NodeTrustDiagnosticState {
+        switch self {
+        case .httpsTransport: return .httpsTransport
+        case .publisherSHA256: return .publisherPinned
+        case .legacyTOFU: return .legacyTOFU
+        }
+    }
+}
+
 enum NodeRuntimeStatus: Equatable, Sendable {
     case stopped
     case starting
@@ -214,6 +642,8 @@ struct NodeBundleCacheSnapshot: Equatable, Sendable {
 
 actor NodeBundleRuntimeService {
     private struct CachedBundle: Sendable {
+        let sourceID: String?
+        let cacheKey: String
         let scriptURL: URL
         let md5: String
         let sha256: String
@@ -243,9 +673,13 @@ actor NodeBundleRuntimeService {
     private let nodeExecutableOverride: URL?
     private let now: () -> Date
     private let migrationCommitHook: (() throws -> Void)?
+    private let diagnosticLogMaximumBytes: Int
+    private let diagnosticLogRetainedFileCount: Int
 
     private var process: Process?
-    private var logHandle: FileHandle?
+    private var outputPipe: Pipe?
+    private var activeDiagnosticWriter: NodeDiagnosticLogWriter?
+    private var diagnosticWriters: [String: NodeDiagnosticLogWriter] = [:]
     private var activeBundleSHA256: String?
     private var serviceBaseURL: URL?
     private var status: NodeRuntimeStatus = .stopped
@@ -264,7 +698,9 @@ actor NodeBundleRuntimeService {
         remoteHTTPClient: HTTPClient,
         nodeExecutableURL: URL? = nil,
         now: @escaping () -> Date = Date.init,
-        migrationCommitHook: (() throws -> Void)? = nil
+        migrationCommitHook: (() throws -> Void)? = nil,
+        diagnosticLogMaximumBytes: Int = 4 * 1_024 * 1_024,
+        diagnosticLogRetainedFileCount: Int = 3
     ) {
         self.applicationSupportDirectory = applicationSupportDirectory
         self.cacheDirectory = cacheDirectory
@@ -272,12 +708,59 @@ actor NodeBundleRuntimeService {
         nodeExecutableOverride = nodeExecutableURL
         self.now = now
         self.migrationCommitHook = migrationCommitHook
+        self.diagnosticLogMaximumBytes = diagnosticLogMaximumBytes
+        self.diagnosticLogRetainedFileCount = diagnosticLogRetainedFileCount
+        Self.purgeLegacyNodeLogsIfNeeded(
+            applicationSupportDirectory: applicationSupportDirectory
+        )
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.connectionProxyDictionary = [:]
         configuration.timeoutIntervalForRequest = 30
         configuration.timeoutIntervalForResource = 90
         localHTTPClient = URLSessionHTTPClient(configuration: configuration)
+    }
+
+    private static func purgeLegacyNodeLogsIfNeeded(
+        applicationSupportDirectory: URL
+    ) {
+        let manager = FileManager.default
+        let root = applicationSupportDirectory
+            .appendingPathComponent("NodeRuntime", isDirectory: true)
+        let marker = root.appendingPathComponent("diagnostics-v2.marker")
+        guard !manager.fileExists(atPath: marker.path) else { return }
+        try? manager.createDirectory(
+            at: root,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        if let directories = try? manager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for directory in directories {
+                guard (try? directory.resourceValues(forKeys: [.isDirectoryKey]))?
+                    .isDirectory == true,
+                    let files = try? manager.contentsOfDirectory(
+                        at: directory,
+                        includingPropertiesForKeys: nil
+                    ) else { continue }
+                for file in files where file.lastPathComponent == "node.log"
+                    || file.lastPathComponent.hasPrefix("node.log.") {
+                    try? manager.removeItem(at: file)
+                }
+            }
+        }
+        _ = manager.createFile(
+            atPath: marker.path,
+            contents: Data("sanitized-jsonl\n".utf8),
+            attributes: [.posixPermissions: 0o600]
+        )
+        try? manager.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: marker.path
+        )
     }
 
     static func supports(_ url: URL) -> Bool {
@@ -316,6 +799,10 @@ actor NodeBundleRuntimeService {
         desiredBundle = nil
         restartAttempt = 0
         stopProcess(publishing: .stopped)
+    }
+
+    func recordDiagnosticEvent(_ event: NodeDiagnosticEvent) {
+        activeDiagnosticWriter?.write(event)
     }
 
     func statusUpdates() -> AsyncStream<NodeRuntimeStatus> {
@@ -504,9 +991,16 @@ actor NodeBundleRuntimeService {
     private func obtainBundle(
         _ descriptor: NodeBundleSourceDescriptor
     ) async throws -> CachedBundle {
+        let writer = diagnosticWriter(for: descriptor)
         do {
             return try await downloadBundle(descriptor)
         } catch let downloadError {
+            record(
+                error: downloadError,
+                context: .bundleTransport,
+                descriptor: descriptor,
+                writer: writer
+            )
             let allowsFallback = (downloadError as? NodeBundleRuntimeError)?
                 .allowsCachedFallback == true
             guard allowsFallback else { throw downloadError }
@@ -514,8 +1008,25 @@ actor NodeBundleRuntimeService {
             let currentCache = cacheURL(for: descriptor.cacheKey)
             if FileManager.default.fileExists(atPath: currentCache.path) {
                 do {
-                    return try loadCachedBundle(descriptor, cacheURL: currentCache)
+                    let cached = try loadCachedBundle(descriptor, cacheURL: currentCache)
+                    writer.write(
+                        diagnosticEvent(
+                            category: .cache,
+                            severity: .info,
+                            code: .trustAccepted,
+                            message: "Validated current Node bundle cache",
+                            descriptor: descriptor,
+                            trustState: cached.trustState.diagnosticState
+                        )
+                    )
+                    return cached
                 } catch {
+                    record(
+                        error: error,
+                        context: .bundleTransport,
+                        descriptor: descriptor,
+                        writer: writer
+                    )
                     // The first hardened build created the destination directory
                     // before it knew whether metadata existed. Treat only a
                     // completely empty directory as an interrupted cache write;
@@ -528,6 +1039,15 @@ actor NodeBundleRuntimeService {
                 }
             }
             do {
+                writer.write(
+                    diagnosticEvent(
+                        category: .cache,
+                        severity: .info,
+                        code: .cacheLegacyDetected,
+                        message: "Legacy Node bundle cache migration requested",
+                        descriptor: descriptor
+                    )
+                )
                 return try migrateLegacyCache(descriptor)
             } catch NodeBundleRuntimeError.legacyCacheUnavailable(let detail) {
                 throw NodeBundleRuntimeError.legacyCacheUnavailable(
@@ -546,6 +1066,7 @@ actor NodeBundleRuntimeService {
     private func downloadBundle(
         _ descriptor: NodeBundleSourceDescriptor
     ) async throws -> CachedBundle {
+        let writer = diagnosticWriter(for: descriptor)
         var headers = HTTPHeaders()
         if let authorization = descriptor.authorizationHeader {
             headers["Authorization"] = authorization
@@ -553,16 +1074,46 @@ actor NodeBundleRuntimeService {
 
         let checksumResponse: HTTPResponse
         do {
-            checksumResponse = try await remoteHTTPClient.send(
+            writer.write(
+                diagnosticEvent(
+                    category: .transport,
+                    severity: .info,
+                    code: .bundleRequest,
+                    message: "Requesting Node bundle checksum",
+                    descriptor: descriptor,
+                    originalURL: descriptor.checksumURL
+                )
+            )
+            checksumResponse = try await sendBundleRequest(
                 HTTPRequest(
                     url: descriptor.checksumURL,
                     headers: headers,
                     timeout: 20,
                     maximumResponseBytes: 256,
-                    retryPolicy: HTTPRetryPolicy(maximumRetries: 2)
+                    retryPolicy: HTTPRetryPolicy(maximumRetries: 2),
+                    allowsNonSuccessfulStatus: true
                 )
             )
+            writer.write(
+                diagnosticEvent(
+                    category: .transport,
+                    severity: .info,
+                    code: .bundleResponse,
+                    message: "Received Node bundle checksum response",
+                    descriptor: descriptor,
+                    response: checksumResponse
+                )
+            )
+            guard (200...299).contains(checksumResponse.statusCode) else {
+                throw HTTPClientError.statusCode(checksumResponse.statusCode)
+            }
         } catch {
+            record(
+                error: error,
+                context: .bundleTransport,
+                descriptor: descriptor,
+                writer: writer
+            )
             throw NodeBundleRuntimeError.downloadFailed(
                 resource: "MD5 校验文件",
                 detail: error.localizedDescription
@@ -589,16 +1140,46 @@ actor NodeBundleRuntimeService {
 
         let scriptResponse: HTTPResponse
         do {
-            scriptResponse = try await remoteHTTPClient.send(
+            writer.write(
+                diagnosticEvent(
+                    category: .transport,
+                    severity: .info,
+                    code: .bundleRequest,
+                    message: "Requesting Node executable bundle",
+                    descriptor: descriptor,
+                    originalURL: descriptor.scriptURL
+                )
+            )
+            scriptResponse = try await sendBundleRequest(
                 HTTPRequest(
                     url: descriptor.scriptURL,
                     headers: headers,
                     timeout: 60,
                     maximumResponseBytes: Self.maximumScriptSize,
-                    retryPolicy: HTTPRetryPolicy(maximumRetries: 2)
+                    retryPolicy: HTTPRetryPolicy(maximumRetries: 2),
+                    allowsNonSuccessfulStatus: true
                 )
             )
+            writer.write(
+                diagnosticEvent(
+                    category: .transport,
+                    severity: .info,
+                    code: .bundleResponse,
+                    message: "Received Node executable bundle response",
+                    descriptor: descriptor,
+                    response: scriptResponse
+                )
+            )
+            guard (200...299).contains(scriptResponse.statusCode) else {
+                throw HTTPClientError.statusCode(scriptResponse.statusCode)
+            }
         } catch {
+            record(
+                error: error,
+                context: .bundleTransport,
+                descriptor: descriptor,
+                writer: writer
+            )
             throw NodeBundleRuntimeError.downloadFailed(
                 resource: "可执行脚本",
                 detail: error.localizedDescription
@@ -618,6 +1199,19 @@ actor NodeBundleRuntimeService {
             throw NodeBundleRuntimeError.integrityRejected("脚本不是有效 UTF-8")
         }
         let actualSHA256 = Self.sha256Hex(scriptResponse.body)
+        if let knownHash = currentLegacyTOFUHash(descriptor), knownHash != actualSHA256 {
+            writer.write(
+                diagnosticEvent(
+                    category: .trust,
+                    severity: .error,
+                    code: .trustHashChanged,
+                    message: "Remote Node bundle hash differs from the established legacy trust record",
+                    descriptor: descriptor,
+                    response: scriptResponse,
+                    trustState: .hashChanged
+                )
+            )
+        }
         try Self.validateTrustedSHA256(
             expected: descriptor.expectedSHA256,
             actual: actualSHA256,
@@ -642,7 +1236,37 @@ actor NodeBundleRuntimeService {
             checksum: checksum,
             metadata: metadata
         )
-        return try loadCachedBundle(descriptor, cacheURL: cacheURL)
+        let cached = try loadCachedBundle(descriptor, cacheURL: cacheURL)
+        writer.write(
+            diagnosticEvent(
+                category: .trust,
+                severity: .info,
+                code: .trustAccepted,
+                message: "Node bundle trust validation succeeded",
+                descriptor: descriptor,
+                response: scriptResponse,
+                trustState: cached.trustState.diagnosticState
+            )
+        )
+        return cached
+    }
+
+    private func sendBundleRequest(_ request: HTTPRequest) async throws -> HTTPResponse {
+        var statusAttempt = 0
+        while true {
+            let response = try await remoteHTTPClient.send(request)
+            if (200...299).contains(response.statusCode) {
+                return response
+            }
+            let retryable = response.statusCode == 408
+                || response.statusCode == 429
+                || (500...599).contains(response.statusCode)
+            guard retryable, statusAttempt < 2 else { return response }
+            statusAttempt += 1
+            try await Task.sleep(
+                nanoseconds: UInt64(500_000_000 * statusAttempt)
+            )
+        }
     }
 
     private func loadCachedBundle(
@@ -702,6 +1326,8 @@ actor NodeBundleRuntimeService {
         let trustState = metadata.trustState
             ?? (descriptor.expectedSHA256 == nil ? .httpsTransport : .publisherSHA256)
         return CachedBundle(
+            sourceID: descriptor.sourceID,
+            cacheKey: descriptor.cacheKey,
             scriptURL: scriptURL,
             md5: expected,
             sha256: actualSHA256,
@@ -783,7 +1409,18 @@ actor NodeBundleRuntimeService {
                 error.localizedDescription
             )
         }
-        return try loadCachedBundle(descriptor, cacheURL: installedURL)
+        let bundle = try loadCachedBundle(descriptor, cacheURL: installedURL)
+        diagnosticWriter(for: descriptor).write(
+            diagnosticEvent(
+                category: .cache,
+                severity: .info,
+                code: .cacheMigrationSucceeded,
+                message: "Legacy Node bundle cache migration succeeded",
+                descriptor: descriptor,
+                trustState: .legacyTOFU
+            )
+        )
+        return bundle
     }
 
     private func installCacheAtomically(
@@ -847,6 +1484,105 @@ actor NodeBundleRuntimeService {
         cacheRootURL().appendingPathComponent(key, isDirectory: true)
     }
 
+    private func currentLegacyTOFUHash(
+        _ descriptor: NodeBundleSourceDescriptor
+    ) -> String? {
+        let metadataURL = cacheURL(for: descriptor.cacheKey)
+            .appendingPathComponent("metadata.json")
+        guard let data = try? Data(contentsOf: metadataURL),
+              let metadata = try? JSONDecoder().decode(CacheMetadata.self, from: data),
+              metadata.pinIdentity == descriptor.pinIdentity,
+              metadata.trustState == .legacyTOFU else { return nil }
+        return metadata.sha256
+    }
+
+    private func diagnosticWriter(
+        for descriptor: NodeBundleSourceDescriptor
+    ) -> NodeDiagnosticLogWriter {
+        if let existing = diagnosticWriters[descriptor.cacheKey] {
+            return existing
+        }
+        let directory = (try? runtimeDirectory(for: descriptor))
+            ?? applicationSupportDirectory
+                .appendingPathComponent("NodeRuntime", isDirectory: true)
+                .appendingPathComponent(descriptor.cacheKey, isDirectory: true)
+        let writer = NodeDiagnosticLogWriter(
+            logURL: directory.appendingPathComponent("node.log"),
+            maximumBytes: diagnosticLogMaximumBytes,
+            retainedFileCount: diagnosticLogRetainedFileCount
+        )
+        diagnosticWriters[descriptor.cacheKey] = writer
+        return writer
+    }
+
+    private func diagnosticEvent(
+        category: NodeDiagnosticCategory,
+        severity: NodeDiagnosticSeverity,
+        code: NodeDiagnosticCode,
+        message: String,
+        descriptor: NodeBundleSourceDescriptor,
+        originalURL: URL? = nil,
+        finalURL: URL? = nil,
+        response: HTTPResponse? = nil,
+        trustState: NodeTrustDiagnosticState? = nil,
+        nodePID: Int32? = nil,
+        localPort: Int? = nil
+    ) -> NodeDiagnosticEvent {
+        NodeDiagnosticEvent(
+            timestamp: now(),
+            category: category,
+            severity: severity,
+            code: code,
+            message: message,
+            sourceID: descriptor.sourceID,
+            cacheKey: descriptor.cacheKey,
+            originalURL: originalURL,
+            finalURL: response?.url ?? finalURL,
+            responseDiagnostics: response?.diagnostics,
+            httpStatus: response?.statusCode,
+            contentType: response?.headers["Content-Type"],
+            contentLength: response?.body.count,
+            trustState: trustState,
+            nodePID: nodePID,
+            localPort: localPort
+        )
+    }
+
+    private func record(
+        error: Error,
+        context: NodeDiagnosticContext,
+        descriptor: NodeBundleSourceDescriptor,
+        writer: NodeDiagnosticLogWriter
+    ) {
+        let classification = NodeDiagnosticClassifier.classify(error, context: context)
+        let trustState: NodeTrustDiagnosticState? = classification.category == .trust
+            ? (classification.code == .trustSHA256Mismatch ? .hashChanged : .untrusted)
+            : nil
+        let finalURL: URL?
+        if let nodeError = error as? NodeBundleRuntimeError {
+            switch nodeError {
+            case .missingTrustedSHA256(let url),
+                 .sha256Mismatch(_, _, let url):
+                finalURL = url
+            default:
+                finalURL = nil
+            }
+        } else {
+            finalURL = nil
+        }
+        writer.write(
+            diagnosticEvent(
+                category: classification.category,
+                severity: .error,
+                code: classification.code,
+                message: error.localizedDescription,
+                descriptor: descriptor,
+                finalURL: finalURL,
+                trustState: trustState
+            )
+        )
+    }
+
     private func runtimeDirectory(
         for descriptor: NodeBundleSourceDescriptor
     ) throws -> URL {
@@ -901,7 +1637,13 @@ actor NodeBundleRuntimeService {
         try validateBundleForExecution(bundle)
         let nodeExecutable = try nodeExecutableURL()
         let launcherURL = bundle.runtimeDirectory.appendingPathComponent("launcher.js")
-        let logURL = bundle.runtimeDirectory.appendingPathComponent("node.log")
+        let writer = diagnosticWriters[bundle.cacheKey] ?? NodeDiagnosticLogWriter(
+            logURL: bundle.runtimeDirectory.appendingPathComponent("node.log"),
+            maximumBytes: diagnosticLogMaximumBytes,
+            retainedFileCount: diagnosticLogRetainedFileCount
+        )
+        diagnosticWriters[bundle.cacheKey] = writer
+        activeDiagnosticWriter = writer
         let temporaryDirectory = bundle.runtimeDirectory
             .appendingPathComponent("tmp", isDirectory: true)
         try FileManager.default.createDirectory(
@@ -910,15 +1652,31 @@ actor NodeBundleRuntimeService {
             attributes: [.posixPermissions: 0o700]
         )
         try Data(Self.launcherScript.utf8).write(to: launcherURL, options: .atomic)
-        FileManager.default.createFile(atPath: logURL.path, contents: nil)
-        for privateFile in [launcherURL, logURL] {
-            try FileManager.default.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: privateFile.path
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: launcherURL.path
+        )
+
+        writer.write(
+            NodeDiagnosticEvent(
+                timestamp: now(),
+                category: .runtime,
+                severity: .info,
+                code: .runtimeLaunchStarted,
+                message: "Launching bundled Node runtime",
+                sourceID: bundle.sourceID,
+                cacheKey: bundle.cacheKey,
+                trustState: bundle.trustState.diagnosticState
             )
+        )
+        let pipe = Pipe()
+        let portCapture = NodePortCapture()
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            portCapture.append(data)
+            writer.writeNodeOutput(data)
         }
-        let handle = try FileHandle(forWritingTo: logURL)
-        try handle.truncate(atOffset: 0)
 
         let process = Process()
         let generation = UUID()
@@ -931,8 +1689,8 @@ actor NodeBundleRuntimeService {
             runtimeDirectory: bundle.runtimeDirectory,
             temporaryDirectory: temporaryDirectory
         )
-        process.standardOutput = handle
-        process.standardError = handle
+        process.standardOutput = pipe
+        process.standardError = pipe
         process.terminationHandler = { [weak self] terminatedProcess in
             let detail = "退出码 \(terminatedProcess.terminationStatus)"
             Task {
@@ -945,29 +1703,81 @@ actor NodeBundleRuntimeService {
         do {
             try process.run()
         } catch {
-            try? handle.close()
+            pipe.fileHandleForReading.readabilityHandler = nil
+            writer.flushNodeOutput()
+            writer.write(
+                NodeDiagnosticEvent(
+                    timestamp: now(),
+                    category: .runtime,
+                    severity: .error,
+                    code: .runtimeLaunchFailed,
+                    message: error.localizedDescription,
+                    sourceID: bundle.sourceID,
+                    cacheKey: bundle.cacheKey,
+                    trustState: bundle.trustState.diagnosticState
+                )
+            )
             throw NodeBundleRuntimeError.nodeLaunchFailed(
                 error.localizedDescription
             )
         }
 
         self.process = process
-        logHandle = handle
+        outputPipe = pipe
         activeBundleSHA256 = bundle.sha256
+        writer.write(
+            NodeDiagnosticEvent(
+                timestamp: now(),
+                category: .runtime,
+                severity: .info,
+                code: .runtimeLaunchStarted,
+                message: "Bundled Node process launched",
+                sourceID: bundle.sourceID,
+                cacheKey: bundle.cacheKey,
+                trustState: bundle.trustState.diagnosticState,
+                nodePID: process.processIdentifier
+            )
+        )
 
         for _ in 0..<900 {
             guard process.isRunning else {
                 process.terminationHandler = nil
                 stopProcess(publishing: nil)
+                writer.write(
+                    NodeDiagnosticEvent(
+                        timestamp: now(),
+                        category: .runtime,
+                        severity: .error,
+                        code: .runtimeExited,
+                        message: "Node process exited before becoming ready",
+                        sourceID: bundle.sourceID,
+                        cacheKey: bundle.cacheKey,
+                        nodePID: process.processIdentifier
+                    )
+                )
                 throw NodeBundleRuntimeError.nodeLaunchFailed(
-                    "进程提前退出，日志位于 \(logURL.path)"
+                    "进程在服务就绪前提前退出"
                 )
             }
-            if let port = Self.port(fromLogAt: logURL),
+            if let port = portCapture.port,
                let baseURL = URL(string: "http://127.0.0.1:\(port)/"),
                await isHealthy(baseURL) {
                 serviceBaseURL = baseURL
                 publish(.running(baseURL))
+                writer.write(
+                    NodeDiagnosticEvent(
+                        timestamp: now(),
+                        category: .runtime,
+                        severity: .info,
+                        code: .runtimeReady,
+                        message: "Node runtime health check succeeded",
+                        sourceID: bundle.sourceID,
+                        cacheKey: bundle.cacheKey,
+                        trustState: bundle.trustState.diagnosticState,
+                        nodePID: process.processIdentifier,
+                        localPort: port
+                    )
+                )
                 startHealthMonitor(generation: generation, baseURL: baseURL)
                 return baseURL
             }
@@ -976,6 +1786,17 @@ actor NodeBundleRuntimeService {
 
         process.terminationHandler = nil
         stopProcess(publishing: nil)
+        writer.write(
+            NodeDiagnosticEvent(
+                timestamp: now(),
+                category: .runtime,
+                severity: .error,
+                code: .runtimeLaunchFailed,
+                message: "Node runtime did not become ready before timeout",
+                sourceID: bundle.sourceID,
+                cacheKey: bundle.cacheKey
+            )
+        )
         throw NodeBundleRuntimeError.nodeLaunchFailed("资源服务启动超过 90 秒")
     }
 
@@ -1008,8 +1829,9 @@ actor NodeBundleRuntimeService {
         if let process, process.isRunning {
             process.terminate()
         }
-        try? logHandle?.close()
-        logHandle = nil
+        outputPipe?.fileHandleForReading.readabilityHandler = nil
+        activeDiagnosticWriter?.flushNodeOutput()
+        outputPipe = nil
         process = nil
         activeBundleSHA256 = nil
         serviceBaseURL = nil
@@ -1024,8 +1846,19 @@ actor NodeBundleRuntimeService {
     ) {
         guard generation == processGeneration else { return }
         guard case .running = status else { return }
-        try? logHandle?.close()
-        logHandle = nil
+        outputPipe?.fileHandleForReading.readabilityHandler = nil
+        activeDiagnosticWriter?.flushNodeOutput()
+        activeDiagnosticWriter?.write(
+            NodeDiagnosticEvent(
+                timestamp: now(),
+                category: .runtime,
+                severity: .error,
+                code: .runtimeExited,
+                message: detail,
+                nodePID: process?.processIdentifier
+            )
+        )
+        outputPipe = nil
         process = nil
         activeBundleSHA256 = nil
         serviceBaseURL = nil
@@ -1058,6 +1891,15 @@ actor NodeBundleRuntimeService {
     private func handleHealthFailure(generation: UUID) {
         guard generation == processGeneration else { return }
         guard case .running = status else { return }
+        activeDiagnosticWriter?.write(
+            NodeDiagnosticEvent(
+                timestamp: now(),
+                category: .runtime,
+                severity: .warning,
+                code: .runtimeHealthFailed,
+                message: "Node runtime failed consecutive health checks"
+            )
+        )
         stopProcess(publishing: nil)
         scheduleRestart(reason: "连续健康检查失败")
     }
@@ -1065,6 +1907,15 @@ actor NodeBundleRuntimeService {
     private func scheduleRestart(reason: String) {
         guard restartTask == nil, desiredBundle != nil else { return }
         guard restartAttempt < Self.restartDelays.count else {
+            activeDiagnosticWriter?.write(
+                NodeDiagnosticEvent(
+                    timestamp: now(),
+                    category: .runtime,
+                    severity: .error,
+                    code: .runtimeRestartExhausted,
+                    message: reason
+                )
+            )
             publish(.failed(
                 NodeBundleRuntimeError.nodeExitedUnexpectedly(
                     "已完成 \(Self.restartDelays.count) 次恢复尝试：\(reason)"
@@ -1075,6 +1926,15 @@ actor NodeBundleRuntimeService {
         let attempt = restartAttempt + 1
         restartAttempt = attempt
         let delay = Self.restartDelays[attempt - 1]
+        activeDiagnosticWriter?.write(
+            NodeDiagnosticEvent(
+                timestamp: now(),
+                category: .runtime,
+                severity: .warning,
+                code: .runtimeRestartScheduled,
+                message: "Node runtime restart scheduled after failure"
+            )
+        )
         publish(.restarting(attempt: attempt, reason: reason))
         restartTask = Task { [weak self] in
             try? await Task.sleep(

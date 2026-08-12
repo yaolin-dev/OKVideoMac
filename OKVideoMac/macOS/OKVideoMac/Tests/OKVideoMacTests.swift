@@ -3450,22 +3450,50 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         let untrustedMD5 = NodeBundleRuntimeService.md5Hex(untrustedDownload)
         let client = NodeProviderStubHTTPClient { request in
             if request.url.path.hasSuffix(".md5") {
+                let finalURL = try XCTUnwrap(URL(
+                    string: "http://cdn.invalid/current.js.md5"
+                ))
                 return HTTPResponse(
-                    url: try XCTUnwrap(URL(
-                        string: "http://cdn.invalid/current.js.md5"
-                    )),
+                    url: finalURL,
                     statusCode: 200,
-                    headers: [:],
-                    body: Data(untrustedMD5.utf8)
+                    headers: ["Content-Type": "text/plain"],
+                    body: Data(untrustedMD5.utf8),
+                    diagnostics: HTTPResponseDiagnostics(
+                        originalURL: request.url,
+                        redirects: [HTTPRedirectHop(
+                            statusCode: 302,
+                            sourceURL: request.url,
+                            destinationURL: finalURL
+                        )],
+                        finalURL: finalURL,
+                        statusCode: 200,
+                        contentType: "text/plain",
+                        contentLength: untrustedMD5.count,
+                        duration: 0.25
+                    )
                 )
             }
+            let finalURL = try XCTUnwrap(URL(
+                string: "http://cdn.invalid/current.jpg"
+            ))
             return HTTPResponse(
-                url: try XCTUnwrap(URL(
-                    string: "http://cdn.invalid/current.jpg"
-                )),
+                url: finalURL,
                 statusCode: 200,
-                headers: [:],
-                body: untrustedDownload
+                headers: ["Content-Type": "image/jpeg"],
+                body: untrustedDownload,
+                diagnostics: HTTPResponseDiagnostics(
+                    originalURL: request.url,
+                    redirects: [HTTPRedirectHop(
+                        statusCode: 302,
+                        sourceURL: request.url,
+                        destinationURL: finalURL
+                    )],
+                    finalURL: finalURL,
+                    statusCode: 200,
+                    contentType: "image/jpeg",
+                    contentLength: untrustedDownload.count,
+                    duration: 0.5
+                )
             )
         }
         let service = NodeBundleRuntimeService(
@@ -3487,6 +3515,20 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             snapshot.sha256,
             NodeBundleRuntimeService.sha256Hex(untrustedDownload)
         )
+        let second = try await service.prepareBundleForTesting(
+            from: fixture.sourceURL
+        )
+        XCTAssertEqual(second.sha256, snapshot.sha256)
+        let logURL = fixture.applicationSupportDirectory
+            .appendingPathComponent("NodeRuntime")
+            .appendingPathComponent(snapshot.cacheKey)
+            .appendingPathComponent("node.log")
+        let log = try String(contentsOf: logURL, encoding: .utf8)
+        XCTAssertTrue(log.contains("NODE_BUNDLE_RESPONSE"))
+        XCTAssertTrue(log.contains("current.jpg"))
+        XCTAssertTrue(log.contains("image/jpeg"))
+        XCTAssertTrue(log.contains("NODE_TRUST_HASH_CHANGED"))
+        XCTAssertTrue(log.contains("legacyTOFU"))
     }
 
     func testLegacyMigrationRejectsMD5Mismatch() async throws {
@@ -3616,6 +3658,139 @@ final class NodeBundleCompatibilityTests: XCTestCase {
 
     func testNodeRestartPolicyIsBoundedExponentialBackoff() {
         XCTAssertEqual(NodeBundleRuntimeService.restartDelays, [1, 2, 5])
+    }
+
+    func testNodeDiagnosticClassifierSeparatesFailureLayers() {
+        XCTAssertEqual(
+            NodeDiagnosticClassifier.classify(
+                HTTPClientError.timeout,
+                context: .bundleTransport
+            ),
+            .init(category: .transport, code: .transportTimeout)
+        )
+        XCTAssertEqual(
+            NodeDiagnosticClassifier.classify(
+                HTTPClientError.transport("ECONNRESET"),
+                context: .bundleTransport
+            ),
+            .init(category: .transport, code: .transportReset)
+        )
+        XCTAssertEqual(
+            NodeDiagnosticClassifier.classify(
+                NodeBundleRuntimeError.legacyMigrationFailed("fixture"),
+                context: .bundleTransport
+            ),
+            .init(category: .cache, code: .cacheMigrationFailed)
+        )
+        XCTAssertEqual(
+            NodeDiagnosticClassifier.classify(
+                NodeBundleRuntimeError.nodeExitedUnexpectedly("fixture"),
+                context: .runtime
+            ),
+            .init(category: .runtime, code: .runtimeExited)
+        )
+        XCTAssertEqual(
+            NodeDiagnosticClassifier.classify(
+                HTTPClientError.transport("connection reset"),
+                context: .spiderSite
+            ),
+            .init(category: .spiderSite, code: .spiderRequestFailed)
+        )
+    }
+
+    func testNodeDiagnosticLogSanitizesRotatesAndUsesPrivatePermissions() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("okvideo-node-log-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let logURL = root.appendingPathComponent("node.log")
+        try Data("Authorization: Bearer legacy-secret\n".utf8).write(to: logURL)
+
+        let writer = NodeDiagnosticLogWriter(
+            logURL: logURL,
+            maximumBytes: 1_024,
+            retainedFileCount: 2
+        )
+        for index in 0..<80 {
+            writer.writeNodeOutput(Data(
+                "token=secret-\(index) /Users/alice/private \(String(repeating: "x", count: 80))\n".utf8
+            ))
+        }
+        writer.close()
+
+        let files = try FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix("node.log") }
+        XCTAssertLessThanOrEqual(files.count, 3)
+        let combined = try files.map { try String(contentsOf: $0) }.joined()
+        XCTAssertFalse(combined.contains("legacy-secret"))
+        XCTAssertFalse(combined.contains("secret-"))
+        XCTAssertFalse(combined.contains("alice"))
+        XCTAssertTrue(combined.contains("<HOME>"))
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: logURL.path
+        )
+        let permissions = try XCTUnwrap(
+            attributes[.posixPermissions] as? NSNumber
+        )
+        XCTAssertEqual(permissions.intValue & 0o777, 0o600)
+    }
+
+    func testRuntimeInitializationPurgesLogsFromAllLegacyCacheKeysOnce() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("okvideo-node-root-log-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let support = root.appendingPathComponent("Application Support")
+        let cache = root.appendingPathComponent("Caches")
+        let runtimeRoot = support.appendingPathComponent("NodeRuntime")
+        for key in ["old-a", "old-b"] {
+            let directory = runtimeRoot.appendingPathComponent(key)
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            try Data("token=legacy-secret".utf8).write(
+                to: directory.appendingPathComponent("node.log")
+            )
+            try Data("rotated-secret".utf8).write(
+                to: directory.appendingPathComponent("node.log.1")
+            )
+        }
+
+        _ = NodeBundleRuntimeService(
+            applicationSupportDirectory: support,
+            cacheDirectory: cache,
+            remoteHTTPClient: NodeProviderStubHTTPClient { _ in
+                throw HTTPClientError.transport("offline")
+            }
+        )
+
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: runtimeRoot.appendingPathComponent("diagnostics-v2.marker").path
+        ))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: runtimeRoot.appendingPathComponent("old-a/node.log").path
+        ))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: runtimeRoot.appendingPathComponent("old-b/node.log.1").path
+        ))
+    }
+
+    func testNodeReleaseErrorPresentationNeverLeaksTechnicalDetails() throws {
+        let rawURL = try XCTUnwrap(URL(
+            string: "http://user:secret@example.invalid/index.js?token=value"
+        ))
+        let presentation = try XCTUnwrap(
+            NodeUserFacingErrorMapper.presentation(
+                for: NodeBundleRuntimeError.missingTrustedSHA256(finalURL: rawURL)
+            )
+        )
+
+        XCTAssertEqual(presentation.title, "Node 安全校验失败")
+        XCTAssertFalse(presentation.message.contains("http"))
+        XCTAssertFalse(presentation.message.contains("secret"))
+        XCTAssertFalse(presentation.message.contains("SHA-256"))
     }
 
     func testIntentionalStopPublishesStoppedAndDoesNotRestart() async throws {

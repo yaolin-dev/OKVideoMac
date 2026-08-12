@@ -173,6 +173,30 @@ final class HTTPClientTests: XCTestCase {
         XCTAssertEqual(request.headers["User-Agent"], "PolicyAgent")
     }
 
+    func testRedirectDiagnosticsDescribeUpgradeDowngradeAndCrossHost() throws {
+        let http = try XCTUnwrap(URL(string: "http://origin.invalid/bundle"))
+        let https = try XCTUnwrap(URL(string: "https://cdn.invalid/bundle"))
+        let downgrade = try XCTUnwrap(URL(string: "http://cdn.invalid/object.jpg"))
+        let diagnostics = HTTPResponseDiagnostics(
+            originalURL: http,
+            redirects: [
+                HTTPRedirectHop(statusCode: 301, sourceURL: http, destinationURL: https),
+                HTTPRedirectHop(statusCode: 302, sourceURL: https, destinationURL: downgrade)
+            ],
+            finalURL: downgrade,
+            statusCode: 200,
+            contentType: "image/jpeg",
+            contentLength: 42,
+            duration: 0.75
+        )
+
+        XCTAssertTrue(diagnostics.crossedScheme)
+        XCTAssertTrue(diagnostics.crossedHost)
+        XCTAssertTrue(diagnostics.redirectedFromHTTPSIntoHTTP)
+        XCTAssertEqual(diagnostics.redirects.map(\.statusCode), [301, 302])
+        XCTAssertEqual(diagnostics.contentType, "image/jpeg")
+    }
+
     private func makeClient() -> URLSessionHTTPClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]

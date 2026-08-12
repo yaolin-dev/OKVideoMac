@@ -149,12 +149,20 @@ public struct HTTPResponse: Equatable, Sendable {
     public let statusCode: Int
     public let headers: HTTPHeaders
     public let body: Data
+    public let diagnostics: HTTPResponseDiagnostics?
 
-    public init(url: URL, statusCode: Int, headers: HTTPHeaders, body: Data) {
+    public init(
+        url: URL,
+        statusCode: Int,
+        headers: HTTPHeaders,
+        body: Data,
+        diagnostics: HTTPResponseDiagnostics? = nil
+    ) {
         self.url = url
         self.statusCode = statusCode
         self.headers = headers
         self.body = body
+        self.diagnostics = diagnostics
     }
 
     public func text() throws -> String {
@@ -190,6 +198,76 @@ public struct HTTPResponse: Equatable, Sendable {
         } catch {
             throw AppError.decoding(error.localizedDescription)
         }
+    }
+}
+
+public struct HTTPRedirectHop: Equatable, Sendable {
+    public let statusCode: Int
+    public let sourceURL: URL
+    public let destinationURL: URL
+
+    public init(statusCode: Int, sourceURL: URL, destinationURL: URL) {
+        self.statusCode = statusCode
+        self.sourceURL = sourceURL
+        self.destinationURL = destinationURL
+    }
+
+    public var crossesScheme: Bool {
+        sourceURL.scheme?.caseInsensitiveCompare(destinationURL.scheme ?? "")
+            != .orderedSame
+    }
+
+    public var crossesHost: Bool {
+        sourceURL.host?.caseInsensitiveCompare(destinationURL.host ?? "")
+            != .orderedSame
+            || sourceURL.port != destinationURL.port
+    }
+
+    public var downgradesHTTPS: Bool {
+        sourceURL.scheme?.lowercased() == "https"
+            && destinationURL.scheme?.lowercased() == "http"
+    }
+}
+
+public struct HTTPResponseDiagnostics: Equatable, Sendable {
+    public let originalURL: URL
+    public let redirects: [HTTPRedirectHop]
+    public let finalURL: URL
+    public let statusCode: Int
+    public let contentType: String?
+    public let contentLength: Int
+    public let duration: TimeInterval
+
+    public init(
+        originalURL: URL,
+        redirects: [HTTPRedirectHop],
+        finalURL: URL,
+        statusCode: Int,
+        contentType: String?,
+        contentLength: Int,
+        duration: TimeInterval
+    ) {
+        self.originalURL = originalURL
+        self.redirects = redirects
+        self.finalURL = finalURL
+        self.statusCode = statusCode
+        self.contentType = contentType
+        self.contentLength = contentLength
+        self.duration = duration
+    }
+
+    public var redirectedFromHTTPSIntoHTTP: Bool {
+        redirects.contains(where: \.downgradesHTTPS)
+            || (originalURL.scheme?.lowercased() == "https"
+                && finalURL.scheme?.lowercased() == "http")
+    }
+
+    public var crossedScheme: Bool {
+        redirects.contains(where: \.crossesScheme)
+    }
+
+    public var crossedHost: Bool {
+        redirects.contains(where: \.crossesHost)
     }
 }
 

@@ -21,10 +21,8 @@ struct NodeRuntimeUnavailableSiteProvider: SiteProvider {
     }
     func action(_ action: String) async throws -> JSONValue { throw error }
 
-    private var error: AppError {
-        .spider(
-            NodeBundleRuntimeError.endpointUnavailable(reason).localizedDescription
-        )
+    private var error: NodeBundleRuntimeError {
+        .endpointUnavailable(reason)
     }
 }
 
@@ -187,6 +185,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
 
     private let baseURL: URL
     private let httpClient: HTTPClient
+    private let diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)?
 
     var configurationWebsiteURL: URL {
         baseURL.appendingPathComponent("website")
@@ -206,13 +205,19 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         return true
     }
 
-    init(site: SiteConfiguration, baseURL: URL, httpClient: HTTPClient) throws {
+    init(
+        site: SiteConfiguration,
+        baseURL: URL,
+        httpClient: HTTPClient,
+        diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)? = nil
+    ) throws {
         guard Self.canHandle(site: site, baseURL: baseURL) else {
             throw AppError.spider("NodeHTTPSpiderSiteProvider 站点配置无效")
         }
         self.site = site
         self.baseURL = baseURL
         self.httpClient = httpClient
+        self.diagnosticReporter = diagnosticReporter
     }
 
     func home() async throws -> SiteHome {
@@ -577,6 +582,21 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                     try await retryDelay(after: attempt)
                     continue
                 }
+                let classification = NodeDiagnosticClassifier.classify(
+                    error,
+                    context: .spiderSite
+                )
+                diagnosticReporter?(
+                    NodeDiagnosticEvent(
+                        category: classification.category,
+                        severity: .error,
+                        code: classification.code,
+                        message: error.localizedDescription,
+                        siteKey: site.key,
+                        operation: method,
+                        originalURL: endpoint
+                    )
+                )
                 throw error
             }
         }

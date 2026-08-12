@@ -37,6 +37,7 @@ public final class URLSessionHTTPClient: HTTPClient {
 
     private func sendOnce(_ request: HTTPRequest) async throws -> HTTPResponse {
         try Task.checkCancellation()
+        let startedAt = Date()
 
         var urlRequest = URLRequest(url: request.url)
         urlRequest.httpMethod = request.method.rawValue
@@ -88,7 +89,16 @@ public final class URLSessionHTTPClient: HTTPClient {
             url: finalURL,
             statusCode: http.statusCode,
             headers: HTTPHeaders(responseHeaders),
-            body: data
+            body: data,
+            diagnostics: HTTPResponseDiagnostics(
+                originalURL: request.url,
+                redirects: redirectDelegate.redirects,
+                finalURL: finalURL,
+                statusCode: http.statusCode,
+                contentType: http.value(forHTTPHeaderField: "Content-Type"),
+                contentLength: data.count,
+                duration: Date().timeIntervalSince(startedAt)
+            )
         )
     }
 
@@ -132,11 +142,18 @@ private final class RedirectDelegate: NSObject, URLSessionTaskDelegate {
     private let maximumRedirects: Int
     private let lock = NSLock()
     private var redirectCount = 0
+    private var redirectHops: [HTTPRedirectHop] = []
 
     var exceededLimit: Bool {
         lock.lock()
         defer { lock.unlock() }
         return redirectCount > maximumRedirects
+    }
+
+    var redirects: [HTTPRedirectHop] {
+        lock.lock()
+        defer { lock.unlock() }
+        return redirectHops
     }
 
     init(maximumRedirects: Int) {
@@ -153,6 +170,15 @@ private final class RedirectDelegate: NSObject, URLSessionTaskDelegate {
         lock.lock()
         redirectCount += 1
         let isAllowed = redirectCount <= maximumRedirects
+        if let sourceURL = response.url, let destinationURL = request.url {
+            redirectHops.append(
+                HTTPRedirectHop(
+                    statusCode: response.statusCode,
+                    sourceURL: sourceURL,
+                    destinationURL: destinationURL
+                )
+            )
+        }
         lock.unlock()
         guard isAllowed else {
             completionHandler(nil)

@@ -62,6 +62,53 @@ struct UserFacingError: Identifiable, Equatable {
     }
 }
 
+struct NodeReleaseErrorPresentation: Equatable {
+    let title: String
+    let message: String
+}
+
+enum NodeUserFacingErrorMapper {
+    static func presentation(for error: Error) -> NodeReleaseErrorPresentation? {
+        if let nodeError = error as? NodeBundleRuntimeError {
+            switch nodeError.diagnosticClassification.category {
+            case .transport:
+                return .init(
+                    title: "Node 组件连接失败",
+                    message: "无法获取运行组件，已尝试使用经过校验的本地缓存。请稍后重试。"
+                )
+            case .trust:
+                return .init(
+                    title: "Node 安全校验失败",
+                    message: "远程运行组件未通过完整性校验，已停止加载。"
+                )
+            case .cache:
+                return .init(
+                    title: "Node 缓存不可用",
+                    message: "本地运行组件缓存无法通过校验或升级，请稍后重试。"
+                )
+            case .runtime:
+                return .init(
+                    title: "Node Runtime 启动失败",
+                    message: "内置运行环境未能正常启动，请重启应用后重试。"
+                )
+            case .spiderSite:
+                return .init(
+                    title: "内容源请求失败",
+                    message: "当前站点暂时无响应，其他站点仍可继续使用。"
+                )
+            }
+        }
+        if let appError = error as? AppError,
+           case .spider = appError {
+            return .init(
+                title: "内容源请求失败",
+                message: "当前站点暂时无响应，请稍后重试或更换站点。"
+            )
+        }
+        return nil
+    }
+}
+
 struct CloudAuthorizationAction: Identifiable, Equatable {
     let id: String
     let title: String
@@ -4750,7 +4797,10 @@ final class AppState: ObservableObject {
                     provider = (try? NodeHTTPSpiderSiteProvider(
                         site: site,
                         baseURL: baseURL,
-                        httpClient: httpClient
+                        httpClient: httpClient,
+                        diagnosticReporter: { [weak runtime = environment.nodeBundleRuntime] event in
+                            Task { await runtime?.recordDiagnosticEvent(event) }
+                        }
                     )) ?? UnsupportedSiteProvider(site: site)
                 } else if [0, 1, 4].contains(site.type) {
                     provider = (try? StandardSiteProvider(
@@ -5325,9 +5375,16 @@ final class AppState: ObservableObject {
     }
 
     private func show(_ error: Error, title: String) {
+        if let presentation = NodeUserFacingErrorMapper.presentation(for: error) {
+            presentedError = UserFacingError(
+                title: presentation.title,
+                message: presentation.message
+            )
+            return
+        }
         presentedError = UserFacingError(
             title: title,
-            message: error.localizedDescription
+            message: LogRedactor.text(error.localizedDescription)
         )
     }
 }
