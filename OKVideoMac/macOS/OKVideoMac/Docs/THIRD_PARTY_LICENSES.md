@@ -1,13 +1,22 @@
-# Third-Party Licenses
+# Third-Party Licenses in the Release App
 
-| 组件 | 固定版本/基线 | 许可证 | 用途 | 当前状态 |
-| --- | --- | --- | --- | --- |
-| FongMi/TV | `5fdff00` | GPL-3.0 | 协议和行为参考 | 已审计，不参与构建 |
-| mpv | v0.41.0 | GPL-2.0-or-later 默认构建 | 播放器 | 未构建/未链接 |
-| FFmpeg | 构建期解析版本 | LGPL/GPL 取决于选项 | libmpv 编解码 | 未构建 |
-| libass | 构建期解析版本 | ISC | 字幕 | 未构建 |
-| QuickJS | 2025-09-13-2 | MIT | JavaScript Spider | arm64 原生桥已构建；App 未验证 |
-| SQLite | macOS 系统库 | Public Domain | 持久化 | 代码已接入 |
-| zlib | macOS 系统库 | zlib License | gzip XMLTV | 代码已接入 |
+This file is a short in-project pointer, not a second inventory. The current
+Release App includes third-party executable content, including:
 
-发布前必须把最终构建解析出的完整依赖版本和许可证文本写入应用资源和发布包。
+- mpv v0.41.0 built with GPL enabled and a local source patch;
+- FFmpeg 7.1.4 built on its `LGPL-2.1-or-later` path;
+- Node.js 22.23.0 as a separate bundled process;
+- QuickJS 2025-09-13-2 statically force-loaded into the project bridge;
+- the complete recursively bundled native dylib dependency chain; and
+- `AndroidDexBridge-release.apk`, including copied and modified GPL-3.0-only
+  FongMi/TV `catvod` source and its Maven runtime graph.
+
+The authoritative component/version/license/source index is
+`OKVideoMac/THIRD_PARTY_NOTICES.md`. License texts are stored in
+`OKVideoMac/THIRD_PARTY_LICENSES/`. The APK has a linked, independent inventory
+at `OKVideoMac/Helpers/AndroidDexBridge/THIRD_PARTY_NOTICES.md`.
+
+Release packaging copies those materials to
+`OKVideoMac.app/Contents/Resources/Legal/`. Third-party components remain under
+their own licenses; the project-level `GPL-3.0-only` license does not replace
+those terms.

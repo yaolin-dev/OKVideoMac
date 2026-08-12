@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SOURCE_ROOT="$(cd "$PROJECT_DIR/../.." && pwd)"
+REPOSITORY_ROOT="$(cd "$SOURCE_ROOT/.." && pwd)"
 source "$SCRIPT_DIR/build-environment.sh"
 
 usage() {
@@ -94,6 +96,34 @@ QUICKJS_ROOT="$OKVIDEOMAC_BUILD_ROOT/QuickJS"
 NODE_RUNTIME="$APP_DESTINATION/Contents/Resources/NodeRuntime/node"
 EXECUTABLE="$APP_DESTINATION/Contents/MacOS/OKVideoMac"
 MPV_BRIDGE="$LIBMPV_ROOT/lib/libOKMPVBridge.dylib"
+LEGAL_SOURCE_DIR="$SOURCE_ROOT/THIRD_PARTY_LICENSES"
+LEGAL_ROOT="$APP_DESTINATION/Contents/Resources/Legal"
+
+legal_source_files=(
+  "$SOURCE_ROOT/LICENSE"
+  "$SOURCE_ROOT/NOTICE.md"
+  "$SOURCE_ROOT/THIRD_PARTY_NOTICES.md"
+  "$SOURCE_ROOT/Helpers/AndroidDexBridge/THIRD_PARTY_NOTICES.md"
+  "$SOURCE_ROOT/Helpers/AndroidDexBridge/FONGMI_CATVOD_CHANGES.md"
+  "$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-without-cocoa.patch"
+  "$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-without-cocoa.NOTICE.md"
+  "$REPOSITORY_ROOT/Docs/THIRD_PARTY_LICENSE_AUDIT.md"
+  "$REPOSITORY_ROOT/Docs/SOURCE_PROVENANCE_MANIFEST.md"
+  "$REPOSITORY_ROOT/Docs/BINARY_SOURCE_MAPPING.md"
+  "$REPOSITORY_ROOT/Docs/OPEN_SOURCE_COMPLIANCE.md"
+  "$REPOSITORY_ROOT/Docs/OPEN_SOURCE_P0_STATUS.md"
+)
+for legal_source_file in "${legal_source_files[@]}"; do
+  if [[ ! -f "$legal_source_file" ]]; then
+    echo "Legal source file is missing: $legal_source_file" >&2
+    exit 1
+  fi
+done
+if [[ ! -d "$LEGAL_SOURCE_DIR" ]] ||
+   [[ -z "$(find "$LEGAL_SOURCE_DIR" -maxdepth 1 -type f -print -quit)" ]]; then
+  echo "Third-party license directory is missing or empty: $LEGAL_SOURCE_DIR" >&2
+  exit 1
+fi
 
 for entitlement_file in "$APP_ENTITLEMENTS" "$NODE_ENTITLEMENTS"; do
   if [[ ! -f "$entitlement_file" ]]; then
@@ -146,13 +176,50 @@ APP_VERSION="$(
     -c 'Print :CFBundleShortVersionString' \
     "$APP_DESTINATION/Contents/Info.plist"
 )"
-if [[ -z "$APP_VERSION" ]]; then
-  echo "Packaged app version is missing." >&2
+APP_BUILD="$(
+  /usr/libexec/PlistBuddy \
+    -c 'Print :CFBundleVersion' \
+    "$APP_DESTINATION/Contents/Info.plist"
+)"
+if [[ -z "$APP_VERSION" || -z "$APP_BUILD" ]]; then
+  echo "Packaged app version or build is missing." >&2
   exit 1
 fi
 ARCHIVE="$ARTIFACTS/OKVideoMac-${APP_VERSION}-macOS-arm64.zip"
 FRAMEWORKS="$APP_DESTINATION/Contents/Frameworks"
 mkdir -p "$FRAMEWORKS"
+
+# Install the complete, repository-maintained legal payload before signing.
+# This changes resources only; executable dependencies, linkage, entitlements,
+# and the inside-out signing order below remain unchanged.
+rm -rf "$LEGAL_ROOT"
+mkdir -p \
+  "$LEGAL_ROOT/AndroidDexBridge" \
+  "$LEGAL_ROOT/Compliance" \
+  "$LEGAL_ROOT/ModifiedSources"
+cp "$SOURCE_ROOT/LICENSE" "$LEGAL_ROOT/LICENSE"
+cp "$SOURCE_ROOT/NOTICE.md" "$LEGAL_ROOT/NOTICE.md"
+cp "$SOURCE_ROOT/THIRD_PARTY_NOTICES.md" \
+  "$LEGAL_ROOT/THIRD_PARTY_NOTICES.md"
+cp -R "$LEGAL_SOURCE_DIR" "$LEGAL_ROOT/THIRD_PARTY_LICENSES"
+cp "$SOURCE_ROOT/Helpers/AndroidDexBridge/THIRD_PARTY_NOTICES.md" \
+  "$LEGAL_ROOT/AndroidDexBridge/THIRD_PARTY_NOTICES.md"
+cp "$SOURCE_ROOT/Helpers/AndroidDexBridge/FONGMI_CATVOD_CHANGES.md" \
+  "$LEGAL_ROOT/AndroidDexBridge/FONGMI_CATVOD_CHANGES.md"
+cp "$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-without-cocoa.patch" \
+  "$LEGAL_ROOT/ModifiedSources/"
+cp "$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-without-cocoa.NOTICE.md" \
+  "$LEGAL_ROOT/ModifiedSources/"
+cp "$REPOSITORY_ROOT/Docs/THIRD_PARTY_LICENSE_AUDIT.md" \
+  "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/Docs/SOURCE_PROVENANCE_MANIFEST.md" \
+  "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/Docs/BINARY_SOURCE_MAPPING.md" \
+  "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/Docs/OPEN_SOURCE_COMPLIANCE.md" \
+  "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/Docs/OPEN_SOURCE_P0_STATUS.md" \
+  "$LEGAL_ROOT/Compliance/"
 
 if [[ ! -f "$APP_DESTINATION/Contents/Resources/LICENSE" ]] ||
    [[ ! -f "$APP_DESTINATION/Contents/Resources/NOTICE.md" ]]; then
@@ -279,6 +346,25 @@ for ((index=${#processed[@]} - 1; index >= 0; index--)); do
 done
 sign_code "$NODE_RUNTIME" "$NODE_ENTITLEMENTS"
 sign_code "$EXECUTABLE" "$APP_ENTITLEMENTS"
+
+# Record hashes only after every nested Mach-O has its final signature. The
+# main executable is deliberately excluded: signing the outer App rewrites its
+# embedded signature, while the manifest itself must already be sealed as an
+# App resource. The final main executable is instead verified by codesign.
+OUTPUT_HASH_MANIFEST="$LEGAL_ROOT/Compliance/BUILD_OUTPUT_SHA256.txt"
+(
+  cd "$APP_DESTINATION"
+  echo "# OKVideoMac $APP_VERSION ($APP_BUILD) stable packaged binary hashes"
+  echo "# Generated after nested signing; paths are App-relative."
+  echo "# Contents/MacOS/OKVideoMac is excluded because outer App signing rewrites it."
+  while IFS= read -r -d '' artifact_file; do
+    if [[ "$artifact_file" != "Contents/MacOS/OKVideoMac" ]] &&
+       file "$artifact_file" | grep -q 'Mach-O'; then
+      shasum -a 256 "$artifact_file"
+    fi
+  done < <(find Contents -type f -print0 | sort -z)
+  shasum -a 256 Contents/Resources/AndroidDexBridge-release.apk
+) > "$OUTPUT_HASH_MANIFEST"
 sign_code "$APP_DESTINATION" "$APP_ENTITLEMENTS"
 
 "$SCRIPT_DIR/verify-bundle.sh" "$APP_DESTINATION"
