@@ -742,6 +742,9 @@ final class AppState: ObservableObject {
     private var lastAutomaticConfigurationRefreshAttemptAt: Date?
     private var configurationRefreshTask: Task<Bool, Never>?
     private var configurationRefreshSessionID = UUID()
+    private var nodeRuntimeStatusTask: Task<Void, Never>?
+    private var activeNodeRuntimeEndpoint: URL?
+    private var nodeRuntimeUnavailableReason = "Node Runtime 尚未启动"
 
     static func bootstrap() -> AppState {
         do {
@@ -778,6 +781,7 @@ final class AppState: ObservableObject {
 
     func start() async {
         guard !hasCompletedStartup, let environment else { return }
+        startNodeRuntimeStatusMonitoring()
         isLoading = true
         defer {
             isLoading = false
@@ -806,8 +810,10 @@ final class AppState: ObservableObject {
                     try await prepareActiveNodeConfigurationIfNeeded()
                     try loadActiveConfigurationContent()
                 } catch {
-                    // The cached configuration and home snapshot are already
-                    // visible. A failed refresh must not invalidate them.
+                    activeNodeRuntimeEndpoint = nil
+                    nodeRuntimeUnavailableReason = error.localizedDescription
+                    rebuildProviders()
+                    show(error, title: "Node Runtime 启动失败")
                 }
             }
             await prepareActiveConfigurationHome(reportLoadErrors: false)
@@ -854,6 +860,17 @@ final class AppState: ObservableObject {
             lastAutomaticConfigurationRefreshAttemptAt = loaded.loadedAt
             activeConfigurationRecord = record
             activeConfiguration = loaded.configuration
+            let importedUsesNodeRuntime: Bool
+            if case .remote(let url) = source {
+                importedUsesNodeRuntime = NodeBundleRuntimeService.supports(url)
+            } else {
+                importedUsesNodeRuntime = false
+            }
+            if !importedUsesNodeRuntime {
+                activeNodeRuntimeEndpoint = nil
+                nodeRuntimeUnavailableReason = "Node Runtime 未用于当前配置"
+                await environment.nodeBundleRuntime.stop()
+            }
             rebuildProviders()
             selectedSiteKey = supportedSites.first?.key
             await loadSearchSiteScope()
@@ -3196,6 +3213,8 @@ final class AppState: ObservableObject {
         cloudAuthorizationPollTask = nil
         playerEventTask?.cancel()
         playerEventTask = nil
+        nodeRuntimeStatusTask?.cancel()
+        nodeRuntimeStatusTask = nil
 
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -3207,6 +3226,7 @@ final class AppState: ObservableObject {
                 )
             }
             await self.environment?.player.shutdown()
+            await self.environment?.nodeBundleRuntime.stop()
             self.pendingPlayback = nil
             self.pendingCloudPlayback = nil
             self.pendingHistoryWrite = nil
@@ -4439,23 +4459,46 @@ final class AppState: ObservableObject {
         }
         if case .remote(let url) = source,
            NodeBundleRuntimeService.supports(url) {
-            return try await environment.nodeBundleRuntime
-                .loadConfiguration(from: url)
+            do {
+                let loaded = try await environment.nodeBundleRuntime
+                    .loadConfiguration(from: url)
+                activeNodeRuntimeEndpoint = loaded.baseURL
+                nodeRuntimeUnavailableReason = ""
+                return loaded
+            } catch {
+                activeNodeRuntimeEndpoint = nil
+                nodeRuntimeUnavailableReason = error.localizedDescription
+                rebuildProviders()
+                throw error
+            }
         }
         return try await environment.configurationLoader.load(source)
     }
 
     private func prepareActiveNodeConfigurationIfNeeded() async throws {
-        guard let environment,
-              let record = activeConfigurationRecord,
+        guard let environment else { return }
+        guard let record = activeConfigurationRecord,
               record.sourceKind == .remote,
               let sourceValue = record.sourceValue,
               let sourceURL = URL(string: sourceValue),
               NodeBundleRuntimeService.supports(sourceURL) else {
+            activeNodeRuntimeEndpoint = nil
+            nodeRuntimeUnavailableReason = "Node Runtime 未用于当前配置"
+            await environment.nodeBundleRuntime.stop()
             return
         }
-        let loaded = try await environment.nodeBundleRuntime
-            .loadConfiguration(from: sourceURL)
+        let loaded: LoadedConfiguration
+        do {
+            loaded = try await environment.nodeBundleRuntime
+                .loadConfiguration(from: sourceURL)
+            activeNodeRuntimeEndpoint = loaded.baseURL
+            nodeRuntimeUnavailableReason = ""
+        } catch {
+            activeNodeRuntimeEndpoint = nil
+            nodeRuntimeUnavailableReason = error.localizedDescription
+            rebuildProviders()
+            throw error
+        }
         let updated = StoredConfiguration(
             id: record.id,
             name: record.name,
@@ -4480,6 +4523,40 @@ final class AppState: ObservableObject {
             return false
         }
         return NodeBundleRuntimeService.supports(sourceURL)
+    }
+
+    private func startNodeRuntimeStatusMonitoring() {
+        guard nodeRuntimeStatusTask == nil, let environment else { return }
+        nodeRuntimeStatusTask = Task { @MainActor [weak self] in
+            let updates = await environment.nodeBundleRuntime.statusUpdates()
+            for await status in updates {
+                guard !Task.isCancelled, let self else { return }
+                self.applyNodeRuntimeStatus(status)
+            }
+        }
+    }
+
+    private func applyNodeRuntimeStatus(_ status: NodeRuntimeStatus) {
+        switch status {
+        case .running(let endpoint):
+            activeNodeRuntimeEndpoint = endpoint
+            nodeRuntimeUnavailableReason = ""
+        case .starting:
+            activeNodeRuntimeEndpoint = nil
+            nodeRuntimeUnavailableReason = "Node Runtime 正在启动"
+        case .restarting(let attempt, let reason):
+            activeNodeRuntimeEndpoint = nil
+            nodeRuntimeUnavailableReason = "Node Runtime 正在第 \(attempt) 次恢复：\(reason)"
+        case .failed(let reason):
+            activeNodeRuntimeEndpoint = nil
+            nodeRuntimeUnavailableReason = reason
+        case .stopped:
+            activeNodeRuntimeEndpoint = nil
+            nodeRuntimeUnavailableReason = "Node Runtime 已停止"
+        }
+        if activeConfigurationUsesNodeRuntime, activeConfiguration != nil {
+            rebuildProviders()
+        }
     }
 
     private func selectedSiteSettingKey(for configurationID: UUID) -> String {
@@ -4651,12 +4728,22 @@ final class AppState: ObservableObject {
             providers = [:]
             return
         }
-        let baseURL = activeConfigurationRecord?.baseURL
+        let usesNodeRuntime = activeConfigurationUsesNodeRuntime
+        let baseURL = usesNodeRuntime
+            ? activeNodeRuntimeEndpoint
+            : activeConfigurationRecord?.baseURL
         let httpClient = configuredHTTPClient(environment: environment)
         providers = Dictionary(
             uniqueKeysWithValues: visibleSites.map { site in
                 let provider: SiteProvider
-                if NodeHTTPSpiderSiteProvider.canHandle(
+                if usesNodeRuntime,
+                   site.extra["okNodeRuntime"] == .bool(true),
+                   activeNodeRuntimeEndpoint == nil {
+                    provider = NodeRuntimeUnavailableSiteProvider(
+                        site: site,
+                        reason: nodeRuntimeUnavailableReason
+                    )
+                } else if NodeHTTPSpiderSiteProvider.canHandle(
                     site: site,
                     baseURL: baseURL
                 ), let baseURL {

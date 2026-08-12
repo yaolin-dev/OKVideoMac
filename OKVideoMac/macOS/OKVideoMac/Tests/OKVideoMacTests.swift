@@ -3420,6 +3420,278 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertTrue(NodeBundleRuntimeService.supports(node))
     }
 
+    func testOfflineLegacyCacheMigratesWithExplicitTOFUTrust() async throws {
+        let fixture = try makeLegacyCacheFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(fixture: fixture)
+
+        let snapshot = try await service.prepareBundleForTesting(
+            from: fixture.sourceURL
+        )
+
+        XCTAssertEqual(snapshot.sha256, NodeBundleRuntimeService.sha256Hex(fixture.script))
+        XCTAssertEqual(snapshot.trustState, .legacyTOFU)
+        let metadataURL = fixture.cacheDirectory
+            .appendingPathComponent("NodeBundles")
+            .appendingPathComponent(snapshot.cacheKey)
+            .appendingPathComponent("metadata.json")
+        let metadata = try JSONDecoder().decode(
+            NodeBundleRuntimeService.CacheMetadata.self,
+            from: Data(contentsOf: metadataURL)
+        )
+        XCTAssertEqual(metadata.trustState, .legacyTOFU)
+        XCTAssertNotEqual(metadata.trustState, .publisherSHA256)
+    }
+
+    func testUnpinnedHTTPRedirectDiscardsDownloadAndMigratesLegacyCache() async throws {
+        let fixture = try makeLegacyCacheFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let untrustedDownload = Data("module.exports = { network: true };".utf8)
+        let untrustedMD5 = NodeBundleRuntimeService.md5Hex(untrustedDownload)
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.path.hasSuffix(".md5") {
+                return HTTPResponse(
+                    url: try XCTUnwrap(URL(
+                        string: "http://cdn.invalid/current.js.md5"
+                    )),
+                    statusCode: 200,
+                    headers: [:],
+                    body: Data(untrustedMD5.utf8)
+                )
+            }
+            return HTTPResponse(
+                url: try XCTUnwrap(URL(
+                    string: "http://cdn.invalid/current.jpg"
+                )),
+                statusCode: 200,
+                headers: [:],
+                body: untrustedDownload
+            )
+        }
+        let service = NodeBundleRuntimeService(
+            applicationSupportDirectory: fixture.applicationSupportDirectory,
+            cacheDirectory: fixture.cacheDirectory,
+            remoteHTTPClient: client
+        )
+
+        let snapshot = try await service.prepareBundleForTesting(
+            from: fixture.sourceURL
+        )
+
+        XCTAssertEqual(snapshot.trustState, .legacyTOFU)
+        XCTAssertEqual(
+            snapshot.sha256,
+            NodeBundleRuntimeService.sha256Hex(fixture.script)
+        )
+        XCTAssertNotEqual(
+            snapshot.sha256,
+            NodeBundleRuntimeService.sha256Hex(untrustedDownload)
+        )
+    }
+
+    func testLegacyMigrationRejectsMD5Mismatch() async throws {
+        let fixture = try makeLegacyCacheFixture(checksum: String(repeating: "0", count: 32))
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(fixture: fixture)
+
+        do {
+            _ = try await service.prepareBundleForTesting(from: fixture.sourceURL)
+            XCTFail("MD5 不匹配的旧缓存不应迁移")
+        } catch {
+            guard case NodeBundleRuntimeError.legacyMD5Mismatch = error else {
+                return XCTFail("意外错误：\(error)")
+            }
+        }
+    }
+
+    func testMigratedCacheRehashRejectsTampering() async throws {
+        let fixture = try makeLegacyCacheFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(fixture: fixture)
+        let snapshot = try await service.prepareBundleForTesting(from: fixture.sourceURL)
+        let migratedScript = fixture.cacheDirectory
+            .appendingPathComponent("NodeBundles")
+            .appendingPathComponent(snapshot.cacheKey)
+            .appendingPathComponent("index.js")
+        try Data("module.exports = { tampered: true };".utf8)
+            .write(to: migratedScript, options: .atomic)
+
+        do {
+            _ = try await service.prepareBundleForTesting(from: fixture.sourceURL)
+            XCTFail("篡改后的新缓存不应进入执行路径")
+        } catch {
+            guard case NodeBundleRuntimeError.integrityRejected = error else {
+                return XCTFail("意外错误：\(error)")
+            }
+        }
+    }
+
+    func testValidNewCacheIsPreferredOverChangedLegacyCache() async throws {
+        let fixture = try makeLegacyCacheFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(fixture: fixture)
+        let first = try await service.prepareBundleForTesting(from: fixture.sourceURL)
+        let descriptor = try NodeBundleSourceDescriptor(url: fixture.sourceURL)
+        let legacyScript = fixture.cacheDirectory
+            .appendingPathComponent("NodeBundles")
+            .appendingPathComponent(descriptor.legacyCacheKey)
+            .appendingPathComponent("index.js")
+        try Data("module.exports = { changed: true };".utf8)
+            .write(to: legacyScript, options: .atomic)
+
+        let second = try await service.prepareBundleForTesting(from: fixture.sourceURL)
+        XCTAssertEqual(second.sha256, first.sha256)
+        XCTAssertEqual(second.trustState, .legacyTOFU)
+    }
+
+    func testEmptyNewCacheDirectoryDoesNotBlockLegacyMigration() async throws {
+        let fixture = try makeLegacyCacheFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let descriptor = try NodeBundleSourceDescriptor(url: fixture.sourceURL)
+        let emptyNewCache = fixture.cacheDirectory
+            .appendingPathComponent("NodeBundles")
+            .appendingPathComponent(descriptor.cacheKey)
+        try FileManager.default.createDirectory(
+            at: emptyNewCache,
+            withIntermediateDirectories: true
+        )
+        let service = makeOfflineRuntime(fixture: fixture)
+
+        let snapshot = try await service.prepareBundleForTesting(from: fixture.sourceURL)
+
+        XCTAssertEqual(snapshot.trustState, .legacyTOFU)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: emptyNewCache.appendingPathComponent("metadata.json").path
+        ))
+    }
+
+    func testInterruptedLegacyMigrationLeavesNoExecutableNewCache() async throws {
+        enum FixtureError: Error { case interrupted }
+        let fixture = try makeLegacyCacheFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            migrationCommitHook: { throw FixtureError.interrupted }
+        )
+        let descriptor = try NodeBundleSourceDescriptor(url: fixture.sourceURL)
+
+        do {
+            _ = try await service.prepareBundleForTesting(from: fixture.sourceURL)
+            XCTFail("提交前中断应导致迁移失败")
+        } catch {
+            guard case NodeBundleRuntimeError.legacyMigrationFailed = error else {
+                return XCTFail("意外错误：\(error)")
+            }
+        }
+        let root = fixture.cacheDirectory.appendingPathComponent("NodeBundles")
+        let destination = root.appendingPathComponent(descriptor.cacheKey)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        let leftovers = try FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix(".\(descriptor.cacheKey).tmp-") }
+        XCTAssertTrue(leftovers.isEmpty)
+    }
+
+    func testUnavailableNodeProviderReportsRuntimeFailureWithoutUsingStaleEndpoint() async throws {
+        let provider = NodeRuntimeUnavailableSiteProvider(
+            site: SiteConfiguration(
+                key: "nodejs_offline",
+                name: "离线站点",
+                type: 3,
+                api: "/spider/offline/3",
+                extra: ["okNodeRuntime": .bool(true)]
+            ),
+            reason: "内置 Node 启动失败"
+        )
+
+        do {
+            _ = try await provider.search(keyword: "测试", page: 1, quick: false)
+            XCTFail("端点失效时不应发出业务请求")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("端点不可用"))
+            XCTAssertTrue(error.localizedDescription.contains("启动失败"))
+        }
+    }
+
+    func testNodeRestartPolicyIsBoundedExponentialBackoff() {
+        XCTAssertEqual(NodeBundleRuntimeService.restartDelays, [1, 2, 5])
+    }
+
+    func testIntentionalStopPublishesStoppedAndDoesNotRestart() async throws {
+        let fixture = try makeLegacyCacheFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(fixture: fixture)
+
+        await service.stop()
+
+        let status = await service.currentStatus()
+        XCTAssertEqual(status, .stopped)
+    }
+
+    private struct LegacyCacheFixture {
+        let root: URL
+        let applicationSupportDirectory: URL
+        let cacheDirectory: URL
+        let sourceURL: URL
+        let script: Data
+    }
+
+    private func makeLegacyCacheFixture(
+        checksum suppliedChecksum: String? = nil
+    ) throws -> LegacyCacheFixture {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("okvideo-node-migration-\(UUID().uuidString)")
+        let support = root.appendingPathComponent("Application Support")
+        let cache = root.appendingPathComponent("Caches")
+        try FileManager.default.createDirectory(
+            at: support,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: cache,
+            withIntermediateDirectories: true
+        )
+        let source = try XCTUnwrap(
+            URL(string: "https://fixture.invalid/index.js.md5#source=fixture&version=1")
+        )
+        let descriptor = try NodeBundleSourceDescriptor(url: source)
+        let legacy = cache
+            .appendingPathComponent("NodeBundles")
+            .appendingPathComponent(descriptor.legacyCacheKey)
+        try FileManager.default.createDirectory(
+            at: legacy,
+            withIntermediateDirectories: true
+        )
+        let script = Data("module.exports = {};".utf8)
+        let checksum = suppliedChecksum ?? NodeBundleRuntimeService.md5Hex(script)
+        try script.write(to: legacy.appendingPathComponent("index.js"))
+        try Data(checksum.utf8).write(
+            to: legacy.appendingPathComponent("index.js.md5")
+        )
+        return LegacyCacheFixture(
+            root: root,
+            applicationSupportDirectory: support,
+            cacheDirectory: cache,
+            sourceURL: source,
+            script: script
+        )
+    }
+
+    private func makeOfflineRuntime(
+        fixture: LegacyCacheFixture,
+        migrationCommitHook: (() throws -> Void)? = nil
+    ) -> NodeBundleRuntimeService {
+        NodeBundleRuntimeService(
+            applicationSupportDirectory: fixture.applicationSupportDirectory,
+            cacheDirectory: fixture.cacheDirectory,
+            remoteHTTPClient: NodeProviderStubHTTPClient { _ in
+                throw URLError(.notConnectedToInternet)
+            },
+            migrationCommitHook: migrationCommitHook
+        )
+    }
+
     func testNodeProviderUsesPOSTHomeWithoutAndroidCapability() async throws {
         let site = SiteConfiguration(
             key: "nodejs_fixture",

@@ -7,9 +7,15 @@ enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
     case missingTrustedSHA256(finalURL: URL)
     case sha256Mismatch(expected: String, actual: String, finalURL: URL)
     case integrityRejected(String)
+    case legacyCacheUnavailable(String)
+    case legacyMD5Mismatch(expected: String, actual: String)
+    case legacyMigrationFailed(String)
+    case invalidCacheMetadata(String)
     case bundledNodeMissing
     case invalidNodeEnvironment(String)
     case nodeLaunchFailed(String)
+    case nodeExitedUnexpectedly(String)
+    case endpointUnavailable(String)
 
     var errorDescription: String? {
         switch self {
@@ -21,18 +27,37 @@ enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
             return "安全拒绝：Node bundle SHA-256 不匹配（最终地址：\(LogRedactor.url(finalURL))，期望 \(expected)，实际 \(actual)）"
         case .integrityRejected(let detail):
             return "安全拒绝：Node bundle 完整性校验失败：\(detail)"
+        case .legacyCacheUnavailable(let detail):
+            return "Node bundle 下载失败，且没有可迁移的离线旧缓存：\(detail)"
+        case .legacyMD5Mismatch(let expected, let actual):
+            return "安全拒绝：旧缓存 MD5 不匹配（期望 \(expected)，实际 \(actual)）"
+        case .legacyMigrationFailed(let detail):
+            return "Node 旧缓存迁移失败：\(detail)"
+        case .invalidCacheMetadata(let detail):
+            return "安全拒绝：Node 缓存元数据无效：\(detail)"
         case .bundledNodeMissing:
             return "内置 Node 缺失：应用包中没有可执行的 NodeRuntime/node，请重新安装 Release 版本"
         case .invalidNodeEnvironment(let detail):
             return "Node 运行环境不满足安全要求：\(detail)"
         case .nodeLaunchFailed(let detail):
             return "内置 Node 启动失败：\(detail)"
+        case .nodeExitedUnexpectedly(let detail):
+            return "Node 运行进程意外退出：\(detail)"
+        case .endpointUnavailable(let detail):
+            return "Node 服务端点不可用：\(detail)"
         }
     }
 
     var allowsCachedFallback: Bool {
-        if case .downloadFailed = self { return true }
-        return false
+        switch self {
+        case .downloadFailed, .missingTrustedSHA256:
+            // Never execute the just-downloaded unpinned HTTP bytes. A
+            // pre-existing cache may still be used after its own MD5/SHA-256
+            // validation (including one-time legacy TOFU migration).
+            return true
+        default:
+            return false
+        }
     }
 }
 
@@ -48,6 +73,7 @@ struct NodeBundleSourceDescriptor: Equatable {
     let expectedSHA256: String?
     let pinIdentity: String
     let cacheKey: String
+    let legacyCacheKey: String
 
     static func supports(_ url: URL) -> Bool {
         guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
@@ -138,6 +164,12 @@ struct NodeBundleSourceDescriptor: Equatable {
                     .utf8
             )
         )
+        legacyCacheKey = Self.sha256Hex(
+            Data(
+                (checksumURL.absoluteString + "\n" + (authorizationHeader ?? ""))
+                    .utf8
+            )
+        )
     }
 
     private static func fragmentValues(_ fragment: String?) -> [String: String] {
@@ -160,8 +192,28 @@ struct NodeBundleSourceDescriptor: Equatable {
     }
 }
 
+enum NodeBundleTrustState: String, Codable, Equatable, Sendable {
+    case httpsTransport
+    case publisherSHA256
+    case legacyTOFU
+}
+
+enum NodeRuntimeStatus: Equatable, Sendable {
+    case stopped
+    case starting
+    case running(URL)
+    case restarting(attempt: Int, reason: String)
+    case failed(String)
+}
+
+struct NodeBundleCacheSnapshot: Equatable, Sendable {
+    let cacheKey: String
+    let sha256: String
+    let trustState: NodeBundleTrustState
+}
+
 actor NodeBundleRuntimeService {
-    private struct CachedBundle {
+    private struct CachedBundle: Sendable {
         let scriptURL: URL
         let md5: String
         let sha256: String
@@ -169,14 +221,16 @@ actor NodeBundleRuntimeService {
         let finalChecksumURL: URL
         let finalScriptURL: URL
         let runtimeDirectory: URL
+        let trustState: NodeBundleTrustState
     }
 
-    private struct CacheMetadata: Codable, Equatable {
+    struct CacheMetadata: Codable, Equatable {
         let pinIdentity: String
         let finalChecksumURL: URL
         let finalScriptURL: URL
         let md5: String
         let sha256: String
+        let trustState: NodeBundleTrustState?
     }
 
     private static let maximumScriptSize = 16 * 1_024 * 1_024
@@ -188,24 +242,36 @@ actor NodeBundleRuntimeService {
     private let localHTTPClient: HTTPClient
     private let nodeExecutableOverride: URL?
     private let now: () -> Date
+    private let migrationCommitHook: (() throws -> Void)?
 
     private var process: Process?
     private var logHandle: FileHandle?
     private var activeBundleSHA256: String?
     private var serviceBaseURL: URL?
+    private var status: NodeRuntimeStatus = .stopped
+    private var statusContinuations: [UUID: AsyncStream<NodeRuntimeStatus>.Continuation] = [:]
+    private var desiredBundle: CachedBundle?
+    private var processGeneration = UUID()
+    private var restartTask: Task<Void, Never>?
+    private var healthMonitorTask: Task<Void, Never>?
+    private var restartAttempt = 0
+
+    static let restartDelays: [TimeInterval] = [1, 2, 5]
 
     init(
         applicationSupportDirectory: URL,
         cacheDirectory: URL,
         remoteHTTPClient: HTTPClient,
         nodeExecutableURL: URL? = nil,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        migrationCommitHook: (() throws -> Void)? = nil
     ) {
         self.applicationSupportDirectory = applicationSupportDirectory
         self.cacheDirectory = cacheDirectory
         self.remoteHTTPClient = remoteHTTPClient
         nodeExecutableOverride = nodeExecutableURL
         self.now = now
+        self.migrationCommitHook = migrationCommitHook
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.connectionProxyDictionary = [:]
@@ -243,7 +309,38 @@ actor NodeBundleRuntimeService {
     }
 
     func stop() {
-        stopProcess()
+        restartTask?.cancel()
+        restartTask = nil
+        healthMonitorTask?.cancel()
+        healthMonitorTask = nil
+        desiredBundle = nil
+        restartAttempt = 0
+        stopProcess(publishing: .stopped)
+    }
+
+    func statusUpdates() -> AsyncStream<NodeRuntimeStatus> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            statusContinuations[id] = continuation
+            continuation.yield(status)
+            continuation.onTermination = { [weak self] _ in
+                Task { await self?.removeStatusContinuation(id) }
+            }
+        }
+    }
+
+    func currentStatus() -> NodeRuntimeStatus {
+        status
+    }
+
+    func prepareBundleForTesting(from sourceURL: URL) async throws -> NodeBundleCacheSnapshot {
+        let descriptor = try NodeBundleSourceDescriptor(url: sourceURL)
+        let bundle = try await obtainBundle(descriptor)
+        return NodeBundleCacheSnapshot(
+            cacheKey: descriptor.cacheKey,
+            sha256: bundle.sha256,
+            trustState: bundle.trustState
+        )
     }
 
     static func normalizeConfiguration(_ data: Data) throws -> Data {
@@ -412,16 +509,37 @@ actor NodeBundleRuntimeService {
         } catch let downloadError {
             let allowsFallback = (downloadError as? NodeBundleRuntimeError)?
                 .allowsCachedFallback == true
-            if allowsFallback {
+            guard allowsFallback else { throw downloadError }
+
+            let currentCache = cacheURL(for: descriptor.cacheKey)
+            if FileManager.default.fileExists(atPath: currentCache.path) {
                 do {
-                    return try loadCachedBundle(descriptor)
-                } catch let cacheSecurityError as NodeBundleRuntimeError {
-                    throw cacheSecurityError
+                    return try loadCachedBundle(descriptor, cacheURL: currentCache)
                 } catch {
-                    throw downloadError
+                    // The first hardened build created the destination directory
+                    // before it knew whether metadata existed. Treat only a
+                    // completely empty directory as an interrupted cache write;
+                    // any executable/cache material must fail closed.
+                    let contents = try? FileManager.default.contentsOfDirectory(
+                        at: currentCache,
+                        includingPropertiesForKeys: nil
+                    )
+                    guard contents?.isEmpty == true else { throw error }
                 }
             }
-            throw downloadError
+            do {
+                return try migrateLegacyCache(descriptor)
+            } catch NodeBundleRuntimeError.legacyCacheUnavailable(let detail) {
+                throw NodeBundleRuntimeError.legacyCacheUnavailable(
+                    "\(downloadError.localizedDescription)；\(detail)"
+                )
+            } catch let migrationError as NodeBundleRuntimeError {
+                throw migrationError
+            } catch {
+                throw NodeBundleRuntimeError.legacyMigrationFailed(
+                    error.localizedDescription
+                )
+            }
         }
     }
 
@@ -507,54 +625,46 @@ actor NodeBundleRuntimeService {
             finalScriptURL: scriptResponse.url
         )
 
-        let directories = try bundleDirectories(descriptor)
-        let scriptURL = directories.cache.appendingPathComponent("index.js")
-        let checksumURL = directories.cache.appendingPathComponent("index.js.md5")
-        let metadataURL = directories.cache.appendingPathComponent("metadata.json")
+        let trustState: NodeBundleTrustState = descriptor.expectedSHA256 == nil
+            ? .httpsTransport
+            : .publisherSHA256
         let metadata = CacheMetadata(
             pinIdentity: descriptor.pinIdentity,
             finalChecksumURL: checksumResponse.url,
             finalScriptURL: scriptResponse.url,
             md5: checksum,
-            sha256: actualSHA256
-        )
-        try scriptResponse.body.write(to: scriptURL, options: .atomic)
-        try Data(checksum.utf8).write(to: checksumURL, options: .atomic)
-        try JSONEncoder().encode(metadata).write(to: metadataURL, options: .atomic)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: scriptURL.path
-        )
-        for privateFile in [checksumURL, metadataURL] {
-            try FileManager.default.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: privateFile.path
-            )
-        }
-        return CachedBundle(
-            scriptURL: scriptURL,
-            md5: checksum,
             sha256: actualSHA256,
-            expectedSHA256: descriptor.expectedSHA256,
-            finalChecksumURL: checksumResponse.url,
-            finalScriptURL: scriptResponse.url,
-            runtimeDirectory: directories.runtime
+            trustState: trustState
         )
+        let cacheURL = try installCacheAtomically(
+            descriptor: descriptor,
+            script: scriptResponse.body,
+            checksum: checksum,
+            metadata: metadata
+        )
+        return try loadCachedBundle(descriptor, cacheURL: cacheURL)
     }
 
     private func loadCachedBundle(
-        _ descriptor: NodeBundleSourceDescriptor
+        _ descriptor: NodeBundleSourceDescriptor,
+        cacheURL: URL
     ) throws -> CachedBundle {
-        let directories = try bundleDirectories(descriptor)
-        let scriptURL = directories.cache.appendingPathComponent("index.js")
-        let checksumURL = directories.cache.appendingPathComponent("index.js.md5")
-        let metadataURL = directories.cache.appendingPathComponent("metadata.json")
-        let metadata = try JSONDecoder().decode(
-            CacheMetadata.self,
-            from: Data(contentsOf: metadataURL)
-        )
+        let scriptURL = cacheURL.appendingPathComponent("index.js")
+        let checksumURL = cacheURL.appendingPathComponent("index.js.md5")
+        let metadataURL = cacheURL.appendingPathComponent("metadata.json")
+        let metadata: CacheMetadata
+        do {
+            metadata = try JSONDecoder().decode(
+                CacheMetadata.self,
+                from: Data(contentsOf: metadataURL)
+            )
+        } catch {
+            throw NodeBundleRuntimeError.invalidCacheMetadata(
+                error.localizedDescription
+            )
+        }
         guard metadata.pinIdentity == descriptor.pinIdentity else {
-            throw NodeBundleRuntimeError.integrityRejected(
+            throw NodeBundleRuntimeError.invalidCacheMetadata(
                 "缓存身份与当前 bundle URL/source/version 不一致"
             )
         }
@@ -565,6 +675,12 @@ actor NodeBundleRuntimeService {
         let expected = try String(contentsOf: checksumURL, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
+        guard expected.range(
+            of: "^[0-9a-f]{32}$",
+            options: .regularExpression
+        ) != nil else {
+            throw NodeBundleRuntimeError.invalidCacheMetadata("缓存 MD5 格式无效")
+        }
         let actual = Self.md5Hex(data)
         guard expected == actual, metadata.md5 == actual else {
             throw NodeBundleRuntimeError.integrityRejected("缓存 MD5 不匹配")
@@ -583,6 +699,8 @@ actor NodeBundleRuntimeService {
             requiresTrustedSHA256: requiresTrustedSHA256,
             finalScriptURL: metadata.finalScriptURL
         )
+        let trustState = metadata.trustState
+            ?? (descriptor.expectedSHA256 == nil ? .httpsTransport : .publisherSHA256)
         return CachedBundle(
             scriptURL: scriptURL,
             md5: expected,
@@ -590,38 +708,173 @@ actor NodeBundleRuntimeService {
             expectedSHA256: descriptor.expectedSHA256,
             finalChecksumURL: metadata.finalChecksumURL,
             finalScriptURL: metadata.finalScriptURL,
-            runtimeDirectory: directories.runtime
+            runtimeDirectory: try runtimeDirectory(for: descriptor),
+            trustState: trustState
         )
     }
 
-    private func bundleDirectories(
+    private func migrateLegacyCache(
         _ descriptor: NodeBundleSourceDescriptor
-    ) throws -> (cache: URL, runtime: URL) {
-        let cache = cacheDirectory
-            .appendingPathComponent("NodeBundles", isDirectory: true)
-            .appendingPathComponent(descriptor.cacheKey, isDirectory: true)
+    ) throws -> CachedBundle {
+        let legacyURL = cacheURL(for: descriptor.legacyCacheKey)
+        let scriptURL = legacyURL.appendingPathComponent("index.js")
+        let checksumURL = legacyURL.appendingPathComponent("index.js.md5")
+        guard FileManager.default.fileExists(atPath: scriptURL.path),
+              FileManager.default.fileExists(atPath: checksumURL.path) else {
+            throw NodeBundleRuntimeError.legacyCacheUnavailable(
+                "旧缓存目录不存在或缺少 index.js/index.js.md5"
+            )
+        }
+        let data = try Data(contentsOf: scriptURL, options: .mappedIfSafe)
+        guard data.count <= Self.maximumScriptSize else {
+            throw NodeBundleRuntimeError.integrityRejected("旧缓存超过 16 MiB 限制")
+        }
+        guard String(data: data, encoding: .utf8) != nil else {
+            throw NodeBundleRuntimeError.integrityRejected("旧缓存脚本不是有效 UTF-8")
+        }
+        let checksum = try String(contentsOf: checksumURL, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard checksum.range(
+            of: "^[0-9a-f]{32}$",
+            options: .regularExpression
+        ) != nil else {
+            throw NodeBundleRuntimeError.integrityRejected("旧缓存 MD5 格式无效")
+        }
+        let actualMD5 = Self.md5Hex(data)
+        guard checksum == actualMD5 else {
+            throw NodeBundleRuntimeError.legacyMD5Mismatch(
+                expected: checksum,
+                actual: actualMD5
+            )
+        }
+        let actualSHA256 = Self.sha256Hex(data)
+        let requiresPin = try Self.requiresTrustedSHA256(
+            finalChecksumURL: descriptor.checksumURL,
+            finalScriptURL: descriptor.scriptURL
+        )
+        try Self.validateTrustedSHA256(
+            expected: descriptor.expectedSHA256,
+            actual: actualSHA256,
+            requiresTrustedSHA256: requiresPin,
+            finalScriptURL: descriptor.scriptURL
+        )
+        let metadata = CacheMetadata(
+            pinIdentity: descriptor.pinIdentity,
+            finalChecksumURL: descriptor.checksumURL,
+            finalScriptURL: descriptor.scriptURL,
+            md5: checksum,
+            sha256: actualSHA256,
+            trustState: .legacyTOFU
+        )
+        let installedURL: URL
+        do {
+            installedURL = try installCacheAtomically(
+                descriptor: descriptor,
+                script: data,
+                checksum: checksum,
+                metadata: metadata,
+                beforeCommit: migrationCommitHook
+            )
+        } catch let error as NodeBundleRuntimeError {
+            throw error
+        } catch {
+            throw NodeBundleRuntimeError.legacyMigrationFailed(
+                error.localizedDescription
+            )
+        }
+        return try loadCachedBundle(descriptor, cacheURL: installedURL)
+    }
+
+    private func installCacheAtomically(
+        descriptor: NodeBundleSourceDescriptor,
+        script: Data,
+        checksum: String,
+        metadata: CacheMetadata,
+        beforeCommit: (() throws -> Void)? = nil
+    ) throws -> URL {
+        let root = cacheRootURL()
+        try secureDirectory(root)
+        let destination = cacheURL(for: descriptor.cacheKey)
+        let staging = root.appendingPathComponent(
+            ".\(descriptor.cacheKey).tmp-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try secureDirectory(staging)
+        var committed = false
+        defer {
+            if !committed {
+                try? FileManager.default.removeItem(at: staging)
+            }
+        }
+        let scriptURL = staging.appendingPathComponent("index.js")
+        let checksumURL = staging.appendingPathComponent("index.js.md5")
+        let metadataURL = staging.appendingPathComponent("metadata.json")
+        try script.write(to: scriptURL, options: .atomic)
+        try Data(checksum.utf8).write(to: checksumURL, options: .atomic)
+        try JSONEncoder().encode(metadata).write(to: metadataURL, options: .atomic)
+        for file in [scriptURL, checksumURL, metadataURL] {
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: file.path
+            )
+            let handle = try FileHandle(forWritingTo: file)
+            try handle.synchronize()
+            try handle.close()
+        }
+        _ = try loadCachedBundle(descriptor, cacheURL: staging)
+        try beforeCommit?()
+
+        if FileManager.default.fileExists(atPath: destination.path) {
+            _ = try FileManager.default.replaceItemAt(
+                destination,
+                withItemAt: staging,
+                backupItemName: nil,
+                options: [.usingNewMetadataOnly]
+            )
+        } else {
+            try FileManager.default.moveItem(at: staging, to: destination)
+        }
+        committed = true
+        return destination
+    }
+
+    private func cacheRootURL() -> URL {
+        cacheDirectory.appendingPathComponent("NodeBundles", isDirectory: true)
+    }
+
+    private func cacheURL(for key: String) -> URL {
+        cacheRootURL().appendingPathComponent(key, isDirectory: true)
+    }
+
+    private func runtimeDirectory(
+        for descriptor: NodeBundleSourceDescriptor
+    ) throws -> URL {
         let runtime = applicationSupportDirectory
             .appendingPathComponent("NodeRuntime", isDirectory: true)
             .appendingPathComponent(descriptor.cacheKey, isDirectory: true)
-        for directory in [cache, runtime] {
-            try FileManager.default.createDirectory(
-                at: directory,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            try FileManager.default.setAttributes(
-                [.posixPermissions: 0o700],
-                ofItemAtPath: directory.path
-            )
-        }
-        return (cache, runtime)
+        try secureDirectory(runtime)
+        return runtime
+    }
+
+    private func secureDirectory(_ directory: URL) throws {
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: directory.path
+        )
     }
 
     private func ensureServiceRunning(_ bundle: CachedBundle) async throws -> URL {
         do {
             try validateBundleForExecution(bundle)
         } catch {
-            stopProcess()
+            desiredBundle = nil
+            stopProcess(publishing: .failed(error.localizedDescription))
             throw error
         }
         if activeBundleSHA256 == bundle.sha256,
@@ -631,7 +884,21 @@ actor NodeBundleRuntimeService {
             return serviceBaseURL
         }
 
-        stopProcess()
+        restartTask?.cancel()
+        restartTask = nil
+        restartAttempt = 0
+        desiredBundle = bundle
+        stopProcess(publishing: .starting)
+        do {
+            return try await startProcess(bundle)
+        } catch {
+            stopProcess(publishing: .failed(error.localizedDescription))
+            throw error
+        }
+    }
+
+    private func startProcess(_ bundle: CachedBundle) async throws -> URL {
+        try validateBundleForExecution(bundle)
         let nodeExecutable = try nodeExecutableURL()
         let launcherURL = bundle.runtimeDirectory.appendingPathComponent("launcher.js")
         let logURL = bundle.runtimeDirectory.appendingPathComponent("node.log")
@@ -654,6 +921,8 @@ actor NodeBundleRuntimeService {
         try handle.truncate(atOffset: 0)
 
         let process = Process()
+        let generation = UUID()
+        processGeneration = generation
         process.executableURL = nodeExecutable
         process.arguments = [launcherURL.path]
         process.currentDirectoryURL = bundle.runtimeDirectory
@@ -664,6 +933,15 @@ actor NodeBundleRuntimeService {
         )
         process.standardOutput = handle
         process.standardError = handle
+        process.terminationHandler = { [weak self] terminatedProcess in
+            let detail = "退出码 \(terminatedProcess.terminationStatus)"
+            Task {
+                await self?.handleUnexpectedTermination(
+                    generation: generation,
+                    detail: detail
+                )
+            }
+        }
         do {
             try process.run()
         } catch {
@@ -679,22 +957,26 @@ actor NodeBundleRuntimeService {
 
         for _ in 0..<900 {
             guard process.isRunning else {
-                stopProcess()
-                throw AppError.configuration(
-                    "Node 资源服务启动失败，日志位于 \(logURL.path)"
+                process.terminationHandler = nil
+                stopProcess(publishing: nil)
+                throw NodeBundleRuntimeError.nodeLaunchFailed(
+                    "进程提前退出，日志位于 \(logURL.path)"
                 )
             }
             if let port = Self.port(fromLogAt: logURL),
                let baseURL = URL(string: "http://127.0.0.1:\(port)/"),
                await isHealthy(baseURL) {
                 serviceBaseURL = baseURL
+                publish(.running(baseURL))
+                startHealthMonitor(generation: generation, baseURL: baseURL)
                 return baseURL
             }
             try await Task.sleep(nanoseconds: 100_000_000)
         }
 
-        stopProcess()
-        throw AppError.configuration("Node 资源服务启动超过 90 秒")
+        process.terminationHandler = nil
+        stopProcess(publishing: nil)
+        throw NodeBundleRuntimeError.nodeLaunchFailed("资源服务启动超过 90 秒")
     }
 
     private func isHealthy(_ baseURL: URL) async -> Bool {
@@ -719,7 +1001,10 @@ actor NodeBundleRuntimeService {
         }
     }
 
-    private func stopProcess() {
+    private func stopProcess(publishing newStatus: NodeRuntimeStatus?) {
+        healthMonitorTask?.cancel()
+        healthMonitorTask = nil
+        process?.terminationHandler = nil
         if let process, process.isRunning {
             process.terminate()
         }
@@ -728,6 +1013,100 @@ actor NodeBundleRuntimeService {
         process = nil
         activeBundleSHA256 = nil
         serviceBaseURL = nil
+        if let newStatus {
+            publish(newStatus)
+        }
+    }
+
+    private func handleUnexpectedTermination(
+        generation: UUID,
+        detail: String
+    ) {
+        guard generation == processGeneration else { return }
+        guard case .running = status else { return }
+        try? logHandle?.close()
+        logHandle = nil
+        process = nil
+        activeBundleSHA256 = nil
+        serviceBaseURL = nil
+        healthMonitorTask?.cancel()
+        healthMonitorTask = nil
+        scheduleRestart(reason: detail)
+    }
+
+    private func startHealthMonitor(generation: UUID, baseURL: URL) {
+        healthMonitorTask?.cancel()
+        healthMonitorTask = Task { [weak self] in
+            var consecutiveFailures = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                let healthy = await self.isHealthy(baseURL)
+                if healthy {
+                    consecutiveFailures = 0
+                } else {
+                    consecutiveFailures += 1
+                    if consecutiveFailures >= 2 {
+                        await self.handleHealthFailure(generation: generation)
+                        return
+                    }
+                }
+            }
+        }
+    }
+
+    private func handleHealthFailure(generation: UUID) {
+        guard generation == processGeneration else { return }
+        guard case .running = status else { return }
+        stopProcess(publishing: nil)
+        scheduleRestart(reason: "连续健康检查失败")
+    }
+
+    private func scheduleRestart(reason: String) {
+        guard restartTask == nil, desiredBundle != nil else { return }
+        guard restartAttempt < Self.restartDelays.count else {
+            publish(.failed(
+                NodeBundleRuntimeError.nodeExitedUnexpectedly(
+                    "已完成 \(Self.restartDelays.count) 次恢复尝试：\(reason)"
+                ).localizedDescription
+            ))
+            return
+        }
+        let attempt = restartAttempt + 1
+        restartAttempt = attempt
+        let delay = Self.restartDelays[attempt - 1]
+        publish(.restarting(attempt: attempt, reason: reason))
+        restartTask = Task { [weak self] in
+            try? await Task.sleep(
+                nanoseconds: UInt64(delay * 1_000_000_000)
+            )
+            guard !Task.isCancelled else { return }
+            await self?.performRestart(attempt: attempt)
+        }
+    }
+
+    private func performRestart(attempt: Int) async {
+        restartTask = nil
+        guard case .restarting(let currentAttempt, _) = status,
+              currentAttempt == attempt,
+              let bundle = desiredBundle else { return }
+        do {
+            _ = try await startProcess(bundle)
+        } catch {
+            stopProcess(publishing: nil)
+            scheduleRestart(reason: error.localizedDescription)
+        }
+    }
+
+    private func publish(_ newStatus: NodeRuntimeStatus) {
+        status = newStatus
+        for continuation in statusContinuations.values {
+            continuation.yield(newStatus)
+        }
+    }
+
+    private func removeStatusContinuation(_ id: UUID) {
+        statusContinuations[id] = nil
     }
 
     private func validateBundleForExecution(_ bundle: CachedBundle) throws {

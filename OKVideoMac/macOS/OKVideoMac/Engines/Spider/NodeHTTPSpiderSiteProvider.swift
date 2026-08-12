@@ -1,6 +1,33 @@
 import Foundation
 import OKVideoCore
 
+struct NodeRuntimeUnavailableSiteProvider: SiteProvider {
+    let site: SiteConfiguration
+    let capability: SiteCapability = .javaScriptSpider
+    let reason: String
+
+    func home() async throws -> SiteHome { throw error }
+    func category(
+        id: String,
+        page: Int,
+        filters: [String: String]
+    ) async throws -> VideoPage { throw error }
+    func detail(id: String) async throws -> VideoDetail { throw error }
+    func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
+        throw error
+    }
+    func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
+        throw error
+    }
+    func action(_ action: String) async throws -> JSONValue { throw error }
+
+    private var error: AppError {
+        .spider(
+            NodeBundleRuntimeError.endpointUnavailable(reason).localizedDescription
+        )
+    }
+}
+
 struct NodeWebAuthorizationRequired: Error, LocalizedError, Equatable {
     let websiteURL: URL
     let title: String
