@@ -156,6 +156,11 @@ required_legal_files=(
   "$LEGAL_ROOT/Compliance/BINARY_SOURCE_MAPPING.md"
   "$LEGAL_ROOT/Compliance/OPEN_SOURCE_COMPLIANCE.md"
   "$LEGAL_ROOT/Compliance/OPEN_SOURCE_P0_STATUS.md"
+  "$LEGAL_ROOT/Compliance/APP_ICON_PROVENANCE.md"
+  "$LEGAL_ROOT/Compliance/MPL_GPL_COMBINATION_REVIEW.md"
+  "$LEGAL_ROOT/Compliance/SOURCE_RELEASE_PROCESS.md"
+  "$LEGAL_ROOT/Compliance/XPP3_1_1_3_3_REMEDIATION.md"
+  "$LEGAL_ROOT/Compliance/SOURCE_RELEASE_INDEX.json"
   "$LEGAL_ROOT/Compliance/BUILD_OUTPUT_SHA256.txt"
 )
 for required_legal_file in "${required_legal_files[@]}"; do
@@ -169,6 +174,16 @@ if ! grep -Fq 'AndroidDexBridge-release.apk' \
    ! grep -Fq 'xpp3:xpp3:1.1.3.3' \
   "$LEGAL_ROOT/AndroidDexBridge/THIRD_PARTY_NOTICES.md"; then
   echo "The legal payload does not link the APK to its dependency notice." >&2
+  exit 1
+fi
+apk_dex_packages="$("$APKANALYZER" dex packages "$BRIDGE_APK")"
+if grep -Fq 'org.xmlpull.mxp1' <<<"$apk_dex_packages"; then
+  echo "The excluded xpp3 implementation is still present in the APK." >&2
+  exit 1
+fi
+if ! grep -Fq 'juniversalchardet-1.0.3-sources.jar' \
+  "$LEGAL_ROOT/Compliance/SOURCE_RELEASE_INDEX.json"; then
+  echo "The source release index does not map MPL covered source." >&2
   exit 1
 fi
 OUTPUT_HASH_MANIFEST="$LEGAL_ROOT/Compliance/BUILD_OUTPUT_SHA256.txt"

@@ -9,22 +9,22 @@ are grouped below only for reporting the remaining work.
 
 | P0 | Before | Phase 1 | Phase 2 evidence/status | Final status |
 | --- | --- | --- | --- | --- |
-| GPL mpv source chain | No consolidated fixed source/patch/build mapping | Exact upstream, patch and build mapping established | Immutable bundle implementation pending | **OPEN** |
-| FongMi/catvod GPL chain | Incorrectly described as not bundled | Exact copied/modified source and APK mapping established | Immutable APK source bundle pending | **OPEN** |
+| GPL mpv source chain | No consolidated fixed source/patch/build mapping | Exact upstream, patch and build mapping established | Release generator includes fixed archive, patch, license, options and build recipe and binds their archive to the binary | **CLOSED technically; publication pending** |
+| FongMi/catvod GPL chain | Incorrectly described as not bundled | Exact copied/modified source and APK mapping established | Project archive plus source-only upstream commit subset, change notice, wrapper and dependency lock are generated and hash-bound | **CLOSED technically; publication pending** |
 | Binary provenance | Node and native chain unresolved | Node/mpv/QuickJS verified; native chain partial | Reproducible native recipe and experiment pending | **OPEN** |
 | stax/xpp3 exact licenses | Both unknown | stax confirmed; xpp3 unresolved | xpp3 exact source recovery exhausted; artifact excluded without adding a replacement, APK builds and runs in an isolated emulator | **CLOSED** |
-| MPL covered source | No source delivery/review | Notice and MPL text present | Exact covered-source bundle and boundary review pending | **OPEN** |
+| MPL covered source | No source delivery/review | Notice and MPL text present | Exact sources JAR/hash and 58-file boundary delivered; DEX combination documented | **NEEDS LEGAL REVIEW** |
 | App icon rights | No author/license evidence | Unresolved | Old asset replaced; retained no-input ImageGen source, prompt, master, hashes and processing record | **CLOSED — VERIFIED OWNED** |
-| Binary/source release mapping | No immutable mapping | Mapping document exists | Source-release artifacts pending | **OPEN** |
+| Binary/source release mapping | No immutable mapping | Mapping document exists | Deterministic generator, source index, outer manifest and SHA256SUMS implemented; public upload still required | **CLOSED technically; publication pending** |
 
 ## Remaining P0 count
 
-Three grouped P0 items remain open after Phase 2A:
+The remaining release blockers after the Phase 2B implementation are:
 
-1. immutable corresponding-source publication for project/GPL mpv/GPL APK;
+1. upload the generated immutable binary/source set to the same persistent
+   release location;
 2. reproducible exact provenance for FFmpeg/native dylibs;
-3. MPL-1.1 covered-source delivery and GPLv3 combination legal review.
+3. counsel review of the documented juniversalchardet/GPL DEX combination.
 
-Phase 2A closes the xpp3 and icon P0s without changing playback behavior. The
-rating remains **Blocked** until the remaining source-release, MPL and native
-provenance work is complete and verified.
+Exact MPL covered-source delivery is no longer missing. The rating remains
+**Blocked** while publication, legal review and native provenance are open.

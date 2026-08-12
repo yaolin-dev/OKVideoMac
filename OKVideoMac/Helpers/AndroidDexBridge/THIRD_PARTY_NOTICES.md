@@ -25,7 +25,7 @@ License texts referenced below are distributed in the repository-level
 | OkHttp `okhttp:5.1.0`, `okhttp-android:5.1.0`, `okhttp-dnsoverhttps:5.1.0`, `logging-interceptor:5.1.0`; Okio `okio:3.15.0`, `okio-jvm:3.15.0` | `Apache-2.0` | Square contributors | `Apache-2.0.txt` |
 | Gson `2.13.1`; Error Prone annotations `2.38.0` | `Apache-2.0` | Google contributors | `Apache-2.0.txt` |
 | Guava `33.4.8-android`, `failureaccess:1.0.3`, `listenablefuture:9999.0-empty-to-avoid-conflict-with-guava`; `jspecify:1.0.0`; J2ObjC annotations `3.0.0` | `Apache-2.0` | Google, JSpecify, and contributors | `Apache-2.0.txt` |
-| `com.googlecode.juniversalchardet:juniversalchardet:1.0.3` | `MPL-1.1` | Mozilla universalchardet authors / Java port contributors | `juniversalchardet-MPL-1.1.txt`; covered-source obligation applies |
+| `com.googlecode.juniversalchardet:juniversalchardet:1.0.3` | POM: `MPL-1.1`; 57/58 source headers offer MPL-1.1/GPL-2.0-or-later/LGPL-2.1-or-later | Mozilla universalchardet authors / Java port contributors | `juniversalchardet-MPL-1.1.txt`; exact sources JAR SHA `3d1cb067f5cfe3cc19b77c837156f22368462af9acac5dd878e785966758fc27` and covered-file list are delivered; combination **Needs legal review** |
 | `com.orhanobut:logger:2.2.0`; Android support annotations `27.1.0` | `Apache-2.0` | logger and Android contributors | `Apache-2.0.txt` |
 | `com.github.thegrizzlylabs:sardine-android:0.9`; `org.simpleframework:simple-xml:2.7.1`; `stax:stax-api:1.0.1` | `Apache-2.0` | respective upstream authors | `Apache-2.0.txt` |
 | `stax:stax:1.2.0` | `Apache-2.0` — **CONFIRMED** | Copyright 2004 BEA Systems | `stax-1.2.0-Apache-2.0.txt` |

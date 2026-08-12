@@ -89,6 +89,8 @@ fi
 NODE_ENTITLEMENTS="$PROJECT_DIR/Supporting/NodeHelper.entitlements"
 DERIVED_DATA="${OKVIDEOMAC_DERIVED_DATA:-$OKVIDEOMAC_BUILD_ROOT/DerivedData}"
 ARTIFACTS="${OKVIDEOMAC_ARTIFACTS:-$OKVIDEOMAC_BUILD_ROOT/Artifacts}"
+SOURCE_RELEASE_DIR="${OKVIDEOMAC_SOURCE_RELEASE_DIR:-$ARTIFACTS/SourceRelease}"
+SOURCE_RELEASE_CACHE="${OKVIDEOMAC_SOURCE_RELEASE_CACHE:-$OKVIDEOMAC_BUILD_ROOT/Downloads/SourceRelease}"
 APP_SOURCE="$DERIVED_DATA/Build/Products/Release/OKVideoMac.app"
 APP_DESTINATION="$ARTIFACTS/OKVideoMac.app"
 LIBMPV_ROOT="$OKVIDEOMAC_BUILD_ROOT/libmpv"
@@ -112,6 +114,10 @@ legal_source_files=(
   "$REPOSITORY_ROOT/Docs/BINARY_SOURCE_MAPPING.md"
   "$REPOSITORY_ROOT/Docs/OPEN_SOURCE_COMPLIANCE.md"
   "$REPOSITORY_ROOT/Docs/OPEN_SOURCE_P0_STATUS.md"
+  "$REPOSITORY_ROOT/Docs/APP_ICON_PROVENANCE.md"
+  "$REPOSITORY_ROOT/Docs/MPL_GPL_COMBINATION_REVIEW.md"
+  "$REPOSITORY_ROOT/Docs/SOURCE_RELEASE_PROCESS.md"
+  "$REPOSITORY_ROOT/Docs/XPP3_1_1_3_3_REMEDIATION.md"
 )
 for legal_source_file in "${legal_source_files[@]}"; do
   if [[ ! -f "$legal_source_file" ]]; then
@@ -186,6 +192,22 @@ if [[ -z "$APP_VERSION" || -z "$APP_BUILD" ]]; then
   exit 1
 fi
 ARCHIVE="$ARTIFACTS/OKVideoMac-${APP_VERSION}-macOS-arm64.zip"
+SOURCE_RELEASE_BASE="OKVideoMac-${APP_VERSION}-build${APP_BUILD}"
+SOURCE_RELEASE_INDEX="$SOURCE_RELEASE_DIR/${SOURCE_RELEASE_BASE}-SOURCE_RELEASE_INDEX.json"
+source_release_arguments=(
+  --output-dir "$SOURCE_RELEASE_DIR"
+  --cache-dir "$SOURCE_RELEASE_CACHE"
+  --commit HEAD
+  --apk "$ANDROID_BRIDGE_APK"
+)
+if [[ "${OKVIDEOMAC_SOURCE_RELEASE_OFFLINE:-0}" == "1" ]]; then
+  source_release_arguments+=(--offline)
+fi
+"$SCRIPT_DIR/create-source-release.sh" "${source_release_arguments[@]}"
+if [[ ! -f "$SOURCE_RELEASE_INDEX" ]]; then
+  echo "Source release index is missing: $SOURCE_RELEASE_INDEX" >&2
+  exit 1
+fi
 FRAMEWORKS="$APP_DESTINATION/Contents/Frameworks"
 mkdir -p "$FRAMEWORKS"
 
@@ -220,6 +242,15 @@ cp "$REPOSITORY_ROOT/Docs/OPEN_SOURCE_COMPLIANCE.md" \
   "$LEGAL_ROOT/Compliance/"
 cp "$REPOSITORY_ROOT/Docs/OPEN_SOURCE_P0_STATUS.md" \
   "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/Docs/APP_ICON_PROVENANCE.md" \
+  "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/Docs/MPL_GPL_COMBINATION_REVIEW.md" \
+  "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/Docs/SOURCE_RELEASE_PROCESS.md" \
+  "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/Docs/XPP3_1_1_3_3_REMEDIATION.md" \
+  "$LEGAL_ROOT/Compliance/"
+cp "$SOURCE_RELEASE_INDEX" "$LEGAL_ROOT/Compliance/SOURCE_RELEASE_INDEX.json"
 
 if [[ ! -f "$APP_DESTINATION/Contents/Resources/LICENSE" ]] ||
    [[ ! -f "$APP_DESTINATION/Contents/Resources/NOTICE.md" ]]; then
@@ -395,5 +426,17 @@ elif [[ "$PACKAGE_MODE" == "distribution" ]]; then
   echo "Notarization step not executed because credentials were not requested."
 fi
 
+# Bind the final (possibly notarized) binary ZIP to the already embedded
+# source-side index. This outer manifest cannot be embedded in the App without
+# creating a circular ZIP/signature hash.
+"$SCRIPT_DIR/create-source-release.sh" \
+  --output-dir "$SOURCE_RELEASE_DIR" \
+  --cache-dir "$SOURCE_RELEASE_CACHE" \
+  --commit HEAD \
+  --apk "$ANDROID_BRIDGE_APK" \
+  --binary "$ARCHIVE" \
+  --offline
+
 echo "Packaged app: $APP_DESTINATION"
 echo "Archive: $ARCHIVE"
+echo "Source release: $SOURCE_RELEASE_DIR"

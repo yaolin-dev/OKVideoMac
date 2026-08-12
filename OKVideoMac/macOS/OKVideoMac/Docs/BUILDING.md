@@ -104,7 +104,15 @@ libmpv 脚本会构建 `libmpv.dylib` 和 `libOKMPVBridge.dylib`。Xcode 工程�
 - 逐个 ad-hoc 签名；
 - 拒绝 Homebrew、MacPorts、`/usr/local` 和 `/Users/...` 绝对依赖；
 - 拒绝非 arm64、桥接未指向 `@rpath/libmpv.dylib` 或无效签名；
-- 输出可分发 zip 和对应 SHA-256。
+- 从精确 Git commit 生成 project/third-party/license 源码归档；
+- 把 source-side index 放入 App legal payload；
+- 输出可分发 zip、外部 binary/source manifest 和统一 SHA-256。
+
+源码发行缓存默认位于
+`$OKVIDEOMAC_BUILD_ROOT/Downloads/SourceRelease`，产物位于
+`$OKVIDEOMAC_BUILD_ROOT/Artifacts/SourceRelease`。缓存预填后可设置
+`OKVIDEOMAC_SOURCE_RELEASE_OFFLINE=1` 强制离线校验。正式打包要求干净工作树；
+详见仓库根目录 `Docs/SOURCE_RELEASE_PROCESS.md`。
 
 App 通过运行时桥接载入 libmpv，因此主可执行文件不直接链接 mpv；验证脚本
 检查 `libOKMPVBridge.dylib` 的链接和整个 dylib 闭包。依赖或完整 Xcode 缺失
