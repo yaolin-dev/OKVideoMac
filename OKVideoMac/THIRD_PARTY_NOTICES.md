@@ -53,9 +53,10 @@ Gradle `releaseRuntimeClasspath`. The exact artifact/version/license table is
 maintained in `Helpers/AndroidDexBridge/THIRD_PARTY_NOTICES.md` and is copied
 into the App's `Resources/Legal/AndroidDexBridge/` directory.
 
-One APK dependency remains a release blocker: the exact license and historical
-source for `xpp3:xpp3:1.1.3.3` could not be proven. No license has been guessed
-or assigned. See `Docs/OPEN_SOURCE_P0_STATUS.md`.
+The legacy transitive dependency `xpp3:xpp3:1.1.3.3` is explicitly excluded
+from the Phase 2 APK because its exact corresponding source could not be
+recovered. It is not part of the distributed runtime inventory. See
+`Docs/XPP3_1_1_3_3_REMEDIATION.md`.
 
 ## Build tooling distributed in source form
 

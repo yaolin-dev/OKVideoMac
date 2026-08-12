@@ -29,7 +29,6 @@ License texts referenced below are distributed in the repository-level
 | `com.orhanobut:logger:2.2.0`; Android support annotations `27.1.0` | `Apache-2.0` | logger and Android contributors | `Apache-2.0.txt` |
 | `com.github.thegrizzlylabs:sardine-android:0.9`; `org.simpleframework:simple-xml:2.7.1`; `stax:stax-api:1.0.1` | `Apache-2.0` | respective upstream authors | `Apache-2.0.txt` |
 | `stax:stax:1.2.0` | `Apache-2.0` — **CONFIRMED** | Copyright 2004 BEA Systems | `stax-1.2.0-Apache-2.0.txt` |
-| `xpp3:xpp3:1.1.3.3` | **UNRESOLVED** | exact historical source/rights not proven | **P0 remains open; no guessed license file** |
 | `com.hierynomus:smbj:0.14.0`; `com.hierynomus:asn-one:0.6.0` | `Apache-2.0` | Hierynomus and contributors | `Apache-2.0.txt` |
 | `org.bouncycastle:bcprov-jdk18on:1.79` | Bouncy Castle license (`MIT`-style) | Legion of the Bouncy Castle Inc. | `Bouncy-Castle-MIT.txt` |
 | `net.engio:mbassador:1.3.0` | `MIT` | mbassador authors | `mbassador-MIT.txt` |
@@ -42,7 +41,7 @@ distribution is build tooling rather than APK runtime content; its own complete
 `LICENSE` and `NOTICE` are nevertheless retained as `Gradle-LICENSE.txt` and
 `Gradle-NOTICE.txt`.
 
-## Exact-version stax and xpp3 findings
+## Exact-version stax and removed xpp3 findings
 
 ### `stax:stax:1.2.0` — CONFIRMED
 
@@ -53,13 +52,16 @@ Systems and the Apache License 2.0. The resolved binary JAR SHA-256 is
 `df6905a047b05e23bc91f03ba57ac2f87c1ddf83e048aa0e5bd13169d5ebf0d9`.
 This proves the exact version's license and source family.
 
-### `xpp3:xpp3:1.1.3.3` — UNRESOLVED — P0 remains open
+### `xpp3:xpp3:1.1.3.3` — excluded from the distributed APK
 
 The resolved binary JAR SHA-256 is
 `b14a6716def83417542d5515677d947fecd2597c125f2c82aa9be8792f66b5ee`.
 Its exact Maven POM declares no license or source-control location, the JAR has
 no license text, and Maven Central provides no matching source JAR. Licensing
 statements for later `1.1.4c` code cannot prove the rights for `1.1.3.3` and
-are deliberately not extrapolated. Phase 2 must either obtain authoritative
-historical source/license evidence for this exact artifact or replace it after
-dependency review.
+are deliberately not extrapolated. The original-author Git/CVS migration also
+lacks an exact 1.1.3.3 source revision. Phase 2 therefore classifies this
+artifact as `REPLACEMENT REQUIRED` and excludes it from `sardine-android:0.9`'s
+transitive graph. Android supplies the XML Pull API/implementation; no new
+artifact is introduced. See `Docs/XPP3_1_1_3_3_REMEDIATION.md` for compatibility
+evidence. Current APK DEX inventory contains no `org/xmlpull/mxp1` class.

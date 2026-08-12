@@ -115,21 +115,22 @@ for that per-package manifest.
 | `Frameworks/libsqlite3.dylib` | `0cc34425224eb33e959bd2ff2b6d67e19f3e4208c5b79c4de27115dff2dd272c` |
 | `Frameworks/libz.1.dylib` | `9b5d38572e4d584ec4354b8721f77bcff30ac6f70ad5385e226d8cbb0d13a5f7` |
 
-## Unresolved inputs
+## Remediated inputs and assets
 
 | Component | Evidence | Status / required action |
 | --- | --- | --- |
-| `xpp3:xpp3:1.1.3.3` | exact POM/JAR contain no license or SCM metadata; no matching source JAR; binary SHA `b14a6716def83417542d5515677d947fecd2597c125f2c82aa9be8792f66b5ee` | `UNRESOLVED`; obtain authoritative historical source/license or replace in Phase 2 |
-| App icon asset set | first tracked in project baseline; no design source, author declaration, purchase/license record, or generation record found; audited outputs: `AppIcon.icns` SHA `9894bac379de362871080b72182953b7cf787885aeab4eba99d36ad87ca125f7`, `Assets.car` SHA `f2967fe5f7314cecd9c83531f480d632a9811a159459eae72670b387177906f8` | `UNRESOLVED`; obtain ownership/license evidence or redesign in Phase 2 |
+| `xpp3:xpp3:1.1.3.3` | exact POM/JAR contain no license or SCM metadata; no matching source JAR; binary SHA `b14a6716def83417542d5515677d947fecd2597c125f2c82aa9be8792f66b5ee`; original-author repository confirms the license family but not exact source | `REPLACEMENT REQUIRED`; excluded from the Phase 2 APK, so no unresolved artifact is distributed |
+| App icon asset set | Phase 2 ImageGen source SHA `147b37b7eada29efb420b5b78836d9d8c695cb9d17e1718f12fc39551063c835`; retained 1024px master SHA `1b795d144d5d0244b109e97380d91af7dc48965e0a8eb3993c85968dd6becd3d`; prompt and processing record in `Docs/APP_ICON_PROVENANCE.md` | `VERIFIED OWNED` for project release provenance; replaces the unresolved baseline asset |
 
 ### App icon rights investigation
 
-The asset catalog first appears in Git commit
+The superseded asset catalog first appears in Git commit
 `f084439a7ccdf2b3b931a60851a44d3883be7c3e` (`chore: establish 0.3.20
 rollback baseline`), authored as
 `Codex <codex@openai.com>` on 2026-08-08. PNG file timestamps predate that
 commit, but timestamps and commit authorship do not establish copyright. A
 repository and history search found no original SVG, PSD, Sketch, Figma, or
 other design source, no AI-generation record, and no commission, purchase, or
-license document. The only defensible result is `UNRESOLVED`; the asset was not
-deleted or replaced in Phase 1.
+license document. Its only defensible result remains `UNRESOLVED`; Phase 2
+replaces it completely with the independently generated, documented asset in
+`Docs/APP_ICON_PROVENANCE.md`.
