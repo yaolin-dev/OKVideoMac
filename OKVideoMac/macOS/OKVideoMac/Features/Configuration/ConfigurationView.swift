@@ -301,7 +301,7 @@ private struct ConfigurationImportSheet: View {
             TextField("点播配置名称（可选）", text: $name)
             if mode == .remote {
                 TextField("https://example.com/config.json", text: $remoteURL)
-                Text("仅允许 HTTP/HTTPS；响应上限 5 MiB，超时 20 秒。")
+                Text("普通配置允许 HTTP/HTTPS。远程 Node bundle 建议 HTTPS；最终为 HTTP 时需在 .js.md5 地址后附 #sha256=<64位哈希>，可再附 &source=<源ID>&version=<版本>。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else {

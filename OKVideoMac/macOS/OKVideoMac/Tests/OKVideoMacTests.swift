@@ -3304,6 +3304,122 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
     }
 
+    func testDescriptorBindsPinToURLSourceAndVersionWithoutSendingFragment() throws {
+        let hash = String(repeating: "a", count: 64)
+        let first = try NodeBundleSourceDescriptor(
+            url: try XCTUnwrap(URL(
+                string: "http://example.invalid/index.js.md5#sha256=\(hash)&source=alpha&version=1"
+            ))
+        )
+        let nextVersion = try NodeBundleSourceDescriptor(
+            url: try XCTUnwrap(URL(
+                string: "http://example.invalid/index.js.md5#sha256=\(hash)&source=alpha&version=2"
+            ))
+        )
+
+        XCTAssertEqual(first.expectedSHA256, hash)
+        XCTAssertEqual(first.sourceID, "alpha")
+        XCTAssertEqual(first.declaredVersion, "1")
+        XCTAssertNil(first.checksumURL.fragment)
+        XCTAssertNil(first.scriptURL.fragment)
+        XCTAssertNotEqual(first.pinIdentity, nextVersion.pinIdentity)
+        XCTAssertNotEqual(first.cacheKey, nextVersion.cacheKey)
+    }
+
+    func testFinalRedirectURLsDetermineWhetherTrustedPinIsRequired() throws {
+        let http = try XCTUnwrap(URL(string: "http://cdn.invalid/index.js"))
+        let https = try XCTUnwrap(URL(string: "https://cdn.invalid/index.js"))
+
+        XCTAssertFalse(try NodeBundleRuntimeService.requiresTrustedSHA256(
+            finalChecksumURL: https.appendingPathExtension("md5"),
+            finalScriptURL: https
+        ))
+        XCTAssertTrue(try NodeBundleRuntimeService.requiresTrustedSHA256(
+            finalChecksumURL: http.appendingPathExtension("md5"),
+            finalScriptURL: https
+        ))
+        XCTAssertTrue(try NodeBundleRuntimeService.requiresTrustedSHA256(
+            finalChecksumURL: https.appendingPathExtension("md5"),
+            finalScriptURL: http
+        ))
+    }
+
+    func testHTTPBundleWithoutPinIsSecurityRejection() throws {
+        let finalURL = try XCTUnwrap(URL(string: "http://cdn.invalid/index.js"))
+
+        XCTAssertThrowsError(try NodeBundleRuntimeService.validateTrustedSHA256(
+            expected: nil,
+            actual: String(repeating: "b", count: 64),
+            requiresTrustedSHA256: true,
+            finalScriptURL: finalURL
+        )) { error in
+            guard case NodeBundleRuntimeError.missingTrustedSHA256 = error else {
+                return XCTFail("意外错误：\(error)")
+            }
+            XCTAssertTrue(error.localizedDescription.contains("安全拒绝"))
+        }
+    }
+
+    func testTrustedPinMismatchIsSecurityRejection() throws {
+        let finalURL = try XCTUnwrap(URL(string: "http://cdn.invalid/index.js"))
+
+        XCTAssertThrowsError(try NodeBundleRuntimeService.validateTrustedSHA256(
+            expected: String(repeating: "a", count: 64),
+            actual: String(repeating: "b", count: 64),
+            requiresTrustedSHA256: true,
+            finalScriptURL: finalURL
+        )) { error in
+            guard case NodeBundleRuntimeError.sha256Mismatch = error else {
+                return XCTFail("意外错误：\(error)")
+            }
+        }
+    }
+
+    func testExecutionPathRehashRejectsTamperedCache() throws {
+        let original = Data("module.exports = {};".utf8)
+        let tampered = Data("module.exports = { pwned: true };".utf8)
+        let httpsScript = try XCTUnwrap(URL(string: "https://cdn.invalid/index.js"))
+
+        XCTAssertThrowsError(try NodeBundleRuntimeService.validateBundleDataForExecution(
+            tampered,
+            expectedMD5: NodeBundleRuntimeService.md5Hex(original),
+            expectedInternalSHA256: NodeBundleRuntimeService.sha256Hex(original),
+            trustedSHA256: nil,
+            finalChecksumURL: httpsScript.appendingPathExtension("md5"),
+            finalScriptURL: httpsScript
+        )) { error in
+            guard case NodeBundleRuntimeError.integrityRejected = error else {
+                return XCTFail("意外错误：\(error)")
+            }
+        }
+    }
+
+    func testNodeEnvironmentIsMinimalAndDropsInjectionVariables() throws {
+        let runtime = URL(fileURLWithPath: "/tmp/okvideo-node-runtime")
+        let environment = try NodeBundleRuntimeService.sanitizedNodeEnvironment(
+            bundlePath: runtime.appendingPathComponent("index.js"),
+            runtimeDirectory: runtime,
+            temporaryDirectory: runtime.appendingPathComponent("tmp"),
+            parentPID: 42
+        )
+
+        XCTAssertEqual(environment["OKVIDEO_PARENT_PID"], "42")
+        XCTAssertEqual(environment["PATH"], "/usr/bin:/bin:/usr/sbin:/sbin")
+        XCTAssertNil(environment["NODE_OPTIONS"])
+        XCTAssertNil(environment["NODE_PATH"])
+        XCTAssertFalse(environment.keys.contains { $0.hasPrefix("DYLD_") })
+        XCTAssertFalse(environment.keys.contains { $0.hasPrefix("LD_") })
+        XCTAssertNil(environment["SSH_AUTH_SOCK"])
+    }
+
+    func testOrdinaryHTTPConfigurationIsOutsideNodeBundlePolicy() throws {
+        let ordinary = try XCTUnwrap(URL(string: "http://example.invalid/config.json"))
+        let node = try XCTUnwrap(URL(string: "http://example.invalid/index.js.md5"))
+
+        XCTAssertFalse(NodeBundleRuntimeService.supports(ordinary))
+        XCTAssertTrue(NodeBundleRuntimeService.supports(node))
+    }
+
     func testNodeProviderUsesPOSTHomeWithoutAndroidCapability() async throws {
         let site = SiteConfiguration(
             key: "nodejs_fixture",

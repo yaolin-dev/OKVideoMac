@@ -2,6 +2,40 @@ import CryptoKit
 import Foundation
 import OKVideoCore
 
+enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
+    case downloadFailed(resource: String, detail: String)
+    case missingTrustedSHA256(finalURL: URL)
+    case sha256Mismatch(expected: String, actual: String, finalURL: URL)
+    case integrityRejected(String)
+    case bundledNodeMissing
+    case invalidNodeEnvironment(String)
+    case nodeLaunchFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .downloadFailed(let resource, let detail):
+            return "Node \(resource)下载失败：\(detail)"
+        case .missingTrustedSHA256(let finalURL):
+            return "安全拒绝：HTTP Node 可执行 bundle 缺少可信 SHA-256（最终地址：\(LogRedactor.url(finalURL))）"
+        case .sha256Mismatch(let expected, let actual, let finalURL):
+            return "安全拒绝：Node bundle SHA-256 不匹配（最终地址：\(LogRedactor.url(finalURL))，期望 \(expected)，实际 \(actual)）"
+        case .integrityRejected(let detail):
+            return "安全拒绝：Node bundle 完整性校验失败：\(detail)"
+        case .bundledNodeMissing:
+            return "内置 Node 缺失：应用包中没有可执行的 NodeRuntime/node，请重新安装 Release 版本"
+        case .invalidNodeEnvironment(let detail):
+            return "Node 运行环境不满足安全要求：\(detail)"
+        case .nodeLaunchFailed(let detail):
+            return "内置 Node 启动失败：\(detail)"
+        }
+    }
+
+    var allowsCachedFallback: Bool {
+        if case .downloadFailed = self { return true }
+        return false
+    }
+}
+
 struct NodeBundleSourceDescriptor: Equatable {
     static let checksumSuffix = ".js.md5"
 
@@ -9,6 +43,10 @@ struct NodeBundleSourceDescriptor: Equatable {
     let checksumURL: URL
     let scriptURL: URL
     let authorizationHeader: String?
+    let sourceID: String?
+    let declaredVersion: String?
+    let expectedSHA256: String?
+    let pinIdentity: String
     let cacheKey: String
 
     static func supports(_ url: URL) -> Bool {
@@ -33,6 +71,21 @@ struct NodeBundleSourceDescriptor: Equatable {
         guard (username == nil) == (password == nil) else {
             throw AppError.configuration("Node 资源地址的账号和密码必须同时提供")
         }
+
+        let fragmentValues = Self.fragmentValues(components.fragment)
+        let expectedSHA256 = fragmentValues["sha256"]?.lowercased()
+        if let expectedSHA256,
+           expectedSHA256.range(
+            of: "^[0-9a-f]{64}$",
+            options: .regularExpression
+           ) == nil {
+            throw AppError.configuration(
+                "Node 资源 URL fragment 中的 sha256 必须是 64 位十六进制"
+            )
+        }
+        let sourceID = Self.nonEmptyFragmentValue(fragmentValues["source"])
+        let declaredVersion = Self.nonEmptyFragmentValue(fragmentValues["version"])
+        components.fragment = nil
 
         // Credentials must never travel over cleartext HTTP. Existing source
         // lists commonly publish an http:// URL even though the same host has
@@ -67,12 +120,39 @@ struct NodeBundleSourceDescriptor: Equatable {
         self.checksumURL = checksumURL
         self.scriptURL = scriptURL
         self.authorizationHeader = authorizationHeader
+        self.sourceID = sourceID
+        self.declaredVersion = declaredVersion
+        self.expectedSHA256 = expectedSHA256
+        pinIdentity = [
+            "request=\(checksumURL.absoluteString)",
+            "source=\(sourceID ?? "-")",
+            "version=\(declaredVersion ?? "-")"
+        ].joined(separator: "\n")
         cacheKey = Self.sha256Hex(
             Data(
-                (checksumURL.absoluteString + "\n" + (authorizationHeader ?? ""))
+                ([
+                    pinIdentity,
+                    "pin=\(expectedSHA256 ?? "-")",
+                    "authorization=\(authorizationHeader ?? "-")"
+                ].joined(separator: "\n"))
                     .utf8
             )
         )
+    }
+
+    private static func fragmentValues(_ fragment: String?) -> [String: String] {
+        guard let fragment, !fragment.isEmpty else { return [:] }
+        var parser = URLComponents()
+        parser.percentEncodedQuery = fragment
+        return (parser.queryItems ?? []).reduce(into: [:]) { values, item in
+            guard let value = item.value else { return }
+            values[item.name.lowercased()] = value
+        }
+    }
+
+    private static func nonEmptyFragmentValue(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func sha256Hex(_ data: Data) -> String {
@@ -85,7 +165,18 @@ actor NodeBundleRuntimeService {
         let scriptURL: URL
         let md5: String
         let sha256: String
+        let expectedSHA256: String?
+        let finalChecksumURL: URL
+        let finalScriptURL: URL
         let runtimeDirectory: URL
+    }
+
+    private struct CacheMetadata: Codable, Equatable {
+        let pinIdentity: String
+        let finalChecksumURL: URL
+        let finalScriptURL: URL
+        let md5: String
+        let sha256: String
     }
 
     private static let maximumScriptSize = 16 * 1_024 * 1_024
@@ -209,16 +300,128 @@ actor NodeBundleRuntimeService {
             .joined()
     }
 
+    static func requiresTrustedSHA256(
+        finalChecksumURL: URL,
+        finalScriptURL: URL
+    ) throws -> Bool {
+        let schemes = [finalChecksumURL, finalScriptURL].map {
+            $0.scheme?.lowercased() ?? ""
+        }
+        guard schemes.allSatisfy({ $0 == "http" || $0 == "https" }) else {
+            throw NodeBundleRuntimeError.integrityRejected(
+                "重定向后的地址不是 HTTP/HTTPS"
+            )
+        }
+        return schemes.contains("http")
+    }
+
+    static func validateTrustedSHA256(
+        expected: String?,
+        actual: String,
+        requiresTrustedSHA256: Bool,
+        finalScriptURL: URL
+    ) throws {
+        if requiresTrustedSHA256, expected == nil {
+            throw NodeBundleRuntimeError.missingTrustedSHA256(
+                finalURL: finalScriptURL
+            )
+        }
+        guard let expected else { return }
+        guard expected == actual else {
+            throw NodeBundleRuntimeError.sha256Mismatch(
+                expected: expected,
+                actual: actual,
+                finalURL: finalScriptURL
+            )
+        }
+    }
+
+    static func sanitizedNodeEnvironment(
+        bundlePath: URL,
+        runtimeDirectory: URL,
+        temporaryDirectory: URL,
+        parentPID: Int32 = ProcessInfo.processInfo.processIdentifier
+    ) throws -> [String: String] {
+        let environment = [
+            "HOST": "127.0.0.1",
+            "PORT": "0",
+            "NODE_ENV": "production",
+            "HOME": runtimeDirectory.path,
+            "TMPDIR": temporaryDirectory.path,
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "LANG": "en_US.UTF-8",
+            "LC_CTYPE": "UTF-8",
+            "OKVIDEO_BUNDLE_PATH": bundlePath.path,
+            "OKVIDEO_PARENT_PID": String(parentPID)
+        ]
+        let forbiddenNames = environment.keys.filter {
+            $0 == "NODE_OPTIONS"
+                || $0 == "NODE_PATH"
+                || $0.hasPrefix("DYLD_")
+                || $0.hasPrefix("LD_")
+        }
+        guard forbiddenNames.isEmpty else {
+            throw NodeBundleRuntimeError.invalidNodeEnvironment(
+                "包含禁止变量：\(forbiddenNames.sorted().joined(separator: ", "))"
+            )
+        }
+        return environment
+    }
+
+    static func validateBundleDataForExecution(
+        _ data: Data,
+        expectedMD5: String,
+        expectedInternalSHA256: String,
+        trustedSHA256: String?,
+        finalChecksumURL: URL,
+        finalScriptURL: URL
+    ) throws {
+        guard data.count <= Self.maximumScriptSize else {
+            throw NodeBundleRuntimeError.integrityRejected(
+                "执行前脚本超过 16 MiB 限制"
+            )
+        }
+        let actualMD5 = Self.md5Hex(data)
+        guard actualMD5 == expectedMD5 else {
+            throw NodeBundleRuntimeError.integrityRejected(
+                "执行前 MD5 不匹配，缓存可能已被篡改"
+            )
+        }
+        let actualSHA256 = Self.sha256Hex(data)
+        guard actualSHA256 == expectedInternalSHA256 else {
+            throw NodeBundleRuntimeError.integrityRejected(
+                "执行前 SHA-256 不匹配，缓存可能已被篡改"
+            )
+        }
+        try Self.validateTrustedSHA256(
+            expected: trustedSHA256,
+            actual: actualSHA256,
+            requiresTrustedSHA256: try Self.requiresTrustedSHA256(
+                finalChecksumURL: finalChecksumURL,
+                finalScriptURL: finalScriptURL
+            ),
+            finalScriptURL: finalScriptURL
+        )
+    }
+
     private func obtainBundle(
         _ descriptor: NodeBundleSourceDescriptor
     ) async throws -> CachedBundle {
         do {
             return try await downloadBundle(descriptor)
-        } catch {
-            if let cached = try? loadCachedBundle(descriptor) {
-                return cached
+        } catch let downloadError {
+            let allowsFallback = (downloadError as? NodeBundleRuntimeError)?
+                .allowsCachedFallback == true
+            if allowsFallback {
+                do {
+                    return try loadCachedBundle(descriptor)
+                } catch let cacheSecurityError as NodeBundleRuntimeError {
+                    throw cacheSecurityError
+                } catch {
+                    throw downloadError
+                }
             }
-            throw error
+            throw downloadError
         }
     }
 
@@ -230,57 +433,111 @@ actor NodeBundleRuntimeService {
             headers["Authorization"] = authorization
         }
 
-        let checksumResponse = try await remoteHTTPClient.send(
-            HTTPRequest(
-                url: descriptor.checksumURL,
-                headers: headers,
-                timeout: 20,
-                maximumResponseBytes: 256,
-                retryPolicy: HTTPRetryPolicy(maximumRetries: 2)
+        let checksumResponse: HTTPResponse
+        do {
+            checksumResponse = try await remoteHTTPClient.send(
+                HTTPRequest(
+                    url: descriptor.checksumURL,
+                    headers: headers,
+                    timeout: 20,
+                    maximumResponseBytes: 256,
+                    retryPolicy: HTTPRetryPolicy(maximumRetries: 2)
+                )
             )
-        )
-        let checksum = try checksumResponse.text()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
+        } catch {
+            throw NodeBundleRuntimeError.downloadFailed(
+                resource: "MD5 校验文件",
+                detail: error.localizedDescription
+            )
+        }
+        let checksum: String
+        do {
+            checksum = try checksumResponse.text()
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+        } catch {
+            throw NodeBundleRuntimeError.integrityRejected(
+                "上游 .md5 响应无法解码"
+            )
+        }
         guard checksum.range(
             of: "^[0-9a-f]{32}$",
             options: .regularExpression
         ) != nil else {
-            throw AppError.configuration("Node 资源的 .md5 响应不是 32 位 MD5")
+            throw NodeBundleRuntimeError.integrityRejected(
+                "上游 .md5 响应不是 32 位 MD5"
+            )
         }
 
-        let scriptResponse = try await remoteHTTPClient.send(
-            HTTPRequest(
-                url: descriptor.scriptURL,
-                headers: headers,
-                timeout: 60,
-                maximumResponseBytes: Self.maximumScriptSize,
-                retryPolicy: HTTPRetryPolicy(maximumRetries: 2)
+        let scriptResponse: HTTPResponse
+        do {
+            scriptResponse = try await remoteHTTPClient.send(
+                HTTPRequest(
+                    url: descriptor.scriptURL,
+                    headers: headers,
+                    timeout: 60,
+                    maximumResponseBytes: Self.maximumScriptSize,
+                    retryPolicy: HTTPRetryPolicy(maximumRetries: 2)
+                )
             )
+        } catch {
+            throw NodeBundleRuntimeError.downloadFailed(
+                resource: "可执行脚本",
+                detail: error.localizedDescription
+            )
+        }
+        let requiresTrustedSHA256 = try Self.requiresTrustedSHA256(
+            finalChecksumURL: checksumResponse.url,
+            finalScriptURL: scriptResponse.url
         )
         let actualMD5 = Self.md5Hex(scriptResponse.body)
         guard actualMD5 == checksum else {
-            throw AppError.configuration(
-                "Node 资源 MD5 校验失败：期望 \(checksum)，实际 \(actualMD5)"
+            throw NodeBundleRuntimeError.integrityRejected(
+                "上游 MD5 不匹配（期望 \(checksum)，实际 \(actualMD5)）"
             )
         }
         guard String(data: scriptResponse.body, encoding: .utf8) != nil else {
-            throw AppError.configuration("Node 资源脚本不是有效 UTF-8")
+            throw NodeBundleRuntimeError.integrityRejected("脚本不是有效 UTF-8")
         }
+        let actualSHA256 = Self.sha256Hex(scriptResponse.body)
+        try Self.validateTrustedSHA256(
+            expected: descriptor.expectedSHA256,
+            actual: actualSHA256,
+            requiresTrustedSHA256: requiresTrustedSHA256,
+            finalScriptURL: scriptResponse.url
+        )
 
         let directories = try bundleDirectories(descriptor)
         let scriptURL = directories.cache.appendingPathComponent("index.js")
         let checksumURL = directories.cache.appendingPathComponent("index.js.md5")
+        let metadataURL = directories.cache.appendingPathComponent("metadata.json")
+        let metadata = CacheMetadata(
+            pinIdentity: descriptor.pinIdentity,
+            finalChecksumURL: checksumResponse.url,
+            finalScriptURL: scriptResponse.url,
+            md5: checksum,
+            sha256: actualSHA256
+        )
         try scriptResponse.body.write(to: scriptURL, options: .atomic)
         try Data(checksum.utf8).write(to: checksumURL, options: .atomic)
+        try JSONEncoder().encode(metadata).write(to: metadataURL, options: .atomic)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o600],
             ofItemAtPath: scriptURL.path
         )
+        for privateFile in [checksumURL, metadataURL] {
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: privateFile.path
+            )
+        }
         return CachedBundle(
             scriptURL: scriptURL,
             md5: checksum,
-            sha256: Self.sha256Hex(scriptResponse.body),
+            sha256: actualSHA256,
+            expectedSHA256: descriptor.expectedSHA256,
+            finalChecksumURL: checksumResponse.url,
+            finalScriptURL: scriptResponse.url,
             runtimeDirectory: directories.runtime
         )
     }
@@ -291,21 +548,48 @@ actor NodeBundleRuntimeService {
         let directories = try bundleDirectories(descriptor)
         let scriptURL = directories.cache.appendingPathComponent("index.js")
         let checksumURL = directories.cache.appendingPathComponent("index.js.md5")
+        let metadataURL = directories.cache.appendingPathComponent("metadata.json")
+        let metadata = try JSONDecoder().decode(
+            CacheMetadata.self,
+            from: Data(contentsOf: metadataURL)
+        )
+        guard metadata.pinIdentity == descriptor.pinIdentity else {
+            throw NodeBundleRuntimeError.integrityRejected(
+                "缓存身份与当前 bundle URL/source/version 不一致"
+            )
+        }
         let data = try Data(contentsOf: scriptURL, options: .mappedIfSafe)
         guard data.count <= Self.maximumScriptSize else {
-            throw AppError.configuration("Node 资源缓存超过 16 MiB 限制")
+            throw NodeBundleRuntimeError.integrityRejected("缓存超过 16 MiB 限制")
         }
         let expected = try String(contentsOf: checksumURL, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         let actual = Self.md5Hex(data)
-        guard expected == actual else {
-            throw AppError.configuration("Node 资源缓存 MD5 校验失败")
+        guard expected == actual, metadata.md5 == actual else {
+            throw NodeBundleRuntimeError.integrityRejected("缓存 MD5 不匹配")
         }
+        let actualSHA256 = Self.sha256Hex(data)
+        guard metadata.sha256 == actualSHA256 else {
+            throw NodeBundleRuntimeError.integrityRejected("缓存 SHA-256 不匹配")
+        }
+        let requiresTrustedSHA256 = try Self.requiresTrustedSHA256(
+            finalChecksumURL: metadata.finalChecksumURL,
+            finalScriptURL: metadata.finalScriptURL
+        )
+        try Self.validateTrustedSHA256(
+            expected: descriptor.expectedSHA256,
+            actual: actualSHA256,
+            requiresTrustedSHA256: requiresTrustedSHA256,
+            finalScriptURL: metadata.finalScriptURL
+        )
         return CachedBundle(
             scriptURL: scriptURL,
             md5: expected,
-            sha256: Self.sha256Hex(data),
+            sha256: actualSHA256,
+            expectedSHA256: descriptor.expectedSHA256,
+            finalChecksumURL: metadata.finalChecksumURL,
+            finalScriptURL: metadata.finalScriptURL,
             runtimeDirectory: directories.runtime
         )
     }
@@ -334,6 +618,12 @@ actor NodeBundleRuntimeService {
     }
 
     private func ensureServiceRunning(_ bundle: CachedBundle) async throws -> URL {
+        do {
+            try validateBundleForExecution(bundle)
+        } catch {
+            stopProcess()
+            throw error
+        }
         if activeBundleSHA256 == bundle.sha256,
            process?.isRunning == true,
            let serviceBaseURL,
@@ -367,23 +657,19 @@ actor NodeBundleRuntimeService {
         process.executableURL = nodeExecutable
         process.arguments = [launcherURL.path]
         process.currentDirectoryURL = bundle.runtimeDirectory
-        var environment = ProcessInfo.processInfo.environment
-        environment["HOST"] = "127.0.0.1"
-        environment["PORT"] = "0"
-        environment["NODE_ENV"] = "production"
-        environment["HOME"] = bundle.runtimeDirectory.path
-        environment["TMPDIR"] = temporaryDirectory.path
-        environment["OKVIDEO_BUNDLE_PATH"] = bundle.scriptURL.path
-        environment["OKVIDEO_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
-        process.environment = environment
+        process.environment = try Self.sanitizedNodeEnvironment(
+            bundlePath: bundle.scriptURL,
+            runtimeDirectory: bundle.runtimeDirectory,
+            temporaryDirectory: temporaryDirectory
+        )
         process.standardOutput = handle
         process.standardError = handle
         do {
             try process.run()
         } catch {
             try? handle.close()
-            throw AppError.configuration(
-                "无法启动内置 Node 服务：\(error.localizedDescription)"
+            throw NodeBundleRuntimeError.nodeLaunchFailed(
+                error.localizedDescription
             )
         }
 
@@ -444,25 +730,52 @@ actor NodeBundleRuntimeService {
         serviceBaseURL = nil
     }
 
-    private func nodeExecutableURL() throws -> URL {
-        let candidates = [
-            nodeExecutableOverride,
-            Bundle.main.resourceURL?
-                .appendingPathComponent("NodeRuntime", isDirectory: true)
-                .appendingPathComponent("node"),
-            URL(fileURLWithPath: "/opt/homebrew/opt/node@22-direct/bin/node"),
-            URL(fileURLWithPath: "/opt/homebrew/bin/node"),
-            URL(fileURLWithPath: "/opt/local/bin/node"),
-            URL(fileURLWithPath: "/usr/local/bin/node")
-        ].compactMap { $0 }
-        if let executable = candidates.first(where: {
-            FileManager.default.isExecutableFile(atPath: $0.path)
-        }) {
-            return executable
-        }
-        throw AppError.configuration(
-            "应用包缺少 NodeRuntime/node，请重新安装 Release 版本"
+    private func validateBundleForExecution(_ bundle: CachedBundle) throws {
+        let data = try Data(contentsOf: bundle.scriptURL, options: .mappedIfSafe)
+        try Self.validateBundleDataForExecution(
+            data,
+            expectedMD5: bundle.md5,
+            expectedInternalSHA256: bundle.sha256,
+            trustedSHA256: bundle.expectedSHA256,
+            finalChecksumURL: bundle.finalChecksumURL,
+            finalScriptURL: bundle.finalScriptURL
         )
+    }
+
+    private func nodeExecutableURL() throws -> URL {
+        #if DEBUG
+        if let nodeExecutableOverride {
+            guard FileManager.default.isExecutableFile(
+                atPath: nodeExecutableOverride.path
+            ) else {
+                throw NodeBundleRuntimeError.invalidNodeEnvironment(
+                    "测试/Debug 指定的 Node 不可执行"
+                )
+            }
+            return nodeExecutableOverride
+        }
+        #endif
+
+        guard let resources = Bundle.main.resourceURL else {
+            throw NodeBundleRuntimeError.bundledNodeMissing
+        }
+        let resourceRoot = resources.resolvingSymlinksInPath()
+        let executable = resources
+            .appendingPathComponent("NodeRuntime", isDirectory: true)
+            .appendingPathComponent("node")
+            .resolvingSymlinksInPath()
+        let allowedPrefix = resourceRoot.path.hasSuffix("/")
+            ? resourceRoot.path
+            : resourceRoot.path + "/"
+        guard executable.path.hasPrefix(allowedPrefix) else {
+            throw NodeBundleRuntimeError.invalidNodeEnvironment(
+                "NodeRuntime/node 解析到 App Bundle 之外"
+            )
+        }
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
+            throw NodeBundleRuntimeError.bundledNodeMissing
+        }
+        return executable
     }
 
     private static func port(fromLogAt url: URL) -> Int? {

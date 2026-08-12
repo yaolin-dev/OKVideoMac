@@ -41,10 +41,20 @@
 | Headers 网络规则 | Supported | host 匹配、Header/Cookie 合并和日志脱敏已接入 |
 | `hosts` / DoH / proxy | Partial | 配置可无损解析，但 URLSession 执行策略尚未完整对齐上游 |
 | QuickJS JavaScript Spider | Partial | C/Swift/App 路径可构建且 smoke test 通过；上游 bundle 兼容面仍需持续样本验证 |
-| Node.js Spider | Experimental | 已有下载、MD5 兼容校验、本地服务和缓存；远程 bundle 仍具有 Node 完整能力 |
+| Node.js Spider | Experimental | Release 仅使用 App 内置 Node；保留上游 MD5，并对远程 bundle 增加 SHA-256、最终 URL 与缓存执行前校验；远程 bundle 仍具有 Node 完整能力 |
 | Android Java/DEX Spider | Experimental | Release APK 可构建和验证；完整路径依赖外部 Android SDK/ADB/Emulator |
 | Python Spider | Not Implemented | 当前不提供 Python 运行时 |
 | WebView Sniffer | Experimental | WKWebView 嗅探和候选媒体上报已接入，但网页行为依赖具体站点 |
+
+### 远程 Node bundle 信任规则
+
+- HTTPS bundle 可沿用现有 `.js.md5` 地址；下载后仍保存并复验内部 SHA-256。
+- 如果 MD5 文件或可执行脚本重定向后的最终 URL 任一为 HTTP，配置地址必须携带可信 SHA-256：
+  `http://example.com/index.js.md5#sha256=<64位十六进制>`。
+- 建议同时声明源身份和版本，例如：
+  `#sha256=<64位>&source=my-source&version=2026.08.12`。URL、源身份和版本共同参与缓存隔离；版本更新必须提供新内容对应的 hash。
+- URL fragment 只用于本地信任判断，不随网络请求发送。缓存文件每次进入执行路径都会重新计算 MD5 和 SHA-256。
+- 该规则只约束会由 Node 执行的 `.js.md5` bundle；普通 HTTP 配置、影视 API、M3U8、直播、图片、字幕和 XMLTV 不受影响。
 
 ## 播放器
 
