@@ -116,8 +116,10 @@ legal_source_files=(
   "$REPOSITORY_ROOT/Docs/OPEN_SOURCE_P0_STATUS.md"
   "$REPOSITORY_ROOT/Docs/APP_ICON_PROVENANCE.md"
   "$REPOSITORY_ROOT/Docs/MPL_GPL_COMBINATION_REVIEW.md"
+  "$REPOSITORY_ROOT/Docs/NATIVE_REPRODUCIBLE_PROVENANCE.md"
   "$REPOSITORY_ROOT/Docs/SOURCE_RELEASE_PROCESS.md"
   "$REPOSITORY_ROOT/Docs/XPP3_1_1_3_3_REMEDIATION.md"
+  "$REPOSITORY_ROOT/ThirdParty/native-lock.json"
 )
 for legal_source_file in "${legal_source_files[@]}"; do
   if [[ ! -f "$legal_source_file" ]]; then
@@ -246,8 +248,12 @@ cp "$REPOSITORY_ROOT/Docs/APP_ICON_PROVENANCE.md" \
   "$LEGAL_ROOT/Compliance/"
 cp "$REPOSITORY_ROOT/Docs/MPL_GPL_COMBINATION_REVIEW.md" \
   "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/Docs/NATIVE_REPRODUCIBLE_PROVENANCE.md" \
+  "$LEGAL_ROOT/Compliance/"
 cp "$REPOSITORY_ROOT/Docs/SOURCE_RELEASE_PROCESS.md" \
   "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/ThirdParty/native-lock.json" \
+  "$LEGAL_ROOT/Compliance/NATIVE_DEPENDENCY_LOCK.json"
 cp "$REPOSITORY_ROOT/Docs/XPP3_1_1_3_3_REMEDIATION.md" \
   "$LEGAL_ROOT/Compliance/"
 cp "$SOURCE_RELEASE_INDEX" "$LEGAL_ROOT/Compliance/SOURCE_RELEASE_INDEX.json"

@@ -26,6 +26,12 @@ archive contains a deterministic source-only subset (`LICENSE.md`, catvod
 build file and `catvod/src/main`) so unrelated upstream prebuilt AARs are not
 redistributed.
 
+Native inputs are sourced from `ThirdParty/native-lock.json`. The generator
+downloads and verifies every exact available native archive. It records but
+does not disguise exceptions: the missing original zlib 1.3.2 distfile and
+historical clang-11 input used by MacPorts libc++ remain explicit in the
+manifest and keep native provenance incomplete.
+
 The licenses archive contains the project license/notices, every retained
 third-party license, APK notices, change notices, and provenance documents.
 `SOURCE_RELEASE_INDEX.json` records the source-side mapping and is safe to

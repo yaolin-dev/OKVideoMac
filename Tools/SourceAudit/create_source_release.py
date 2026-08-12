@@ -15,6 +15,7 @@ import subprocess
 import tarfile
 import tempfile
 import urllib.request
+import urllib.parse
 import zipfile
 from typing import Optional
 
@@ -260,6 +261,29 @@ def make_source_release(args: argparse.Namespace) -> None:
     for entry in inputs:
         resolved_inputs.append((entry, download_locked(entry, cache, args.offline)))
 
+    native_lock_path = repo / "ThirdParty/native-lock.json"
+    native_lock = json.loads(native_lock_path.read_text(encoding="utf-8"))
+    resolved_native_inputs: list[tuple[dict[str, object], Path]] = []
+    for component in native_lock["components"]:
+        status = str(component["status"])
+        upstream = component.get("upstream")
+        source_hash = component.get("source_sha256")
+        if not upstream or not source_hash or "UNAVAILABLE" in status or "UNRESOLVED" in status:
+            continue
+        filename = Path(urllib.parse.urlparse(str(upstream)).path).name
+        if not filename:
+            fail(f"Native source URL has no filename: {upstream}")
+        entry = {
+            "id": f"native-{component['component']}",
+            "version": component["version"],
+            "url": upstream,
+            "filename": filename,
+            "sha256": source_hash,
+            "license": component["license"],
+            "include_in_bundle": True,
+        }
+        resolved_native_inputs.append((entry, download_locked(entry, cache, args.offline)))
+
     project_archive = output / f"{base}-source.tar.gz"
     third_party_archive = output / f"{base}-third-party-source.tar.gz"
     licenses_archive = output / f"{base}-licenses.tar.gz"
@@ -281,10 +305,16 @@ def make_source_release(args: argparse.Namespace) -> None:
                 filtered_name = f"FongMi-TV-catvod-{commit_id}.tar.gz"
                 filtered_fongmi = sources / filtered_name
                 filtered_fongmi_archive(local, filtered_fongmi, commit_id)
+        for entry, local in resolved_native_inputs:
+            destination = sources / str(entry["filename"])
+            if not destination.exists():
+                shutil.copy2(local, destination)
         for relative in (
             "ThirdParty/source-release-lock.json",
+            "ThirdParty/native-lock.json",
             "ThirdParty/juniversalchardet-1.0.3-covered-files.txt",
             "Docs/MPL_GPL_COMBINATION_REVIEW.md",
+            "Docs/NATIVE_REPRODUCIBLE_PROVENANCE.md",
             "OKVideoMac/Helpers/AndroidDexBridge/FONGMI_CATVOD_CHANGES.md",
             "OKVideoMac/Helpers/AndroidDexBridge/THIRD_PARTY_NOTICES.md",
             "OKVideoMac/Helpers/AndroidDexBridge/app/gradle.lockfile",
@@ -292,6 +322,9 @@ def make_source_release(args: argparse.Namespace) -> None:
             "OKVideoMac/macOS/OKVideoMac/Patches/mpv-0.41.0-coreaudio-without-cocoa.patch",
             "OKVideoMac/macOS/OKVideoMac/Patches/mpv-0.41.0-coreaudio-without-cocoa.NOTICE.md",
             "OKVideoMac/macOS/OKVideoMac/Scripts/build-libmpv.sh",
+            "OKVideoMac/macOS/OKVideoMac/Scripts/build-libmpv-repro.sh",
+            "OKVideoMac/macOS/OKVideoMac/Scripts/build-third-party-native.sh",
+            "OKVideoMac/macOS/OKVideoMac/Scripts/create-repro-experiment-app.sh",
             "OKVideoMac/macOS/OKVideoMac/Scripts/build-quickjs.sh",
             "OKVideoMac/macOS/OKVideoMac/Scripts/build-android-dex-bridge.sh",
         ):
@@ -311,6 +344,7 @@ def make_source_release(args: argparse.Namespace) -> None:
             "Docs/APP_ICON_PROVENANCE.md",
             "Docs/BINARY_SOURCE_MAPPING.md",
             "Docs/MPL_GPL_COMBINATION_REVIEW.md",
+            "Docs/NATIVE_REPRODUCIBLE_PROVENANCE.md",
             "Docs/SOURCE_PROVENANCE_MANIFEST.md",
             "Docs/SOURCE_RELEASE_PROCESS.md",
             "Docs/XPP3_1_1_3_3_REMEDIATION.md",
@@ -337,6 +371,11 @@ def make_source_release(args: argparse.Namespace) -> None:
         record = dict(entry)
         record["verified_sha256"] = sha256(local)
         locked_inputs.append(record)
+    locked_native_inputs = []
+    for entry, local in resolved_native_inputs:
+        record = dict(entry)
+        record["verified_sha256"] = sha256(local)
+        locked_native_inputs.append(record)
     fongmi_subset_name = (
         f"FongMi-TV-catvod-5fdff00a602dc56e8ba756174daef20edab024f2.tar.gz"
     )
@@ -393,6 +432,17 @@ def make_source_release(args: argparse.Namespace) -> None:
             "native": {"lock": "ThirdParty/native-lock.json", "status": "see native lock and Phase 2 provenance report"},
         },
         "locked_inputs": locked_inputs,
+        "locked_native_inputs": locked_native_inputs,
+        "native_exceptions": [
+            {
+                "component": component["component"],
+                "status": component["status"],
+                "reason": "No exact distributable source archive is currently available",
+            }
+            for component in native_lock["components"]
+            if "UNAVAILABLE" in str(component["status"])
+            or "UNRESOLVED" in str(component["status"])
+        ],
     }
     index_path = output / f"{base}-SOURCE_RELEASE_INDEX.json"
     atomic_json(index_path, index)

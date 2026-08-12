@@ -48,6 +48,14 @@ those inputs; therefore they remain `PARTIAL`.
 | libass | 0.17.5 | `https://github.com/libass/libass/releases/download/0.17.5/libass-0.17.5.tar.xz` | `fa286fc9ee1ba3b932703a3df7b8474d01dc8abe29ec69b6fa68781dc4bf7acc` | retained source; `libass.9.dylib` metadata matches | `ISC` | `PARTIAL` |
 | HarfBuzz | 14.2.1 | `https://github.com/harfbuzz/harfbuzz/releases/download/14.2.1/harfbuzz-14.2.1.tar.xz` | `a54a5d8e9380a41fbb762ce367bcbf7704792dfca0d93f1bbca86c5a57902e0e` | retained source; `libharfbuzz.0.dylib` metadata matches | `MIT` | `PARTIAL` |
 
+Phase 2 adds `ThirdParty/native-lock.json` and isolated build recipes. FFmpeg
+7.1.4 and patched mpv 0.41.0 were rebuilt successfully against locked versions,
+with unchanged public FFmpeg symbol sets and license mode. This raises FFmpeg
+to `VERIFIED` for exact source plus functional recipe reproducibility, but not
+for original-batch or bit-for-bit identity; the stable SDK is 13.1 and the
+current validation SDK is 15.2. The overall native chain remains `PARTIAL` for
+the reasons recorded in `Docs/NATIVE_REPRODUCIBLE_PROVENANCE.md`.
+
 ## MacPorts native inputs with partial build provenance
 
 Installed registry receipts retain exact versions, variants, and the Portfile
