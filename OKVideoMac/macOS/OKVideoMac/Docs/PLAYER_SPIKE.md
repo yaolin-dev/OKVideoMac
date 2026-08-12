@@ -1,5 +1,9 @@
 # libmpv Player Spike
 
+> 文档类型：历史原型记录。本文的“仍未执行”保留当时的原始门禁，
+> 不代表当前播放器状态。当前能力见 `Docs/COMPATIBILITY.md`，实测
+> 生命周期数据见 `Docs/MPV_TEARDOWN_AB_EXPERIMENT.md`。
+
 ## 决策
 
 正式方向为 `mpv_render_context` + `NSOpenGLView`，不用外部 mpv 窗口，也不把

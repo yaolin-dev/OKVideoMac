@@ -1,5 +1,9 @@
 # OKVideoMac Migration Status
 
+> 文档类型：历史迁移记录。本文保留项目早期无完整 Xcode 环境时的
+> 实现和验证状态，不代表当前版本。当前事实以仓库根目录 `README.md`
+> 和 `Docs/COMPATIBILITY.md` 为准。
+
 ## 当前可运行版本
 
 无。源码已建立，但当前机器缺少完整 Xcode，Command Line Tools 的 Swift

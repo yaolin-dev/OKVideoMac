@@ -526,6 +526,75 @@ final class SiteProviderTests: XCTestCase {
         )
     }
 
+    func testIncompletePlayableDetailUsesFallbackSummary() throws {
+        let site = SiteConfiguration(
+            key: "node-content",
+            name: "Node Content",
+            type: 3,
+            api: "http://127.0.0.1/spider/content/3"
+        )
+        let fallback = VideoSummary(
+            siteKey: site.key,
+            siteName: site.name,
+            videoID: "share-123",
+            title: "无悔追踪",
+            remarks: "全集"
+        )
+        let value = JSONValue.object([
+            "list": .array([
+                .object([
+                    "vod_play_from": .string("夸克"),
+                    "vod_play_url": .string("第1集$quark://episode-1")
+                ])
+            ])
+        ])
+
+        let result = try SpiderResponseMapper.selection(
+            value,
+            site: site,
+            baseURL: nil,
+            fallbackSummary: fallback,
+            allowsPlaceholderAction: false
+        )
+        guard case .detail(let detail) = result else {
+            return XCTFail("可播放的部分详情应使用搜索摘要补全")
+        }
+        XCTAssertEqual(detail.summary.videoID, "share-123")
+        XCTAssertEqual(detail.summary.title, "无悔追踪")
+        XCTAssertEqual(detail.summary.remarks, "全集")
+        XCTAssertEqual(detail.playSources.first?.name, "夸克")
+        XCTAssertEqual(detail.playSources.first?.episodes.count, 1)
+    }
+
+    func testContentSiteBlankDetailPlaceholderIsNotAnAction() throws {
+        let site = SiteConfiguration(
+            key: "node-content",
+            name: "Node Content",
+            type: 3,
+            api: "http://127.0.0.1/spider/content/3"
+        )
+
+        XCTAssertThrowsError(
+            try SpiderResponseMapper.selection(
+                .object(["list": .array([.object([:])])]),
+                site: site,
+                baseURL: nil,
+                fallbackSummary: VideoSummary(
+                    siteKey: site.key,
+                    siteName: site.name,
+                    videoID: "share-123",
+                    title: "无悔追踪"
+                ),
+                allowsPlaceholderAction: false
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AppError,
+                .spider("Spider 详情响应缺少可识别的影视信息")
+            )
+        }
+    }
+
     func testEmptyDetailListRemainsAnError() throws {
         let site = SiteConfiguration(
             key: "broken",

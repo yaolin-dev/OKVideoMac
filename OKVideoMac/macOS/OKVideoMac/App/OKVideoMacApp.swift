@@ -79,12 +79,37 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
 
     private let mainMenuLocalizer = MainMenuChineseLocalizer()
     private weak var appState: AppState?
+    private var playerWindowController: PlayerPlaybackWindowController?
+    private var playerPresentationCancellable: AnyCancellable?
     private var terminationState = TerminationState.idle
     private var terminationTask: Task<Void, Never>?
     private var terminationTimeoutTask: Task<Void, Never>?
 
     func install(appState: AppState) {
+        guard self.appState !== appState
+                || playerPresentationCancellable == nil else { return }
         self.appState = appState
+        let playerWindowController = PlayerPlaybackWindowController(
+            appState: appState
+        )
+        self.playerWindowController = playerWindowController
+        playerPresentationCancellable = appState.$isPlayerPresented
+            .removeDuplicates()
+            .sink { [weak playerWindowController, weak appState] isPresented in
+                if isPresented {
+                    // Do not build the AppKit/OpenGL hierarchy inline with
+                    // the click transaction. Playback can create libmpv and
+                    // issue loadfile immediately; the window mounts on the
+                    // next main-loop turn and attaches its render context in
+                    // parallel with network and demux startup.
+                    DispatchQueue.main.async {
+                        guard appState?.isPlayerPresented == true else { return }
+                        playerWindowController?.present()
+                    }
+                } else {
+                    playerWindowController?.dismiss()
+                }
+            }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -144,6 +169,145 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
         guard terminationState == .waiting else { return }
         terminationState = .completed
         NSApp.reply(toApplicationShouldTerminate: true)
+    }
+}
+
+/// Owns playback as a separate AppKit window. The browsing WindowGroup never
+/// hosts an mpv surface and is therefore unaffected by video aspect-ratio,
+/// full-screen, resize, or render-context lifecycle changes.
+@MainActor
+final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
+    private static let frameAutosaveName = "OKVideoMac.PlayerWindow.v2"
+    private weak var appState: AppState?
+    private var window: NSWindow?
+    private var hostingController: NSHostingController<AnyView>?
+    private var isDismissingFromState = false
+
+    init(appState: AppState) {
+        self.appState = appState
+    }
+
+    func present() {
+        guard let appState else { return }
+        if let window {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let contentSize = initialContentSize()
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: contentSize),
+            styleMask: [
+                .titled,
+                .closable,
+                .miniaturizable,
+                .resizable,
+                .fullSizeContentView
+            ],
+            backing: .buffered,
+            defer: false
+        )
+        window.delegate = self
+        window.isReleasedWhenClosed = false
+        window.tabbingMode = .disallowed
+        window.collectionBehavior = [.fullScreenPrimary]
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.backgroundColor = .black
+        window.isOpaque = true
+        window.hasShadow = true
+        window.acceptsMouseMovedEvents = true
+        window.contentMinSize = NSSize(width: 800, height: 450)
+        window.contentAspectRatio = NSSize(width: 16, height: 9)
+
+        let rootView = AnyView(
+            PlayerPlaybackWindowRoot(appState: appState)
+                .environmentObject(appState)
+        )
+        let hostingController = NSHostingController(rootView: rootView)
+        window.contentViewController = hostingController
+        self.hostingController = hostingController
+        self.window = window
+
+        if !window.setFrameUsingName(Self.frameAutosaveName) {
+            window.center()
+        }
+        window.setFrameAutosaveName(Self.frameAutosaveName)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func dismiss() {
+        guard let window else { return }
+        isDismissingFromState = true
+        window.close()
+        clearWindowReferences()
+        isDismissingFromState = false
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let closingWindow = notification.object as? NSWindow,
+              closingWindow === window else { return }
+        let shouldClosePlayback = !isDismissingFromState
+            && appState?.isPlayerPresented == true
+        clearWindowReferences()
+        if shouldClosePlayback {
+            Task { @MainActor [weak appState] in
+                await appState?.closePlayer()
+            }
+        }
+    }
+
+    private func clearWindowReferences() {
+        window?.delegate = nil
+        window = nil
+        hostingController = nil
+    }
+
+    private func initialContentSize() -> NSSize {
+        let visibleFrame = NSScreen.main?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1_440, height: 900)
+        return PlayerWindowSizingPolicy.initialContentSize(
+            visibleFrame: visibleFrame
+        )
+    }
+}
+
+enum PlayerWindowSizingPolicy {
+    static let aspectRatio: CGFloat = 16 / 9
+
+    static func initialContentSize(visibleFrame: NSRect) -> NSSize {
+        let maximumWidth = max(800, visibleFrame.width * 0.82)
+        let maximumHeight = max(450, visibleFrame.height * 0.86)
+        let width = min(maximumWidth, maximumHeight * aspectRatio)
+        return NSSize(width: width, height: width / aspectRatio)
+    }
+}
+
+private struct PlayerPlaybackWindowRoot: View {
+    @ObservedObject var appState: AppState
+
+    var body: some View {
+        ZStack {
+            Color.black
+                .ignoresSafeArea()
+
+            if PlayerSurfaceMountPolicy.shouldMount(
+                isPlayerPresented: appState.isPlayerPresented,
+                hasRenderPlayer: appState.embeddedPlayer != nil
+            ), let player = appState.embeddedPlayer {
+                MPVRenderView(player: player) { error in
+                    appState.reportPlayerRenderError(error)
+                }
+                .id(player.renderOwnerID)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+            }
+
+            PlayerView(onWindowChromeRestored: {})
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(minWidth: 800, minHeight: 450)
+        .background(Color.black)
     }
 }
 

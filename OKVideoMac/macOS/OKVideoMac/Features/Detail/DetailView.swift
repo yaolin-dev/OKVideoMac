@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import OKVideoCore
 import SwiftUI
@@ -62,6 +63,10 @@ struct DetailView: View {
     @State private var episodeSearchKeyword = ""
     @State private var episodeSortOrder: EpisodeSortOrder = .sourceOrder
     @State private var selectedRangeID: String?
+    @State private var episodeScrollRevision = 0
+    @State private var preparedPresentations: [EpisodePresentation] = []
+    @State private var preparedRangeOptions: [EpisodeRangeOption] = []
+    @State private var isPreparingEpisodes = false
     @State private var showsAllActors = false
     @State private var showsFullSynopsis = false
 
@@ -94,12 +99,28 @@ struct DetailView: View {
             }
         }
         .onAppear(perform: performInitialSelection)
+        .task(id: selectedSource?.id) {
+            await prepareSelectedSourceEpisodes()
+        }
         .onChange(of: selectedSourceIndex) { newValue in
             guard detail.playSources.indices.contains(newValue) else { return }
             lastPlaySourceName = detail.playSources[newValue].name
             episodeSearchKeyword = ""
             episodeSortOrder = .sourceOrder
             selectedRangeID = nil
+            preparedPresentations = []
+            preparedRangeOptions = []
+            isPreparingEpisodes = true
+            resetEpisodeScroll()
+        }
+        .onChange(of: selectedRangeID) { _ in
+            resetEpisodeScroll()
+        }
+        .onChange(of: episodeSearchKeyword) { _ in
+            resetEpisodeScroll()
+        }
+        .onChange(of: episodeSortOrder) { _ in
+            resetEpisodeScroll()
         }
     }
 
@@ -199,35 +220,46 @@ struct DetailView: View {
                     Spacer()
                 }
 
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(detail.playSources.indices, id: \.self) { index in
-                            Button {
-                                selectedSourceIndex = index
-                            } label: {
-                                HStack(spacing: 6) {
-                                    if selectedSourceIndex == index {
-                                        Image(systemName: "checkmark")
+                ScrollViewReader { sourceProxy in
+                    ScrollView(.horizontal, showsIndicators: true) {
+                        HStack(spacing: 8) {
+                            ForEach(detail.playSources.indices, id: \.self) { index in
+                                Button {
+                                    selectedSourceIndex = index
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        if selectedSourceIndex == index {
+                                            Image(systemName: "checkmark")
+                                        }
+                                        Text(detail.playSources[index].name)
+                                        Text("\(detail.playSources[index].episodes.count)")
+                                            .font(.caption2.monospacedDigit())
+                                            .foregroundColor(
+                                                selectedSourceIndex == index
+                                                    ? .white.opacity(0.8)
+                                                    : .secondary
+                                            )
                                     }
-                                    Text(detail.playSources[index].name)
-                                    Text("\(detail.playSources[index].episodes.count)")
-                                        .font(.caption2.monospacedDigit())
-                                        .foregroundColor(
-                                            selectedSourceIndex == index
-                                                ? .white.opacity(0.8)
-                                                : .secondary
-                                        )
                                 }
-                            }
-                            .buttonStyle(
-                                DetailSourceButtonStyle(
-                                    isSelected: selectedSourceIndex == index
+                                .buttonStyle(
+                                    DetailSourceButtonStyle(
+                                        isSelected: selectedSourceIndex == index
+                                    )
                                 )
-                            )
+                                .id(index)
+                            }
+                        }
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 8)
+                    }
+                    .onAppear {
+                        sourceProxy.scrollTo(selectedSourceIndex, anchor: .center)
+                    }
+                    .onChange(of: selectedSourceIndex) { selectedIndex in
+                        withAnimation(.easeOut(duration: 0.16)) {
+                            sourceProxy.scrollTo(selectedIndex, anchor: .center)
                         }
                     }
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 8)
                 }
 
                 episodeControls
@@ -290,34 +322,62 @@ struct DetailView: View {
 
     @ViewBuilder
     private var episodeContent: some View {
-        if filteredPresentations.isEmpty {
+        if isPreparingEpisodes {
+            VStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("正在整理 \(selectedSource?.episodes.count ?? 0) 集…")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if filteredPresentations.isEmpty {
             EmptyStateView(
                 systemImage: "magnifyingglass",
                 title: "没有匹配的分集",
                 message: "请更换关键词或选择其他分集区间。"
             )
         } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    if !regularPresentations.isEmpty {
-                        EpisodeSection(
-                            title: "剧集",
-                            episodes: regularPresentations,
-                            onPlay: playSelectedEpisode
-                        )
-                    }
+            ScrollViewReader { episodeProxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        Color.clear
+                            .frame(height: 0)
+                            .id(DetailEpisodeScrollTarget.top)
 
-                    if !otherPresentations.isEmpty {
-                        EpisodeSection(
-                            title: isSingleEpisode
-                                ? "播放"
-                                : regularPresentations.isEmpty ? "播放资源" : "其他资源",
-                            episodes: otherPresentations,
-                            onPlay: playSelectedEpisode
-                        )
+                        if !regularPresentations.isEmpty {
+                            EpisodeSection(
+                                title: "剧集",
+                                episodes: regularPresentations,
+                                onPlay: playSelectedEpisode
+                            )
+                        }
+
+                        if !otherPresentations.isEmpty {
+                            EpisodeSection(
+                                title: isSingleEpisode
+                                    ? "播放"
+                                    : regularPresentations.isEmpty ? "播放资源" : "其他资源",
+                                episodes: otherPresentations,
+                                onPlay: playSelectedEpisode
+                            )
+                        }
+                    }
+                    .padding(20)
+                }
+                .padding(.top, 8)
+                .onChange(of: episodeScrollRevision) { _ in
+                    DispatchQueue.main.async {
+                        var transaction = Transaction()
+                        transaction.disablesAnimations = true
+                        withTransaction(transaction) {
+                            episodeProxy.scrollTo(
+                                DetailEpisodeScrollTarget.top,
+                                anchor: .top
+                            )
+                        }
                     }
                 }
-                .padding(20)
             }
         }
     }
@@ -334,9 +394,8 @@ struct DetailView: View {
     }
 
     private var allPresentations: [EpisodePresentation] {
-        guard let source = selectedSource else { return [] }
-        return EpisodeListPresentation.presentations(
-            from: source.episodes,
+        EpisodeListPresentation.filterAndSort(
+            preparedPresentations,
             query: episodeSearchKeyword,
             sortOrder: episodeSortOrder
         )
@@ -361,7 +420,7 @@ struct DetailView: View {
     }
 
     private var rangeOptions: [EpisodeRangeOption] {
-        EpisodeListPresentation.rangeOptions(from: allPresentations)
+        preparedRangeOptions
     }
 
     private var canSortEpisodes: Bool {
@@ -381,6 +440,37 @@ struct DetailView: View {
         } else {
             selectedSourceIndex = 0
         }
+    }
+
+    private func resetEpisodeScroll() {
+        episodeScrollRevision &+= 1
+    }
+
+    @MainActor
+    private func prepareSelectedSourceEpisodes() async {
+        guard let source = selectedSource else {
+            preparedPresentations = []
+            preparedRangeOptions = []
+            isPreparingEpisodes = false
+            return
+        }
+        let sourceID = source.id
+        isPreparingEpisodes = true
+        let snapshot = await EpisodePresentationRepository.shared.snapshot(
+            videoID: detail.summary.id,
+            source: source
+        )
+        guard !Task.isCancelled, selectedSource?.id == sourceID else { return }
+        preparedPresentations = snapshot.values
+        preparedRangeOptions = snapshot.rangeOptions
+        if selectedRangeID == nil,
+           EpisodeInitialRangePolicy.shouldSelectRecentRange(
+               episodeCount: snapshot.values.count,
+               rangeCount: snapshot.rangeOptions.count
+           ) {
+            selectedRangeID = snapshot.rangeOptions.last?.id
+        }
+        isPreparingEpisodes = false
     }
 
     private func playSelectedEpisode(_ presentation: EpisodePresentation) {
@@ -547,7 +637,7 @@ enum EpisodeSortOrder: String, CaseIterable, Identifiable {
     }
 }
 
-struct EpisodePresentation: Identifiable, Equatable {
+struct EpisodePresentation: Identifiable, Equatable, Sendable {
     let episode: PlayEpisode
     let displayName: String
     let originalName: String
@@ -559,10 +649,79 @@ struct EpisodePresentation: Identifiable, Equatable {
     var id: String { episode.id }
 }
 
-struct EpisodeRangeOption: Identifiable, Equatable {
+struct EpisodeRangeOption: Identifiable, Equatable, Sendable {
     let id: String
     let title: String
     let episodeIDs: Set<String>
+}
+
+struct EpisodePresentationSnapshot: Sendable {
+    let values: [EpisodePresentation]
+    let valuesByEpisodeID: [String: EpisodePresentation]
+    let rangeOptions: [EpisodeRangeOption]
+}
+
+private struct EpisodePresentationRepositoryKey: Hashable, Sendable {
+    let videoID: String
+    let sourceID: String
+    let episodeCount: Int
+    let firstEpisodeID: String?
+    let lastEpisodeID: String?
+}
+
+actor EpisodePresentationRepository {
+    static let shared = EpisodePresentationRepository()
+
+    private var snapshots: [
+        EpisodePresentationRepositoryKey: EpisodePresentationSnapshot
+    ] = [:]
+    private let capacity = 24
+
+    func snapshot(
+        videoID: String,
+        source: PlaySource
+    ) -> EpisodePresentationSnapshot {
+        let key = EpisodePresentationRepositoryKey(
+            videoID: videoID,
+            sourceID: source.id,
+            episodeCount: source.episodes.count,
+            firstEpisodeID: source.episodes.first?.id,
+            lastEpisodeID: source.episodes.last?.id
+        )
+        if let snapshot = snapshots[key] {
+            return snapshot
+        }
+
+        let values = EpisodeListPresentation.presentations(
+            from: source.episodes,
+            query: "",
+            sortOrder: .sourceOrder
+        )
+        let snapshot = EpisodePresentationSnapshot(
+            values: values,
+            valuesByEpisodeID: Dictionary(
+                values.map { ($0.id, $0) },
+                uniquingKeysWith: { current, _ in current }
+            ),
+            rangeOptions: EpisodeListPresentation.rangeOptions(from: values)
+        )
+        if snapshots.count >= capacity, let oldestKey = snapshots.keys.first {
+            snapshots.removeValue(forKey: oldestKey)
+        }
+        snapshots[key] = snapshot
+        return snapshot
+    }
+}
+
+enum EpisodeInitialRangePolicy {
+    static let largeEpisodeThreshold = 200
+
+    static func shouldSelectRecentRange(
+        episodeCount: Int,
+        rangeCount: Int
+    ) -> Bool {
+        episodeCount > largeEpisodeThreshold && rangeCount > 1
+    }
 }
 
 private struct EpisodeSequenceCandidate: Hashable {
@@ -583,14 +742,82 @@ private struct EpisodeRangePicker: View {
     let options: [EpisodeRangeOption]
     @Binding var selectedID: String?
 
+    private var presentationMode: EpisodeRangePickerPresentationMode {
+        EpisodeRangePickerPolicy.presentationMode(optionCount: options.count)
+    }
+
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 7) {
-                rangeButton(title: "全部", id: nil)
+        switch presentationMode {
+        case .chips:
+            ScrollView(.horizontal, showsIndicators: true) {
+                HStack(spacing: 7) {
+                    rangeButton(title: "全部", id: nil)
+                    ForEach(options) { option in
+                        rangeButton(title: option.title, id: option.id)
+                    }
+                }
+                .padding(.trailing, 4)
+            }
+        case .compactMenu:
+            compactPicker
+        }
+    }
+
+    private var compactPicker: some View {
+        HStack(spacing: 8) {
+            rangeButton(title: "全部", id: nil)
+
+            Text("分集区间")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            Picker("分集区间", selection: $selectedID) {
+                Text("选择区间").tag(String?.none)
                 ForEach(options) { option in
-                    rangeButton(title: option.title, id: option.id)
+                    Text(option.title).tag(Optional(option.id))
                 }
             }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: 190)
+
+            Button {
+                selectedID = EpisodeRangePickerPolicy.adjacentID(
+                    options: options,
+                    selectedID: selectedID,
+                    offset: -1
+                )
+            } label: {
+                Image(systemName: "chevron.left")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(!EpisodeRangePickerPolicy.canMove(
+                options: options,
+                selectedID: selectedID,
+                offset: -1
+            ))
+            .help("上一分集区间")
+
+            Button {
+                selectedID = EpisodeRangePickerPolicy.adjacentID(
+                    options: options,
+                    selectedID: selectedID,
+                    offset: 1
+                )
+            } label: {
+                Image(systemName: "chevron.right")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(!EpisodeRangePickerPolicy.canMove(
+                options: options,
+                selectedID: selectedID,
+                offset: 1
+            ))
+            .help("下一分集区间")
+
+            Spacer(minLength: 0)
         }
     }
 
@@ -610,6 +837,54 @@ private struct EpisodeRangePicker: View {
         )
         .appInteractiveHover(cornerRadius: 14, selected: isSelected)
     }
+}
+
+enum EpisodeRangePickerPresentationMode: Equatable {
+    case chips
+    case compactMenu
+}
+
+enum EpisodeRangePickerPolicy {
+    static let compactThreshold = 8
+
+    static func presentationMode(
+        optionCount: Int
+    ) -> EpisodeRangePickerPresentationMode {
+        optionCount > compactThreshold ? .compactMenu : .chips
+    }
+
+    static func canMove(
+        options: [EpisodeRangeOption],
+        selectedID: String?,
+        offset: Int
+    ) -> Bool {
+        adjacentID(
+            options: options,
+            selectedID: selectedID,
+            offset: offset
+        ) != selectedID
+    }
+
+    static func adjacentID(
+        options: [EpisodeRangeOption],
+        selectedID: String?,
+        offset: Int
+    ) -> String? {
+        guard !options.isEmpty, offset != 0 else { return selectedID }
+        guard let selectedID else {
+            return offset > 0 ? options.first?.id : nil
+        }
+        guard let index = options.firstIndex(where: { $0.id == selectedID }) else {
+            return offset > 0 ? options.first?.id : nil
+        }
+        let target = index + offset
+        guard options.indices.contains(target) else { return selectedID }
+        return options[target].id
+    }
+}
+
+enum DetailEpisodeScrollTarget {
+    static let top = "detail-episode-scroll-top"
 }
 
 private struct EpisodeSection: View {
@@ -633,25 +908,182 @@ private struct EpisodeSection: View {
                 spacing: 8
             ) {
                 ForEach(episodes) { presentation in
-                    Button {
-                        onPlay(presentation)
-                    } label: {
-                        HStack(spacing: 7) {
-                            Image(systemName: "play.fill")
-                                .font(.caption2)
-                                .foregroundColor(.accentColor)
-                            Text(presentation.displayName)
-                                .lineLimit(1)
-                            Spacer(minLength: 0)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(DetailEpisodeButtonStyle())
-                    .help(presentation.originalName)
-                    .accessibilityLabel("播放 \(presentation.displayName)")
+                    DetailEpisodeButton(
+                        presentation: presentation,
+                        onPlay: onPlay
+                    )
                 }
             }
         }
+    }
+}
+
+struct DetailEpisodeButton: View {
+    let presentation: EpisodePresentation
+    let onPlay: (EpisodePresentation) -> Void
+    let originalNamePresentationMode: DetailEpisodeOriginalNamePresentationMode = .anchoredPopover
+
+    @ViewBuilder
+    var body: some View {
+        switch originalNamePresentationMode {
+        case .anchoredPopover:
+            DetailEpisodeButtonPopoverInteraction(
+                presentation: presentation,
+                onPlay: onPlay
+            )
+        }
+    }
+}
+
+enum DetailEpisodeOriginalNamePresentationMode: Equatable {
+    case anchoredPopover
+}
+
+private struct DetailEpisodeButtonPopoverInteraction: View {
+    let presentation: EpisodePresentation
+    let onPlay: (EpisodePresentation) -> Void
+    @State private var showsOriginalNamePopover = false
+
+    var body: some View {
+        Button {
+            onPlay(presentation)
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "play.fill")
+                    .font(.caption2)
+                    .foregroundColor(.accentColor)
+                Text(presentation.displayName)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(DetailEpisodeButtonStyle())
+        .contextMenu {
+            Button("查看原始名称…") {
+                DispatchQueue.main.async {
+                    showsOriginalNamePopover = true
+                }
+            }
+            Button("复制原始名称") {
+                DetailEpisodeOriginalNameActions.copy(presentation.originalName)
+            }
+        }
+        .popover(
+            isPresented: $showsOriginalNamePopover,
+            arrowEdge: .bottom
+        ) {
+            DetailEpisodeOriginalNamePopover(
+                originalName: presentation.originalName,
+                onClose: { showsOriginalNamePopover = false }
+            )
+        }
+        .accessibilityLabel("播放 \(presentation.displayName)")
+        .accessibilityHint("右键可以查看或复制原始名称")
+    }
+}
+
+struct DetailEpisodeOriginalNamePopover: View {
+    let originalName: String
+    let onClose: () -> Void
+    @State private var didCopy = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 7) {
+                Image(systemName: "doc.text")
+                    .foregroundColor(.secondary)
+                Text("文件信息")
+                    .font(.headline)
+                Spacer()
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.caption.weight(.semibold))
+                        .frame(width: 20, height: 20)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+                .help("关闭")
+                .accessibilityLabel("关闭文件信息")
+            }
+
+            Text("原始名称")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            ScrollView {
+                Text(originalName)
+                    .font(.callout.monospaced())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(9)
+            }
+            .frame(minHeight: 42, maxHeight: 120)
+            .background(Color(nsColor: .textBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    DetailEpisodeOriginalNameActions.copy(originalName)
+                    didCopy = true
+                } label: {
+                    Label(
+                        didCopy ? "已复制" : "复制名称",
+                        systemImage: didCopy ? "checkmark" : "doc.on.doc"
+                    )
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Spacer()
+
+                Text("点击外部或按 Esc 关闭")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(14)
+        .frame(width: 370)
+        .task(id: didCopy) {
+            guard didCopy else { return }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled else { return }
+            didCopy = false
+        }
+    }
+}
+
+enum DetailEpisodeOriginalNameActions {
+    static func copy(
+        _ originalName: String,
+        to pasteboard: NSPasteboard = .general
+    ) {
+        pasteboard.clearContents()
+        pasteboard.setString(originalName, forType: .string)
+    }
+}
+
+private final class EpisodeRegexCache: @unchecked Sendable {
+    static let shared = EpisodeRegexCache()
+
+    private let cache = NSCache<NSString, NSRegularExpression>()
+
+    func regex(for pattern: String) -> NSRegularExpression? {
+        let key = pattern as NSString
+        if let regex = cache.object(forKey: key) {
+            return regex
+        }
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return nil
+        }
+        cache.setObject(regex, forKey: key)
+        return regex
     }
 }
 
@@ -916,7 +1348,7 @@ enum EpisodeNameParser {
         }
 
         let unitPattern = #"(?:^|[^全共\d])(第)?\s*(\d{1,4})\s*(集|话)"#
-        if let regex = try? NSRegularExpression(pattern: unitPattern) {
+        if let regex = EpisodeRegexCache.shared.regex(for: unitPattern) {
             let text = compact as NSString
             let matches = regex.matches(
                 in: compact,
@@ -943,7 +1375,7 @@ enum EpisodeNameParser {
         }
 
         let stem = filenameStem(from: compact)
-        if let regex = try? NSRegularExpression(pattern: #"\d{1,4}"#) {
+        if let regex = EpisodeRegexCache.shared.regex(for: #"\d{1,4}"#) {
             let text = stem as NSString
             let matches = regex.matches(
                 in: stem,
@@ -1069,7 +1501,7 @@ enum EpisodeNameParser {
         in value: String,
         pattern: String
     ) -> NSTextCheckingResult? {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+        guard let regex = EpisodeRegexCache.shared.regex(for: pattern) else {
             return nil
         }
         return regex.firstMatch(
@@ -1155,6 +1587,32 @@ enum EpisodeListPresentation {
             return values.sorted { lhs, rhs in
                 compare(lhs, rhs, ascending: false)
             }
+        }
+    }
+
+    static func filterAndSort(
+        _ presentations: [EpisodePresentation],
+        query: String,
+        sortOrder: EpisodeSortOrder
+    ) -> [EpisodePresentation] {
+        let keyword = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let values: [EpisodePresentation]
+        if keyword.isEmpty {
+            values = presentations
+        } else {
+            values = presentations.filter {
+                $0.displayName.localizedCaseInsensitiveContains(keyword)
+                    || $0.originalName.localizedCaseInsensitiveContains(keyword)
+            }
+        }
+
+        switch sortOrder {
+        case .sourceOrder:
+            return values
+        case .episodeAscending:
+            return values.sorted { compare($0, $1, ascending: true) }
+        case .episodeDescending:
+            return values.sorted { compare($0, $1, ascending: false) }
         }
     }
 

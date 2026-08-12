@@ -49,6 +49,61 @@ struct InlineImageRequest: Equatable {
     }
 }
 
+struct ImageCacheIdentity: Hashable, Sendable {
+    let rawValue: String
+
+    init(url: URL) {
+        rawValue = Self.nodeImageProxyIdentity(for: url) ?? url.absoluteString
+    }
+
+    private static func nodeImageProxyIdentity(for url: URL) -> String? {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = components.host?.lowercased(),
+              ["127.0.0.1", "localhost", "::1"].contains(host),
+              components.path == "/imageProxy",
+              let queryItems = components.queryItems,
+              let targetURL = queryItems.first(where: { $0.name == "url" })?.value,
+              !targetURL.isEmpty else {
+            return nil
+        }
+
+        let customHeaders = queryItems.first(where: { $0.name == "customHeaders" })?.value
+        let stableHeaders = customHeaders.map(canonicalHeaders) ?? ""
+        let additionalItems = queryItems
+            .filter { item in
+                item.name != "url" && item.name != "customHeaders" && item.name != "cache"
+            }
+            .map { "\($0.name)=\($0.value ?? "")" }
+            .sorted()
+            .joined(separator: "&")
+        let stableValue = [targetURL, stableHeaders, additionalItems]
+            .joined(separator: "\u{1F}")
+        return "node-image-proxy-v1:" + digest(stableValue)
+    }
+
+    private static func canonicalHeaders(_ value: String) -> String {
+        guard let data = value.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              JSONSerialization.isValidJSONObject(object),
+              let canonicalData = try? JSONSerialization.data(
+                  withJSONObject: object,
+                  options: [.sortedKeys]
+              ),
+              let canonicalValue = String(data: canonicalData, encoding: .utf8) else {
+            return value
+        }
+        return canonicalValue
+    }
+
+    private static func digest(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+}
+
 @MainActor
 enum DecodedImageCacheCost {
     static let unknownRepresentationCost = 1 * 1_024 * 1_024
@@ -108,7 +163,7 @@ enum DecodedImageCacheCost {
 }
 
 private final class ImageMemoryCache {
-    private let storage = NSCache<NSURL, NSImage>()
+    private let storage = NSCache<NSString, NSImage>()
 
     init() {
         storage.countLimit = 300
@@ -116,15 +171,15 @@ private final class ImageMemoryCache {
     }
 
     @MainActor
-    func image(for url: URL) -> NSImage? {
-        storage.object(forKey: url as NSURL)
+    func image(for identity: ImageCacheIdentity) -> NSImage? {
+        storage.object(forKey: identity.rawValue as NSString)
     }
 
     @MainActor
-    func insert(_ image: NSImage, for url: URL) {
+    func insert(_ image: NSImage, for identity: ImageCacheIdentity) {
         storage.setObject(
             image,
-            forKey: url as NSURL,
+            forKey: identity.rawValue as NSString,
             cost: DecodedImageCacheCost.cost(for: image)
         )
     }
@@ -148,7 +203,7 @@ private struct LoadedImageData: Sendable {
 actor ImageDataRepository {
     private let cacheDirectory: URL
     private let httpClient: HTTPClient
-    private var inFlight: [URL: Task<Data, Error>] = [:]
+    private var inFlight: [ImageCacheIdentity: Task<Data, Error>] = [:]
 
     init(cacheDirectory: URL, httpClient: HTTPClient) throws {
         self.cacheDirectory = cacheDirectory
@@ -165,9 +220,19 @@ actor ImageDataRepository {
     }
 
     fileprivate func data(for url: URL) async throws -> LoadedImageData {
-        let diskURL = cacheDirectory.appendingPathComponent(cacheKey(for: url))
+        let identity = ImageCacheIdentity(url: url)
+        let diskURL = cacheDirectory.appendingPathComponent(cacheKey(for: identity))
         if let data = try? Data(contentsOf: diskURL) {
             return LoadedImageData(data: data, origin: .disk)
+        }
+        if identity.rawValue != url.absoluteString {
+            let legacyDiskURL = cacheDirectory.appendingPathComponent(
+                legacyCacheKey(for: url)
+            )
+            if let data = try? Data(contentsOf: legacyDiskURL) {
+                try? persistMigratedData(data, at: diskURL)
+                return LoadedImageData(data: data, origin: .disk)
+            }
         }
         return LoadedImageData(
             data: try await downloadedData(for: url),
@@ -176,7 +241,8 @@ actor ImageDataRepository {
     }
 
     func downloadedData(for url: URL) async throws -> Data {
-        if let task = inFlight[url] {
+        let identity = ImageCacheIdentity(url: url)
+        if let task = inFlight[identity] {
             return try await task.value
         }
 
@@ -193,13 +259,14 @@ actor ImageDataRepository {
             )
             return response.body
         }
-        inFlight[url] = task
-        defer { inFlight[url] = nil }
+        inFlight[identity] = task
+        defer { inFlight[identity] = nil }
         return try await task.value
     }
 
     func persistValidatedData(_ data: Data, for url: URL) throws {
-        let diskURL = cacheDirectory.appendingPathComponent(cacheKey(for: url))
+        let identity = ImageCacheIdentity(url: url)
+        let diskURL = cacheDirectory.appendingPathComponent(cacheKey(for: identity))
         try data.write(to: diskURL, options: [.atomic])
         try? FileManager.default.setAttributes(
             [.posixPermissions: 0o600],
@@ -217,16 +284,29 @@ actor ImageDataRepository {
         }
     }
 
-    private func cacheKey(for url: URL) -> String {
+    private func cacheKey(for identity: ImageCacheIdentity) -> String {
+        let digest = SHA256.hash(data: Data(identity.rawValue.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined() + ".image"
+    }
+
+    private func legacyCacheKey(for url: URL) -> String {
         let digest = SHA256.hash(data: Data(url.absoluteString.utf8))
         return digest.map { String(format: "%02x", $0) }.joined() + ".image"
+    }
+
+    private func persistMigratedData(_ data: Data, at diskURL: URL) throws {
+        try data.write(to: diskURL, options: [.atomic])
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: diskURL.path
+        )
     }
 }
 
 final class ImageRepository: Sendable {
     private let dataRepository: ImageDataRepository
     @MainActor private let memoryCache = ImageMemoryCache()
-    @MainActor private var inFlightImages: [URL: Task<Void, Error>] = [:]
+    @MainActor private var inFlightImages: [ImageCacheIdentity: Task<Void, Error>] = [:]
 
     init(dataRepository: ImageDataRepository) {
         self.dataRepository = dataRepository
@@ -234,15 +314,16 @@ final class ImageRepository: Sendable {
 
     @MainActor
     func cachedImage(for url: URL) -> NSImage? {
-        memoryCache.image(for: url)
+        memoryCache.image(for: ImageCacheIdentity(url: url))
     }
 
     @MainActor
     func image(for url: URL) async throws -> NSImage {
+        let identity = ImageCacheIdentity(url: url)
         if let cached = cachedImage(for: url) {
             return cached
         }
-        if let task = inFlightImages[url] {
+        if let task = inFlightImages[identity] {
             try await task.value
             return try cachedImageAfterLoad(for: url)
         }
@@ -250,8 +331,8 @@ final class ImageRepository: Sendable {
         let task = Task { @MainActor in
             try await loadAndCacheImage(for: url)
         }
-        inFlightImages[url] = task
-        defer { inFlightImages[url] = nil }
+        inFlightImages[identity] = task
+        defer { inFlightImages[identity] = nil }
         try await task.value
         return try cachedImageAfterLoad(for: url)
     }
@@ -291,7 +372,7 @@ final class ImageRepository: Sendable {
         if loaded.origin == .network {
             try await dataRepository.persistValidatedData(loaded.data, for: url)
         }
-        memoryCache.insert(image, for: url)
+        memoryCache.insert(image, for: ImageCacheIdentity(url: url))
     }
 
     @MainActor
@@ -300,6 +381,16 @@ final class ImageRepository: Sendable {
             throw AppError.decoding("海报不是有效图片")
         }
         return image
+    }
+}
+
+enum RemoteImageLoadingPolicy {
+    static func shouldClearCurrentImage(for nextURL: URL?) -> Bool {
+        nextURL == nil
+    }
+
+    static func shouldShowFailure(hasCurrentImage: Bool) -> Bool {
+        !hasCurrentImage
     }
 }
 
@@ -346,8 +437,10 @@ struct RemoteImage<Content: View, Placeholder: View>: View {
             }
         }
         .task(id: url) {
-            image = nil
             loadFailed = false
+            if RemoteImageLoadingPolicy.shouldClearCurrentImage(for: url) {
+                image = nil
+            }
             guard let url, let repository else { return }
             if let cached = repository.cachedImage(for: url) {
                 image = cached
@@ -359,7 +452,9 @@ struct RemoteImage<Content: View, Placeholder: View>: View {
                 image = loaded
             } catch {
                 guard !Task.isCancelled, self.url == url else { return }
-                loadFailed = true
+                loadFailed = RemoteImageLoadingPolicy.shouldShowFailure(
+                    hasCurrentImage: image != nil || repository.cachedImage(for: url) != nil
+                )
             }
         }
     }

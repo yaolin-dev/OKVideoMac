@@ -65,33 +65,95 @@ extension View {
     }
 }
 
+struct AppHoverTooltipModifier: ViewModifier {
+    let text: String
+    let delay: TimeInterval
+
+    @State private var isHovering = false
+    @State private var isPresented = false
+    @State private var hoverGeneration = 0
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .bottomLeading) {
+                if isPresented {
+                    tooltip
+                        .alignmentGuide(.bottom) { dimensions in
+                            dimensions[.top] - 6
+                        }
+                        .transition(.opacity)
+                        .zIndex(1)
+                }
+            }
+            .zIndex(isPresented ? 1_000 : 0)
+            .onHover(perform: handleHover)
+            .onDisappear {
+                hoverGeneration &+= 1
+                isHovering = false
+                isPresented = false
+            }
+            .accessibilityHint(text)
+    }
+
+    private var tooltip: some View {
+        Text(text)
+            .font(.system(size: 13))
+            .foregroundColor(Color(nsColor: .labelColor))
+            .multilineTextAlignment(.leading)
+            .lineLimit(4)
+            .frame(maxWidth: 520, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(
+                Color(nsColor: .windowBackgroundColor),
+                in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+            .allowsHitTesting(false)
+    }
+
+    private func handleHover(_ inside: Bool) {
+        hoverGeneration &+= 1
+        let generation = hoverGeneration
+        isHovering = inside
+
+        guard inside else {
+            isPresented = false
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard isHovering, hoverGeneration == generation else { return }
+            withAnimation(.easeOut(duration: 0.08)) {
+                isPresented = true
+            }
+        }
+    }
+}
+
+extension View {
+    func appHoverTooltip(
+        _ text: String,
+        delay: TimeInterval = 0.1
+    ) -> some View {
+        modifier(AppHoverTooltipModifier(text: text, delay: delay))
+    }
+}
+
 struct RootView: View {
     @EnvironmentObject private var state: AppState
-    @State private var sidebarLayoutRevision = 0
 
     var body: some View {
         ZStack {
             AppSurfacePalette.background
                 .ignoresSafeArea()
 
-            persistentPlayerSurface
-                .opacity(state.isPlayerPresented ? 1 : 0)
-                .accessibilityHidden(true)
-
             browsingContent
-                .opacity(state.isPlayerPresented ? 0 : 1)
-                .allowsHitTesting(!state.isPlayerPresented)
-                .accessibilityHidden(state.isPlayerPresented)
-
-            if state.isPlayerPresented {
-                PlayerView {
-                    sidebarLayoutRevision &+= 1
-                }
-                    .environmentObject(state)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .transition(.opacity)
-                    .zIndex(10)
-            }
         }
         .alert(item: $state.presentedError) { error in
             Alert(
@@ -132,7 +194,6 @@ struct RootView: View {
                     .environmentObject(state)
             }
         }
-        .animation(.easeInOut(duration: 0.15), value: state.isPlayerPresented)
         .background {
             WindowCloseObserver {
                 Task { await state.closePlayer() }
@@ -141,37 +202,35 @@ struct RootView: View {
     }
 
     @ViewBuilder
-    private var persistentPlayerSurface: some View {
-        ZStack {
-            Color.black
-            if let player = state.embeddedPlayer {
-                MPVRenderView(player: player) { error in
-                    state.reportPlayerRenderError(error)
-                }
-                .id(player.renderOwnerID)
-            }
-        }
-        .ignoresSafeArea()
-        .allowsHitTesting(false)
-    }
-
-    @ViewBuilder
     private var browsingContent: some View {
         if #available(macOS 13.0, *) {
             NavigationSplitView {
                 SidebarView()
-                    .id(sidebarLayoutRevision)
             } detail: {
                 SectionContentView()
             }
         } else {
             NavigationView {
                 SidebarView()
-                    .id(sidebarLayoutRevision)
                 SectionContentView()
             }
             .navigationViewStyle(.columns)
         }
+    }
+}
+
+enum PlayerSurfaceMountPolicy {
+    static func shouldMount(
+        isPlayerPresented: Bool,
+        hasRenderPlayer: Bool
+    ) -> Bool {
+        isPlayerPresented && hasRenderPlayer
+    }
+}
+
+enum PlayerSurfaceBackdropPolicy {
+    static func shouldShow(isPlayerPresented: Bool) -> Bool {
+        isPlayerPresented
     }
 }
 

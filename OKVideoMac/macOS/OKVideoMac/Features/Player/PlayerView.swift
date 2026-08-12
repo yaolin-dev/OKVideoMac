@@ -13,8 +13,12 @@ struct PlayerView: View {
     @State private var displayedVolume: Double?
     @State private var pendingVolume: Double?
     @State private var isVolumeEditing = false
+    @State private var isLiveVolumeControlPresented = false
+    @State private var isLiveVolumeHovering = false
     @State private var volumeCommandTask: Task<Void, Never>?
     @State private var activeUtilityPanel: PlayerUtilityPanel?
+    @State private var inspectedPlayerEpisode: EpisodePresentation?
+    @State private var playerEpisodePageIndex = 0
     @State private var isWindowFullScreen = false
     @State private var isProgressHovering = false
     @State private var progressHoverFraction: Double?
@@ -42,7 +46,7 @@ struct PlayerView: View {
 
             PlayerSurfaceInteractionView(
                 onMove: revealControls,
-                onDoubleClick: toggleFullScreen
+                onDoubleClick: handleSurfaceDoubleClick
             )
 
             if controlsVisible {
@@ -57,6 +61,24 @@ struct PlayerView: View {
             }
 
             playbackStatusOverlay
+                .allowsHitTesting(false)
+
+            if state.isLivePlayback,
+               let notice = state.livePlaybackNotice {
+                VStack {
+                    Spacer()
+                    Text(notice)
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(.black.opacity(0.72), in: Capsule())
+                        .padding(.bottom, controlsVisible ? 92 : 28)
+                }
+                .transition(.opacity)
+                .allowsHitTesting(false)
+                .zIndex(45)
+            }
 
             if state.isLivePlayback {
                 livePlayerOverlay
@@ -99,13 +121,13 @@ struct PlayerView: View {
                 isLivePlayback: state.isLivePlayback,
                 controlsVisible: controlsVisible,
                 title: playbackDisplayTitle,
-                videoAspectRatio: playerVideoAspectRatio,
+                videoAspectRatio: playerWindowAspectRatio,
                 onRestore: onWindowChromeRestored,
                 onFullScreenChange: { isWindowFullScreen = $0 }
             )
                 .frame(width: 0, height: 0)
         }
-        .frame(minWidth: 800, minHeight: 520)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.clear)
         .onAppear {
             lastLiveChannelID = state.livePlaybackChannel?.id
@@ -116,13 +138,32 @@ struct PlayerView: View {
             volumeCommandTask?.cancel()
             volumeCommandTask = nil
             pendingVolume = nil
+            isLiveVolumeControlPresented = false
+            isLiveVolumeHovering = false
             activeUtilityPanel = nil
+            inspectedPlayerEpisode = nil
         }
         .onChange(of: state.playerSnapshot.status) { _ in
             revealControls()
         }
         .onChange(of: state.livePlaybackChannel?.id) { channelID in
             handleLiveChannelChange(channelID)
+        }
+        .onChange(of: activeUtilityPanel) { panel in
+            if panel != .episodes {
+                inspectedPlayerEpisode = nil
+            }
+        }
+        .onChange(of: state.currentPlayerEpisodeID) { _ in
+            inspectedPlayerEpisode = nil
+            if activeUtilityPanel == .episodes {
+                alignPlayerEpisodePageWithCurrentEpisode()
+            }
+        }
+        .onChange(of: state.playerEpisodePresentations.count) { _ in
+            if activeUtilityPanel == .episodes {
+                alignPlayerEpisodePageWithCurrentEpisode()
+            }
         }
         .animation(
             .easeInOut(duration: 0.22),
@@ -177,60 +218,37 @@ struct PlayerView: View {
             LinearGradient(
                 colors: [
                     Color.black.opacity(0),
-                    Color.black.opacity(0.58)
+                    Color.black.opacity(0.54)
                 ],
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .frame(height: 150)
+            .frame(height: 132)
         }
         .ignoresSafeArea()
         .allowsHitTesting(false)
     }
 
     private var livePlayerOverlay: some View {
-        ZStack(alignment: .topTrailing) {
-            VStack(spacing: 0) {
-                HStack(alignment: .top) {
-                    Spacer(minLength: 80)
-                    liveChannelInfoCard
+        GeometryReader { geometry in
+            let metrics = LivePlayerOverlayMetrics(
+                viewportSize: geometry.size
+            )
+            ZStack(alignment: .topTrailing) {
+                VStack(spacing: 0) {
+                    Spacer(minLength: metrics.minimumTopSpace)
+                    HStack(alignment: .bottom) {
+                        livePrimaryControls(metrics: metrics)
+                        Spacer(minLength: metrics.minimumControlSeparation)
+                        liveFullScreenButton(metrics: metrics)
+                    }
+                    .padding(.horizontal, metrics.outerHorizontalPadding)
+                    .padding(.bottom, metrics.outerBottomPadding)
                 }
-                .padding(.trailing, 52)
 
-                Spacer(minLength: 40)
-
-                HStack {
-                    livePrimaryControls
-                    Spacer()
-                }
-            }
-            .padding(.horizontal, 30)
-            .padding(.top, 24)
-            .padding(.bottom, 26)
-
-            Button {
-                Task { await state.closePlayer() }
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 18, weight: .medium))
-                    .frame(width: 40, height: 40)
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .foregroundColor(.white.opacity(0.96))
-            .background(Color.black.opacity(0.46))
-            .clipShape(Circle())
-            .overlay {
-                Circle()
-                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
-            }
-            .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
-            .padding(.top, 16)
-            .padding(.trailing, 20)
-            .help("退出直播")
-            .onHover { inside in
-                controlsHovering = inside
-                inside ? keepControlsVisible() : scheduleControlsHide()
+                liveChannelInfoCard
+                    .padding(.top, max(24, metrics.outerBottomPadding))
+                    .padding(.trailing, metrics.outerHorizontalPadding)
             }
         }
         .opacity(controlsVisible ? 1 : 0)
@@ -253,9 +271,12 @@ struct PlayerView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
                     Text("正在播放")
                         .foregroundColor(.white.opacity(0.72))
-                    Text(state.livePlaybackProgrammes.current?.title ?? "直播节目")
-                        .fontWeight(.semibold)
-                        .lineLimit(1)
+                    Text(
+                        state.livePlaybackProgrammes.current?.title
+                            ?? "直播节目"
+                    )
+                    .fontWeight(.semibold)
+                    .lineLimit(1)
                 }
 
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -295,30 +316,115 @@ struct PlayerView: View {
         }
     }
 
-    private var livePrimaryControls: some View {
-        HStack(spacing: 12) {
-            liveChannelNavigationButton(
-                offset: -1,
-                systemImage: "chevron.up",
-                help: "上一个频道（↑）"
-            )
-
-            liveChannelNavigationButton(
-                offset: 1,
-                systemImage: "chevron.down",
-                help: "下一个频道（↓）"
-            )
+    private func livePrimaryControls(
+        metrics: LivePlayerOverlayMetrics
+    ) -> some View {
+        HStack(alignment: .bottom, spacing: metrics.controlSpacing) {
+            liveBroadcastIndicator(metrics: metrics)
 
             Button {
                 Task { await state.togglePlayPause() }
             } label: {
                 Image(systemName: isPaused ? "play.fill" : "pause.fill")
-                    .font(.system(size: 22, weight: .semibold))
-                    .frame(width: 40, height: 40)
+                    .font(
+                        .system(
+                            size: metrics.primaryIconSize,
+                            weight: .semibold
+                        )
+                    )
+                    .frame(
+                        width: metrics.controlDiameter,
+                        height: metrics.controlDiameter
+                    )
+                    .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .keyboardShortcut(.space, modifiers: [])
             .help(isPaused ? "播放" : "暂停")
+            .modifier(PlayerControlHoverEffect())
+
+            liveVolumeControl(metrics: metrics)
+        }
+        .foregroundColor(.white.opacity(0.96))
+        .onHover { inside in
+            controlsHovering = inside
+            inside ? keepControlsVisible() : scheduleControlsHide()
+        }
+    }
+
+    private func liveBroadcastIndicator(
+        metrics: LivePlayerOverlayMetrics
+    ) -> some View {
+        ZStack {
+            Image(systemName: "dot.radiowaves.left.and.right")
+                .font(
+                    .system(
+                        size: metrics.liveIconSize,
+                        weight: .semibold
+                    )
+                )
+            Circle()
+                .fill(Color.red)
+                .frame(
+                    width: metrics.liveDotDiameter,
+                    height: metrics.liveDotDiameter
+                )
+        }
+        .frame(
+            width: metrics.controlDiameter,
+            height: metrics.controlDiameter
+        )
+        .contentShape(Circle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("正在直播")
+        .help("正在直播")
+    }
+
+    private func liveVolumeControl(
+        metrics: LivePlayerOverlayMetrics
+    ) -> some View {
+        VStack(spacing: metrics.volumePopoverSpacing) {
+            if isLiveVolumeControlPresented {
+                Slider(
+                    value: Binding(
+                        get: {
+                            displayedVolume ?? state.playerSnapshot.volume
+                        },
+                        set: enqueueLivePlayerVolume
+                    ),
+                    in: 0...100,
+                    onEditingChanged: { editing in
+                        isVolumeEditing = editing
+                        if editing {
+                            keepControlsVisible()
+                        } else {
+                            enqueueLivePlayerVolume(
+                                displayedVolume ?? state.playerSnapshot.volume
+                            )
+                            if !isLiveVolumeHovering {
+                                isLiveVolumeControlPresented = false
+                            }
+                            scheduleControlsHide()
+                        }
+                    }
+                )
+                .tint(.white)
+                .controlSize(.mini)
+                .frame(width: metrics.volumeSliderWidth)
+                .padding(.horizontal, metrics.volumePopoverHorizontalPadding)
+                .padding(.vertical, metrics.volumePopoverVerticalPadding)
+                .background(Color.black.opacity(0.42))
+                .background(.ultraThinMaterial)
+                .clipShape(Capsule())
+                .overlay {
+                    Capsule()
+                        .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                }
+                .shadow(color: .black.opacity(0.34), radius: 8, y: 3)
+                .transition(
+                    .opacity.combined(with: .move(edge: .bottom))
+                )
+            }
 
             Button {
                 Task { await state.togglePlayerMute() }
@@ -328,63 +434,81 @@ struct PlayerView: View {
                         ? "speaker.slash.fill"
                         : "speaker.wave.2.fill"
                 )
-                .font(.system(size: 21, weight: .medium))
-                .frame(width: 40, height: 40)
+                .font(
+                    .system(
+                        size: metrics.secondaryIconSize,
+                        weight: .medium
+                    )
+                )
+                .frame(
+                    width: metrics.controlDiameter,
+                    height: metrics.controlDiameter
+                )
+                .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .help(state.playerSnapshot.isMuted ? "取消静音" : "静音")
+            .help(state.playerSnapshot.isMuted ? "取消静音" : "静音与音量")
+            .modifier(PlayerControlHoverEffect())
+        }
+        .onHover { inside in
+            isLiveVolumeHovering = inside
+            if inside {
+                isLiveVolumeControlPresented = true
+            } else if !isVolumeEditing {
+                isLiveVolumeControlPresented = false
+            }
+        }
+        .animation(
+            .easeOut(duration: 0.16),
+            value: isLiveVolumeControlPresented
+        )
+        // Keep the permanent icon row fixed while the wider slider temporarily
+        // overflows above the speaker button.
+        .frame(width: metrics.controlDiameter, alignment: .bottom)
+    }
 
-            Label("直播", systemImage: "dot.radiowaves.left.and.right")
-                .font(.system(size: 18, weight: .semibold))
+    private func liveFullScreenButton(
+        metrics: LivePlayerOverlayMetrics
+    ) -> some View {
+        Button {
+            toggleFullScreen()
+        } label: {
+            Image(
+                systemName: isWindowFullScreen
+                    ? "arrow.down.right.and.arrow.up.left"
+                    : "arrow.up.left.and.arrow.down.right"
+            )
+            .font(
+                .system(
+                    size: metrics.secondaryIconSize,
+                    weight: .medium
+                )
+            )
+            .frame(
+                width: metrics.controlDiameter,
+                height: metrics.controlDiameter
+            )
+            .contentShape(Circle())
         }
-        .foregroundColor(.white.opacity(0.94))
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Color.black.opacity(0.28))
-        .background(.ultraThinMaterial)
-        .clipShape(Capsule())
-        .overlay {
-            Capsule()
-                .stroke(Color.white.opacity(0.08), lineWidth: 1)
-        }
+        .buttonStyle(.plain)
+        .foregroundColor(.white.opacity(0.96))
+        .help(isWindowFullScreen ? "退出全屏" : "进入全屏")
+        .modifier(PlayerControlHoverEffect())
         .onHover { inside in
             controlsHovering = inside
             inside ? keepControlsVisible() : scheduleControlsHide()
         }
     }
 
-    private func liveChannelNavigationButton(
-        offset: Int,
-        systemImage: String,
-        help: String
-    ) -> some View {
-        Button {
-            Task { await state.switchLiveChannel(by: offset) }
-        } label: {
-            Image(systemName: systemImage)
-                .font(.system(size: 18, weight: .bold))
-                .frame(width: 38, height: 38)
-                .background(Color.white.opacity(0.10))
-                .clipShape(Circle())
+    private func enqueueLivePlayerVolume(_ volume: Double) {
+        if state.playerSnapshot.isMuted {
+            Task { @MainActor in
+                if state.playerSnapshot.isMuted {
+                    await state.togglePlayerMute()
+                }
+            }
         }
-        .buttonStyle(.plain)
-        .disabled(!state.canSwitchLiveChannel)
-        .opacity(state.canSwitchLiveChannel ? 1 : 0.38)
-        .help(help)
-    }
-
-    private var liveStreamSummary: String {
-        guard let channel = state.livePlaybackChannel else { return "直播" }
-        let format = state.livePlaybackStream?.format?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .uppercased()
-        return [
-            format?.isEmpty == false ? format : nil,
-            channel.groupName,
-            "\(channel.streams.count) 条线路"
-        ]
-        .compactMap { $0 }
-        .joined(separator: " · ")
+        enqueuePlayerVolume(volume)
     }
 
     private var playbackDisplayTitle: String {
@@ -409,21 +533,27 @@ struct PlayerView: View {
         return contentTitle
     }
 
-    private var playerVideoAspectRatio: Double? {
-        if let override = state.playerAspectRatio {
-            let parts = override.split(separator: ":")
-            if parts.count == 2,
-               let width = Double(parts[0]),
-               let height = Double(parts[1]),
-               width > 0,
-               height > 0 {
-                return width / height
-            }
-        }
-        let width = state.playerSnapshot.videoWidth
-        let height = state.playerSnapshot.videoHeight
-        guard width > 0, height > 0 else { return nil }
-        return Double(width) / Double(height)
+    private var liveStreamSummary: String {
+        guard let channel = state.livePlaybackChannel else { return "直播" }
+        let format = state.livePlaybackStream?.format?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+        return [
+            format?.isEmpty == false ? format : nil,
+            channel.groupName,
+            "\(channel.streams.count) 条线路"
+        ]
+        .compactMap { $0 }
+        .joined(separator: " · ")
+    }
+
+    private var playerWindowAspectRatio: Double? {
+        PlayerWindowAspectPolicy.aspectRatio(
+            isLivePlayback: state.isLivePlayback,
+            override: state.playerAspectRatio,
+            videoWidth: state.playerSnapshot.videoWidth,
+            videoHeight: state.playerSnapshot.videoHeight
+        )
     }
 
     private func episodePanelDisplayName(
@@ -452,25 +582,6 @@ struct PlayerView: View {
                 }
 
                 Spacer(minLength: 24)
-
-                Button {
-                    Task { await state.closePlayer() }
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 18, weight: .medium))
-                        .frame(width: 38, height: 38)
-                        .contentShape(Circle())
-                        .shadow(color: .black.opacity(0.82), radius: 4, y: 1)
-                }
-                .buttonStyle(.plain)
-                .foregroundColor(.white.opacity(0.96))
-                .background(.ultraThinMaterial, in: Circle())
-                .background(Color.black.opacity(0.16), in: Circle())
-                .overlay {
-                    Circle()
-                        .stroke(Color.white.opacity(0.06), lineWidth: 1)
-                }
-                .help("退出播放")
             }
         }
         .frame(maxWidth: .infinity)
@@ -862,6 +973,12 @@ struct PlayerView: View {
     ) -> some View {
         let isActive = activeUtilityPanel == panel
         return Button {
+            if isActive || panel != .episodes {
+                inspectedPlayerEpisode = nil
+            }
+            if panel == .episodes, !isActive {
+                alignPlayerEpisodePageWithCurrentEpisode()
+            }
             withAnimation(.easeInOut(duration: 0.16)) {
                 activeUtilityPanel = isActive ? nil : panel
             }
@@ -895,103 +1012,142 @@ struct PlayerView: View {
 
     private var episodePanel: some View {
         let presentations = state.playerEpisodePresentations
+        let pageCount = PlayerEpisodePagePolicy.pageCount(
+            episodeCount: presentations.count
+        )
+        let safePageIndex = PlayerEpisodePagePolicy.clampedPageIndex(
+            playerEpisodePageIndex,
+            episodeCount: presentations.count
+        )
+        let pagePresentations = PlayerEpisodePagePolicy.page(
+            presentations,
+            pageIndex: safePageIndex
+        )
         return playerPanel(width: 500) {
             VStack(alignment: .leading, spacing: 12) {
                 panelHeader(
                     title: "选集",
-                    detail: "共 \(presentations.count) 集"
+                    detail: "共 \(state.playerEpisodes.count) 集"
                 )
 
-                if presentations.isEmpty {
+                if state.isPlayerEpisodeListPreparing {
+                    HStack(spacing: 9) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("正在整理分集…")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.62))
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 74)
+                } else if presentations.isEmpty {
                     panelEmptyState("暂无分集")
                 } else {
-                    ScrollViewReader { proxy in
-                        ScrollView(.vertical, showsIndicators: true) {
-                            LazyVGrid(
-                                columns: [
-                                    GridItem(
-                                        .adaptive(minimum: 82, maximum: 118),
-                                        spacing: 8
-                                    )
-                                ],
-                                alignment: .leading,
-                                spacing: 8
-                            ) {
-                                ForEach(presentations) { presentation in
-                                let selected = presentation.id
-                                    == state.currentPlayerEpisodeID
-                                Button {
-                                    activeUtilityPanel = nil
-                                    Task {
-                                        await state.playPlayerEpisode(
-                                            presentation.episode
-                                        )
-                                    }
-                                } label: {
-                                    VStack(spacing: 4) {
-                                        Text(
-                                            episodePanelDisplayName(
-                                                presentation
-                                            )
-                                        )
-                                            .font(.system(size: 13, weight: .medium))
-                                            .lineLimit(1)
-                                        if selected {
-                                            Image(systemName: "checkmark")
-                                                .font(.caption2.bold())
-                                        }
-                                    }
-                                    .foregroundColor(.white.opacity(selected ? 1 : 0.88))
-                                    .frame(maxWidth: .infinity, minHeight: 46)
-                                    .background(
-                                        selected
-                                            ? playerAccentColor.opacity(0.58)
-                                            : Color.white.opacity(0.055),
-                                        in: RoundedRectangle(
-                                            cornerRadius: 8,
-                                            style: .continuous
-                                        )
-                                    )
-                                    .overlay {
-                                        RoundedRectangle(cornerRadius: 8)
-                                            .stroke(
-                                                Color.white.opacity(
-                                                    selected ? 0.16 : 0.055
-                                                ),
-                                                lineWidth: 1
-                                            )
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(selected)
-                                .help(presentation.originalName)
-                                .id(presentation.id)
-                                }
-                            }
-                        }
-                        .onAppear {
-                            guard let selected = state.currentPlayerEpisodeID else {
-                                return
-                            }
-                            DispatchQueue.main.async {
-                                proxy.scrollTo(selected, anchor: .center)
-                            }
-                        }
+                    if pageCount > 1 {
+                        playerEpisodePageControls(
+                            presentations: presentations,
+                            pageCount: pageCount,
+                            selectedPageIndex: safePageIndex
+                        )
                     }
+
+                    PlayerEpisodeGrid(
+                        presentations: pagePresentations,
+                        selectedEpisodeID: state.currentPlayerEpisodeID,
+                        accentColor: playerAccentColor,
+                        displayName: episodePanelDisplayName,
+                        onPlay: { presentation in
+                            inspectedPlayerEpisode = nil
+                            activeUtilityPanel = nil
+                            Task {
+                                await state.playPlayerEpisode(
+                                    presentation.episode
+                                )
+                            }
+                        },
+                        onInspect: { presentation in
+                            inspectedPlayerEpisode = presentation
+                        }
+                    )
+                    .equatable()
                     .frame(
-                        height: min(
-                            286,
-                            max(
-                                54,
-                                CGFloat(
-                                    ceil(Double(presentations.count) / 5.0)
-                                ) * 54
-                            )
+                        height: PlayerEpisodePanelLayoutPolicy.gridHeight(
+                            episodeCount: pagePresentations.count,
+                            showsInspector: inspectedPlayerEpisode != nil
                         )
                     )
+
+                    if let inspectedPlayerEpisode {
+                        PlayerEpisodeOriginalNameInspector(
+                            originalName: inspectedPlayerEpisode.originalName,
+                            onClose: { self.inspectedPlayerEpisode = nil }
+                        )
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    }
                 }
             }
         }
+    }
+
+    private func playerEpisodePageControls(
+        presentations: [EpisodePresentation],
+        pageCount: Int,
+        selectedPageIndex: Int
+    ) -> some View {
+        HStack(spacing: 8) {
+            Text("分集区间")
+                .font(.caption)
+                .foregroundColor(.white.opacity(0.58))
+
+            Picker(
+                "分集区间",
+                selection: $playerEpisodePageIndex
+            ) {
+                ForEach(0..<pageCount, id: \.self) { pageIndex in
+                    Text(
+                        PlayerEpisodePagePolicy.title(
+                            presentations: presentations,
+                            pageIndex: pageIndex
+                        )
+                    )
+                    .tag(pageIndex)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(maxWidth: 190)
+
+            Button {
+                inspectedPlayerEpisode = nil
+                playerEpisodePageIndex = max(0, selectedPageIndex - 1)
+            } label: {
+                Image(systemName: "chevron.left")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(selectedPageIndex == 0)
+
+            Button {
+                inspectedPlayerEpisode = nil
+                playerEpisodePageIndex = min(
+                    pageCount - 1,
+                    selectedPageIndex + 1
+                )
+            } label: {
+                Image(systemName: "chevron.right")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(selectedPageIndex >= pageCount - 1)
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func alignPlayerEpisodePageWithCurrentEpisode() {
+        playerEpisodePageIndex = PlayerEpisodePagePolicy.pageIndex(
+            presentations: state.playerEpisodePresentations,
+            selectedEpisodeID: state.currentPlayerEpisodeID
+        )
     }
 
     private var audioTrackPanel: some View {
@@ -1458,6 +1614,10 @@ struct PlayerView: View {
     }
 
     private var isFailed: Bool {
+        if state.isLivePlayback,
+           state.isRecoveringLivePlayback || state.hasExhaustedLivePlayback {
+            return false
+        }
         if case .failed = state.playerSnapshot.status {
             return true
         }
@@ -1577,6 +1737,14 @@ struct PlayerView: View {
 
     private func toggleFullScreen() {
         (NSApp.keyWindow ?? NSApp.mainWindow)?.toggleFullScreen(nil)
+    }
+
+    private func handleSurfaceDoubleClick() {
+        if activeUtilityPanel != nil {
+            inspectedPlayerEpisode = nil
+            activeUtilityPanel = nil
+        }
+        toggleFullScreen()
     }
 
     private func trackMenu(
@@ -1859,6 +2027,298 @@ struct PlayerView: View {
     }
 }
 
+struct LivePlayerOverlayMetrics: Equatable {
+    let scale: CGFloat
+
+    init(viewportSize: CGSize) {
+        let widthScale = viewportSize.width / 1_280
+        let heightScale = viewportSize.height / 720
+        scale = min(max(min(widthScale, heightScale), 0.80), 1.10)
+    }
+
+    var controlDiameter: CGFloat { max(34, 40 * scale) }
+    var primaryIconSize: CGFloat { max(18, 20 * scale) }
+    var secondaryIconSize: CGFloat { max(17, 19 * scale) }
+    var liveIconSize: CGFloat { max(18, 21 * scale) }
+    var liveDotDiameter: CGFloat { max(5, 6 * scale) }
+    var controlSpacing: CGFloat { max(9, 12 * scale) }
+    var volumeSliderWidth: CGFloat { max(76, 92 * scale) }
+    var volumePopoverSpacing: CGFloat { max(7, 9 * scale) }
+    var volumePopoverHorizontalPadding: CGFloat { max(9, 11 * scale) }
+    var volumePopoverVerticalPadding: CGFloat { max(6, 7 * scale) }
+    var outerHorizontalPadding: CGFloat { max(18, 26 * scale) }
+    var outerBottomPadding: CGFloat { max(16, 24 * scale) }
+    var minimumTopSpace: CGFloat { max(40, 64 * scale) }
+    var minimumControlSeparation: CGFloat { max(36, 52 * scale) }
+}
+
+enum PlayerEpisodeOriginalNamePresentationMode: Equatable {
+    case panelInspector
+}
+
+struct PlayerEpisodeGrid: View, Equatable {
+    let presentations: [EpisodePresentation]
+    let selectedEpisodeID: String?
+    let accentColor: Color
+    let displayName: (EpisodePresentation) -> String
+    let onPlay: (EpisodePresentation) -> Void
+    let onInspect: (EpisodePresentation) -> Void
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.presentations == rhs.presentations
+            && lhs.selectedEpisodeID == rhs.selectedEpisodeID
+    }
+
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: true) {
+            LazyVGrid(
+                columns: [
+                    GridItem(
+                        .adaptive(minimum: 82, maximum: 118),
+                        spacing: 8
+                    )
+                ],
+                alignment: .leading,
+                spacing: 8
+            ) {
+                ForEach(presentations) { presentation in
+                    let selected = presentation.id == selectedEpisodeID
+                    PlayerEpisodeButton(
+                        presentation: presentation,
+                        displayName: displayName(presentation),
+                        selected: selected,
+                        accentColor: accentColor,
+                        onPlay: {
+                            guard !selected else { return }
+                            onPlay(presentation)
+                        },
+                        onInspect: { onInspect(presentation) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+struct PlayerEpisodeButton: View {
+    let presentation: EpisodePresentation
+    let displayName: String
+    let selected: Bool
+    let accentColor: Color
+    let onPlay: () -> Void
+    let onInspect: () -> Void
+    let originalNamePresentationMode: PlayerEpisodeOriginalNamePresentationMode = .panelInspector
+
+    var body: some View {
+        Button(action: onPlay) {
+            VStack(spacing: 4) {
+                Text(displayName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .bold))
+                }
+            }
+            .foregroundColor(.white.opacity(selected ? 1 : 0.92))
+            .frame(maxWidth: .infinity, minHeight: 46)
+            .background(
+                selected
+                    ? accentColor.opacity(0.58)
+                    : Color.white.opacity(0.055),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.white.opacity(selected ? 0.16 : 0.08))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("查看原始名称") {
+                // Defer the state mutation until AppKit has dismissed the
+                // context menu. This keeps the inspector transition stable.
+                DispatchQueue.main.async(execute: onInspect)
+            }
+
+            Button("复制原始名称") {
+                PlayerEpisodeOriginalNameActions.copy(
+                    presentation.originalName
+                )
+            }
+        }
+        .accessibilityHint("右键可以查看或复制原始名称")
+    }
+}
+
+enum PlayerEpisodeOriginalNameActions {
+    static func copy(
+        _ originalName: String,
+        to pasteboard: NSPasteboard = .general
+    ) {
+        pasteboard.clearContents()
+        pasteboard.setString(originalName, forType: .string)
+    }
+}
+
+struct PlayerEpisodeOriginalNameInspector: View {
+    let originalName: String
+    let onClose: () -> Void
+    @State private var didCopy = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Label("文件信息", systemImage: "doc.text")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.white.opacity(0.94))
+
+                Spacer()
+
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .frame(width: 20, height: 20)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.white.opacity(0.62))
+                .help("关闭文件信息")
+            }
+
+            Text("原始名称")
+                .font(.caption2)
+                .foregroundColor(.white.opacity(0.55))
+
+            ScrollView(.vertical, showsIndicators: true) {
+                Text(originalName)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.9))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+            }
+            .frame(minHeight: 34, maxHeight: 64)
+            .background(
+                Color.black.opacity(0.18),
+                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+            )
+
+            HStack {
+                Button {
+                    PlayerEpisodeOriginalNameActions.copy(originalName)
+                    didCopy = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+                        didCopy = false
+                    }
+                } label: {
+                    Label(
+                        didCopy ? "已复制" : "复制名称",
+                        systemImage: didCopy ? "checkmark" : "doc.on.doc"
+                    )
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Spacer()
+
+                Text("右键剧集可查看或复制")
+                    .font(.caption2)
+                    .foregroundColor(.white.opacity(0.45))
+            }
+        }
+        .padding(10)
+        .background(
+            Color.white.opacity(0.045),
+            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(Color.white.opacity(0.09))
+        }
+    }
+}
+
+enum PlayerEpisodePanelLayoutPolicy {
+    static func gridHeight(
+        episodeCount: Int,
+        showsInspector: Bool
+    ) -> CGFloat {
+        let rowCount = Int(ceil(Double(max(episodeCount, 1)) / 5.0))
+        let regularHeight = min(286, max(54, CGFloat(rowCount) * 54))
+        return showsInspector ? min(regularHeight, 196) : regularHeight
+    }
+}
+
+enum PlayerEpisodePagePolicy {
+    static let pageSize = 50
+
+    static func pageCount(episodeCount: Int) -> Int {
+        guard episodeCount > 0 else { return 0 }
+        return Int(ceil(Double(episodeCount) / Double(pageSize)))
+    }
+
+    static func clampedPageIndex(
+        _ pageIndex: Int,
+        episodeCount: Int
+    ) -> Int {
+        let count = pageCount(episodeCount: episodeCount)
+        guard count > 0 else { return 0 }
+        return min(max(pageIndex, 0), count - 1)
+    }
+
+    static func page(
+        _ presentations: [EpisodePresentation],
+        pageIndex: Int
+    ) -> [EpisodePresentation] {
+        guard !presentations.isEmpty else { return [] }
+        let safeIndex = clampedPageIndex(
+            pageIndex,
+            episodeCount: presentations.count
+        )
+        let start = safeIndex * pageSize
+        let end = min(start + pageSize, presentations.count)
+        return Array(presentations[start..<end])
+    }
+
+    static func pageIndex(
+        presentations: [EpisodePresentation],
+        selectedEpisodeID: String?
+    ) -> Int {
+        guard let selectedEpisodeID,
+              let index = presentations.firstIndex(where: {
+                  $0.id == selectedEpisodeID
+              }) else {
+            return 0
+        }
+        return index / pageSize
+    }
+
+    static func title(
+        presentations: [EpisodePresentation],
+        pageIndex: Int
+    ) -> String {
+        let values = page(presentations, pageIndex: pageIndex)
+        guard let first = values.first, let last = values.last else {
+            return "暂无分集"
+        }
+        if let firstNumber = first.episodeNumber,
+           let lastNumber = last.episodeNumber {
+            return "\(firstNumber)–\(lastNumber) 集"
+        }
+        let safeIndex = clampedPageIndex(
+            pageIndex,
+            episodeCount: presentations.count
+        )
+        let start = safeIndex * pageSize + 1
+        let end = start + values.count - 1
+        return "\(start)–\(end) 项"
+    }
+}
+
 private enum PlayerUtilityPanel: Equatable {
     case episodes
     case audio
@@ -1887,9 +2347,10 @@ enum PlayerControlVisibilityPolicy {
         isLivePlayback: Bool,
         controlsHovering: Bool,
         isFailed: Bool,
+        keepsControlsVisible: Bool = false,
         isPlaying: Bool
     ) -> Bool {
-        guard !isFailed else { return false }
+        guard !isFailed, !keepsControlsVisible else { return false }
         // A live picture should return to a clean, cursor-free surface even
         // when the pointer is parked over a card or control. Only real mouse
         // movement should reveal the overlay again.
@@ -1924,11 +2385,32 @@ enum PlayerUnavailablePlaceholderPolicy {
 }
 
 enum PlayerSurfaceGesture {
+    enum MouseDownAction: Equatable {
+        case performDoubleClick
+        case ignore
+    }
+
+    static func action(
+        clickCount: Int,
+        buttonNumber: Int
+    ) -> MouseDownAction {
+        guard buttonNumber == 0 else { return .ignore }
+        switch clickCount {
+        case 2:
+            return .performDoubleClick
+        default:
+            return .ignore
+        }
+    }
+
     static func togglesFullScreen(
         clickCount: Int,
         buttonNumber: Int
     ) -> Bool {
-        clickCount == 2 && buttonNumber == 0
+        action(
+            clickCount: clickCount,
+            buttonNumber: buttonNumber
+        ) == .performDoubleClick
     }
 }
 
@@ -2003,11 +2485,14 @@ private final class PlayerSurfaceInteractionNSView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         forwardMove(force: true)
-        if PlayerSurfaceGesture.togglesFullScreen(
+        switch PlayerSurfaceGesture.action(
             clickCount: event.clickCount,
             buttonNumber: event.buttonNumber
         ) {
+        case .performDoubleClick:
             onDoubleClick?()
+        case .ignore:
+            break
         }
     }
 
@@ -2101,8 +2586,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
         private var acceptsMouseMovedEvents = false
         private var titlebarSeparatorStyle: NSTitlebarSeparatorStyle = .automatic
         private var windowTitle = ""
-        private var windowFrame = NSRect.zero
-        private var contentAspectRatio = NSSize(width: 0, height: 0)
+        private var contentAspectRatio = NSSize.zero
         private var closeButtonWasHidden = false
         private var miniaturizeButtonWasHidden = false
         private var zoomButtonWasHidden = false
@@ -2158,7 +2642,6 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             acceptsMouseMovedEvents = newWindow.acceptsMouseMovedEvents
             titlebarSeparatorStyle = newWindow.titlebarSeparatorStyle
             windowTitle = newWindow.title
-            windowFrame = newWindow.frame
             contentAspectRatio = newWindow.contentAspectRatio
             closeButtonWasHidden = newWindow.standardWindowButton(
                 .closeButton
@@ -2206,63 +2689,53 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                 return
             }
             // AppKit owns the window frame throughout a live resize. Mutating
-            // titlebar style, contentAspectRatio or display state from a
-            // SwiftUI update while that transaction is active can re-enter
-            // NSWindow's private resize path and terminate with SIGTRAP.
+            // titlebar style or display state from a SwiftUI update while that
+            // transaction is active can re-enter NSWindow's private resize
+            // path and terminate with SIGTRAP.
             // Keep the desired configuration and apply it once AppKit posts
             // didEndLiveResize instead.
             guard PlayerWindowMutationPolicy.canApply(
                 isInLiveResize: window.inLiveResize
             ) else { return }
 
-            window.toolbar?.isVisible = false
-            window.backgroundColor = .black
-            window.acceptsMouseMovedEvents = true
-            if #available(macOS 11.0, *) {
-                window.titlebarSeparatorStyle = .none
-            }
+            Self.withPreservedOuterFrame(of: window) {
+                // Live and on-demand playback share one chrome mode. The
+                // browsing toolbar remains structurally owned by RootView but
+                // is hidden while the player is presented, and full-size
+                // content lets the native video surface extend beneath the
+                // transparent titlebar.
+                window.styleMask.insert(.fullSizeContentView)
+                window.titlebarAppearsTransparent = true
+                window.titleVisibility = .hidden
+                window.toolbar?.isVisible = false
+                window.backgroundColor = .black
+                window.acceptsMouseMovedEvents = true
+                if #available(macOS 11.0, *) {
+                    window.titlebarSeparatorStyle = .none
+                }
 
-            if window.title != configuration.title {
-                window.title = configuration.title
-            }
+                if window.title != configuration.title {
+                    window.title = configuration.title
+                }
 
-            if appliedConfiguration?.isLivePlayback
-                    != configuration.isLivePlayback
-                || appliedConfiguration?.controlsVisible
-                    != configuration.controlsVisible {
-                if configuration.isLivePlayback,
-                   configuration.controlsVisible {
-                    window.styleMask.remove(.fullSizeContentView)
-                    window.titlebarAppearsTransparent = false
-                    window.titleVisibility = .visible
+                if configuration.controlsVisible {
                     window.isMovableByWindowBackground = false
-                    setStandardWindowButtonsHidden(false, on: window)
+                    restoreStandardWindowButtonVisibility(on: window)
                 } else {
-                    window.styleMask.insert(.fullSizeContentView)
-                    window.titlebarAppearsTransparent = true
-                    window.titleVisibility = .hidden
                     window.isMovableByWindowBackground = true
-                    if !configuration.controlsVisible {
-                        setStandardWindowButtonsHidden(true, on: window)
-                    } else {
-                        restoreStandardWindowButtonVisibility(on: window)
-                    }
+                    setStandardWindowButtonsHidden(true, on: window)
                 }
             }
+
             if let ratio = configuration.videoAspectRatio,
-               ratio.isFinite,
-               ratio > 0 {
-                let targetAspectRatio = NSSize(width: ratio, height: 1)
-                if !Self.aspectRatiosMatch(
+               (!Self.aspectRatiosMatch(
+                    appliedConfiguration?.videoAspectRatio,
+                    ratio
+               ) || !Self.aspectRatiosMatch(
                     window.contentAspectRatio,
-                    targetAspectRatio
-                ) {
-                    window.contentAspectRatio = targetAspectRatio
-                }
-                Self.resizeWindowToMatchVideo(
-                    aspectRatio: ratio,
-                    window: window
-                )
+                    ratio
+               )) {
+                Self.applyAspectRatio(ratio, to: window)
             }
             appliedConfiguration = configuration
             Self.markWindowForRefresh(
@@ -2286,7 +2759,6 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             let savedAcceptsMouseMovedEvents = acceptsMouseMovedEvents
             let savedTitlebarSeparatorStyle = titlebarSeparatorStyle
             let savedWindowTitle = windowTitle
-            let savedWindowFrame = windowFrame
             let savedContentAspectRatio = contentAspectRatio
             let savedCloseButtonWasHidden = closeButtonWasHidden
             let savedMiniaturizeButtonWasHidden = miniaturizeButtonWasHidden
@@ -2305,63 +2777,172 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             // swift_beginAccess crashes. Mark the window dirty on the next run
             // loop instead and let AppKit own the display cycle.
             DispatchQueue.main.async { [weak window, onRestore] in
-                defer {
-                    if let willCloseObserver {
-                        NotificationCenter.default.removeObserver(
-                            willCloseObserver
-                        )
+                Self.restoreWhenWindowIsStable(
+                    window,
+                    lifetime: lifetime
+                ) { window in
+                    defer {
+                        if let willCloseObserver {
+                            NotificationCenter.default.removeObserver(
+                                willCloseObserver
+                            )
+                        }
                     }
-                }
-                guard let window else {
+                    guard let window else {
+                        onRestore()
+                        return
+                    }
+                    Self.withPreservedOuterFrame(of: window) {
+                        if savedHadFullSizeContentView {
+                            window.styleMask.insert(.fullSizeContentView)
+                        } else {
+                            window.styleMask.remove(.fullSizeContentView)
+                        }
+                        window.titlebarAppearsTransparent =
+                            savedTitlebarAppearsTransparent
+                        window.titleVisibility = savedTitleVisibility
+                        if let savedToolbarWasVisible {
+                            window.toolbar?.isVisible = savedToolbarWasVisible
+                        }
+                        if let savedBackgroundColor {
+                            window.backgroundColor = savedBackgroundColor
+                        }
+                        window.isMovableByWindowBackground =
+                            savedIsMovableByWindowBackground
+                        window.acceptsMouseMovedEvents =
+                            savedAcceptsMouseMovedEvents
+                        window.titlebarSeparatorStyle =
+                            savedTitlebarSeparatorStyle
+                        window.title = savedWindowTitle
+                        window.contentAspectRatio = savedContentAspectRatio
+                        window.standardWindowButton(.closeButton)?.isHidden =
+                            savedCloseButtonWasHidden
+                        window.standardWindowButton(
+                            .miniaturizeButton
+                        )?.isHidden = savedMiniaturizeButtonWasHidden
+                        window.standardWindowButton(.zoomButton)?.isHidden =
+                            savedZoomButtonWasHidden
+                    }
+                    Self.markWindowForRefresh(window, lifetime: lifetime)
                     onRestore()
-                    return
                 }
-                // NSWindow posts willClose while AppKit owns a private frame
-                // and snapshot transaction. Any style/frame/layout mutation
-                // during that transaction can trap inside
-                // _adjustNeedsDisplayRegionForNewFrame. The window is going
-                // away, so there is nothing useful to restore in that case.
-                guard lifetime?.isClosing != true else {
-                    onRestore()
-                    return
-                }
-                if savedHadFullSizeContentView {
-                    window.styleMask.insert(.fullSizeContentView)
-                } else {
-                    window.styleMask.remove(.fullSizeContentView)
-                }
-                window.titlebarAppearsTransparent = savedTitlebarAppearsTransparent
-                window.titleVisibility = savedTitleVisibility
-                if let savedToolbarWasVisible {
-                    window.toolbar?.isVisible = savedToolbarWasVisible
-                }
-                if let savedBackgroundColor {
-                    window.backgroundColor = savedBackgroundColor
-                }
-                window.isMovableByWindowBackground =
-                    savedIsMovableByWindowBackground
-                window.acceptsMouseMovedEvents = savedAcceptsMouseMovedEvents
-                window.titlebarSeparatorStyle = savedTitlebarSeparatorStyle
-                window.title = savedWindowTitle
-                // Applying a video's aspect ratio changes the actual NSWindow
-                // frame as soon as the user resizes it. Clearing that constraint
-                // alone leaves the browsing UI in the video's shape, so restore
-                // the complete pre-playback frame after removing the constraint.
-                window.contentAspectRatio = savedContentAspectRatio
-                if !window.styleMask.contains(.fullScreen),
-                   !window.inLiveResize,
-                   !savedWindowFrame.isEmpty {
-                    window.setFrame(savedWindowFrame, display: false)
-                }
-                window.standardWindowButton(.closeButton)?.isHidden =
-                    savedCloseButtonWasHidden
-                window.standardWindowButton(.miniaturizeButton)?.isHidden =
-                    savedMiniaturizeButtonWasHidden
-                window.standardWindowButton(.zoomButton)?.isHidden =
-                    savedZoomButtonWasHidden
-                Self.markWindowForRefresh(window, lifetime: lifetime)
-                onRestore()
             }
+        }
+
+        private static func withPreservedOuterFrame(
+            of window: NSWindow,
+            mutations: () -> Void
+        ) {
+            let outerFrame = window.frame
+            mutations()
+            guard !window.styleMask.contains(.fullScreen),
+                  !window.inLiveResize,
+                  window.frame != outerFrame else { return }
+            // Toolbar/titlebar mutations can ask AppKit to preserve the old
+            // content size by changing the outer frame. Restore the frame from
+            // this same stable transaction; it is the user's current frame,
+            // never a pre-playback frame or a video-derived aspect ratio.
+            window.setFrame(outerFrame, display: false)
+        }
+
+        private static func aspectRatiosMatch(
+            _ lhs: Double?,
+            _ rhs: Double
+        ) -> Bool {
+            guard let lhs, lhs.isFinite, lhs > 0 else { return false }
+            return abs(lhs - rhs) < 0.0001
+        }
+
+        private static func aspectRatiosMatch(
+            _ lhs: NSSize,
+            _ rhs: Double
+        ) -> Bool {
+            guard lhs.width.isFinite,
+                  lhs.height.isFinite,
+                  lhs.width > 0,
+                  lhs.height > 0 else { return false }
+            return abs(Double(lhs.width / lhs.height) - rhs) < 0.0001
+        }
+
+        private static func applyAspectRatio(
+            _ aspectRatio: Double,
+            to window: NSWindow
+        ) {
+            guard aspectRatio.isFinite,
+                  aspectRatio > 0,
+                  !window.styleMask.contains(.fullScreen),
+                  !window.inLiveResize else { return }
+
+            window.contentAspectRatio = NSSize(
+                width: aspectRatio,
+                height: 1
+            )
+
+            let contentRect = window.contentRect(forFrameRect: window.frame)
+            let visibleFrame = window.screen?.visibleFrame
+            let chromeWidth = max(0, window.frame.width - contentRect.width)
+            let chromeHeight = max(0, window.frame.height - contentRect.height)
+            let maximumContentSize = NSSize(
+                width: max(
+                    1,
+                    (visibleFrame?.width ?? .greatestFiniteMagnitude)
+                        - chromeWidth
+                ),
+                height: max(
+                    1,
+                    (visibleFrame?.height ?? .greatestFiniteMagnitude)
+                        - chromeHeight
+                )
+            )
+            guard let targetContentSize = PlayerWindowAspectPolicy.contentSize(
+                current: contentRect.size,
+                aspectRatio: aspectRatio,
+                minimum: window.contentMinSize,
+                maximum: maximumContentSize
+            ) else { return }
+
+            var targetFrame = window.frameRect(
+                forContentRect: NSRect(origin: .zero, size: targetContentSize)
+            )
+            targetFrame.origin = NSPoint(
+                x: window.frame.midX - targetFrame.width / 2,
+                y: window.frame.midY - targetFrame.height / 2
+            )
+            if let visibleFrame {
+                targetFrame.origin.x = min(
+                    max(targetFrame.origin.x, visibleFrame.minX),
+                    visibleFrame.maxX - targetFrame.width
+                )
+                targetFrame.origin.y = min(
+                    max(targetFrame.origin.y, visibleFrame.minY),
+                    visibleFrame.maxY - targetFrame.height
+                )
+            }
+            window.setFrame(targetFrame, display: false)
+        }
+
+        private static func restoreWhenWindowIsStable(
+            _ window: NSWindow?,
+            lifetime: WindowLifetime?,
+            completion: @escaping (NSWindow?) -> Void
+        ) {
+            guard let window,
+                  lifetime?.isClosing != true else {
+                completion(nil)
+                return
+            }
+            guard !window.inLiveResize else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.016) {
+                    [weak window] in
+                    restoreWhenWindowIsStable(
+                        window,
+                        lifetime: lifetime,
+                        completion: completion
+                    )
+                }
+                return
+            }
+            completion(window)
         }
 
         private func scheduleWindowConfiguration(
@@ -2477,65 +3058,6 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             }
         }
 
-        private static func aspectRatiosMatch(
-            _ lhs: NSSize,
-            _ rhs: NSSize
-        ) -> Bool {
-            guard lhs.width > 0,
-                  lhs.height > 0,
-                  rhs.width > 0,
-                  rhs.height > 0 else { return false }
-            return abs(
-                lhs.width / lhs.height - rhs.width / rhs.height
-            ) < 0.0001
-        }
-
-        private static func resizeWindowToMatchVideo(
-            aspectRatio: Double,
-            window: NSWindow
-        ) {
-            guard !window.styleMask.contains(.fullScreen),
-                  !window.inLiveResize else { return }
-            let contentRect = window.contentRect(forFrameRect: window.frame)
-            guard !aspectRatiosMatch(
-                contentRect.size,
-                NSSize(width: aspectRatio, height: 1)
-            ) else { return }
-
-            let visibleFrame = window.screen?.visibleFrame
-            let chromeWidth = max(0, window.frame.width - contentRect.width)
-            let chromeHeight = max(0, window.frame.height - contentRect.height)
-            let maximumContentSize = NSSize(
-                width: max(1, (visibleFrame?.width ?? .greatestFiniteMagnitude) - chromeWidth),
-                height: max(1, (visibleFrame?.height ?? .greatestFiniteMagnitude) - chromeHeight)
-            )
-            guard let targetContentSize = PlayerWindowAspectPolicy.contentSize(
-                current: contentRect.size,
-                aspectRatio: aspectRatio,
-                minimum: window.contentMinSize,
-                maximum: maximumContentSize
-            ) else { return }
-
-            var targetFrame = window.frameRect(
-                forContentRect: NSRect(origin: .zero, size: targetContentSize)
-            )
-            targetFrame.origin = NSPoint(
-                x: window.frame.midX - targetFrame.width / 2,
-                y: window.frame.midY - targetFrame.height / 2
-            )
-            if let visibleFrame {
-                targetFrame.origin.x = min(
-                    max(targetFrame.origin.x, visibleFrame.minX),
-                    visibleFrame.maxX - targetFrame.width
-                )
-                targetFrame.origin.y = min(
-                    max(targetFrame.origin.y, visibleFrame.minY),
-                    visibleFrame.maxY - targetFrame.height
-                )
-            }
-            window.setFrame(targetFrame, display: false)
-        }
-
         private static func markWindowForRefresh(
             _ window: NSWindow?,
             lifetime: WindowLifetime?
@@ -2549,9 +3071,8 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             contentView.superview?.needsLayout = true
             contentView.superview?.needsDisplay = true
             window.invalidateCursorRects(for: contentView)
-            // The style-mask and aspect-ratio mutations above are committed by
-            // AppKit after this callback returns. Refresh on the next main-loop
-            // turn so SwiftUI lays out against the final content rect, then
+            // Titlebar mutations are committed by AppKit after this callback
+            // returns. Refresh on the next main-loop turn, then
             // explicitly update the OpenGL drawable. Without this pass the old
             // framebuffer size can survive until the next manual window resize.
             DispatchQueue.main.async { [weak window] in
@@ -2582,6 +3103,26 @@ enum PlayerWindowMutationPolicy {
 }
 
 enum PlayerWindowAspectPolicy {
+    static let liveAspectRatio = 16.0 / 9.0
+
+    static func aspectRatio(
+        isLivePlayback: Bool,
+        override: String?,
+        videoWidth: Int,
+        videoHeight: Int
+    ) -> Double? {
+        if isLivePlayback {
+            return liveAspectRatio
+        }
+        if let override,
+           let ratio = parsedAspectRatio(override) {
+            return ratio
+        }
+        guard videoWidth > 0, videoHeight > 0 else { return nil }
+        let ratio = Double(videoWidth) / Double(videoHeight)
+        return ratio.isFinite && ratio > 0 ? ratio : nil
+    }
+
     static func contentSize(
         current: NSSize,
         aspectRatio: Double,
@@ -2599,24 +3140,19 @@ enum PlayerWindowAspectPolicy {
               aspectRatio > 0 else { return nil }
 
         let ratio = CGFloat(aspectRatio)
-        let boundedMaximumWidth = min(
-            maximum.width,
-            maximum.height * ratio
+        let maximumWidth = min(maximum.width, maximum.height * ratio)
+        guard maximumWidth.isFinite, maximumWidth > 0 else { return nil }
+        let minimumWidth = min(
+            max(minimum.width, minimum.height * ratio),
+            maximumWidth
         )
-        guard boundedMaximumWidth.isFinite,
-              boundedMaximumWidth > 0 else { return nil }
-        let requiredMinimumWidth = max(
-            minimum.width,
-            minimum.height * ratio
-        )
-        let lowerWidth = min(requiredMinimumWidth, boundedMaximumWidth)
 
-        func candidate(width proposedWidth: CGFloat) -> NSSize {
-            let width = min(
-                max(proposedWidth, lowerWidth),
-                boundedMaximumWidth
+        func candidate(width: CGFloat) -> NSSize {
+            let boundedWidth = min(max(width, minimumWidth), maximumWidth)
+            return NSSize(
+                width: boundedWidth,
+                height: boundedWidth / ratio
             )
-            return NSSize(width: width, height: width / ratio)
         }
 
         let preservingWidth = candidate(width: current.width)
@@ -2628,6 +3164,18 @@ enum PlayerWindowAspectPolicy {
         return changeScore(preservingWidth) <= changeScore(preservingHeight)
             ? preservingWidth
             : preservingHeight
+    }
+
+    private static func parsedAspectRatio(_ value: String) -> Double? {
+        let parts = value.split(separator: ":")
+        guard parts.count == 2,
+              let width = Double(parts[0]),
+              let height = Double(parts[1]),
+              width.isFinite,
+              height.isFinite,
+              width > 0,
+              height > 0 else { return nil }
+        return width / height
     }
 }
 

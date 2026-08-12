@@ -132,6 +132,28 @@ private let mpvRenderUpdateCallback: MPVRenderUpdateCallback = { rawContext in
 
 private let mpvRenderUpdateFrame: UInt64 = 1 << 0
 
+enum MPVRenderSafetyPolicy {
+    static func framebufferSize(
+        backingBounds: NSRect,
+        isInLiveResize: Bool,
+        isAttachedToWindow: Bool
+    ) -> (width: Int32, height: Int32)? {
+        guard isAttachedToWindow,
+              !isInLiveResize else { return nil }
+        let width = backingBounds.width.rounded()
+        let height = backingBounds.height.rounded()
+        guard width.isFinite,
+              height.isFinite,
+              width > 0,
+              height > 0,
+              width <= CGFloat(Int32.max),
+              height <= CGFloat(Int32.max) else {
+            return nil
+        }
+        return (Int32(width), Int32(height))
+    }
+}
+
 final class MPVOpenGLView: NSOpenGLView {
     private let player: MPVPlayerClient
     private let renderOwnerID: String
@@ -235,17 +257,20 @@ final class MPVOpenGLView: NSOpenGLView {
         // current CGContext, so even a fallback NSColor fill traps. A nil mpv
         // context means teardown owns the surface and there is nothing left
         // for this view to draw.
-        guard let renderContext, let openGLContext else { return }
+        guard let renderContext,
+              let openGLContext,
+              let framebufferSize = MPVRenderSafetyPolicy.framebufferSize(
+                backingBounds: convertToBacking(bounds),
+                isInLiveResize: window?.inLiveResize == true,
+                isAttachedToWindow: window != nil
+              ) else { return }
         openGLContext.makeCurrentContext()
-        let backingBounds = convertToBacking(bounds)
-        let width = max(1, Int32(backingBounds.width.rounded()))
-        let height = max(1, Int32(backingBounds.height.rounded()))
         do {
             try player.render(
                 renderContext,
                 framebuffer: 0,
-                width: width,
-                height: height,
+                width: framebufferSize.width,
+                height: framebufferSize.height,
                 flipY: true
             )
             openGLContext.flushBuffer()
@@ -262,7 +287,10 @@ final class MPVOpenGLView: NSOpenGLView {
     /// native thread, so `MPVRenderCallbackBox` always invokes this method on
     /// the main render thread rather than calling into libmpv directly.
     fileprivate func consumeRenderUpdateAndRequestDisplay() {
-        guard let renderContext, let openGLContext else { return }
+        guard window != nil,
+              window?.inLiveResize != true,
+              let renderContext,
+              let openGLContext else { return }
         openGLContext.makeCurrentContext()
         let flags = player.renderUpdate(renderContext)
         if flags & mpvRenderUpdateFrame != 0 {

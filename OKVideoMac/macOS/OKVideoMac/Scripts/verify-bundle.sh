@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_FILE="$SCRIPT_DIR/../OKVideoMac.xcodeproj/project.pbxproj"
+
 if [[ "$#" -ne 1 ]]; then
   echo "Usage: $0 /path/to/OKVideoMac.app" >&2
   exit 64
@@ -12,6 +15,20 @@ FRAMEWORKS="$APP/Contents/Frameworks"
 BRIDGE_APK="$APP/Contents/Resources/AndroidDexBridge-release.apk"
 NODE_RUNTIME="$APP/Contents/Resources/NodeRuntime/node"
 APKANALYZER="${ANDROID_SDK_ROOT:-/Volumes/XcodeDev/AndroidSDK}/cmdline-tools/latest/bin/apkanalyzer"
+EXPECTED_VERSION="${OKVIDEOMAC_EXPECTED_VERSION:-$(
+  awk -F' = ' '/MARKETING_VERSION = / {
+    gsub(/[ ;]/, "", $2)
+    print $2
+    exit
+  }' "$PROJECT_FILE"
+)}"
+EXPECTED_BUILD="${OKVIDEOMAC_EXPECTED_BUILD:-$(
+  awk -F' = ' '/CURRENT_PROJECT_VERSION = / {
+    gsub(/[ ;]/, "", $2)
+    print $2
+    exit
+  }' "$PROJECT_FILE"
+)}"
 
 if [[ ! -x "$EXECUTABLE" ]]; then
   echo "Main executable missing: $EXECUTABLE" >&2
@@ -41,9 +58,15 @@ if [[ ! -f "$BRIDGE_APK" ]]; then
   echo "Bundled Android Release bridge is missing." >&2
   exit 1
 fi
-if [[ "$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")" != "0.3.39" ]] ||
-   [[ "$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist")" != "60" ]]; then
-  echo "The app has unexpected formal-release version metadata." >&2
+ACTUAL_VERSION="$(
+  plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist"
+)"
+ACTUAL_BUILD="$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist")"
+if [[ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]] ||
+   [[ "$ACTUAL_BUILD" != "$EXPECTED_BUILD" ]]; then
+  echo "The app has unexpected formal-release version metadata:" >&2
+  echo "  expected $EXPECTED_VERSION ($EXPECTED_BUILD)" >&2
+  echo "  actual   $ACTUAL_VERSION ($ACTUAL_BUILD)" >&2
   exit 1
 fi
 if [[ ! -f "$APP/Contents/Resources/AppIcon.icns" ]] ||

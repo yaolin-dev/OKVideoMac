@@ -358,9 +358,15 @@ private struct PendingCloudPlayback {
     var detail: VideoDetail
     var source: PlaySource
     var episode: PlayEpisode
+    var origin: PlaybackRequestOrigin = .direct
 }
 
-private struct PlayerEpisodePresentationCacheKey: Equatable {
+enum PlaybackRequestOrigin: Equatable, Sendable {
+    case direct
+    case history
+}
+
+private struct PlayerEpisodePresentationCacheKey: Equatable, Sendable {
     let videoID: String
     let sourceID: String
     let episodeCount: Int
@@ -454,6 +460,162 @@ enum LiveChannelDeletionPolicy {
     }
 }
 
+struct LivePlaybackCandidate: Equatable {
+    let channel: LiveChannel
+    let stream: LiveStream
+
+    var identifier: String {
+        "\(channel.id)::\(stream.id)"
+    }
+}
+
+enum LivePlaybackRecoveryPolicy {
+    static func candidates(
+        channels: [LiveChannel],
+        startingChannel: LiveChannel,
+        startingStream: LiveStream,
+        excluding attemptedIdentifiers: Set<String> = []
+    ) -> [LivePlaybackCandidate] {
+        let normalized = LiveChannelNavigationPolicy.normalizedChannels(
+            channels,
+            including: startingChannel
+        )
+        guard let startingIndex = normalized.firstIndex(where: {
+            $0.id == startingChannel.id
+        }) else {
+            return []
+        }
+
+        let orderedChannels = Array(normalized[startingIndex...])
+            + Array(normalized[..<startingIndex])
+        var seenStreamURLs = Set<String>()
+        var values: [LivePlaybackCandidate] = []
+        for channel in orderedChannels {
+            let streams: [LiveStream]
+            if channel.id == startingChannel.id {
+                streams = [startingStream] + startingChannel.streams.filter {
+                    $0.id != startingStream.id
+                }
+            } else {
+                streams = channel.streams
+            }
+            for stream in streams {
+                let candidate = LivePlaybackCandidate(
+                    channel: channel.id == startingChannel.id
+                        ? startingChannel
+                        : channel,
+                    stream: stream
+                )
+                guard seenStreamURLs.insert(stream.id).inserted,
+                      !attemptedIdentifiers.contains(candidate.identifier) else {
+                    continue
+                }
+                values.append(candidate)
+            }
+        }
+        return values
+    }
+}
+
+enum LiveStreamProbeResult: Equatable, Sendable {
+    case reachable
+    case definitivelyUnavailable
+    case inconclusive
+}
+
+enum LiveSourceValidationPolicy {
+    static func result(forHTTPStatus statusCode: Int) -> LiveStreamProbeResult {
+        switch statusCode {
+        case 200...399:
+            return .reachable
+        case 400, 401, 403, 404, 410, 451:
+            return .definitivelyUnavailable
+        default:
+            return .inconclusive
+        }
+    }
+
+    static func shouldRemoveChannel(
+        streamResults: [LiveStreamProbeResult]
+    ) -> Bool {
+        !streamResults.isEmpty
+            && streamResults.allSatisfy { $0 == .definitivelyUnavailable }
+    }
+}
+
+enum LiveSourceValidationStatus: Equatable {
+    case checking(completed: Int, total: Int)
+    case completed(removed: Int, total: Int)
+    case failed(String)
+}
+
+private actor LiveStreamAvailabilityProber {
+    private let httpClient: URLSessionHTTPClient
+
+    init() {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpMaximumConnectionsPerHost = 4
+        configuration.timeoutIntervalForRequest = 6
+        configuration.timeoutIntervalForResource = 7
+        httpClient = URLSessionHTTPClient(configuration: configuration)
+    }
+
+    func result(for stream: LiveStream) async -> LiveStreamProbeResult {
+        if stream.needsParsing {
+            return .inconclusive
+        }
+        if stream.url.isFileURL {
+            return FileManager.default.fileExists(atPath: stream.url.path)
+                ? .reachable
+                : .definitivelyUnavailable
+        }
+        guard ["http", "https"].contains(
+            stream.url.scheme?.lowercased() ?? ""
+        ) else {
+            return .inconclusive
+        }
+
+        let first = await probeOnce(stream)
+        guard first == .definitivelyUnavailable else { return first }
+        do {
+            try await Task.sleep(nanoseconds: 400_000_000)
+        } catch {
+            return .inconclusive
+        }
+        let second = await probeOnce(stream)
+        return second == .definitivelyUnavailable
+            ? .definitivelyUnavailable
+            : second == .reachable ? .reachable : .inconclusive
+    }
+
+    private func probeOnce(_ stream: LiveStream) async -> LiveStreamProbeResult {
+        var headers = HTTPHeaders(stream.headers)
+        headers["Range"] = "bytes=0-1023"
+        do {
+            let response = try await httpClient.send(
+                HTTPRequest(
+                    url: stream.url,
+                    headers: headers,
+                    timeout: 6,
+                    maximumResponseBytes: 256 * 1_024,
+                    retryPolicy: .none,
+                    allowsNonSuccessfulStatus: true
+                )
+            )
+            return LiveSourceValidationPolicy.result(
+                forHTTPStatus: response.statusCode
+            )
+        } catch let error as HTTPClientError {
+            if case .responseTooLarge = error {
+                return .reachable
+            }
+            return .inconclusive
+        } catch {
+            return .inconclusive
+        }
+    }
+}
+
 private struct LivePlaybackNavigationContext {
     let sourceID: UUID
     let channels: [LiveChannel]
@@ -499,6 +661,11 @@ final class AppState: ObservableObject {
     @Published private(set) var livePlaybackChannel: LiveChannel?
     @Published private(set) var livePlaybackStream: LiveStream?
     @Published private(set) var livePlaybackSourceID: UUID?
+    @Published private(set) var isRecoveringLivePlayback = false
+    @Published private(set) var hasExhaustedLivePlayback = false
+    @Published private(set) var livePlaybackNotice: String?
+    @Published private(set) var liveSourceValidationStatuses:
+        [UUID: LiveSourceValidationStatus] = [:]
     @Published private(set) var selectedDetail: VideoDetail?
     @Published private(set) var pendingDetailSummary: VideoSummary?
     @Published private(set) var incognitoMode = false
@@ -507,6 +674,8 @@ final class AppState: ObservableObject {
     @Published private(set) var favoriteLiveChannelIDs: Set<String> = []
     @Published private(set) var deletedLiveChannelIDs: Set<String> = []
     @Published private(set) var playerSnapshot = PlayerSnapshot()
+    @Published private(set) var playerEpisodePresentations: [EpisodePresentation] = []
+    @Published private(set) var isPlayerEpisodeListPreparing = false
     @Published private(set) var playerRenderClient: MPVPlayerClient?
     @Published private(set) var playerSubtitlesEnabled = false
     @Published private(set) var selectedPlayerSubtitleTrackID: Int?
@@ -549,7 +718,12 @@ final class AppState: ObservableObject {
     private var activePlayback: ActivePlaybackContext?
     private var pendingPlayback: PendingCloudPlayback?
     private var livePlaybackNavigationContext: LivePlaybackNavigationContext?
+    private var livePlaybackAttemptedIdentifiers = Set<String>()
+    private var livePlaybackRecoveryTask: Task<Void, Never>?
+    private var livePlaybackNoticeTask: Task<Void, Never>?
+    private var liveSourceValidationTasks: [UUID: Task<Void, Never>] = [:]
     private var playerEpisodePresentationCache: PlayerEpisodePresentationCache?
+    private var playerEpisodePreparationTask: Task<Void, Never>?
     private var pendingCloudPlayback: PendingCloudPlayback?
     private var pendingNodeOperation: PendingNodeOperation?
     private var playbackSessionID = UUID()
@@ -565,7 +739,6 @@ final class AppState: ObservableObject {
     private var isClosingPlayer = false
     private var prefersPlayerSubtitlesEnabled = false
     private var preferredPlayerSubtitleTrack: PlayerSubtitleTrackPreference?
-    private var playerStartedInFullScreen = false
     private var lastAutomaticConfigurationRefreshAttemptAt: Date?
     private var configurationRefreshTask: Task<Bool, Never>?
     private var configurationRefreshSessionID = UUID()
@@ -1030,20 +1203,26 @@ final class AppState: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         do {
-            let selection = try await provider.select(id: summary.videoID)
+            let selection = try await provider.select(summary: summary)
             guard detailLoadSessionID == sessionID else { return }
             pendingDetailSummary = nil
             switch selection {
             case .detail(let detail):
                 selectedDetail = detail
             case .action(let result):
-                if let authorization = await waitForCloudAuthorization() {
+                if Self.shouldWaitForCloudAuthorization(
+                    capability: provider.capability
+                ), let authorization = await waitForCloudAuthorization() {
                     await presentCloudAuthorization(authorization, pending: nil)
                 } else {
                     presentedError = UserFacingError(
                         title: summary.title,
                         message: Self.siteActionMessage(result)
-                            ?? Self.unconfirmedSiteActionMessage
+                            ?? (Self.shouldWaitForCloudAuthorization(
+                                capability: provider.capability
+                            )
+                                ? Self.unconfirmedSiteActionMessage
+                                : "站点返回了无法识别的操作结果，请重试或切换来源。")
                     )
                 }
             }
@@ -1200,7 +1379,8 @@ final class AppState: ObservableObject {
             await startPlayback(
                 detail: playback.detail,
                 source: playback.source,
-                episode: playback.episode
+                episode: playback.episode,
+                origin: playback.origin
             )
         case nil:
             break
@@ -1440,13 +1620,20 @@ final class AppState: ObservableObject {
             await startPlayback(
                 detail: pending.detail,
                 source: pending.source,
-                episode: pending.episode
+                episode: pending.episode,
+                origin: pending.origin
             )
         }
     }
 
     static let unconfirmedSiteActionMessage =
         "未检测到网盘设置或授权界面，当前操作尚未完成。请稍后重试。"
+
+    static func shouldWaitForCloudAuthorization(
+        capability: SiteCapability
+    ) -> Bool {
+        capability == .javaDexSpider
+    }
 
     /// Returns only an explicit upstream result. Empty placeholder objects are
     /// commands, not proof that their side effect completed successfully.
@@ -1529,7 +1716,8 @@ final class AppState: ObservableObject {
                 await startPlayback(
                     detail: detail,
                     source: selection.source,
-                    episode: selection.episode
+                    episode: selection.episode,
+                    origin: .history
                 )
                 return
             }
@@ -1555,7 +1743,8 @@ final class AppState: ObservableObject {
             await startPlayback(
                 detail: context.detail,
                 source: context.source,
-                episode: context.episode
+                episode: context.episode,
+                origin: .history
             )
             return
         }
@@ -1590,7 +1779,8 @@ final class AppState: ObservableObject {
                     await startPlayback(
                         detail: detail,
                         source: selection.source,
-                        episode: selection.episode
+                        episode: selection.episode,
+                        origin: .history
                     )
                     return
                 }
@@ -1689,7 +1879,8 @@ final class AppState: ObservableObject {
         pendingPlayback = PendingCloudPlayback(
             detail: context.detail,
             source: context.source,
-            episode: context.episode
+            episode: context.episode,
+            origin: .history
         )
         playbackResolutionState = .restoringHistory
         currentPlaybackAttempt = nil
@@ -1992,7 +2183,8 @@ final class AppState: ObservableObject {
     func startPlayback(
         detail: VideoDetail,
         source: PlaySource,
-        episode: PlayEpisode
+        episode: PlayEpisode,
+        origin: PlaybackRequestOrigin = .direct
     ) async {
         guard !isShutdownRequested,
               let environment,
@@ -2017,7 +2209,13 @@ final class AppState: ObservableObject {
         pendingPlayback = PendingCloudPlayback(
             detail: detail,
             source: source,
-            episode: episode
+            episode: episode,
+            origin: origin
+        )
+        preparePlayerEpisodePresentations(
+            detail: detail,
+            source: source,
+            sessionID: sessionID
         )
         livePlaybackChannel = nil
         livePlaybackStream = nil
@@ -2104,9 +2302,11 @@ final class AppState: ObservableObject {
 
                 let result: SitePlaybackResult
                 do {
-                    result = try await provider.player(
+                    result = try await requestSitePlayback(
+                        provider: provider,
                         flag: candidateSource.name,
-                        episodeURL: candidateEpisode.url
+                        episodeURL: candidateEpisode.url,
+                        sessionID: sessionID
                     )
                     guard playbackSessionID == sessionID else {
                         throw CancellationError()
@@ -2119,7 +2319,8 @@ final class AppState: ObservableObject {
                             PendingCloudPlayback(
                                 detail: detail,
                                 source: source,
-                                episode: episode
+                                episode: episode,
+                                origin: origin
                             )
                         )
                     )
@@ -2131,7 +2332,8 @@ final class AppState: ObservableObject {
                         pending: PendingCloudPlayback(
                             detail: detail,
                             source: source,
-                            episode: episode
+                            episode: episode,
+                            origin: origin
                         )
                     )
                     return
@@ -2236,6 +2438,22 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func requestSitePlayback(
+        provider: any SiteProvider,
+        flag: String,
+        episodeURL: String,
+        sessionID: UUID
+    ) async throws -> SitePlaybackResult {
+        try Task.checkCancellation()
+        guard playbackSessionID == sessionID else {
+            throw CancellationError()
+        }
+        return try await provider.player(
+            flag: flag,
+            episodeURL: episodeURL
+        )
+    }
+
     @discardableResult
     func importLiveSource(
         source: LiveSourceInput,
@@ -2267,6 +2485,10 @@ final class AppState: ObservableObject {
             liveSources = try await environment.database.liveSources()
             loadedLivePlaylists[record.id] = loaded.playlist
             await loadEPG(for: record, playlist: loaded.playlist)
+            startInitialLiveSourceValidation(
+                sourceID: record.id,
+                playlist: loaded.playlist
+            )
             return true
         } catch {
             show(error, title: "直播源加载失败")
@@ -2331,6 +2553,9 @@ final class AppState: ObservableObject {
 
     func deleteLiveSource(_ id: UUID) async {
         guard let environment else { return }
+        liveSourceValidationTasks[id]?.cancel()
+        liveSourceValidationTasks[id] = nil
+        liveSourceValidationStatuses[id] = nil
         do {
             try await environment.database.deleteLiveSource(id: id)
             liveSources = try await environment.database.liveSources()
@@ -2357,6 +2582,143 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func startInitialLiveSourceValidation(
+        sourceID: UUID,
+        playlist: LivePlaylist
+    ) {
+        liveSourceValidationTasks[sourceID]?.cancel()
+        let channels = playlist.groups.flatMap(\.channels)
+        guard !channels.isEmpty else {
+            liveSourceValidationStatuses[sourceID] = .completed(
+                removed: 0,
+                total: 0
+            )
+            return
+        }
+        liveSourceValidationStatuses[sourceID] = .checking(
+            completed: 0,
+            total: channels.count
+        )
+        let prober = LiveStreamAvailabilityProber()
+        liveSourceValidationTasks[sourceID] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var unavailableChannelIDs = Set<String>()
+            var completed = 0
+
+            for startIndex in stride(
+                from: 0,
+                to: channels.count,
+                by: 4
+            ) {
+                guard !Task.isCancelled else { return }
+                let endIndex = min(startIndex + 4, channels.count)
+                let batch = Array(channels[startIndex..<endIndex])
+                let results = await withTaskGroup(
+                    of: (String, Bool).self,
+                    returning: [(String, Bool)].self
+                ) { group in
+                    for channel in batch {
+                        group.addTask {
+                            guard !channel.streams.isEmpty else {
+                                return (channel.id, true)
+                            }
+                            var streamResults: [LiveStreamProbeResult] = []
+                            for stream in channel.streams {
+                                guard !Task.isCancelled else {
+                                    return (channel.id, false)
+                                }
+                                streamResults.append(
+                                    await prober.result(for: stream)
+                                )
+                            }
+                            return (
+                                channel.id,
+                                LiveSourceValidationPolicy.shouldRemoveChannel(
+                                    streamResults: streamResults
+                                )
+                            )
+                        }
+                    }
+                    var values: [(String, Bool)] = []
+                    for await result in group {
+                        values.append(result)
+                    }
+                    return values
+                }
+                guard !Task.isCancelled else { return }
+                for (channelID, isUnavailable) in results
+                where isUnavailable {
+                    unavailableChannelIDs.insert(channelID)
+                }
+                completed += batch.count
+                self.liveSourceValidationStatuses[sourceID] = .checking(
+                    completed: completed,
+                    total: channels.count
+                )
+            }
+
+            guard !Task.isCancelled,
+                  self.liveSources.contains(where: { $0.id == sourceID }) else {
+                return
+            }
+            do {
+                try await self.applyAutomaticallyUnavailableLiveChannels(
+                    unavailableChannelIDs,
+                    sourceID: sourceID,
+                    channels: channels
+                )
+                self.liveSourceValidationStatuses[sourceID] = .completed(
+                    removed: unavailableChannelIDs.count,
+                    total: channels.count
+                )
+            } catch {
+                self.liveSourceValidationStatuses[sourceID] = .failed(
+                    error.localizedDescription
+                )
+            }
+            self.liveSourceValidationTasks[sourceID] = nil
+        }
+    }
+
+    private func applyAutomaticallyUnavailableLiveChannels(
+        _ channelIDs: Set<String>,
+        sourceID: UUID,
+        channels: [LiveChannel]
+    ) async throws {
+        guard !channelIDs.isEmpty else { return }
+        let previousDeletedIDs = deletedLiveChannelIDs
+        let previousFavoriteIDs = favoriteLiveChannelIDs
+        let sourceName = liveSources.first(where: { $0.id == sourceID })?.name
+        for channel in channels where channelIDs.contains(channel.id) {
+            deletedLiveChannelIDs.insert(
+                LiveChannelDeletionPolicy.identifier(
+                    sourceID: sourceID,
+                    channelID: channel.id
+                )
+            )
+            if let sourceName {
+                favoriteLiveChannelIDs.remove(
+                    liveFavoriteID(
+                        sourceName: sourceName,
+                        channel: channel
+                    )
+                )
+            }
+        }
+        do {
+            try await persistDeletedLiveChannels()
+            if favoriteLiveChannelIDs != previousFavoriteIDs {
+                try await persistFavoriteLiveChannels()
+            }
+        } catch {
+            deletedLiveChannelIDs = previousDeletedIDs
+            favoriteLiveChannelIDs = previousFavoriteIDs
+            try? await persistDeletedLiveChannels()
+            try? await persistFavoriteLiveChannels()
+            throw error
+        }
+    }
+
     func playLive(
         channel: LiveChannel,
         stream: LiveStream,
@@ -2364,6 +2726,18 @@ final class AppState: ObservableObject {
         navigationChannels: [LiveChannel]? = nil
     ) async {
         guard !isShutdownRequested, let environment else { return }
+        let clickRequestID = UUID()
+        PlayerStartupTraceStore.shared.begin(
+            requestID: clickRequestID,
+            mode: environment.player.mode
+        )
+        livePlaybackRecoveryTask?.cancel()
+        livePlaybackRecoveryTask = nil
+        livePlaybackNoticeTask?.cancel()
+        livePlaybackNoticeTask = nil
+        livePlaybackNotice = nil
+        hasExhaustedLivePlayback = false
+        livePlaybackAttemptedIdentifiers = []
         if let navigationChannels {
             livePlaybackNavigationContext = LivePlaybackNavigationContext(
                 sourceID: sourceID,
@@ -2381,52 +2755,27 @@ final class AppState: ObservableObject {
                 channels: [channel]
             )
         }
-        let sessionID = UUID()
-        PlayerStartupTraceStore.shared.begin(
-            requestID: sessionID,
-            mode: environment.player.mode
+
+        activePlayback = nil
+        pendingPlayback = nil
+        livePlaybackChannel = channel
+        livePlaybackStream = stream
+        livePlaybackSourceID = sourceID
+        playbackQualitySwitchSessionID = UUID()
+        playbackQualities = []
+        selectedPlaybackQualityID = nil
+        isSwitchingPlaybackQuality = false
+        presentPlayer()
+
+        playbackSessionID = clickRequestID
+        activePlayerRequestID = clickRequestID
+        await attemptLivePlaybackCandidates(
+            startingChannel: channel,
+            startingStream: stream,
+            sourceID: sourceID,
+            isAutomaticRecovery: false,
+            initialRequestID: clickRequestID
         )
-        playbackSessionID = sessionID
-        activePlayerRequestID = sessionID
-        do {
-            try await environment.player.prepareForPlayback(
-                requestID: sessionID
-            )
-            guard playbackSessionID == sessionID else { return }
-            let media = ResolvedMedia(
-                url: stream.url,
-                headers: HTTPHeaders(stream.headers),
-                format: stream.format,
-                siteKey: "live",
-                sourceName: channel.name,
-                episodeName: stream.name
-            )
-            activePlayback = nil
-            pendingPlayback = nil
-            livePlaybackChannel = channel
-            livePlaybackStream = stream
-            livePlaybackSourceID = sourceID
-            playbackQualitySwitchSessionID = UUID()
-            playbackQualities = []
-            selectedPlaybackQualityID = nil
-            isSwitchingPlaybackQuality = false
-            presentPlayer()
-            try await environment.player.load(
-                media,
-                startPosition: nil,
-                requestID: sessionID
-            )
-            guard playbackSessionID == sessionID else { return }
-        } catch {
-            PlayerStartupTraceStore.shared.cancel(requestID: sessionID)
-            guard playbackSessionID == sessionID else { return }
-            livePlaybackChannel = nil
-            livePlaybackStream = nil
-            livePlaybackSourceID = nil
-            livePlaybackNavigationContext = nil
-            await dismissPlayerSurfaceAndRestoreWindow()
-            show(error, title: "直播播放失败")
-        }
     }
 
     func switchLiveChannel(by offset: Int) async {
@@ -2450,6 +2799,126 @@ final class AppState: ObservableObject {
             sourceID: sourceID,
             navigationChannels: context.channels
         )
+    }
+
+    private func attemptLivePlaybackCandidates(
+        startingChannel: LiveChannel,
+        startingStream: LiveStream,
+        sourceID: UUID,
+        isAutomaticRecovery: Bool,
+        initialRequestID: UUID? = nil
+    ) async {
+        guard let environment,
+              let context = livePlaybackNavigationContext,
+              context.sourceID == sourceID else {
+            return
+        }
+        isRecoveringLivePlayback = true
+        hasExhaustedLivePlayback = false
+        let candidates = LivePlaybackRecoveryPolicy.candidates(
+            channels: context.channels,
+            startingChannel: startingChannel,
+            startingStream: startingStream,
+            excluding: livePlaybackAttemptedIdentifiers
+        )
+        var skippedCount = 0
+        var pendingInitialRequestID = initialRequestID
+        for candidate in candidates {
+            guard !Task.isCancelled,
+                  !isShutdownRequested,
+                  livePlaybackSourceID == sourceID,
+                  isPlayerPresented else {
+                isRecoveringLivePlayback = false
+                return
+            }
+            livePlaybackAttemptedIdentifiers.insert(candidate.identifier)
+            let requestID = pendingInitialRequestID ?? UUID()
+            if pendingInitialRequestID == nil {
+                PlayerStartupTraceStore.shared.begin(
+                    requestID: requestID,
+                    mode: environment.player.mode
+                )
+            }
+            pendingInitialRequestID = nil
+            playbackSessionID = requestID
+            activePlayerRequestID = requestID
+            livePlaybackChannel = candidate.channel
+            livePlaybackStream = candidate.stream
+            let media = ResolvedMedia(
+                url: candidate.stream.url,
+                headers: HTTPHeaders(candidate.stream.headers),
+                format: candidate.stream.format,
+                siteKey: "live",
+                sourceName: candidate.channel.name,
+                episodeName: candidate.stream.name
+            )
+            do {
+                try await environment.player.load(
+                    media,
+                    startPosition: nil,
+                    requestID: requestID
+                )
+                guard playbackSessionID == requestID else { return }
+                isRecoveringLivePlayback = false
+                hasExhaustedLivePlayback = false
+                if skippedCount > 0 || isAutomaticRecovery {
+                    showLivePlaybackNotice(
+                        "已自动跳过失效线路，正在播放 \(candidate.channel.name)"
+                    )
+                }
+                return
+            } catch {
+                PlayerStartupTraceStore.shared.cancel(requestID: requestID)
+                guard playbackSessionID == requestID else { return }
+                skippedCount += 1
+            }
+        }
+        finishExhaustedLivePlayback()
+    }
+
+    private func recoverLivePlaybackAfterFailure(requestID: UUID?) {
+        guard !isShutdownRequested,
+              isPlayerPresented,
+              !isRecoveringLivePlayback,
+              livePlaybackRecoveryTask == nil,
+              PlaybackRequestOwnershipPolicy.accepts(
+                  requestID: requestID,
+                  activeRequestID: activePlayerRequestID
+              ),
+              let channel = livePlaybackChannel,
+              let stream = livePlaybackStream,
+              let sourceID = livePlaybackSourceID else {
+            return
+        }
+        livePlaybackRecoveryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.attemptLivePlaybackCandidates(
+                startingChannel: channel,
+                startingStream: stream,
+                sourceID: sourceID,
+                isAutomaticRecovery: true
+            )
+            self.livePlaybackRecoveryTask = nil
+        }
+    }
+
+    private func finishExhaustedLivePlayback() {
+        isRecoveringLivePlayback = false
+        hasExhaustedLivePlayback = true
+        livePlaybackNoticeTask?.cancel()
+        livePlaybackNoticeTask = nil
+        livePlaybackNotice = "当前直播源暂时没有可播放的频道"
+    }
+
+    private func showLivePlaybackNotice(_ message: String) {
+        livePlaybackNoticeTask?.cancel()
+        livePlaybackNotice = message
+        livePlaybackNoticeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.livePlaybackNotice = nil
+            self?.livePlaybackNoticeTask = nil
+        }
     }
 
     func isLiveFavorite(sourceName: String, channel: LiveChannel) -> Bool {
@@ -2715,6 +3184,14 @@ final class AppState: ObservableObject {
         activePlayerRequestID = UUID()
         playbackQualitySwitchSessionID = UUID()
         livePlaybackNavigationContext = nil
+        livePlaybackRecoveryTask?.cancel()
+        livePlaybackRecoveryTask = nil
+        livePlaybackNoticeTask?.cancel()
+        livePlaybackNoticeTask = nil
+        for task in liveSourceValidationTasks.values {
+            task.cancel()
+        }
+        liveSourceValidationTasks = [:]
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = nil
         playerEventTask?.cancel()
@@ -2784,6 +3261,14 @@ final class AppState: ObservableObject {
         playbackSessionID = UUID()
         activePlayerRequestID = UUID()
         playbackQualitySwitchSessionID = UUID()
+        livePlaybackRecoveryTask?.cancel()
+        livePlaybackRecoveryTask = nil
+        livePlaybackNoticeTask?.cancel()
+        livePlaybackNoticeTask = nil
+        isRecoveringLivePlayback = false
+        hasExhaustedLivePlayback = false
+        livePlaybackNotice = nil
+        livePlaybackAttemptedIdentifiers = []
         // Capture the final position before stop resets the player snapshot.
         await persistPlaybackProgress()
         // Ignore the stop event for history purposes. It otherwise publishes a
@@ -3558,33 +4043,27 @@ final class AppState: ObservableObject {
         activePlayback?.source.episodes ?? pendingPlayback?.source.episodes ?? []
     }
 
-    var playerEpisodePresentations: [EpisodePresentation] {
-        episodePresentationCache()?.values ?? []
-    }
-
     var currentPlayerEpisodePresentation: EpisodePresentation? {
         guard let episodeID = currentPlayerEpisodeID else { return nil }
-        return episodePresentationCache()?.valuesByEpisodeID[episodeID]
+        if let cached = playerEpisodePresentationCache?
+            .valuesByEpisodeID[episodeID] {
+            return cached
+        }
+        guard let episode = playerEpisodes.first(where: { $0.id == episodeID }) else {
+            return nil
+        }
+        return EpisodeNameParser.presentation(for: episode)
     }
 
     var currentPlayerEpisodeID: String? {
         activePlayback?.episode.id ?? pendingPlayback?.episode.id
     }
 
-    private func episodePresentationCache() -> PlayerEpisodePresentationCache? {
-        let detail: VideoDetail
-        let source: PlaySource
-        if let activePlayback {
-            detail = activePlayback.detail
-            source = activePlayback.source
-        } else if let pendingPlayback {
-            detail = pendingPlayback.detail
-            source = pendingPlayback.source
-        } else {
-            playerEpisodePresentationCache = nil
-            return nil
-        }
-
+    private func preparePlayerEpisodePresentations(
+        detail: VideoDetail,
+        source: PlaySource,
+        sessionID: UUID
+    ) {
         let key = PlayerEpisodePresentationCacheKey(
             videoID: detail.summary.id,
             sourceID: source.id,
@@ -3594,24 +4073,30 @@ final class AppState: ObservableObject {
         )
         if let cache = playerEpisodePresentationCache,
            cache.key == key {
-            return cache
+            playerEpisodePresentations = cache.values
+            isPlayerEpisodeListPreparing = false
+            return
         }
-
-        let values = EpisodeListPresentation.presentations(
-            from: source.episodes,
-            query: "",
-            sortOrder: .sourceOrder
-        )
-        let cache = PlayerEpisodePresentationCache(
-            key: key,
-            values: values,
-            valuesByEpisodeID: Dictionary(
-                values.map { ($0.id, $0) },
-                uniquingKeysWith: { current, _ in current }
+        playerEpisodePreparationTask?.cancel()
+        playerEpisodePresentations = []
+        isPlayerEpisodeListPreparing = true
+        playerEpisodePreparationTask = Task { [weak self] in
+            let snapshot = await EpisodePresentationRepository.shared.snapshot(
+                videoID: detail.summary.id,
+                source: source
             )
-        )
-        playerEpisodePresentationCache = cache
-        return cache
+            guard !Task.isCancelled, let self,
+                  self.playbackSessionID == sessionID else { return }
+            let cache = PlayerEpisodePresentationCache(
+                key: key,
+                values: snapshot.values,
+                valuesByEpisodeID: snapshot.valuesByEpisodeID
+            )
+            self.playerEpisodePresentationCache = cache
+            self.playerEpisodePresentations = snapshot.values
+            self.isPlayerEpisodeListPreparing = false
+            self.playerEpisodePreparationTask = nil
+        }
     }
 
     nonisolated static func orderedPlaybackSources(
@@ -3766,6 +4251,21 @@ final class AppState: ObservableObject {
                         == normalizedReference
                 }) {
                     return (source, episode)
+                }
+            }
+
+            // Quark episode URLs contain an expiring stoken. When detail has
+            // refreshed the same share/file, prefer that fresh URL even if the
+            // display name or the opaque token changed.
+            if let identity = QuarkEpisodeReference.identity(
+                from: normalizedReference
+            ) {
+                for source in orderedSources {
+                    if let episode = source.episodes.first(where: {
+                        QuarkEpisodeReference.identity(from: $0.url) == identity
+                    }) {
+                        return (source, episode)
+                    }
                 }
             }
         }
@@ -4436,6 +4936,12 @@ final class AppState: ObservableObject {
                     ) else {
                         continue
                     }
+                    if self.livePlaybackChannel != nil {
+                        self.recoverLivePlaybackAfterFailure(
+                            requestID: requestID
+                        )
+                        continue
+                    }
                     let endedSessionID = self.playbackSessionID
                     if self.activePlayback != nil {
                         try? await self.savePlaybackHistory(
@@ -4451,6 +4957,12 @@ final class AppState: ObservableObject {
                         requestID: requestID,
                         activeRequestID: self.activePlayerRequestID
                     ) else {
+                        continue
+                    }
+                    if self.livePlaybackChannel != nil {
+                        self.recoverLivePlaybackAfterFailure(
+                            requestID: requestID
+                        )
                         continue
                     }
                     self.show(AppError.playback(message), title: "播放器错误")
@@ -4655,7 +5167,9 @@ final class AppState: ObservableObject {
                 posterURL: detail.summary.posterURL,
                 sourceName: playback.source.name,
                 episodeName: playback.episode.name,
-                episodeReference: playback.episode.url,
+                episodeReference: QuarkEpisodeReference.durableHistoryReference(
+                    playback.episode.url
+                ),
                 mediaReference: playback.media.url.absoluteString,
                 position: position,
                 duration: duration
@@ -4712,44 +5226,15 @@ final class AppState: ObservableObject {
     }
 
     private func presentPlayer() {
-        if !isPlayerPresented {
-            let window = NSApp.keyWindow ?? NSApp.mainWindow
-            playerStartedInFullScreen = window?.styleMask.contains(.fullScreen)
-                ?? false
-        }
         isPlayerPresented = true
-    }
-
-    private func restoreWindowAfterPlayer() async {
-        let window = NSApp.keyWindow ?? NSApp.mainWindow
-        let isFullScreen = window?.styleMask.contains(.fullScreen) ?? false
-        let shouldExit = Self.shouldExitFullScreenAfterPlayer(
-            startedInFullScreen: playerStartedInFullScreen,
-            isFullScreen: isFullScreen
-        )
-        playerStartedInFullScreen = false
-        guard shouldExit, let window else { return }
-        window.toggleFullScreen(nil)
-        for _ in 0..<40 where window.styleMask.contains(.fullScreen) {
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
     }
 
     private func dismissPlayerSurfaceAndRestoreWindow() async {
         isPlayerPresented = false
-        // Let SwiftUI hide the player chrome and restore its window
-        // configurator before a possible full-screen transition begins. The
-        // surface container stays mounted; fullDestroy removes the native
-        // render view until the next playback recreates a client.
+        // The player owns a separate window. Yield once so AppKit can close
+        // that window after the native render context has detached; the
+        // browsing window is never resized or transitioned by playback.
         await Task.yield()
-        await restoreWindowAfterPlayer()
-    }
-
-    static func shouldExitFullScreenAfterPlayer(
-        startedInFullScreen: Bool,
-        isFullScreen: Bool
-    ) -> Bool {
-        !startedInFullScreen && isFullScreen
     }
 
     private func show(_ error: Error, title: String) {

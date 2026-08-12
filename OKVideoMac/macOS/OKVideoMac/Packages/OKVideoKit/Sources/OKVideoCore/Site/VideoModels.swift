@@ -231,6 +231,7 @@ public protocol SiteProvider {
         filters: [String: String]
     ) async throws -> VideoPage
     func select(id: String) async throws -> SiteSelectionResult
+    func select(summary: VideoSummary) async throws -> SiteSelectionResult
     func detail(id: String) async throws -> VideoDetail
     func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult
@@ -238,6 +239,10 @@ public protocol SiteProvider {
 }
 
 public extension SiteProvider {
+    func select(summary: VideoSummary) async throws -> SiteSelectionResult {
+        try await select(id: summary.videoID)
+    }
+
     func select(id: String) async throws -> SiteSelectionResult {
         .detail(try await detail(id: id))
     }

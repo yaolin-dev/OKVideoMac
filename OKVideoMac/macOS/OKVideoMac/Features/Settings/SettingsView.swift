@@ -802,6 +802,9 @@ private struct LiveSourceSettingsPane: View {
                 Text("更新于 \(source.updatedAt.formatted(date: .abbreviated, time: .shortened))")
                     .font(.caption2)
                     .foregroundColor(.secondary)
+                if let status = state.liveSourceValidationStatuses[source.id] {
+                    liveSourceValidationStatus(status)
+                }
             }
             Spacer()
             if source.sourceKind == .remote {
@@ -823,6 +826,38 @@ private struct LiveSourceSettingsPane: View {
             .help("删除直播源")
         }
         .padding(16)
+    }
+
+    @ViewBuilder
+    private func liveSourceValidationStatus(
+        _ status: LiveSourceValidationStatus
+    ) -> some View {
+        switch status {
+        case .checking(let completed, let total):
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.mini)
+                Text("正在后台检测频道 \(completed)/\(total)")
+            }
+            .font(.caption2)
+            .foregroundColor(.secondary)
+        case .completed(let removed, let total):
+            Label(
+                removed == 0
+                    ? "已检测 \(total) 个频道，未发现明确失效项"
+                    : "已检测 \(total) 个频道，清理 \(removed) 个（可恢复）",
+                systemImage: removed == 0
+                    ? "checkmark.circle"
+                    : "trash.slash"
+            )
+            .font(.caption2)
+            .foregroundColor(.secondary)
+        case .failed(let message):
+            Label("后台检测未完成：\(message)", systemImage: "exclamationmark.triangle")
+                .font(.caption2)
+                .foregroundColor(.orange)
+                .lineLimit(2)
+        }
     }
 
     private func sourceDescription(_ source: StoredLiveSource) -> String {

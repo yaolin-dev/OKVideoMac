@@ -17,8 +17,8 @@ settings:
     MACOSX_DEPLOYMENT_TARGET: "12.0"
     SWIFT_VERSION: "5.7"
     CLANG_ENABLE_MODULES: true
-    MARKETING_VERSION: 0.3.39
-    CURRENT_PROJECT_VERSION: 51
+    MARKETING_VERSION: 0.3.41
+    CURRENT_PROJECT_VERSION: 62
 
 targets:
   OKVideoMac:
@@ -66,8 +66,6 @@ targets:
             UTTypeTagSpecification:
               public.filename-extension:
                 - json
-    entitlements:
-      path: Supporting/OKVideoMac.entitlements
     postBuildScripts:
       - name: Embed Android Java/Dex bridge
         script: |
@@ -107,15 +105,10 @@ targets:
             FRAMEWORKS_DIR="${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}"
             LICENSES_DIR="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/Licenses"
             QUICKJS_DESTINATION="${FRAMEWORKS_DIR}/libOKQuickJS.dylib"
-            SIGN_IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY:--}"
-            if [[ -z "${SIGN_IDENTITY}" ]]; then
-              SIGN_IDENTITY="-"
-            fi
             mkdir -p "${FRAMEWORKS_DIR}"
             mkdir -p "${LICENSES_DIR}"
             rm -f "${QUICKJS_DESTINATION}"
             cp "${QUICKJS_SOURCE}" "${QUICKJS_DESTINATION}"
-            /usr/bin/codesign --force --sign "${SIGN_IDENTITY}" --timestamp=none "${QUICKJS_DESTINATION}"
             cp "${QUICKJS_ROOT}/LICENSE" "${LICENSES_DIR}/QuickJS-MIT.txt"
           fi
       - name: Embed optional Node runtime
@@ -126,14 +119,9 @@ targets:
             RESOURCES_DIR="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
             NODE_DIR="${RESOURCES_DIR}/NodeRuntime"
             LICENSES_DIR="${RESOURCES_DIR}/Licenses"
-            SIGN_IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY:--}"
-            if [[ -z "${SIGN_IDENTITY}" ]]; then
-              SIGN_IDENTITY="-"
-            fi
             mkdir -p "${NODE_DIR}" "${LICENSES_DIR}"
             cp "${NODE_SOURCE}" "${NODE_DIR}/node"
             chmod 755 "${NODE_DIR}/node"
-            /usr/bin/codesign --force --sign "${SIGN_IDENTITY}" --timestamp=none "${NODE_DIR}/node"
             if [[ -f "${NODE_ROOT}/LICENSE" ]]; then
               cp "${NODE_ROOT}/LICENSE" "${LICENSES_DIR}/Node.js-LICENSE.txt"
             fi
@@ -151,8 +139,10 @@ targets:
         CODE_SIGN_STYLE: Automatic
       configs:
         Debug:
+          CODE_SIGN_ENTITLEMENTS: Supporting/OKVideoMac.dev.entitlements
           ENABLE_HARDENED_RUNTIME: false
         Release:
+          CODE_SIGN_ENTITLEMENTS: Supporting/OKVideoMac.release.entitlements
           ENABLE_HARDENED_RUNTIME: true
 
   OKVideoMacTests:

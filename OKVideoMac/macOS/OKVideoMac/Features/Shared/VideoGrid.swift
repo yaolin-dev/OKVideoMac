@@ -79,7 +79,6 @@ private struct VideoCard: View {
         .zIndex(isHovering ? 1 : 0)
         .animation(.easeOut(duration: 0.16), value: isHovering)
         .onHover { isHovering = $0 }
-        .help(item.title)
         .accessibilityLabel("\(item.title)，来源 \(item.siteName)")
     }
 

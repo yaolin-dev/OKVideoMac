@@ -27,6 +27,12 @@ enum PlayerTeardownMode: String, CaseIterable, Sendable {
     }
 }
 
+enum PlayerLoadTimeoutPolicy {
+    static func seconds(for media: ResolvedMedia) -> Int {
+        media.siteKey == "live" ? 8 : 30
+    }
+}
+
 enum PlayerExperimentLogger {
     static func lifecycle(
         _ message: String,
@@ -97,13 +103,20 @@ final class PlayerStartupTraceStore {
     private var requestByPlayerID: [UUID: UUID] = [:]
 
     func begin(requestID: UUID, mode: PlayerTeardownMode) {
+        let now = ProcessInfo.processInfo.systemUptime
         lock.lock()
         traces[requestID] = Trace(
             requestID: requestID,
             mode: mode,
-            t0: ProcessInfo.processInfo.systemUptime
+            t0: now
         )
         lock.unlock()
+        PlayerExperimentLogger.performance(
+            "phase=click elapsed_ms=0",
+            playerID: nil,
+            requestID: requestID,
+            mode: mode
+        )
     }
 
     func markClientReady(requestID: UUID, playerID: UUID) {
@@ -118,6 +131,13 @@ final class PlayerStartupTraceStore {
         traces[requestID] = trace
         requestByPlayerID[playerID] = requestID
         lock.unlock()
+        PlayerExperimentLogger.performance(
+            "phase=client_ready click_to_client_ready_ms="
+                + "\(milliseconds(now - trace.t0))",
+            playerID: playerID,
+            requestID: requestID,
+            mode: trace.mode
+        )
     }
 
     func markLoadfileIssued(requestID: UUID, playerID: UUID) {
@@ -132,6 +152,13 @@ final class PlayerStartupTraceStore {
         traces[requestID] = trace
         requestByPlayerID[playerID] = requestID
         lock.unlock()
+        PlayerExperimentLogger.performance(
+            "phase=loadfile click_to_loadfile_ms="
+                + "\(milliseconds(now - trace.t0))",
+            playerID: playerID,
+            requestID: requestID,
+            mode: trace.mode
+        )
     }
 
     func markFileLoaded(requestID: UUID, playerID: UUID) {
@@ -146,6 +173,13 @@ final class PlayerStartupTraceStore {
         traces[requestID] = trace
         requestByPlayerID[playerID] = requestID
         lock.unlock()
+        PlayerExperimentLogger.performance(
+            "phase=file_loaded click_to_file_loaded_ms="
+                + "\(milliseconds(now - trace.t0))",
+            playerID: playerID,
+            requestID: requestID,
+            mode: trace.mode
+        )
     }
 
     func markFirstFrame(playerID: UUID) {
@@ -168,11 +202,13 @@ final class PlayerStartupTraceStore {
               let t2 = trace.t2,
               let t3 = trace.t3 else { return }
         let clientInit = milliseconds(t1 - trace.t0)
+        let clickToLoadfile = milliseconds(t2 - trace.t0)
         let loadToFileLoaded = milliseconds(t3 - t2)
         let fileLoadedToFirstFrame = milliseconds(now - t3)
         let total = milliseconds(now - trace.t0)
         PlayerExperimentLogger.performance(
-            "Player startup: client_init_ms=\(clientInit)"
+            "phase=first_frame client_init_ms=\(clientInit)"
+                + " click_to_loadfile_ms=\(clickToLoadfile)"
                 + " loadfile_to_file_loaded_ms=\(loadToFileLoaded)"
                 + " file_loaded_to_first_frame_ms=\(fileLoadedToFirstFrame)"
                 + " total_click_to_first_frame_ms=\(total)",
@@ -375,8 +411,24 @@ final class MPVPlayerClient: PlayerClient {
         startPosition: TimeInterval?,
         requestID: UUID
     ) async throws {
+        try await load(
+            media,
+            startPosition: startPosition,
+            requestID: requestID,
+            aspectRatio: nil,
+            panscan: 0
+        )
+    }
+
+    func load(
+        _ media: ResolvedMedia,
+        startPosition: TimeInterval?,
+        requestID: UUID,
+        aspectRatio: String?,
+        panscan: Double
+    ) async throws {
         try validate(media: media)
-        try await waitForRenderContext()
+        let loadTimeoutSeconds = PlayerLoadTimeoutPolicy.seconds(for: media)
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<Void, Error>) in
             queue.async {
@@ -396,6 +448,11 @@ final class MPVPlayerClient: PlayerClient {
                 self.currentRequestID = requestID
                 self.pendingLoad = (identifier, continuation)
                 do {
+                    try self.applyViewport(
+                        aspectRatio: aspectRatio,
+                        panscan: panscan,
+                        client: client
+                    )
                     try self.applyHTTPHeaders(media.headers, client: client)
                     self.pendingStartPosition = startPosition.flatMap {
                         $0.isFinite && $0 > 0 ? $0 : nil
@@ -428,11 +485,15 @@ final class MPVPlayerClient: PlayerClient {
                     self.completeLoad(.failure(error))
                     return
                 }
-                self.queue.asyncAfter(deadline: .now() + .seconds(30)) {
+                self.queue.asyncAfter(
+                    deadline: .now() + .seconds(loadTimeoutSeconds)
+                ) {
                     guard self.pendingLoad?.identifier == identifier else {
                         return
                     }
-                    let error = AppError.playback("libmpv 媒体加载超时（30 秒）")
+                    let error = AppError.playback(
+                        "libmpv 媒体加载超时（\(loadTimeoutSeconds) 秒）"
+                    )
                     self.snapshot.status = .failed(error.localizedDescription)
                     self.emitSnapshot()
                     self.completeLoad(.failure(error))
@@ -995,6 +1056,33 @@ final class MPVPlayerClient: PlayerClient {
         )
     }
 
+    private func applyViewport(
+        aspectRatio: String?,
+        panscan: Double,
+        client: OpaquePointer
+    ) throws {
+        let trimmedRatio = aspectRatio?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        try setPropertyString(
+            "video-aspect-override",
+            value: trimmedRatio?.isEmpty == false ? trimmedRatio! : "-1",
+            client: client,
+            operation: "设置加载画面比例"
+        )
+        let boundedPanscan = min(max(panscan, 0), 1)
+        try "panscan".withCString { namePointer in
+            try library.checked(
+                library.setPropertyDouble(
+                    client,
+                    namePointer,
+                    boundedPanscan
+                ),
+                operation: "设置加载画面填充"
+            )
+        }
+    }
+
     private func setPropertyString(
         _ name: String,
         value: String,
@@ -1029,26 +1117,6 @@ final class MPVPlayerClient: PlayerClient {
         guard !media.url.absoluteString.contains("\0") else {
             throw AppError.playback("媒体 URL 包含无效字符")
         }
-    }
-
-    private func waitForRenderContext() async throws {
-        for _ in 0..<100 {
-            try Task.checkCancellation()
-            guard isRunning else {
-                throw AppError.playback("libmpv 已关闭")
-            }
-            if hasActiveRenderContext() {
-                return
-            }
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
-        throw AppError.playback("播放器窗口未能在 5 秒内建立 OpenGL Render Context")
-    }
-
-    private func hasActiveRenderContext() -> Bool {
-        lifecycleLock.lock()
-        defer { lifecycleLock.unlock() }
-        return renderContextCount > 0 && lifecycleState == .running
     }
 
     private func installPropertyObservers(client: OpaquePointer) throws {
@@ -1472,6 +1540,7 @@ final class PlayerLifecycleController {
     private var rememberedAudioDelay: TimeInterval = 0
     private var rememberedAspectRatio: String?
     private var rememberedHardwareDecoding = true
+    private var usesFixedLiveWindow = false
 
     init(mode: PlayerTeardownMode = .configured()) {
         self.mode = mode
@@ -1601,10 +1670,15 @@ final class PlayerLifecycleController {
         requestID: UUID
     ) async throws {
         let player = try await prepareForPlayback(requestID: requestID)
+        usesFixedLiveWindow = PlayerViewportPolicy.usesFixedLiveWindow(
+            siteKey: media.siteKey
+        )
         try await player.load(
             media,
             startPosition: startPosition,
-            requestID: requestID
+            requestID: requestID,
+            aspectRatio: usesFixedLiveWindow ? nil : rememberedAspectRatio,
+            panscan: PlayerViewportPolicy.panscan(siteKey: media.siteKey)
         )
     }
 
@@ -1674,6 +1748,7 @@ final class PlayerLifecycleController {
 
     func setAspectRatio(_ ratio: String?) async throws {
         rememberedAspectRatio = ratio
+        guard !usesFixedLiveWindow else { return }
         try await requireClient().setAspectRatio(ratio)
     }
 
@@ -1739,5 +1814,18 @@ final class PlayerLifecycleController {
         try await player.setHardwareDecoding(
             enabled: rememberedHardwareDecoding
         )
+    }
+}
+
+enum PlayerViewportPolicy {
+    static func usesFixedLiveWindow(siteKey: String) -> Bool {
+        siteKey == "live"
+    }
+
+    static func panscan(siteKey: String) -> Double {
+        // A fixed 16:9 live window must not imply destructive cropping.
+        // libmpv keeps the stream's display aspect ratio and naturally adds
+        // pillarbox/letterbox bars when an older source does not match 16:9.
+        0
     }
 }

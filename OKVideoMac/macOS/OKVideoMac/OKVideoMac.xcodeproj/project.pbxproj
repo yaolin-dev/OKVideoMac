@@ -479,7 +479,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "BUILD_ROOT=\"${OKVIDEOMAC_BUILD_ROOT:-/Volumes/XcodeDev/OKVideoMacBuild}\"\nQUICKJS_ROOT=\"${BUILD_ROOT}/QuickJS\"\nif [[ ! -d \"${QUICKJS_ROOT}\" ]]; then\n  QUICKJS_ROOT=\"${SRCROOT}/Vendor/Build/QuickJS\"\nfi\nQUICKJS_SOURCE=\"${QUICKJS_ROOT}/lib/libOKQuickJS.dylib\"\nif [[ -f \"${QUICKJS_SOURCE}\" ]]; then\n  FRAMEWORKS_DIR=\"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}\"\n  LICENSES_DIR=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/Licenses\"\n  QUICKJS_DESTINATION=\"${FRAMEWORKS_DIR}/libOKQuickJS.dylib\"\n  SIGN_IDENTITY=\"${EXPANDED_CODE_SIGN_IDENTITY:--}\"\n  if [[ -z \"${SIGN_IDENTITY}\" ]]; then\n    SIGN_IDENTITY=\"-\"\n  fi\n  mkdir -p \"${FRAMEWORKS_DIR}\"\n  mkdir -p \"${LICENSES_DIR}\"\n  rm -f \"${QUICKJS_DESTINATION}\"\n  cp \"${QUICKJS_SOURCE}\" \"${QUICKJS_DESTINATION}\"\n  /usr/bin/codesign --force --sign \"${SIGN_IDENTITY}\" --timestamp=none \"${QUICKJS_DESTINATION}\"\n  cp \"${QUICKJS_ROOT}/LICENSE\" \"${LICENSES_DIR}/QuickJS-MIT.txt\"\nfi\n";
+			shellScript = "BUILD_ROOT=\"${OKVIDEOMAC_BUILD_ROOT:-/Volumes/XcodeDev/OKVideoMacBuild}\"\nQUICKJS_ROOT=\"${BUILD_ROOT}/QuickJS\"\nif [[ ! -d \"${QUICKJS_ROOT}\" ]]; then\n  QUICKJS_ROOT=\"${SRCROOT}/Vendor/Build/QuickJS\"\nfi\nQUICKJS_SOURCE=\"${QUICKJS_ROOT}/lib/libOKQuickJS.dylib\"\nif [[ -f \"${QUICKJS_SOURCE}\" ]]; then\n  FRAMEWORKS_DIR=\"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}\"\n  LICENSES_DIR=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/Licenses\"\n  QUICKJS_DESTINATION=\"${FRAMEWORKS_DIR}/libOKQuickJS.dylib\"\n  mkdir -p \"${FRAMEWORKS_DIR}\"\n  mkdir -p \"${LICENSES_DIR}\"\n  rm -f \"${QUICKJS_DESTINATION}\"\n  cp \"${QUICKJS_SOURCE}\" \"${QUICKJS_DESTINATION}\"\n  cp \"${QUICKJS_ROOT}/LICENSE\" \"${LICENSES_DIR}/QuickJS-MIT.txt\"\nfi\n";
 		};
 		C0DE00000000000000000005 /* Embed optional Node runtime */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -497,7 +497,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "NODE_SOURCE=\"${OKVIDEOMAC_NODE_RUNTIME:-/opt/homebrew/opt/node@22-direct/bin/node}\"\nNODE_ROOT=\"$(cd \"$(dirname \"${NODE_SOURCE}\")/..\" 2>/dev/null && pwd || true)\"\nif [[ -x \"${NODE_SOURCE}\" ]]; then\n  RESOURCES_DIR=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\n  NODE_DIR=\"${RESOURCES_DIR}/NodeRuntime\"\n  LICENSES_DIR=\"${RESOURCES_DIR}/Licenses\"\n  SIGN_IDENTITY=\"${EXPANDED_CODE_SIGN_IDENTITY:--}\"\n  if [[ -z \"${SIGN_IDENTITY}\" ]]; then\n    SIGN_IDENTITY=\"-\"\n  fi\n  mkdir -p \"${NODE_DIR}\" \"${LICENSES_DIR}\"\n  cp \"${NODE_SOURCE}\" \"${NODE_DIR}/node\"\n  chmod 755 \"${NODE_DIR}/node\"\n  /usr/bin/codesign --force --sign \"${SIGN_IDENTITY}\" --timestamp=none \"${NODE_DIR}/node\"\n  if [[ -f \"${NODE_ROOT}/LICENSE\" ]]; then\n    cp \"${NODE_ROOT}/LICENSE\" \"${LICENSES_DIR}/Node.js-LICENSE.txt\"\n  fi\nfi\n";
+			shellScript = "NODE_SOURCE=\"${OKVIDEOMAC_NODE_RUNTIME:-/opt/homebrew/opt/node@22-direct/bin/node}\"\nNODE_ROOT=\"$(cd \"$(dirname \"${NODE_SOURCE}\")/..\" 2>/dev/null && pwd || true)\"\nif [[ -x \"${NODE_SOURCE}\" ]]; then\n  RESOURCES_DIR=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\n  NODE_DIR=\"${RESOURCES_DIR}/NodeRuntime\"\n  LICENSES_DIR=\"${RESOURCES_DIR}/Licenses\"\n  mkdir -p \"${NODE_DIR}\" \"${LICENSES_DIR}\"\n  cp \"${NODE_SOURCE}\" \"${NODE_DIR}/node\"\n  chmod 755 \"${NODE_DIR}/node\"\n  if [[ -f \"${NODE_ROOT}/LICENSE\" ]]; then\n    cp \"${NODE_ROOT}/LICENSE\" \"${LICENSES_DIR}/Node.js-LICENSE.txt\"\n  fi\nfi\n";
 		};
 		A32519CEFAD95825DFAF1A40 /* Embed optional libmpv runtime */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -605,7 +605,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 60;
+				CURRENT_PROJECT_VERSION = 62;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -624,7 +624,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				MARKETING_VERSION = 0.3.39;
+				MARKETING_VERSION = 0.3.41;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -640,7 +640,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_ENTITLEMENTS = Supporting/OKVideoMac.entitlements;
+				CODE_SIGN_ENTITLEMENTS = Supporting/OKVideoMac.dev.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				ENABLE_HARDENED_RUNTIME = NO;
@@ -679,7 +679,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_ENTITLEMENTS = Supporting/OKVideoMac.entitlements;
+				CODE_SIGN_ENTITLEMENTS = Supporting/OKVideoMac.release.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -749,7 +749,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 60;
+				CURRENT_PROJECT_VERSION = 62;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -762,7 +762,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				MARKETING_VERSION = 0.3.39;
+				MARKETING_VERSION = 0.3.41;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

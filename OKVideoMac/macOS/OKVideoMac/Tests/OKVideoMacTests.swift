@@ -1,11 +1,82 @@
 import AppKit
 import Combine
+import CryptoKit
 import XCTest
 import OKVideoCore
 import OKVideoPersistence
 @testable import OKVideoMac
 
 final class OKVideoMacTests: XCTestCase {
+    func testNativePlayerSurfaceMountsOnlyWhilePlayerIsVisible() {
+        XCTAssertFalse(
+            PlayerSurfaceMountPolicy.shouldMount(
+                isPlayerPresented: false,
+                hasRenderPlayer: true
+            )
+        )
+        XCTAssertFalse(
+            PlayerSurfaceMountPolicy.shouldMount(
+                isPlayerPresented: true,
+                hasRenderPlayer: false
+            )
+        )
+        XCTAssertTrue(
+            PlayerSurfaceMountPolicy.shouldMount(
+                isPlayerPresented: true,
+                hasRenderPlayer: true
+            )
+        )
+    }
+
+    func testPlayerBackdropDoesNotWaitForNativeRenderClient() {
+        XCTAssertFalse(
+            PlayerSurfaceBackdropPolicy.shouldShow(
+                isPlayerPresented: false
+            )
+        )
+        XCTAssertTrue(
+            PlayerSurfaceBackdropPolicy.shouldShow(
+                isPlayerPresented: true
+            )
+        )
+    }
+
+    func testMPVRenderSafetyRejectsWindowResizeAndInvalidGeometry() {
+        XCTAssertNil(
+            MPVRenderSafetyPolicy.framebufferSize(
+                backingBounds: NSRect(x: 0, y: 0, width: 1_920, height: 1_080),
+                isInLiveResize: true,
+                isAttachedToWindow: true
+            )
+        )
+        XCTAssertNil(
+            MPVRenderSafetyPolicy.framebufferSize(
+                backingBounds: NSRect(x: 0, y: 0, width: 1_920, height: 1_080),
+                isInLiveResize: false,
+                isAttachedToWindow: false
+            )
+        )
+        XCTAssertNil(
+            MPVRenderSafetyPolicy.framebufferSize(
+                backingBounds: NSRect(
+                    x: 0,
+                    y: 0,
+                    width: CGFloat.infinity,
+                    height: 1
+                ),
+                isInLiveResize: false,
+                isAttachedToWindow: true
+            )
+        )
+        let valid = MPVRenderSafetyPolicy.framebufferSize(
+            backingBounds: NSRect(x: 0, y: 0, width: 1_919.6, height: 1_079.6),
+            isInLiveResize: false,
+            isAttachedToWindow: true
+        )
+        XCTAssertEqual(valid?.width, 1_920)
+        XCTAssertEqual(valid?.height, 1_080)
+    }
+
     func testPlayerTeardownModeUsesEnvironmentThenDefaults() {
         let suiteName = "OKVideoMacTests.PlayerTeardownMode.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -223,6 +294,122 @@ final class OKVideoMacTests: XCTestCase {
                 from: values
             ).isEmpty
         )
+    }
+
+    func testLivePlaybackRecoveryTriesBackupLineBeforeNextChannel() throws {
+        let primary = try XCTUnwrap(
+            URL(string: "https://example.com/cctv1-primary.m3u8")
+        )
+        let backup = try XCTUnwrap(
+            URL(string: "https://example.com/cctv1-backup.m3u8")
+        )
+        let current = LiveChannel(
+            groupName: "央视频道",
+            name: "CCTV-1",
+            streams: [
+                LiveStream(name: "主线", url: primary),
+                LiveStream(name: "备线", url: backup)
+            ]
+        )
+        let next = try makeLiveChannel(
+            name: "CCTV-2",
+            streamPath: "cctv2"
+        )
+
+        let candidates = LivePlaybackRecoveryPolicy.candidates(
+            channels: [current, next],
+            startingChannel: current,
+            startingStream: current.streams[0]
+        )
+
+        XCTAssertEqual(
+            candidates.map { "\($0.channel.name)::\($0.stream.name)" },
+            ["CCTV-1::主线", "CCTV-1::备线", "CCTV-2::默认"]
+        )
+    }
+
+    func testLivePlaybackRecoveryExcludesAttemptedAndDuplicateURLs() throws {
+        let sharedURL = try XCTUnwrap(
+            URL(string: "https://example.com/shared.m3u8")
+        )
+        let current = LiveChannel(
+            groupName: "央视频道",
+            name: "CCTV-1",
+            streams: [LiveStream(name: "主线", url: sharedURL)]
+        )
+        let duplicate = LiveChannel(
+            groupName: "央视频道",
+            name: "CCTV-2",
+            streams: [LiveStream(name: "重复", url: sharedURL)]
+        )
+        let attempted = LivePlaybackCandidate(
+            channel: current,
+            stream: current.streams[0]
+        ).identifier
+
+        let candidates = LivePlaybackRecoveryPolicy.candidates(
+            channels: [current, duplicate],
+            startingChannel: current,
+            startingStream: current.streams[0],
+            excluding: [attempted]
+        )
+
+        XCTAssertTrue(candidates.isEmpty)
+    }
+
+    func testLiveSourceValidationRequiresEveryLineToBeDefinitivelyUnavailable() {
+        XCTAssertTrue(
+            LiveSourceValidationPolicy.shouldRemoveChannel(
+                streamResults: [
+                    .definitivelyUnavailable,
+                    .definitivelyUnavailable
+                ]
+            )
+        )
+        XCTAssertFalse(
+            LiveSourceValidationPolicy.shouldRemoveChannel(
+                streamResults: [.definitivelyUnavailable, .inconclusive]
+            )
+        )
+        XCTAssertFalse(
+            LiveSourceValidationPolicy.shouldRemoveChannel(
+                streamResults: [.definitivelyUnavailable, .reachable]
+            )
+        )
+        XCTAssertFalse(
+            LiveSourceValidationPolicy.shouldRemoveChannel(streamResults: [])
+        )
+    }
+
+    func testLiveSourceValidationUsesConservativeHTTPClassification() {
+        XCTAssertEqual(
+            LiveSourceValidationPolicy.result(forHTTPStatus: 206),
+            .reachable
+        )
+        XCTAssertEqual(
+            LiveSourceValidationPolicy.result(forHTTPStatus: 404),
+            .definitivelyUnavailable
+        )
+        XCTAssertEqual(
+            LiveSourceValidationPolicy.result(forHTTPStatus: 503),
+            .inconclusive
+        )
+    }
+
+    func testLivePlaybackUsesShorterLoadTimeoutThanOnDemandVideo() throws {
+        let url = try XCTUnwrap(URL(string: "https://example.com/live.m3u8"))
+        let live = ResolvedMedia(
+            url: url,
+            headers: [:],
+            siteKey: "live",
+            sourceName: "直播",
+            episodeName: "默认"
+        )
+        var video = live
+        video.siteKey = "vod"
+
+        XCTAssertEqual(PlayerLoadTimeoutPolicy.seconds(for: live), 8)
+        XCTAssertEqual(PlayerLoadTimeoutPolicy.seconds(for: video), 30)
     }
 
     func testSearchSiteScopeSettingRoundTrip() throws {
@@ -609,6 +796,60 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(requestCount, 1)
     }
 
+    func testNodeImageProxyCacheIdentityIgnoresLocalPortAndCacheLifetime() throws {
+        let firstURL = try makeNodeImageProxyURL(
+            host: "127.0.0.1",
+            port: 58_799,
+            cacheLifetime: 86_400,
+            targetURL: "https://images.example.invalid/poster.jpg?size=large",
+            customHeaders: #"{"Referer":"https://example.invalid","User-Agent":"OKVideo"}"#
+        )
+        let secondURL = try makeNodeImageProxyURL(
+            host: "localhost",
+            port: 61_008,
+            cacheLifetime: 60,
+            targetURL: "https://images.example.invalid/poster.jpg?size=large",
+            customHeaders: #"{"User-Agent":"OKVideo","Referer":"https://example.invalid"}"#
+        )
+        let differentPosterURL = try makeNodeImageProxyURL(
+            host: "127.0.0.1",
+            port: 61_008,
+            cacheLifetime: 86_400,
+            targetURL: "https://images.example.invalid/other.jpg",
+            customHeaders: #"{"Referer":"https://example.invalid","User-Agent":"OKVideo"}"#
+        )
+
+        XCTAssertEqual(
+            ImageCacheIdentity(url: firstURL),
+            ImageCacheIdentity(url: secondURL)
+        )
+        XCTAssertNotEqual(
+            ImageCacheIdentity(url: firstURL),
+            ImageCacheIdentity(url: differentPosterURL)
+        )
+    }
+
+    @MainActor
+    func testImageRepositoryReusesMemoryCacheWhenNodeProxyPortChanges() async throws {
+        let cacheDirectory = temporaryImageCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let firstURL = try makeNodeImageProxyURL(port: 58_799)
+        let secondURL = try makeNodeImageProxyURL(port: 61_008)
+        let client = ImageRepositoryHTTPClientProbe(body: try makeTestImageData())
+        let repository = try makeImageRepository(
+            cacheDirectory: cacheDirectory,
+            httpClient: client
+        )
+
+        let first = try await repository.image(for: firstURL)
+        let second = try await repository.image(for: secondURL)
+
+        XCTAssertTrue(first === second)
+        XCTAssertTrue(repository.cachedImage(for: secondURL) === first)
+        let requestCount = await client.requestCount()
+        XCTAssertEqual(requestCount, 1)
+    }
+
     @MainActor
     func testImageRepositoryRestoresImageFromDiskCache() async throws {
         let cacheDirectory = temporaryImageCacheDirectory()
@@ -634,6 +875,84 @@ final class OKVideoMacTests: XCTestCase {
         let secondRequestCount = await secondClient.requestCount()
         XCTAssertEqual(firstRequestCount, 1)
         XCTAssertEqual(secondRequestCount, 0)
+    }
+
+    @MainActor
+    func testImageRepositoryRestoresNodeProxyImageFromDiskAfterPortChanges() async throws {
+        let cacheDirectory = temporaryImageCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let firstURL = try makeNodeImageProxyURL(port: 58_799)
+        let secondURL = try makeNodeImageProxyURL(port: 61_008)
+        let firstClient = ImageRepositoryHTTPClientProbe(body: try makeTestImageData())
+        let firstRepository = try makeImageRepository(
+            cacheDirectory: cacheDirectory,
+            httpClient: firstClient
+        )
+        _ = try await firstRepository.image(for: firstURL)
+
+        let secondClient = ImageRepositoryHTTPClientProbe(
+            error: HTTPClientError.statusCode(500)
+        )
+        let secondRepository = try makeImageRepository(
+            cacheDirectory: cacheDirectory,
+            httpClient: secondClient
+        )
+        _ = try await secondRepository.image(for: secondURL)
+
+        let firstRequestCount = await firstClient.requestCount()
+        let secondRequestCount = await secondClient.requestCount()
+        XCTAssertEqual(firstRequestCount, 1)
+        XCTAssertEqual(secondRequestCount, 0)
+    }
+
+    @MainActor
+    func testImageRepositoryMigratesLegacyNodeProxyDiskCache() async throws {
+        let cacheDirectory = temporaryImageCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        try FileManager.default.createDirectory(
+            at: cacheDirectory,
+            withIntermediateDirectories: true
+        )
+        let legacyURL = try makeNodeImageProxyURL(port: 58_799)
+        let legacyDigest = SHA256.hash(data: Data(legacyURL.absoluteString.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        try makeTestImageData().write(
+            to: cacheDirectory.appendingPathComponent(legacyDigest + ".image")
+        )
+        let client = ImageRepositoryHTTPClientProbe(
+            error: HTTPClientError.statusCode(500)
+        )
+        let repository = try makeImageRepository(
+            cacheDirectory: cacheDirectory,
+            httpClient: client
+        )
+
+        _ = try await repository.image(for: legacyURL)
+
+        let requestCount = await client.requestCount()
+        XCTAssertEqual(requestCount, 0)
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: cacheDirectory.path).count,
+            2
+        )
+    }
+
+    func testRemoteImageLoadingPolicyPreservesOldImageWhileReplacementLoads() throws {
+        let replacementURL = try XCTUnwrap(
+            URL(string: "https://images.example.invalid/replacement.jpg")
+        )
+
+        XCTAssertFalse(
+            RemoteImageLoadingPolicy.shouldClearCurrentImage(for: replacementURL)
+        )
+        XCTAssertTrue(RemoteImageLoadingPolicy.shouldClearCurrentImage(for: nil))
+        XCTAssertFalse(
+            RemoteImageLoadingPolicy.shouldShowFailure(hasCurrentImage: true)
+        )
+        XCTAssertTrue(
+            RemoteImageLoadingPolicy.shouldShowFailure(hasCurrentImage: false)
+        )
     }
 
     @MainActor
@@ -763,6 +1082,26 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    private func makeNodeImageProxyURL(
+        host: String = "127.0.0.1",
+        port: Int,
+        cacheLifetime: Int = 86_400,
+        targetURL: String = "https://images.example.invalid/poster.jpg",
+        customHeaders: String = #"{"Referer":"https://example.invalid"}"#
+    ) throws -> URL {
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = host
+        components.port = port
+        components.path = "/imageProxy"
+        components.queryItems = [
+            URLQueryItem(name: "url", value: targetURL),
+            URLQueryItem(name: "cache", value: String(cacheLifetime)),
+            URLQueryItem(name: "customHeaders", value: customHeaders)
+        ]
+        return try XCTUnwrap(components.url)
+    }
+
     func testEpisodeNameParserUsesRealSeasonAndEpisodeNumber() {
         let episode = PlayEpisode(
             name: "[1.3GB]Nirvana.in.Fire.S01E14.2015.2160p.mkv",
@@ -774,6 +1113,227 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(presentation.seasonNumber, 1)
         XCTAssertEqual(presentation.episodeNumber, 14)
         XCTAssertEqual(presentation.displayName, "第 1 季 · 第 14 集")
+    }
+
+    func testDetailEpisodeButtonUsesAnchoredOriginalNamePopover() {
+        let presentation = EpisodeNameParser.presentation(
+            for: PlayEpisode(
+                name: "[2.4GB]03.mp4【铁拳教育】",
+                url: "https://media.example.invalid/episode-03.mp4"
+            )
+        )
+        let button = DetailEpisodeButton(
+            presentation: presentation,
+            onPlay: { _ in }
+        )
+        XCTAssertEqual(button.originalNamePresentationMode, .anchoredPopover)
+        XCTAssertEqual(presentation.displayName, "第 3 集")
+    }
+
+    func testDetailEpisodeOriginalNameCanBeCopiedFromContextMenuAction() {
+        let pasteboard = NSPasteboard(
+            name: NSPasteboard.Name("OKVideoMacTests.\(UUID().uuidString)")
+        )
+        let originalName = "[2.4GB]03.mp4【铁拳教育】"
+
+        DetailEpisodeOriginalNameActions.copy(originalName, to: pasteboard)
+
+        XCTAssertEqual(pasteboard.string(forType: .string), originalName)
+    }
+
+    func testLargeEpisodeRangePickerUsesCompactNavigation() {
+        XCTAssertEqual(
+            EpisodeRangePickerPolicy.presentationMode(optionCount: 8),
+            .chips
+        )
+        XCTAssertEqual(
+            EpisodeRangePickerPolicy.presentationMode(optionCount: 9),
+            .compactMenu
+        )
+
+        let options = (0..<12).map { index in
+            EpisodeRangeOption(
+                id: "range-\(index)",
+                title: "\(index * 20 + 1)–\((index + 1) * 20) 集",
+                episodeIDs: []
+            )
+        }
+        XCTAssertEqual(
+            EpisodeRangePickerPolicy.adjacentID(
+                options: options,
+                selectedID: nil,
+                offset: 1
+            ),
+            "range-0"
+        )
+        XCTAssertEqual(
+            EpisodeRangePickerPolicy.adjacentID(
+                options: options,
+                selectedID: "range-4",
+                offset: 1
+            ),
+            "range-5"
+        )
+        XCTAssertFalse(
+            EpisodeRangePickerPolicy.canMove(
+                options: options,
+                selectedID: "range-11",
+                offset: 1
+            )
+        )
+    }
+
+    func testPlayerEpisodeButtonUsesPanelInspectorWithoutHoverOverlay() {
+        let presentation = EpisodeNameParser.presentation(
+            for: PlayEpisode(
+                name: "[1.8GB]S02E31.mkv【魔神英雄传】",
+                url: "https://media.example.invalid/episode-31.mkv"
+            )
+        )
+        let button = PlayerEpisodeButton(
+            presentation: presentation,
+            displayName: presentation.displayName,
+            selected: false,
+            accentColor: .blue,
+            onPlay: {},
+            onInspect: {}
+        )
+
+        XCTAssertEqual(
+            button.originalNamePresentationMode,
+            .panelInspector
+        )
+    }
+
+    func testPlayerEpisodeOriginalNameCanBeCopied() {
+        let pasteboard = NSPasteboard(
+            name: NSPasteboard.Name("OKVideoMacTests.\(UUID().uuidString)")
+        )
+        let originalName = "[1.8GB]S02E31.mkv【魔神英雄传】"
+
+        PlayerEpisodeOriginalNameActions.copy(originalName, to: pasteboard)
+
+        XCTAssertEqual(pasteboard.string(forType: .string), originalName)
+    }
+
+    func testPlayerEpisodeInspectorReservesSpaceWithoutGrowingPanel() {
+        XCTAssertEqual(
+            PlayerEpisodePanelLayoutPolicy.gridHeight(
+                episodeCount: 241,
+                showsInspector: false
+            ),
+            286
+        )
+        XCTAssertEqual(
+            PlayerEpisodePanelLayoutPolicy.gridHeight(
+                episodeCount: 241,
+                showsInspector: true
+            ),
+            196
+        )
+        XCTAssertEqual(
+            PlayerEpisodePanelLayoutPolicy.gridHeight(
+                episodeCount: 3,
+                showsInspector: true
+            ),
+            54
+        )
+    }
+
+    func testLargeEpisodeDetailDefaultsToRecentRange() {
+        XCTAssertFalse(
+            EpisodeInitialRangePolicy.shouldSelectRecentRange(
+                episodeCount: 200,
+                rangeCount: 10
+            )
+        )
+        XCTAssertTrue(
+            EpisodeInitialRangePolicy.shouldSelectRecentRange(
+                episodeCount: 1_141,
+                rangeCount: 58
+            )
+        )
+    }
+
+    func testPlayerEpisodePagesBoundRenderedButtonsAndLocateCurrentEpisode() {
+        let presentations = (1...1_141).map { number in
+            EpisodePresentation(
+                episode: PlayEpisode(
+                    name: "E\(number)",
+                    url: "https://media.example.invalid/\(number).m3u8"
+                ),
+                displayName: "第 \(number) 集",
+                originalName: "E\(number)",
+                seasonNumber: nil,
+                episodeNumber: number,
+                isSpecial: false,
+                sourceIndex: number - 1
+            )
+        }
+
+        XCTAssertEqual(
+            PlayerEpisodePagePolicy.pageCount(
+                episodeCount: presentations.count
+            ),
+            23
+        )
+        let currentID = presentations[516].id
+        let pageIndex = PlayerEpisodePagePolicy.pageIndex(
+            presentations: presentations,
+            selectedEpisodeID: currentID
+        )
+        XCTAssertEqual(pageIndex, 10)
+        let page = PlayerEpisodePagePolicy.page(
+            presentations,
+            pageIndex: pageIndex
+        )
+        XCTAssertEqual(page.count, 50)
+        XCTAssertTrue(page.contains(where: { $0.id == currentID }))
+        XCTAssertEqual(
+            PlayerEpisodePagePolicy.title(
+                presentations: presentations,
+                pageIndex: pageIndex
+            ),
+            "501–550 集"
+        )
+        XCTAssertEqual(
+            PlayerEpisodePagePolicy.page(
+                presentations,
+                pageIndex: 22
+            ).count,
+            41
+        )
+
+        let visiblePage = PlayerEpisodePagePolicy.page(
+            presentations,
+            pageIndex: pageIndex
+        )
+        let firstGrid = PlayerEpisodeGrid(
+            presentations: visiblePage,
+            selectedEpisodeID: currentID,
+            accentColor: .blue,
+            displayName: { $0.displayName },
+            onPlay: { _ in },
+            onInspect: { _ in }
+        )
+        let unchangedGrid = PlayerEpisodeGrid(
+            presentations: visiblePage,
+            selectedEpisodeID: currentID,
+            accentColor: .blue,
+            displayName: { $0.displayName },
+            onPlay: { _ in },
+            onInspect: { _ in }
+        )
+        let changedSelectionGrid = PlayerEpisodeGrid(
+            presentations: visiblePage,
+            selectedEpisodeID: visiblePage.first?.id,
+            accentColor: .blue,
+            displayName: { $0.displayName },
+            onPlay: { _ in },
+            onInspect: { _ in }
+        )
+        XCTAssertEqual(firstGrid, unchangedGrid)
+        XCTAssertNotEqual(firstGrid, changedSelectionGrid)
     }
 
     func testEpisodeNameParserDoesNotInferNumberFromSourcePosition() {
@@ -1851,6 +2411,25 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     @MainActor
+    func testOnlyJavaDexActionsWaitForCloudAuthorization() {
+        XCTAssertTrue(
+            AppState.shouldWaitForCloudAuthorization(
+                capability: .javaDexSpider
+            )
+        )
+        XCTAssertFalse(
+            AppState.shouldWaitForCloudAuthorization(
+                capability: .javaScriptSpider
+            )
+        )
+        XCTAssertFalse(
+            AppState.shouldWaitForCloudAuthorization(
+                capability: .standardJSON
+            )
+        )
+    }
+
+    @MainActor
     func testSiteActionPreservesExplicitUpstreamMessage() {
         XCTAssertEqual(
             AppState.siteActionMessage(
@@ -1900,29 +2479,11 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    @MainActor
-    func testPlayerExitRestoresOnlyFullScreenEnteredDuringPlayback() {
-        XCTAssertTrue(
-            AppState.shouldExitFullScreenAfterPlayer(
-                startedInFullScreen: false,
-                isFullScreen: true
-            )
-        )
-        XCTAssertFalse(
-            AppState.shouldExitFullScreenAfterPlayer(
-                startedInFullScreen: true,
-                isFullScreen: true
-            )
-        )
-        XCTAssertFalse(
-            AppState.shouldExitFullScreenAfterPlayer(
-                startedInFullScreen: false,
-                isFullScreen: false
-            )
-        )
-    }
-
     func testPlayerSurfaceOnlyTogglesFullScreenOnLeftDoubleClick() {
+        XCTAssertEqual(
+            PlayerSurfaceGesture.action(clickCount: 1, buttonNumber: 0),
+            .ignore
+        )
         XCTAssertTrue(
             PlayerSurfaceGesture.togglesFullScreen(
                 clickCount: 2,
@@ -1954,6 +2515,15 @@ final class OKVideoMacTests: XCTestCase {
         )
         XCTAssertFalse(
             PlayerControlVisibilityPolicy.shouldAutoHide(
+                isLivePlayback: true,
+                controlsHovering: false,
+                isFailed: false,
+                keepsControlsVisible: true,
+                isPlaying: false
+            )
+        )
+        XCTAssertFalse(
+            PlayerControlVisibilityPolicy.shouldAutoHide(
                 isLivePlayback: false,
                 controlsHovering: true,
                 isFailed: false,
@@ -1980,26 +2550,119 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testPlayerWindowAspectPolicyRemovesLetterboxingWithinScreenBounds() {
-        let size = PlayerWindowAspectPolicy.contentSize(
-            current: NSSize(width: 1_936, height: 1_248),
-            aspectRatio: 16.0 / 9.0,
-            minimum: NSSize(width: 800, height: 520),
-            maximum: NSSize(width: 1_936, height: 1_248)
+    func testLiveWindowAlwaysUsesSixteenByNineRegardlessOfChannelVideo() {
+        let ratio = PlayerWindowAspectPolicy.aspectRatio(
+            isLivePlayback: true,
+            override: "4:3",
+            videoWidth: 720,
+            videoHeight: 576
         )
 
-        XCTAssertNotNil(size)
-        XCTAssertEqual(size?.width ?? 0, 1_936, accuracy: 0.001)
-        XCTAssertEqual(size?.height ?? 0, 1_089, accuracy: 0.001)
+        XCTAssertEqual(ratio ?? 0, 16.0 / 9.0, accuracy: 0.0001)
+        XCTAssertTrue(
+            PlayerViewportPolicy.usesFixedLiveWindow(siteKey: "live")
+        )
+        XCTAssertFalse(
+            PlayerViewportPolicy.usesFixedLiveWindow(siteKey: "vod")
+        )
         XCTAssertEqual(
-            (size?.width ?? 0) / (size?.height ?? 1),
-            16.0 / 9.0,
-            accuracy: 0.001
+            PlayerViewportPolicy.panscan(siteKey: "live"),
+            0,
+            accuracy: 0.0001
         )
     }
 
+    func testPlayerDefaultWindowIsLargerAndRemainsSixteenByNine() {
+        let visibleFrame = NSRect(x: 0, y: 0, width: 1_440, height: 900)
+        let size = PlayerWindowSizingPolicy.initialContentSize(
+            visibleFrame: visibleFrame
+        )
+
+        XCTAssertEqual(size.width, 1_180.8, accuracy: 0.001)
+        XCTAssertEqual(size.height, 664.2, accuracy: 0.001)
+        XCTAssertEqual(size.width / size.height, 16.0 / 9.0, accuracy: 0.0001)
+        XCTAssertLessThanOrEqual(size.width, visibleFrame.width * 0.82)
+        XCTAssertLessThanOrEqual(size.height, visibleFrame.height * 0.86)
+    }
+
+    func testLiveImmersiveControlsScaleWithPlayerViewport() {
+        let compact = LivePlayerOverlayMetrics(
+            viewportSize: CGSize(width: 800, height: 450)
+        )
+        let standard = LivePlayerOverlayMetrics(
+            viewportSize: CGSize(width: 1_280, height: 720)
+        )
+        let large = LivePlayerOverlayMetrics(
+            viewportSize: CGSize(width: 1_920, height: 1_080)
+        )
+
+        XCTAssertEqual(compact.scale, 0.80, accuracy: 0.0001)
+        XCTAssertEqual(standard.scale, 1, accuracy: 0.0001)
+        XCTAssertEqual(large.scale, 1.10, accuracy: 0.0001)
+        XCTAssertEqual(compact.controlDiameter, 34, accuracy: 0.001)
+        XCTAssertEqual(standard.controlDiameter, 40, accuracy: 0.001)
+        XCTAssertEqual(large.controlDiameter, 44, accuracy: 0.001)
+        XCTAssertEqual(compact.volumeSliderWidth, 76, accuracy: 0.001)
+        XCTAssertEqual(standard.volumeSliderWidth, 92, accuracy: 0.001)
+        XCTAssertEqual(large.volumeSliderWidth, 101.2, accuracy: 0.001)
+        XCTAssertLessThan(
+            compact.outerHorizontalPadding,
+            standard.outerHorizontalPadding
+        )
+        XCTAssertLessThan(
+            standard.outerHorizontalPadding,
+            large.outerHorizontalPadding
+        )
+    }
+
+    func testOnDemandWindowUsesOverrideOrDetectedVideoRatio() {
+        XCTAssertEqual(
+            PlayerWindowAspectPolicy.aspectRatio(
+                isLivePlayback: false,
+                override: "2.35:1",
+                videoWidth: 1_920,
+                videoHeight: 1_080
+            ) ?? 0,
+            2.35,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(
+            PlayerWindowAspectPolicy.aspectRatio(
+                isLivePlayback: false,
+                override: nil,
+                videoWidth: 1_920,
+                videoHeight: 1_080
+            ) ?? 0,
+            16.0 / 9.0,
+            accuracy: 0.0001
+        )
+        XCTAssertNil(
+            PlayerWindowAspectPolicy.aspectRatio(
+                isLivePlayback: false,
+                override: nil,
+                videoWidth: 1_920,
+                videoHeight: 0
+            )
+        )
+    }
+
+    func testPlayerWindowAspectSizeKeepsWidthAndHeightInSync() throws {
+        let size = try XCTUnwrap(
+            PlayerWindowAspectPolicy.contentSize(
+                current: NSSize(width: 1_200, height: 800),
+                aspectRatio: 16.0 / 9.0,
+                minimum: NSSize(width: 900, height: 600),
+                maximum: NSSize(width: 1_920, height: 1_080)
+            )
+        )
+
+        XCTAssertEqual(size.width / size.height, 16.0 / 9.0, accuracy: 0.0001)
+        XCTAssertGreaterThanOrEqual(size.width, 900)
+        XCTAssertGreaterThanOrEqual(size.height, 600)
+    }
+
     @MainActor
-    func testPlayerWindowChromeRestoresWithoutClobberingWindowState() async {
+    func testPlayerWindowChromeLocksAspectWithoutResizingOnLiveChannelChange() async {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
             styleMask: [.titled, .closable, .resizable],
@@ -2020,51 +2683,69 @@ final class OKVideoMacTests: XCTestCase {
 
         XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))
         XCTAssertFalse(toolbar.isVisible)
+        XCTAssertTrue(window.titlebarAppearsTransparent)
         XCTAssertEqual(window.titleVisibility, .hidden)
+        XCTAssertEqual(window.frame, originalWindowFrame)
+        XCTAssertEqual(window.contentAspectRatio, originalContentAspectRatio)
 
         coordinator.configure(
             isLivePlayback: false,
             controlsVisible: false,
             title: "琅琊榜 · 第 23 集",
-            videoAspectRatio: 16.0 / 9.0
+            videoAspectRatio: 2.0
         )
         await drainMainQueue()
         XCTAssertTrue(window.standardWindowButton(.closeButton)?.isHidden ?? false)
+        XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))
+        XCTAssertFalse(toolbar.isVisible)
+        XCTAssertTrue(window.titlebarAppearsTransparent)
+        XCTAssertEqual(window.titleVisibility, .hidden)
         XCTAssertEqual(
             window.contentAspectRatio.width / window.contentAspectRatio.height,
-            16.0 / 9.0,
-            accuracy: 0.001
+            2.0,
+            accuracy: 0.0001
         )
-        let playbackContentRect = window.contentRect(forFrameRect: window.frame)
         XCTAssertEqual(
-            playbackContentRect.width / playbackContentRect.height,
-            16.0 / 9.0,
-            // NSWindow rounds the converted frame to backing pixels.
+            window.contentRect(forFrameRect: window.frame).width
+                / window.contentRect(forFrameRect: window.frame).height,
+            2.0,
             accuracy: 0.005
         )
 
         coordinator.configure(
             isLivePlayback: true,
             controlsVisible: true,
-            title: "013 CCTV-3(高清)"
+            title: "013 CCTV-3(高清)",
+            videoAspectRatio: 16.0 / 9.0
         )
         await drainMainQueue()
-        XCTAssertFalse(window.styleMask.contains(.fullSizeContentView))
-        XCTAssertFalse(window.titlebarAppearsTransparent)
-        XCTAssertEqual(window.titleVisibility, .visible)
+        XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))
+        XCTAssertFalse(toolbar.isVisible)
+        XCTAssertTrue(window.titlebarAppearsTransparent)
+        XCTAssertEqual(window.titleVisibility, .hidden)
         XCTAssertEqual(window.title, "013 CCTV-3(高清)")
         XCTAssertFalse(window.standardWindowButton(.closeButton)?.isHidden ?? true)
+        XCTAssertEqual(
+            window.contentAspectRatio.width / window.contentAspectRatio.height,
+            16.0 / 9.0,
+            accuracy: 0.0001
+        )
+        let liveFrame = window.frame
 
         coordinator.configure(
             isLivePlayback: true,
             controlsVisible: false,
-            title: "013 CCTV-3(高清)"
+            title: "CCTV-1",
+            videoAspectRatio: 16.0 / 9.0
         )
         await drainMainQueue()
         XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))
+        XCTAssertFalse(toolbar.isVisible)
         XCTAssertTrue(window.titlebarAppearsTransparent)
         XCTAssertEqual(window.titleVisibility, .hidden)
         XCTAssertTrue(window.standardWindowButton(.closeButton)?.isHidden ?? false)
+        XCTAssertEqual(window.title, "CCTV-1")
+        XCTAssertEqual(window.frame, liveFrame)
 
         window.setFrame(
             NSRect(x: 40, y: 60, width: 1_120, height: 630),
@@ -2072,7 +2753,8 @@ final class OKVideoMacTests: XCTestCase {
         )
 
         // AppKit can update unrelated style-mask bits while entering or
-        // leaving full screen. Restoring player chrome must preserve them.
+        // leaving full screen. Restoring player chrome must preserve them and
+        // must not resize the frame to compensate for toolbar visibility.
         window.styleMask.insert(.miniaturizable)
         coordinator.restore()
         await drainMainQueue()
@@ -2082,7 +2764,10 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(toolbar.isVisible)
         XCTAssertEqual(window.titleVisibility, .visible)
         XCTAssertFalse(window.titlebarAppearsTransparent)
-        XCTAssertEqual(window.frame, originalWindowFrame)
+        XCTAssertEqual(
+            window.frame,
+            NSRect(x: 40, y: 60, width: 1_120, height: 630)
+        )
         XCTAssertEqual(window.contentAspectRatio, originalContentAspectRatio)
     }
 
@@ -2761,6 +3446,137 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
     }
 
+    func testQuarkEpisodeReferenceKeepsStableHistoryIdentityWithoutStoken() throws {
+        let original = try makeQuarkEpisodeReference(
+            stoken: "expired-stoken",
+            passcode: "2468"
+        )
+        let identity = try XCTUnwrap(
+            QuarkEpisodeReference.identity(from: original)
+        )
+
+        let durable = QuarkEpisodeReference.durableHistoryReference(original)
+
+        XCTAssertEqual(identity.providerID, "quark")
+        XCTAssertEqual(identity.shareID, "share-123")
+        XCTAssertEqual(identity.fileID, "file-456")
+        XCTAssertEqual(QuarkEpisodeReference.identity(from: durable), identity)
+        XCTAssertTrue(QuarkEpisodeReference.requiresShareTokenRefresh(durable))
+        XCTAssertEqual(try quarkStoken(from: durable), "")
+        XCTAssertEqual(QuarkEpisodeReference.passcode(from: durable), "2468")
+    }
+
+    func testNodeProviderRefreshesDurableQuarkHistoryBeforePlayback() async throws {
+        let client = QuarkRefreshHTTPClient(firstPlayFailure: .none)
+        let provider = try makeNodeProvider(httpClient: client)
+        let durable = QuarkEpisodeReference.durableHistoryReference(
+            try makeQuarkEpisodeReference(stoken: "expired-stoken")
+        )
+
+        let result = try await provider.player(
+            flag: "夸克",
+            episodeURL: durable
+        )
+        let requests = await client.capturedRequests()
+        let playRequests = requests.filter { $0.url.path.hasSuffix("/play") }
+        let tokenRequests = requests.filter {
+            $0.url == QuarkEpisodeReference.shareTokenURL
+        }
+
+        XCTAssertEqual(result.url, "https://media.example.invalid/video.m3u8")
+        XCTAssertEqual(tokenRequests.count, 1)
+        XCTAssertEqual(playRequests.count, 1)
+        XCTAssertEqual(
+            try quarkStoken(from: nodeEpisodeID(from: playRequests[0])),
+            "fresh-stoken"
+        )
+    }
+
+    func testNodeProviderRefreshesExplicit41016OnceAndRetriesPlayOnce() async throws {
+        let client = QuarkRefreshHTTPClient(firstPlayFailure: .expiredStoken)
+        let provider = try makeNodeProvider(httpClient: client)
+        let episode = try makeQuarkEpisodeReference(stoken: "expired-stoken")
+
+        let result = try await provider.player(flag: "夸克", episodeURL: episode)
+        let requests = await client.capturedRequests()
+        let playRequests = requests.filter { $0.url.path.hasSuffix("/play") }
+        let tokenRequests = requests.filter {
+            $0.url == QuarkEpisodeReference.shareTokenURL
+        }
+
+        XCTAssertEqual(result.url, "https://media.example.invalid/video.m3u8")
+        XCTAssertEqual(tokenRequests.count, 1)
+        XCTAssertEqual(playRequests.count, 2)
+        XCTAssertEqual(
+            try quarkStoken(from: nodeEpisodeID(from: playRequests[0])),
+            "expired-stoken"
+        )
+        XCTAssertEqual(
+            try quarkStoken(from: nodeEpisodeID(from: playRequests[1])),
+            "fresh-stoken"
+        )
+    }
+
+    func testNodeProviderRecoversFromLegacyMissingTaskErrorWithoutBlindRetry() async throws {
+        let client = QuarkRefreshHTTPClient(firstPlayFailure: .missingTask)
+        let provider = try makeNodeProvider(httpClient: client)
+        let episode = try makeQuarkEpisodeReference(stoken: "expired-stoken")
+
+        _ = try await provider.player(flag: "夸克", episodeURL: episode)
+        let requests = await client.capturedRequests()
+
+        XCTAssertEqual(
+            requests.filter { $0.url.path.hasSuffix("/play") }.count,
+            2
+        )
+        XCTAssertEqual(
+            requests.filter { $0.url == QuarkEpisodeReference.shareTokenURL }.count,
+            1
+        )
+    }
+
+    func testQuarkRefreshFailurePreservesOriginalErrorCode() async throws {
+        let client = NodeProviderStubHTTPClient { request in
+            XCTAssertEqual(request.url, QuarkEpisodeReference.shareTokenURL)
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 404,
+                headers: ["Content-Type": "application/json"],
+                body: Data(
+                    #"{"code":41016,"message":"分享的 stoken 过期"}"#.utf8
+                )
+            )
+        }
+        let provider = try makeNodeProvider(httpClient: client)
+        let durable = QuarkEpisodeReference.durableHistoryReference(
+            try makeQuarkEpisodeReference(stoken: "expired-stoken")
+        )
+
+        do {
+            _ = try await provider.player(flag: "夸克", episodeURL: durable)
+            XCTFail("令牌刷新失败时应保留原始错误")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("41016"))
+            XCTAssertTrue(error.localizedDescription.contains("stoken 过期"))
+        }
+    }
+
+    private func makeNodeProvider(
+        httpClient: HTTPClient
+    ) throws -> NodeHTTPSpiderSiteProvider {
+        try NodeHTTPSpiderSiteProvider(
+            site: SiteConfiguration(
+                key: "nodejs_quark",
+                name: "夸克网盘",
+                type: 4,
+                api: "/spider/quark/4",
+                extra: ["okNodeRuntime": .bool(true)]
+            ),
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: httpClient
+        )
+    }
+
     func testApplicationAppearanceNamesCoverAllThemeChoices() {
         XCTAssertNil(AppAppearanceController.appearanceName(for: .system))
         XCTAssertEqual(
@@ -2846,6 +3662,120 @@ private struct NodeProviderStubHTTPClient: HTTPClient {
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         try handler(request)
     }
+}
+
+private actor QuarkRefreshHTTPClient: HTTPClient {
+    enum FirstPlayFailure {
+        case none
+        case expiredStoken
+        case missingTask
+    }
+
+    private let firstPlayFailure: FirstPlayFailure
+    private var playRequestCount = 0
+    private var requests: [HTTPRequest] = []
+
+    init(firstPlayFailure: FirstPlayFailure) {
+        self.firstPlayFailure = firstPlayFailure
+    }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        requests.append(request)
+        if request.url == QuarkEpisodeReference.shareTokenURL {
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"data":{"stoken":"fresh-stoken"}}"#.utf8)
+            )
+        }
+        guard request.url.path.hasSuffix("/play") else {
+            throw HTTPClientError.statusCode(404)
+        }
+        playRequestCount += 1
+        if playRequestCount == 1 {
+            switch firstPlayFailure {
+            case .none:
+                break
+            case .expiredStoken:
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 500,
+                    headers: ["Content-Type": "application/json"],
+                    body: Data(
+                        #"{"code":41016,"error":"分享的 stoken 过期"}"#.utf8
+                    )
+                )
+            case .missingTask:
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 500,
+                    headers: ["Content-Type": "application/json"],
+                    body: Data(
+                        #"{"error":"夸克转存没有返回 task_id"}"#.utf8
+                    )
+                )
+            }
+        }
+        return HTTPResponse(
+            url: request.url,
+            statusCode: 200,
+            headers: ["Content-Type": "application/json"],
+            body: Data(
+                #"{"parse":0,"url":"https://media.example.invalid/video.m3u8"}"#.utf8
+            )
+        )
+    }
+
+    func capturedRequests() -> [HTTPRequest] {
+        requests
+    }
+}
+
+private func makeQuarkEpisodeReference(
+    stoken: String,
+    passcode: String = ""
+) throws -> String {
+    let tokenData = try JSONSerialization.data(
+        withJSONObject: [
+            "shareId": "share-123",
+            "fid": "file-456",
+            "stoken": stoken,
+            "passcode": passcode
+        ],
+        options: [.sortedKeys, .withoutEscapingSlashes]
+    )
+    let token = try XCTUnwrap(String(data: tokenData, encoding: .utf8))
+    let outerData = try JSONSerialization.data(
+        withJSONObject: [
+            "providerId": "quark",
+            "shareId": "share-123",
+            "fileId": "file-456",
+            "playToken": token
+        ],
+        options: [.sortedKeys, .withoutEscapingSlashes]
+    )
+    return outerData.base64EncodedString()
+}
+
+private func nodeEpisodeID(from request: HTTPRequest) throws -> String {
+    let body = try XCTUnwrap(request.body)
+    let value = try JSONDecoder().decode(JSONValue.self, from: body)
+    return try XCTUnwrap(value.objectValue?["id"]?.stringValue)
+}
+
+private func quarkStoken(from episodeReference: String) throws -> String {
+    let outerData = try XCTUnwrap(
+        Data(base64Encoded: episodeReference, options: .ignoreUnknownCharacters)
+    )
+    let outer = try XCTUnwrap(
+        JSONSerialization.jsonObject(with: outerData) as? [String: Any]
+    )
+    let playToken = try XCTUnwrap(outer["playToken"] as? String)
+    let token = try XCTUnwrap(
+        JSONSerialization.jsonObject(with: Data(playToken.utf8)) as? [String: Any]
+    )
+    return try XCTUnwrap(token["stoken"] as? String)
 }
 
 private actor ImageRepositoryHTTPClientProbe: HTTPClient {

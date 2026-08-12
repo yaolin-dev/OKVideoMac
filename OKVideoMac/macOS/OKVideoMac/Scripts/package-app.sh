@@ -5,17 +5,102 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/build-environment.sh"
 
+usage() {
+  cat <<'USAGE'
+Usage: package-app.sh [--mode local|distribution] [--notarize]
+
+Modes:
+  local         Ad-hoc Hardened Runtime package for local testing (default).
+  distribution  Developer ID Application package suitable for notarization.
+
+Distribution environment:
+  DEVELOPER_ID_APPLICATION   Certificate name or SHA-1 identity (required).
+  OKVIDEOMAC_NOTARY_PROFILE  notarytool keychain profile (with --notarize).
+USAGE
+}
+
+PACKAGE_MODE="${OKVIDEOMAC_PACKAGE_MODE:-local}"
+NOTARIZE=0
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --mode)
+      if [[ "$#" -lt 2 ]]; then
+        echo "--mode requires local or distribution." >&2
+        exit 64
+      fi
+      PACKAGE_MODE="$2"
+      shift 2
+      ;;
+    --notarize)
+      NOTARIZE=1
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 64
+      ;;
+  esac
+done
+
+case "$PACKAGE_MODE" in
+  local)
+    SIGN_IDENTITY="-"
+    APP_ENTITLEMENTS="$PROJECT_DIR/Supporting/OKVideoMac.dev.entitlements"
+    TIMESTAMP_ARGUMENT="--timestamp=none"
+    ;;
+  distribution)
+    SIGN_IDENTITY="${DEVELOPER_ID_APPLICATION:-}"
+    APP_ENTITLEMENTS="$PROJECT_DIR/Supporting/OKVideoMac.release.entitlements"
+    TIMESTAMP_ARGUMENT="--timestamp"
+    if [[ -z "$SIGN_IDENTITY" || "$SIGN_IDENTITY" == "-" ]]; then
+      echo "distribution mode requires DEVELOPER_ID_APPLICATION." >&2
+      exit 2
+    fi
+    if ! security find-identity -v -p codesigning |
+         grep -F -- "$SIGN_IDENTITY" >/dev/null; then
+      echo "Developer ID signing identity is not available: $SIGN_IDENTITY" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "Unsupported package mode: $PACKAGE_MODE" >&2
+    exit 64
+    ;;
+esac
+
+if [[ "$NOTARIZE" -eq 1 && "$PACKAGE_MODE" != "distribution" ]]; then
+  echo "--notarize is only valid in distribution mode." >&2
+  exit 64
+fi
+if [[ "$NOTARIZE" -eq 1 && -z "${OKVIDEOMAC_NOTARY_PROFILE:-}" ]]; then
+  echo "--notarize requires OKVIDEOMAC_NOTARY_PROFILE." >&2
+  exit 2
+fi
+
+"$SCRIPT_DIR/check-doc-status.sh"
+
+NODE_ENTITLEMENTS="$PROJECT_DIR/Supporting/NodeHelper.entitlements"
 DERIVED_DATA="${OKVIDEOMAC_DERIVED_DATA:-$OKVIDEOMAC_BUILD_ROOT/DerivedData}"
 ARTIFACTS="${OKVIDEOMAC_ARTIFACTS:-$OKVIDEOMAC_BUILD_ROOT/Artifacts}"
 APP_SOURCE="$DERIVED_DATA/Build/Products/Release/OKVideoMac.app"
 APP_DESTINATION="$ARTIFACTS/OKVideoMac.app"
-ARCHIVE="$ARTIFACTS/OKVideoMac-0.3.39-macOS-arm64.zip"
 LIBMPV_ROOT="$OKVIDEOMAC_BUILD_ROOT/libmpv"
 QUICKJS_ROOT="$OKVIDEOMAC_BUILD_ROOT/QuickJS"
 NODE_RUNTIME="$APP_DESTINATION/Contents/Resources/NodeRuntime/node"
 EXECUTABLE="$APP_DESTINATION/Contents/MacOS/OKVideoMac"
 MPV_BRIDGE="$LIBMPV_ROOT/lib/libOKMPVBridge.dylib"
 
+for entitlement_file in "$APP_ENTITLEMENTS" "$NODE_ENTITLEMENTS"; do
+  if [[ ! -f "$entitlement_file" ]]; then
+    echo "Entitlements file is missing: $entitlement_file" >&2
+    exit 1
+  fi
+done
 if ! xcodebuild -version >/dev/null 2>&1; then
   echo "Full Xcode is required for packaging." >&2
   exit 1
@@ -25,6 +110,7 @@ if [[ ! -d "$PROJECT_DIR/OKVideoMac.xcodeproj" ]]; then
   exit 1
 fi
 
+echo "Packaging mode: $PACKAGE_MODE"
 if [[ "${OKVIDEOMAC_SKIP_ANDROID_BRIDGE_BUILD:-0}" != "1" ]]; then
   "$SCRIPT_DIR/build-android-dex-bridge.sh"
 fi
@@ -35,6 +121,9 @@ if [[ ! -f "$ANDROID_BRIDGE_APK" ]]; then
   exit 1
 fi
 
+# Native dependencies are normalized after Xcode has built the app. Signing is
+# therefore deliberately deferred until the complete nested-code inventory is
+# final; Xcode must not create a signature that install_name_tool later breaks.
 xcodebuild \
   -project "$PROJECT_DIR/OKVideoMac.xcodeproj" \
   -scheme OKVideoMac \
@@ -52,6 +141,16 @@ fi
 rm -rf "$APP_DESTINATION"
 mkdir -p "$ARTIFACTS"
 cp -R "$APP_SOURCE" "$APP_DESTINATION"
+APP_VERSION="$(
+  /usr/libexec/PlistBuddy \
+    -c 'Print :CFBundleShortVersionString' \
+    "$APP_DESTINATION/Contents/Info.plist"
+)"
+if [[ -z "$APP_VERSION" ]]; then
+  echo "Packaged app version is missing." >&2
+  exit 1
+fi
+ARCHIVE="$ARTIFACTS/OKVideoMac-${APP_VERSION}-macOS-arm64.zip"
 FRAMEWORKS="$APP_DESTINATION/Contents/Frameworks"
 mkdir -p "$FRAMEWORKS"
 
@@ -109,7 +208,20 @@ processed=()
 while [[ "${#pending[@]}" -gt 0 ]]; do
   binary="${pending[0]}"
   pending=("${pending[@]:1}")
+  already_processed=0
+  if [[ "${#processed[@]}" -gt 0 ]]; then
+    for existing_binary in "${processed[@]}"; do
+      if [[ "$existing_binary" == "$binary" ]]; then
+        already_processed=1
+        break
+      fi
+    done
+  fi
+  if [[ "$already_processed" -eq 1 ]]; then
+    continue
+  fi
   processed+=("$binary")
+
   while IFS= read -r dependency; do
     case "$dependency" in
       /opt/homebrew/*|/opt/local/*|/usr/local/*)
@@ -119,8 +231,8 @@ while [[ "${#pending[@]}" -gt 0 ]]; do
           cp "$dependency" "$destination"
           chmod u+w "$destination"
           install_name_tool -id "@rpath/$base" "$destination"
-          pending+=("$destination")
         fi
+        pending+=("$destination")
         install_name_tool -change "$dependency" "@rpath/$base" "$binary"
         ;;
     esac
@@ -141,17 +253,61 @@ while [[ "${#pending[@]}" -gt 0 ]]; do
   )
 done
 
+sign_code() {
+  target="$1"
+  entitlement_file="${2:-}"
+  arguments=(
+    --force
+    --sign "$SIGN_IDENTITY"
+    --options runtime
+    "$TIMESTAMP_ARGUMENT"
+  )
+  if [[ -n "$entitlement_file" ]]; then
+    arguments+=(--entitlements "$entitlement_file")
+  fi
+  codesign "${arguments[@]}" "$target"
+}
+
+# Explicit inside-out signing. --deep is verification-only and is never used
+# to create or repair signatures.
 for ((index=${#processed[@]} - 1; index >= 0; index--)); do
-  codesign --force --sign - --timestamp=none "${processed[$index]}"
+  binary="${processed[$index]}"
+  if [[ "$binary" == "$EXECUTABLE" || "$binary" == "$NODE_RUNTIME" ]]; then
+    continue
+  fi
+  sign_code "$binary"
 done
-codesign --force --sign - --timestamp=none "$APP_DESTINATION"
+sign_code "$NODE_RUNTIME" "$NODE_ENTITLEMENTS"
+sign_code "$EXECUTABLE" "$APP_ENTITLEMENTS"
+sign_code "$APP_DESTINATION" "$APP_ENTITLEMENTS"
 
 "$SCRIPT_DIR/verify-bundle.sh" "$APP_DESTINATION"
-rm -f "$ARCHIVE" "$ARCHIVE.sha256"
-ditto -c -k --sequesterRsrc --keepParent "$APP_DESTINATION" "$ARCHIVE"
-(
-  cd "$ARTIFACTS"
-  shasum -a 256 "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256"
-)
+"$SCRIPT_DIR/verify-release-signing.sh" --mode "$PACKAGE_MODE" "$APP_DESTINATION"
+
+create_archive() {
+  rm -f "$ARCHIVE" "$ARCHIVE.sha256"
+  ditto -c -k --sequesterRsrc --keepParent "$APP_DESTINATION" "$ARCHIVE"
+  (
+    cd "$ARTIFACTS"
+    shasum -a 256 "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256"
+  )
+}
+
+create_archive
+if [[ "$NOTARIZE" -eq 1 ]]; then
+  xcrun notarytool submit "$ARCHIVE" \
+    --keychain-profile "$OKVIDEOMAC_NOTARY_PROFILE" \
+    --wait
+  xcrun stapler staple "$APP_DESTINATION"
+  xcrun stapler validate "$APP_DESTINATION"
+  "$SCRIPT_DIR/verify-release-signing.sh" \
+    --mode distribution \
+    --require-gatekeeper \
+    "$APP_DESTINATION"
+  create_archive
+elif [[ "$PACKAGE_MODE" == "distribution" ]]; then
+  echo "Notarization step not executed because credentials were not requested."
+fi
+
 echo "Packaged app: $APP_DESTINATION"
 echo "Archive: $ARCHIVE"

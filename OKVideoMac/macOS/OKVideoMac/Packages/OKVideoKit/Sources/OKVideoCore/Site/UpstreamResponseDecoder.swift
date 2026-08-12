@@ -451,7 +451,9 @@ public enum SpiderResponseMapper {
     public static func selection(
         _ value: JSONValue,
         site: SiteConfiguration,
-        baseURL: URL?
+        baseURL: URL?,
+        fallbackSummary: VideoSummary? = nil,
+        allowsPlaceholderAction: Bool = true
     ) throws -> SiteSelectionResult {
         let response = try decode(value, site: site, baseURL: baseURL)
         if let video = response.videos.first(where: {
@@ -466,16 +468,65 @@ public enum SpiderResponseMapper {
                 )
             )
         }
+        if let fallbackSummary,
+           var video = response.videos.first(where: {
+               detailPayloadIsRecoverable($0)
+           }) {
+            video.id = video.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? fallbackSummary.videoID
+                : video.id
+            video.name = video.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? fallbackSummary.title
+                : video.name
+            video.picture = video.picture?.nonEmptyValue
+                ?? fallbackSummary.posterURL?.absoluteString
+            video.remarks = video.remarks?.nonEmptyValue ?? fallbackSummary.remarks
+            video.year = video.year?.nonEmptyValue ?? fallbackSummary.year
+            video.typeName = video.typeName?.nonEmptyValue ?? fallbackSummary.categoryName
+            video.tag = video.tag?.nonEmptyValue ?? fallbackSummary.tag
+            return .detail(
+                try UpstreamResponseDecoder.detail(
+                    from: video,
+                    site: site,
+                    baseURL: baseURL
+                )
+            )
+        }
+        if response.videos.contains(where: {
+            $0.action?.nonEmptyValue != nil
+        }) {
+            return .action(value)
+        }
         // Configuration/account spiders intentionally return {"list":[{}]}
         // after handling the selected command. An empty list still represents
         // a failed detail request and remains an error.
-        if !response.videos.isEmpty {
+        if allowsPlaceholderAction, !response.videos.isEmpty {
             return .action(value)
         }
         if let message = response.message {
             throw AppError.spider(message)
         }
+        if !response.videos.isEmpty {
+            throw AppError.spider("Spider 详情响应缺少可识别的影视信息")
+        }
         throw AppError.spider("Spider 详情响应没有有效项目")
+    }
+
+    private static func detailPayloadIsRecoverable(_ video: UpstreamVideo) -> Bool {
+        guard video.action?.nonEmptyValue == nil else { return false }
+        return [
+            video.typeName,
+            video.picture,
+            video.remarks,
+            video.year,
+            video.area,
+            video.director,
+            video.actors,
+            video.content,
+            video.playFrom,
+            video.playURL,
+            video.tag
+        ].contains { $0?.nonEmptyValue != nil }
     }
 
     public static func player(
@@ -664,5 +715,12 @@ private final class XMLVideoParserDelegate: NSObject, XMLParserDelegate {
             currentVideo = nil
         }
         text = ""
+    }
+}
+
+private extension String {
+    var nonEmptyValue: String? {
+        let value = trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
     }
 }

@@ -9,6 +9,151 @@ struct NodeWebAuthorizationRequired: Error, LocalizedError, Equatable {
     var errorDescription: String? { message }
 }
 
+/// The Node bundle embeds Quark's short-lived share authorization inside the
+/// opaque episode URL. Keep the codec in the host app so an expired `stoken`
+/// can be refreshed without modifying a downloaded third-party bundle.
+enum QuarkEpisodeReference {
+    struct Identity: Equatable {
+        let providerID: String
+        let shareID: String
+        let fileID: String
+    }
+
+    static let shareTokenURL = URL(
+        string: "https://drive.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc"
+    )!
+
+    static func identity(from rawValue: String) -> Identity? {
+        guard let payload = payload(from: rawValue),
+              payload.providerID.caseInsensitiveCompare("quark") == .orderedSame,
+              !payload.shareID.isEmpty,
+              !payload.fileID.isEmpty else {
+            return nil
+        }
+        return Identity(
+            providerID: payload.providerID.lowercased(),
+            shareID: payload.shareID,
+            fileID: payload.fileID
+        )
+    }
+
+    static func requiresShareTokenRefresh(_ rawValue: String) -> Bool {
+        guard let payload = payload(from: rawValue),
+              payload.providerID.caseInsensitiveCompare("quark") == .orderedSame else {
+            return false
+        }
+        return payload.stoken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func replacingStoken(
+        in rawValue: String,
+        with stoken: String
+    ) throws -> String {
+        guard let outerData = Data(
+            base64Encoded: rawValue,
+            options: .ignoreUnknownCharacters
+        ),
+        var outer = try JSONSerialization.jsonObject(with: outerData)
+            as? [String: Any],
+        var token = try JSONSerialization.jsonObject(
+            with: Data((outer["playToken"] as? String ?? "").utf8)
+        ) as? [String: Any] else {
+            throw AppError.playback("夸克分集令牌格式无效，无法刷新分享授权")
+        }
+        token["stoken"] = stoken
+        let tokenData = try JSONSerialization.data(
+            withJSONObject: token,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+        guard let tokenString = String(data: tokenData, encoding: .utf8) else {
+            throw AppError.playback("夸克分享令牌编码失败")
+        }
+        outer["playToken"] = tokenString
+        let data = try JSONSerialization.data(
+            withJSONObject: outer,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+        return data.base64EncodedString()
+    }
+
+    /// History keeps the stable share/file identity but deliberately omits the
+    /// expiring stoken. The provider reacquires it before the next playback.
+    static func durableHistoryReference(_ rawValue: String) -> String {
+        guard identity(from: rawValue) != nil else { return rawValue }
+        return (try? replacingStoken(in: rawValue, with: "")) ?? rawValue
+    }
+
+    static func passcode(from rawValue: String) -> String {
+        guard let outerData = Data(
+            base64Encoded: rawValue,
+            options: .ignoreUnknownCharacters
+        ),
+        let outer = try? JSONSerialization.jsonObject(with: outerData)
+            as? [String: Any] else {
+            return ""
+        }
+        if let value = firstString(
+            in: outer,
+            keys: ["passcode", "passCode", "password", "pwd"]
+        ) {
+            return value
+        }
+        guard let playToken = outer["playToken"] as? String,
+              let token = try? JSONSerialization.jsonObject(
+                with: Data(playToken.utf8)
+              ) as? [String: Any] else {
+            return ""
+        }
+        return firstString(
+            in: token,
+            keys: ["passcode", "passCode", "password", "pwd"]
+        ) ?? ""
+    }
+
+    private struct Payload {
+        let providerID: String
+        let shareID: String
+        let fileID: String
+        let stoken: String
+    }
+
+    private static func payload(from rawValue: String) -> Payload? {
+        guard let data = Data(
+            base64Encoded: rawValue,
+            options: .ignoreUnknownCharacters
+        ),
+        let outer = try? JSONSerialization.jsonObject(with: data)
+            as? [String: Any],
+        let providerID = outer["providerId"] as? String,
+        let playToken = outer["playToken"] as? String,
+        let token = try? JSONSerialization.jsonObject(
+            with: Data(playToken.utf8)
+        ) as? [String: Any] else {
+            return nil
+        }
+        let shareID = (outer["shareId"] as? String)
+            ?? (token["shareId"] as? String)
+            ?? ""
+        let fileID = (outer["fileId"] as? String)
+            ?? (token["fid"] as? String)
+            ?? ""
+        return Payload(
+            providerID: providerID,
+            shareID: shareID,
+            fileID: fileID,
+            stoken: token["stoken"] as? String ?? ""
+        )
+    }
+
+    private static func firstString(
+        in object: [String: Any],
+        keys: [String]
+    ) -> String? {
+        keys.compactMap { object[$0] as? String }
+            .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+}
+
 final class NodeHTTPSpiderSiteProvider: SiteProvider {
     let site: SiteConfiguration
     let capability: SiteCapability = .javaScriptSpider
@@ -111,6 +256,17 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     }
 
     func select(id: String) async throws -> SiteSelectionResult {
+        try await select(id: id, fallbackSummary: nil)
+    }
+
+    func select(summary: VideoSummary) async throws -> SiteSelectionResult {
+        try await select(id: summary.videoID, fallbackSummary: summary)
+    }
+
+    private func select(
+        id: String,
+        fallbackSummary: VideoSummary?
+    ) async throws -> SiteSelectionResult {
         if isConfigurationCenter,
            id == "config-center" || id == "node-web-configuration" {
             throw webAuthorizationRequired(
@@ -127,7 +283,9 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 maximumAttempts: 2
             ),
             site: site,
-            baseURL: baseURL
+            baseURL: baseURL,
+            fallbackSummary: fallbackSummary,
+            allowsPlaceholderAction: isConfigurationCenter
         )
     }
 
@@ -158,35 +316,40 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     }
 
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
-        do {
-            var result = try SpiderResponseMapper.player(
-                await invoke(
-                    method: "play",
-                    body: [
-                        "flag": .string(flag),
-                        "id": .string(episodeURL),
-                        "vipFlags": .array([]),
-                        "flags": .array([])
-                    ],
-                    maximumAttempts: 2
-                ),
-                site: site
+        var resolvedEpisodeURL = episodeURL
+        var refreshedShareToken = false
+        if QuarkEpisodeReference.requiresShareTokenRefresh(resolvedEpisodeURL) {
+            resolvedEpisodeURL = try await refreshQuarkShareToken(
+                in: resolvedEpisodeURL
             )
-            result.url = normalizePlaybackURL(result.url)
-            result.qualities = result.qualities.map {
-                PlaybackQuality(
-                    name: $0.name,
-                    url: normalizePlaybackURL($0.url)
-                )
-            }
-            result.subtitles = result.subtitles.map { subtitle in
-                URL(string: normalizePlaybackURL(subtitle.absoluteString))
-                    ?? subtitle
-            }
-            return result
+            refreshedShareToken = true
+        }
+        do {
+            return try await resolvePlayer(
+                flag: flag,
+                episodeURL: resolvedEpisodeURL
+            )
         } catch let authorization as NodeWebAuthorizationRequired {
             throw authorization
         } catch {
+            if !refreshedShareToken,
+               Self.shouldRefreshQuarkShareToken(after: error),
+               QuarkEpisodeReference.identity(from: resolvedEpisodeURL) != nil {
+                let refreshedURL = try await refreshQuarkShareToken(
+                    in: resolvedEpisodeURL
+                )
+                do {
+                    return try await resolvePlayer(
+                        flag: flag,
+                        episodeURL: refreshedURL
+                    )
+                } catch {
+                    throw AppError.spider(
+                        "\(site.name) play 失败：已刷新夸克分享令牌，"
+                            + "但转存仍失败：\(error.localizedDescription)"
+                    )
+                }
+            }
             // Some Node spiders put an already playable URL directly in the
             // episode field even though their optional play resolver is down.
             // Preserve that valid fallback instead of turning a resolver 500
@@ -201,6 +364,113 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             }
             throw error
         }
+    }
+
+    private func resolvePlayer(
+        flag: String,
+        episodeURL: String
+    ) async throws -> SitePlaybackResult {
+        var result = try SpiderResponseMapper.player(
+            await invoke(
+                method: "play",
+                body: [
+                    "flag": .string(flag),
+                    "id": .string(episodeURL),
+                    "vipFlags": .array([]),
+                    "flags": .array([])
+                ],
+                // POST /play may perform a cloud transfer. Blindly repeating
+                // it cannot repair an expired token and can duplicate work.
+                maximumAttempts: 1
+            ),
+            site: site
+        )
+        result.url = normalizePlaybackURL(result.url)
+        result.qualities = result.qualities.map {
+            PlaybackQuality(
+                name: $0.name,
+                url: normalizePlaybackURL($0.url)
+            )
+        }
+        result.subtitles = result.subtitles.map { subtitle in
+            URL(string: normalizePlaybackURL(subtitle.absoluteString))
+                ?? subtitle
+        }
+        return result
+    }
+
+    private func refreshQuarkShareToken(
+        in episodeURL: String
+    ) async throws -> String {
+        guard let identity = QuarkEpisodeReference.identity(from: episodeURL) else {
+            throw AppError.playback("夸克分集令牌缺少分享或文件标识")
+        }
+        let body = try JSONSerialization.data(
+            withJSONObject: [
+                "pwd_id": identity.shareID,
+                "passcode": QuarkEpisodeReference.passcode(from: episodeURL)
+            ],
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+        let response = try await httpClient.send(
+            HTTPRequest(
+                url: QuarkEpisodeReference.shareTokenURL,
+                method: .post,
+                headers: [
+                    "Content-Type": "application/json; charset=utf-8",
+                    "Referer": "https://pan.quark.cn/",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                ],
+                body: body,
+                timeout: 20,
+                maximumResponseBytes: 1_024 * 1_024,
+                maximumRedirects: 2,
+                retryPolicy: .none,
+                allowsNonSuccessfulStatus: true
+            )
+        )
+        let value = try? JSONDecoder().decode(JSONValue.self, from: response.body)
+        let message = value.flatMap(Self.serverMessage)
+        guard (200...299).contains(response.statusCode) else {
+            let code = value.flatMap(Self.serverCode)
+            let detail = [
+                code.map { "错误码 \($0)" },
+                message
+            ]
+                .compactMap { $0 }
+                .joined(separator: "：")
+            throw AppError.playback(
+                "夸克分享令牌刷新失败："
+                    + (detail.isEmpty
+                        ? "HTTP 状态码 \(response.statusCode)"
+                        : detail)
+            )
+        }
+        guard let stoken = value?.objectValue?["data"]?
+            .objectValue?["stoken"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+        !stoken.isEmpty else {
+            throw AppError.playback(
+                "夸克分享令牌刷新失败："
+                    + (message ?? "接口未返回新 stoken，分享可能已失效")
+            )
+        }
+        return try QuarkEpisodeReference.replacingStoken(
+            in: episodeURL,
+            with: stoken
+        )
+    }
+
+    private static func shouldRefreshQuarkShareToken(after error: Error) -> Bool {
+        let message = error.localizedDescription.lowercased()
+        let missingTask = (message.contains("task_id")
+            || message.contains("task id"))
+            && (message.contains("没有返回")
+                || message.contains("未返回")
+                || message.contains("missing")
+                || message.contains("empty")
+                || message.contains("null"))
+        return missingTask || isExpiredQuarkShareTokenMessage(message)
     }
 
     func action(_ action: String) async throws -> JSONValue {
@@ -342,8 +612,46 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         return nil
     }
 
+    private static func serverCode(from value: JSONValue) -> String? {
+        guard case .object(let object) = value else { return nil }
+        for key in ["code", "errorCode", "error_code", "errno"] {
+            switch object[key] {
+            case .integer(let value):
+                return String(value)
+            case .number(let value):
+                return value.rounded() == value
+                    ? String(Int64(value))
+                    : String(value)
+            case .string(let value):
+                let trimmed = value.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+                if !trimmed.isEmpty { return trimmed }
+            default:
+                continue
+            }
+        }
+        return nil
+    }
+
+    private static func isExpiredQuarkShareTokenMessage(
+        _ message: String
+    ) -> Bool {
+        let normalized = message.lowercased()
+        return normalized.contains("41016")
+            || (normalized.contains("stoken")
+                && (normalized.contains("过期")
+                    || normalized.contains("expired")))
+    }
+
     private static func isAuthorizationMessage(_ message: String) -> Bool {
         let normalized = message.lowercased()
+        // A share stoken is independent from the user's cloud-drive login.
+        // Treating 41016 as a Cookie/login problem bypasses the refresh path
+        // and sends the user to an authorization screen that cannot fix it.
+        if isExpiredQuarkShareTokenMessage(normalized) {
+            return false
+        }
         let configurationHints = [
             "请先去配置中心", "请先到配置中心",
             "还没有配置", "未登录", "还没有登录",
