@@ -56,7 +56,7 @@ and exact evidence is packaged for counsel.
 | POM | SHA-256 `7846399b35c7cd642a9b3a000c3e2d62d04eb37a4547b6933cc8b18bcc2f086b` | Declares MPL-1.1 only |
 | FongMi catvod | commit `5fdff00a602dc56e8ba756174daef20edab024f2` | Copied/modified GPL-3.0-only source |
 | AndroidDexBridge | local app + catvod source | APK host, RPC bridge, and dynamic Spider loader |
-| Release APK | SHA-256 `5a46aec0bcdd9fc446cfeb1e3ddc3d97b1b2de7978ad88b8283d78fec2f20af7` | Embedded byte-for-byte in Desktop Release |
+| Final Release APK | SHA-256 `59ee18fa061bad09bf60b8836e3be141878b7b0167987af6228386173072a845` | Gradle output embedded byte-for-byte in Desktop Release |
 
 Exact Gradle origin, reproduced offline:
 
@@ -114,9 +114,12 @@ The 58 files are not all consistent.
 
 Conclusion: `PRESENT_IN_RELEASE_DEX`.
 
-The Release APK at both the Phase 2 build output and Desktop bundle was
+The final clean Release APK at the Gradle build output and packaged app is
 byte-identical with SHA-256
-`5a46aec0bcdd9fc446cfeb1e3ddc3d97b1b2de7978ad88b8283d78fec2f20af7`.
+`59ee18fa061bad09bf60b8836e3be141878b7b0167987af6228386173072a845`.
+The pre-audit Phase 2 APK/container SHA-256 was
+`5a46aec0bcdd9fc446cfeb1e3ddc3d97b1b2de7978ad88b8283d78fec2f20af7`;
+both DEX payload hashes below remained byte-identical across the rebuild.
 
 | DEX | SHA-256 | Role |
 |---|---|---|
@@ -316,7 +319,10 @@ or a future evidence-backed removal/replacement. It is not marked Ready.
     lowest engineering-risk disposition. Future removal is preferable only
     after closing/proving the supported plugin set.
 14. **Replacement tests:** not applicable; no replacement made.
-15. **APK hash changed:** No; it remains `5a46aec0…20af7`.
+15. **APK hash changed:** Yes at the outer signed/ZIP container level after
+    the mandated clean final rebuild: Phase 2 `5a46aec0…20af7`, final Release
+    `59ee18fa…a845`. Both DEX hashes and inventories are unchanged; there was
+    no Android runtime/source/dependency change.
 16. **SBOM accurate:** Yes; component remains listed.
 17. **MPL-1.1 component remains:** Yes, according to POM/component treatment;
     57 exact file headers also offer alternatives.
@@ -343,4 +349,3 @@ For this release, retain the stable implementation, keep the P0 open, and give
 the exact evidence package to counsel. A later removal should proceed only
 after product policy defines a closed supported Spider set and real protected
 packages demonstrate that the host-provided API is unnecessary.
-

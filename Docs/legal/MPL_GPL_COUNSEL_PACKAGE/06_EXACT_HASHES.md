@@ -10,7 +10,8 @@ All hashes are SHA-256 unless labeled otherwise.
 | juniversalchardet sources JAR | `3d1cb067f5cfe3cc19b77c837156f22368462af9acac5dd878e785966758fc27` |
 | juniversalchardet binary JAR | `757bfe906193b8b651e79dc26cd67d6b55d0770a2cdfb0381591504f779d4a76` |
 | juniversalchardet POM | `7846399b35c7cd642a9b3a000c3e2d62d04eb37a4547b6933cc8b18bcc2f086b` |
-| Release APK | `5a46aec0bcdd9fc446cfeb1e3ddc3d97b1b2de7978ad88b8283d78fec2f20af7` |
+| Final Release APK | `59ee18fa061bad09bf60b8836e3be141878b7b0167987af6228386173072a845` |
+| Pre-audit Phase 2 APK container | `5a46aec0bcdd9fc446cfeb1e3ddc3d97b1b2de7978ad88b8283d78fec2f20af7` |
 | APK `classes.dex` | `a317f2f8af8ce79e5f6a02efc0bf2f2f9e126d50686bcf597fcff98ac303e9ea` |
 | APK `classes2.dex` | `332360b30f2dd6393493b0bda7860d9769f901dfb4177f2fd8b816b215f4f0c7` |
 | `catvod/build.gradle` | `3e72bcc983724057cfb85032a8c89ac7c191486da608cd21e45615205f4b503e` |
@@ -29,4 +30,3 @@ All hashes are SHA-256 unless labeled otherwise.
 The saved Spider JAR hashes document compatibility investigation only; those
 third-party packages are dynamically downloaded and are not Release-bundle
 components.
-

@@ -9,13 +9,18 @@ This is a factual binary inventory, not a legal opinion.
 ## Exact Release artifact
 
 - Source baseline: commit `1552e51df9bc42aa7832e0ed3816e4dc96d7b88f`.
-- Build output path:
+- Final build output path:
   `OKVideoMac/Helpers/AndroidDexBridge/app/build/outputs/apk/release/app-release.apk`.
-- Installed Release path:
+- Final packaged/installed Release path:
   `/Users/linyao/Desktop/OKVideoMac.app/Contents/Resources/AndroidDexBridge-release.apk`.
-- Both files were byte-identical at audit time.
-- APK SHA-256:
-  `5a46aec0bcdd9fc446cfeb1e3ddc3d97b1b2de7978ad88b8283d78fec2f20af7`.
+- The Gradle output and packaged app copy were byte-identical after the final
+  clean Release rebuild.
+- Final APK SHA-256:
+  `59ee18fa061bad09bf60b8836e3be141878b7b0167987af6228386173072a845`.
+- The pre-audit Phase 2 APK had SHA-256
+  `5a46aec0bcdd9fc446cfeb1e3ddc3d97b1b2de7978ad88b8283d78fec2f20af7`;
+  its two DEX entries are byte-identical to the final rebuild. The APK-level
+  hash changed only at the outer signed/ZIP container level.
 - App Release: `OKVideoMac 0.3.41 (62)`.
 - Android build type: `release`, `minifyEnabled false`.
 
