@@ -1,29 +1,37 @@
 # Building OKVideoMac
 
-## 当前已知环境状态
+## Supported / verified environment
 
-2026-07-29 检查结果：
+Phase 4 在 2026-08-12 已于以下环境完成验证：
 
-- macOS 12.7.6 arm64；
-- Swift 5.7.2；
-- 只有 Command Line Tools，没有完整 Xcode；
-- CLT 编译器和 SDK Swift 模块版本不匹配；
-- XCTest 不可用；
-- Homebrew 存在，但当前 Homebrew 6.0.2 在 Monterey 上安装源码公式时出现
-  公式 DSL 兼容错误；
-- 因此本机原生依赖改由 MacPorts `/opt/local` 提供；
-- MacPorts 本体位于系统盘 `/opt/local`，不是移动硬盘；当前仅安装 MacPorts
-  本体，ports 数量为 0；
-- XcodeGen 未安装到 PATH，但已用官方 2.38.0 二进制成功生成工程；
-- Meson、Ninja、mpv/libmpv 和 FFmpeg/libass 开发包不存在；
-- QuickJS 2025-09-13-2 已成功构建并通过原生桥 smoke test。
+- macOS 14.8.8（23J620），Apple Silicon / arm64；
+- Xcode 16.2（16C5032a）；
+- Swift 6.0.3（swiftlang-6.0.3.1.10）；
+- 0.3.41（Build 62）arm64 Release 构建、152 项 macOS App 单元测试、
+  Android Release Bridge 构建和本地 Release packaging 通过；
+- 最低部署目标为 macOS 12.0；Xcode 14.2 是较早的 macOS 12 构建基线，
+  不是上述 Phase 4 artifact 的实际 builder；
+- Android Bridge 构建需要 JDK 17、Gradle wrapper、Android SDK 35 / build-tools
+  35；其运行时能力是可选的 Experimental compatibility；
+- 原生依赖构建使用 MacPorts `/opt/local` 提供 pkg-config、FFmpeg 7、libass
+  等输入，并由仓库 lock、脚本和哈希校验约束。
 
-因此当前仓库中的测试和 App 尚未在本机成功编译。安装完整 Xcode 14.2 后必须
-重新执行以下全部门禁。
+早期 2026-07-29 环境只有 Command Line Tools，曾因编译器/SDK Swift 模块不
+匹配、XCTest 不可用和依赖缺失而无法构建 App。该历史事实已被上述 Phase 4
+成功验证取代，不再代表当前源码状态。
+
+## Current reproducibility caveats
+
+2026-08-13 的 fresh audit 遇到 Google Maven TLS handshake termination，且
+位于 `/Volumes/XcodeDev` 的外部开发卷发生 I/O stall，导致该次独立重跑无法
+完成。这些是当次网络/存储环境事实，不是源码编译失败。恢复可用网络、Xcode
+卷和已锁定依赖缓存后，应重新运行本文门禁；正式发布仍必须来自 clean worktree
+和 `package-app.sh` 的 controlled output。
 
 ## 前置条件
 
-1. 安装完整 Xcode 14.2，并选择其 Developer 目录：
+1. 安装完整 Xcode（Phase 4 已验证 16.2；较早 macOS 12 基线为 14.2），并选择
+   其 Developer 目录。以下是当前维护机的外部卷示例，不是通用必需路径：
 
    ```bash
    ./Scripts/mount-xcode-dev.sh
@@ -46,6 +54,9 @@
    FFmpeg/libass。
 3. 构建 libmpv 时需要 FFmpeg、libass 及 mpv Meson 检测到的依赖。这些只允许
    作为构建期依赖；最终 `.app` 必须携带完整 dylib 闭包。
+4. 构建可选 Android Bridge 需要 JDK 17、Android SDK 35/build-tools 35 和
+   Gradle wrapper 所需的已锁定 Maven artifacts。Native Mode 启动和使用不要求
+   Android SDK 或 Emulator。
 
 ## 工程和测试
 
@@ -87,8 +98,10 @@ MacPorts 本体、头文件和动态库位于系统盘 `/opt/local`。
 脚本固定 QuickJS 2025-09-13-2 和 mpv v0.41.0，并验证源码 SHA-256。
 QuickJS 脚本会同时构建 `libOKQuickJS.dylib` 并运行 C smoke test。
 libmpv 脚本会构建 `libmpv.dylib` 和 `libOKMPVBridge.dylib`。Xcode 工程在
-这些文件存在时把它们和许可证复制到 App。当前机器尚未执行 libmpv 构建；
-即使依赖脚本成功，仍须完成 App 构建与真实播放门禁。
+这些文件存在时把它们和许可证复制到 App。早期环境尚未执行 libmpv 构建的记录
+属于历史状态；Phase 4 已完成稳定 native 候选构建、ABI/capability 核验与
+Release packaging。新的发布 commit 仍须重新运行 package gate，不能仅复用
+历史结论替代最终 artifact 验证。
 
 ## 打包
 
