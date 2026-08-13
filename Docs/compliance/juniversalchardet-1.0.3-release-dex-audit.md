@@ -65,9 +65,13 @@ inspection:
 Gradle `dependencyInsight` shows the locked module is a direct `api`
 dependency of project `:catvod`, inherited by the app's
 `releaseRuntimeClasspath`. D8 merges it into the same APK and same
-`classes2.dex` as GPL-3.0 FongMi/catvod and local bridge classes. There is no
-JAR boundary, relocation, shading, source copying, source modification,
-separate process, IPC boundary, or build-tool-only use for this component.
+multidex application as GPL-3.0 FongMi/catvod and local bridge classes. The 56
+`com.github.catvod` classes and 19 local bridge classes are in `classes.dex`;
+the 62 juniversalchardet classes are in `classes2.dex`. They are therefore in
+the same APK and application/class-loader graph, but not the same individual
+DEX file. There is no JAR boundary, relocation, shading, source copying,
+source modification, separate process, IPC boundary, or build-tool-only use
+for this component.
 
 The bridge does, however, use `DexClassLoader` at runtime to download arbitrary
 configuration-selected CatVod Spider JARs with the APK's class loader as
@@ -75,4 +79,3 @@ parent. This means the host's exported runtime classes can be consumed by a
 future external Spider even though no audited current caller was found. That
 open-ended host-contract risk is the reason zero current references alone do
 not establish `REMOVE_SAFE`.
-

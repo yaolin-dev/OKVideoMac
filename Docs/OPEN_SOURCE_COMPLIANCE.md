@@ -16,7 +16,9 @@ release materials are:
 - `OKVideoMac/Helpers/AndroidDexBridge/THIRD_PARTY_NOTICES.md` — APK graph;
 - `Docs/SOURCE_PROVENANCE_MANIFEST.md` — versions, hashes, inputs, outputs;
 - `Docs/BINARY_SOURCE_MAPPING.md` — immutable binary-to-source answers; and
-- `Docs/OPEN_SOURCE_P0_STATUS.md` — unresolved release blockers.
+- `Docs/OPEN_SOURCE_P0_STATUS.md` — unresolved release blockers;
+- `Docs/MPL_GPL_COMBINATION_AUDIT.md` — exact Phase 3 disposition; and
+- `Docs/legal/MPL_GPL_COUNSEL_PACKAGE/` — counsel evidence and questions.
 
 Release packaging copies this material into
 `OKVideoMac.app/Contents/Resources/Legal/` so the App is self-describing.

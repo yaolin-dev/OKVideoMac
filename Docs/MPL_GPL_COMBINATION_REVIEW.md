@@ -7,6 +7,10 @@ Date: 2026-08-13
 This document records technical facts for counsel. It does not select a
 license alternative or make a legal compatibility conclusion.
 
+The Phase 3 full audit supersedes this short review for disposition and exact
+DEX placement: `Docs/MPL_GPL_COMBINATION_AUDIT.md`. Counsel evidence is in
+`Docs/legal/MPL_GPL_COUNSEL_PACKAGE/`.
+
 ## Exact artifact and covered source
 
 - Runtime coordinate: `com.googlecode.juniversalchardet:juniversalchardet:1.0.3`.
@@ -41,9 +45,12 @@ source files at source level.
 ## GPL-3.0 combination context
 
 The same APK contains copied and modified FongMi/TV catvod code distributed by
-this project under GPL-3.0. The classes are merged into the same DEX payload at
-build time. The APK notice identifies both the GPL catvod source and the
-juniversalchardet license/source. The release bundle provides:
+this project under GPL-3.0. Exact DEX inventory shows 56 catvod and 19 local
+bridge classes in `classes.dex`, while all 62 juniversalchardet classes are in
+`classes2.dex`. They are in one APK/application and shared class-loader graph,
+but not the same individual DEX file. The APK notice identifies both the GPL
+catvod source and the juniversalchardet license/source. The release bundle
+provides:
 
 1. exact project and modified catvod source;
 2. exact FongMi upstream commit source subset and change notice;
@@ -54,8 +61,8 @@ juniversalchardet license/source. The release bundle provides:
 ## Question reserved for counsel
 
 Counsel should confirm the appropriate license-election and notice treatment
-for distributing the tri-licensed files in the same DEX payload as GPL-3.0
-code, with particular attention to the headerless `Constants.java` and the
-POM's MPL-only declaration. Until that review is complete, the combination is
-not represented as legally cleared even though exact covered source is
-delivered.
+for distributing the tri-licensed files in the same APK/application graph as
+GPL-3.0 code, with particular attention to separate DEX placement, the
+headerless `Constants.java`, and the POM's MPL-only declaration. Until that
+review is complete, the combination is not represented as legally cleared
+even though exact covered source is delivered.
