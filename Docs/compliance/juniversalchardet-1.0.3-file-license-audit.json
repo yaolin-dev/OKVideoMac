@@ -1,0 +1,882 @@
+{
+  "schema_version": 1,
+  "coordinate": "com.googlecode.juniversalchardet:juniversalchardet:1.0.3",
+  "evidence": {
+    "sources_jar": "juniversalchardet-1.0.3-sources.jar",
+    "sources_jar_sha256": "3d1cb067f5cfe3cc19b77c837156f22368462af9acac5dd878e785966758fc27",
+    "audit_basis": "Exact Java entries in the sources JAR"
+  },
+  "summary": {
+    "java_file_count": 58,
+    "tri_license_alternative_header_count": 57,
+    "headerless_file_count": 1,
+    "exhibit_a_file_count": 0,
+    "all_files_consistent": false
+  },
+  "files": [
+    {
+      "path": "org/mozilla/universalchardet/CharsetListener.java",
+      "sha256": "717dfd549702e6ada446b60c0516c4e7d6edd3e5431a8d28d0a38e337f35b698",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/Constants.java",
+      "sha256": "0fc32b552c70769a08101cefcb27a1adddb4c719f8d0199753f20d1e3cfff995",
+      "detected_copyright": [],
+      "detected_license": [],
+      "alternate_license_present": false,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "No file header precedes the package declaration; no license, copyright, Exhibit A, or alternative-license text is present in this file."
+    },
+    {
+      "path": "org/mozilla/universalchardet/UniversalDetector.java",
+      "sha256": "e156f407a362016b90f6b103949f43573f95f83f91557dc700859c770ee7cf89",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 2001 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/Big5Prober.java",
+      "sha256": "a0420a7d816eb2db6b5308611fdf14394b3ec5065030ef1090d911be62462747",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/CharsetProber.java",
+      "sha256": "29fa896ad584a5d8688048c59cc424a5d40cc2d9fbc33e591630eb6a2c893785",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 2001 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/EUCJPProber.java",
+      "sha256": "68c784bd9e652255d31892a358b820376f2b02488aefa439584510b3d7ee153e",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/EUCKRProber.java",
+      "sha256": "85ad801100afd1621fb02fcc7742de0f0722fd3668246206fef8028b01831859",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/EUCTWProber.java",
+      "sha256": "d3142e8caa54f9d5540d5ad235392055d143b44602cb72086f784d859f8600e2",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/EscCharsetProber.java",
+      "sha256": "fa7a2681813ee996f633649caa51ac11b8d8f4111d8a6e3127b5e77d12a1fadf",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/GB18030Prober.java",
+      "sha256": "6122e89957b766cce60c8af80d8b144ca0206cf331339e0a15683ed176c822f6",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/HebrewProber.java",
+      "sha256": "b6ef00542e81c96d77c4b67cf4308d020521b4605ab0e79b3ab9961605037a43",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 2005 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/Latin1Prober.java",
+      "sha256": "b153ef9cb20744416b492e1198a86329b160f714546a57fc543e450e162d197b",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 2001 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/MBCSGroupProber.java",
+      "sha256": "ee23d49dc56137c76bd90879d8e3a231d5c1100f8c166e0fbea547e56af6f9a4",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 2001 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/SBCSGroupProber.java",
+      "sha256": "72d43843a7cfb7b4cd2b405f8a00b8c5072eb99b0d1c5a562753ea570c28e879",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 2001 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/SJISProber.java",
+      "sha256": "abb2a96d30300bf39c11502f8ce66f37d0bacfeac77c17f287ae9fcb4427a9f4",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/SingleByteCharsetProber.java",
+      "sha256": "45291036d8133f177a4d7365fca5c9747c97b9075502c2b1fec898d6cd59a71c",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 2001 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/UTF8Prober.java",
+      "sha256": "00b7e4d7a3ac5bee76732993e40a03d66f4ffd9313d97c69086add53cf702bf2",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/contextanalysis/EUCJPContextAnalysis.java",
+      "sha256": "8e44b513ac040122c8b5c6f47fba47cc9e76886ab1e3feeaa3539ed037e16072",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/contextanalysis/JapaneseContextAnalysis.java",
+      "sha256": "471fb90c762657ed14cb0cc588b8742c5db7bd4c9bc1a2c1f11aa3986c0a780a",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/contextanalysis/SJISContextAnalysis.java",
+      "sha256": "365f8da9a905430875eb3f55a9ff6320399a26405b2648b24ba96a23cf43005a",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/distributionanalysis/Big5DistributionAnalysis.java",
+      "sha256": "c72c970f2150acd1ad8aa236f26a61ecf56a190d929782a607fe43bf2e10372d",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/distributionanalysis/CharDistributionAnalysis.java",
+      "sha256": "01cc994ffd637306ff10bc5b551c57ab2cbbb69619b3a1ba606ccf38db62dd00",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/distributionanalysis/EUCJPDistributionAnalysis.java",
+      "sha256": "f9261bf29cc99e48386ea6f574154795cfd01eec105c0505146964af580536b1",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/distributionanalysis/EUCKRDistributionAnalysis.java",
+      "sha256": "6e3fe21a5223772c2cdbf6b55b762050071e77f342fd724e548c56d582c6fdc5",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/distributionanalysis/EUCTWDistributionAnalysis.java",
+      "sha256": "f70fe74274d3eb7c3818941aedec649e81b417ce55a7f28d9b23dac62ff8d3ca",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/distributionanalysis/GB2312DistributionAnalysis.java",
+      "sha256": "04ed801551968c8a8dab97bd9c71ae0e321e211c1662da7833a92546c164d307",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/distributionanalysis/JISDistributionAnalysis.java",
+      "sha256": "57e35413a521a13c84c74bcc09f532457afc72d3d4d5e51f522eab07fe8e9fe0",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/distributionanalysis/SJISDistributionAnalysis.java",
+      "sha256": "be9272d90fdfd7195e95265251e1b86f6057e424cac51e1f5132ef704f0d9f7f",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/sequence/BulgarianModel.java",
+      "sha256": "5cd13ffb5c9baefa41e936d3b630ff322f2e87619c437aed4410f00e50e5ed6f",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/sequence/CyrillicModel.java",
+      "sha256": "9dbb4eb9d3984a66e47eacf3012504c4c5a4331f5583c0d95438ab3823b7b7a4",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/sequence/GreekModel.java",
+      "sha256": "26d0627c218c46e338c5fa79b1525c4116bec31ea9bc1d0d8980dec0399e75fc",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/sequence/HebrewModel.java",
+      "sha256": "ec39eee817294a6d8b17a5a1fc487c65185dff44c7fe868e5c4b10d129e01354",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 2005 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/sequence/Ibm855Model.java",
+      "sha256": "2bd4aa23a2da5b54d2b626dcc60fb73fd48943e1edd524b33a84dde2bd866bc9",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/sequence/Ibm866Model.java",
+      "sha256": "0836d15536a9a024a623abdcc349f964ce4f56bf91e5c38cf48835ecf2fda2d2",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/sequence/Koi8rModel.java",
+      "sha256": "ee18ba36ba23325d3ad46faeddd2d20377f4913f474b828d211df8b2f5c77a00",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/sequence/Latin5BulgarianModel.java",
+      "sha256": "b680e6f8969a22176a059d5a5d38bcaa0c050d6c941bf510e1abe12bbf7ca8e6",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/sequence/Latin5Model.java",
+      "sha256": "ac10f02e997e212bf5f781657aee5a0948a0a56634fe46e64cef13e976b9230f",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/sequence/Latin7Model.java",
+      "sha256": "23878a88a1ad0fca98475fd4bd9f1fe79894e110951aabee2fc2c10d8b001345",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/sequence/MacCyrillicModel.java",
+      "sha256": "65b8f8a76092909799106fff762f489e59d8d04419c442e70c2e8e9cb9b9ad44",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/sequence/SequenceModel.java",
+      "sha256": "a19ada7f2f4b3fcecbdfe033ee5c41708fba657726c56bf0e9c59adeea3967f0",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 2001 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/sequence/Win1251BulgarianModel.java",
+      "sha256": "0c95c2a0dfd8d603ee7318e8918c913f546a7e05e351389b8352225bd26c07c4",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/sequence/Win1251Model.java",
+      "sha256": "6919775a3fae22ab4d257c2d7e9ebd26d11026d38043076277cea17147960611",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/sequence/Win1253Model.java",
+      "sha256": "0fde1de3fa528e3084398ad0666263f0f9edccba3205596477ec7df4bf193463",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/statemachine/Big5SMModel.java",
+      "sha256": "35093948cd0ccb7c38161299878f30f3eba0e6d0dfc3def14331bcac4aa817fe",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/statemachine/CodingStateMachine.java",
+      "sha256": "28238fdfdb2f5da720df2fdc0151f3228467bd781fc059cac601a2a020bb9814",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/statemachine/EUCJPSMModel.java",
+      "sha256": "831ee32b97b4be4fa0fde1dd23dbeac0716425c42c32e57e19e10b509283bcdd",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/statemachine/EUCKRSMModel.java",
+      "sha256": "52196b70dcef6040a04d41ce91f46e524e9c05795fe2fdf26b0ff8cfb6cf6894",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/statemachine/EUCTWSMModel.java",
+      "sha256": "ca78d6c605a50ba08c03441c7c13abf31f7da8a5b24e2e467b4e3ef90fbf2658",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/statemachine/GB18030SMModel.java",
+      "sha256": "71ce30a2c55e55a18fc5f3530121529ecce80053f4e210327b4833bf40366b05",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/statemachine/HZSMModel.java",
+      "sha256": "08812c954c12b8e167b1dfa4d3dcc75a80a01646eff59375e40a78555b0e23e8",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/statemachine/ISO2022CNSMModel.java",
+      "sha256": "e47987aa204ea4c4372e18f92a14609f296145a5e3b492387db93649843b5d53",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/statemachine/ISO2022JPSMModel.java",
+      "sha256": "93a5aecd4f6a325013377f56632d796bbda4bbecf3116575b11d1fa30aa5d418",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/statemachine/ISO2022KRSMModel.java",
+      "sha256": "0da68f4e8c8313ed02e899b77facfbe4f673e058419826de5f604af117b1cbf8",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/statemachine/PkgInt.java",
+      "sha256": "2ee4354cdeb9c9d5c53504440c007bf201f8e4b94071cc5e3c0bac564000baa9",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/statemachine/SJISSMModel.java",
+      "sha256": "9be32a4a92d482ae7baa1b151a9685e6c8ab93c8377cea6597087f48c0421b21",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/statemachine/SMModel.java",
+      "sha256": "7b272f227b6d2853bb618f263beaeda08756060d094d18f4fda70c80da161332",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/statemachine/UCS2BESMModel.java",
+      "sha256": "e61892d120f0c10cabeb4a64d829adaf83e6a97148a7400eb63e217e5669b09a",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    },
+    {
+      "path": "org/mozilla/universalchardet/prober/statemachine/UTF8SMModel.java",
+      "sha256": "25d42c4c97f8ae2ea699994ed2ab83f2832101ce1dea095495c3a03d8751e044",
+      "detected_copyright": [
+        "Portions created by the Initial Developer are Copyright (C) 1998 the Initial Developer. All Rights Reserved."
+      ],
+      "detected_license": [
+        "MPL-1.1",
+        "GPL-2.0-or-later",
+        "LGPL-2.1-or-later"
+      ],
+      "alternate_license_present": true,
+      "exhibit_a_present": false,
+      "relevant_header_summary": "File header states MPL 1.1 and expressly permits use under GPL 2.0 or later or LGPL 2.1 or later instead; recipient may use the file under any one of MPL, GPL, or LGPL."
+    }
+  ]
+}
