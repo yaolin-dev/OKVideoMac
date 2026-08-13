@@ -160,6 +160,19 @@ required_legal_files=(
   "$LEGAL_ROOT/Compliance/OPEN_SOURCE_P0_STATUS.md"
   "$LEGAL_ROOT/Compliance/APP_ICON_PROVENANCE.md"
   "$LEGAL_ROOT/Compliance/MPL_GPL_COMBINATION_REVIEW.md"
+  "$LEGAL_ROOT/Compliance/MPL_GPL_COMBINATION_AUDIT.md"
+  "$LEGAL_ROOT/Compliance/MPL_GPL_EVIDENCE/juniversalchardet-1.0.3-file-license-audit.json"
+  "$LEGAL_ROOT/Compliance/MPL_GPL_EVIDENCE/juniversalchardet-1.0.3-file-license-audit.md"
+  "$LEGAL_ROOT/Compliance/MPL_GPL_EVIDENCE/juniversalchardet-1.0.3-release-dex-audit.md"
+  "$LEGAL_ROOT/Compliance/MPL_GPL_EVIDENCE/juniversalchardet-1.0.3-release-dex-classes.txt"
+  "$LEGAL_ROOT/Compliance/MPL_GPL_COUNSEL_PACKAGE/README.md"
+  "$LEGAL_ROOT/Compliance/MPL_GPL_COUNSEL_PACKAGE/01_COMPONENTS.md"
+  "$LEGAL_ROOT/Compliance/MPL_GPL_COUNSEL_PACKAGE/02_LICENSE_HEADERS.md"
+  "$LEGAL_ROOT/Compliance/MPL_GPL_COUNSEL_PACKAGE/03_BUILD_AND_DEX_RELATIONSHIP.md"
+  "$LEGAL_ROOT/Compliance/MPL_GPL_COUNSEL_PACKAGE/04_MODIFICATIONS.md"
+  "$LEGAL_ROOT/Compliance/MPL_GPL_COUNSEL_PACKAGE/05_DISTRIBUTION_MODEL.md"
+  "$LEGAL_ROOT/Compliance/MPL_GPL_COUNSEL_PACKAGE/06_EXACT_HASHES.md"
+  "$LEGAL_ROOT/Compliance/MPL_GPL_COUNSEL_PACKAGE/07_QUESTIONS_FOR_COUNSEL.md"
   "$LEGAL_ROOT/Compliance/NATIVE_REPRODUCIBLE_PROVENANCE.md"
   "$LEGAL_ROOT/Compliance/LGPL_LIBRARY_REPLACEMENT.md"
   "$LEGAL_ROOT/Compliance/SBOM_RELEASE_PROCESS.md"
@@ -180,6 +193,13 @@ for required_legal_file in "${required_legal_files[@]}"; do
     exit 1
   fi
 done
+PYTHONDONTWRITEBYTECODE=1 python3 -m json.tool \
+  "$LEGAL_ROOT/Compliance/MPL_GPL_EVIDENCE/juniversalchardet-1.0.3-file-license-audit.json" \
+  >/dev/null
+if [[ "$(wc -l < "$LEGAL_ROOT/Compliance/MPL_GPL_EVIDENCE/juniversalchardet-1.0.3-release-dex-classes.txt" | tr -d ' ')" != "62" ]]; then
+  echo "The packaged juniversalchardet DEX class inventory is incomplete." >&2
+  exit 1
+fi
 PYTHONDONTWRITEBYTECODE=1 python3 \
   "$REPOSITORY_ROOT/Tools/SourceAudit/verify_sbom.py" \
   --app "$APP" \

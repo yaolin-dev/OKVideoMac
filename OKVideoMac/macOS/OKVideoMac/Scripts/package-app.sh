@@ -118,6 +118,19 @@ legal_source_files=(
   "$REPOSITORY_ROOT/Docs/OPEN_SOURCE_P0_STATUS.md"
   "$REPOSITORY_ROOT/Docs/APP_ICON_PROVENANCE.md"
   "$REPOSITORY_ROOT/Docs/MPL_GPL_COMBINATION_REVIEW.md"
+  "$REPOSITORY_ROOT/Docs/MPL_GPL_COMBINATION_AUDIT.md"
+  "$REPOSITORY_ROOT/Docs/compliance/juniversalchardet-1.0.3-file-license-audit.json"
+  "$REPOSITORY_ROOT/Docs/compliance/juniversalchardet-1.0.3-file-license-audit.md"
+  "$REPOSITORY_ROOT/Docs/compliance/juniversalchardet-1.0.3-release-dex-audit.md"
+  "$REPOSITORY_ROOT/Docs/compliance/juniversalchardet-1.0.3-release-dex-classes.txt"
+  "$REPOSITORY_ROOT/Docs/legal/MPL_GPL_COUNSEL_PACKAGE/README.md"
+  "$REPOSITORY_ROOT/Docs/legal/MPL_GPL_COUNSEL_PACKAGE/01_COMPONENTS.md"
+  "$REPOSITORY_ROOT/Docs/legal/MPL_GPL_COUNSEL_PACKAGE/02_LICENSE_HEADERS.md"
+  "$REPOSITORY_ROOT/Docs/legal/MPL_GPL_COUNSEL_PACKAGE/03_BUILD_AND_DEX_RELATIONSHIP.md"
+  "$REPOSITORY_ROOT/Docs/legal/MPL_GPL_COUNSEL_PACKAGE/04_MODIFICATIONS.md"
+  "$REPOSITORY_ROOT/Docs/legal/MPL_GPL_COUNSEL_PACKAGE/05_DISTRIBUTION_MODEL.md"
+  "$REPOSITORY_ROOT/Docs/legal/MPL_GPL_COUNSEL_PACKAGE/06_EXACT_HASHES.md"
+  "$REPOSITORY_ROOT/Docs/legal/MPL_GPL_COUNSEL_PACKAGE/07_QUESTIONS_FOR_COUNSEL.md"
   "$REPOSITORY_ROOT/Docs/NATIVE_REPRODUCIBLE_PROVENANCE.md"
   "$REPOSITORY_ROOT/Docs/LGPL_LIBRARY_REPLACEMENT.md"
   "$REPOSITORY_ROOT/Docs/SBOM_RELEASE_PROCESS.md"
@@ -225,6 +238,8 @@ rm -rf "$LEGAL_ROOT"
 mkdir -p \
   "$LEGAL_ROOT/AndroidDexBridge" \
   "$LEGAL_ROOT/Compliance" \
+  "$LEGAL_ROOT/Compliance/MPL_GPL_COUNSEL_PACKAGE" \
+  "$LEGAL_ROOT/Compliance/MPL_GPL_EVIDENCE" \
   "$LEGAL_ROOT/ModifiedSources"
 cp "$SOURCE_ROOT/LICENSE" "$LEGAL_ROOT/LICENSE"
 cp "$SOURCE_ROOT/NOTICE.md" "$LEGAL_ROOT/NOTICE.md"
@@ -253,6 +268,18 @@ cp "$REPOSITORY_ROOT/Docs/APP_ICON_PROVENANCE.md" \
   "$LEGAL_ROOT/Compliance/"
 cp "$REPOSITORY_ROOT/Docs/MPL_GPL_COMBINATION_REVIEW.md" \
   "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/Docs/MPL_GPL_COMBINATION_AUDIT.md" \
+  "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/Docs/compliance/juniversalchardet-1.0.3-file-license-audit.json" \
+  "$LEGAL_ROOT/Compliance/MPL_GPL_EVIDENCE/"
+cp "$REPOSITORY_ROOT/Docs/compliance/juniversalchardet-1.0.3-file-license-audit.md" \
+  "$LEGAL_ROOT/Compliance/MPL_GPL_EVIDENCE/"
+cp "$REPOSITORY_ROOT/Docs/compliance/juniversalchardet-1.0.3-release-dex-audit.md" \
+  "$LEGAL_ROOT/Compliance/MPL_GPL_EVIDENCE/"
+cp "$REPOSITORY_ROOT/Docs/compliance/juniversalchardet-1.0.3-release-dex-classes.txt" \
+  "$LEGAL_ROOT/Compliance/MPL_GPL_EVIDENCE/"
+cp -R "$REPOSITORY_ROOT/Docs/legal/MPL_GPL_COUNSEL_PACKAGE/." \
+  "$LEGAL_ROOT/Compliance/MPL_GPL_COUNSEL_PACKAGE/"
 cp "$REPOSITORY_ROOT/Docs/NATIVE_REPRODUCIBLE_PROVENANCE.md" \
   "$LEGAL_ROOT/Compliance/"
 cp "$REPOSITORY_ROOT/Docs/LGPL_LIBRARY_REPLACEMENT.md" \
