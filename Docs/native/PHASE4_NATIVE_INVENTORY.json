@@ -1,0 +1,913 @@
+{
+  "app_sha_scope": "individual Mach-O files; bundle xattrs excluded",
+  "audit_date": "2026-08-13",
+  "entries": [
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 25,
+      "exported_symbols_sha256": "3381502d89781b19d8fb11ff3f72a3f323096c111f046ff3ed5305aded5a0de0",
+      "install_name": "@rpath/libOKMPVBridge.dylib",
+      "linked_dylibs": [
+        "@rpath/libOKMPVBridge.dylib (compatibility version 0.0.0, current version 0.0.0)",
+        "@rpath/libmpv.dylib (compatibility version 2.0.0, current version 2.0.0)",
+        "@rpath/libavformat.61.dylib (compatibility version 61.0.0, current version 61.7.102)",
+        "@rpath/libavcodec.61.dylib (compatibility version 61.0.0, current version 61.19.101)",
+        "@rpath/libavutil.59.dylib (compatibility version 59.0.0, current version 59.39.100)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)"
+      ],
+      "path": "Contents/Frameworks/libOKMPVBridge.dylib",
+      "provenance_basis": "source and clang recipe verified with bridge smoke",
+      "provenance_level": "A",
+      "rpaths": [
+        "@loader_path"
+      ],
+      "sha256": "068d6fe69b4f51ddada58499754d177c2d7b0d51c2bf73e23491aa77a8edc350",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=9+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "project Git commit",
+      "source_archive_sha256": null,
+      "source_component": "OKMPVBridge",
+      "source_version": "project"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 276,
+      "exported_symbols_sha256": "5811a0d85048377cec3a5f4d2d98610bab9c7c3d66482b3c2731bbd251a56604",
+      "install_name": "@rpath/libOKQuickJS.dylib",
+      "linked_dylibs": [
+        "@rpath/libOKQuickJS.dylib (compatibility version 0.0.0, current version 0.0.0)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)"
+      ],
+      "path": "Contents/Frameworks/libOKQuickJS.dylib",
+      "provenance_basis": "exact source, locked recipe, rebuild and smoke verified",
+      "provenance_level": "A",
+      "rpaths": [],
+      "sha256": "e1dc2d48b5972e8e6d346e5f6e20da9d5e3d701163450c73f06a2d58a2141414",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=219+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "quickjs-2025-09-13-2.tar.xz",
+      "source_archive_sha256": "996c6b5018fc955ad4d06426d0e9cb713685a00c825aa5c0418bd53f7df8b0b4",
+      "source_component": "QuickJS + OKQuickJSBridge",
+      "source_version": "2025-09-13-2"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 50,
+      "exported_symbols_sha256": "e91222468af0a5cf569663f257419531911931fdf8e71db2cf9fea2753e829bc",
+      "install_name": "@rpath/libass.9.dylib",
+      "linked_dylibs": [
+        "@rpath/libass.9.dylib (compatibility version 14.0.0, current version 14.2.0)",
+        "@rpath/libiconv.2.dylib (compatibility version 10.0.0, current version 10.0.0)",
+        "@rpath/libfreetype.6.dylib (compatibility version 27.0.0, current version 27.6.0)",
+        "@rpath/libfribidi.0.dylib (compatibility version 5.0.0, current version 5.0.0)",
+        "@rpath/libharfbuzz.0.dylib (compatibility version 61421.0.0, current version 61421.0.0)",
+        "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/ApplicationServices (compatibility version 1.0.0, current version 61.0.0)",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 1953.255.0)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1319.0.0)",
+        "/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText (compatibility version 1.0.0, current version 1.0.0)"
+      ],
+      "path": "Contents/Frameworks/libass.9.dylib",
+      "provenance_basis": "exact source and MacPorts receipt/Portfile locked; full replay pending",
+      "provenance_level": "B",
+      "rpaths": [],
+      "sha256": "edc1b46c29e05f2a4d73c51a8e44ce9fd014d25f52fff7ad9e3c5e1af32151c7",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=55+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "libass-0.17.5.tar.gz",
+      "source_archive_sha256": "fa286fc9ee1ba3b932703a3df7b8474d01dc8abe29ec69b6fa68781dc4bf7acc",
+      "source_component": "libass",
+      "source_version": "0.17.5"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 422,
+      "exported_symbols_sha256": "6c8b96c3ebba95aff4c974b9c9d8e6a878f51beb97144a24472586f93926863d",
+      "install_name": "@rpath/libavcodec.61.dylib",
+      "linked_dylibs": [
+        "@rpath/libavcodec.61.dylib (compatibility version 61.0.0, current version 61.19.101)",
+        "@rpath/libswresample.5.dylib (compatibility version 5.0.0, current version 5.3.100)",
+        "@rpath/libavutil.59.dylib (compatibility version 59.0.0, current version 59.39.100)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1319.0.0)",
+        "@rpath/liblzma.5.dylib (compatibility version 14.0.0, current version 14.3.0)",
+        "/System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox (compatibility version 1.0.0, current version 1000.0.0)",
+        "@rpath/libz.1.dylib (compatibility version 1.0.0, current version 1.3.2)",
+        "/System/Library/Frameworks/VideoToolbox.framework/Versions/A/VideoToolbox (compatibility version 1.0.0, current version 1.0.0)",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 1953.255.0)",
+        "/System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia (compatibility version 1.0.0, current version 1.0.0)",
+        "/System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo (compatibility version 1.2.0, current version 1.5.0)",
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices (compatibility version 1.0.0, current version 1228.0.0)",
+        "@rpath/libiconv.2.dylib (compatibility version 10.0.0, current version 10.0.0)"
+      ],
+      "path": "Contents/Frameworks/libavcodec.61.dylib",
+      "provenance_basis": "exact source/configuration, clean rebuild, symbols and capability smoke verified",
+      "provenance_level": "A",
+      "rpaths": [],
+      "sha256": "c2cd9e5d9993a1ce6e2d6361d0dab55c12d64c48a5ec51e24e4abcfb8cc616a1",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=3174+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "ffmpeg-7.1.4.tar.xz",
+      "source_archive_sha256": "71f4aac3573ed9060489cb62526a6c7dda815ae10993789611acd7be9fa9fbf4",
+      "source_component": "FFmpeg",
+      "source_version": "7.1.4"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 290,
+      "exported_symbols_sha256": "b806b4ddad8f481897829bccf36c0aadbdc3e8f5e170d5493b7c919db509de8b",
+      "install_name": "@rpath/libavfilter.10.dylib",
+      "linked_dylibs": [
+        "@rpath/libavfilter.10.dylib (compatibility version 10.0.0, current version 10.5.100)",
+        "@rpath/libswscale.8.dylib (compatibility version 8.0.0, current version 8.3.100)",
+        "@rpath/libavformat.61.dylib (compatibility version 61.0.0, current version 61.7.102)",
+        "@rpath/libavcodec.61.dylib (compatibility version 61.0.0, current version 61.19.101)",
+        "@rpath/libswresample.5.dylib (compatibility version 5.0.0, current version 5.3.100)",
+        "@rpath/libavutil.59.dylib (compatibility version 59.0.0, current version 59.39.100)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1319.0.0)",
+        "/System/Library/Frameworks/VideoToolbox.framework/Versions/A/VideoToolbox (compatibility version 1.0.0, current version 1.0.0)",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 1953.255.0)",
+        "/System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia (compatibility version 1.0.0, current version 1.0.0)",
+        "/System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo (compatibility version 1.2.0, current version 1.5.0)",
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices (compatibility version 1.0.0, current version 1228.0.0)",
+        "@rpath/libbz2.1.0.dylib (compatibility version 1.0.0, current version 1.0.8)",
+        "@rpath/libz.1.dylib (compatibility version 1.0.0, current version 1.3.2)",
+        "/System/Library/Frameworks/Security.framework/Versions/A/Security (compatibility version 1.0.0, current version 60420.60.24)",
+        "@rpath/liblzma.5.dylib (compatibility version 14.0.0, current version 14.3.0)",
+        "/System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox (compatibility version 1.0.0, current version 1000.0.0)",
+        "@rpath/libiconv.2.dylib (compatibility version 10.0.0, current version 10.0.0)"
+      ],
+      "path": "Contents/Frameworks/libavfilter.10.dylib",
+      "provenance_basis": "exact source/configuration, clean rebuild, symbols and capability smoke verified",
+      "provenance_level": "A",
+      "rpaths": [],
+      "sha256": "47fc8696d302d84a085a91e21dd83414dd36afe6d150b775e36a279cc367a0b5",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=890+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "ffmpeg-7.1.4.tar.xz",
+      "source_archive_sha256": "71f4aac3573ed9060489cb62526a6c7dda815ae10993789611acd7be9fa9fbf4",
+      "source_component": "FFmpeg",
+      "source_version": "7.1.4"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 526,
+      "exported_symbols_sha256": "85dd64c5cb31abba1c6c63238732bce242eb2d6e975728098848fd70d0a04994",
+      "install_name": "@rpath/libavformat.61.dylib",
+      "linked_dylibs": [
+        "@rpath/libavformat.61.dylib (compatibility version 61.0.0, current version 61.7.102)",
+        "@rpath/libavcodec.61.dylib (compatibility version 61.0.0, current version 61.19.101)",
+        "@rpath/libswresample.5.dylib (compatibility version 5.0.0, current version 5.3.100)",
+        "@rpath/libavutil.59.dylib (compatibility version 59.0.0, current version 59.39.100)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1319.0.0)",
+        "@rpath/libbz2.1.0.dylib (compatibility version 1.0.0, current version 1.0.8)",
+        "@rpath/libz.1.dylib (compatibility version 1.0.0, current version 1.3.2)",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 1953.255.0)",
+        "/System/Library/Frameworks/Security.framework/Versions/A/Security (compatibility version 1.0.0, current version 60420.60.24)",
+        "@rpath/liblzma.5.dylib (compatibility version 14.0.0, current version 14.3.0)",
+        "/System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox (compatibility version 1.0.0, current version 1000.0.0)",
+        "/System/Library/Frameworks/VideoToolbox.framework/Versions/A/VideoToolbox (compatibility version 1.0.0, current version 1.0.0)",
+        "/System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia (compatibility version 1.0.0, current version 1.0.0)",
+        "/System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo (compatibility version 1.2.0, current version 1.5.0)",
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices (compatibility version 1.0.0, current version 1228.0.0)",
+        "@rpath/libiconv.2.dylib (compatibility version 10.0.0, current version 10.0.0)",
+        "/usr/lib/libobjc.A.dylib (compatibility version 1.0.0, current version 228.0.0)"
+      ],
+      "path": "Contents/Frameworks/libavformat.61.dylib",
+      "provenance_basis": "exact source/configuration, clean rebuild, symbols and capability smoke verified",
+      "provenance_level": "A",
+      "rpaths": [],
+      "sha256": "75f3aa0d50d57688618849ed2814ff4eaeaab3870f0d232004ff63d5b282bcf0",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=593+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "ffmpeg-7.1.4.tar.xz",
+      "source_archive_sha256": "71f4aac3573ed9060489cb62526a6c7dda815ae10993789611acd7be9fa9fbf4",
+      "source_component": "FFmpeg",
+      "source_version": "7.1.4"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 607,
+      "exported_symbols_sha256": "a234797b342914e787042e464255713960ffcc7b6d43e9e429e5aa73cc511288",
+      "install_name": "@rpath/libavutil.59.dylib",
+      "linked_dylibs": [
+        "@rpath/libavutil.59.dylib (compatibility version 59.0.0, current version 59.39.100)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1319.0.0)",
+        "/System/Library/Frameworks/VideoToolbox.framework/Versions/A/VideoToolbox (compatibility version 1.0.0, current version 1.0.0)",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 1953.255.0)",
+        "/System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia (compatibility version 1.0.0, current version 1.0.0)",
+        "/System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo (compatibility version 1.2.0, current version 1.5.0)",
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices (compatibility version 1.0.0, current version 1228.0.0)",
+        "@rpath/libiconv.2.dylib (compatibility version 10.0.0, current version 10.0.0)",
+        "/usr/lib/libobjc.A.dylib (compatibility version 1.0.0, current version 228.0.0)"
+      ],
+      "path": "Contents/Frameworks/libavutil.59.dylib",
+      "provenance_basis": "exact source/configuration, clean rebuild, symbols and capability smoke verified",
+      "provenance_level": "A",
+      "rpaths": [],
+      "sha256": "a0efd1ba3e43b135b802d6af01a1a26aa66801c6ff1ff868abbb288c82c69331",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=176+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "ffmpeg-7.1.4.tar.xz",
+      "source_archive_sha256": "71f4aac3573ed9060489cb62526a6c7dda815ae10993789611acd7be9fa9fbf4",
+      "source_component": "FFmpeg",
+      "source_version": "7.1.4"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 11,
+      "exported_symbols_sha256": "dfba68e82b55e5fc13ca1838130f4015d04091c7bf5848233853431d48284e48",
+      "install_name": "@rpath/libbrotlicommon.1.dylib",
+      "linked_dylibs": [
+        "@rpath/libbrotlicommon.1.dylib (compatibility version 1.0.0, current version 1.2.0)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.100.3)"
+      ],
+      "path": "Contents/Frameworks/libbrotlicommon.1.dylib",
+      "provenance_basis": "exact source and receipt/Portfile locked",
+      "provenance_level": "B",
+      "rpaths": [],
+      "sha256": "86a2a571055f648ded77205c89fb56982cf5c4c199466e7f75c8c2216bd5d02d",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=37+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "v1.2.0.tar.gz",
+      "source_archive_sha256": "816c96e8e8f193b40151dad7e8ff37b1221d019dbcb9c35cd3fadbfe6477dfec",
+      "source_component": "Brotli",
+      "source_version": "1.2.0"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 14,
+      "exported_symbols_sha256": "7134e192e62f46ffc3b0e3a58e43da120bfb8e927bad33017aeda48c2e25ee45",
+      "install_name": "@rpath/libbrotlidec.1.dylib",
+      "linked_dylibs": [
+        "@rpath/libbrotlidec.1.dylib (compatibility version 1.0.0, current version 1.2.0)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.100.3)",
+        "@rpath/libbrotlicommon.1.dylib (compatibility version 1.0.0, current version 1.2.0)"
+      ],
+      "path": "Contents/Frameworks/libbrotlidec.1.dylib",
+      "provenance_basis": "exact source and receipt/Portfile locked",
+      "provenance_level": "B",
+      "rpaths": [],
+      "sha256": "f000b6403215d7f37664c4eeb3c5085d64034d7557118c7ed61bdc54040b3e96",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=17+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "v1.2.0.tar.gz",
+      "source_archive_sha256": "816c96e8e8f193b40151dad7e8ff37b1221d019dbcb9c35cd3fadbfe6477dfec",
+      "source_component": "Brotli",
+      "source_version": "1.2.0"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 35,
+      "exported_symbols_sha256": "a563da5afa95a77f68e020ebffb30804f2b02bc19ecff05db294c2574b18ee7c",
+      "install_name": "@rpath/libbz2.1.0.dylib",
+      "linked_dylibs": [
+        "@rpath/libbz2.1.0.dylib (compatibility version 1.0.0, current version 1.0.8)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.0.0)"
+      ],
+      "path": "Contents/Frameworks/libbz2.1.0.dylib",
+      "provenance_basis": "exact source and receipt/Portfile locked",
+      "provenance_level": "B",
+      "rpaths": [],
+      "sha256": "b57f67715c0d0a4b2f544b0bf36d9c41e6a6f497a368bee1c9d01c8ceb5e3bff",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=27+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "bzip2-1.0.8.tar.gz",
+      "source_archive_sha256": "ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269",
+      "source_component": "bzip2",
+      "source_version": "1.0.8"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 2106,
+      "exported_symbols_sha256": "53742cada6c37fb5cbd103ca229970f0ce36d860c25ea425b39aff81dc00430e",
+      "install_name": "@rpath/libc++.1.0.dylib",
+      "linked_dylibs": [
+        "@rpath/libc++.1.0.dylib (compatibility version 1.0.0, current version 1.0.0)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.0.0)",
+        "@rpath/libc++abi.1.dylib (compatibility version 1.0.0, current version 1.0.0)"
+      ],
+      "path": "Contents/Frameworks/libc++.1.0.dylib",
+      "provenance_basis": "receipt retained; historical compiler source/configuration incomplete",
+      "provenance_level": "C",
+      "rpaths": [],
+      "sha256": "9b883e2304d73fb4c2ae9ee8a4ff934b7f5f9c676719b461122b97515e72347c",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=173+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "historical clang-11 copied output",
+      "source_archive_sha256": null,
+      "source_component": "MacPorts libc++",
+      "source_version": "11.1.0"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 366,
+      "exported_symbols_sha256": "2f2ae2fa5813050905d202ad62f51e2ec33a0d40d0cfd21f74920e5c30015e4e",
+      "install_name": "@rpath/libc++abi.1.dylib",
+      "linked_dylibs": [
+        "@rpath/libc++abi.1.dylib (compatibility version 1.0.0, current version 1.0.0)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.0.0)"
+      ],
+      "path": "Contents/Frameworks/libc++abi.1.dylib",
+      "provenance_basis": "receipt retained; historical compiler source/configuration incomplete",
+      "provenance_level": "C",
+      "rpaths": [],
+      "sha256": "9f7d551daa6b311e6528fb0ca6d466e9384cad8da983fbd1313ec472bfea51bb",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=58+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "historical clang-11 copied output",
+      "source_archive_sha256": null,
+      "source_component": "MacPorts libc++abi",
+      "source_version": "11.1.0"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 220,
+      "exported_symbols_sha256": "2d71dc2f76cb4e7b557e755feb602b976372aae0e616cfc0794f6188ef0bc37f",
+      "install_name": "@rpath/libfreetype.6.dylib",
+      "linked_dylibs": [
+        "@rpath/libfreetype.6.dylib (compatibility version 27.0.0, current version 27.6.0)",
+        "@rpath/libz.1.dylib (compatibility version 1.0.0, current version 1.3.2)",
+        "@rpath/libbz2.1.0.dylib (compatibility version 1.0.0, current version 1.0.8)",
+        "@rpath/libpng16.16.dylib (compatibility version 73.0.0, current version 73.0.0)",
+        "@rpath/libbrotlidec.1.dylib (compatibility version 1.0.0, current version 1.2.0)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.100.3)"
+      ],
+      "path": "Contents/Frameworks/libfreetype.6.dylib",
+      "provenance_basis": "exact source and receipt/Portfile locked",
+      "provenance_level": "B",
+      "rpaths": [],
+      "sha256": "0aeb6b32083af5905fa455c1bb4dcfdbb4e875474cdafdcc96149a01f6f03150",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=164+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "freetype-2.14.3.tar.xz",
+      "source_archive_sha256": "36bc4f1cc413335368ee656c42afca65c5a3987e8768cc28cf11ba775e785a5f",
+      "source_component": "FreeType",
+      "source_version": "2.14.3"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 49,
+      "exported_symbols_sha256": "64c4e810afa7e9c14c571f5c528fff4e95a55028dce32ac02bd5425053a43fc8",
+      "install_name": "@rpath/libfribidi.0.dylib",
+      "linked_dylibs": [
+        "@rpath/libfribidi.0.dylib (compatibility version 5.0.0, current version 5.0.0)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.100.3)"
+      ],
+      "path": "Contents/Frameworks/libfribidi.0.dylib",
+      "provenance_basis": "exact source and receipt/Portfile locked",
+      "provenance_level": "B",
+      "rpaths": [],
+      "sha256": "2c2ceea3c6f13a147a90995c42d9c8cc92b6ea5a42aa7377771e8633d2981a78",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=38+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "fribidi-1.0.16.tar.xz",
+      "source_archive_sha256": "1b1cde5b235d40479e91be2f0e88a309e3214c8ab470ec8a2744d82a5a9ea05c",
+      "source_component": "FriBidi",
+      "source_version": "1.0.16"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 552,
+      "exported_symbols_sha256": "d42d671b5bb6df17bab9790d4de9ccf0e3846fbbd053cebc3989ebacd0674ca6",
+      "install_name": "@rpath/libharfbuzz.0.dylib",
+      "linked_dylibs": [
+        "@rpath/libharfbuzz.0.dylib (compatibility version 61421.0.0, current version 61421.0.0)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1319.0.0)",
+        "@rpath/libfreetype.6.dylib (compatibility version 27.0.0, current version 27.6.0)",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 1953.255.0)",
+        "/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics (compatibility version 64.0.0, current version 1690.3.3)",
+        "/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText (compatibility version 1.0.0, current version 1.0.0)"
+      ],
+      "path": "Contents/Frameworks/libharfbuzz.0.dylib",
+      "provenance_basis": "exact source and MacPorts receipt/Portfile locked; full replay pending",
+      "provenance_level": "B",
+      "rpaths": [],
+      "sha256": "9bf8008c39c3cb90b4aeb27862dbd9ed443ac504121084066c2a5f025611fefc",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=337+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "harfbuzz-14.2.1.tar.xz",
+      "source_archive_sha256": "a54a5d8e9380a41fbb762ce367bcbf7704792dfca0d93f1bbca86c5a57902e0e",
+      "source_component": "HarfBuzz",
+      "source_version": "14.2.1"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 10,
+      "exported_symbols_sha256": "066b2b92678928f686234ac707a041488179fcbebd44c30bbb6e4a88c0946cba",
+      "install_name": "@rpath/libiconv.2.dylib",
+      "linked_dylibs": [
+        "@rpath/libiconv.2.dylib (compatibility version 10.0.0, current version 10.0.0)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.100.3)"
+      ],
+      "path": "Contents/Frameworks/libiconv.2.dylib",
+      "provenance_basis": "exact source and receipt/Portfile locked",
+      "provenance_level": "B",
+      "rpaths": [],
+      "sha256": "de69743a272ffcf7cf76b9b59cfbac1e87020f89219c5ea07771deb6d1cd905b",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=285+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "libiconv-1.18.tar.gz",
+      "source_archive_sha256": "3b08f5f4f9b4eb82f151a7040bfd6fe6c6fb922efe4b1659c66ea933276965e8",
+      "source_component": "GNU libiconv",
+      "source_version": "1.18"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 194,
+      "exported_symbols_sha256": "f594f3155f56dd362294fe251fd61b1fe74110653c33e13e7ca1862b5d03328c",
+      "install_name": "@rpath/libjpeg.8.dylib",
+      "linked_dylibs": [
+        "@rpath/libjpeg.8.dylib (compatibility version 8.0.0, current version 8.3.2)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.100.3)"
+      ],
+      "path": "Contents/Frameworks/libjpeg.8.dylib",
+      "provenance_basis": "exact source and receipt/Portfile locked",
+      "provenance_level": "B",
+      "rpaths": [],
+      "sha256": "374bd2ae25393b6d165fd04f98b48a1930b37fdb1b2c8cefeb12b42141ecd64c",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=105+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "libjpeg-turbo-3.2.0.tar.gz",
+      "source_archive_sha256": "6f30092cef9fb839779646608f4ee14ae3cbac989c47fa05e841b0841f09878e",
+      "source_component": "libjpeg-turbo",
+      "source_version": "3.2.0"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 382,
+      "exported_symbols_sha256": "55445034904cdc8b960b9855e4a67cb43ee9c11f37ebafd5f81ae8cb17eb72fd",
+      "install_name": "@rpath/liblcms2.2.dylib",
+      "linked_dylibs": [
+        "@rpath/liblcms2.2.dylib (compatibility version 3.0.0, current version 3.19.0)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.100.3)"
+      ],
+      "path": "Contents/Frameworks/liblcms2.2.dylib",
+      "provenance_basis": "exact source and receipt/Portfile locked",
+      "provenance_level": "B",
+      "rpaths": [],
+      "sha256": "7ca8711d2681113e5e442729b478ce2191014d6b7efcaa1b02d234b1d6acccd7",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=87+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "lcms2-2.19.1.tar.gz",
+      "source_archive_sha256": "bfc54f7bab59fbc921012014a8032e4cba4abd46db47d46b76416a8c0b2815c8",
+      "source_component": "Little CMS 2",
+      "source_version": "2.19.1"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 114,
+      "exported_symbols_sha256": "c21571f9a1243a66eeb0505b0460f6b17abc5d96d622b791b11aeee785ea7bf7",
+      "install_name": "@rpath/liblzma.5.dylib",
+      "linked_dylibs": [
+        "@rpath/liblzma.5.dylib (compatibility version 14.0.0, current version 14.3.0)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.100.3)"
+      ],
+      "path": "Contents/Frameworks/liblzma.5.dylib",
+      "provenance_basis": "exact source and receipt/Portfile locked",
+      "provenance_level": "B",
+      "rpaths": [],
+      "sha256": "399ead9f2d64ec9ad05d852c8a95d85608d730073684d6952f758d107074a773",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=41+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "xz-5.8.3.tar.bz2",
+      "source_archive_sha256": "33bf69c0d6c698e83a68f77e6c1f465778e418ca0b3d59860d3ab446f4ac99a6",
+      "source_component": "XZ/liblzma",
+      "source_version": "5.8.3"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 54,
+      "exported_symbols_sha256": "468b8c8399ad97b40a36b1bf5d0cb96094c863557ea3d7bcac46f79c39f70008",
+      "install_name": "@rpath/libmpv.dylib",
+      "linked_dylibs": [
+        "@rpath/libmpv.dylib (compatibility version 2.0.0, current version 2.0.0)",
+        "@rpath/libass.9.dylib (compatibility version 14.0.0, current version 14.2.0)",
+        "@rpath/libavcodec.61.dylib (compatibility version 61.0.0, current version 61.19.101)",
+        "@rpath/libavfilter.10.dylib (compatibility version 10.0.0, current version 10.5.100)",
+        "@rpath/libavformat.61.dylib (compatibility version 61.0.0, current version 61.7.102)",
+        "@rpath/libavutil.59.dylib (compatibility version 59.0.0, current version 59.39.100)",
+        "@rpath/libplacebo.360.dylib (compatibility version 360.0.0, current version 360.0.0)",
+        "@rpath/libswresample.5.dylib (compatibility version 5.0.0, current version 5.3.100)",
+        "@rpath/libswscale.8.dylib (compatibility version 8.0.0, current version 8.3.100)",
+        "@rpath/liblcms2.2.dylib (compatibility version 3.0.0, current version 3.19.0)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1319.0.0)",
+        "@rpath/libz.1.dylib (compatibility version 1.0.0, current version 1.3.2)",
+        "/System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia (compatibility version 1.0.0, current version 1.0.0)",
+        "/System/Library/Frameworks/AVFoundation.framework/Versions/A/AVFoundation (compatibility version 1.0.0, current version 2.0.0)",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 1953.255.0)",
+        "/System/Library/Frameworks/CoreAudio.framework/Versions/A/CoreAudio (compatibility version 1.0.0, current version 1.0.0)",
+        "/System/Library/Frameworks/AudioUnit.framework/Versions/A/AudioUnit (compatibility version 1.0.0, current version 1.0.0)",
+        "/System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox (compatibility version 1.0.0, current version 1000.0.0)",
+        "@rpath/libjpeg.8.dylib (compatibility version 8.0.0, current version 8.3.2)",
+        "/usr/lib/libobjc.A.dylib (compatibility version 1.0.0, current version 228.0.0)"
+      ],
+      "path": "Contents/Frameworks/libmpv.dylib",
+      "provenance_basis": "exact source/patch, Meson recipe, rebuild and ABI smoke verified",
+      "provenance_level": "A",
+      "rpaths": [],
+      "sha256": "6f2f7f53ed3ec1309ae6cef869dd8a83bb4bfff09ad9d61a87f6e2f5778b0cd4",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=451+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "mpv-v0.41.0.tar.gz + project patch",
+      "source_archive_sha256": "ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209",
+      "source_component": "mpv",
+      "source_version": "0.41.0"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 502,
+      "exported_symbols_sha256": "d98a8facb84db85a53cf5a940b598a270ac41262d63ab7257362f5d18951d258",
+      "install_name": "@rpath/libplacebo.360.dylib",
+      "linked_dylibs": [
+        "@rpath/libplacebo.360.dylib (compatibility version 360.0.0, current version 360.0.0)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.100.3)",
+        "@rpath/liblcms2.2.dylib (compatibility version 3.0.0, current version 3.18.0)",
+        "@rpath/libc++.1.0.dylib (compatibility version 1.0.0, current version 1.0.0)"
+      ],
+      "path": "Contents/Frameworks/libplacebo.360.dylib",
+      "provenance_basis": "exact source and receipt/Portfile locked",
+      "provenance_level": "B",
+      "rpaths": [],
+      "sha256": "c0d56e040b62f565c397e833d4cdf63ed3ee0204e1a3795e65df2ece501bd95d",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=201+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "v7.360.1.tar.gz",
+      "source_archive_sha256": "d05fdf90bea2f629eaa2d115e909fd356388ac639e54f77b87a018a6d76224bd",
+      "source_component": "libplacebo",
+      "source_version": "7.360.1"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 256,
+      "exported_symbols_sha256": "af58413acc5596042b94686cc0ce90ad0d2f66b102209427624581187a10695b",
+      "install_name": "@rpath/libpng16.16.dylib",
+      "linked_dylibs": [
+        "@rpath/libpng16.16.dylib (compatibility version 75.0.0, current version 75.0.0)",
+        "@rpath/libz.1.dylib (compatibility version 1.0.0, current version 1.3.2)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.100.3)"
+      ],
+      "path": "Contents/Frameworks/libpng16.16.dylib",
+      "provenance_basis": "exact source and receipt/Portfile locked",
+      "provenance_level": "B",
+      "rpaths": [],
+      "sha256": "7dbba253a553534b35d38ff9120b7d2703ac2f4fbfa216f4cbc199e461c1b35a",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=47+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "libpng-1.6.58.tar.xz",
+      "source_archive_sha256": "28eb403f51f0f7405249132cecfe82ea5c0ef97f1b32c5a65828814ae0d34775",
+      "source_component": "libpng",
+      "source_version": "1.6.58"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 351,
+      "exported_symbols_sha256": "4566171165640a89cb94e9228cffc9743a9508f1678a706585a64d2f3f295705",
+      "install_name": "@rpath/libsqlite3.dylib",
+      "linked_dylibs": [
+        "@rpath/libsqlite3.dylib (compatibility version 9.0.0, current version 9.6.0)",
+        "/usr/lib/libz.1.dylib (compatibility version 1.0.0, current version 1.2.11)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.100.3)"
+      ],
+      "path": "Contents/Frameworks/libsqlite3.dylib",
+      "provenance_basis": "exact source and receipt/Portfile locked",
+      "provenance_level": "B",
+      "rpaths": [],
+      "sha256": "0cc34425224eb33e959bd2ff2b6d67e19f3e4208c5b79c4de27115dff2dd272c",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=308+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "sqlite-autoconf-3530400.tar.gz",
+      "source_archive_sha256": "0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c",
+      "source_component": "SQLite",
+      "source_version": "3.53.4"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 23,
+      "exported_symbols_sha256": "6ada31ae00764a9d25c0059f644cf6e4e03da8e007ae2fbe7d17d0b574f6cdee",
+      "install_name": "@rpath/libswresample.5.dylib",
+      "linked_dylibs": [
+        "@rpath/libswresample.5.dylib (compatibility version 5.0.0, current version 5.3.100)",
+        "@rpath/libavutil.59.dylib (compatibility version 59.0.0, current version 59.39.100)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1319.0.0)",
+        "/System/Library/Frameworks/VideoToolbox.framework/Versions/A/VideoToolbox (compatibility version 1.0.0, current version 1.0.0)",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 1953.255.0)",
+        "/System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia (compatibility version 1.0.0, current version 1.0.0)",
+        "/System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo (compatibility version 1.2.0, current version 1.5.0)",
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices (compatibility version 1.0.0, current version 1228.0.0)",
+        "@rpath/libiconv.2.dylib (compatibility version 10.0.0, current version 10.0.0)"
+      ],
+      "path": "Contents/Frameworks/libswresample.5.dylib",
+      "provenance_basis": "exact source/configuration, clean rebuild, symbols and capability smoke verified",
+      "provenance_level": "A",
+      "rpaths": [],
+      "sha256": "0fe4c643bf83444da3f6024cbfa057c6643a968b766dddf726459ac0ce907736",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=26+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "ffmpeg-7.1.4.tar.xz",
+      "source_archive_sha256": "71f4aac3573ed9060489cb62526a6c7dda815ae10993789611acd7be9fa9fbf4",
+      "source_component": "FFmpeg",
+      "source_version": "7.1.4"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 31,
+      "exported_symbols_sha256": "8c0191138bb45ae9769466f535a8b878d93965bd1d0006724f7b03fcd434e6c9",
+      "install_name": "@rpath/libswscale.8.dylib",
+      "linked_dylibs": [
+        "@rpath/libswscale.8.dylib (compatibility version 8.0.0, current version 8.3.100)",
+        "@rpath/libavutil.59.dylib (compatibility version 59.0.0, current version 59.39.100)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1319.0.0)",
+        "/System/Library/Frameworks/VideoToolbox.framework/Versions/A/VideoToolbox (compatibility version 1.0.0, current version 1.0.0)",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 1953.255.0)",
+        "/System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia (compatibility version 1.0.0, current version 1.0.0)",
+        "/System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo (compatibility version 1.2.0, current version 1.5.0)",
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices (compatibility version 1.0.0, current version 1228.0.0)",
+        "@rpath/libiconv.2.dylib (compatibility version 10.0.0, current version 10.0.0)"
+      ],
+      "path": "Contents/Frameworks/libswscale.8.dylib",
+      "provenance_basis": "exact source/configuration, clean rebuild, symbols and capability smoke verified",
+      "provenance_level": "A",
+      "rpaths": [],
+      "sha256": "3977f92265d0262f52a4181e673018a96b953f3231bc63facdb1fdbad50af686",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=166+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "ffmpeg-7.1.4.tar.xz",
+      "source_archive_sha256": "71f4aac3573ed9060489cb62526a6c7dda815ae10993789611acd7be9fa9fbf4",
+      "source_component": "FFmpeg",
+      "source_version": "7.1.4"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 98,
+      "exported_symbols_sha256": "54f652a4a9169eaade00c66c496843c3ae6bd942637b6d15e60a0501db5ab808",
+      "install_name": "@rpath/libz.1.dylib",
+      "linked_dylibs": [
+        "@rpath/libz.1.dylib (compatibility version 1.0.0, current version 1.3.2)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1311.100.3)"
+      ],
+      "path": "Contents/Frameworks/libz.1.dylib",
+      "provenance_basis": "receipt and expected hash retained; exact historical archive unavailable",
+      "provenance_level": "C",
+      "rpaths": [],
+      "sha256": "9b5d38572e4d584ec4354b8721f77bcff30ac6f70ad5385e226d8cbb0d13a5f7",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=22+2 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "historical receipt; original archive unavailable",
+      "source_archive_sha256": "d7a0654783a4da529d1bb793b7ad9c3318020af77667bcae35f95d0e42a792f3",
+      "source_component": "zlib",
+      "source_version": "1.3.2"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 2481,
+      "exported_symbols_sha256": "67420b4355337a67439f3abf0443c1c5481e9ec2654d3cac93ede9bf3b9f89b8",
+      "install_name": null,
+      "linked_dylibs": [
+        "/usr/lib/libz.1.dylib (compatibility version 1.0.0, current version 1.2.12)",
+        "@rpath/libsqlite3.dylib (compatibility version 9.0.0, current version 9.6.0)",
+        "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation (compatibility version 300.0.0, current version 3208.0.0)",
+        "/usr/lib/libobjc.A.dylib (compatibility version 1.0.0, current version 228.0.0)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)",
+        "/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit (compatibility version 45.0.0, current version 2575.30.19)",
+        "/System/Library/Frameworks/Combine.framework/Versions/A/Combine (compatibility version 1.0.0, current version 338.0.0)",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 3208.0.0)",
+        "/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics (compatibility version 64.0.0, current version 1889.2.7)",
+        "/System/Library/Frameworks/CryptoKit.framework/Versions/A/CryptoKit (compatibility version 1.0.0, current version 1.0.0)",
+        "/System/Library/Frameworks/SwiftUI.framework/Versions/A/SwiftUI (compatibility version 1.0.0, current version 6.2.16)",
+        "/System/Library/Frameworks/WebKit.framework/Versions/A/WebKit (compatibility version 1.0.0, current version 620.1.16)",
+        "/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 1800.105.0)",
+        "/usr/lib/swift/libswiftCore.dylib (compatibility version 1.0.0, current version 0.0.0)",
+        "/usr/lib/swift/libswiftCoreFoundation.dylib (compatibility version 1.0.0, current version 120.100.0, weak)",
+        "/usr/lib/swift/libswiftCoreImage.dylib (compatibility version 1.0.0, current version 2.0.0, weak)",
+        "/usr/lib/swift/libswiftDarwin.dylib (compatibility version 1.0.0, current version 234.60.42, weak)",
+        "/usr/lib/swift/libswiftDispatch.dylib (compatibility version 1.0.0, current version 49.0.0)",
+        "/usr/lib/swift/libswiftIOKit.dylib (compatibility version 1.0.0, current version 1.0.0, weak)",
+        "/usr/lib/swift/libswiftMetal.dylib (compatibility version 1.0.0, current version 367.6.0, weak)",
+        "/usr/lib/swift/libswiftOSLog.dylib (compatibility version 1.0.0, current version 8.0.0, weak)",
+        "/usr/lib/swift/libswiftObjectiveC.dylib (compatibility version 1.0.0, current version 10.0.0, weak)",
+        "/usr/lib/swift/libswiftQuartzCore.dylib (compatibility version 1.0.0, current version 4.0.0, weak)",
+        "/usr/lib/swift/libswiftSpatial.dylib (compatibility version 1.0.0, current version 1.0.0, weak)",
+        "/usr/lib/swift/libswiftUniformTypeIdentifiers.dylib (compatibility version 1.0.0, current version 827.5.1)",
+        "/usr/lib/swift/libswiftWebKit.dylib (compatibility version 1.0.0, current version 0.0.0, weak)",
+        "/usr/lib/swift/libswiftXPC.dylib (compatibility version 1.0.0, current version 62.0.1, weak)",
+        "/usr/lib/swift/libswift_Concurrency.dylib (compatibility version 1.0.0, current version 0.0.0)",
+        "/usr/lib/swift/libswiftos.dylib (compatibility version 1.0.0, current version 1062.0.2)",
+        "/usr/lib/swift/libswiftsimd.dylib (compatibility version 1.0.0, current version 21.0.0, weak)",
+        "/usr/lib/swift/libswiftFoundation.dylib (compatibility version 1.0.0, current version 1.0.0)",
+        "/usr/lib/swift/libswiftCoreGraphics.dylib (compatibility version 1.0.0, current version 120.100.0)"
+      ],
+      "path": "Contents/MacOS/OKVideoMac",
+      "provenance_basis": "Xcode Release recipe verified",
+      "provenance_level": "A",
+      "rpaths": [
+        "@executable_path/../Frameworks"
+      ],
+      "sha256": "b1fba4c23d047da48c8b8ae7da804a11e98ba77738dbe35525502052b5a07aec",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=3601+7 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "project Git commit",
+      "source_archive_sha256": null,
+      "source_component": "OKVideoMac",
+      "source_version": "0.3.41 (62)"
+    },
+    {
+      "architecture": [
+        "arm64"
+      ],
+      "exported_symbol_count": 31469,
+      "exported_symbols_sha256": "d0140459dea86ce12253180eb3cff095f5bdc1f939f3921176ff5e7c8d9a3b28",
+      "install_name": null,
+      "linked_dylibs": [
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 3038.1.255)",
+        "/System/Library/Frameworks/Security.framework/Versions/A/Security (compatibility version 1.0.0, current version 61439.1.1)",
+        "/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 1800.101.0)",
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)"
+      ],
+      "path": "Contents/Resources/NodeRuntime/node",
+      "provenance_basis": "official binary and source locked; local source rebuild not required or replayed",
+      "provenance_level": "B",
+      "rpaths": [],
+      "sha256": "60df37880c72f74c789d0857c2729f42256e7ae944c9a5055162da97e54adc3e",
+      "signature": {
+        "authority": null,
+        "flags": "0x10002(adhoc,runtime) hashes=27353+7 location=embedded",
+        "team_id": "not set",
+        "valid": true
+      },
+      "source_archive": "node-v22.23.0.tar.gz",
+      "source_archive_sha256": "61fd42cd1c3ff04a849f5ad5d08c58b111831944b5b94bc90fc623eab41418a2",
+      "source_component": "Node.js",
+      "source_version": "22.23.0"
+    }
+  ],
+  "macho_count": 28,
+  "provenance_level_counts": {
+    "A": 10,
+    "B": 15,
+    "C": 3,
+    "D": 0
+  },
+  "release": "OKVideoMac 0.3.41 (62)",
+  "schema": 1
+}
