@@ -16,7 +16,7 @@ recorded.
 | --- | --- |
 | Phase 4 starting commit | `70120436d477e205fafcebc17974049e5c375d09` |
 | Phase 4 branch | `codex/engineering-readiness-phase4` |
-| Phase 4 worktree | `/private/tmp/okvideomac-engineering-readiness-phase4` |
+| Phase 4 worktree | isolated temporary worktree (local path intentionally omitted from release evidence) |
 | Phase 3 branch / commit | `codex/mpl-gpl-p0-audit` / `70120436d477e205fafcebc17974049e5c375d09` |
 | Primary branch / commit | `codex/mpv-teardown-ab-experiment` / `557c3c90051b9867e84c4de78bddce1bd62be93c` |
 | Phase 2 branch / commit | `codex/open-source-compliance-phase2` / `1552e51df9bc42aa7832e0ed3816e4dc96d7b88f` |
@@ -46,4 +46,3 @@ OKVideoMac is a non-commercial personal open-source project. License
 obligations are still treated as applicable to distribution. Independent legal
 review is not used as a mandatory engineering release gate; known license
 interpretation issues are documented transparently.
-
