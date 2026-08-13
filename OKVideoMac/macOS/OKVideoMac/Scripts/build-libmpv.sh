@@ -124,6 +124,9 @@ MACOSX_DEPLOYMENT_TARGET=12.0 clang \
   "$BRIDGE_SOURCE" \
   -L"$(dirname "$LIBMPV_PATH")" \
   -lmpv \
+  -lavformat \
+  -lavcodec \
+  -lavutil \
   -Wl,-install_name,@rpath/libOKMPVBridge.dylib \
   -Wl,-rpath,@loader_path \
   -o "$BRIDGE_OUTPUT"

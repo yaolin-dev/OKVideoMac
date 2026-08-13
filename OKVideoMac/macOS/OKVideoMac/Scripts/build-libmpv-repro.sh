@@ -102,8 +102,10 @@ SMOKE="$PREFIX/bin/mpv-bridge-smoke"
 clang -arch arm64 -std=c11 -Wall -Wextra -Werror -dynamiclib \
   -mmacosx-version-min=12.0 \
   -I"$PREFIX/include" \
+  -I"$FFMPEG_PREFIX/include" \
   "$PROJECT_DIR/Native/MPVBridge/OKMPVBridge.c" \
   -L"$(dirname "$LIBMPV")" -lmpv \
+  -L"$FFMPEG_PREFIX/lib" -lavformat -lavcodec -lavutil \
   -Wl,-install_name,@rpath/libOKMPVBridge.dylib \
   -Wl,-rpath,"$(dirname "$LIBMPV")" \
   -o "$BRIDGE"

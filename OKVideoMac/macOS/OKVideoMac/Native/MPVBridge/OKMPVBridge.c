@@ -4,7 +4,12 @@
 #include <mpv/render.h>
 #include <mpv/render_gl.h>
 
+#include <libavcodec/packet.h>
+#include <libavformat/avformat.h>
+#include <libavutil/dovi_meta.h>
+
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -17,6 +22,139 @@ struct OKMPVClient {
 struct OKMPVRenderContext {
     mpv_render_context *context;
 };
+
+static char *join_http_headers(
+    int header_count,
+    const char *const *headers
+) {
+    if (header_count <= 0) {
+        return NULL;
+    }
+    size_t length = 1;
+    for (int index = 0; index < header_count; index++) {
+        if (headers[index] == NULL) {
+            return NULL;
+        }
+        length += strlen(headers[index]) + 2;
+    }
+    char *joined = calloc(length, 1);
+    if (joined == NULL) {
+        return NULL;
+    }
+    for (int index = 0; index < header_count; index++) {
+        strcat(joined, headers[index]);
+        strcat(joined, "\r\n");
+    }
+    return joined;
+}
+
+int okmpv_probe_media_info(
+    const char *url,
+    int header_count,
+    const char *const *headers,
+    int *profile,
+    int *level,
+    double *duration_seconds,
+    char *container_name,
+    int container_name_capacity
+) {
+    if (url == NULL || profile == NULL || level == NULL || header_count < 0 ||
+        (header_count > 0 && headers == NULL) || container_name_capacity < 0 ||
+        (container_name_capacity > 0 && container_name == NULL)) {
+        return AVERROR(EINVAL);
+    }
+    *profile = -1;
+    *level = -1;
+    if (duration_seconds != NULL) {
+        *duration_seconds = 0;
+    }
+    if (container_name_capacity > 0) {
+        container_name[0] = '\0';
+    }
+
+    AVFormatContext *format_context = NULL;
+    AVDictionary *options = NULL;
+    char *joined_headers = join_http_headers(header_count, headers);
+    if (header_count > 0 && joined_headers == NULL) {
+        return AVERROR(ENOMEM);
+    }
+    if (joined_headers != NULL) {
+        av_dict_set(&options, "headers", joined_headers, 0);
+    }
+    // This probe runs before playback begins. Opening the container header is
+    // sufficient for both the demuxer name and Dolby Vision configuration.
+    // Do not ask FFmpeg to scan packets: cloud-drive proxy URLs can represent
+    // multi-gigabyte files and a deep stream-info scan may issue many Range
+    // requests before the player is even created.
+    av_dict_set(&options, "rw_timeout", "8000000", 0);
+
+    int result = avformat_open_input(&format_context, url, NULL, &options);
+    av_dict_free(&options);
+    free(joined_headers);
+    if (result < 0) {
+        return result;
+    }
+    if (container_name_capacity > 0 && format_context->iformat != NULL) {
+        snprintf(
+            container_name,
+            (size_t)container_name_capacity,
+            "%s",
+            format_context->iformat->name != NULL
+                ? format_context->iformat->name
+                : ""
+        );
+    }
+    if (duration_seconds != NULL &&
+        format_context->duration != AV_NOPTS_VALUE &&
+        format_context->duration > 0) {
+        *duration_seconds =
+            (double)format_context->duration / (double)AV_TIME_BASE;
+    }
+
+    int found = 0;
+    for (unsigned int index = 0; index < format_context->nb_streams; index++) {
+        const AVCodecParameters *parameters =
+            format_context->streams[index]->codecpar;
+        if (parameters == NULL || parameters->codec_type != AVMEDIA_TYPE_VIDEO) {
+            continue;
+        }
+        const AVPacketSideData *side_data = av_packet_side_data_get(
+            parameters->coded_side_data,
+            parameters->nb_coded_side_data,
+            AV_PKT_DATA_DOVI_CONF
+        );
+        if (side_data != NULL &&
+            side_data->size >= sizeof(AVDOVIDecoderConfigurationRecord)) {
+            const AVDOVIDecoderConfigurationRecord *configuration =
+                (const AVDOVIDecoderConfigurationRecord *)side_data->data;
+            *profile = configuration->dv_profile;
+            *level = configuration->dv_level;
+            found = 1;
+            break;
+        }
+    }
+    avformat_close_input(&format_context);
+    return found;
+}
+
+int okmpv_probe_dolby_vision(
+    const char *url,
+    int header_count,
+    const char *const *headers,
+    int *profile,
+    int *level
+) {
+    return okmpv_probe_media_info(
+        url,
+        header_count,
+        headers,
+        profile,
+        level,
+        NULL,
+        NULL,
+        0
+    );
+}
 
 static void copy_string(char *destination, size_t size, const char *source) {
     if (size == 0) {

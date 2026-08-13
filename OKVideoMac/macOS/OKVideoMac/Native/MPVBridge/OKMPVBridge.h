@@ -91,6 +91,31 @@ const char *okmpv_error_string(int error);
 const char *okmpv_client_api_version_string(void);
 int okmpv_event_size(void);
 
+/*
+ * Inspect the first video stream with FFmpeg without decoding frames.
+ * Returns 1 for Dolby Vision, 0 when no Dolby Vision configuration is
+ * present, and a negative AVERROR code when the input cannot be probed.
+ */
+int okmpv_probe_dolby_vision(
+    const char *url,
+    int header_count,
+    const char *const *headers,
+    int *profile,
+    int *level
+);
+
+/* Probe Dolby Vision metadata together with the actual FFmpeg container. */
+int okmpv_probe_media_info(
+    const char *url,
+    int header_count,
+    const char *const *headers,
+    int *profile,
+    int *level,
+    double *duration_seconds,
+    char *container_name,
+    int container_name_capacity
+);
+
 int okmpv_render_create(
     OKMPVClient *client,
     OKMPVGetProcAddress get_proc_address,
