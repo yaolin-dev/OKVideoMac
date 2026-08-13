@@ -498,4 +498,3 @@ Primary external sources used for unstable/current candidate facts:
 
 Exact binary/source/POM/license facts were additionally verified from the
 downloaded official Maven/Unicode artifacts and are identified by hash above.
-

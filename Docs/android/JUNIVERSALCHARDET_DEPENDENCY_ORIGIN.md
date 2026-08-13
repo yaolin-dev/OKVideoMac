@@ -105,4 +105,3 @@ subtitle call was removed.
 
 The repository call census supports “unused by current visible source.” It
 does not support “unused by arbitrary external or protected Spider code.”
-

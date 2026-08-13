@@ -91,4 +91,3 @@ This supports a no-detector application architecture for tracked code. It does
 not prove that protected/external Spider byte-processing code has no detector
 dependency, because that code runs inside the Spider rather than through the
 bridge's nine conversions.
-
