@@ -137,6 +137,16 @@ legal_source_files=(
   "$REPOSITORY_ROOT/Docs/THIRD_PARTY_LICENSE_REAUDIT_PHASE2.md"
   "$REPOSITORY_ROOT/Docs/SOURCE_RELEASE_PROCESS.md"
   "$REPOSITORY_ROOT/Docs/XPP3_1_1_3_3_REMEDIATION.md"
+  "$REPOSITORY_ROOT/Docs/ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md"
+  "$REPOSITORY_ROOT/Docs/APPLE_RELEASE_GATES_PHASE4.md"
+  "$REPOSITORY_ROOT/Docs/IMMUTABLE_RELEASE_READINESS.md"
+  "$REPOSITORY_ROOT/Docs/native/PHASE4_NATIVE_INVENTORY.json"
+  "$REPOSITORY_ROOT/Docs/native/PHASE4_NATIVE_PROVENANCE.md"
+  "$REPOSITORY_ROOT/Docs/native/PHASE4_BASELINE_MACHO_SHA256.txt"
+  "$REPOSITORY_ROOT/Docs/native/PROVENANCE_CLEAN_NATIVE_BUILD.md"
+  "$REPOSITORY_ROOT/Docs/native/PHASE4_CANDIDATE_ABI_CAPABILITY.md"
+  "$REPOSITORY_ROOT/Docs/native/PHASE4_PLAYBACK_REGRESSION.md"
+  "$REPOSITORY_ROOT/Docs/native/MANUAL_PLAYBACK_REGRESSION.md"
   "$REPOSITORY_ROOT/ThirdParty/native-lock.json"
 )
 for legal_source_file in "${legal_source_files[@]}"; do
@@ -238,6 +248,7 @@ rm -rf "$LEGAL_ROOT"
 mkdir -p \
   "$LEGAL_ROOT/AndroidDexBridge" \
   "$LEGAL_ROOT/Compliance" \
+  "$LEGAL_ROOT/Compliance/Phase4/Native" \
   "$LEGAL_ROOT/Compliance/MPL_GPL_COUNSEL_PACKAGE" \
   "$LEGAL_ROOT/Compliance/MPL_GPL_EVIDENCE" \
   "$LEGAL_ROOT/ModifiedSources"
@@ -294,6 +305,26 @@ cp "$REPOSITORY_ROOT/ThirdParty/native-lock.json" \
   "$LEGAL_ROOT/Compliance/NATIVE_DEPENDENCY_LOCK.json"
 cp "$REPOSITORY_ROOT/Docs/XPP3_1_1_3_3_REMEDIATION.md" \
   "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/Docs/ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md" \
+  "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/Docs/APPLE_RELEASE_GATES_PHASE4.md" \
+  "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/Docs/IMMUTABLE_RELEASE_READINESS.md" \
+  "$LEGAL_ROOT/Compliance/"
+cp "$REPOSITORY_ROOT/Docs/native/PHASE4_NATIVE_INVENTORY.json" \
+  "$LEGAL_ROOT/Compliance/Phase4/Native/"
+cp "$REPOSITORY_ROOT/Docs/native/PHASE4_NATIVE_PROVENANCE.md" \
+  "$LEGAL_ROOT/Compliance/Phase4/Native/"
+cp "$REPOSITORY_ROOT/Docs/native/PHASE4_BASELINE_MACHO_SHA256.txt" \
+  "$LEGAL_ROOT/Compliance/Phase4/Native/"
+cp "$REPOSITORY_ROOT/Docs/native/PROVENANCE_CLEAN_NATIVE_BUILD.md" \
+  "$LEGAL_ROOT/Compliance/Phase4/Native/"
+cp "$REPOSITORY_ROOT/Docs/native/PHASE4_CANDIDATE_ABI_CAPABILITY.md" \
+  "$LEGAL_ROOT/Compliance/Phase4/Native/"
+cp "$REPOSITORY_ROOT/Docs/native/PHASE4_PLAYBACK_REGRESSION.md" \
+  "$LEGAL_ROOT/Compliance/Phase4/Native/"
+cp "$REPOSITORY_ROOT/Docs/native/MANUAL_PLAYBACK_REGRESSION.md" \
+  "$LEGAL_ROOT/Compliance/Phase4/Native/"
 cp "$SOURCE_RELEASE_INDEX" "$LEGAL_ROOT/Compliance/SOURCE_RELEASE_INDEX.json"
 
 if [[ ! -f "$APP_DESTINATION/Contents/Resources/LICENSE" ]] ||
@@ -456,6 +487,26 @@ OUTPUT_HASH_MANIFEST="$LEGAL_ROOT/Compliance/BUILD_OUTPUT_SHA256.txt"
   done < <(find Contents -type f -print0 | sort -z)
   shasum -a 256 Contents/Resources/AndroidDexBridge-release.apk
 ) > "$OUTPUT_HASH_MANIFEST"
+
+# Scan the complete pre-sign App and exact source-release artifacts for common
+# credentials and accidental host-local paths. The JSON attestation is sealed
+# into the outer App signature immediately afterward.
+sensitive_scan_arguments=(
+  "$APP_DESTINATION"
+  "$SOURCE_RELEASE_DIR/${SOURCE_RELEASE_BASE}-source.tar.gz"
+  "$SOURCE_RELEASE_DIR/${SOURCE_RELEASE_BASE}-third-party-source.tar.gz"
+  "$SOURCE_RELEASE_DIR/${SOURCE_RELEASE_BASE}-licenses.tar.gz"
+  "$SOURCE_RELEASE_INDEX"
+  --forbidden-literal "/Users/$(id -un)/"
+  --forbidden-literal "$REPOSITORY_ROOT/"
+)
+if [[ -n "${TMPDIR:-}" ]]; then
+  sensitive_scan_arguments+=(--forbidden-literal "${TMPDIR%/}/")
+fi
+PYTHONDONTWRITEBYTECODE=1 python3 \
+  "$REPOSITORY_ROOT/Tools/SourceAudit/scan_release_artifacts.py" \
+  "${sensitive_scan_arguments[@]}" \
+  --json-output "$LEGAL_ROOT/Compliance/SENSITIVE_INFORMATION_SCAN.json"
 sign_code "$APP_DESTINATION" "$APP_ENTITLEMENTS"
 
 "$SCRIPT_DIR/verify-bundle.sh" "$APP_DESTINATION"
@@ -500,6 +551,20 @@ fi
   --sbom "$SBOM_DIR/OKVideoMac-Android.spdx.json" \
   --sbom "$SBOM_DIR/OKVideoMac-Android.cdx.json" \
   --offline
+
+# This second pass covers the final, possibly stapled ZIP and every adjacent
+# manifest/SBOM-bound source artifact. It runs after the last mutating step.
+final_sensitive_scan_arguments=(
+  "$SOURCE_RELEASE_DIR"
+  --forbidden-literal "/Users/$(id -un)/"
+  --forbidden-literal "$REPOSITORY_ROOT/"
+)
+if [[ -n "${TMPDIR:-}" ]]; then
+  final_sensitive_scan_arguments+=(--forbidden-literal "${TMPDIR%/}/")
+fi
+PYTHONDONTWRITEBYTECODE=1 python3 \
+  "$REPOSITORY_ROOT/Tools/SourceAudit/scan_release_artifacts.py" \
+  "${final_sensitive_scan_arguments[@]}"
 
 echo "Packaged app: $APP_DESTINATION"
 echo "Archive: $ARCHIVE"

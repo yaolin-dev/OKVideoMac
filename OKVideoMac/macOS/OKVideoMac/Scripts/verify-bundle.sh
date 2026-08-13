@@ -180,6 +180,17 @@ required_legal_files=(
   "$LEGAL_ROOT/Compliance/NATIVE_DEPENDENCY_LOCK.json"
   "$LEGAL_ROOT/Compliance/SOURCE_RELEASE_PROCESS.md"
   "$LEGAL_ROOT/Compliance/XPP3_1_1_3_3_REMEDIATION.md"
+  "$LEGAL_ROOT/Compliance/ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md"
+  "$LEGAL_ROOT/Compliance/APPLE_RELEASE_GATES_PHASE4.md"
+  "$LEGAL_ROOT/Compliance/IMMUTABLE_RELEASE_READINESS.md"
+  "$LEGAL_ROOT/Compliance/Phase4/Native/PHASE4_NATIVE_INVENTORY.json"
+  "$LEGAL_ROOT/Compliance/Phase4/Native/PHASE4_NATIVE_PROVENANCE.md"
+  "$LEGAL_ROOT/Compliance/Phase4/Native/PHASE4_BASELINE_MACHO_SHA256.txt"
+  "$LEGAL_ROOT/Compliance/Phase4/Native/PROVENANCE_CLEAN_NATIVE_BUILD.md"
+  "$LEGAL_ROOT/Compliance/Phase4/Native/PHASE4_CANDIDATE_ABI_CAPABILITY.md"
+  "$LEGAL_ROOT/Compliance/Phase4/Native/PHASE4_PLAYBACK_REGRESSION.md"
+  "$LEGAL_ROOT/Compliance/Phase4/Native/MANUAL_PLAYBACK_REGRESSION.md"
+  "$LEGAL_ROOT/Compliance/SENSITIVE_INFORMATION_SCAN.json"
   "$LEGAL_ROOT/Compliance/SOURCE_RELEASE_INDEX.json"
   "$LEGAL_ROOT/Compliance/BUILD_OUTPUT_SHA256.txt"
   "$LEGAL_ROOT/Compliance/SBOM/OKVideoMac-macOS.spdx.json"
@@ -196,6 +207,13 @@ done
 PYTHONDONTWRITEBYTECODE=1 python3 -m json.tool \
   "$LEGAL_ROOT/Compliance/MPL_GPL_EVIDENCE/juniversalchardet-1.0.3-file-license-audit.json" \
   >/dev/null
+PYTHONDONTWRITEBYTECODE=1 python3 -m json.tool \
+  "$LEGAL_ROOT/Compliance/Phase4/Native/PHASE4_NATIVE_INVENTORY.json" \
+  >/dev/null
+if [[ "$(PYTHONDONTWRITEBYTECODE=1 python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$LEGAL_ROOT/Compliance/SENSITIVE_INFORMATION_SCAN.json")" != "CLEAN" ]]; then
+  echo "The packaged sensitive-information scan is not clean." >&2
+  exit 1
+fi
 if [[ "$(wc -l < "$LEGAL_ROOT/Compliance/MPL_GPL_EVIDENCE/juniversalchardet-1.0.3-release-dex-classes.txt" | tr -d ' ')" != "62" ]]; then
   echo "The packaged juniversalchardet DEX class inventory is incomplete." >&2
   exit 1
