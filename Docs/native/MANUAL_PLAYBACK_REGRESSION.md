@@ -16,14 +16,14 @@ inventing a pass.
 
 | Area | Required checks | Stable | Candidate | Notes / measured evidence |
 | --- | --- | --- | --- | --- |
-| VOD codecs | H.264, HEVC, AV1 if supported; AAC, AC3/EAC3 | pending | pending | |
-| VOD formats | MP4, MKV, TS, HLS; 1080p, 4K, high bitrate, long-form | pending | pending | |
+| VOD codecs | H.264, HEVC, AV1 if supported; AAC, AC3/EAC3 | H.264/AAC observed | H.264/AAC and HEVC/AAC observed | AV1 and AC3/EAC3 pending |
+| VOD formats | MP4, MKV, TS, HLS; 1080p, 4K, high bitrate, long-form | 1080p network fixture observed | 1080p plus 4K MKV observed | TS fixture blocked by expired external cookie; broader matrix pending |
 | Tracks | multiple audio tracks; embedded/external subtitles | pending | pending | |
-| Seek | first, repeated rapid, forward/backward, large/small, paused/playing | pending | pending | |
-| Lifecycle | open/play/pause/resume/stop/close/reopen/episode switching | pending | pending | |
+| Seek | first, repeated rapid, forward/backward, large/small, paused/playing | repeated paused forward/backward observed | same | large-span and sustained rapid scrub pending |
+| Lifecycle | open/play/pause/resume/stop/close/reopen/episode switching | open/play/pause/resume/close/re-enter observed | same across multiple fixtures | stop and rapid episode switching pending |
 | Subtitles | Chinese, ASS/SSA, SRT, switch, disable, visual correctness | pending | pending | |
-| Live TV | first channel, same/different source, HLS/TS, 4:3/16:9 | pending | pending | |
-| Live switching | sequential and rapid switching; exit/re-enter | pending | pending | |
+| Live TV | first channel, same/different source, HLS/TS, 4:3/16:9 | CCTV-1 observed | CCTV-1 observed | protocol/aspect/source breadth pending |
+| Live switching | sequential and rapid switching; exit/re-enter | five rapid next actions observed | same | longer and cross-source sequences pending |
 | Visual | smoothness, HDR where supported, subtitle rendering, controls | pending | pending | |
 
 ## Performance and Stability Record
