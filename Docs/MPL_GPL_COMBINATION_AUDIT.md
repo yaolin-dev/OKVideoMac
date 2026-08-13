@@ -12,6 +12,17 @@ P0 disposition: `OPEN — COUNSEL REVIEW REQUIRED`
 
 This is an engineering/compliance audit, not a legal opinion.
 
+> Phase 4 rating addendum: the Phase 3 decision and evidence below are retained
+> as historical audit evidence. Current engineering disposition:
+> `DOCUMENTED LICENSE INTERPRETATION RISK`. Independent Legal Review:
+> `NOT PERFORMED`. This item is not treated as an engineering release blocker.
+
+Exact source evidence shows tri-license text on 57 of 58 Java source files.
+One file lacks a file-level header. Maven metadata identifies MPL-1.1. No
+independent legal opinion has been obtained regarding artifact-wide license
+interpretation. The component is retained to preserve the open Spider
+compatibility contract.
+
 ## Executive Summary
 
 The exact sources JAR establishes that 57 of 58 Java files carry a historical

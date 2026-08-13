@@ -19,6 +19,10 @@ release materials are:
 - `Docs/OPEN_SOURCE_P0_STATUS.md` — unresolved release blockers;
 - `Docs/MPL_GPL_COMBINATION_AUDIT.md` — exact Phase 3 disposition; and
 - `Docs/legal/MPL_GPL_COUNSEL_PACKAGE/` — counsel evidence and questions.
+- `Docs/ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md` — current engineering
+  readiness rating, separately from independent legal review; and
+- `Docs/IMMUTABLE_RELEASE_READINESS.md` — immutable publication workflow and
+  final-hash boundary.
 
 Release packaging copies this material into
 `OKVideoMac.app/Contents/Resources/Legal/` so the App is self-describing.
@@ -37,9 +41,13 @@ Release packaging copies this material into
 - Exact-version license/source proof for `xpp3:1.1.3.3` was not recoverable;
   the artifact is now excluded from the Release APK rather than distributed
   under an assumed license. The superseded icon was replaced by an independently
-  generated asset with retained source, prompt and hashes. The release remains
-  **Blocked** for the explicitly open publication, native-provenance and MPL/GPL
-  legal-review P0s.
+  generated asset with retained source, prompt and hashes.
+- `juniversalchardet:1.0.3` is retained as a `DOCUMENTED LICENSE
+  INTERPRETATION RISK` to preserve the open Spider compatibility contract.
+  Independent Legal Review is `NOT PERFORMED`; this is not represented as
+  legal approval and is not a Phase 4 engineering release blocker.
+- Developer ID/notarization and the unperformed public immutable publication
+  are external release gates tracked separately from engineering readiness.
 
 ## Corresponding source
 
@@ -77,7 +85,9 @@ Before every new release, the maintainer must:
 8. Generate SPDX 2.3 and CycloneDX 1.6 SBOMs and require exact equality between
    the 28-Mach-O inventory and the macOS SBOM, and between the Gradle lock and
    Android SBOM.
-9. Reassess `OPEN_SOURCE_P0_STATUS.md`. Do not publish while any P0 remains.
+9. Reassess the current Phase 4 readiness report and do not publish while any
+   engineering P0 remains. External Apple and publication gates must be stated
+   explicitly rather than collapsed into a generic legal-review blocker.
 
 Never upgrade or replace a third-party binary without synchronizing its source
 lock, license, notices, change record, binary mapping, and final output hashes.

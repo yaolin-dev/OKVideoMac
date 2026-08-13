@@ -4,6 +4,12 @@ Date: 2026-08-13
 Baseline: `Docs/THIRD_PARTY_LICENSE_AUDIT.md`
 Overall rating after the MPL/GPL Phase 3 audit: **Blocked**
 
+> Historical Phase 3 snapshot. Phase 4 supersedes the rating framework without
+> deleting this evidence. Current `juniversalchardet:1.0.3` disposition is
+> `DOCUMENTED LICENSE INTERPRETATION RISK`; Independent Legal Review is
+> `NOT PERFORMED`. See `ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md` for the
+> current engineering rating and external gates.
+
 The baseline audit remains unchanged as historical evidence. Similar findings
 are grouped below only for reporting the remaining work.
 

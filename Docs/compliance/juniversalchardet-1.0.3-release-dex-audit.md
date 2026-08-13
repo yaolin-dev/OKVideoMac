@@ -12,7 +12,7 @@ This is a factual binary inventory, not a legal opinion.
 - Final build output path:
   `OKVideoMac/Helpers/AndroidDexBridge/app/build/outputs/apk/release/app-release.apk`.
 - Final packaged/installed Release path:
-  `/Users/linyao/Desktop/OKVideoMac.app/Contents/Resources/AndroidDexBridge-release.apk`.
+  `<INSTALLED_APP>/Contents/Resources/AndroidDexBridge-release.apk`.
 - The Gradle output and packaged app copy were byte-identical after the final
   clean Release rebuild.
 - Final APK SHA-256:
