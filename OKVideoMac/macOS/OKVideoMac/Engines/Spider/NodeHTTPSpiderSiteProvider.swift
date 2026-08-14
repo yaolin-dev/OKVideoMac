@@ -180,12 +180,18 @@ enum QuarkEpisodeReference {
 }
 
 final class NodeHTTPSpiderSiteProvider: SiteProvider {
+    private struct InvocationResult {
+        let value: JSONValue
+        let baseURL: URL
+    }
+
     let site: SiteConfiguration
     let capability: SiteCapability = .javaScriptSpider
 
     private let baseURL: URL
     private let httpClient: HTTPClient
     private let diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)?
+    private let ensureRuntimeReady: (@Sendable () async throws -> URL)?
 
     var configurationWebsiteURL: URL {
         baseURL.appendingPathComponent("website")
@@ -209,7 +215,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         site: SiteConfiguration,
         baseURL: URL,
         httpClient: HTTPClient,
-        diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)? = nil
+        diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)? = nil,
+        ensureRuntimeReady: (@Sendable () async throws -> URL)? = nil
     ) throws {
         guard Self.canHandle(site: site, baseURL: baseURL) else {
             throw AppError.spider("NodeHTTPSpiderSiteProvider 站点配置无效")
@@ -218,6 +225,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         self.baseURL = baseURL
         self.httpClient = httpClient
         self.diagnosticReporter = diagnosticReporter
+        self.ensureRuntimeReady = ensureRuntimeReady
     }
 
     func home() async throws -> SiteHome {
@@ -232,10 +240,10 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             maximumAttempts: 2
         )
         var result = try SpiderResponseMapper.home(
-            home,
-            homeVideoValue: homeVideo,
+            home.value,
+            homeVideoValue: homeVideo?.value,
             site: site,
-            baseURL: baseURL
+            baseURL: home.baseURL
         )
         if isConfigurationCenter {
             result.recommendations = result.recommendations.map { summary in
@@ -258,7 +266,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         filters: [String: String]
     ) async throws -> VideoPage {
         let values = filters.mapValues(JSONValue.string)
-        let value = try await invoke(
+        let invocation = try await invoke(
             method: "category",
             body: [
                 "id": .string(id),
@@ -272,9 +280,9 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             maximumAttempts: 2
         )
         return try SpiderResponseMapper.page(
-            value,
+            invocation.value,
             site: site,
-            baseURL: baseURL,
+            baseURL: invocation.baseURL,
             page: page
         )
     }
@@ -301,21 +309,24 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     ) async throws -> SiteSelectionResult {
         if isConfigurationCenter,
            id == "config-center" || id == "node-web-configuration" {
+            let readyBaseURL = try await runtimeBaseURL()
             throw webAuthorizationRequired(
-                message: "在内置配置中心中管理网盘登录与扫码授权。"
+                message: "在内置配置中心中管理网盘登录与扫码授权。",
+                baseURL: readyBaseURL
             )
         }
+        let invocation = try await invoke(
+            method: "detail",
+            body: [
+                "id": .array([.string(id)]),
+                "ids": .array([.string(id)])
+            ],
+            maximumAttempts: 2
+        )
         return try SpiderResponseMapper.selection(
-            await invoke(
-                method: "detail",
-                body: [
-                    "id": .array([.string(id)]),
-                    "ids": .array([.string(id)])
-                ],
-                maximumAttempts: 2
-            ),
+            invocation.value,
             site: site,
-            baseURL: baseURL,
+            baseURL: invocation.baseURL,
             fallbackSummary: fallbackSummary,
             allowsPlaceholderAction: isConfigurationCenter
         )
@@ -328,7 +339,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 pagination: Pagination(page: page, pageCount: 0)
             )
         }
-        let value = try await invoke(
+        let invocation = try await invoke(
             method: "search",
             body: [
                 "wd": .string(keyword),
@@ -340,9 +351,9 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             maximumAttempts: 2
         )
         return try SpiderResponseMapper.page(
-            value,
+            invocation.value,
             site: site,
-            baseURL: baseURL,
+            baseURL: invocation.baseURL,
             page: page
         )
     }
@@ -387,8 +398,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             // Preserve that valid fallback instead of turning a resolver 500
             // into a total playback failure.
             if MediaURLClassifier.isDirectMediaURL(episodeURL) {
+                let readyBaseURL = try await runtimeBaseURL()
                 return SitePlaybackResult(
-                    url: normalizePlaybackURL(episodeURL),
+                    url: normalizePlaybackURL(
+                        episodeURL,
+                        baseURL: readyBaseURL
+                    ),
                     needsParsing: false,
                     flag: flag,
                     headers: HTTPHeaders(site.header)
@@ -402,30 +417,40 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         flag: String,
         episodeURL: String
     ) async throws -> SitePlaybackResult {
+        let invocation = try await invoke(
+            method: "play",
+            body: [
+                "flag": .string(flag),
+                "id": .string(episodeURL),
+                "vipFlags": .array([]),
+                "flags": .array([])
+            ],
+            // POST /play may perform a cloud transfer. Blindly repeating
+            // it cannot repair an expired token and can duplicate work.
+            maximumAttempts: 1
+        )
         var result = try SpiderResponseMapper.player(
-            await invoke(
-                method: "play",
-                body: [
-                    "flag": .string(flag),
-                    "id": .string(episodeURL),
-                    "vipFlags": .array([]),
-                    "flags": .array([])
-                ],
-                // POST /play may perform a cloud transfer. Blindly repeating
-                // it cannot repair an expired token and can duplicate work.
-                maximumAttempts: 1
-            ),
+            invocation.value,
             site: site
         )
-        result.url = normalizePlaybackURL(result.url)
+        result.url = normalizePlaybackURL(
+            result.url,
+            baseURL: invocation.baseURL
+        )
         result.qualities = result.qualities.map {
             PlaybackQuality(
                 name: $0.name,
-                url: normalizePlaybackURL($0.url)
+                url: normalizePlaybackURL(
+                    $0.url,
+                    baseURL: invocation.baseURL
+                )
             )
         }
         result.subtitles = result.subtitles.map { subtitle in
-            URL(string: normalizePlaybackURL(subtitle.absoluteString))
+            URL(string: normalizePlaybackURL(
+                subtitle.absoluteString,
+                baseURL: invocation.baseURL
+            ))
                 ?? subtitle
         }
         return result
@@ -509,29 +534,37 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         if action == "node-web-configuration"
             || action == "config-center"
             || action.contains("/website") {
+            let readyBaseURL = try await runtimeBaseURL()
             throw webAuthorizationRequired(
-                message: "在内置配置中心中管理网盘登录与扫码授权。"
+                message: "在内置配置中心中管理网盘登录与扫码授权。",
+                baseURL: readyBaseURL
             )
         }
         return try await invoke(
             method: "action",
             body: ["action": .string(action)]
-        )
+        ).value
     }
 
     private func invoke(
         method: String,
         body: [String: JSONValue],
         maximumAttempts: Int = 1
-    ) async throws -> JSONValue {
-        let apiURL = try ResourceResolver.resolve(site.api, relativeTo: baseURL)
-        let endpoint = apiURL.appendingPathComponent(method)
+    ) async throws -> InvocationResult {
         let requestBody = try JSONEncoder().encode(JSONValue.object(body))
         var headers = HTTPHeaders(site.header)
         headers["Content-Type"] = "application/json; charset=utf-8"
         let attempts = max(1, maximumAttempts)
+        var lastEndpoint = baseURL
         for attempt in 0..<attempts {
             do {
+                let readyBaseURL = try await runtimeBaseURL()
+                let apiURL = try ResourceResolver.resolve(
+                    site.api,
+                    relativeTo: readyBaseURL
+                )
+                let endpoint = apiURL.appendingPathComponent(method)
+                lastEndpoint = endpoint
                 let response = try await httpClient.send(
                     HTTPRequest(
                         url: endpoint,
@@ -560,12 +593,18 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                     }
                 }
                 guard !(200...299).contains(response.statusCode) else {
-                    return value
+                    return InvocationResult(
+                        value: value,
+                        baseURL: readyBaseURL
+                    )
                 }
                 let message = Self.serverMessage(from: value)
                     ?? "HTTP 状态码 \(response.statusCode)"
                 if Self.isAuthorizationMessage(message) {
-                    throw webAuthorizationRequired(message: message)
+                    throw webAuthorizationRequired(
+                        message: message,
+                        baseURL: readyBaseURL
+                    )
                 }
                 if attempt + 1 < attempts,
                    (500...599).contains(response.statusCode) {
@@ -594,7 +633,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                         message: error.localizedDescription,
                         siteKey: site.key,
                         operation: method,
-                        originalURL: endpoint
+                        originalURL: lastEndpoint
                     )
                 )
                 throw error
@@ -609,10 +648,11 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     }
 
     private func webAuthorizationRequired(
-        message: String
+        message: String,
+        baseURL: URL
     ) -> NodeWebAuthorizationRequired {
         NodeWebAuthorizationRequired(
-            websiteURL: configurationWebsiteURL,
+            websiteURL: baseURL.appendingPathComponent("website"),
             title: site.name.replacingOccurrences(of: "|", with: " "),
             message: message
         )
@@ -623,7 +663,17 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         try await Task.sleep(nanoseconds: nanoseconds)
     }
 
-    private func normalizePlaybackURL(_ rawValue: String) -> String {
+    private func runtimeBaseURL() async throws -> URL {
+        if let ensureRuntimeReady {
+            return try await ensureRuntimeReady()
+        }
+        return baseURL
+    }
+
+    private func normalizePlaybackURL(
+        _ rawValue: String,
+        baseURL: URL
+    ) -> String {
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return value }
         if value.hasPrefix("/") {

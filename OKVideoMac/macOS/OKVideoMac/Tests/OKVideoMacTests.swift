@@ -3420,6 +3420,31 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertTrue(NodeBundleRuntimeService.supports(node))
     }
 
+    func testNativeAndQuickJSSitesRemainOutsideNodeReadinessBarrier() throws {
+        let loopback = try XCTUnwrap(URL(string: "http://127.0.0.1:18000/"))
+        let native = SiteConfiguration(
+            key: "native_fixture",
+            name: "Native",
+            type: 0,
+            api: "https://example.invalid/api"
+        )
+        let quickJS = SiteConfiguration(
+            key: "quickjs_fixture",
+            name: "QuickJS",
+            type: 3,
+            api: "https://example.invalid/spider.js"
+        )
+
+        XCTAssertFalse(NodeHTTPSpiderSiteProvider.canHandle(
+            site: native,
+            baseURL: loopback
+        ))
+        XCTAssertFalse(NodeHTTPSpiderSiteProvider.canHandle(
+            site: quickJS,
+            baseURL: loopback
+        ))
+    }
+
     func testOfflineLegacyCacheMigratesWithExplicitTOFUTrust() async throws {
         let fixture = try makeLegacyCacheFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -3804,6 +3829,389 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(status, .stopped)
     }
 
+    func testSharedRuntimeStartupCompletesImmediateOperationsWithoutRace() async throws {
+        let startup = SharedNodeRuntimeStartup<Int>()
+
+        for expected in 0..<100 {
+            let value = try await startup.run(sessionID: UUID()) { expected }
+            XCTAssertEqual(value, expected)
+        }
+    }
+
+    func testConcurrentRuntimeCallersJoinExactlyOneStartup() async throws {
+        let startup = SharedNodeRuntimeStartup<Int>()
+        let sessionID = UUID()
+        let gate = NodeReadinessTestGate()
+        let counter = NodeReadinessTestCounter()
+
+        let callers = (0..<3).map { _ in
+            Task {
+                try await startup.run(sessionID: sessionID) {
+                    await counter.increment()
+                    await gate.wait()
+                    return 42
+                }
+            }
+        }
+        let didStart = await waitUntil { await counter.value == 1 }
+        XCTAssertTrue(didStart)
+        var startupCount = await counter.value
+        XCTAssertEqual(startupCount, 1)
+
+        await gate.open()
+        for caller in callers {
+            let value = try await caller.value
+            XCTAssertEqual(value, 42)
+        }
+        startupCount = await counter.value
+        XCTAssertEqual(startupCount, 1)
+    }
+
+    func testCallerCancellationDoesNotCancelSharedRuntimeStartup() async throws {
+        let startup = SharedNodeRuntimeStartup<Int>()
+        let sessionID = UUID()
+        let gate = NodeReadinessTestGate()
+        let counter = NodeReadinessTestCounter()
+        let sharedOperation: @Sendable () async throws -> Int = {
+            await counter.increment()
+            await gate.wait()
+            try Task.checkCancellation()
+            return 7
+        }
+        let cancelledCaller = Task {
+            try await startup.run(
+                sessionID: sessionID,
+                sharedOperation
+            )
+        }
+        let survivingCaller = Task {
+            try await startup.run(
+                sessionID: sessionID,
+                sharedOperation
+            )
+        }
+        let didStart = await waitUntil { await counter.value == 1 }
+        XCTAssertTrue(didStart)
+
+        cancelledCaller.cancel()
+        do {
+            _ = try await cancelledCaller.value
+            XCTFail("被取消的 caller 不应继续")
+        } catch is CancellationError {
+            // Expected: only this waiter is cancelled.
+        }
+        var startupCount = await counter.value
+        XCTAssertEqual(startupCount, 1)
+
+        await gate.open()
+        let survivingValue = try await survivingCaller.value
+        XCTAssertEqual(survivingValue, 7)
+        startupCount = await counter.value
+        XCTAssertEqual(startupCount, 1)
+    }
+
+    func testFailedSharedRuntimeStartupAllowsControlledRetry() async throws {
+        enum FixtureFailure: Error { case firstAttempt }
+        let startup = SharedNodeRuntimeStartup<Int>()
+        let counter = NodeReadinessTestCounter()
+
+        do {
+            _ = try await startup.run(sessionID: UUID()) {
+                await counter.increment()
+                throw FixtureFailure.firstAttempt
+            }
+            XCTFail("首次 startup 应失败")
+        } catch FixtureFailure.firstAttempt {
+            // Expected.
+        }
+
+        let value = try await startup.run(sessionID: UUID()) {
+            await counter.increment()
+            return 9
+        }
+        XCTAssertEqual(value, 9)
+        let startupCount = await counter.value
+        XCTAssertEqual(startupCount, 2)
+    }
+
+    func testNodeBusinessRequestWaitsForReadinessAndUsesReadyEndpoint() async throws {
+        let gate = NodeReadinessTestGate()
+        let readinessCalls = NodeReadinessTestCounter()
+        let client = NodeReadinessRecordingHTTPClient()
+        let initialURL = try XCTUnwrap(URL(string: "http://127.0.0.1:18001/"))
+        let readyURL = try XCTUnwrap(URL(string: "http://127.0.0.1:18002/"))
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: SiteConfiguration(
+                key: "nodejs_readiness_fixture",
+                name: "Readiness Fixture",
+                type: 3,
+                api: "/spider/readiness/3",
+                extra: ["okNodeRuntime": .bool(true)]
+            ),
+            baseURL: initialURL,
+            httpClient: client,
+            ensureRuntimeReady: {
+                await readinessCalls.increment()
+                await gate.wait()
+                return readyURL
+            }
+        )
+
+        let request = Task { try await provider.home() }
+        let reachedBarrier = await waitUntil { await readinessCalls.value == 1 }
+        XCTAssertTrue(reachedBarrier)
+        var requestCount = await client.requestCount
+        XCTAssertEqual(requestCount, 0)
+
+        await gate.open()
+        _ = try await request.value
+        requestCount = await client.requestCount
+        let lastPort = await client.lastURL?.port
+        XCTAssertEqual(requestCount, 2)
+        XCTAssertEqual(lastPort, 18_002)
+    }
+
+    func testRuntimeWaitsForHealthSharesOneProcessAndUsesReadyFastPath() async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(nodeReadinessFixtureScript(startDelayMilliseconds: 250).utf8)
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let node = try testNodeExecutableURL()
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: node,
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+
+        let endpoints: [URL]
+        do {
+            endpoints = try await withThrowingTaskGroup(of: URL.self) { group in
+                for _ in 0..<3 {
+                    group.addTask {
+                        try await service.ensureReady(from: fixture.sourceURL)
+                    }
+                }
+                var values: [URL] = []
+                for try await endpoint in group {
+                    values.append(endpoint)
+                }
+                return values
+            }
+        } catch {
+            let log = (try? runtimeLog(fixture: fixture)) ?? "<missing log>"
+            XCTFail("runtime startup failed: \(error)\n\(log)")
+            await service.stop()
+            return
+        }
+        XCTAssertEqual(Set(endpoints).count, 1)
+        let status = await service.currentStatus()
+        XCTAssertEqual(status, .running(try XCTUnwrap(endpoints.first)))
+
+        let warmStart = Date()
+        let warmEndpoint = try await service.ensureReady(from: fixture.sourceURL)
+        let warmElapsed = Date().timeIntervalSince(warmStart)
+        XCTAssertEqual(warmEndpoint, endpoints.first)
+        XCTAssertLessThan(warmElapsed, 0.1)
+
+        let log = try runtimeLog(fixture: fixture)
+        XCTAssertEqual(log.components(separatedBy: "Bundled Node process launched").count - 1, 1)
+        XCTAssertTrue(log.contains("NODE_RUNTIME_STARTUP_JOINED"))
+        XCTAssertTrue(log.contains("NODE_RUNTIME_READY"))
+        await service.stop()
+    }
+
+    func testReadinessTimeoutExitsStartingAndSubsequentRequestRetries() async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(nodeReadinessFixtureScript(startDelayMilliseconds: 2_000).utf8)
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 0.15,
+            readinessPollInterval: 0.01
+        )
+
+        for _ in 0..<2 {
+            do {
+                _ = try await service.ensureReady(from: fixture.sourceURL)
+                XCTFail("永不在 deadline 前 ready 的 runtime 应超时")
+            } catch {
+                guard case .failed = await service.currentStatus() else {
+                    return XCTFail("失败后 runtime 不应停留在 starting")
+                }
+            }
+        }
+
+        let log = try runtimeLog(fixture: fixture)
+        XCTAssertEqual(log.components(separatedBy: "Bundled Node process launched").count - 1, 2)
+        await service.stop()
+    }
+
+    func testRuntimeDeathInvalidatesEndpointAndNextRequestRecovers() async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(nodeReadinessFixtureScript(startDelayMilliseconds: 0).utf8)
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+        let first: URL
+        do {
+            first = try await service.ensureReady(from: fixture.sourceURL)
+        } catch {
+            let log = (try? runtimeLog(fixture: fixture)) ?? "<missing log>"
+            XCTFail("runtime startup failed: \(error)\n\(log)")
+            await service.stop()
+            return
+        }
+        _ = try? await URLSession.shared.data(
+            from: first.appendingPathComponent("exit")
+        )
+        let invalidated = await waitUntil {
+            let status = await service.currentStatus()
+            if case .restarting = status { return true }
+            return false
+        }
+        XCTAssertTrue(invalidated)
+
+        let recovered = try await service.ensureReady(from: fixture.sourceURL)
+        XCTAssertNotEqual(recovered, first)
+        let log = try runtimeLog(fixture: fixture)
+        XCTAssertTrue(log.contains("NODE_RUNTIME_ENDPOINT_INVALIDATED"))
+        XCTAssertEqual(log.components(separatedBy: "Bundled Node process launched").count - 1, 2)
+        await service.stop()
+    }
+
+    func testNodeSpawnFailurePublishesFailedAndCanBeRetried() async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(nodeReadinessFixtureScript(startDelayMilliseconds: 0).utf8)
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let missingExecutable = fixture.root.appendingPathComponent("missing-node")
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: missingExecutable,
+            readinessTimeout: 0.2,
+            readinessPollInterval: 0.01
+        )
+
+        for _ in 0..<2 {
+            do {
+                _ = try await service.ensureReady(from: fixture.sourceURL)
+                XCTFail("无效 executable 不应启动成功")
+            } catch {
+                guard case .failed = await service.currentStatus() else {
+                    return XCTFail("spawn failure 后 runtime 不应停在 starting")
+                }
+            }
+        }
+        await service.stop()
+    }
+
+    func testNodeExitBeforeHealthPublishesFailedWithoutStickingInStarting() async throws {
+        let script = Data(
+            "module.exports={start(){process.exit(9)},stop(){}};".utf8
+        )
+        let fixture = try makeLegacyCacheFixture(script: script)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 1,
+            readinessPollInterval: 0.01
+        )
+
+        do {
+            _ = try await service.ensureReady(from: fixture.sourceURL)
+            XCTFail("health ready 前退出的 Node 不应被发布为 ready")
+        } catch {
+            let status = await service.currentStatus()
+            guard case .failed = status else {
+                return XCTFail("early exit 后 runtime 不应停留在 starting")
+            }
+        }
+        await service.stop()
+    }
+
+    private func waitUntil(
+        _ predicate: @escaping () async -> Bool
+    ) async -> Bool {
+        for _ in 0..<20_000 {
+            if await predicate() { return true }
+            await Task.yield()
+        }
+        return false
+    }
+
+    private func testNodeExecutableURL() throws -> URL {
+        let candidates = [
+            Bundle.main.resourceURL?
+                .appendingPathComponent("NodeRuntime")
+                .appendingPathComponent("node"),
+            URL(fileURLWithPath: "/opt/homebrew/opt/node@22-direct/bin/node"),
+            URL(fileURLWithPath: "/opt/homebrew/bin/node")
+        ].compactMap { $0 }
+        guard let executable = candidates.first(where: {
+            FileManager.default.isExecutableFile(atPath: $0.path)
+        }) else {
+            throw XCTSkip("Node runtime executable is unavailable")
+        }
+        return executable
+    }
+
+    private func runtimeLog(fixture: LegacyCacheFixture) throws -> String {
+        let descriptor = try NodeBundleSourceDescriptor(url: fixture.sourceURL)
+        let logURL = fixture.applicationSupportDirectory
+            .appendingPathComponent("NodeRuntime")
+            .appendingPathComponent(descriptor.cacheKey)
+            .appendingPathComponent("node.log")
+        return try String(contentsOf: logURL, encoding: .utf8)
+    }
+
+    private func nodeReadinessFixtureScript(
+        startDelayMilliseconds: Int
+    ) -> String {
+        #"""
+        'use strict';
+        const http = require('http');
+        let server = null;
+        module.exports = {
+          start() {
+            return new Promise((resolve) => {
+              setTimeout(() => {
+                server = http.createServer((request, response) => {
+                  response.setHeader('Content-Type', 'application/json');
+                  if (request.url === '/health') {
+                    response.end(JSON.stringify({ok: true, name: 'CatVodSpiderios'}));
+                  } else if (request.url === '/config') {
+                    response.end(JSON.stringify({sites: []}));
+                  } else if (request.url === '/exit') {
+                    response.end(JSON.stringify({ok: true}));
+                    setImmediate(() => process.exit(7));
+                  } else {
+                    response.statusCode = 404;
+                    response.end(JSON.stringify({error: 'fixture-not-found'}));
+                  }
+                });
+                server.listen(0, '127.0.0.1', () => {
+                  console.log(`fixture listening http://127.0.0.1:${server.address().port}`);
+                  resolve();
+                });
+              }, \#(startDelayMilliseconds));
+            });
+          },
+          stop() {
+            return new Promise((resolve) => server ? server.close(resolve) : resolve());
+          }
+        };
+        """#
+    }
+
     private struct LegacyCacheFixture {
         let root: URL
         let applicationSupportDirectory: URL
@@ -3813,7 +4221,8 @@ final class NodeBundleCompatibilityTests: XCTestCase {
     }
 
     private func makeLegacyCacheFixture(
-        checksum suppliedChecksum: String? = nil
+        checksum suppliedChecksum: String? = nil,
+        script suppliedScript: Data? = nil
     ) throws -> LegacyCacheFixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("okvideo-node-migration-\(UUID().uuidString)")
@@ -3838,7 +4247,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             at: legacy,
             withIntermediateDirectories: true
         )
-        let script = Data("module.exports = {};".utf8)
+        let script = suppliedScript ?? Data("module.exports = {};".utf8)
         let checksum = suppliedChecksum ?? NodeBundleRuntimeService.md5Hex(script)
         try script.write(to: legacy.appendingPathComponent("index.js"))
         try Data(checksum.utf8).write(
@@ -3855,7 +4264,10 @@ final class NodeBundleCompatibilityTests: XCTestCase {
 
     private func makeOfflineRuntime(
         fixture: LegacyCacheFixture,
-        migrationCommitHook: (() throws -> Void)? = nil
+        migrationCommitHook: (() throws -> Void)? = nil,
+        nodeExecutableURL: URL? = nil,
+        readinessTimeout: TimeInterval = 90,
+        readinessPollInterval: TimeInterval = 0.1
     ) -> NodeBundleRuntimeService {
         NodeBundleRuntimeService(
             applicationSupportDirectory: fixture.applicationSupportDirectory,
@@ -3863,7 +4275,10 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             remoteHTTPClient: NodeProviderStubHTTPClient { _ in
                 throw URLError(.notConnectedToInternet)
             },
-            migrationCommitHook: migrationCommitHook
+            nodeExecutableURL: nodeExecutableURL,
+            migrationCommitHook: migrationCommitHook,
+            readinessTimeout: readinessTimeout,
+            readinessPollInterval: readinessPollInterval
         )
     }
 
@@ -4215,6 +4630,51 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                 tooltipWidth: 58
             ),
             171
+        )
+    }
+}
+
+private actor NodeReadinessTestGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func open() {
+        isOpen = true
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending {
+            waiter.resume()
+        }
+    }
+}
+
+private actor NodeReadinessTestCounter {
+    private(set) var value = 0
+
+    func increment() {
+        value += 1
+    }
+}
+
+private actor NodeReadinessRecordingHTTPClient: HTTPClient {
+    private(set) var requestCount = 0
+    private(set) var lastURL: URL?
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        requestCount += 1
+        lastURL = request.url
+        return HTTPResponse(
+            url: request.url,
+            statusCode: 200,
+            headers: ["Content-Type": "application/json"],
+            body: Data(#"{"class":[],"list":[]}"#.utf8)
         )
     }
 }

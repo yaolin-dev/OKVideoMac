@@ -4562,14 +4562,19 @@ final class AppState: ObservableObject {
         lastAutomaticConfigurationRefreshAttemptAt = loaded.loadedAt
     }
 
-    private var activeConfigurationUsesNodeRuntime: Bool {
+    private var activeNodeRuntimeSourceURL: URL? {
         guard let record = activeConfigurationRecord,
               record.sourceKind == .remote,
               let sourceValue = record.sourceValue,
-              let sourceURL = URL(string: sourceValue) else {
-            return false
+              let sourceURL = URL(string: sourceValue),
+              NodeBundleRuntimeService.supports(sourceURL) else {
+            return nil
         }
-        return NodeBundleRuntimeService.supports(sourceURL)
+        return sourceURL
+    }
+
+    private var activeConfigurationUsesNodeRuntime: Bool {
+        activeNodeRuntimeSourceURL != nil
     }
 
     private func startNodeRuntimeStatusMonitoring() {
@@ -4776,20 +4781,37 @@ final class AppState: ObservableObject {
             return
         }
         let usesNodeRuntime = activeConfigurationUsesNodeRuntime
+        let nodeSourceURL = activeNodeRuntimeSourceURL
         let baseURL = usesNodeRuntime
             ? activeNodeRuntimeEndpoint
             : activeConfigurationRecord?.baseURL
+        let nodeFallbackBaseURL = activeNodeRuntimeEndpoint
+            ?? activeConfigurationRecord?.baseURL
+            ?? URL(string: "http://127.0.0.1/")!
         let httpClient = configuredHTTPClient(environment: environment)
         providers = Dictionary(
             uniqueKeysWithValues: visibleSites.map { site in
                 let provider: SiteProvider
                 if usesNodeRuntime,
                    site.extra["okNodeRuntime"] == .bool(true),
-                   activeNodeRuntimeEndpoint == nil {
-                    provider = NodeRuntimeUnavailableSiteProvider(
+                   let nodeSourceURL,
+                   NodeHTTPSpiderSiteProvider.canHandle(
+                       site: site,
+                       baseURL: nodeFallbackBaseURL
+                   ) {
+                    provider = (try? NodeHTTPSpiderSiteProvider(
                         site: site,
-                        reason: nodeRuntimeUnavailableReason
-                    )
+                        baseURL: nodeFallbackBaseURL,
+                        httpClient: httpClient,
+                        diagnosticReporter: { [weak runtime = environment.nodeBundleRuntime] event in
+                            Task { await runtime?.recordDiagnosticEvent(event) }
+                        },
+                        ensureRuntimeReady: {
+                            try await environment.nodeBundleRuntime.ensureReady(
+                                from: nodeSourceURL
+                            )
+                        }
+                    )) ?? UnsupportedSiteProvider(site: site)
                 } else if NodeHTTPSpiderSiteProvider.canHandle(
                     site: site,
                     baseURL: baseURL

@@ -39,6 +39,9 @@ enum NodeDiagnosticCode: String, Codable, Equatable, Sendable {
     case cacheMigrationSucceeded = "NODE_CACHE_MIGRATION_SUCCEEDED"
     case cacheMigrationFailed = "NODE_CACHE_MIGRATION_FAILED"
     case runtimeLaunchStarted = "NODE_RUNTIME_LAUNCH_STARTED"
+    case runtimeStartRequested = "NODE_RUNTIME_START_REQUESTED"
+    case runtimeStartupJoined = "NODE_RUNTIME_STARTUP_JOINED"
+    case runtimeReadinessWaiting = "NODE_RUNTIME_READINESS_WAITING"
     case runtimeLaunchFailed = "NODE_RUNTIME_LAUNCH_FAILED"
     case runtimeReady = "NODE_RUNTIME_READY"
     case runtimeHealthFailed = "NODE_RUNTIME_HEALTH_FAILED"
@@ -49,6 +52,106 @@ enum NodeDiagnosticCode: String, Codable, Equatable, Sendable {
     case runtimeUnavailable = "NODE_RUNTIME_UNAVAILABLE"
     case spiderRequestFailed = "NODE_SPIDER_REQUEST_FAILED"
     case spiderOutput = "NODE_SPIDER_OUTPUT"
+}
+
+/// Shares one unstructured startup operation across independent callers.
+/// Cancelling a waiter only resumes that waiter; the shared operation remains
+/// alive until it completes or the runtime owner explicitly tears it down.
+actor SharedNodeRuntimeStartup<Value: Sendable> {
+    private struct Session {
+        let id: UUID
+        let task: Task<Value, Error>
+        var waiters: [UUID: CheckedContinuation<Value, Error>] = [:]
+    }
+
+    private enum State {
+        case running(Session)
+        case completed(UUID, Result<Value, Error>)
+    }
+
+    private var state: State?
+
+    func run(
+        sessionID: UUID,
+        _ operation: @escaping @Sendable () async throws -> Value
+    ) async throws -> Value {
+        let waiterID = UUID()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                guard !Task.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                if case .running(var session) = state {
+                    guard session.id == sessionID else {
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
+                    session.waiters[waiterID] = continuation
+                    state = .running(session)
+                    return
+                }
+                if case .completed(let completedID, let result) = state,
+                   completedID == sessionID {
+                    continuation.resume(with: result)
+                    return
+                }
+
+                let task = Task {
+                    try await operation()
+                }
+                state = .running(Session(
+                    id: sessionID,
+                    task: task,
+                    waiters: [waiterID: continuation]
+                ))
+                Task { [weak self] in
+                    let result: Result<Value, Error>
+                    do {
+                        result = .success(try await task.value)
+                    } catch {
+                        result = .failure(error)
+                    }
+                    await self?.complete(sessionID: sessionID, result: result)
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(waiterID) }
+        }
+    }
+
+    func cancel() {
+        guard case .running(let session) = state else {
+            state = nil
+            return
+        }
+        state = nil
+        session.task.cancel()
+        for continuation in session.waiters.values {
+            continuation.resume(throwing: CancellationError())
+        }
+    }
+
+    private func cancelWaiter(_ waiterID: UUID) {
+        guard case .running(var session) = state,
+              let continuation = session.waiters.removeValue(forKey: waiterID)
+        else { return }
+        state = .running(session)
+        continuation.resume(throwing: CancellationError())
+    }
+
+    private func complete(
+        sessionID: UUID,
+        result: Result<Value, Error>
+    ) {
+        guard case .running(let session) = state,
+              session.id == sessionID else { return }
+        state = .completed(sessionID, result)
+        for continuation in session.waiters.values {
+            continuation.resume(with: result)
+        }
+    }
 }
 
 enum NodeTrustDiagnosticState: String, Codable, Equatable, Sendable {
@@ -479,7 +582,7 @@ enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
     }
 }
 
-struct NodeBundleSourceDescriptor: Equatable {
+struct NodeBundleSourceDescriptor: Equatable, Sendable {
     static let checksumSuffix = ".js.md5"
 
     let originalURL: URL
@@ -654,6 +757,18 @@ actor NodeBundleRuntimeService {
         let trustState: NodeBundleTrustState
     }
 
+    private enum StartupSource: Sendable {
+        case descriptor(NodeBundleSourceDescriptor)
+        case cached(CachedBundle)
+
+        var cacheKey: String {
+            switch self {
+            case .descriptor(let descriptor): descriptor.cacheKey
+            case .cached(let bundle): bundle.cacheKey
+            }
+        }
+    }
+
     struct CacheMetadata: Codable, Equatable {
         let pinIdentity: String
         let finalChecksumURL: URL
@@ -675,12 +790,15 @@ actor NodeBundleRuntimeService {
     private let migrationCommitHook: (() throws -> Void)?
     private let diagnosticLogMaximumBytes: Int
     private let diagnosticLogRetainedFileCount: Int
+    private let readinessTimeout: TimeInterval
+    private let readinessPollInterval: TimeInterval
+    private let sharedStartup = SharedNodeRuntimeStartup<URL>()
 
     private var process: Process?
     private var outputPipe: Pipe?
     private var activeDiagnosticWriter: NodeDiagnosticLogWriter?
     private var diagnosticWriters: [String: NodeDiagnosticLogWriter] = [:]
-    private var activeBundleSHA256: String?
+    private var activeBundleCacheKey: String?
     private var serviceBaseURL: URL?
     private var status: NodeRuntimeStatus = .stopped
     private var statusContinuations: [UUID: AsyncStream<NodeRuntimeStatus>.Continuation] = [:]
@@ -689,6 +807,8 @@ actor NodeBundleRuntimeService {
     private var restartTask: Task<Void, Never>?
     private var healthMonitorTask: Task<Void, Never>?
     private var restartAttempt = 0
+    private var startupCacheKey: String?
+    private var startupGeneration: UUID?
 
     static let restartDelays: [TimeInterval] = [1, 2, 5]
 
@@ -700,7 +820,9 @@ actor NodeBundleRuntimeService {
         now: @escaping () -> Date = Date.init,
         migrationCommitHook: (() throws -> Void)? = nil,
         diagnosticLogMaximumBytes: Int = 4 * 1_024 * 1_024,
-        diagnosticLogRetainedFileCount: Int = 3
+        diagnosticLogRetainedFileCount: Int = 3,
+        readinessTimeout: TimeInterval = 90,
+        readinessPollInterval: TimeInterval = 0.1
     ) {
         self.applicationSupportDirectory = applicationSupportDirectory
         self.cacheDirectory = cacheDirectory
@@ -710,6 +832,8 @@ actor NodeBundleRuntimeService {
         self.migrationCommitHook = migrationCommitHook
         self.diagnosticLogMaximumBytes = diagnosticLogMaximumBytes
         self.diagnosticLogRetainedFileCount = diagnosticLogRetainedFileCount
+        self.readinessTimeout = max(0.1, readinessTimeout)
+        self.readinessPollInterval = max(0.01, readinessPollInterval)
         Self.purgeLegacyNodeLogsIfNeeded(
             applicationSupportDirectory: applicationSupportDirectory
         )
@@ -768,9 +892,7 @@ actor NodeBundleRuntimeService {
     }
 
     func loadConfiguration(from sourceURL: URL) async throws -> LoadedConfiguration {
-        let descriptor = try NodeBundleSourceDescriptor(url: sourceURL)
-        let bundle = try await obtainBundle(descriptor)
-        let baseURL = try await ensureServiceRunning(bundle)
+        let baseURL = try await ensureReady(from: sourceURL)
         let configURL = baseURL.appendingPathComponent("config")
         let response = try await localHTTPClient.send(
             HTTPRequest(
@@ -791,11 +913,26 @@ actor NodeBundleRuntimeService {
         )
     }
 
-    func stop() {
+    /// Returns only after the selected bundle's localhost `/health` endpoint
+    /// has answered with the expected runtime identity. Every Node business
+    /// request uses this point-of-use barrier; process existence alone is not
+    /// considered ready.
+    func ensureReady(from sourceURL: URL) async throws -> URL {
+        let descriptor = try NodeBundleSourceDescriptor(url: sourceURL)
+        return try await ensureReady(
+            source: .descriptor(descriptor),
+            automaticRestart: false
+        )
+    }
+
+    func stop() async {
         restartTask?.cancel()
         restartTask = nil
         healthMonitorTask?.cancel()
         healthMonitorTask = nil
+        startupGeneration = nil
+        startupCacheKey = nil
+        await sharedStartup.cancel()
         desiredBundle = nil
         restartAttempt = 0
         stopProcess(publishing: .stopped)
@@ -1605,32 +1742,178 @@ actor NodeBundleRuntimeService {
         )
     }
 
-    private func ensureServiceRunning(_ bundle: CachedBundle) async throws -> URL {
-        do {
-            try validateBundleForExecution(bundle)
-        } catch {
-            desiredBundle = nil
-            stopProcess(publishing: .failed(error.localizedDescription))
-            throw error
-        }
-        if activeBundleSHA256 == bundle.sha256,
+    private func ensureReady(
+        source: StartupSource,
+        automaticRestart: Bool
+    ) async throws -> URL {
+        try Task.checkCancellation()
+        let cacheKey = source.cacheKey
+        if activeBundleCacheKey == cacheKey,
            process?.isRunning == true,
            let serviceBaseURL,
-           await isHealthy(serviceBaseURL) {
+           case .running(let publishedURL) = status,
+           publishedURL == serviceBaseURL {
             return serviceBaseURL
         }
 
-        restartTask?.cancel()
-        restartTask = nil
-        restartAttempt = 0
-        desiredBundle = bundle
-        stopProcess(publishing: .starting)
+        if let startupCacheKey, let generation = startupGeneration {
+            recordStartupLifecycle(
+                code: .runtimeStartupJoined,
+                message: startupCacheKey == cacheKey
+                    ? "Joined existing Node runtime startup"
+                    : "Waiting for another Node runtime startup to finish",
+                cacheKey: cacheKey
+            )
+            if startupCacheKey == cacheKey {
+                do {
+                    let endpoint = try await sharedStartup.run(
+                        sessionID: generation
+                    ) {
+                        throw CancellationError()
+                    }
+                    finishStartup(generation: generation)
+                    try Task.checkCancellation()
+                    return endpoint
+                } catch {
+                    if !Task.isCancelled {
+                        finishStartup(generation: generation)
+                    }
+                    throw error
+                }
+            }
+            do {
+                _ = try await sharedStartup.run(sessionID: generation) {
+                    throw CancellationError()
+                }
+            } catch {
+                if Task.isCancelled {
+                    throw error
+                }
+            }
+            finishStartup(generation: generation)
+            try Task.checkCancellation()
+            return try await ensureReady(
+                source: source,
+                automaticRestart: automaticRestart
+            )
+        }
+
+        if !automaticRestart {
+            restartTask?.cancel()
+            restartTask = nil
+            restartAttempt = 0
+        }
+        let generation = UUID()
+        startupGeneration = generation
+        startupCacheKey = cacheKey
+        recordStartupLifecycle(
+            code: .runtimeStartRequested,
+            message: automaticRestart
+                ? "Controlled Node runtime restart requested"
+                : "Node runtime start requested",
+            cacheKey: cacheKey
+        )
+        publish(.starting)
+        recordStartupLifecycle(
+            code: .runtimeReadinessWaiting,
+            message: "Waiting for Node runtime health readiness",
+            cacheKey: cacheKey
+        )
+
         do {
-            return try await startProcess(bundle)
+            let endpoint = try await sharedStartup.run(
+                sessionID: generation
+            ) { [weak self] in
+                guard let self else { throw CancellationError() }
+                return try await self.performStartup(
+                    source: source,
+                    generation: generation
+                )
+            }
+            finishStartup(generation: generation)
+            try Task.checkCancellation()
+            return endpoint
         } catch {
-            stopProcess(publishing: .failed(error.localizedDescription))
+            if !Task.isCancelled {
+                finishStartup(generation: generation)
+            }
             throw error
         }
+    }
+
+    private func finishStartup(generation: UUID) {
+        guard startupGeneration == generation else { return }
+        startupGeneration = nil
+        startupCacheKey = nil
+    }
+
+    private func performStartup(
+        source: StartupSource,
+        generation: UUID
+    ) async throws -> URL {
+        do {
+            let bundle: CachedBundle
+            switch source {
+            case .descriptor(let descriptor):
+                bundle = try await obtainBundle(descriptor)
+            case .cached(let cached):
+                bundle = cached
+            }
+            try Task.checkCancellation()
+            try validateBundleForExecution(bundle)
+            guard startupGeneration == generation else {
+                throw CancellationError()
+            }
+            desiredBundle = bundle
+            stopProcess(publishing: .starting)
+            let endpoint = try await startProcess(bundle)
+            guard startupGeneration == generation else {
+                throw CancellationError()
+            }
+            activeBundleCacheKey = bundle.cacheKey
+            return endpoint
+        } catch {
+            if startupGeneration == generation {
+                stopProcess(publishing: .failed(error.localizedDescription))
+            }
+            throw error
+        }
+    }
+
+    private func recordStartupLifecycle(
+        code: NodeDiagnosticCode,
+        message: String,
+        cacheKey: String
+    ) {
+        let writer: NodeDiagnosticLogWriter
+        if let existing = diagnosticWriters[cacheKey] {
+            writer = existing
+        } else {
+            let directory = applicationSupportDirectory
+                .appendingPathComponent("NodeRuntime", isDirectory: true)
+                .appendingPathComponent(cacheKey, isDirectory: true)
+            do {
+                try secureDirectory(directory)
+            } catch {
+                return
+            }
+            writer = NodeDiagnosticLogWriter(
+                logURL: directory.appendingPathComponent("node.log"),
+                maximumBytes: diagnosticLogMaximumBytes,
+                retainedFileCount: diagnosticLogRetainedFileCount
+            )
+            diagnosticWriters[cacheKey] = writer
+        }
+        writer.write(
+            NodeDiagnosticEvent(
+                timestamp: now(),
+                category: .runtime,
+                severity: .info,
+                code: code,
+                message: message,
+                cacheKey: cacheKey
+            )
+        )
     }
 
     private func startProcess(_ bundle: CachedBundle) async throws -> URL {
@@ -1724,7 +2007,6 @@ actor NodeBundleRuntimeService {
 
         self.process = process
         outputPipe = pipe
-        activeBundleSHA256 = bundle.sha256
         writer.write(
             NodeDiagnosticEvent(
                 timestamp: now(),
@@ -1739,7 +2021,9 @@ actor NodeBundleRuntimeService {
             )
         )
 
-        for _ in 0..<900 {
+        let readinessDeadline = Date().addingTimeInterval(readinessTimeout)
+        while Date() < readinessDeadline {
+            try Task.checkCancellation()
             guard process.isRunning else {
                 process.terminationHandler = nil
                 stopProcess(publishing: nil)
@@ -1781,7 +2065,9 @@ actor NodeBundleRuntimeService {
                 startHealthMonitor(generation: generation, baseURL: baseURL)
                 return baseURL
             }
-            try await Task.sleep(nanoseconds: 100_000_000)
+            try await Task.sleep(
+                nanoseconds: UInt64(readinessPollInterval * 1_000_000_000)
+            )
         }
 
         process.terminationHandler = nil
@@ -1797,7 +2083,7 @@ actor NodeBundleRuntimeService {
                 cacheKey: bundle.cacheKey
             )
         )
-        throw NodeBundleRuntimeError.nodeLaunchFailed("资源服务启动超过 90 秒")
+        throw NodeBundleRuntimeError.nodeLaunchFailed("资源服务启动超时")
     }
 
     private func isHealthy(_ baseURL: URL) async -> Bool {
@@ -1833,7 +2119,7 @@ actor NodeBundleRuntimeService {
         activeDiagnosticWriter?.flushNodeOutput()
         outputPipe = nil
         process = nil
-        activeBundleSHA256 = nil
+        activeBundleCacheKey = nil
         serviceBaseURL = nil
         if let newStatus {
             publish(newStatus)
@@ -1860,10 +2146,19 @@ actor NodeBundleRuntimeService {
         )
         outputPipe = nil
         process = nil
-        activeBundleSHA256 = nil
+        activeBundleCacheKey = nil
         serviceBaseURL = nil
         healthMonitorTask?.cancel()
         healthMonitorTask = nil
+        activeDiagnosticWriter?.write(
+            NodeDiagnosticEvent(
+                timestamp: now(),
+                category: .runtime,
+                severity: .warning,
+                code: .runtimeEndpointInvalidated,
+                message: "Node runtime endpoint invalidated after process exit"
+            )
+        )
         scheduleRestart(reason: detail)
     }
 
@@ -1951,7 +2246,10 @@ actor NodeBundleRuntimeService {
               currentAttempt == attempt,
               let bundle = desiredBundle else { return }
         do {
-            _ = try await startProcess(bundle)
+            _ = try await ensureReady(
+                source: .cached(bundle),
+                automaticRestart: true
+            )
         } catch {
             stopProcess(publishing: nil)
             scheduleRestart(reason: error.localizedDescription)
