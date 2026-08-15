@@ -1,12 +1,51 @@
 import AppKit
 import Combine
 import CryptoKit
+import SwiftUI
 import XCTest
 import OKVideoCore
 import OKVideoPersistence
 @testable import OKVideoMac
 
 final class OKVideoMacTests: XCTestCase {
+    func testImportURLNormalizationOnlyTrimsEdges() throws {
+        let exact = "https://user:pass@example.invalid/a%20b/config.js.md5?q=x%2By#fragment"
+        let raw = " \t\n\(exact)\r\n "
+
+        XCTAssertEqual(ImportURLInput.normalized(raw), exact)
+        XCTAssertEqual(
+            try XCTUnwrap(ImportURLInput.httpURL(from: raw)).absoluteString,
+            exact
+        )
+    }
+
+    func testImportURLValidationUsesNormalizedValueWithoutInternalRewrite() {
+        XCTAssertNil(ImportURLInput.httpURL(from: "  file:///tmp/config.json  "))
+        XCTAssertEqual(
+            ImportURLInput.normalized("\nhttps://example.invalid/a?x=one two\t"),
+            "https://example.invalid/a?x=one two"
+        )
+    }
+
+    @MainActor
+    func testImportURLTextFieldSynchronizesNativeChangesImmediately() {
+        var value = ""
+        let field = NSTextField(string: "https://example.invalid/config.json")
+        let coordinator = ImportURLTextField.Coordinator(
+            text: Binding(
+                get: { value },
+                set: { value = $0 }
+            )
+        )
+
+        coordinator.controlTextDidChange(
+            Notification(name: NSControl.textDidChangeNotification, object: field)
+        )
+
+        XCTAssertEqual(value, "https://example.invalid/config.json")
+        XCTAssertNotNil(ImportURLInput.httpURL(from: value))
+    }
+
     func testImportProgressMessagesDescribeActualCommitStage() {
         XCTAssertEqual(
             ConfigurationImportPhase.downloadingAndParsing.title,

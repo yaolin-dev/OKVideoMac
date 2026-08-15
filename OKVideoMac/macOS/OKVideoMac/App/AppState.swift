@@ -62,6 +62,17 @@ struct UserFacingError: Identifiable, Equatable {
     }
 }
 
+enum ImportOperationResult {
+    case success
+    case cancelled
+    case failure(UserFacingError)
+}
+
+private struct ImportedConfigurationPayload {
+    let loaded: LoadedConfiguration
+    let nodeRuntimeEndpoint: URL?
+}
+
 struct NodeReleaseErrorPresentation: Equatable {
     let title: String
     let message: String
@@ -800,6 +811,7 @@ final class AppState: ObservableObject {
     @Published private(set) var isAndroidRuntimeBusy = false
 
     private let environment: AppEnvironment?
+    private var configurationImportOperationID: UUID?
     private var providers: [String: SiteProvider] = [:]
     private var searchTask: Task<Void, Never>?
     private var searchSessionID = UUID()
@@ -929,10 +941,56 @@ final class AppState: ObservableObject {
         name: String?,
         progress: (ConfigurationImportPhase) -> Void = { _ in }
     ) async -> Bool {
-        guard let environment else { return false }
+        let result = await importConfigurationForSheet(
+            source: source,
+            name: name,
+            progress: progress,
+            onCommitStarted: {}
+        )
+        switch result {
+        case .success:
+            return true
+        case .cancelled:
+            return false
+        case .failure(let error):
+            presentedError = error
+            return false
+        }
+    }
+
+    func importConfigurationForSheet(
+        source: ConfigurationSource,
+        name: String?,
+        progress: (ConfigurationImportPhase) -> Void = { _ in },
+        onCommitStarted: () -> Void
+    ) async -> ImportOperationResult {
+        guard let environment else {
+            return .failure(
+                UserFacingError(
+                    title: "配置导入失败",
+                    message: "应用环境尚未初始化"
+                )
+            )
+        }
+        guard configurationImportOperationID == nil else {
+            return .failure(
+                UserFacingError(
+                    title: "配置导入失败",
+                    message: "已有配置正在导入，请稍候"
+                )
+            )
+        }
+        let operationID = UUID()
+        configurationImportOperationID = operationID
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            if configurationImportOperationID == operationID {
+                configurationImportOperationID = nil
+                isLoading = false
+            }
+        }
         do {
+            try ensureConfigurationImportIsActive(operationID)
             if case .remote(let url) = source,
                NodeBundleRuntimeService.supports(url) {
                 progress(.startingNodeRuntime)
@@ -941,8 +999,8 @@ final class AppState: ObservableObject {
             } else {
                 progress(.parsing)
             }
-            let loaded = try await loadConfiguration(source)
-            try Task.checkCancellation()
+            let payload = try await loadConfigurationForImport(source)
+            try ensureConfigurationImportIsActive(operationID)
             let sourceDetails: (StoredConfigurationSourceKind, String?)
             switch source {
             case .remote(let url):
@@ -956,32 +1014,40 @@ final class AppState: ObservableObject {
                 name: name?.nonEmpty ?? source.displayName,
                 sourceKind: sourceDetails.0,
                 sourceValue: sourceDetails.1,
-                baseURL: loaded.baseURL,
-                rawData: loaded.rawData,
-                updatedAt: loaded.loadedAt,
+                baseURL: payload.loaded.baseURL,
+                rawData: payload.loaded.rawData,
+                updatedAt: payload.loaded.loadedAt,
                 isActive: true
             )
             progress(.saving)
-            try Task.checkCancellation()
-            try await environment.database.saveConfiguration(record)
-            try Task.checkCancellation()
+            try ensureConfigurationImportIsActive(operationID)
+            onCommitStarted()
+            try ensureConfigurationImportIsActive(operationID)
+            let committedConfigurations = try await environment.database
+                .commitImportedConfiguration(record)
+
+            // SQLite commit is the operation's cancellation boundary. The
+            // Sheet disables cancellation before this point, and the model
+            // state below is committed synchronously before the next await.
             progress(.activating)
             resetSearchForConfigurationChange()
-            configurations = try await environment.database.configurations()
-            try Task.checkCancellation()
+            configurations = committedConfigurations
             configurationRefreshSessionID = UUID()
             configurationRefreshTask?.cancel()
             configurationRefreshTask = nil
-            lastAutomaticConfigurationRefreshAttemptAt = loaded.loadedAt
+            lastAutomaticConfigurationRefreshAttemptAt = payload.loaded.loadedAt
             activeConfigurationRecord = record
-            activeConfiguration = loaded.configuration
+            activeConfiguration = payload.loaded.configuration
             let importedUsesNodeRuntime: Bool
             if case .remote(let url) = source {
                 importedUsesNodeRuntime = NodeBundleRuntimeService.supports(url)
             } else {
                 importedUsesNodeRuntime = false
             }
-            if !importedUsesNodeRuntime {
+            if importedUsesNodeRuntime {
+                activeNodeRuntimeEndpoint = payload.nodeRuntimeEndpoint
+                nodeRuntimeUnavailableReason = ""
+            } else {
                 activeNodeRuntimeEndpoint = nil
                 nodeRuntimeUnavailableReason = "Node Runtime 未用于当前配置"
                 Task { @MainActor [weak self] in
@@ -994,16 +1060,24 @@ final class AppState: ObservableObject {
             rebuildProviders()
             selectedSiteKey = supportedSites.first?.key
             await loadSearchSiteScope()
-            try Task.checkCancellation()
             await prepareActiveConfigurationHome()
-            try Task.checkCancellation()
             try await reloadHistory()
-            return true
+            return .success
         } catch is CancellationError {
-            return false
+            return .cancelled
         } catch {
-            show(error, title: "配置导入失败")
-            return false
+            return .failure(
+                userFacingError(for: error, title: "配置导入失败")
+            )
+        }
+    }
+
+    private func ensureConfigurationImportIsActive(
+        _ operationID: UUID
+    ) throws {
+        try Task.checkCancellation()
+        guard configurationImportOperationID == operationID else {
+            throw CancellationError()
         }
     }
 
@@ -4665,6 +4739,30 @@ final class AppState: ObservableObject {
         return try await environment.configurationLoader.load(source)
     }
 
+    private func loadConfigurationForImport(
+        _ source: ConfigurationSource
+    ) async throws -> ImportedConfigurationPayload {
+        guard let environment else {
+            throw AppError.configuration("应用环境尚未初始化")
+        }
+        if case .remote(let url) = source,
+           NodeBundleRuntimeService.supports(url) {
+            let loaded = try await environment.nodeBundleRuntime
+                .loadConfiguration(from: url)
+            try Task.checkCancellation()
+            return ImportedConfigurationPayload(
+                loaded: loaded,
+                nodeRuntimeEndpoint: loaded.baseURL
+            )
+        }
+        let loaded = try await environment.configurationLoader.load(source)
+        try Task.checkCancellation()
+        return ImportedConfigurationPayload(
+            loaded: loaded,
+            nodeRuntimeEndpoint: nil
+        )
+    }
+
     private func prepareActiveNodeConfigurationIfNeeded() async throws {
         guard let environment else { return }
         guard let record = activeConfigurationRecord,
@@ -5704,14 +5802,20 @@ final class AppState: ObservableObject {
     }
 
     private func show(_ error: Error, title: String) {
+        presentedError = userFacingError(for: error, title: title)
+    }
+
+    private func userFacingError(
+        for error: Error,
+        title: String
+    ) -> UserFacingError {
         if let presentation = NodeUserFacingErrorMapper.presentation(for: error) {
-            presentedError = UserFacingError(
+            return UserFacingError(
                 title: presentation.title,
                 message: presentation.message
             )
-            return
         }
-        presentedError = UserFacingError(
+        return UserFacingError(
             title: title,
             message: LogRedactor.text(error.localizedDescription)
         )

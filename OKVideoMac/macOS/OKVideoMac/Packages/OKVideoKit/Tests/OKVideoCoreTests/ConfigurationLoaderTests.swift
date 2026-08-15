@@ -74,6 +74,51 @@ final class ConfigurationLoaderTests: XCTestCase {
             )
         }
     }
+
+    func testRemoteLoadHonorsCancellationAfterNetworkAwait() async throws {
+        let response = HTTPResponse(
+            url: URL(string: "https://example.invalid/config.json")!,
+            statusCode: 200,
+            headers: [:],
+            body: Data(#"{"sites":[]}"#.utf8)
+        )
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await ConfigurationLoader(
+                httpClient: StubHTTPClient(response: response)
+            ).load(.remote(response.url))
+        }
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation after HTTP response")
+        } catch is CancellationError {
+            // Expected: the loader observes cancellation before decode/parse.
+        }
+    }
+
+    func testPastedLoadHonorsCancellationAfterParse() async throws {
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await ConfigurationLoader(
+                httpClient: StubHTTPClient(
+                    response: HTTPResponse(
+                        url: URL(string: "https://example.invalid/")!,
+                        statusCode: 200,
+                        headers: [:],
+                        body: Data()
+                    )
+                )
+            ).load(.pasted(text: #"{"sites":[]}"#, baseURL: nil))
+        }
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation after parse")
+        } catch is CancellationError {
+            // Expected.
+        }
+    }
 }
 
 private struct StubHTTPClient: HTTPClient {

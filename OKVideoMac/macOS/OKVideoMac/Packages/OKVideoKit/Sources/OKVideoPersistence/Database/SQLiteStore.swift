@@ -87,39 +87,66 @@ public actor SQLiteStore:
 
     public func saveConfiguration(_ configuration: StoredConfiguration) throws {
         try connection.transaction {
-            if configuration.isActive {
-                try connection.execute("UPDATE configurations SET is_active = 0")
-            }
-            try connection.execute(
-                """
-                INSERT INTO configurations (
-                    id, name, source_kind, source_value, base_url,
-                    raw_data, updated_at, is_active
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    name = excluded.name,
-                    source_kind = excluded.source_kind,
-                    source_value = excluded.source_value,
-                    base_url = excluded.base_url,
-                    raw_data = excluded.raw_data,
-                    updated_at = excluded.updated_at,
-                    is_active = excluded.is_active
-                """,
-                bindings: [
-                    .text(configuration.id.uuidString),
-                    .text(configuration.name),
-                    .text(configuration.sourceKind.rawValue),
-                    .optional(configuration.sourceValue),
-                    .optional(configuration.baseURL?.absoluteString),
-                    .blob(configuration.rawData),
-                    .double(configuration.updatedAt.timeIntervalSince1970),
-                    .integer(configuration.isActive ? 1 : 0)
-                ]
-            )
+            try writeConfiguration(configuration)
+        }
+    }
+
+    /// Atomically persists an imported active configuration and returns the
+    /// post-commit configuration list. Cancellation before the transaction's
+    /// final read rolls the entire import back.
+    public func commitImportedConfiguration(
+        _ configuration: StoredConfiguration
+    ) throws -> [StoredConfiguration] {
+        try Task.checkCancellation()
+        return try connection.transaction {
+            try Task.checkCancellation()
+            try writeConfiguration(configuration)
+            try Task.checkCancellation()
+            let values = try readConfigurations()
+            try Task.checkCancellation()
+            return values
         }
     }
 
     public func configurations() throws -> [StoredConfiguration] {
+        try readConfigurations()
+    }
+
+    private func writeConfiguration(
+        _ configuration: StoredConfiguration
+    ) throws {
+        if configuration.isActive {
+            try connection.execute("UPDATE configurations SET is_active = 0")
+        }
+        try connection.execute(
+            """
+            INSERT INTO configurations (
+                id, name, source_kind, source_value, base_url,
+                raw_data, updated_at, is_active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                source_kind = excluded.source_kind,
+                source_value = excluded.source_value,
+                base_url = excluded.base_url,
+                raw_data = excluded.raw_data,
+                updated_at = excluded.updated_at,
+                is_active = excluded.is_active
+            """,
+            bindings: [
+                .text(configuration.id.uuidString),
+                .text(configuration.name),
+                .text(configuration.sourceKind.rawValue),
+                .optional(configuration.sourceValue),
+                .optional(configuration.baseURL?.absoluteString),
+                .blob(configuration.rawData),
+                .double(configuration.updatedAt.timeIntervalSince1970),
+                .integer(configuration.isActive ? 1 : 0)
+            ]
+        )
+    }
+
+    private func readConfigurations() throws -> [StoredConfiguration] {
         var values: [StoredConfiguration] = []
         try connection.query(
             """

@@ -893,6 +893,7 @@ actor NodeBundleRuntimeService {
 
     func loadConfiguration(from sourceURL: URL) async throws -> LoadedConfiguration {
         let baseURL = try await ensureReady(from: sourceURL)
+        try Task.checkCancellation()
         let configURL = baseURL.appendingPathComponent("config")
         let response = try await localHTTPClient.send(
             HTTPRequest(
@@ -902,8 +903,11 @@ actor NodeBundleRuntimeService {
                 retryPolicy: HTTPRetryPolicy(maximumRetries: 1, initialDelay: 0.25)
             )
         )
+        try Task.checkCancellation()
         let normalized = try Self.normalizeConfiguration(response.body)
+        try Task.checkCancellation()
         let parsed = try ConfigurationParser().parse(normalized)
+        try Task.checkCancellation()
         return LoadedConfiguration(
             source: .remote(sourceURL),
             baseURL: baseURL,

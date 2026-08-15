@@ -35,7 +35,9 @@ public struct ConfigurationLoader {
                 retryPolicy: .standard
             )
             let response = try await httpClient.send(request)
+            try Task.checkCancellation()
             rawData = try payloadDecoder.decode(response.body)
+            try Task.checkCancellation()
             resolvedBaseURL = response.url.deletingLastPathComponent()
 
         case .localFile(let url):
@@ -63,14 +65,17 @@ public struct ConfigurationLoader {
                 throw AppError.configuration("粘贴内容不是有效 UTF-8")
             }
             rawData = try payloadDecoder.decode(data)
+            try Task.checkCancellation()
             resolvedBaseURL = baseURL
         }
 
+        let configuration = try parser.parse(rawData)
+        try Task.checkCancellation()
         return LoadedConfiguration(
             source: source,
             baseURL: resolvedBaseURL,
             rawData: rawData,
-            configuration: try parser.parse(rawData),
+            configuration: configuration,
             loadedAt: now()
         )
     }

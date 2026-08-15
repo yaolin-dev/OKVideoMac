@@ -46,6 +46,65 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(storedHistoryIDs, [history.id])
     }
 
+    func testImportedConfigurationCommitReturnsPostCommitState() async throws {
+        let store = try makeStore()
+        let original = StoredConfiguration(
+            name: "Original",
+            sourceKind: .pasted,
+            rawData: Data(#"{"sites":[]}"#.utf8),
+            isActive: true
+        )
+        let imported = StoredConfiguration(
+            name: "Imported",
+            sourceKind: .remote,
+            sourceValue: "https://example.invalid/config.json",
+            rawData: Data(#"{"sites":[]}"#.utf8),
+            isActive: true
+        )
+        try await store.saveConfiguration(original)
+
+        let committed = try await store.commitImportedConfiguration(imported)
+        let activeID = try await store.activeConfiguration()?.id
+
+        XCTAssertEqual(committed.count, 2)
+        XCTAssertEqual(committed.filter(\.isActive).map(\.id), [imported.id])
+        XCTAssertEqual(activeID, imported.id)
+    }
+
+    func testCancelledImportedConfigurationDoesNotPersistOrDeactivate() async throws {
+        let store = try makeStore()
+        let original = StoredConfiguration(
+            name: "Original",
+            sourceKind: .pasted,
+            rawData: Data(#"{"sites":[]}"#.utf8),
+            isActive: true
+        )
+        let cancelled = StoredConfiguration(
+            name: "Cancelled",
+            sourceKind: .remote,
+            sourceValue: "https://example.invalid/cancelled.json",
+            rawData: Data(#"{"sites":[]}"#.utf8),
+            isActive: true
+        )
+        try await store.saveConfiguration(original)
+
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await store.commitImportedConfiguration(cancelled)
+        }
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation before SQLite commit")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let stored = try await store.configurations()
+        let activeID = try await store.activeConfiguration()?.id
+        XCTAssertEqual(stored.map(\.id), [original.id])
+        XCTAssertEqual(activeID, original.id)
+    }
+
     func testFavoriteUpsertDoesNotDuplicate() async throws {
         let store = try makeStore()
         try await store.saveFavorite(
