@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>OK影视 Mac</string>
+	<string>OKVideoMac</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>

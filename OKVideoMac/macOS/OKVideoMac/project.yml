@@ -43,7 +43,7 @@ targets:
     info:
       path: Supporting/Info.plist
       properties:
-        CFBundleDisplayName: OK影视 Mac
+        CFBundleDisplayName: OKVideoMac
         CFBundleName: OKVideoMac
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
