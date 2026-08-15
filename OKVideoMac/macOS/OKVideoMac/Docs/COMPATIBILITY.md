@@ -78,8 +78,8 @@
 | macOS 12.0+ | Supported | Info.plist 和全部 Mach-O `minos` 由包体脚本验证 |
 | Intel Mac / Universal Binary | Not Implemented | 当前只交付 arm64 |
 | 本地 Hardened Runtime 包 | Supported | ad-hoc 签名，仅主 App 使用开发期 Library Validation 例外 |
-| Developer ID 分发 | Partial | 显式 nested-code 签名与权限校验流程已实现，尚无真实证书验收 |
-| Notarization / Staple / Gatekeeper | Partial | 脚本路径已实现，尚未用真实发布凭据在干净机验收 |
+| Developer ID 分发 | Supported | 0.3.41（Build 63）正式 DMG 已使用 Developer ID Application 签名，Hardened Runtime、secure timestamp 与权限边界验证通过 |
+| Notarization / Staple / Gatekeeper | Supported | 0.3.41（Build 63）App 与 DMG 的 Apple notarization、staple 和 Gatekeeper 验证通过 |
 | App Sandbox | Not Applicable | 当前为 Developer ID 外部分发目标；Sandbox 与 Hardened Runtime 是不同边界 |
 
 ## 明确不提供

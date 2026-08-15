@@ -12,18 +12,18 @@ FongMi/TV 的公开配置协议与主要业务流程。当前版本为 **0.3.41�
 - 当前版本：0.3.41（Build 63）
 - 最低系统：macOS 12.0
 - 支持架构：Apple Silicon / arm64
-- 当前候选验证：198 项 Xcode 集成测试和 94 项 OKVideoKit 测试通过，arm64
-  Release 与 Android Release Bridge 构建通过；本地 Release packaging 会继续
-  验证 28 个 Mach-O 的架构、部署目标、依赖闭包、签名和 Hardened Runtime
-- 对外分发：Build 63 候选尚未执行 Developer ID signing、notarization、staple
-  或 Gatekeeper 实物验收
+- 发行验证：198 项 Xcode 集成测试和 94 项 OKVideoKit 测试通过，arm64 Release
+  与 Android Release Bridge 构建通过；正式 Release packaging 已验证 28 个
+  Mach-O 的架构、部署目标、依赖闭包、签名和 Hardened Runtime
+- 对外分发：Build 63 已完成 Developer ID signing、Apple notarization、staple
+  和 Gatekeeper 实物验收
 
 ## 安装
 
 正式公开版本发布后：
 
 1. 只从本仓库官方 GitHub Releases 页面下载 0.3.41 对应的 macOS arm64 发布包；
-2. 解压 ZIP 或打开正式发布 artifact；
+2. 打开 `OKVideoMac-0.3.41-macOS-arm64.dmg`；
 3. 将 `OKVideoMac.app` 移入 `/Applications`；
 4. 从 Applications 或 Finder 正常启动。
 
@@ -31,9 +31,9 @@ FongMi/TV 的公开配置协议与主要业务流程。当前版本为 **0.3.41�
 
 ### Gatekeeper 与 macOS 安全
 
-正式公开分发流程的目标是 Developer ID Application 签名、Hardened Runtime、
-Apple notarization 和 staple。完成该流程的正式包不应要求关闭任何 macOS 安全
-机制。
+0.3.41（Build 63）正式 DMG 已使用 Developer ID Application: Yao Lin
+（KGG363ABK9）签名，启用 Hardened Runtime，并通过 Apple notarization、staple
+和 Gatekeeper 验证。安装和运行不需要关闭任何 macOS 安全机制。
 
 如果 macOS 阻止首次打开已从官方 Release 下载的包，可先在 Finder 中按住
 Control 点击（或右键点击）App，再选择 **打开**。也可前往 **系统设置 →
@@ -42,10 +42,8 @@ Control 点击（或右键点击）App，再选择 **打开**。也可前往 **�
 不要全局关闭 Gatekeeper、关闭 SIP、删除系统级 quarantine policy、修改系统
 安全数据库或使用其他绕过 Apple 安全机制的方法。
 
-当前仓库已验证的本地 Release 包使用 ad-hoc 签名，只证明打包结构、Hardened
-Runtime 和签名流程的本地有效性；它不是 Developer ID 签名或 Apple 已公证的
-公开发行包。只有完成上述正式分发流程并通过 Gatekeeper 验证的 artifact 才可
-作为官方 Release 上传。
+请只使用本仓库 GitHub Releases 页面提供的正式 DMG，并核对 Release 页面公布的
+SHA-256；本地开发包或来源不明的副本不属于正式发行 artifact。
 
 ## Native Mode 与 Android Compatibility Mode
 
@@ -100,8 +98,6 @@ image；缺少已安装的 arm64 system image 或命令行工具时只报告缺�
 - Node bundles/scripts 以高权限子进程执行，只应使用可信、可核验的来源；
 - juniversalchardet 保留用于兼容性，其状态为 **Documented License
   Interpretation Risk**；**Independent Legal Review: NOT PERFORMED**；
-- 正式 Developer ID 签名、公证、staple 和 Gatekeeper 实物验收仍是发布前
-  Apple external gates；
 - 项目不实施 DRM 绕过、TVBus 或 ForceTech 私有引擎。
 
 完整工程状态见
@@ -148,7 +144,7 @@ Git tag 指向的 exact release commit 才是项目源码基准；不要把移�
 - third-party source package：
   `OKVideoMac-0.3.41-build63-third-party-source.tar.gz`；
 - license package：`OKVideoMac-0.3.41-build63-licenses.tar.gz`；
-- macOS artifact：`OKVideoMac-0.3.41-macOS-arm64.zip`。
+- macOS artifact：`OKVideoMac-0.3.41-macOS-arm64.dmg`。
 
 文件清单与生成规则见
 [`Docs/SOURCE_RELEASE_PROCESS.md`](../Docs/SOURCE_RELEASE_PROCESS.md) 和
