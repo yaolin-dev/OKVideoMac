@@ -4,12 +4,15 @@ Audit date: 2026-08-15 (Asia/Shanghai)
 
 ## 1. Final Status
 
-`READY_WITH_REMAINING_GATES`
+`READY_FOR_BASELINE_FREEZE`
 
 The integrated source passes the automated engineering, clean Release build,
-runtime smoke, bundle, source-release, SBOM, secret, and runtime-path gates.
-Formal distribution signing can begin after maintainer review. GitHub publication
-and the final DMG remain gated by the explicit items in sections 15 and 16.
+runtime smoke, bundle, source-release, SBOM, secret, runtime-path, targeted Git
+history privacy, and engineering license/provenance gates. The next exact commit
+containing this closure is ready to become the unique baseline candidate.
+Distribution signing remains blocked until the maintainer completes and accepts
+the final manual regression. GitHub publication and the final DMG remain gated
+by the later controlled release stages.
 
 ## 2. New Release Candidate
 
@@ -284,21 +287,33 @@ or test/developer-tool-only, not user runtime dependencies.
 
 ## 11. Privacy Audit
 
-`ATTENTION`
+`PASS_ACCEPTED`
 
-The current distributable source/package scan is clean. Candidate Git ancestry
-contains the local path `/Users/linyao/` in historical `AGENTS.md`, introduced
-by `008a1e10fdd179a4ec2aea4d958ca01a405c3e5b`. This is not a credential and is
-excluded from the generated source release, but it would remain visible if the
-complete Git history were made public. No history was rewritten. The maintainer
-must explicitly accept that disclosure or authorize a separate history privacy
-remediation before making the repository public.
+`HISTORY_PRIVACY_CLASSIFICATION=BENIGN_LOCAL_PATHS_ONLY`
 
-Candidate-ancestry author email was `codex@openai.com`; no private maintainer
-email, user database, account, cookie, or private content-source payload was
-found.
+The current distributable source/package scan is clean. A targeted complete
+history review found the local path prefix `/Users/linyao/` only in release
+evidence and development-path records: historical `AGENTS.md`, a DEX audit,
+the Android dependency inventory, and this report. The corresponding changes
+contain path strings only, not the contents of private files. The maintainer's
+stated policy accepts this limited disclosure, so no history rewrite is
+required.
+
+Runtime source no longer depends on the maintainer home path, and these
+historical strings do not affect product portability. Targeted history scans
+found no private maintainer email or phone number, customer/internal material,
+user database, account, cookie, credential assignment, private source URL,
+token, password, Authorization secret, signing/notary credential, private key,
+certificate payload, `.p12`, or App Store Connect/GitHub secret. The lone
+`Authorization: Bearer legacy-secret` occurrence and credential-shaped URLs are
+explicit test fixtures on reserved example domains. Candidate-ancestry author
+email is `codex@openai.com`.
 
 ## 12. License / Provenance
+
+`LICENSE_PROVENANCE_ENGINEERING_GATE=PASS`
+
+`READY_FOR_MAINTAINER_LICENSE_ACCEPTANCE`
 
 - Native inventory: 28 Mach-O objects.
 - Binary/source mapping classification: A=10, B=15, C=3, D=0. No unmapped
@@ -315,9 +330,12 @@ found.
 - Source release, third-party source archive, license archive, index, manifest,
   and checksums were generated and verified offline.
 
-No source/binary mapping defect was found. A maintainer or counsel review of the
-published license/provenance set remains an external GitHub-publication gate; no
-claim of legal advice is made by this engineering audit.
+No source/binary mapping defect or new explicit license-text omission was
+found. The authoritative third-party index, source provenance manifest, and
+binary/source mapping have been aligned to 0.3.41 (63). The documented
+`juniversalchardet` interpretation risk and partial native reproducibility
+grades remain disclosed; they are not hidden or misrepresented. This is an
+engineering publication acceptance, not legal advice.
 
 ## 13. Documentation
 
@@ -378,13 +396,16 @@ assessment, or final DMG creation occurred.
 
 ## 15. Release Baseline
 
-`NEW_RELEASE_BASELINE_CANDIDATE` is intentionally **not defined yet**.
+The commit containing this final privacy/license closure and build-63 metadata
+alignment is ready to become `NEW_RELEASE_BASELINE_CANDIDATE`. A commit cannot
+embed its own object ID, so its exact SHA is recorded in the maintainer handoff
+and immutable build evidence immediately after this documentation commit is
+created.
 
-The integration source HEAD is an engineering candidate and has passed the
-automated gates, but the Git-history privacy decision, external license review,
-and final maintainer manual regression remain open. The historical baseline
-`ae7fa3d20c2feb46f53758f946d7b18cd239b76a` was not changed, deleted, amended,
-or rewritten.
+The historical baseline `ae7fa3d20c2feb46f53758f946d7b18cd239b76a`
+was not changed, deleted, amended, or rewritten. Once the exact new SHA is
+recorded, Release Freeze begins and the previous `f169e24` artifact is evidence
+only; it cannot be reused as the final candidate.
 
 ## 16. Remaining Issues
 
@@ -394,17 +415,9 @@ None found.
 
 ### P1
 
-1. GitHub history privacy decision: the historical local username/path described
-   in section 11 requires explicit maintainer acceptance or separately authorized
-   history remediation before the repository is made public.
-2. Final maintainer manual regression has not been repeated against the eventual
-   Developer ID signed candidate. Real configuration import, playback/seek/
+1. Final maintainer manual regression has not been repeated against the exact
+   frozen candidate. Real configuration import, playback/seek/
    episode switching, Live switching, and restart persistence must be accepted.
-3. Published license/provenance materials need the maintainer's external legal
-   acceptance before public-repository publication.
-4. Existing Swift 6 concurrency diagnostics are technical debt for a future
-   language-mode migration. They do not block the current Swift 5 Release build,
-   and no new distinct warning class remains from the recent fix set.
 
 ### P2
 
@@ -412,25 +425,31 @@ None found.
    fixed local SDK/AVD/serial default.
 2. Align Android command-line tools, SDK XML, and Kotlin metadata versions.
 3. Add build-phase output declarations and plan the future OpenGL/Metal migration.
+4. Resolve existing Swift 6 concurrency diagnostics during a future language-mode
+   migration. They do not block the current Swift 5 Release build, and no new
+   distinct warning class remains from the release fixes.
 
 ## 17. Release Gates
 
-- `ENGINEERING_OPEN_SOURCE_READINESS=READY_WITH_EXTERNAL_GATES`
-- `DISTRIBUTION_SIGNING_GATE=READY_FOR_DISTRIBUTION_SIGNING`
+- `ENGINEERING_OPEN_SOURCE_READINESS=PASS`
+- `GIT_HISTORY_PRIVACY=PASS_ACCEPTED`
+- `LICENSE_PROVENANCE_ENGINEERING_GATE=PASS`
+- `DISTRIBUTION_SIGNING_GATE=WAITING_FOR_FINAL_MANUAL_REGRESSION`
 - `GITHUB_PUBLICATION_GATE=NOT_READY`
 - `FINAL_DMG_GATE=NOT_READY`
 
-The signing gate means the exact engineering source is technically ready to
-enter the controlled Developer ID workflow; it does not mean signing was
-performed. GitHub and DMG gates are deliberately independent.
+The frozen candidate must first be rebuilt from its exact SHA and pass the final
+engineering verification and maintainer manual regression. It does not mean
+signing was performed. GitHub and DMG gates are deliberately independent.
 
 ## 18. Recommended Next Step
 
-`MAINTAINER_REVIEW_GITHUB_HISTORY_PRIVACY_AND_LICENSE_GATES`
+`FREEZE_EXACT_BASELINE_AND_REBUILD_UNSIGNED_FINAL_CANDIDATE`
 
-Resolve or explicitly accept those two publication-only external gates before
-defining the immutable new release baseline candidate and authorizing the next
-controlled distribution-signing run.
+Record the exact documentation-closure commit as the immutable baseline, build
+from that exact SHA in a new clean directory, rerun final engineering checks,
+and then stop for maintainer manual regression. Do not begin distribution
+signing until the maintainer explicitly reports that regression as PASS.
 
 ## 19. Integrity
 
@@ -445,4 +464,3 @@ controlled distribution-signing run.
 - Push: NO
 - Make GitHub public: NO
 - GitHub Release: NO
-

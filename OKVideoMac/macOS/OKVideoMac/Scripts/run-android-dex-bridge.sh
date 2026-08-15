@@ -1,6 +1,13 @@
 #!/bin/zsh
 set -euo pipefail
 
+# DEVELOPER-ONLY MANUAL TOOL.
+# This script is not used by the OKVideoMac product runtime. It intentionally
+# assumes a maintainer-local SDK, AVD, and fixed emulator serial for legacy
+# bridge development. Public users and contributors must not treat these
+# defaults as production runtime behavior; the App uses its ownership-verified
+# managed Android runtime instead.
+
 SCRIPT_DIR=${0:A:h}
 REPOSITORY_ROOT=${SCRIPT_DIR:h:h:h}
 ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-/Volumes/XcodeDev/AndroidSDK}
