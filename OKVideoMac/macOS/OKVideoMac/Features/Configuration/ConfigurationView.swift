@@ -120,7 +120,7 @@ struct ConfigurationView: View {
                 icon: "plus",
                 color: .indigo,
                 title: "导入点播配置",
-                subtitle: "通过 URL 或粘贴 JSON 添加配置"
+                subtitle: "通过 URL 或粘贴内容导入点播配置。"
             ) {
                 Button("导入…") {
                     showingImport = true
@@ -263,7 +263,7 @@ private struct ConfigurationRow: View {
             }
             return LogRedactor.url(url)
         case .localFile: return record.sourceValue ?? "本地文件"
-        case .pasted: return "粘贴的 JSON"
+        case .pasted: return "粘贴内容"
         }
     }
 }
@@ -271,7 +271,7 @@ private struct ConfigurationRow: View {
 private struct ConfigurationImportSheet: View {
     enum Mode: String, CaseIterable, Identifiable {
         case remote = "URL"
-        case pasted = "粘贴 JSON"
+        case pasted = "粘贴内容"
 
         var id: String { rawValue }
     }

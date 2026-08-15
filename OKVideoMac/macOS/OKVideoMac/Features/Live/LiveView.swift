@@ -62,7 +62,7 @@ struct LiveView: View {
             EmptyStateView(
                 systemImage: "dot.radiowaves.left.and.right",
                 title: "尚未添加直播源",
-                message: "请前往“设置 → 直播源”导入 M3U、TXT 或 JSON 直播列表。"
+                message: "点击下方按钮，通过 URL、粘贴内容或本地文件添加 M3U、M3U8、TXT 或 JSON 直播源。"
             )
             Button {
                 state.selectedSettingsPane = .liveSources
@@ -824,7 +824,7 @@ struct LiveSourceImportSheet: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("添加直播源")
                 .font(.title2)
-            Text("直播源独立于点播配置保存，支持 M3U、TXT 和 JSON。")
+            Text("直播源独立于点播配置保存，支持 M3U、M3U8、TXT 和 JSON。")
                 .font(.callout)
                 .foregroundColor(.secondary)
             Picker("方式", selection: $mode) {

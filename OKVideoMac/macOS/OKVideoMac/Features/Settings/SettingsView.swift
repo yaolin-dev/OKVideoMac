@@ -361,7 +361,9 @@ struct SettingsView: View {
                     icon: "square.stack.3d.up.fill",
                     color: .indigo,
                     title: "当前配置",
-                    subtitle: "\(state.visibleSites.count) 个可见站点",
+                    subtitle: state.activeConfigurationRecord == nil
+                        ? "尚未导入点播配置"
+                        : "\(state.visibleSites.count) 个可见站点",
                     value: state.activeConfigurationRecord?.name ?? "未设置"
                 )
             }
@@ -440,12 +442,12 @@ struct SettingsView: View {
 
                 VStack(alignment: .leading, spacing: 6) {
                     Label(
-                        "该模块仅用于 Java/Dex 点播站点，普通播放和 JS 站点不需要它。",
+                        "该模块仅用于需要 Android Java/Dex 运行环境的点播站点；普通 API 站点和 JavaScript 站点不需要启动。",
                         systemImage: "info.circle"
                     )
                     Text(
-                        "应用会复用现有的 OKVideoDexBridge 模拟器数据；"
-                            + "退出 OK影视时不会强制关闭，需要时可在此手动停止。"
+                        "模块启动后会在后台继续运行；"
+                            + "退出 OK影视 Mac 时不会自动停止，可在此手动停止。"
                     )
                     .foregroundColor(.secondary)
                 }
@@ -689,7 +691,7 @@ private struct LiveSourceSettingsPane: View {
                             .foregroundColor(.secondary)
                         Text("尚未添加直播源")
                             .font(.headline)
-                        Text("支持远程 URL、本地 M3U/TXT/JSON 文件和粘贴内容。")
+                        Text("支持远程 URL、本地 M3U/M3U8/TXT/JSON 文件和粘贴内容。")
                             .font(.callout)
                             .foregroundColor(.secondary)
                     }
@@ -714,7 +716,7 @@ private struct LiveSourceSettingsPane: View {
                     icon: "link.badge.plus",
                     color: .teal,
                     title: "通过 URL 或粘贴内容添加",
-                    subtitle: "远程来源可在更新后直接刷新"
+                    subtitle: "远程来源添加后可随时重新下载并刷新"
                 ) {
                     Button("添加…") {
                         showingImport = true

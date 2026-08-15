@@ -26,7 +26,7 @@ struct HomeView: View {
                 EmptyStateView(
                     systemImage: "doc.badge.plus",
                     title: "尚未导入配置",
-                    message: "前往“设置 > 点播配置”导入你有权使用的 FongMi JSON 配置。"
+                    message: "前往“设置 → 点播配置”，通过 URL、粘贴内容或本地文件导入你有权使用的点播配置。"
                 )
         } else if state.visibleSites.isEmpty {
                 EmptyStateView(

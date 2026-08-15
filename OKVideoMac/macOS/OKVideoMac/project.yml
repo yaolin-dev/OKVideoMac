@@ -51,7 +51,7 @@ targets:
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
-        NSHumanReadableCopyright: "Copyright © 2026 OKVideoMac contributors"
+        NSHumanReadableCopyright: "Copyright © 2026 Yao Lin"
         CFBundleDocumentTypes:
           - CFBundleTypeName: FongMi Configuration
             CFBundleTypeRole: Editor

@@ -176,7 +176,7 @@ public enum ConfigurationSource: Equatable, Sendable {
         switch self {
         case .remote(let url): return LogRedactor.url(url)
         case .localFile(let url): return url.lastPathComponent
-        case .pasted: return "粘贴的 JSON"
+        case .pasted: return "粘贴内容"
         }
     }
 
