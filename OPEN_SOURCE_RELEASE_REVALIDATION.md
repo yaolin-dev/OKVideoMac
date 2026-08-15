@@ -292,7 +292,7 @@ or test/developer-tool-only, not user runtime dependencies.
 `HISTORY_PRIVACY_CLASSIFICATION=BENIGN_LOCAL_PATHS_ONLY`
 
 The current distributable source/package scan is clean. A targeted complete
-history review found the local path prefix `/Users/linyao/` only in release
+history review found the local path prefix `/Users/<maintainer>/` only in release
 evidence and development-path records: historical `AGENTS.md`, a DEX audit,
 the Android dependency inventory, and this report. The corresponding changes
 contain path strings only, not the contents of private files. The maintainer's
