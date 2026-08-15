@@ -708,6 +708,12 @@ private struct LivePlaybackNavigationContext {
     let channels: [LiveChannel]
 }
 
+private struct PendingPlaybackStartupGate {
+    let identity: UUID
+    let continuation: AsyncThrowingStream<Void, Error>.Continuation
+    let timeoutTask: Task<Void, Never>
+}
+
 @MainActor
 final class AppState: ObservableObject {
     let navigation = AppNavigationState()
@@ -818,6 +824,10 @@ final class AppState: ObservableObject {
     private var pendingNodeOperation: PendingNodeOperation?
     private var playbackSessionID = UUID()
     private var activePlayerRequestID = UUID()
+    private var pendingPlaybackStartupGates:
+        [UUID: PendingPlaybackStartupGate] = [:]
+    private var presentedPlaybackErrorRequestIDs = Set<UUID>()
+    private var playbackRequestsResolving = Set<UUID>()
     private var playbackQualitySwitchSessionID = UUID()
     private var lastHistorySaveAt = Date.distantPast
     private var pendingHistoryWrite: PlaybackHistoryWrite?
@@ -2320,6 +2330,8 @@ final class AppState: ObservableObject {
         guard !isShutdownRequested,
               let environment,
               let provider = providers[detail.summary.siteKey] else { return }
+        cancelAllPlaybackStartupGates()
+        presentedPlaybackErrorRequestIDs.removeAll()
         // Detail is presented above SearchView, so opening the player does not
         // reliably trigger SearchView.onDisappear. Stop the aggregate search
         // explicitly before cloud URL resolution starts; otherwise its site
@@ -2327,6 +2339,10 @@ final class AppState: ObservableObject {
         // proxy traffic. Keep the accumulated results for a fast return.
         cancelSearch()
         let sessionID = UUID()
+        playbackRequestsResolving.insert(sessionID)
+        defer {
+            playbackRequestsResolving.remove(sessionID)
+        }
         PlayerStartupTraceStore.shared.begin(
             requestID: sessionID,
             mode: environment.player.mode
@@ -2550,6 +2566,7 @@ final class AppState: ObservableObject {
             playbackResolutionState = .exhausted
             playbackFailureSummary = message
             playerSnapshot.status = .failed(message)
+            presentPlaybackErrorOnce(message, requestID: sessionID)
         } catch is CancellationError {
             if playbackSessionID == sessionID {
                 await dismissPlayerSurfaceAndRestoreWindow()
@@ -2566,6 +2583,7 @@ final class AppState: ObservableObject {
             playbackResolutionState = .failed
             playbackFailureSummary = message
             playerSnapshot.status = .failed(message)
+            presentPlaybackErrorOnce(message, requestID: sessionID)
         }
     }
 
@@ -3348,6 +3366,8 @@ final class AppState: ObservableObject {
         }
 
         isShutdownRequested = true
+        cancelAllPlaybackStartupGates()
+        playbackRequestsResolving.removeAll()
         playbackSessionID = UUID()
         activePlayerRequestID = UUID()
         playbackQualitySwitchSessionID = UUID()
@@ -3429,6 +3449,8 @@ final class AppState: ObservableObject {
         isClosingPlayer = true
         defer { isClosingPlayer = false }
         let closingRequestID = activePlayerRequestID
+        cancelAllPlaybackStartupGates()
+        playbackRequestsResolving.removeAll()
         playbackSessionID = UUID()
         activePlayerRequestID = UUID()
         playbackQualitySwitchSessionID = UUID()
@@ -5222,6 +5244,16 @@ final class AppState: ObservableObject {
                     await self.applyPlayerSubtitlePreference(
                         requestID: requestID
                     )
+                case .playbackStarted(let requestID):
+                    guard PlaybackRequestOwnershipPolicy.accepts(
+                        requestID: requestID,
+                        activeRequestID: self.activePlayerRequestID
+                    ), let requestID else {
+                        continue
+                    }
+                    _ = self.completePlaybackStartupGate(
+                        requestID: requestID
+                    )
                 case .ended(let requestID):
                     guard PlaybackRequestOwnershipPolicy.accepts(
                         requestID: requestID,
@@ -5258,7 +5290,30 @@ final class AppState: ObservableObject {
                         )
                         continue
                     }
-                    self.show(AppError.playback(message), title: "播放器错误")
+                    if let requestID,
+                       self.failPlaybackStartupGate(
+                           requestID: requestID,
+                           error: AppError.playback(message)
+                       ) {
+                        self.playbackFailureSummary = message
+                        continue
+                    }
+                    if let requestID,
+                       self.playbackRequestsResolving.contains(requestID) {
+                        self.playbackFailureSummary = message
+                        continue
+                    }
+                    if let requestID {
+                        self.presentPlaybackErrorOnce(
+                            message,
+                            requestID: requestID
+                        )
+                    } else {
+                        self.show(
+                            AppError.playback(message),
+                            title: "播放器错误"
+                        )
+                    }
                 }
             }
         }
@@ -5355,6 +5410,108 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func beginPlaybackStartupGate(
+        requestID: UUID,
+        timeoutSeconds: UInt64 = 12
+    ) -> (
+        identity: UUID,
+        stream: AsyncThrowingStream<Void, Error>
+    ) {
+        cancelPlaybackStartupGate(requestID: requestID)
+        let identity = UUID()
+        var captured: AsyncThrowingStream<Void, Error>.Continuation!
+        let stream = AsyncThrowingStream<Void, Error>(
+            bufferingPolicy: .bufferingNewest(1)
+        ) { continuation in
+            captured = continuation
+        }
+        let timeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(
+                nanoseconds: timeoutSeconds * 1_000_000_000
+            )
+            guard !Task.isCancelled else { return }
+            self?.failPlaybackStartupGate(
+                requestID: requestID,
+                expectedIdentity: identity,
+                error: AppError.playback(
+                    "该线路已载入，但 \(timeoutSeconds) 秒内没有产生音视频"
+                )
+            )
+        }
+        pendingPlaybackStartupGates[requestID] = PendingPlaybackStartupGate(
+            identity: identity,
+            continuation: captured,
+            timeoutTask: timeoutTask
+        )
+        return (identity, stream)
+    }
+
+    @discardableResult
+    private func completePlaybackStartupGate(requestID: UUID) -> Bool {
+        guard let gate = pendingPlaybackStartupGates.removeValue(
+            forKey: requestID
+        ) else { return false }
+        gate.timeoutTask.cancel()
+        gate.continuation.yield(())
+        gate.continuation.finish()
+        return true
+    }
+
+    @discardableResult
+    private func failPlaybackStartupGate(
+        requestID: UUID,
+        expectedIdentity: UUID? = nil,
+        error: Error
+    ) -> Bool {
+        guard let gate = pendingPlaybackStartupGates[requestID],
+              expectedIdentity == nil || gate.identity == expectedIdentity else {
+            return false
+        }
+        pendingPlaybackStartupGates[requestID] = nil
+        gate.timeoutTask.cancel()
+        gate.continuation.finish(throwing: error)
+        return true
+    }
+
+    private func cancelPlaybackStartupGate(
+        requestID: UUID,
+        expectedIdentity: UUID? = nil
+    ) {
+        _ = failPlaybackStartupGate(
+            requestID: requestID,
+            expectedIdentity: expectedIdentity,
+            error: CancellationError()
+        )
+    }
+
+    private func cancelAllPlaybackStartupGates() {
+        let gates = pendingPlaybackStartupGates
+        pendingPlaybackStartupGates.removeAll()
+        for gate in gates.values {
+            gate.timeoutTask.cancel()
+            gate.continuation.finish(throwing: CancellationError())
+        }
+    }
+
+    private func awaitPlaybackStartup(
+        _ stream: AsyncThrowingStream<Void, Error>
+    ) async throws {
+        var iterator = stream.makeAsyncIterator()
+        guard try await iterator.next() != nil else {
+            throw CancellationError()
+        }
+    }
+
+    private func presentPlaybackErrorOnce(
+        _ message: String,
+        requestID: UUID
+    ) {
+        guard presentedPlaybackErrorRequestIDs.insert(requestID).inserted else {
+            return
+        }
+        show(AppError.playback(message), title: "播放器错误")
+    }
+
     private func loadResolvedPlayback(
         _ media: ResolvedMedia,
         detail: VideoDetail,
@@ -5397,21 +5554,37 @@ final class AppState: ObservableObject {
         selectedDetail = nil
         presentPlayer()
         activePlayerRequestID = sessionID
-        try await environment.player.load(
-            media,
-            startPosition: startPosition,
-            requestID: sessionID
-        )
-        guard playbackSessionID == sessionID else {
-            throw CancellationError()
+        let startupGate = beginPlaybackStartupGate(requestID: sessionID)
+        defer {
+            cancelPlaybackStartupGate(
+                requestID: sessionID,
+                expectedIdentity: startupGate.identity
+            )
         }
-        // A natural EOF can leave libmpv's pause/keep-open state latched while
-        // the next episode is being resolved. Reassert autoplay only after the
-        // replacement file has finished loading so automatic episode advance
-        // cannot remain frozen on its first frame.
-        try await environment.player.play()
-        guard playbackSessionID == sessionID else {
-            throw CancellationError()
+        do {
+            try await environment.player.load(
+                media,
+                startPosition: startPosition,
+                requestID: sessionID
+            )
+            guard playbackSessionID == sessionID else {
+                throw CancellationError()
+            }
+            // A natural EOF can leave libmpv's pause/keep-open state latched
+            // while the next episode is being resolved. Reassert autoplay
+            // after file-loaded, then wait for actual media progress before
+            // committing this resolver candidate as playable.
+            try await environment.player.play()
+            guard playbackSessionID == sessionID else {
+                throw CancellationError()
+            }
+            try await awaitPlaybackStartup(startupGate.stream)
+            guard playbackSessionID == sessionID else {
+                throw CancellationError()
+            }
+        } catch {
+            await environment.player.stop()
+            throw error
         }
         activePlayback = playback
         pendingPlayback = nil

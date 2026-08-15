@@ -82,6 +82,7 @@ public struct PlayerSnapshot: Equatable, Sendable {
 public enum PlayerEvent: Equatable, Sendable {
     case snapshot(PlayerSnapshot, requestID: UUID?)
     case fileLoaded(requestID: UUID?)
+    case playbackStarted(requestID: UUID?)
     case ended(requestID: UUID?)
     case error(String, requestID: UUID?)
 }

@@ -1611,6 +1611,69 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testNothingToPlayErrorUsesActionableLocalizedMessage() {
+        XCTAssertEqual(
+            MPVPlaybackErrorPolicy.userFacingMessage(
+                nativeMessage: "no audio or video data played"
+            ),
+            "该线路没有返回可播放的音视频数据"
+        )
+        XCTAssertEqual(
+            MPVPlaybackErrorPolicy.userFacingMessage(
+                nativeMessage: "fixture error"
+            ),
+            "fixture error"
+        )
+    }
+
+    func testPlaybackStartupRequiresFileLoadedAndCompletesOnlyOnce() {
+        let requestID = UUID()
+        let playerID = UUID()
+        let store = PlayerStartupTraceStore.shared
+        store.begin(requestID: requestID, mode: .warmStop)
+        store.markClientReady(requestID: requestID, playerID: playerID)
+        store.markLoadfileIssued(requestID: requestID, playerID: playerID)
+
+        XCTAssertNil(store.markFirstFrame(playerID: playerID))
+
+        store.markFileLoaded(requestID: requestID, playerID: playerID)
+        store.markFileLoaded(requestID: requestID, playerID: playerID)
+        XCTAssertEqual(store.markFirstFrame(playerID: playerID), requestID)
+        XCTAssertNil(store.markFirstFrame(playerID: playerID))
+        XCTAssertNil(store.markTimelineProgress(playerID: playerID))
+    }
+
+    func testTimelineProgressCanConfirmAudioOnlyPlayback() {
+        let requestID = UUID()
+        let playerID = UUID()
+        let store = PlayerStartupTraceStore.shared
+        store.begin(requestID: requestID, mode: .warmStop)
+        store.markClientReady(requestID: requestID, playerID: playerID)
+        store.markLoadfileIssued(requestID: requestID, playerID: playerID)
+        store.markFileLoaded(requestID: requestID, playerID: playerID)
+
+        XCTAssertEqual(
+            store.markTimelineProgress(playerID: playerID),
+            requestID
+        )
+        XCTAssertNil(store.markFirstFrame(playerID: playerID))
+    }
+
+    func testPlaybackStartSignalResetsIndependentlyOfTracing() {
+        let signal = PlayerPlaybackStartSignal()
+        let failedCandidateRequestID = UUID()
+        let fallbackRequestID = UUID()
+
+        signal.reset(requestID: failedCandidateRequestID)
+        XCTAssertNil(signal.claimPlaybackStarted())
+        signal.cancel()
+
+        signal.reset(requestID: fallbackRequestID)
+        signal.markFileLoaded()
+        XCTAssertEqual(signal.claimPlaybackStarted(), fallbackRequestID)
+        XCTAssertNil(signal.claimPlaybackStarted())
+    }
+
     func testMPVTimelinePropertiesAreTheOnlyRateLimitedSnapshots() {
         XCTAssertTrue(MPVPlayerClient.isTimelineProperty("time-pos"))
         XCTAssertTrue(

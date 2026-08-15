@@ -33,6 +33,15 @@ enum PlayerLoadTimeoutPolicy {
     }
 }
 
+enum MPVPlaybackErrorPolicy {
+    static func userFacingMessage(nativeMessage: String) -> String {
+        if nativeMessage == "no audio or video data played" {
+            return "该线路没有返回可播放的音视频数据"
+        }
+        return nativeMessage
+    }
+}
+
 enum PlayerExperimentLogger {
     static func lifecycle(
         _ message: String,
@@ -57,6 +66,21 @@ enum PlayerExperimentLogger {
     ) {
         write(
             category: "MPV-PERF",
+            message: message,
+            playerID: playerID,
+            requestID: requestID,
+            mode: mode
+        )
+    }
+
+    static func failure(
+        _ message: String,
+        playerID: UUID?,
+        requestID: UUID?,
+        mode: PlayerTeardownMode
+    ) {
+        write(
+            category: "MPV-ERROR",
             message: message,
             playerID: playerID,
             requestID: requestID,
@@ -164,7 +188,7 @@ final class PlayerStartupTraceStore {
     func markFileLoaded(requestID: UUID, playerID: UUID) {
         let now = ProcessInfo.processInfo.systemUptime
         lock.lock()
-        guard var trace = traces[requestID] else {
+        guard var trace = traces[requestID], trace.t3 == nil else {
             lock.unlock()
             return
         }
@@ -182,7 +206,20 @@ final class PlayerStartupTraceStore {
         )
     }
 
-    func markFirstFrame(playerID: UUID) {
+    @discardableResult
+    func markFirstFrame(playerID: UUID) -> UUID? {
+        completePlaybackStart(playerID: playerID, phase: "first_frame")
+    }
+
+    @discardableResult
+    func markTimelineProgress(playerID: UUID) -> UUID? {
+        completePlaybackStart(playerID: playerID, phase: "timeline_progress")
+    }
+
+    private func completePlaybackStart(
+        playerID: UUID,
+        phase: String
+    ) -> UUID? {
         let now = ProcessInfo.processInfo.systemUptime
         let completed: Trace?
         lock.lock()
@@ -200,14 +237,14 @@ final class PlayerStartupTraceStore {
         guard let trace = completed,
               let t1 = trace.t1,
               let t2 = trace.t2,
-              let t3 = trace.t3 else { return }
+              let t3 = trace.t3 else { return nil }
         let clientInit = milliseconds(t1 - trace.t0)
         let clickToLoadfile = milliseconds(t2 - trace.t0)
         let loadToFileLoaded = milliseconds(t3 - t2)
         let fileLoadedToFirstFrame = milliseconds(now - t3)
         let total = milliseconds(now - trace.t0)
         PlayerExperimentLogger.performance(
-            "phase=first_frame client_init_ms=\(clientInit)"
+            "phase=\(phase) client_init_ms=\(clientInit)"
                 + " click_to_loadfile_ms=\(clickToLoadfile)"
                 + " loadfile_to_file_loaded_ms=\(loadToFileLoaded)"
                 + " file_loaded_to_first_frame_ms=\(fileLoadedToFirstFrame)"
@@ -216,6 +253,7 @@ final class PlayerStartupTraceStore {
             requestID: trace.requestID,
             mode: trace.mode
         )
+        return trace.requestID
     }
 
     func cancel(playerID: UUID) {
@@ -237,6 +275,48 @@ final class PlayerStartupTraceStore {
 
     private func milliseconds(_ interval: TimeInterval) -> Int {
         max(0, Int((interval * 1_000).rounded()))
+    }
+}
+
+/// Owns the playback-start signal for the media currently loaded by one mpv
+/// client. This is deliberately independent from performance tracing: a
+/// failed candidate may clear its trace before the resolver tries the next
+/// candidate with the same request ID, but that must never prevent the next
+/// candidate from confirming real playback.
+final class PlayerPlaybackStartSignal {
+    private let lock = NSLock()
+    private var requestID: UUID?
+    private var fileLoaded = false
+    private var wasClaimed = false
+
+    func reset(requestID: UUID) {
+        lock.lock()
+        self.requestID = requestID
+        fileLoaded = false
+        wasClaimed = false
+        lock.unlock()
+    }
+
+    func markFileLoaded() {
+        lock.lock()
+        fileLoaded = true
+        lock.unlock()
+    }
+
+    func claimPlaybackStarted() -> UUID? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard fileLoaded, !wasClaimed, let requestID else { return nil }
+        wasClaimed = true
+        return requestID
+    }
+
+    func cancel() {
+        lock.lock()
+        requestID = nil
+        fileLoaded = false
+        wasClaimed = false
+        lock.unlock()
     }
 }
 
@@ -297,6 +377,7 @@ final class MPVPlayerClient: PlayerClient {
     private let queueKey = DispatchSpecificKey<UInt8>()
     private let queueValue: UInt8 = 1
     private let lifecycleLock = NSLock()
+    private let playbackStartSignal = PlayerPlaybackStartSignal()
     private let continuation: AsyncStream<PlayerEvent>.Continuation
     private var client: OpaquePointer?
     private var snapshot = PlayerSnapshot()
@@ -308,6 +389,8 @@ final class MPVPlayerClient: PlayerClient {
     private var didEmitEndedForCurrentMedia = false
     private var pendingStartPosition: TimeInterval?
     private var pendingSubtitles: [URL] = []
+    private var didEmitFileLoadedForCurrentMedia = false
+    private var startupTimelinePosition: Double?
     private var renderContextCount = 0
     private var pendingLoad: (
         identifier: UUID,
@@ -460,6 +543,9 @@ final class MPVPlayerClient: PlayerClient {
                     self.pendingSubtitles = media.subtitles
                     self.isReplacingMedia = true
                     self.didEmitEndedForCurrentMedia = false
+                    self.didEmitFileLoadedForCurrentMedia = false
+                    self.startupTimelinePosition = nil
+                    self.playbackStartSignal.reset(requestID: requestID)
                     self.snapshot.position = 0
                     self.snapshot.duration = 0
                     self.snapshot.bufferedPercent = 0
@@ -524,6 +610,7 @@ final class MPVPlayerClient: PlayerClient {
     }
 
     func stop() async {
+        playbackStartSignal.cancel()
         PlayerExperimentLogger.lifecycle(
             "stop begin",
             playerID: renderOwnerID,
@@ -706,6 +793,7 @@ final class MPVPlayerClient: PlayerClient {
     }
 
     func shutdown() async {
+        playbackStartSignal.cancel()
         guard beginShutdown() else {
             await waitForShutdownCompletion()
             return
@@ -809,9 +897,12 @@ final class MPVPlayerClient: PlayerClient {
 
     func reportSwap(_ renderContext: OpaquePointer) {
         library.renderReportSwap(renderContext)
-        PlayerStartupTraceStore.shared.markFirstFrame(
-            playerID: renderOwnerID
-        )
+        if let requestID = playbackStartSignal.claimPlaybackStarted() {
+            PlayerStartupTraceStore.shared.markFirstFrame(
+                playerID: renderOwnerID
+            )
+            continuation.yield(.playbackStarted(requestID: requestID))
+        }
     }
 
     func destroyRenderContext(_ renderContext: OpaquePointer) {
@@ -1188,7 +1279,10 @@ final class MPVPlayerClient: PlayerClient {
         switch event.eventID {
         case NativeEvent.fileLoaded:
             guard let client else { return }
-            if let currentRequestID {
+            let isFirstFileLoaded = !didEmitFileLoadedForCurrentMedia
+            didEmitFileLoadedForCurrentMedia = true
+            if isFirstFileLoaded, let currentRequestID {
+                playbackStartSignal.markFileLoaded()
                 PlayerStartupTraceStore.shared.markFileLoaded(
                     requestID: currentRequestID,
                     playerID: renderOwnerID
@@ -1236,14 +1330,27 @@ final class MPVPlayerClient: PlayerClient {
             }
             refreshTracks(client: client)
             emitSnapshot()
-            completeLoad(.success(()))
-            continuation.yield(.fileLoaded(requestID: currentRequestID))
+            if isFirstFileLoaded {
+                completeLoad(.success(()))
+                continuation.yield(.fileLoaded(requestID: currentRequestID))
+            }
         case NativeEvent.endFile:
             if isReplacingMedia {
                 guard event.endFileReason != 2 else { return }
-                let message = event.error < 0
+                let nativeMessage = event.error < 0
                     ? library.errorString(for: event.error)
                     : "libmpv 在媒体载入完成前结束"
+                let message = MPVPlaybackErrorPolicy.userFacingMessage(
+                    nativeMessage: nativeMessage
+                )
+                PlayerExperimentLogger.failure(
+                    "phase=end_file reason=\(event.endFileReason)"
+                        + " error=\(event.error)"
+                        + " message=\(LogRedactor.text(nativeMessage))",
+                    playerID: renderOwnerID,
+                    requestID: currentRequestID,
+                    mode: teardownMode
+                )
                 snapshot.status = .failed(message)
                 isReplacingMedia = false
                 emitSnapshot()
@@ -1261,7 +1368,18 @@ final class MPVPlayerClient: PlayerClient {
                 snapshot.status = .stopped
                 emitSnapshot()
             } else if event.error < 0 {
-                let message = library.errorString(for: event.error)
+                let nativeMessage = library.errorString(for: event.error)
+                let message = MPVPlaybackErrorPolicy.userFacingMessage(
+                    nativeMessage: nativeMessage
+                )
+                PlayerExperimentLogger.failure(
+                    "phase=end_file reason=\(event.endFileReason)"
+                        + " error=\(event.error)"
+                        + " message=\(LogRedactor.text(nativeMessage))",
+                    playerID: renderOwnerID,
+                    requestID: currentRequestID,
+                    mode: teardownMode
+                )
                 snapshot.status = .failed(message)
                 emitSnapshot()
                 continuation.yield(
@@ -1290,7 +1408,23 @@ final class MPVPlayerClient: PlayerClient {
         let name = String(cString: propertyName)
         switch name {
         case "time-pos":
-            snapshot.position = max(0, event.doubleValue)
+            let position = max(0, event.doubleValue)
+            snapshot.position = position
+            if let previous = startupTimelinePosition {
+                if abs(position - previous) >= 0.05,
+                   let requestID = playbackStartSignal
+                    .claimPlaybackStarted() {
+                    PlayerStartupTraceStore.shared.markTimelineProgress(
+                        playerID: renderOwnerID
+                    )
+                    continuation.yield(
+                        .playbackStarted(requestID: requestID)
+                    )
+                    startupTimelinePosition = nil
+                }
+            } else if didEmitFileLoadedForCurrentMedia {
+                startupTimelinePosition = position
+            }
         case "duration":
             snapshot.duration = max(0, event.doubleValue)
         case "pause":
