@@ -1,7 +1,7 @@
 # OKVideoMac
 
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端，兼容
-FongMi/TV 的公开配置协议与主要业务流程。当前版本为 **0.3.41（Build 62）**，
+FongMi/TV 的公开配置协议与主要业务流程。当前版本为 **0.3.41（Build 63）**，
 支持 **arm64**，最低系统为 **macOS 12.0**。
 
 项目不内置内容源、账号、Cookie、DRM key 或私人服务配置。请只导入你有权使用
@@ -9,13 +9,14 @@ FongMi/TV 的公开配置协议与主要业务流程。当前版本为 **0.3.41�
 
 ## 当前版本
 
-- 当前版本：0.3.41（Build 62）
+- 当前版本：0.3.41（Build 63）
 - 最低系统：macOS 12.0
 - 支持架构：Apple Silicon / arm64
-- Phase 4 本地验证：152 项 macOS App 单元测试、arm64 Release/Android
-  Release Bridge 构建、28 个 Mach-O 的架构/部署目标/依赖闭包/签名检查及本地
-  Hardened Runtime packaging 通过
-- 对外分发：Developer ID、notarization、staple 和 Gatekeeper 实物验收尚未执行
+- 当前候选验证：198 项 Xcode 集成测试和 94 项 OKVideoKit 测试通过，arm64
+  Release 与 Android Release Bridge 构建通过；本地 Release packaging 会继续
+  验证 28 个 Mach-O 的架构、部署目标、依赖闭包、签名和 Hardened Runtime
+- 对外分发：Build 63 候选尚未执行 Developer ID signing、notarization、staple
+  或 Gatekeeper 实物验收
 
 ## 安装
 
@@ -69,9 +70,12 @@ Emulator**。已由当前实现和 Phase 4 证据确认的 Native 能力包括�
 runtime。Android Bridge 是 optional compatibility infrastructure，而不是
 OKVideoMac 的启动 prerequisite。
 
-当前 Android compatibility 的可移植性仍有限，开发环境默认路径包括
-`/Volumes/XcodeDev`。高级用户可能需要手工配置 Android SDK/runtime path；
-这不影响不使用该兼容层的 Native Mode。
+当前实现为 OKVideoMac 使用独立的 App Support AVD，并验证每次启动的 PID、
+AVD、动态 serial 与 console port 后才允许执行 `adb` 安装、forward 或停止操作。
+它会优先使用 App 托管或用户明确选择的 SDK，再兼容 `ANDROID_HOME`、
+`ANDROID_SDK_ROOT`、默认 SDK 目录与 PATH。第一阶段不会自动下载 SDK 或 system
+image；缺少已安装的 arm64 system image 或命令行工具时只报告缺项。这不影响
+不使用该兼容层的 Native Mode。
 
 ## 主要能力
 
@@ -89,7 +93,8 @@ OKVideoMac 的启动 prerequisite。
 ## 首次发布的已知限制与风险
 
 - 当前只交付 arm64，不支持 Intel Mac/Universal Binary；
-- Android compatibility 需要外部 SDK/ADB/Emulator，且可能需要手工路径配置；
+- Android compatibility 仍需要外部 SDK/ADB/Emulator、已安装的 arm64 system
+  image 和命令行工具；本版本不自动下载这些组件；
 - HDR、AV1、字幕组合和广泛性能/长时间运行矩阵尚未全部覆盖；
 - 外部 Spider 兼容范围是开放的，Web 嗅探和自动换源也受上游实现影响；
 - Node bundles/scripts 以高权限子进程执行，只应使用可信、可核验的来源；
@@ -128,21 +133,21 @@ Git tag 指向的 exact release commit 才是项目源码基准；不要把移�
 `master` 或 `latest` 当作对应源码。正式 Release 应同时提供并由统一
 `SHA256SUMS` 绑定：
 
-- source release index：`OKVideoMac-0.3.41-build62-SOURCE_RELEASE_INDEX.json`；
+- source release index：`OKVideoMac-0.3.41-build63-SOURCE_RELEASE_INDEX.json`；
 - binary-to-source mapping：
   [`Docs/BINARY_SOURCE_MAPPING.md`](../Docs/BINARY_SOURCE_MAPPING.md)；
 - binary/source manifest：
-  `OKVideoMac-0.3.41-build62-SOURCE_RELEASE_MANIFEST.json`；
-- hashes：`OKVideoMac-0.3.41-build62-SHA256SUMS`；
+  `OKVideoMac-0.3.41-build63-SOURCE_RELEASE_MANIFEST.json`；
+- hashes：`OKVideoMac-0.3.41-build63-SHA256SUMS`；
 - macOS SPDX / CycloneDX：`OKVideoMac-macOS.spdx.json`、
   `OKVideoMac-macOS.cdx.json`；
 - Android SPDX / CycloneDX：`OKVideoMac-Android.spdx.json`、
   `OKVideoMac-Android.cdx.json`；
 - exact APK：`OKVideoMac-0.3.41-AndroidDexBridge-release.apk`；
-- exact project source：`OKVideoMac-0.3.41-build62-source.tar.gz`；
+- exact project source：`OKVideoMac-0.3.41-build63-source.tar.gz`；
 - third-party source package：
-  `OKVideoMac-0.3.41-build62-third-party-source.tar.gz`；
-- license package：`OKVideoMac-0.3.41-build62-licenses.tar.gz`；
+  `OKVideoMac-0.3.41-build63-third-party-source.tar.gz`；
+- license package：`OKVideoMac-0.3.41-build63-licenses.tar.gz`；
 - macOS artifact：`OKVideoMac-0.3.41-macOS-arm64.zip`。
 
 文件清单与生成规则见

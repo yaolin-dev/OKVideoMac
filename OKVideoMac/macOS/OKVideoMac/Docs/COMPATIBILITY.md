@@ -1,7 +1,7 @@
 # Compatibility
 
-- 对照版本：0.3.41（Build 62）
-- 最近更新：2026-08-12
+- 对照版本：0.3.41（Build 63）
+- 最近更新：2026-08-15
 - 当前交付目标：Apple Silicon / arm64 / macOS 12.0+
 
 ## 状态定义
@@ -19,9 +19,9 @@
 
 | 能力 | 状态 | 证据与限制 |
 | --- | --- | --- |
-| 配置 URL | Supported | 配置加载、重试、最后可用副本与失败隔离有自动化测试 |
+| 配置 URL | Supported | 规范化、加载、取消、原子持久化与失败隔离有自动化测试 |
 | 本地配置和 Finder 打开 | Supported | 只接受用户选择或 Finder 传入的本地文件 |
-| 粘贴 JSON 配置 | Supported | 大小限制、重复 key 与未知字段处理有测试 |
+| 粘贴内容配置 | Supported | 同事件粘贴同步、大小限制、重复 key 与未知字段处理有测试 |
 | 首页、分类、筛选和详情 | Supported | 完整 App 测试和 Release 构建通过 |
 | 多站搜索、去重和排序 | Supported | 并发、错误隔离、稳定标识和聚合规则有测试 |
 | 收藏、历史和播放进度 | Supported | SQLite 迁移、恢复与归属隔离有测试 |
@@ -41,8 +41,8 @@
 | Headers 网络规则 | Supported | host 匹配、Header/Cookie 合并和日志脱敏已接入 |
 | `hosts` / DoH / proxy | Partial | 配置可无损解析，但 URLSession 执行策略尚未完整对齐上游 |
 | QuickJS JavaScript Spider | Partial | C/Swift/App 路径可构建且 smoke test 通过；上游 bundle 兼容面仍需持续样本验证 |
-| Node.js Spider | Experimental | Release 仅使用 App 内置 Node；保留上游 MD5，并对远程 bundle 增加 SHA-256、最终 URL 与缓存执行前校验；远程 bundle 仍具有 Node 完整能力 |
-| Android Java/DEX Spider | Experimental | Release APK 可构建和验证；完整路径依赖外部 Android SDK/ADB/Emulator |
+| Node.js Spider | Experimental | Release 仅使用 App 内置 Node；冷启动与并发调用共享 readiness，保留上游 MD5，并对远程 bundle 增加 SHA-256、最终 URL 与缓存执行前校验；远程 bundle 仍具有 Node 完整能力 |
+| Android Java/DEX Spider | Experimental | Release APK 可构建和验证；使用专用 AVD、动态 serial 和所有权校验，不操作用户 Emulator；仍依赖已安装的外部 Android SDK/ADB/Emulator 与 arm64 system image |
 | Python Spider | Not Implemented | 当前不提供 Python 运行时 |
 | WebView Sniffer | Experimental | WKWebView 嗅探和候选媒体上报已接入，但网页行为依赖具体站点 |
 
