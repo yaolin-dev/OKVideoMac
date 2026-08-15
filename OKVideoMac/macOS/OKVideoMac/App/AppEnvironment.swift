@@ -52,7 +52,11 @@ struct AppEnvironment {
                 cacheDirectory: directories.caches,
                 remoteHTTPClient: httpClient
             ),
-            androidDexBridge: AndroidDexBridgeClient(),
+            androidDexBridge: AndroidDexBridgeClient(
+                runtime: AndroidDexBridgeRuntime(
+                    applicationSupportDirectory: directories.applicationSupport
+                )
+            ),
             player: player,
             imageRepository: ImageRepository(
                 dataRepository: try ImageDataRepository(

@@ -3902,6 +3902,23 @@ final class AppState: ObservableObject {
         androidRuntimeStatus = await environment.androidDexBridge.runtimeStatus()
     }
 
+    func chooseAndroidSDK() async {
+        guard let environment, !isAndroidRuntimeBusy else { return }
+        let panel = NSOpenPanel()
+        panel.title = "选择 Android SDK"
+        panel.message = "请选择包含 platform-tools 和 emulator 的 Android SDK 目录。"
+        panel.prompt = "选择 SDK"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Android", isDirectory: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        await environment.androidDexBridge.setUserSelectedSDKRoot(url)
+        androidRuntimeStatus = await environment.androidDexBridge.runtimeStatus()
+    }
+
     func startAndroidRuntime() async {
         guard let environment, !isAndroidRuntimeBusy else { return }
         isAndroidRuntimeBusy = true

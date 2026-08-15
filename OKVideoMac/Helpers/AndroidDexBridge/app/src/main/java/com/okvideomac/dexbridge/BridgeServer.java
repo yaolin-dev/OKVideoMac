@@ -69,6 +69,7 @@ final class BridgeServer {
             "Last-Modified"
     };
     private static volatile boolean started;
+    private static volatile String runtimeGeneration = "";
 
     private BridgeServer() {
     }
@@ -83,6 +84,10 @@ final class BridgeServer {
         );
         thread.setDaemon(false);
         thread.start();
+    }
+
+    static void setRuntimeGeneration(String generation) {
+        runtimeGeneration = generation == null ? "" : generation;
     }
 
     private static void serve(Context context) {
@@ -120,7 +125,8 @@ final class BridgeServer {
                 if ("GET".equals(method) && "/health".equals(target)) {
                     JSONObject health = new JSONObject();
                     health.put("ok", true);
-                    health.put("version", "0.3.14");
+                    health.put("version", "0.3.15");
+                    health.put("generation", runtimeGeneration);
                     writeJSON(output, 200, health);
                     return;
                 }

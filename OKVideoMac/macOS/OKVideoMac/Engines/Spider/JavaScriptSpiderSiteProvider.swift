@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import OKVideoCore
 
@@ -570,15 +571,15 @@ struct AndroidRuntimeStatus: Equatable {
 
     static let checking = AndroidRuntimeStatus(
         phase: .checking,
-        title: "正在检查",
-        detail: "正在检查 Android 兼容模块的运行状态",
+        title: "准备中",
+        detail: "正在检查 Android 兼容环境…",
         progress: nil
     )
 
     static func unavailable(_ detail: String) -> AndroidRuntimeStatus {
         AndroidRuntimeStatus(
             phase: .unavailable,
-            title: "依赖不完整",
+            title: "需要处理",
             detail: detail,
             progress: nil
         )
@@ -587,26 +588,26 @@ struct AndroidRuntimeStatus: Equatable {
     static let stopped = AndroidRuntimeStatus(
         phase: .stopped,
         title: "已停止",
-        detail: "使用 Java/Dex 点播站点前请手动启动",
+        detail: "Java/Dex 站点需要时将自动启动",
         progress: nil
     )
 
     static func starting(
-        _ detail: String = "首次启动可能需要 1–4 分钟",
+        _ _: String = "首次启动可能需要 1–4 分钟",
         progress: Double = 0
     ) -> AndroidRuntimeStatus {
         AndroidRuntimeStatus(
             phase: .starting,
-            title: "正在启动",
-            detail: detail,
+            title: "准备中",
+            detail: "正在准备 Android 兼容环境…",
             progress: min(max(progress, 0), 1)
         )
     }
 
     static let running = AndroidRuntimeStatus(
         phase: .running,
-        title: "已运行",
-        detail: "Android Bridge 已就绪，Java/Dex 站点可以使用",
+        title: "已就绪",
+        detail: "Java/Dex 站点可正常使用",
         progress: 1
     )
 
@@ -620,7 +621,7 @@ struct AndroidRuntimeStatus: Equatable {
     static func failed(_ detail: String) -> AndroidRuntimeStatus {
         AndroidRuntimeStatus(
             phase: .failed,
-            title: "操作失败",
+            title: "需要处理",
             detail: detail,
             progress: nil
         )
@@ -679,6 +680,10 @@ final class AndroidDexBridgeClient {
     func repairRuntime() async throws -> AndroidRuntimeStatus {
         try await runtime.repair()
         return await runtime.status()
+    }
+
+    func setUserSelectedSDKRoot(_ url: URL) async {
+        await runtime.setUserSelectedSDKRoot(url)
     }
 
     func hostReachableProxyURL(_ rawURL: String) -> String {
@@ -1046,68 +1051,344 @@ final class AndroidDexBridgeClient {
     }
 }
 
-actor AndroidDexBridgeRuntime {
-    private static let bridgeVersion = "0.3.14"
-    private static let bridgeVersionCode = 26
-    private static let networkCheckInterval: TimeInterval = 30
-    private let sdkRoot = URL(fileURLWithPath: "/Volumes/XcodeDev/AndroidSDK")
-    private let compatibilityADB = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(
-            "Library/Application Support/OKVideoMac/AndroidPlatformTools/adb"
-        )
-    private let avdHome = URL(fileURLWithPath: "/Volumes/XcodeDev/AndroidAVD")
-    private var avdDirectory: URL {
-        avdHome.appendingPathComponent("OKVideoDexBridge.avd")
+struct AndroidToolchain: Equatable, Sendable {
+    let sdkRoot: URL
+    let adb: URL
+    let emulator: URL
+    let avdManager: URL?
+}
+
+struct AndroidSystemImage: Equatable, Sendable {
+    let packageID: String
+    let apiLevel: Int
+    let variant: String
+    let architecture: String
+}
+
+struct AndroidToolchainResolver {
+    static let userSDKRootDefaultsKey = "OKVideoMac.AndroidSDKRoot"
+
+    let applicationSupportDirectory: URL
+    let homeDirectory: URL
+    let environment: [String: String]
+    let userSelectedSDKRoot: String?
+    let fileManager: FileManager
+
+    func resolve() -> AndroidToolchain? {
+        for root in candidateSDKRoots() {
+            if let toolchain = toolchain(at: root) {
+                return toolchain
+            }
+        }
+        return nil
     }
-    private let runtimeDirectory = URL(
-        fileURLWithPath: "/Volumes/XcodeDev/OKVideoMacBuild/AndroidRuntimeApp",
-        isDirectory: true
+
+    func toolchain(at root: URL) -> AndroidToolchain? {
+        let normalizedRoot = Self.normalized(root)
+        let adb = normalizedRoot.appendingPathComponent("platform-tools/adb")
+        let emulator = normalizedRoot.appendingPathComponent("emulator/emulator")
+        guard fileManager.isExecutableFile(atPath: adb.path),
+              fileManager.isExecutableFile(atPath: emulator.path) else {
+            return nil
+        }
+        return AndroidToolchain(
+            sdkRoot: normalizedRoot,
+            adb: adb.resolvingSymlinksInPath(),
+            emulator: emulator.resolvingSymlinksInPath(),
+            avdManager: avdManager(in: normalizedRoot)
+        )
+    }
+
+    func installedSystemImages(in toolchain: AndroidToolchain) -> [AndroidSystemImage] {
+        let root = toolchain.sdkRoot.appendingPathComponent("system-images")
+        guard let apiDirectories = try? fileManager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        var images: [AndroidSystemImage] = []
+        for apiDirectory in apiDirectories {
+            let apiName = apiDirectory.lastPathComponent
+            guard apiName.hasPrefix("android-"),
+                  let apiLevel = Int(apiName.dropFirst("android-".count)),
+                  let variants = try? fileManager.contentsOfDirectory(
+                    at: apiDirectory,
+                    includingPropertiesForKeys: [.isDirectoryKey],
+                    options: [.skipsHiddenFiles]
+                  ) else { continue }
+            for variantDirectory in variants {
+                guard let architectures = try? fileManager.contentsOfDirectory(
+                    at: variantDirectory,
+                    includingPropertiesForKeys: [.isDirectoryKey],
+                    options: [.skipsHiddenFiles]
+                ) else { continue }
+                for architectureDirectory in architectures {
+                    let architecture = architectureDirectory.lastPathComponent
+                    guard architecture == "arm64-v8a",
+                          fileManager.fileExists(
+                            atPath: architectureDirectory
+                                .appendingPathComponent("package.xml").path
+                          ) else { continue }
+                    let variant = variantDirectory.lastPathComponent
+                    images.append(
+                        AndroidSystemImage(
+                            packageID: "system-images;\(apiName);\(variant);\(architecture)",
+                            apiLevel: apiLevel,
+                            variant: variant,
+                            architecture: architecture
+                        )
+                    )
+                }
+            }
+        }
+        return images.sorted { lhs, rhs in
+            if lhs.apiLevel != rhs.apiLevel {
+                return lhs.apiLevel > rhs.apiLevel
+            }
+            let rank: (String) -> Int = { variant in
+                switch variant {
+                case "google_apis": return 0
+                case "default": return 1
+                default: return 2
+                }
+            }
+            return rank(lhs.variant) < rank(rhs.variant)
+        }
+    }
+
+    private func candidateSDKRoots() -> [URL] {
+        var candidates: [URL] = [
+            applicationSupportDirectory
+                .appendingPathComponent("AndroidRuntime/sdk", isDirectory: true)
+        ]
+        if let userSelectedSDKRoot, !userSelectedSDKRoot.isEmpty {
+            candidates.append(Self.url(from: userSelectedSDKRoot))
+        }
+        if let androidHome = environment["ANDROID_HOME"], !androidHome.isEmpty {
+            candidates.append(Self.url(from: androidHome))
+        }
+        if let deprecatedRoot = environment["ANDROID_SDK_ROOT"],
+           !deprecatedRoot.isEmpty {
+            candidates.append(Self.url(from: deprecatedRoot))
+        }
+        candidates.append(
+            homeDirectory.appendingPathComponent("Library/Android/sdk")
+        )
+        if let path = environment["PATH"] {
+            for entry in path.split(separator: ":", omittingEmptySubsequences: true) {
+                if let inferred = Self.inferredSDKRoot(
+                    fromPATHEntry: URL(fileURLWithPath: String(entry))
+                ) {
+                    candidates.append(inferred)
+                }
+            }
+        }
+
+        var seen = Set<String>()
+        return candidates.compactMap { candidate in
+            let normalized = Self.normalized(candidate)
+            return seen.insert(normalized.path).inserted ? normalized : nil
+        }
+    }
+
+    private func avdManager(in sdkRoot: URL) -> URL? {
+        let latest = sdkRoot.appendingPathComponent(
+            "cmdline-tools/latest/bin/avdmanager"
+        )
+        if fileManager.isExecutableFile(atPath: latest.path) {
+            return latest.resolvingSymlinksInPath()
+        }
+        let commandLineTools = sdkRoot.appendingPathComponent("cmdline-tools")
+        guard let versions = try? fileManager.contentsOfDirectory(
+            at: commandLineTools,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return nil }
+        for version in versions.sorted(by: { $0.lastPathComponent > $1.lastPathComponent }) {
+            let candidate = version.appendingPathComponent("bin/avdmanager")
+            if fileManager.isExecutableFile(atPath: candidate.path) {
+                return candidate.resolvingSymlinksInPath()
+            }
+        }
+        return nil
+    }
+
+    static func inferredSDKRoot(fromPATHEntry entry: URL) -> URL? {
+        let normalized = normalized(entry)
+        switch normalized.lastPathComponent {
+        case "platform-tools", "emulator":
+            return normalized.deletingLastPathComponent()
+        case "bin":
+            let version = normalized.deletingLastPathComponent()
+            let commandLineTools = version.deletingLastPathComponent()
+            guard commandLineTools.lastPathComponent == "cmdline-tools" else {
+                return nil
+            }
+            return commandLineTools.deletingLastPathComponent()
+        default:
+            return nil
+        }
+    }
+
+    private static func url(from path: String) -> URL {
+        URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+    }
+
+    private static func normalized(_ url: URL) -> URL {
+        url.standardizedFileURL.resolvingSymlinksInPath()
+    }
+}
+
+struct AndroidPortForwardIdentity: Codable, Equatable, Sendable {
+    let hostPort: Int
+    let devicePort: Int
+}
+
+struct AndroidRuntimeIdentity: Codable, Equatable, Sendable {
+    let schema: Int
+    var generation: String
+    let sdkRoot: URL
+    let emulatorExecutable: URL
+    let avdName: String
+    let avdDirectory: URL
+    let pid: Int32
+    let consolePort: Int
+    let serial: String
+    let forwards: [AndroidPortForwardIdentity]
+    let launchedAt: Date
+}
+
+actor AndroidDexBridgeRuntime {
+    private static let bridgeVersion = "0.3.15"
+    private static let bridgeVersionCode = 27
+    private static let networkCheckInterval: TimeInterval = 30
+    private static let manifestSchema = 1
+    private static let avdName = "OKVideoMac_Runtime"
+    static let candidateConsolePorts = Array(
+        stride(from: 5_554, through: 5_682, by: 2)
     )
-    private let device = "emulator-5554"
-    private let hostPort = BridgeServerPort.host
+
+    private let applicationSupportDirectory: URL
+    private let runtimeDirectory: URL
+    private let avdHome: URL
+    private let avdDirectory: URL
+    private let manifestURL: URL
+    private let fileManager: FileManager
+    private let defaults: UserDefaults
+    private let baseEnvironment: [String: String]
+    private let homeDirectory: URL
+    private var userSelectedSDKRoot: String?
     private var emulatorProcess: Process?
+    private var emulatorLogHandle: FileHandle?
     private var ready = false
     private var acceptsNewerBridge = false
     private var lastNetworkCheck: Date?
     private var readinessTask: Task<Void, Error>?
     private var operationStatus: AndroidRuntimeStatus?
+    private var lastFailure: AndroidRuntimeStatus?
 
-    private var adbExecutable: URL {
-        if FileManager.default.isExecutableFile(atPath: compatibilityADB.path) {
-            return compatibilityADB
-        }
-        return sdkRoot.appendingPathComponent("platform-tools/adb")
+    init(
+        applicationSupportDirectory: URL? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) {
+        let fileManager = FileManager.default
+        let defaults = UserDefaults.standard
+        let support = applicationSupportDirectory ?? fileManager
+            .homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                "Library/Application Support/OKVideoMac",
+                isDirectory: true
+            )
+        self.applicationSupportDirectory = support
+        runtimeDirectory = support.appendingPathComponent(
+            "AndroidRuntime",
+            isDirectory: true
+        )
+        avdHome = runtimeDirectory.appendingPathComponent("avd", isDirectory: true)
+        avdDirectory = avdHome.appendingPathComponent(
+            "\(Self.avdName).avd",
+            isDirectory: true
+        )
+        manifestURL = runtimeDirectory.appendingPathComponent(
+            "runtime-manifest.json"
+        )
+        self.fileManager = fileManager
+        self.defaults = defaults
+        baseEnvironment = environment
+        homeDirectory = fileManager.homeDirectoryForCurrentUser
+        userSelectedSDKRoot = defaults.string(
+            forKey: AndroidToolchainResolver.userSDKRootDefaultsKey
+        )
     }
 
     func status() async -> AndroidRuntimeStatus {
         if let operationStatus {
             return operationStatus
         }
-        if await isHealthy(acceptVersionMismatch: true) {
-            ready = true
-            acceptsNewerBridge = true
-            lastNetworkCheck = Date()
-            return .running
+        if let lastFailure {
+            return lastFailure
+        }
+
+        if fileManager.fileExists(atPath: manifestURL.path) {
+            guard let identity = loadIdentity() else {
+                return .failed("Android 运行记录损坏，需要重新初始化")
+            }
+            guard let toolchain = resolver().toolchain(at: identity.sdkRoot) else {
+                return .failed("原 Android SDK 已不可用，无法安全确认运行实例")
+            }
+            if verifyProcessOwnership(identity, toolchain: toolchain) {
+                guard verifyDeviceOwnership(identity, toolchain: toolchain) else {
+                    return .starting(progress: 0.45)
+                }
+                if await isHealthy(
+                    identity,
+                    toolchain: toolchain,
+                    acceptVersionMismatch: true
+                ) {
+                    ready = true
+                    acceptsNewerBridge = true
+                    lastNetworkCheck = Date()
+                    return .running
+                }
+                return .starting(progress: 0.70)
+            }
+            if processExecutablePath(pid: identity.pid) != nil
+                || deviceIsReachable(identity, toolchain: toolchain) {
+                return .failed("无法安全确认 Android 实例所有权；请重新初始化")
+            }
+            try? fileManager.removeItem(at: manifestURL)
         }
 
         ready = false
-        let adb = adbExecutable
-        let emulator = sdkRoot.appendingPathComponent("emulator/emulator")
-        guard FileManager.default.isExecutableFile(atPath: adb.path) else {
-            return .unavailable("ADB 不可用：\(adb.path)")
+        guard let toolchain = resolver().resolve() else {
+            return .unavailable("未找到完整 Android SDK，请选择包含 adb 和 emulator 的 SDK")
         }
-        guard FileManager.default.isExecutableFile(atPath: emulator.path) else {
-            return .unavailable("Android Emulator 不可用：\(emulator.path)")
+        if fileManager.fileExists(
+            atPath: avdDirectory.appendingPathComponent("config.ini").path
+        ) {
+            return .stopped
         }
-        let configuration = avdDirectory.appendingPathComponent("config.ini")
-        guard FileManager.default.fileExists(atPath: configuration.path) else {
-            return .unavailable("缺少 OKVideoDexBridge 模拟器：\(avdHome.path)")
+        guard toolchain.avdManager != nil else {
+            return .unavailable("缺少 Android SDK Command-line Tools（avdmanager）")
         }
-        if (try? run(adb, ["-s", device, "get-state"])) != nil
-            || emulatorProcess?.isRunning == true {
-            return .starting("模拟器已启动，Bridge 服务尚未就绪", progress: 0.55)
+        guard !resolver().installedSystemImages(in: toolchain).isEmpty else {
+            return .unavailable("缺少可用的 arm64 Android system image")
         }
         return .stopped
+    }
+
+    func setUserSelectedSDKRoot(_ url: URL) {
+        let normalized = url.standardizedFileURL.resolvingSymlinksInPath().path
+        defaults.set(
+            normalized,
+            forKey: AndroidToolchainResolver.userSDKRootDefaultsKey
+        )
+        userSelectedSDKRoot = normalized
+        ready = false
+        acceptsNewerBridge = false
+        lastNetworkCheck = nil
+        lastFailure = nil
     }
 
     func start() async throws {
@@ -1118,44 +1399,101 @@ actor AndroidDexBridgeRuntime {
         ready = false
         acceptsNewerBridge = false
         lastNetworkCheck = nil
-        readinessTask?.cancel()
+        let activeTask = readinessTask
+        activeTask?.cancel()
+        _ = try? await activeTask?.value
         readinessTask = nil
+        lastFailure = nil
         try await prepareRuntime(forceInstall: true)
     }
 
     func stop() async {
         operationStatus = .stopping
-        defer { operationStatus = nil }
-        readinessTask?.cancel()
+        let task = readinessTask
+        task?.cancel()
         readinessTask = nil
+        _ = try? await task?.value
         ready = false
         acceptsNewerBridge = false
         lastNetworkCheck = nil
+        defer { operationStatus = nil }
 
-        let adb = adbExecutable
-        if FileManager.default.isExecutableFile(atPath: adb.path) {
-            _ = try? run(adb, ["-s", device, "emu", "kill"])
-            for _ in 0..<20 {
-                if (try? run(adb, ["-s", device, "get-state"])) == nil {
-                    break
+        guard let identity = loadIdentity() else {
+            lastFailure = nil
+            return
+        }
+        guard let toolchain = resolver().toolchain(at: identity.sdkRoot),
+              verifyOwnership(identity, toolchain: toolchain) else {
+            if processExecutablePath(pid: identity.pid) == nil,
+               !deviceIsReachable(
+                    identity,
+                    toolchain: resolver().toolchain(at: identity.sdkRoot)
+               ) {
+                clearRuntimeRecord()
+                lastFailure = nil
+            } else {
+                lastFailure = .failed(
+                    "无法安全确认 Android 实例所有权，已拒绝停止任何 Emulator"
+                )
+            }
+            return
+        }
+        do {
+            try removeOwnedPortForwards(identity, toolchain: toolchain)
+            _ = try runVerifiedADB(
+                identity,
+                toolchain: toolchain,
+                ["emu", "kill"]
+            )
+            for _ in 0..<40 {
+                if processExecutablePath(pid: identity.pid) == nil,
+                   !deviceIsReachable(identity, toolchain: toolchain) {
+                    clearRuntimeRecord()
+                    lastFailure = nil
+                    return
                 }
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
+            if verifyProcessOwnership(identity, toolchain: toolchain) {
+                _ = Darwin.kill(identity.pid, SIGTERM)
+            }
+            for _ in 0..<20 {
+                if processExecutablePath(pid: identity.pid) == nil,
+                   !deviceIsReachable(identity, toolchain: toolchain) {
+                    clearRuntimeRecord()
+                    lastFailure = nil
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            lastFailure = .failed(
+                "专用 Android Emulator 未确认停止；已保留运行记录以防误操作"
+            )
+        } catch {
+            lastFailure = .failed(LogRedactor.text(error.localizedDescription))
         }
-        if emulatorProcess?.isRunning == true {
-            emulatorProcess?.terminate()
-        }
-        emulatorProcess = nil
     }
 
     func ensureReady() async throws {
         if ready {
+            guard let identity = loadIdentity(),
+                  let toolchain = resolver().toolchain(at: identity.sdkRoot),
+                  verifyOwnership(identity, toolchain: toolchain) else {
+                ready = false
+                throw AppError.spider(
+                    "Android 运行实例所有权校验失败，已拒绝继续操作"
+                )
+            }
             if let lastNetworkCheck,
                Date().timeIntervalSince(lastNetworkCheck)
                     < Self.networkCheckInterval {
                 return
             }
-            if await isHealthy(acceptVersionMismatch: acceptsNewerBridge) {
+            if await isHealthy(
+                identity,
+                toolchain: toolchain,
+                acceptVersionMismatch: acceptsNewerBridge
+            ) {
                 lastNetworkCheck = Date()
                 return
             }
@@ -1164,6 +1502,7 @@ actor AndroidDexBridgeRuntime {
         if let readinessTask {
             return try await readinessTask.value
         }
+        lastFailure = nil
         let task = Task {
             try await prepareRuntime()
         }
@@ -1178,29 +1517,27 @@ actor AndroidDexBridgeRuntime {
     }
 
     func resetAuthorizationUI() async throws {
-        let adb = adbExecutable
-        guard FileManager.default.isExecutableFile(atPath: adb.path) else {
-            throw AppError.spider("Android ADB 运行时不可用")
+        guard let identity = loadIdentity(),
+              let toolchain = resolver().toolchain(at: identity.sdkRoot),
+              verifyOwnership(identity, toolchain: toolchain) else {
+            throw AppError.spider("Android 运行实例所有权校验失败")
         }
 
         ready = false
-        _ = try? run(
-            adb,
+        _ = try? runVerifiedADB(
+            identity,
+            toolchain: toolchain,
             [
-                "-s", device, "shell", "am", "force-stop",
+                "shell", "am", "force-stop",
                 "com.okvideomac.dexbridge"
             ]
         )
-        try configurePortForwards(adb)
-        _ = try? run(
-            adb,
-            [
-                "-s", device, "shell", "am", "start",
-                "-n", "com.okvideomac.dexbridge/.BridgeActivity"
-            ]
-        )
+        try configurePortForwards(identity, toolchain: toolchain)
+        try startBridge(identity, toolchain: toolchain)
         for _ in 0..<20 {
             if await isHealthy(
+                identity,
+                toolchain: toolchain,
                 acceptVersionMismatch: acceptsNewerBridge
             ) {
                 ready = true
@@ -1216,137 +1553,202 @@ actor AndroidDexBridgeRuntime {
     }
 
     private func prepareRuntime(forceInstall: Bool = false) async throws {
-        operationStatus = .starting(
-            "步骤 1/7：检查 Android 运行依赖",
-            progress: 0.03
-        )
+        operationStatus = .starting(progress: 0.03)
         defer { operationStatus = nil }
-        let adb = adbExecutable
-        let emulator = sdkRoot.appendingPathComponent("emulator/emulator")
-        guard FileManager.default.isExecutableFile(atPath: adb.path),
-              FileManager.default.isExecutableFile(atPath: emulator.path) else {
-            throw AppError.spider(
-                "Java/Dex Android 运行时未安装在 /Volumes/XcodeDev/AndroidSDK"
-            )
-        }
+        var activeIdentity: AndroidRuntimeIdentity?
+        var activeToolchain: AndroidToolchain?
+        do {
+            try Task.checkCancellation()
+            try createRuntimeDirectories()
 
-        if (try? run(adb, ["-s", device, "get-state"])) == nil {
-            operationStatus = .starting(
-                "步骤 2/7：启动 Android 模拟器",
-                progress: 0.10
-            )
-            try launchEmulator(emulator)
-        }
-        operationStatus = .starting(
-            "步骤 3/7：等待 Android 系统完成开机",
-            progress: 0.16
-        )
-        try await waitForBoot(adb)
-        operationStatus = .starting(
-            "步骤 4/7：检查 Bridge 版本与端口",
-            progress: 0.56
-        )
-        let installedVersionCode = installedBridgeVersionCode(adb)
-        let hasNewerBridge = installedVersionCode.map {
-            $0 > Self.bridgeVersionCode
-        } ?? false
-        if ready,
-           await isHealthy(acceptVersionMismatch: hasNewerBridge),
-           let lastNetworkCheck,
-           Date().timeIntervalSince(lastNetworkCheck)
-                < Self.networkCheckInterval {
-            return
-        }
-        try configurePortForwards(adb)
+            if fileManager.fileExists(atPath: manifestURL.path) {
+                guard let recorded = loadIdentity() else {
+                    throw AppError.spider(
+                        "Android 运行记录损坏；为避免误操作其他设备，已停止"
+                    )
+                }
+                guard let recordedToolchain = resolver().toolchain(
+                    at: recorded.sdkRoot
+                ) else {
+                    throw AppError.spider(
+                        "原 Android SDK 已不可用，无法安全复用运行实例"
+                    )
+                }
+                if verifyOwnership(recorded, toolchain: recordedToolchain) {
+                    activeIdentity = recorded
+                    activeToolchain = recordedToolchain
+                } else if processExecutablePath(pid: recorded.pid) != nil
+                            || deviceIsReachable(
+                                recorded,
+                                toolchain: recordedToolchain
+                            ) {
+                    throw AppError.spider(
+                        "Android 实例身份与运行记录不一致；已拒绝继续操作"
+                    )
+                } else {
+                    clearRuntimeRecord()
+                }
+            }
 
-        operationStatus = .starting(
-            "步骤 5/7：检查并修复模拟器网络",
-            progress: 0.66
-        )
-        let networkWasRepaired: Bool
-        if let lastNetworkCheck,
-           Date().timeIntervalSince(lastNetworkCheck)
-                < Self.networkCheckInterval {
-            networkWasRepaired = false
-        } else {
-            networkWasRepaired = try await ensureEmulatorNetwork(adb)
-        }
-        if !forceInstall, !networkWasRepaired,
-           await isHealthy(acceptVersionMismatch: hasNewerBridge) {
-            ready = true
-            acceptsNewerBridge = hasNewerBridge
-            lastNetworkCheck = Date()
-            return
-        }
+            let toolchain: AndroidToolchain
+            var identity: AndroidRuntimeIdentity
+            if let activeIdentity, let activeToolchain {
+                identity = activeIdentity
+                toolchain = activeToolchain
+            } else {
+                guard let resolved = resolver().resolve() else {
+                    throw AppError.spider(
+                        "未找到完整 Android SDK；请选择包含 adb 和 emulator 的 SDK"
+                    )
+                }
+                toolchain = resolved
+                try ensureManagedAVD(toolchain)
+                operationStatus = .starting(progress: 0.10)
+                identity = try await launchManagedEmulator(toolchain)
+                activeIdentity = identity
+                activeToolchain = toolchain
+            }
 
-        operationStatus = .starting(
-            "步骤 6/7：安装并启动 Android Bridge",
-            progress: 0.84
-        )
-        let apk = try bridgeAPK()
-        _ = try run(adb, ["-s", device, "install", "-r", apk.path])
-        _ = try run(
-            adb,
-            [
-                "-s", device, "shell", "am", "start",
-                "-n", "com.okvideomac.dexbridge/.BridgeActivity"
-            ]
-        )
-        for attempt in 0..<30 {
-            operationStatus = .starting(
-                "步骤 7/7：等待 Bridge 健康检查",
-                progress: 0.92 + (Double(attempt) / 30 * 0.07)
+            operationStatus = .starting(progress: 0.18)
+            try await waitForOwnership(identity, toolchain: toolchain)
+            try await waitForBoot(identity, toolchain: toolchain)
+            try Task.checkCancellation()
+
+            if forceInstall {
+                identity.generation = UUID().uuidString
+                try saveIdentity(identity)
+                activeIdentity = identity
+            }
+
+            operationStatus = .starting(progress: 0.55)
+            let installedVersionCode = installedBridgeVersionCode(
+                identity,
+                toolchain: toolchain
             )
-            if await isHealthy() {
+            let hasNewerBridge = installedVersionCode.map {
+                $0 > Self.bridgeVersionCode
+            } ?? false
+            try configurePortForwards(identity, toolchain: toolchain)
+
+            operationStatus = .starting(progress: 0.68)
+            let networkWasRepaired: Bool
+            if let lastNetworkCheck,
+               Date().timeIntervalSince(lastNetworkCheck)
+                    < Self.networkCheckInterval {
+                networkWasRepaired = false
+            } else {
+                networkWasRepaired = try await ensureEmulatorNetwork(
+                    identity,
+                    toolchain: toolchain
+                )
+            }
+            if !forceInstall, !networkWasRepaired,
+               await isHealthy(
+                    identity,
+                    toolchain: toolchain,
+                    acceptVersionMismatch: hasNewerBridge
+               ) {
                 ready = true
-                acceptsNewerBridge = false
+                acceptsNewerBridge = hasNewerBridge
                 lastNetworkCheck = Date()
+                lastFailure = nil
                 return
             }
-            try await Task.sleep(nanoseconds: 500_000_000)
+
+            operationStatus = .starting(progress: 0.84)
+            let apk = try bridgeAPK()
+            _ = try runVerifiedADB(
+                identity,
+                toolchain: toolchain,
+                ["install", "-r", apk.path]
+            )
+            try startBridge(identity, toolchain: toolchain)
+            for attempt in 0..<30 {
+                try Task.checkCancellation()
+                operationStatus = .starting(
+                    progress: 0.92 + (Double(attempt) / 30 * 0.07)
+                )
+                if await isHealthy(identity, toolchain: toolchain) {
+                    ready = true
+                    acceptsNewerBridge = false
+                    lastNetworkCheck = Date()
+                    lastFailure = nil
+                    return
+                }
+                try await Task.sleep(nanoseconds: 500_000_000)
+            }
+            throw AppError.spider("Java/Dex Android 桥启动超时")
+        } catch {
+            ready = false
+            if let identity = activeIdentity,
+               let toolchain = activeToolchain {
+                let cleaned = await cleanupFailedRuntime(
+                    identity,
+                    toolchain: toolchain
+                )
+                if !cleaned {
+                    lastFailure = .failed(
+                        "运行失败且无法安全确认实例所有权；需要重新初始化"
+                    )
+                }
+            }
+            if lastFailure == nil {
+                lastFailure = .failed(LogRedactor.text(error.localizedDescription))
+            }
+            throw error
         }
-        throw AppError.spider("Java/Dex Android 桥启动超时")
     }
 
-    private func configurePortForwards(_ adb: URL) throws {
-        let forwards = [
-            (host: BridgeServerPort.host, guest: BridgeServerPort.guest),
-            (
-                host: BridgeServerPort.kaiserHost,
-                guest: BridgeServerPort.kaiserGuest
-            ),
-            (
-                host: BridgeServerPort.cloudFileHost,
-                guest: BridgeServerPort.cloudFileGuest
-            )
-        ]
-        let listing = (try? run(
-            adb,
-            ["-s", device, "forward", "--list"]
-        )) ?? ""
-        for forward in forwards {
+    private func configurePortForwards(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) throws {
+        var listing = try runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            ["forward", "--list"]
+        )
+        for forward in identity.forwards {
             if Self.portForwardExists(
                 listing: listing,
-                device: device,
-                host: forward.host,
-                guest: forward.guest
+                device: identity.serial,
+                host: forward.hostPort,
+                guest: forward.devicePort
             ) {
                 continue
             }
-            _ = try? run(
-                adb,
+            if Self.deviceHasHostForward(
+                listing: listing,
+                device: identity.serial,
+                host: forward.hostPort
+            ) {
+                _ = try runVerifiedADB(
+                    identity,
+                    toolchain: toolchain,
+                    ["forward", "--remove", "tcp:\(forward.hostPort)"]
+                )
+            }
+            _ = try runVerifiedADB(
+                identity,
+                toolchain: toolchain,
                 [
-                    "-s", device, "forward", "--remove",
-                    "tcp:\(forward.host)"
+                    "forward", "tcp:\(forward.hostPort)",
+                    "tcp:\(forward.devicePort)"
                 ]
             )
-            _ = try run(
-                adb,
-                [
-                    "-s", device, "forward",
-                    "tcp:\(forward.host)", "tcp:\(forward.guest)"
-                ]
+            listing = try runVerifiedADB(
+                identity,
+                toolchain: toolchain,
+                ["forward", "--list"]
             )
+            guard Self.portForwardExists(
+                listing: listing,
+                device: identity.serial,
+                host: forward.hostPort,
+                guest: forward.devicePort
+            ) else {
+                throw AppError.spider("Android Bridge 端口映射校验失败")
+            }
         }
     }
 
@@ -1363,29 +1765,47 @@ actor AndroidDexBridgeRuntime {
         }
     }
 
-    private func ensureEmulatorNetwork(_ adb: URL) async throws -> Bool {
-        if networkLooksReady(adb) {
+    static func deviceHasHostForward(
+        listing: String,
+        device: String,
+        host: Int
+    ) -> Bool {
+        let prefix = "\(device) tcp:\(host) "
+        return listing.split(whereSeparator: \.isNewline).contains {
+            String($0).trimmingCharacters(in: .whitespacesAndNewlines)
+                .hasPrefix(prefix)
+        }
+    }
+
+    private func ensureEmulatorNetwork(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) async throws -> Bool {
+        if networkLooksReady(identity, toolchain: toolchain) {
             lastNetworkCheck = Date()
             return false
         }
 
-        _ = try? run(
-            adb,
+        _ = try? runVerifiedADB(
+            identity,
+            toolchain: toolchain,
             [
-                "-s", device, "shell", "cmd", "wifi",
+                "shell", "cmd", "wifi",
                 "clear-user-disabled-networks"
             ]
         )
-        _ = try? run(
-            adb,
+        _ = try? runVerifiedADB(
+            identity,
+            toolchain: toolchain,
             [
-                "-s", device, "shell", "cmd", "wifi",
+                "shell", "cmd", "wifi",
                 "connect-network", "AndroidWifi", "open"
             ]
         )
 
         for _ in 0..<60 {
-            if networkLooksReady(adb) {
+            try Task.checkCancellation()
+            if networkLooksReady(identity, toolchain: toolchain) {
                 lastNetworkCheck = Date()
                 return true
             }
@@ -1394,13 +1814,18 @@ actor AndroidDexBridgeRuntime {
         throw AppError.spider("Java/Dex Android 运行时网络连接失败，请稍后重试")
     }
 
-    private func networkLooksReady(_ adb: URL) -> Bool {
-        guard let status = try? run(
-            adb,
-            ["-s", device, "shell", "cmd", "wifi", "status"]
-        ), let routes = try? run(
-            adb,
-            ["-s", device, "shell", "ip", "route", "show", "table", "all"]
+    private func networkLooksReady(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) -> Bool {
+        guard let status = try? runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            ["shell", "cmd", "wifi", "status"]
+        ), let routes = try? runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            ["shell", "ip", "route", "show", "table", "all"]
         ) else {
             return false
         }
@@ -1411,45 +1836,16 @@ actor AndroidDexBridgeRuntime {
         status.contains("Wifi is connected") && routes.contains("default via")
     }
 
-    private func launchEmulator(_ executable: URL) throws {
-        try FileManager.default.createDirectory(
-            at: runtimeDirectory,
-            withIntermediateDirectories: true
-        )
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = [
-            "-avd", "OKVideoDexBridge",
-            "-no-window",
-            "-no-audio",
-            "-no-boot-anim",
-            "-no-metrics",
-            "-no-snapshot",
-            "-gpu", "off",
-            "-accel", "on",
-            "-datadir", runtimeDirectory.path
-        ]
-        var environment = ProcessInfo.processInfo.environment
-        environment["ANDROID_SDK_ROOT"] = sdkRoot.path
-        environment["ANDROID_AVD_HOME"] = avdHome.path
-        process.environment = environment
-        let logURL = runtimeDirectory.appendingPathComponent("emulator.log")
-        if !FileManager.default.fileExists(atPath: logURL.path) {
-            FileManager.default.createFile(atPath: logURL.path, contents: nil)
-        }
-        let log = try FileHandle(forWritingTo: logURL)
-        try log.seekToEnd()
-        process.standardOutput = log
-        process.standardError = log
-        try process.run()
-        emulatorProcess = process
-    }
-
-    private func waitForBoot(_ adb: URL) async throws {
+    private func waitForBoot(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) async throws {
         for _ in 0..<240 {
-            if let value = try? run(
-                adb,
-                ["-s", device, "shell", "getprop", "sys.boot_completed"]
+            try Task.checkCancellation()
+            if let value = try? runVerifiedADB(
+                identity,
+                toolchain: toolchain,
+                ["shell", "getprop", "sys.boot_completed"]
             ), value.trimmingCharacters(in: .whitespacesAndNewlines) == "1" {
                 return
             }
@@ -1469,11 +1865,15 @@ actor AndroidDexBridgeRuntime {
         )
     }
 
-    private func installedBridgeVersionCode(_ adb: URL) -> Int? {
-        guard let output = try? run(
-            adb,
+    private func installedBridgeVersionCode(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) -> Int? {
+        guard let output = try? runVerifiedADB(
+            identity,
+            toolchain: toolchain,
             [
-                "-s", device, "shell", "dumpsys", "package",
+                "shell", "dumpsys", "package",
                 "com.okvideomac.dexbridge"
             ]
         ) else { return nil }
@@ -1490,10 +1890,15 @@ actor AndroidDexBridgeRuntime {
     }
 
     private func isHealthy(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain,
         acceptVersionMismatch: Bool = false
     ) async -> Bool {
+        guard verifyOwnership(identity, toolchain: toolchain) else {
+            return false
+        }
         guard let url = URL(
-            string: "http://127.0.0.1:\(hostPort)/health"
+            string: "http://127.0.0.1:\(BridgeServerPort.host)/health"
         ) else { return false }
         var request = URLRequest(url: url)
         request.timeoutInterval = 2
@@ -1508,24 +1913,508 @@ actor AndroidDexBridgeRuntime {
                     as? [String: Any] else {
                 return false
             }
-            return object["ok"] as? Bool == true
-                && (
-                    object["version"] as? String == Self.bridgeVersion
-                        || acceptVersionMismatch
-                )
+            return Self.healthMatches(
+                object,
+                generation: identity.generation,
+                acceptVersionMismatch: acceptVersionMismatch
+            )
         } catch {
             return false
         }
     }
 
-    private func run(_ executable: URL, _ arguments: [String]) throws -> String {
+    static func healthMatches(
+        _ object: [String: Any],
+        generation: String,
+        acceptVersionMismatch: Bool = false
+    ) -> Bool {
+        object["ok"] as? Bool == true
+            && object["generation"] as? String == generation
+            && (
+                object["version"] as? String == bridgeVersion
+                    || acceptVersionMismatch
+            )
+    }
+
+    static func avdName(from emulatorConsoleOutput: String) -> String? {
+        emulatorConsoleOutput.split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty && $0 != "OK" }
+    }
+
+    static func commandMatches(
+        _ command: String,
+        avdName: String,
+        consolePort: Int
+    ) -> Bool {
+        let hasAVD = command.contains("-avd \(avdName)")
+            || command.contains("@\(avdName)")
+        let hasPort = command.contains("-port \(consolePort)")
+            || command.contains("-ports \(consolePort),")
+        return hasAVD && hasPort
+    }
+
+    static func isEmulatorPortConflict(_ output: String) -> Bool {
+        let text = output.lowercased()
+        let mentionsPort = text.contains("port") || text.contains("socket")
+        let mentionsConflict = text.contains("already in use")
+            || text.contains("address in use")
+            || text.contains("cannot bind")
+            || text.contains("failed to bind")
+            || text.contains("used by another")
+        return mentionsPort && mentionsConflict
+    }
+
+    static func ownershipAllowsMutation(
+        processOwned: Bool,
+        deviceOwned: Bool
+    ) -> Bool {
+        processOwned && deviceOwned
+    }
+
+    private func resolver() -> AndroidToolchainResolver {
+        AndroidToolchainResolver(
+            applicationSupportDirectory: applicationSupportDirectory,
+            homeDirectory: homeDirectory,
+            environment: baseEnvironment,
+            userSelectedSDKRoot: userSelectedSDKRoot,
+            fileManager: fileManager
+        )
+    }
+
+    private func createRuntimeDirectories() throws {
+        for directory in [runtimeDirectory, avdHome] {
+            try fileManager.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: directory.path
+            )
+        }
+    }
+
+    private func childEnvironment(
+        for toolchain: AndroidToolchain
+    ) -> [String: String] {
+        var environment = baseEnvironment
+        environment["ANDROID_HOME"] = toolchain.sdkRoot.path
+        environment.removeValue(forKey: "ANDROID_SDK_ROOT")
+        environment["ANDROID_AVD_HOME"] = avdHome.path
+        return environment
+    }
+
+    private func ensureManagedAVD(_ toolchain: AndroidToolchain) throws {
+        try createRuntimeDirectories()
+        let configuration = avdDirectory.appendingPathComponent("config.ini")
+        if fileManager.fileExists(atPath: configuration.path) {
+            let listing = try run(
+                toolchain.emulator,
+                ["-list-avds"],
+                environment: childEnvironment(for: toolchain)
+            )
+            guard listing.split(whereSeparator: \.isNewline).contains(
+                where: {
+                    String($0).trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    ) == Self.avdName
+                }
+            ) else {
+                throw AppError.spider(
+                    "专用 Android 环境记录不完整，需要重新初始化"
+                )
+            }
+            return
+        }
+        if fileManager.fileExists(atPath: avdDirectory.path) {
+            throw AppError.spider(
+                "专用 AVD 目录不完整；为避免覆盖现有数据，已停止"
+            )
+        }
+        guard let avdManager = toolchain.avdManager else {
+            throw AppError.spider(
+                "缺少 Android SDK Command-line Tools（avdmanager）"
+            )
+        }
+        guard let image = resolver().installedSystemImages(in: toolchain).first else {
+            throw AppError.spider(
+                "缺少可用的 arm64 Android system image；本版本不会自动下载"
+            )
+        }
+        _ = try run(
+            avdManager,
+            [
+                "create", "avd",
+                "-n", Self.avdName,
+                "-k", image.packageID,
+                "-p", avdDirectory.path
+            ],
+            environment: childEnvironment(for: toolchain),
+            input: Data("no\n".utf8)
+        )
+        guard fileManager.fileExists(atPath: configuration.path) else {
+            throw AppError.spider("专用 Android 环境创建失败")
+        }
+        let listing = try run(
+            toolchain.emulator,
+            ["-list-avds"],
+            environment: childEnvironment(for: toolchain)
+        )
+        guard Self.avdName(from: listing) == Self.avdName
+            || listing.split(whereSeparator: \.isNewline).contains(
+                where: {
+                    String($0).trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    ) == Self.avdName
+                }
+            ) else {
+            throw AppError.spider("专用 Android 环境无法被 Emulator 识别")
+        }
+    }
+
+    private func launchManagedEmulator(
+        _ toolchain: AndroidToolchain
+    ) async throws -> AndroidRuntimeIdentity {
+        let generation = UUID().uuidString
+        for consolePort in Self.candidateConsolePorts {
+            try Task.checkCancellation()
+            let logURL = runtimeDirectory.appendingPathComponent(
+                "emulator-\(generation)-\(consolePort).log"
+            )
+            _ = fileManager.createFile(atPath: logURL.path, contents: nil)
+            let log = try FileHandle(forWritingTo: logURL)
+            let process = Process()
+            process.executableURL = toolchain.emulator
+            process.arguments = [
+                "-avd", Self.avdName,
+                "-port", "\(consolePort)",
+                "-no-window",
+                "-no-audio",
+                "-no-boot-anim",
+                "-no-metrics",
+                "-no-snapshot",
+                "-gpu", "off",
+                "-accel", "on"
+            ]
+            process.environment = childEnvironment(for: toolchain)
+            process.standardOutput = log
+            process.standardError = log
+            do {
+                try process.run()
+            } catch {
+                try? log.close()
+                throw error
+            }
+            for _ in 0..<20 where process.isRunning {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            if !process.isRunning {
+                try? log.close()
+                let output = (
+                    try? String(contentsOf: logURL, encoding: .utf8)
+                ) ?? ""
+                if Self.isEmulatorPortConflict(output) {
+                    continue
+                }
+                throw AppError.spider(
+                    "Android Emulator 启动失败："
+                        + String(output.suffix(1_000))
+                )
+            }
+
+            emulatorProcess = process
+            emulatorLogHandle = log
+            let identity = AndroidRuntimeIdentity(
+                schema: Self.manifestSchema,
+                generation: generation,
+                sdkRoot: toolchain.sdkRoot,
+                emulatorExecutable: toolchain.emulator,
+                avdName: Self.avdName,
+                avdDirectory: avdDirectory,
+                pid: process.processIdentifier,
+                consolePort: consolePort,
+                serial: "emulator-\(consolePort)",
+                forwards: Self.expectedForwards,
+                launchedAt: Date()
+            )
+            try saveIdentity(identity)
+            return identity
+        }
+        throw AppError.spider("没有可用的 Android Emulator console port")
+    }
+
+    private func waitForOwnership(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) async throws {
+        for _ in 0..<120 {
+            try Task.checkCancellation()
+            guard verifyProcessOwnership(identity, toolchain: toolchain) else {
+                throw AppError.spider(
+                    "Android Emulator 进程身份校验失败；已拒绝继续操作"
+                )
+            }
+            if verifyDeviceOwnership(identity, toolchain: toolchain) {
+                return
+            }
+            try await Task.sleep(nanoseconds: 500_000_000)
+        }
+        throw AppError.spider("等待专用 Android Emulator 设备身份超时")
+    }
+
+    private func verifyOwnership(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) -> Bool {
+        Self.ownershipAllowsMutation(
+            processOwned: verifyProcessOwnership(
+                identity,
+                toolchain: toolchain
+            ),
+            deviceOwned: verifyDeviceOwnership(
+                identity,
+                toolchain: toolchain
+            )
+        )
+    }
+
+    private func verifyProcessOwnership(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) -> Bool {
+        guard identity.schema == Self.manifestSchema,
+              identity.avdName == Self.avdName,
+              identity.avdDirectory.standardizedFileURL
+                == avdDirectory.standardizedFileURL,
+              identity.serial == "emulator-\(identity.consolePort)",
+              Self.candidateConsolePorts.contains(identity.consolePort),
+              identity.emulatorExecutable.standardizedFileURL
+                == toolchain.emulator.standardizedFileURL,
+              let executablePath = processExecutablePath(pid: identity.pid)
+        else { return false }
+
+        let executable = URL(fileURLWithPath: executablePath)
+            .standardizedFileURL.resolvingSymlinksInPath()
+        let emulatorRoot = toolchain.sdkRoot
+            .appendingPathComponent("emulator", isDirectory: true)
+            .standardizedFileURL.resolvingSymlinksInPath().path + "/"
+        guard executable == toolchain.emulator.standardizedFileURL
+                .resolvingSymlinksInPath()
+                || executable.path.hasPrefix(emulatorRoot),
+              let command = try? run(
+                URL(fileURLWithPath: "/bin/ps"),
+                ["-p", "\(identity.pid)", "-o", "command="]
+              ),
+              Self.commandMatches(
+                command,
+                avdName: identity.avdName,
+                consolePort: identity.consolePort
+              ) else { return false }
+        return true
+    }
+
+    private func verifyDeviceOwnership(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) -> Bool {
+        guard let state = try? run(
+            toolchain.adb,
+            ["-s", identity.serial, "get-state"]
+        ), state.trimmingCharacters(in: .whitespacesAndNewlines) == "device",
+        let avdOutput = try? run(
+            toolchain.adb,
+            ["-s", identity.serial, "emu", "avd", "name"]
+        ), Self.avdName(from: avdOutput) == identity.avdName else {
+            return false
+        }
+        return true
+    }
+
+    private func runVerifiedADB(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain,
+        _ arguments: [String]
+    ) throws -> String {
+        guard verifyOwnership(identity, toolchain: toolchain) else {
+            throw AppError.spider(
+                "Android 运行实例所有权校验失败，已拒绝执行 ADB 操作"
+            )
+        }
+        return try run(
+            toolchain.adb,
+            ["-s", identity.serial] + arguments
+        )
+    }
+
+    private func deviceIsReachable(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain?
+    ) -> Bool {
+        guard let toolchain,
+              let state = try? run(
+                toolchain.adb,
+                ["-s", identity.serial, "get-state"]
+              ) else { return false }
+        return state.trimmingCharacters(in: .whitespacesAndNewlines) == "device"
+    }
+
+    private func processExecutablePath(pid: Int32) -> String? {
+        let capacity = 4_096
+        var buffer = [CChar](repeating: 0, count: capacity)
+        let length = proc_pidpath(pid, &buffer, UInt32(capacity))
+        guard length > 0 else { return nil }
+        return String(cString: buffer)
+    }
+
+    private func startBridge(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) throws {
+        _ = try runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            [
+                "shell", "am", "start",
+                "-n", "com.okvideomac.dexbridge/.BridgeActivity",
+                "--es", "okvideomac_runtime_generation", identity.generation
+            ]
+        )
+    }
+
+    private func removeOwnedPortForwards(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) throws {
+        var listing = try runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            ["forward", "--list"]
+        )
+        for forward in identity.forwards where Self.portForwardExists(
+            listing: listing,
+            device: identity.serial,
+            host: forward.hostPort,
+            guest: forward.devicePort
+        ) {
+            _ = try runVerifiedADB(
+                identity,
+                toolchain: toolchain,
+                ["forward", "--remove", "tcp:\(forward.hostPort)"]
+            )
+            listing = try runVerifiedADB(
+                identity,
+                toolchain: toolchain,
+                ["forward", "--list"]
+            )
+        }
+    }
+
+    private func cleanupFailedRuntime(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) async -> Bool {
+        guard verifyOwnership(identity, toolchain: toolchain) else {
+            return false
+        }
+        try? removeOwnedPortForwards(identity, toolchain: toolchain)
+        _ = try? runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            ["emu", "kill"]
+        )
+        for _ in 0..<40 {
+            if processExecutablePath(pid: identity.pid) == nil,
+               !deviceIsReachable(identity, toolchain: toolchain) {
+                clearRuntimeRecord()
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        if verifyProcessOwnership(identity, toolchain: toolchain) {
+            _ = Darwin.kill(identity.pid, SIGTERM)
+        }
+        for _ in 0..<20 {
+            if processExecutablePath(pid: identity.pid) == nil {
+                clearRuntimeRecord()
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return false
+    }
+
+    private func loadIdentity() -> AndroidRuntimeIdentity? {
+        guard let data = try? Data(contentsOf: manifestURL),
+              let identity = try? JSONDecoder().decode(
+                AndroidRuntimeIdentity.self,
+                from: data
+              ),
+              identity.schema == Self.manifestSchema,
+              identity.avdName == Self.avdName,
+              identity.avdDirectory.standardizedFileURL
+                == avdDirectory.standardizedFileURL,
+              identity.serial == "emulator-\(identity.consolePort)",
+              identity.forwards == Self.expectedForwards,
+              !identity.generation.isEmpty else { return nil }
+        return identity
+    }
+
+    private func saveIdentity(_ identity: AndroidRuntimeIdentity) throws {
+        try createRuntimeDirectories()
+        let data = try JSONEncoder().encode(identity)
+        try data.write(to: manifestURL, options: [.atomic])
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: manifestURL.path
+        )
+    }
+
+    private func clearRuntimeRecord() {
+        try? emulatorLogHandle?.close()
+        emulatorLogHandle = nil
+        emulatorProcess = nil
+        if fileManager.fileExists(atPath: manifestURL.path) {
+            try? fileManager.removeItem(at: manifestURL)
+        }
+    }
+
+    private static let expectedForwards = [
+        AndroidPortForwardIdentity(
+            hostPort: BridgeServerPort.host,
+            devicePort: BridgeServerPort.guest
+        ),
+        AndroidPortForwardIdentity(
+            hostPort: BridgeServerPort.kaiserHost,
+            devicePort: BridgeServerPort.kaiserGuest
+        ),
+        AndroidPortForwardIdentity(
+            hostPort: BridgeServerPort.cloudFileHost,
+            devicePort: BridgeServerPort.cloudFileGuest
+        )
+    ]
+
+    private func run(
+        _ executable: URL,
+        _ arguments: [String],
+        environment: [String: String]? = nil,
+        input: Data? = nil
+    ) throws -> String {
         let process = Process()
         let output = Pipe()
         process.executableURL = executable
         process.arguments = arguments
+        process.environment = environment
         process.standardOutput = output
         process.standardError = output
+        let inputPipe = input.map { _ in Pipe() }
+        process.standardInput = inputPipe
         try process.run()
+        if let input, let inputPipe {
+            inputPipe.fileHandleForWriting.write(input)
+            try? inputPipe.fileHandleForWriting.close()
+        }
         process.waitUntilExit()
         let data = output.fileHandleForReading.readDataToEndOfFile()
         let text = String(data: data, encoding: .utf8) ?? ""

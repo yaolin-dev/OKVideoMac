@@ -1873,8 +1873,8 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(MainMenuChineseLocalization.title(for: "File"), "文件")
         XCTAssertEqual(MainMenuChineseLocalization.title(for: "Edit"), "编辑")
         XCTAssertEqual(
-            MainMenuChineseLocalization.title(for: "About OK影视 Mac"),
-            "关于 OK影视 Mac"
+            MainMenuChineseLocalization.title(for: "About OKVideoMac"),
+            "关于 OKVideoMac"
         )
         XCTAssertEqual(
             MainMenuChineseLocalization.title(for: "Bring All to Front"),
@@ -2168,6 +2168,239 @@ final class OKVideoMacTests: XCTestCase {
                 routes: "10.0.2.0/24 dev wlan0"
             )
         )
+    }
+
+    func testAndroidToolchainResolverPrefersUserSelectionOverEnvironment()
+        throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "AndroidResolver-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let selected = root.appendingPathComponent("Selected SDK")
+        let environmentSDK = root.appendingPathComponent("Environment SDK")
+        try makeFakeAndroidSDK(at: selected)
+        try makeFakeAndroidSDK(at: environmentSDK)
+
+        let resolver = AndroidToolchainResolver(
+            applicationSupportDirectory: root.appendingPathComponent("Support"),
+            homeDirectory: root.appendingPathComponent("Home"),
+            environment: ["ANDROID_HOME": environmentSDK.path],
+            userSelectedSDKRoot: selected.path,
+            fileManager: .default
+        )
+
+        XCTAssertEqual(
+            resolver.resolve()?.sdkRoot,
+            selected.standardizedFileURL.resolvingSymlinksInPath()
+        )
+    }
+
+    func testAndroidToolchainResolverPrefersManagedSDKThenAndroidHome()
+        throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "AndroidResolver-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let support = root.appendingPathComponent("Support")
+        let managed = support.appendingPathComponent("AndroidRuntime/sdk")
+        let selected = root.appendingPathComponent("Selected")
+        let androidHome = root.appendingPathComponent("AndroidHome")
+        let deprecated = root.appendingPathComponent("Deprecated")
+        try makeFakeAndroidSDK(at: managed)
+        try makeFakeAndroidSDK(at: selected)
+        try makeFakeAndroidSDK(at: androidHome)
+        try makeFakeAndroidSDK(at: deprecated)
+
+        var resolver = AndroidToolchainResolver(
+            applicationSupportDirectory: support,
+            homeDirectory: root.appendingPathComponent("Home"),
+            environment: [
+                "ANDROID_HOME": androidHome.path,
+                "ANDROID_SDK_ROOT": deprecated.path
+            ],
+            userSelectedSDKRoot: selected.path,
+            fileManager: .default
+        )
+        XCTAssertEqual(
+            resolver.resolve()?.sdkRoot,
+            managed.standardizedFileURL.resolvingSymlinksInPath()
+        )
+
+        try FileManager.default.removeItem(at: managed)
+        resolver = AndroidToolchainResolver(
+            applicationSupportDirectory: support,
+            homeDirectory: root.appendingPathComponent("Home"),
+            environment: [
+                "ANDROID_HOME": androidHome.path,
+                "ANDROID_SDK_ROOT": deprecated.path
+            ],
+            userSelectedSDKRoot: nil,
+            fileManager: .default
+        )
+        XCTAssertEqual(
+            resolver.resolve()?.sdkRoot,
+            androidHome.standardizedFileURL.resolvingSymlinksInPath()
+        )
+    }
+
+    func testAndroidToolchainResolverFindsOnlyInstalledArm64Images() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "AndroidImages-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        try makeFakeAndroidSDK(at: root)
+        let valid = root.appendingPathComponent(
+            "system-images/android-35/google_apis/arm64-v8a"
+        )
+        let invalid = root.appendingPathComponent(
+            "system-images/android-36/google_apis/x86_64"
+        )
+        try FileManager.default.createDirectory(
+            at: valid,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: invalid,
+            withIntermediateDirectories: true
+        )
+        XCTAssertTrue(
+            FileManager.default.createFile(
+                atPath: valid.appendingPathComponent("package.xml").path,
+                contents: Data()
+            )
+        )
+        XCTAssertTrue(
+            FileManager.default.createFile(
+                atPath: invalid.appendingPathComponent("package.xml").path,
+                contents: Data()
+            )
+        )
+        let resolver = AndroidToolchainResolver(
+            applicationSupportDirectory: root.appendingPathComponent("Support"),
+            homeDirectory: root.appendingPathComponent("Home"),
+            environment: [:],
+            userSelectedSDKRoot: nil,
+            fileManager: .default
+        )
+        let toolchain = try XCTUnwrap(resolver.toolchain(at: root))
+
+        XCTAssertEqual(
+            resolver.installedSystemImages(in: toolchain).map(\.packageID),
+            ["system-images;android-35;google_apis;arm64-v8a"]
+        )
+    }
+
+    func testAndroidRuntimeIdentityPoliciesRejectAmbiguousOwnership() {
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.ownershipAllowsMutation(
+                processOwned: true,
+                deviceOwned: true
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.ownershipAllowsMutation(
+                processOwned: false,
+                deviceOwned: true
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.ownershipAllowsMutation(
+                processOwned: true,
+                deviceOwned: false
+            )
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.candidateConsolePorts.allSatisfy {
+                $0 >= 5_554 && $0 <= 5_682 && $0.isMultiple(of: 2)
+            }
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.commandMatches(
+                "/sdk/emulator -avd OKVideoMac_Runtime -port 5560",
+                avdName: "OKVideoMac_Runtime",
+                consolePort: 5_560
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.commandMatches(
+                "/sdk/emulator -avd Pixel_8 -port 5560",
+                avdName: "OKVideoMac_Runtime",
+                consolePort: 5_560
+            )
+        )
+    }
+
+    func testAndroidBridgeHealthRequiresCurrentGeneration() {
+        let current: [String: Any] = [
+            "ok": true,
+            "version": "0.3.15",
+            "generation": "current-generation"
+        ]
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.healthMatches(
+                current,
+                generation: "current-generation"
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.healthMatches(
+                current,
+                generation: "stale-generation"
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.healthMatches(
+                ["ok": true, "version": "0.3.15"],
+                generation: "current-generation"
+            )
+        )
+    }
+
+    func testAndroidBridgeForwardInspectionIsScopedToVerifiedSerial() {
+        let listing = """
+        emulator-5554 tcp:19978 tcp:9978
+        emulator-5560 tcp:19978 tcp:8096
+        """
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.portForwardExists(
+                listing: listing,
+                device: "emulator-5554",
+                host: 19_978,
+                guest: 9_978
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.portForwardExists(
+                listing: listing,
+                device: "emulator-5560",
+                host: 19_978,
+                guest: 9_978
+            )
+        )
+    }
+
+    private func makeFakeAndroidSDK(at root: URL) throws {
+        let adb = root.appendingPathComponent("platform-tools/adb")
+        let emulator = root.appendingPathComponent("emulator/emulator")
+        for executable in [adb, emulator] {
+            try FileManager.default.createDirectory(
+                at: executable.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            XCTAssertTrue(
+                FileManager.default.createFile(
+                    atPath: executable.path,
+                    contents: Data("#!/bin/sh\nexit 0\n".utf8)
+                )
+            )
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: executable.path
+            )
+        }
     }
 
     func testAndroidBridgeRewritesCloudOriginalProxyAndEncodesItsPath() {

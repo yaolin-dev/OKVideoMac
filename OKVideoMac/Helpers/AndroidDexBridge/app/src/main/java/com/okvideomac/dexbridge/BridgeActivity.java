@@ -40,7 +40,15 @@ public final class BridgeActivity extends Activity {
         // context. Supplying the visible Activity (rather than only the
         // Application) gives AlertDialog a valid themed window owner.
         com.github.catvod.Init.set(this);
+        updateRuntimeGeneration(getIntent());
         BridgeServer.start(getApplicationContext());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        updateRuntimeGeneration(intent);
     }
 
     @Override
@@ -58,6 +66,14 @@ public final class BridgeActivity extends Activity {
             com.github.catvod.Init.set(getApplicationContext());
         }
         super.onDestroy();
+    }
+
+    private static void updateRuntimeGeneration(Intent intent) {
+        BridgeServer.setRuntimeGeneration(
+                intent == null
+                        ? ""
+                        : intent.getStringExtra("okvideomac_runtime_generation")
+        );
     }
 
     static Context hostContext() {

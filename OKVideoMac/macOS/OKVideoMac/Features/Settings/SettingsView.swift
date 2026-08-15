@@ -221,7 +221,7 @@ struct SettingsView: View {
     private var configurationSettings: some View {
         SettingsPage(
             title: "点播配置",
-            subtitle: "导入、切换和维护 FongMi 点播配置"
+            subtitle: "导入、切换和维护点播配置"
         ) {
             ConfigurationView(embedded: true)
                 .environmentObject(state)
@@ -345,7 +345,7 @@ struct SettingsView: View {
                     icon: "app.badge",
                     color: .green,
                     title: "版本",
-                    subtitle: "OK影视 Mac",
+                    subtitle: "OKVideoMac",
                     value: state.versionDescription
                 )
                 SettingsDivider()
@@ -412,6 +412,11 @@ struct SettingsView: View {
                         }
                         .disabled(state.isAndroidRuntimeBusy)
 
+                        Button("选择 SDK…") {
+                            Task { await state.chooseAndroidSDK() }
+                        }
+                        .disabled(state.isAndroidRuntimeBusy)
+
                         Button("修复") {
                             Task { await state.repairAndroidRuntime() }
                         }
@@ -446,8 +451,8 @@ struct SettingsView: View {
                         systemImage: "info.circle"
                     )
                     Text(
-                        "模块启动后会在后台继续运行；"
-                            + "退出 OK影视 Mac 时不会自动停止，可在此手动停止。"
+                        "进入 Java/Dex 站点时会自动准备；设置页按钮仅用于检查和维护。"
+                            + "退出 OKVideoMac 时不会强制关闭，可在此手动停止。"
                     )
                     .foregroundColor(.secondary)
                 }
@@ -469,7 +474,10 @@ struct SettingsView: View {
             }
         }
         .task {
-            await state.refreshAndroidRuntimeStatus()
+            while !Task.isCancelled {
+                await state.refreshAndroidRuntimeStatus()
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
         }
     }
 
