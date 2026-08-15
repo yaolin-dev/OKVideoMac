@@ -77,7 +77,7 @@ targets:
           fi
       - name: Embed optional libmpv runtime
         script: |
-          BUILD_ROOT="${OKVIDEOMAC_BUILD_ROOT:-/Volumes/XcodeDev/OKVideoMacBuild}"
+          BUILD_ROOT="${OKVIDEOMAC_BUILD_ROOT:-${SRCROOT}/Vendor/Build}"
           MPV_ROOT="${BUILD_ROOT}/libmpv"
           if [[ ! -d "${MPV_ROOT}" ]]; then
             MPV_ROOT="${SRCROOT}/Vendor/Build/libmpv"
@@ -95,7 +95,7 @@ targets:
           fi
       - name: Embed optional QuickJS runtime
         script: |
-          BUILD_ROOT="${OKVIDEOMAC_BUILD_ROOT:-/Volumes/XcodeDev/OKVideoMacBuild}"
+          BUILD_ROOT="${OKVIDEOMAC_BUILD_ROOT:-${SRCROOT}/Vendor/Build}"
           QUICKJS_ROOT="${BUILD_ROOT}/QuickJS"
           if [[ ! -d "${QUICKJS_ROOT}" ]]; then
             QUICKJS_ROOT="${SRCROOT}/Vendor/Build/QuickJS"
@@ -113,19 +113,49 @@ targets:
           fi
       - name: Embed optional Node runtime
         script: |
-          NODE_SOURCE="${OKVIDEOMAC_NODE_RUNTIME:-/opt/homebrew/opt/node@22-direct/bin/node}"
-          NODE_ROOT="$(cd "$(dirname "${NODE_SOURCE}")/.." 2>/dev/null && pwd || true)"
-          if [[ -x "${NODE_SOURCE}" ]]; then
-            RESOURCES_DIR="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
-            NODE_DIR="${RESOURCES_DIR}/NodeRuntime"
-            LICENSES_DIR="${RESOURCES_DIR}/Licenses"
-            mkdir -p "${NODE_DIR}" "${LICENSES_DIR}"
-            cp "${NODE_SOURCE}" "${NODE_DIR}/node"
-            chmod 755 "${NODE_DIR}/node"
-            if [[ -f "${NODE_ROOT}/LICENSE" ]]; then
-              cp "${NODE_ROOT}/LICENSE" "${LICENSES_DIR}/Node.js-LICENSE.txt"
-            fi
+          NODE_SOURCE="${OKVIDEOMAC_NODE_RUNTIME:-}"
+          if [[ -z "${NODE_SOURCE}" ]]; then
+            NODE_SOURCE="$(command -v node || true)"
           fi
+          if [[ ! -x "${NODE_SOURCE}" ]]; then
+            if [[ "${CONFIGURATION}" == "Release" ]]; then
+              echo "Node runtime not found. Set OKVIDEOMAC_NODE_RUNTIME to the supported Node executable." >&2
+              exit 1
+            fi
+            exit 0
+          fi
+          while [[ -L "${NODE_SOURCE}" ]]; do
+            NODE_LINK="$(readlink "${NODE_SOURCE}")"
+            if [[ "${NODE_LINK}" == /* ]]; then
+              NODE_SOURCE="${NODE_LINK}"
+            else
+              NODE_SOURCE="$(cd "$(dirname "${NODE_SOURCE}")" && pwd)/${NODE_LINK}"
+            fi
+          done
+          NODE_SOURCE="$(cd "$(dirname "${NODE_SOURCE}")" && pwd)/$(basename "${NODE_SOURCE}")"
+          NODE_ROOT="$(cd "$(dirname "${NODE_SOURCE}")/.." && pwd)"
+          NODE_VERSION="$("${NODE_SOURCE}" --version 2>/dev/null || true)"
+          if [[ "${NODE_VERSION}" != v22.* ]]; then
+            if [[ "${CONFIGURATION}" == "Release" ]]; then
+              echo "Unsupported Node runtime ${NODE_VERSION:-unknown}. Provide Node 22 with OKVIDEOMAC_NODE_RUNTIME." >&2
+              exit 1
+            fi
+            exit 0
+          fi
+          if [[ ! -f "${NODE_ROOT}/LICENSE" ]]; then
+            if [[ "${CONFIGURATION}" == "Release" ]]; then
+              echo "Node license not found at ${NODE_ROOT}/LICENSE. Provide a complete Node 22 distribution with OKVIDEOMAC_NODE_RUNTIME." >&2
+              exit 1
+            fi
+            exit 0
+          fi
+          RESOURCES_DIR="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
+          NODE_DIR="${RESOURCES_DIR}/NodeRuntime"
+          LICENSES_DIR="${RESOURCES_DIR}/Licenses"
+          mkdir -p "${NODE_DIR}" "${LICENSES_DIR}"
+          cp "${NODE_SOURCE}" "${NODE_DIR}/node"
+          chmod 755 "${NODE_DIR}/node"
+          cp "${NODE_ROOT}/LICENSE" "${LICENSES_DIR}/Node.js-LICENSE.txt"
     dependencies:
       - package: OKVideoKit
         product: OKVideoCore

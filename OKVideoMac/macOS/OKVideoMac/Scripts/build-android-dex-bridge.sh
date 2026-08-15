@@ -4,17 +4,32 @@ set -euo pipefail
 SCRIPT_DIR=${0:A:h}
 REPOSITORY_ROOT=${SCRIPT_DIR:h:h:h}
 HELPER_DIR="$REPOSITORY_ROOT/Helpers/AndroidDexBridge"
-ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-/Volumes/XcodeDev/AndroidSDK}
-GRADLE_USER_HOME=${GRADLE_USER_HOME:-/Volumes/XcodeDev/OKVideoMacBuild/Gradle}
 
-if [[ ! -x "$ANDROID_SDK_ROOT/platform-tools/adb" ]]; then
-    print -u2 "Android SDK not found at $ANDROID_SDK_ROOT"
+if [[ -n "${ANDROID_HOME:-}" ]]; then
+    RESOLVED_ANDROID_SDK="$ANDROID_HOME"
+elif [[ -n "${ANDROID_SDK_ROOT:-}" ]]; then
+    RESOLVED_ANDROID_SDK="$ANDROID_SDK_ROOT"
+elif [[ -d "$HOME/Library/Android/sdk" ]]; then
+    RESOLVED_ANDROID_SDK="$HOME/Library/Android/sdk"
+else
+    print -u2 "Android SDK not found. Set ANDROID_HOME or ANDROID_SDK_ROOT, or install it at $HOME/Library/Android/sdk."
     exit 1
 fi
 
-export ANDROID_SDK_ROOT
-export GRADLE_USER_HOME
-export JAVA_HOME=${JAVA_HOME:-/Library/Java/JavaVirtualMachines/zulu-17.jdk/Contents/Home}
+if [[ ! -x "$RESOLVED_ANDROID_SDK/platform-tools/adb" ]]; then
+    print -u2 "Android SDK platform-tools are missing: $RESOLVED_ANDROID_SDK/platform-tools/adb"
+    exit 1
+fi
+
+export ANDROID_HOME="$RESOLVED_ANDROID_SDK"
+export ANDROID_SDK_ROOT="$RESOLVED_ANDROID_SDK"
+if [[ -z "${JAVA_HOME:-}" ]]; then
+    RESOLVED_JAVA_HOME="$(/usr/libexec/java_home -v 17 2>/dev/null)" || {
+        print -u2 "JDK 17 is required. Set JAVA_HOME to a JDK 17 installation."
+        exit 1
+    }
+    export JAVA_HOME="$RESOLVED_JAVA_HOME"
+fi
 
 cd "$HELPER_DIR"
 ./gradlew --no-daemon :app:assembleRelease

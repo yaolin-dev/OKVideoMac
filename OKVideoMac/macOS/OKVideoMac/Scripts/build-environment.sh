@@ -12,17 +12,9 @@ export PKG_CONFIG="/opt/local/bin/pkg-config"
 export CMAKE_PREFIX_PATH="/opt/local"
 
 if [[ -z "${OKVIDEOMAC_BUILD_ROOT:-}" ]]; then
-  if [[ -d "/Volumes/XcodeDev" ]]; then
-    export OKVIDEOMAC_BUILD_ROOT="/Volumes/XcodeDev/OKVideoMacBuild"
-  else
-    _okvideomac_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    _okvideomac_project_dir="$(cd "$_okvideomac_script_dir/.." && pwd)"
-    export OKVIDEOMAC_BUILD_ROOT="$_okvideomac_project_dir/Vendor/Build"
-    unset _okvideomac_project_dir
-    unset _okvideomac_script_dir
-  fi
-fi
-
-if [[ -d "/Volumes/XcodeDev/Xcode.app/Contents/Developer" ]]; then
-  export DEVELOPER_DIR="/Volumes/XcodeDev/Xcode.app/Contents/Developer"
+  _okvideomac_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  _okvideomac_project_dir="$(cd "$_okvideomac_script_dir/.." && pwd)"
+  export OKVIDEOMAC_BUILD_ROOT="$_okvideomac_project_dir/Vendor/Build"
+  unset _okvideomac_project_dir
+  unset _okvideomac_script_dir
 fi

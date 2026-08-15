@@ -17,7 +17,27 @@ FRAMEWORKS="$APP/Contents/Frameworks"
 BRIDGE_APK="$APP/Contents/Resources/AndroidDexBridge-release.apk"
 NODE_RUNTIME="$APP/Contents/Resources/NodeRuntime/node"
 LEGAL_ROOT="$APP/Contents/Resources/Legal"
-APKANALYZER="${ANDROID_SDK_ROOT:-/Volumes/XcodeDev/AndroidSDK}/cmdline-tools/latest/bin/apkanalyzer"
+ANDROID_SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+if [[ -z "$ANDROID_SDK" && -d "$HOME/Library/Android/sdk" ]]; then
+  ANDROID_SDK="$HOME/Library/Android/sdk"
+fi
+APKANALYZER=""
+if [[ -n "$ANDROID_SDK" ]]; then
+  if [[ -x "$ANDROID_SDK/cmdline-tools/latest/bin/apkanalyzer" ]]; then
+    APKANALYZER="$ANDROID_SDK/cmdline-tools/latest/bin/apkanalyzer"
+  else
+    while IFS= read -r candidate; do
+      if [[ -x "$candidate" ]]; then
+        APKANALYZER="$candidate"
+        break
+      fi
+    done < <(find "$ANDROID_SDK/cmdline-tools" -mindepth 3 -maxdepth 3 \
+      -path '*/bin/apkanalyzer' -type f 2>/dev/null | sort -r)
+  fi
+fi
+if [[ -z "$APKANALYZER" ]]; then
+  APKANALYZER="$(command -v apkanalyzer || true)"
+fi
 EXPECTED_VERSION="${OKVIDEOMAC_EXPECTED_VERSION:-$(
   awk -F' = ' '/MARKETING_VERSION = / {
     gsub(/[ ;]/, "", $2)
@@ -83,6 +103,8 @@ if [[ -f "$APP/Contents/Resources/AndroidDexBridge-debug.apk" ]]; then
 fi
 if [[ ! -x "$APKANALYZER" ]]; then
   echo "apkanalyzer is required to verify the Android bridge." >&2
+  echo "Detected Android SDK: ${ANDROID_SDK:-none}" >&2
+  echo "Install Android SDK Command-line Tools, or set ANDROID_HOME or ANDROID_SDK_ROOT." >&2
   exit 1
 fi
 if [[ "$("$APKANALYZER" manifest debuggable "$BRIDGE_APK")" != "false" ]]; then
