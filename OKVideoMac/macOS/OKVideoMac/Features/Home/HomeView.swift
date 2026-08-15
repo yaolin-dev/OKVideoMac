@@ -23,11 +23,19 @@ struct HomeView: View {
             ProgressView("正在恢复上次内容…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if state.activeConfiguration == nil {
+            VStack(spacing: 18) {
                 EmptyStateView(
                     systemImage: "doc.badge.plus",
                     title: "尚未导入配置",
                     message: "前往“设置 → 点播配置”，通过 URL、粘贴内容或本地文件导入你有权使用的点播配置。"
                 )
+                Button {
+                    state.selectedSettingsPane = .configurations
+                    state.selectedSection = .settings
+                } label: {
+                    Label("打开点播配置设置", systemImage: "gearshape")
+                }
+            }
         } else if state.visibleSites.isEmpty {
                 EmptyStateView(
                     systemImage: "rectangle.slash",
