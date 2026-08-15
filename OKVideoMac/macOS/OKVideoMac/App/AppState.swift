@@ -5030,6 +5030,7 @@ final class AppState: ObservableObject {
             ?? activeConfigurationRecord?.baseURL
             ?? URL(string: "http://127.0.0.1/")!
         let httpClient = configuredHTTPClient(environment: environment)
+        let nodeBundleRuntime = environment.nodeBundleRuntime
         providers = Dictionary(
             uniqueKeysWithValues: visibleSites.map { site in
                 let provider: SiteProvider
@@ -5044,11 +5045,11 @@ final class AppState: ObservableObject {
                         site: site,
                         baseURL: nodeFallbackBaseURL,
                         httpClient: httpClient,
-                        diagnosticReporter: { [weak runtime = environment.nodeBundleRuntime] event in
+                        diagnosticReporter: { [weak runtime = nodeBundleRuntime] event in
                             Task { await runtime?.recordDiagnosticEvent(event) }
                         },
                         ensureRuntimeReady: {
-                            try await environment.nodeBundleRuntime.ensureReady(
+                            try await nodeBundleRuntime.ensureReady(
                                 from: nodeSourceURL
                             )
                         }
@@ -5061,7 +5062,7 @@ final class AppState: ObservableObject {
                         site: site,
                         baseURL: baseURL,
                         httpClient: httpClient,
-                        diagnosticReporter: { [weak runtime = environment.nodeBundleRuntime] event in
+                        diagnosticReporter: { [weak runtime = nodeBundleRuntime] event in
                             Task { await runtime?.recordDiagnosticEvent(event) }
                         }
                     )) ?? UnsupportedSiteProvider(site: site)
