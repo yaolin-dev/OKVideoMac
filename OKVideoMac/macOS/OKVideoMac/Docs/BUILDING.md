@@ -28,26 +28,25 @@ OKVideoKit 独立测试、arm64 Release 编译和 Android Release Bridge 离线�
 ## Current reproducibility caveats
 
 2026-08-13 的 fresh audit 遇到 Google Maven TLS handshake termination，且
-位于 `/Volumes/XcodeDev` 的外部开发卷发生 I/O stall，导致该次独立重跑无法
+维护者当时使用的外部开发卷发生 I/O stall，导致该次独立重跑无法
 完成。这些是当次网络/存储环境事实，不是源码编译失败。恢复可用网络、Xcode
-卷和已锁定依赖缓存后，应重新运行本文门禁；正式发布仍必须来自 clean worktree
+和已锁定依赖缓存后，应重新运行本文门禁；正式发布仍必须来自 clean worktree
 和 `package-app.sh` 的 controlled output。
 
 ## 前置条件
 
 1. 安装完整 Xcode（Phase 4 已验证 16.2；较早 macOS 12 基线为 14.2），并选择
-   其 Developer 目录。以下是当前维护机的外部卷示例，不是通用必需路径：
+   其 Developer 目录。标准安装可直接执行：
 
    ```bash
-   ./Scripts/mount-xcode-dev.sh
-   sudo xcode-select -s /Volumes/XcodeDev/Xcode.app/Contents/Developer
+   sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+   xcodebuild -version
    ```
 
-   本机将 Xcode 放在 T7 Shield 内的 APFS 稀疏卷
-   `/Volumes/T7 Shield/XcodeDev.sparsebundle`。不要把 Xcode.app 直接放在
-   exFAT 文件系统上；重启或重新连接移动硬盘后，先运行挂载脚本。
+   如果 Xcode 安装在其他位置，可设置 `DEVELOPER_DIR` 或把实际路径传给
+   `xcode-select`。仓库不要求特定卷名或维护者目录。
 
-2. Xcode 验证完成后，安装最小开发期工具：XcodeGen 2.38+、Meson、Ninja、
+2. Xcode 验证完成后，安装最小开发期工具：精确 XcodeGen 2.38.0、Meson、Ninja、
    pkg-config、FFmpeg 和 libass。Monterey 本机仅使用 MacPorts：
 
    ```bash
@@ -61,37 +60,46 @@ OKVideoKit 独立测试、arm64 Release 编译和 Android Release Bridge 离线�
    作为构建期依赖；最终 `.app` 必须携带完整 dylib 闭包。
 4. 构建可选 Android Bridge 需要 JDK 17、Android SDK 35/build-tools 35 和
    Gradle wrapper 所需的已锁定 Maven artifacts。Native Mode 启动和使用不要求
-   Android SDK 或 Emulator。
+   Android SDK 或 Emulator。脚本依次读取 `ANDROID_HOME`、
+   `ANDROID_SDK_ROOT` 和标准目录 `$HOME/Library/Android/sdk`；找不到时会
+   明确失败。Gradle 默认使用用户自己的标准缓存，设置 `GRADLE_USER_HOME`
+   时则尊重该覆盖值。
+
+5. Release 构建嵌入 Node runtime。可设置
+   `OKVIDEOMAC_NODE_RUNTIME=/absolute/path/to/node` 明确选择受支持的 Node
+   可执行文件；否则脚本从 `PATH` 查找 `node`。找不到时 Release 构建会立即
+   失败，而不会生成缺少 Node runtime 的残缺 App。
 
 ## 工程和测试
 
 ```bash
 cd OKVideoMac/macOS/OKVideoMac
+export OKVIDEOMAC_BUILD_ROOT="${OKVIDEOMAC_BUILD_ROOT:-$PWD/Vendor/Build}"
 ./Scripts/bootstrap.sh
 swift test \
   --package-path Packages/OKVideoKit \
-  --scratch-path /Volumes/XcodeDev/OKVideoMacBuild/SwiftPM
+  --scratch-path "$OKVIDEOMAC_BUILD_ROOT/SwiftPM"
 xcodebuild \
   -project OKVideoMac.xcodeproj \
   -scheme OKVideoMac \
   -configuration Debug \
   -destination 'platform=macOS,arch=arm64' \
-  -derivedDataPath /Volumes/XcodeDev/OKVideoMacBuild/DerivedData \
+  -derivedDataPath "$OKVIDEOMAC_BUILD_ROOT/DerivedData" \
   CODE_SIGNING_ALLOWED=NO \
   build
 xcodebuild \
   -project OKVideoMac.xcodeproj \
   -scheme OKVideoMac \
   -destination 'platform=macOS,arch=arm64' \
-  -derivedDataPath /Volumes/XcodeDev/OKVideoMacBuild/DerivedData \
+  -derivedDataPath "$OKVIDEOMAC_BUILD_ROOT/DerivedData" \
   CODE_SIGNING_ALLOWED=NO \
   test
 ```
 
-脚本在 `/Volumes/XcodeDev` 已挂载时默认设置
-`OKVIDEOMAC_BUILD_ROOT=/Volumes/XcodeDev/OKVideoMacBuild`。下载缓存、第三方
-源码、原生构建目录、DerivedData 和最终 `Artifacts` 都放在该目录；只有
-MacPorts 本体、头文件和动态库位于系统盘 `/opt/local`。
+`OKVIDEOMAC_BUILD_ROOT` 未设置时默认使用仓库内的 `Vendor/Build`。如需把下载
+缓存、第三方源码、原生构建目录、DerivedData 和 `Artifacts` 放到其他磁盘，
+请在运行脚本前显式导出该变量。MacPorts 本体、头文件和动态库仍位于
+`/opt/local`。
 
 ## 原生依赖
 
