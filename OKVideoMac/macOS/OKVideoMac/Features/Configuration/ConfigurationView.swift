@@ -283,6 +283,8 @@ private struct ConfigurationImportSheet: View {
     @State private var remoteURL = ""
     @State private var pastedText = ""
     @State private var baseURL = ""
+    @State private var importPhase: ConfigurationImportPhase?
+    @State private var submissionTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -297,10 +299,13 @@ private struct ConfigurationImportSheet: View {
                 }
             }
             .pickerStyle(.segmented)
+            .disabled(isSubmitting)
 
             TextField("点播配置名称（可选）", text: $name)
+                .disabled(isSubmitting)
             if mode == .remote {
                 TextField("https://example.com/config.json", text: $remoteURL)
+                    .disabled(isSubmitting)
                 Text("普通配置允许 HTTP/HTTPS。远程 Node bundle 建议 HTTPS；最终为 HTTP 时需在 .js.md5 地址后附 #sha256=<64位哈希>，可再附 &source=<源ID>&version=<版本>。")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -312,28 +317,58 @@ private struct ConfigurationImportSheet: View {
                         RoundedRectangle(cornerRadius: 4)
                             .stroke(Color.secondary.opacity(0.3))
                     )
+                    .disabled(isSubmitting)
                 TextField("相对资源基准 URL（可选）", text: $baseURL)
+                    .disabled(isSubmitting)
             }
             Spacer()
+            if let importPhase {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(importPhase.title)
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                }
+            }
             HStack {
                 Spacer()
                 Button("取消") {
+                    submissionTask?.cancel()
+                    submissionTask = nil
                     isPresented = false
                 }
-                Button("导入") {
+                .disabled(isCommitInProgress)
+                Button {
                     importValue()
+                } label: {
+                    if isSubmitting {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("导入中")
+                        }
+                    } else {
+                        Text("导入")
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!canImport)
             }
         }
         .padding(22)
+        .interactiveDismissDisabled(isCommitInProgress)
+        .onDisappear {
+            submissionTask?.cancel()
+            submissionTask = nil
+        }
     }
 
     private var canImport: Bool {
+        guard !isSubmitting else { return false }
         switch mode {
         case .remote:
-            guard let url = URL(string: remoteURL),
+            guard let url = URL(string: normalizedRemoteURL),
                   ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
                 return false
             }
@@ -343,11 +378,24 @@ private struct ConfigurationImportSheet: View {
         }
     }
 
+    private var isSubmitting: Bool {
+        submissionTask != nil
+    }
+
+    private var isCommitInProgress: Bool {
+        guard isSubmitting else { return false }
+        return importPhase == .saving || importPhase == .activating
+    }
+
+    private var normalizedRemoteURL: String {
+        remoteURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func importValue() {
         let source: ConfigurationSource
         switch mode {
         case .remote:
-            guard let url = URL(string: remoteURL) else { return }
+            guard let url = URL(string: normalizedRemoteURL) else { return }
             source = .remote(url)
         case .pasted:
             source = .pasted(
@@ -355,11 +403,32 @@ private struct ConfigurationImportSheet: View {
                 baseURL: baseURL.isEmpty ? nil : URL(string: baseURL)
             )
         }
-        Task {
-            let succeeded = await state.importConfiguration(source: source, name: name)
+        importPhase = initialPhase(for: source)
+        submissionTask = Task {
+            let succeeded = await state.importConfiguration(
+                source: source,
+                name: name
+            ) { phase in
+                importPhase = phase
+            }
+            guard !Task.isCancelled else { return }
+            submissionTask = nil
             if succeeded {
                 isPresented = false
+            } else {
+                importPhase = nil
             }
         }
+    }
+
+    private func initialPhase(
+        for source: ConfigurationSource
+    ) -> ConfigurationImportPhase {
+        if case .remote(let url) = source {
+            return NodeBundleRuntimeService.supports(url)
+                ? .startingNodeRuntime
+                : .downloadingAndParsing
+        }
+        return .parsing
     }
 }

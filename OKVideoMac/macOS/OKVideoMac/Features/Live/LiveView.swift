@@ -108,18 +108,7 @@ struct LiveView: View {
         )
         let programmeDate = Date()
         return VStack(spacing: 0) {
-            if let failure = state.epgFailures[sourceID] {
-                Label(
-                    "EPG 暂不可用：\(failure)",
-                    systemImage: "exclamationmark.triangle"
-                )
-                .font(.caption)
-                .foregroundColor(.orange)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
-                .background(Color.orange.opacity(0.07))
-            }
+            liveSourceBackgroundStatus(sourceID: sourceID)
 
             if channels.isEmpty {
                 EmptyStateView(
@@ -174,6 +163,85 @@ struct LiveView: View {
                 .background(AppSurfacePalette.background)
             }
         }
+    }
+
+    @ViewBuilder
+    private func liveSourceBackgroundStatus(sourceID: UUID) -> some View {
+        if let epgStatus = state.liveSourceEPGStatuses[sourceID] {
+            switch epgStatus {
+            case .loading:
+                backgroundStatusLabel(
+                    "正在后台下载并整理节目单…",
+                    systemImage: "clock.arrow.circlepath",
+                    color: .secondary,
+                    showsProgress: true
+                )
+            case .ready:
+                backgroundStatusLabel(
+                    "节目单已就绪",
+                    systemImage: "checkmark.circle",
+                    color: .green
+                )
+            case .failed(let message):
+                backgroundStatusLabel(
+                    "EPG 暂不可用：\(message)",
+                    systemImage: "exclamationmark.triangle",
+                    color: .orange
+                )
+            }
+        }
+
+        if let validation = state.liveSourceValidationStatuses[sourceID] {
+            switch validation {
+            case .checking(let completed, let total):
+                backgroundStatusLabel(
+                    "正在后台检测频道 \(completed)/\(total)",
+                    systemImage: "waveform.path.ecg",
+                    color: .secondary,
+                    showsProgress: true
+                )
+            case .completed(let removed, let total):
+                backgroundStatusLabel(
+                    removed == 0
+                        ? "已检测 \(total) 个频道，未发现明确失效项"
+                        : "已检测 \(total) 个频道，清理 \(removed) 个失效项（可恢复）",
+                    systemImage: removed == 0
+                        ? "checkmark.circle"
+                        : "trash.slash",
+                    color: .secondary
+                )
+            case .failed(let message):
+                backgroundStatusLabel(
+                    "后台频道检测未完成：\(message)",
+                    systemImage: "exclamationmark.triangle",
+                    color: .orange
+                )
+            }
+        }
+    }
+
+    private func backgroundStatusLabel(
+        _ title: String,
+        systemImage: String,
+        color: Color,
+        showsProgress: Bool = false
+    ) -> some View {
+        HStack(spacing: 8) {
+            if showsProgress {
+                ProgressView()
+                    .controlSize(.mini)
+            } else {
+                Image(systemName: systemImage)
+            }
+            Text(title)
+                .lineLimit(2)
+        }
+        .font(.caption)
+        .foregroundColor(color)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 8)
+        .background(color.opacity(0.07))
     }
 
     private var selectedSource: StoredLiveSource? {
@@ -819,6 +887,8 @@ struct LiveSourceImportSheet: View {
     @State private var remoteURL = ""
     @State private var pastedText = ""
     @State private var baseURL = ""
+    @State private var importPhase: LiveSourceImportPhase?
+    @State private var submissionTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -833,9 +903,12 @@ struct LiveSourceImportSheet: View {
                 }
             }
             .pickerStyle(.segmented)
+            .disabled(isSubmitting)
             TextField("直播源名称（可选）", text: $name)
+                .disabled(isSubmitting)
             if mode == .remote {
                 TextField("https://example.com/channels.m3u", text: $remoteURL)
+                    .disabled(isSubmitting)
                 Text("仅允许 HTTP/HTTPS；响应上限 32 MiB，超时 30 秒。")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -847,28 +920,58 @@ struct LiveSourceImportSheet: View {
                         RoundedRectangle(cornerRadius: 4)
                             .stroke(Color.secondary.opacity(0.3))
                     )
+                    .disabled(isSubmitting)
                 TextField("相对频道地址的基准 URL（可选）", text: $baseURL)
+                    .disabled(isSubmitting)
             }
             Spacer()
+            if let importPhase {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(importPhase.title)
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                }
+            }
             HStack {
                 Spacer()
                 Button("取消") {
+                    submissionTask?.cancel()
+                    submissionTask = nil
                     isPresented = false
                 }
-                Button("添加") {
+                .disabled(isCommitInProgress)
+                Button {
                     importValue()
+                } label: {
+                    if isSubmitting {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("添加中")
+                        }
+                    } else {
+                        Text("添加")
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!canImport)
             }
         }
         .padding(22)
+        .interactiveDismissDisabled(isCommitInProgress)
+        .onDisappear {
+            submissionTask?.cancel()
+            submissionTask = nil
+        }
     }
 
     private var canImport: Bool {
+        guard !isSubmitting else { return false }
         switch mode {
         case .remote:
-            guard let url = URL(string: remoteURL),
+            guard let url = URL(string: normalizedRemoteURL),
                   ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
                 return false
             }
@@ -880,11 +983,24 @@ struct LiveSourceImportSheet: View {
         }
     }
 
+    private var isSubmitting: Bool {
+        submissionTask != nil
+    }
+
+    private var isCommitInProgress: Bool {
+        guard isSubmitting else { return false }
+        return importPhase == .saving || importPhase == .publishing
+    }
+
+    private var normalizedRemoteURL: String {
+        remoteURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func importValue() {
         let input: LiveSourceInput
         switch mode {
         case .remote:
-            guard let url = URL(string: remoteURL) else { return }
+            guard let url = URL(string: normalizedRemoteURL) else { return }
             input = .remote(url)
         case .pasted:
             input = .pasted(
@@ -892,13 +1008,20 @@ struct LiveSourceImportSheet: View {
                 baseURL: baseURL.isEmpty ? nil : URL(string: baseURL)
             )
         }
-        Task {
+        importPhase = mode == .remote ? .downloadingAndParsing : .parsing
+        submissionTask = Task {
             let succeeded = await state.importLiveSource(
                 source: input,
                 name: name
-            )
+            ) { phase in
+                importPhase = phase
+            }
+            guard !Task.isCancelled else { return }
+            submissionTask = nil
             if succeeded {
                 isPresented = false
+            } else {
+                importPhase = nil
             }
         }
     }

@@ -6,7 +6,7 @@ final class XMLTVParserTests: XCTestCase {
     H4sIAAAAAAAC/5WQywqDMBBFfyVkW9qMWfQBY9x1WfoLqU7bQBIlRrF/X0WxForQWZ7LzLkMZp2zrKVQm9KnPNkBzxTGVmH+1N6TZaZI+d10sQnEFRamrqx+bb12pM4jRvFFUUyrCqtQPoJ2jtiEPqdYHXWIKZcg93CQJwnDsA0cAYawrBZZssj6diZaUtfmZk3O5g4jRTE7/9MnK3r5Q3+hLq7KRf/EN6Myf/leAQAA
     """
 
-    func testGzipXMLTVAndCurrentNextLookup() throws {
+    func testGzipXMLTVAndCurrentNextLookup() async throws {
         let data = try XCTUnwrap(Data(base64Encoded: compressedFixture))
         XCTAssertTrue(Gzip.isCompressed(data))
 
@@ -41,6 +41,11 @@ final class XMLTVParserTests: XCTestCase {
             .currentAndNext(for: channel, at: date)
         XCTAssertEqual(indexed.current?.title, "Public Fixture")
         XCTAssertEqual(indexed.next?.title, "Next Fixture")
+
+        let detachedIndex = await XMLTVScheduleIndexBuilder.build(guide: guide)
+            .currentAndNext(for: channel, at: date)
+        XCTAssertEqual(detachedIndex.current?.title, "Public Fixture")
+        XCTAssertEqual(detachedIndex.next?.title, "Next Fixture")
     }
 
     func testInvalidProgrammeDoesNotDiscardValidEntries() throws {

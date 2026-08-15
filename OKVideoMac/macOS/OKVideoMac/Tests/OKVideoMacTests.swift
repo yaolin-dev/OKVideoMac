@@ -7,6 +7,25 @@ import OKVideoPersistence
 @testable import OKVideoMac
 
 final class OKVideoMacTests: XCTestCase {
+    func testImportProgressMessagesDescribeActualCommitStage() {
+        XCTAssertEqual(
+            ConfigurationImportPhase.downloadingAndParsing.title,
+            "正在下载并解析…"
+        )
+        XCTAssertEqual(
+            ConfigurationImportPhase.startingNodeRuntime.title,
+            "正在启动 Node Runtime…"
+        )
+        XCTAssertEqual(
+            ConfigurationImportPhase.activating.title,
+            "正在启用配置…"
+        )
+        XCTAssertEqual(
+            LiveSourceImportPhase.publishing.title,
+            "正在发布到直播列表…"
+        )
+    }
+
     func testNativePlayerSurfaceMountsOnlyWhilePlayerIsVisible() {
         XCTAssertFalse(
             PlayerSurfaceMountPolicy.shouldMount(

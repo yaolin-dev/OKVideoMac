@@ -236,3 +236,13 @@ public struct XMLTVScheduleIndex: Sendable {
         )
     }
 }
+
+/// Builds the read-optimized XMLTV index on a detached utility task so large
+/// guides never sort their programme lists on the app's main actor.
+public enum XMLTVScheduleIndexBuilder {
+    public static func build(guide: XMLTVGuide) async -> XMLTVScheduleIndex {
+        await Task.detached(priority: .utility) {
+            XMLTVScheduleIndex(guide: guide)
+        }.value
+    }
+}

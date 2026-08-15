@@ -596,6 +596,46 @@ enum LiveSourceValidationStatus: Equatable {
     case failed(String)
 }
 
+enum ConfigurationImportPhase: Equatable {
+    case downloadingAndParsing
+    case parsing
+    case startingNodeRuntime
+    case saving
+    case activating
+
+    var title: String {
+        switch self {
+        case .downloadingAndParsing: return "正在下载并解析…"
+        case .parsing: return "正在解析配置…"
+        case .startingNodeRuntime: return "正在启动 Node Runtime…"
+        case .saving: return "正在保存配置…"
+        case .activating: return "正在启用配置…"
+        }
+    }
+}
+
+enum LiveSourceImportPhase: Equatable {
+    case downloadingAndParsing
+    case parsing
+    case saving
+    case publishing
+
+    var title: String {
+        switch self {
+        case .downloadingAndParsing: return "正在下载并解析…"
+        case .parsing: return "正在解析直播源…"
+        case .saving: return "正在保存直播源…"
+        case .publishing: return "正在发布到直播列表…"
+        }
+    }
+}
+
+enum LiveSourceEPGStatus: Equatable {
+    case loading
+    case ready
+    case failed(String)
+}
+
 private actor LiveStreamAvailabilityProber {
     private let httpClient: URLSessionHTTPClient
 
@@ -705,6 +745,8 @@ final class AppState: ObservableObject {
     @Published private(set) var loadedEPGGuides: [UUID: XMLTVGuide] = [:]
     private var loadedEPGScheduleIndexes: [UUID: XMLTVScheduleIndex] = [:]
     @Published private(set) var epgFailures: [UUID: String] = [:]
+    @Published private(set) var liveSourceEPGStatuses:
+        [UUID: LiveSourceEPGStatus] = [:]
     @Published private(set) var livePlaybackChannel: LiveChannel?
     @Published private(set) var livePlaybackStream: LiveStream?
     @Published private(set) var livePlaybackSourceID: UUID?
@@ -769,6 +811,7 @@ final class AppState: ObservableObject {
     private var livePlaybackRecoveryTask: Task<Void, Never>?
     private var livePlaybackNoticeTask: Task<Void, Never>?
     private var liveSourceValidationTasks: [UUID: Task<Void, Never>] = [:]
+    private var liveSourceEPGTasks: [UUID: Task<Void, Never>] = [:]
     private var playerEpisodePresentationCache: PlayerEpisodePresentationCache?
     private var playerEpisodePreparationTask: Task<Void, Never>?
     private var pendingCloudPlayback: PendingCloudPlayback?
@@ -873,13 +916,23 @@ final class AppState: ObservableObject {
     @discardableResult
     func importConfiguration(
         source: ConfigurationSource,
-        name: String?
+        name: String?,
+        progress: (ConfigurationImportPhase) -> Void = { _ in }
     ) async -> Bool {
         guard let environment else { return false }
         isLoading = true
         defer { isLoading = false }
         do {
+            if case .remote(let url) = source,
+               NodeBundleRuntimeService.supports(url) {
+                progress(.startingNodeRuntime)
+            } else if case .remote = source {
+                progress(.downloadingAndParsing)
+            } else {
+                progress(.parsing)
+            }
             let loaded = try await loadConfiguration(source)
+            try Task.checkCancellation()
             let sourceDetails: (StoredConfigurationSourceKind, String?)
             switch source {
             case .remote(let url):
@@ -898,9 +951,14 @@ final class AppState: ObservableObject {
                 updatedAt: loaded.loadedAt,
                 isActive: true
             )
+            progress(.saving)
+            try Task.checkCancellation()
             try await environment.database.saveConfiguration(record)
+            try Task.checkCancellation()
+            progress(.activating)
             resetSearchForConfigurationChange()
             configurations = try await environment.database.configurations()
+            try Task.checkCancellation()
             configurationRefreshSessionID = UUID()
             configurationRefreshTask?.cancel()
             configurationRefreshTask = nil
@@ -916,14 +974,23 @@ final class AppState: ObservableObject {
             if !importedUsesNodeRuntime {
                 activeNodeRuntimeEndpoint = nil
                 nodeRuntimeUnavailableReason = "Node Runtime 未用于当前配置"
-                await environment.nodeBundleRuntime.stop()
+                Task { @MainActor [weak self] in
+                    guard let self, !self.activeConfigurationUsesNodeRuntime else {
+                        return
+                    }
+                    await environment.nodeBundleRuntime.stop()
+                }
             }
             rebuildProviders()
             selectedSiteKey = supportedSites.first?.key
             await loadSearchSiteScope()
+            try Task.checkCancellation()
             await prepareActiveConfigurationHome()
+            try Task.checkCancellation()
             try await reloadHistory()
             return true
+        } catch is CancellationError {
+            return false
         } catch {
             show(error, title: "配置导入失败")
             return false
@@ -2521,13 +2588,20 @@ final class AppState: ObservableObject {
     @discardableResult
     func importLiveSource(
         source: LiveSourceInput,
-        name: String?
+        name: String?,
+        progress: (LiveSourceImportPhase) -> Void = { _ in }
     ) async -> Bool {
         guard let environment else { return false }
         isLoading = true
         defer { isLoading = false }
         do {
+            if case .remote = source {
+                progress(.downloadingAndParsing)
+            } else {
+                progress(.parsing)
+            }
             let loaded = try await environment.liveSourceLoader.load(source)
+            try Task.checkCancellation()
             let sourceDetails: (StoredLiveSourceKind, String?)
             switch source {
             case .remote(let url):
@@ -2545,15 +2619,18 @@ final class AppState: ObservableObject {
                 rawData: loaded.rawData,
                 updatedAt: loaded.loadedAt
             )
+            progress(.saving)
+            try Task.checkCancellation()
             try await environment.database.saveLiveSource(record)
+            try Task.checkCancellation()
+            progress(.publishing)
             liveSources = try await environment.database.liveSources()
+            try Task.checkCancellation()
             loadedLivePlaylists[record.id] = loaded.playlist
-            await loadEPG(for: record, playlist: loaded.playlist)
-            startInitialLiveSourceValidation(
-                sourceID: record.id,
-                playlist: loaded.playlist
-            )
+            startLiveSourceBackgroundWork(for: record, playlist: loaded.playlist)
             return true
+        } catch is CancellationError {
+            return false
         } catch {
             show(error, title: "直播源加载失败")
             return false
@@ -2570,7 +2647,7 @@ final class AppState: ObservableObject {
                 baseURL: source.baseURL
             )
             loadedLivePlaylists[source.id] = playlist
-            await loadEPG(for: source, playlist: playlist)
+            startLiveSourceBackgroundWork(for: source, playlist: playlist)
         } catch {
             show(error, title: "直播源加载失败")
         }
@@ -2609,7 +2686,7 @@ final class AppState: ObservableObject {
             loadedEPGGuides[id] = nil
             loadedEPGScheduleIndexes[id] = nil
             epgFailures[id] = nil
-            await loadEPG(for: updated, playlist: loaded.playlist)
+            startLiveSourceBackgroundWork(for: updated, playlist: loaded.playlist)
         } catch {
             show(error, title: "直播源刷新失败")
         }
@@ -2619,7 +2696,10 @@ final class AppState: ObservableObject {
         guard let environment else { return }
         liveSourceValidationTasks[id]?.cancel()
         liveSourceValidationTasks[id] = nil
+        liveSourceEPGTasks[id]?.cancel()
+        liveSourceEPGTasks[id] = nil
         liveSourceValidationStatuses[id] = nil
+        liveSourceEPGStatuses[id] = nil
         do {
             try await environment.database.deleteLiveSource(id: id)
             liveSources = try await environment.database.liveSources()
@@ -2644,6 +2724,30 @@ final class AppState: ObservableObject {
         } catch {
             show(error, title: "删除直播源失败")
         }
+    }
+
+    private func startLiveSourceBackgroundWork(
+        for source: StoredLiveSource,
+        playlist: LivePlaylist
+    ) {
+        liveSourceEPGTasks[source.id]?.cancel()
+        if playlist.epgURL == nil {
+            loadedEPGGuides[source.id] = nil
+            loadedEPGScheduleIndexes[source.id] = nil
+            epgFailures[source.id] = nil
+            liveSourceEPGStatuses[source.id] = nil
+            liveSourceEPGTasks[source.id] = nil
+        } else {
+            liveSourceEPGStatuses[source.id] = .loading
+            liveSourceEPGTasks[source.id] = Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.loadEPG(for: source, playlist: playlist)
+            }
+        }
+        startInitialLiveSourceValidation(
+            sourceID: source.id,
+            playlist: playlist
+        )
     }
 
     private func startInitialLiveSourceValidation(
@@ -4945,19 +5049,32 @@ final class AppState: ObservableObject {
             loadedEPGGuides[source.id] = nil
             loadedEPGScheduleIndexes[source.id] = nil
             epgFailures[source.id] = nil
+            liveSourceEPGStatuses[source.id] = nil
             return
         }
         do {
             let guide = try await environment.epgService.guide(
                 for: epgURL
             )
-            loadedEPGScheduleIndexes[source.id] = XMLTVScheduleIndex(guide: guide)
+            try Task.checkCancellation()
+            let index = await XMLTVScheduleIndexBuilder.build(guide: guide)
+            try Task.checkCancellation()
+            guard liveSources.contains(where: { $0.id == source.id }) else {
+                return
+            }
+            loadedEPGScheduleIndexes[source.id] = index
             loadedEPGGuides[source.id] = guide
             epgFailures[source.id] = nil
+            liveSourceEPGStatuses[source.id] = .ready
+        } catch is CancellationError {
+            return
         } catch {
             loadedEPGGuides[source.id] = nil
             loadedEPGScheduleIndexes[source.id] = nil
             epgFailures[source.id] = error.localizedDescription
+            liveSourceEPGStatuses[source.id] = .failed(
+                error.localizedDescription
+            )
         }
     }
 
