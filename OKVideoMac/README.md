@@ -1,8 +1,9 @@
 # OKVideoMac
 
-OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端，兼容
-FongMi/TV 的公开配置协议与主要业务流程。当前版本为 **0.3.41（Build 63）**，
-支持 **arm64**，最低系统为 **macOS 12.0**。
+OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于
+配置格式、站点类型和运行时，而不是简单以 TVBox、FongMi、MiraPlay 或 CatPawOpen
+等生态名称判断。当前版本为 **0.3.41（Build 63）**，支持 **arm64**，最低系统为
+**macOS 12.0**。
 
 项目不内置内容源、账号、Cookie、DRM key 或私人服务配置。请只导入你有权使用
 且信任的配置、脚本和媒体。
@@ -45,35 +46,63 @@ Control 点击（或右键点击）App，再选择 **打开**。也可前往 **�
 请只使用本仓库 GitHub Releases 页面提供的正式 DMG，并核对 Release 页面公布的
 SHA-256；本地开发包或来源不明的副本不属于正式发行 artifact。
 
-## Native Mode 与 Android Compatibility Mode
+## 源兼容性与 Android Compatibility Mode
+
+| 源 / 运行时 | 状态 | 说明 |
+| --- | --- | --- |
+| Native CMS JSON | ✅ Supported | 原生 Provider 路径 |
+| CMS XML API 响应 | ◐ Partial | 已覆盖核心响应映射；具体源行为可能不同 |
+| FongMi 风格 JSON 配置 | ◐ Supported with limitations | 部分字段仅解析或保留，并未进入功能执行链 |
+| FongMi 图片/Base64 包装 JSON | ✅ Supported | 识别单层指定格式的包装 |
+| QuickJS Spider | ◐ Selected | 仅限符合当前接口的部分 CatVod/FongMi 风格脚本 |
+| CatVod/CatPaw 风格 Node `.js.md5` | ◐ Selected | 仅限使用当前受支持 Node 视频接口的源 |
+| Java/Dex `csp_` Spider | 🧪 Experimental | 需要可选 Android Bridge |
+| M3U / TXT / JSON 直播 | ✅ Supported | 通过独立直播源导入器使用 |
+| XMLTV EPG | ✅ Supported | 包括 M3U `tvg-url` 指向的 gzip XMLTV |
+| JSON / Web 解析 | ◐ Partial | 当前只执行有限的解析器类型和路径 |
+
+实际兼容性取决于源格式、站点类型、运行时、API 结构、解析方式及媒体行为。
+能够使用部分 TVBox、FongMi、MiraPlay 或 CatPawOpen 生态中的源，并不代表对这些
+生态实现完整兼容。OKVideoMac 实现了部分 FongMi 配置约定及 CatVod Spider 接口，
+并支持部分 TVBox 风格的配置格式和 Spider 运行时。详细矩阵见
+[`macOS/OKVideoMac/Docs/COMPATIBILITY.md`](macOS/OKVideoMac/Docs/COMPATIBILITY.md)。
 
 ### Native Mode
 
 OKVideoMac 的启动和主要 Native Mode 功能**不要求安装 Android SDK 或
 Emulator**。已由当前实现和 Phase 4 证据确认的 Native 能力包括：
 
-- 标准 XML、JSON 和 Base64 配置/数据路径；
+- Native CMS JSON、部分 CMS XML API 响应和指定的 FongMi 图片/Base64 包装 JSON；
 - M3U、TXT、JSON 直播源和 XMLTV；
 - QuickJS Spider 路径；
 - Node Spider 路径；
 - 原生 libmpv 点播与直播播放；
 - 首页、分类、筛选、详情、搜索、收藏、历史和播放进度恢复。
 
-不同外部配置或 Spider 的实际兼容性仍取决于其实现，不保证任意上游都等价。
+普通 Native、QuickJS、Node、直播和 XMLTV 源均不需要 Android。不同外部配置或
+Spider 的实际兼容性仍取决于其实现，不保证任意上游都等价。
 
 ### Android Compatibility Mode（Experimental / Advanced Compatibility）
 
-随包提供的 Android APK 是针对部分 Java/Dex `csp_` Spider 的**可选兼容层**。
-只有这类兼容能力需要外部 Android SDK、`adb`、Emulator 或兼容 Android
-runtime。Android Bridge 是 optional compatibility infrastructure，而不是
-OKVideoMac 的启动 prerequisite。
+Android 支持是可选的。Android Bridge 只是针对部分 Java/Dex `csp_` Spider 的
+**可选兼容运行时**，不是 OKVideoMac 的基础运行依赖。Native Provider、QuickJS、
+Node、直播源、XMLTV 和普通播放均不经过 Android Bridge。
 
-当前实现为 OKVideoMac 使用独立的 App Support AVD，并验证每次启动的 PID、
-AVD、动态 serial 与 console port 后才允许执行 `adb` 安装、forward 或停止操作。
-它会优先使用 App 托管或用户明确选择的 SDK，再兼容 `ANDROID_HOME`、
-`ANDROID_SDK_ROOT`、默认 SDK 目录与 PATH。第一阶段不会自动下载 SDK 或 system
-image；缺少已安装的 arm64 system image 或命令行工具时只报告缺项。这不影响
-不使用该兼容层的 Native Mode。
+需要该兼容层时，用户需准备 Android SDK、Platform-Tools（`adb`）、Android
+Emulator、Command-line Tools（`avdmanager`）和已安装的 `arm64-v8a` system
+image。Android Studio 本体不是运行时依赖，但通过 Android Studio 的 SDK Manager
+安装这些组件是最简单的推荐方式。
+
+OKVideoMac 会自行创建并启动名为 `OKVideoMac_Runtime` 的专用无窗口 AVD；不需要
+手工创建 AVD，也不使用真实 Android 设备或用户已有的普通 AVD。正式 App 已内置
+`AndroidDexBridge-release.apk`，启动时会通过 `adb install -r` 自动安装或更新，
+用户不需要下载或手工安装 APK。
+
+安装后可前往 **设置 → 高级 → Android 兼容模块**，点击 **检查**；若未自动找到
+SDK，可点击 **选择 SDK…** 并选择包含 `platform-tools` 和 `emulator` 的 SDK 根目录。
+显示“已就绪 — Java/Dex 站点可正常使用”即表示启动成功。完整安装、发现顺序与故障
+排查见 [Android Bridge 设置（中文）](macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP_zh-CN.md)
+或 [Android Bridge Setup (English)](macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP.md)。
 
 ## 主要能力
 
@@ -100,11 +129,12 @@ image；缺少已安装的 arm64 system image 或命令行工具时只报告缺�
   Interpretation Risk**；**Independent Legal Review: NOT PERFORMED**；
 - 项目不实施 DRM 绕过、TVBus 或 ForceTech 私有引擎。
 
-完整工程状态见
+Build 62 阶段留存的历史工程准备记录见
 [`Docs/ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md`](../Docs/ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md)，
-juniversalchardet 结论见
+同期 juniversalchardet 兼容性审计见
 [`Docs/JUNIVERSALCHARDET_ELIMINATION_AUDIT.md`](../Docs/JUNIVERSALCHARDET_ELIMINATION_AUDIT.md)。
-这些材料是工程证据，不构成法律意见或“无风险”保证。
+这些材料保留为历史工程证据，不代表最终 Build 63 的发布状态，也不构成法律意见
+或“无风险”保证。
 
 ## 报告问题
 
@@ -146,9 +176,10 @@ Git tag 指向的 exact release commit 才是项目源码基准；不要把移�
 - license package：`OKVideoMac-0.3.41-build63-licenses.tar.gz`；
 - macOS artifact：`OKVideoMac-0.3.41-macOS-arm64.dmg`。
 
-文件清单与生成规则见
-[`Docs/SOURCE_RELEASE_PROCESS.md`](../Docs/SOURCE_RELEASE_PROCESS.md) 和
-[`Docs/IMMUTABLE_RELEASE_READINESS.md`](../Docs/IMMUTABLE_RELEASE_READINESS.md)。
+当前 Build 63 文件清单与生成规则见
+[`Docs/SOURCE_RELEASE_PROCESS.md`](../Docs/SOURCE_RELEASE_PROCESS.md)。Build 62
+发布准备阶段的历史工程状态保留在
+[Historical Build 62 Release Readiness Record](../Docs/IMMUTABLE_RELEASE_READINESS.md)。
 下载后应对照 Release 页给出的 `SHA256SUMS`，并确认 tag、exact commit、
 source index 和 binary-bound manifest 一致。
 

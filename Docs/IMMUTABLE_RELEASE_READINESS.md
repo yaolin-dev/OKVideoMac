@@ -1,5 +1,14 @@
 # OKVideoMac Immutable Release Readiness
 
+> **Historical Build 62 release-readiness snapshot**
+>
+> This document records the pre-finalization Build 62 state as assessed on
+> 2026-08-13. Its original findings are retained unchanged as historical
+> engineering evidence and do not describe the final v0.3.41 release. The final
+> v0.3.41 release is Build 63; its binary, source-release, signing, notarization,
+> and publication state are defined by the current release metadata and release
+> documentation.
+
 Date: 2026-08-13
 
 Release: OKVideoMac 0.3.41 (62)
