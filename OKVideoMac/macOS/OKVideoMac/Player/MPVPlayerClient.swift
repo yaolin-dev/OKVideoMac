@@ -207,8 +207,8 @@ final class PlayerStartupTraceStore {
     }
 
     @discardableResult
-    func markFirstFrame(playerID: UUID) -> UUID? {
-        completePlaybackStart(playerID: playerID, phase: "first_frame")
+    func markFirstRenderSwap(playerID: UUID) -> UUID? {
+        completePlaybackStart(playerID: playerID, phase: "first_render_swap")
     }
 
     @discardableResult
@@ -241,14 +241,14 @@ final class PlayerStartupTraceStore {
         let clientInit = milliseconds(t1 - trace.t0)
         let clickToLoadfile = milliseconds(t2 - trace.t0)
         let loadToFileLoaded = milliseconds(t3 - t2)
-        let fileLoadedToFirstFrame = milliseconds(now - t3)
+        let fileLoadedToCompletion = milliseconds(now - t3)
         let total = milliseconds(now - trace.t0)
         PlayerExperimentLogger.performance(
             "phase=\(phase) client_init_ms=\(clientInit)"
                 + " click_to_loadfile_ms=\(clickToLoadfile)"
                 + " loadfile_to_file_loaded_ms=\(loadToFileLoaded)"
-                + " file_loaded_to_first_frame_ms=\(fileLoadedToFirstFrame)"
-                + " total_click_to_first_frame_ms=\(total)",
+                + " file_loaded_to_\(phase)_ms=\(fileLoadedToCompletion)"
+                + " total_click_to_\(phase)_ms=\(total)",
             playerID: playerID,
             requestID: trace.requestID,
             mode: trace.mode
@@ -898,7 +898,7 @@ final class MPVPlayerClient: PlayerClient {
     func reportSwap(_ renderContext: OpaquePointer) {
         library.renderReportSwap(renderContext)
         if let requestID = playbackStartSignal.claimPlaybackStarted() {
-            PlayerStartupTraceStore.shared.markFirstFrame(
+            PlayerStartupTraceStore.shared.markFirstRenderSwap(
                 playerID: renderOwnerID
             )
             continuation.yield(.playbackStarted(requestID: requestID))
@@ -1801,9 +1801,17 @@ final class PlayerLifecycleController {
     func load(
         _ media: ResolvedMedia,
         startPosition: TimeInterval?,
-        requestID: UUID
+        requestID: UUID,
+        waitForRenderSurface: ((UUID) async throws -> Void)? = nil
     ) async throws {
         let player = try await prepareForPlayback(requestID: requestID)
+        if let waitForRenderSurface {
+            try await waitForRenderSurface(player.renderOwnerID)
+            try Task.checkCancellation()
+            guard renderPlayer === player else {
+                throw CancellationError()
+            }
+        }
         usesFixedLiveWindow = PlayerViewportPolicy.usesFixedLiveWindow(
             siteKey: media.siteKey
         )

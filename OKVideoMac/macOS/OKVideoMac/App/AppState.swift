@@ -811,6 +811,7 @@ final class AppState: ObservableObject {
     @Published private(set) var isAndroidRuntimeBusy = false
 
     private let environment: AppEnvironment?
+    private let playerRenderSurfaceGate = PlayerRenderSurfaceReadinessGate()
     private var configurationImportOperationID: UUID?
     private var providers: [String: SiteProvider] = [:]
     private var searchTask: Task<Void, Never>?
@@ -889,6 +890,14 @@ final class AppState: ObservableObject {
         environment?.player.onRenderClientChanged = { [weak self] player in
             self?.playerRenderClient = player
         }
+    }
+
+    func playerRenderSurfaceDidBecomeReady(_ renderOwnerID: UUID) {
+        playerRenderSurfaceGate.markReady(renderOwnerID: renderOwnerID)
+    }
+
+    func playerRenderSurfaceDidBecomeUnavailable(_ renderOwnerID: UUID) {
+        playerRenderSurfaceGate.markUnavailable(renderOwnerID: renderOwnerID)
     }
 
     func start() async {
@@ -3113,7 +3122,7 @@ final class AppState: ObservableObject {
                 episodeName: candidate.stream.name
             )
             do {
-                try await environment.player.load(
+                try await loadPlayerAfterRenderSurfaceReady(
                     media,
                     startPosition: nil,
                     requestID: requestID
@@ -3440,6 +3449,7 @@ final class AppState: ObservableObject {
         }
 
         isShutdownRequested = true
+        playerRenderSurfaceGate.reset()
         cancelAllPlaybackStartupGates()
         playbackRequestsResolving.removeAll()
         playbackSessionID = UUID()
@@ -3523,6 +3533,7 @@ final class AppState: ObservableObject {
         isClosingPlayer = true
         defer { isClosingPlayer = false }
         let closingRequestID = activePlayerRequestID
+        playerRenderSurfaceGate.reset()
         cancelAllPlaybackStartupGates()
         playbackRequestsResolving.removeAll()
         playbackSessionID = UUID()
@@ -3756,7 +3767,7 @@ final class AppState: ObservableObject {
 
             replacementStarted = true
             activePlayerRequestID = switchSessionID
-            try await environment.player.load(
+            try await loadPlayerAfterRenderSurfaceReady(
                 resolvedMedia,
                 startPosition: previousPosition,
                 requestID: switchSessionID
@@ -3801,7 +3812,7 @@ final class AppState: ObservableObject {
                playbackQualitySwitchSessionID == switchSessionID,
                playbackSessionID == owningPlaybackSessionID {
                 do {
-                    try await environment.player.load(
+                    try await loadPlayerAfterRenderSurfaceReady(
                         previousMedia,
                         startPosition: previousPosition,
                         requestID: switchSessionID
@@ -5661,7 +5672,7 @@ final class AppState: ObservableObject {
             )
         }
         do {
-            try await environment.player.load(
+            try await loadPlayerAfterRenderSurfaceReady(
                 media,
                 startPosition: startPosition,
                 requestID: sessionID
@@ -5788,6 +5799,35 @@ final class AppState: ObservableObject {
 
     private func finishScheduledHistoryPersistence() async {
         await historyPersistenceTask?.value
+    }
+
+    private func loadPlayerAfterRenderSurfaceReady(
+        _ media: ResolvedMedia,
+        startPosition: TimeInterval?,
+        requestID: UUID
+    ) async throws {
+        guard let environment else {
+            throw AppError.playback("应用环境尚未初始化")
+        }
+        try await environment.player.load(
+            media,
+            startPosition: startPosition,
+            requestID: requestID,
+            waitForRenderSurface: { [weak self] renderOwnerID in
+                guard let self else { throw CancellationError() }
+                try await self.playerRenderSurfaceGate.waitUntilReady(
+                    requestID: requestID,
+                    renderOwnerID: renderOwnerID
+                )
+                try Task.checkCancellation()
+                guard self.isPlayerPresented,
+                      self.activePlayerRequestID == requestID,
+                      environment.player.renderPlayer?.renderOwnerID
+                        == renderOwnerID else {
+                    throw CancellationError()
+                }
+            }
+        )
     }
 
     private func presentPlayer() {

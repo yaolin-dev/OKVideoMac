@@ -98,10 +98,9 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak playerWindowController, weak appState] isPresented in
                 if isPresented {
                     // Do not build the AppKit/OpenGL hierarchy inline with
-                    // the click transaction. Playback can create libmpv and
-                    // issue loadfile immediately; the window mounts on the
-                    // next main-loop turn and attaches its render context in
-                    // parallel with network and demux startup.
+                    // the click transaction. The window mounts on the next
+                    // main-loop turn; playback remains gated until the
+                    // attached OpenGL view reports a usable render surface.
                     DispatchQueue.main.async {
                         guard appState?.isPlayerPresented == true else { return }
                         playerWindowController?.present()
@@ -295,9 +294,22 @@ private struct PlayerPlaybackWindowRoot: View {
                 isPlayerPresented: appState.isPlayerPresented,
                 hasRenderPlayer: appState.embeddedPlayer != nil
             ), let player = appState.embeddedPlayer {
-                MPVRenderView(player: player) { error in
-                    appState.reportPlayerRenderError(error)
-                }
+                MPVRenderView(
+                    player: player,
+                    onError: { error in
+                        appState.reportPlayerRenderError(error)
+                    },
+                    onSurfaceReady: { renderOwnerID in
+                        appState.playerRenderSurfaceDidBecomeReady(
+                            renderOwnerID
+                        )
+                    },
+                    onSurfaceUnavailable: { renderOwnerID in
+                        appState.playerRenderSurfaceDidBecomeUnavailable(
+                            renderOwnerID
+                        )
+                    }
+                )
                 .id(player.renderOwnerID)
                 .ignoresSafeArea()
                 .allowsHitTesting(false)

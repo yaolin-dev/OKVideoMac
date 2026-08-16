@@ -135,6 +135,127 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(valid?.height, 1_080)
     }
 
+    func testRenderSurfaceReadinessRequiresAttachedUsableDrawable() {
+        XCTAssertTrue(
+            MPVRenderSurfaceReadinessPolicy.isReady(
+                isAttachedToWindow: true,
+                hasSuperview: true,
+                hasOpenGLContext: true,
+                hasRenderContext: true,
+                drawableWidth: 1_920,
+                drawableHeight: 1_080
+            )
+        )
+        XCTAssertFalse(
+            MPVRenderSurfaceReadinessPolicy.isReady(
+                isAttachedToWindow: true,
+                hasSuperview: true,
+                hasOpenGLContext: true,
+                hasRenderContext: true,
+                drawableWidth: 0,
+                drawableHeight: 1_080
+            )
+        )
+        XCTAssertFalse(
+            MPVRenderSurfaceReadinessPolicy.isReady(
+                isAttachedToWindow: false,
+                hasSuperview: true,
+                hasOpenGLContext: true,
+                hasRenderContext: true,
+                drawableWidth: 1_920,
+                drawableHeight: 1_080
+            )
+        )
+    }
+
+    @MainActor
+    func testRenderSurfaceGateReleasesPendingRequestOnceReady() async throws {
+        let gate = PlayerRenderSurfaceReadinessGate()
+        let requestID = UUID()
+        let renderOwnerID = UUID()
+        let wait = Task { @MainActor in
+            try await gate.waitUntilReady(
+                requestID: requestID,
+                renderOwnerID: renderOwnerID
+            )
+        }
+        await Task.yield()
+
+        XCTAssertEqual(gate.pendingRequestID, requestID)
+        gate.markReady(renderOwnerID: renderOwnerID)
+        try await wait.value
+        XCTAssertNil(gate.pendingRequestID)
+
+        // An already-ready surface passes immediately and repeated ready events
+        // cannot consume or replay the completed request.
+        try await gate.waitUntilReady(
+            requestID: UUID(),
+            renderOwnerID: renderOwnerID
+        )
+        gate.markReady(renderOwnerID: renderOwnerID)
+        XCTAssertNil(gate.pendingRequestID)
+    }
+
+    @MainActor
+    func testRenderSurfaceGateUsesLatestPendingRequest() async throws {
+        let gate = PlayerRenderSurfaceReadinessGate()
+        let renderOwnerID = UUID()
+        let firstRequestID = UUID()
+        let secondRequestID = UUID()
+        let first = Task { @MainActor in
+            try await gate.waitUntilReady(
+                requestID: firstRequestID,
+                renderOwnerID: renderOwnerID
+            )
+        }
+        await Task.yield()
+        let second = Task { @MainActor in
+            try await gate.waitUntilReady(
+                requestID: secondRequestID,
+                renderOwnerID: renderOwnerID
+            )
+        }
+        await Task.yield()
+
+        XCTAssertEqual(gate.pendingRequestID, secondRequestID)
+        do {
+            try await first.value
+            XCTFail("Superseded request unexpectedly reached loadfile")
+        } catch is CancellationError {
+            // Expected: latest request wins.
+        }
+        gate.markReady(renderOwnerID: renderOwnerID)
+        try await second.value
+    }
+
+    @MainActor
+    func testRenderSurfaceGateResetsAfterTeardown() async throws {
+        let gate = PlayerRenderSurfaceReadinessGate()
+        let renderOwnerID = UUID()
+        gate.markReady(renderOwnerID: renderOwnerID)
+        XCTAssertEqual(gate.readyRenderOwnerID, renderOwnerID)
+
+        gate.markUnavailable(renderOwnerID: renderOwnerID)
+        XCTAssertNil(gate.readyRenderOwnerID)
+
+        let requestID = UUID()
+        let wait = Task { @MainActor in
+            try await gate.waitUntilReady(
+                requestID: requestID,
+                renderOwnerID: renderOwnerID
+            )
+        }
+        await Task.yield()
+        XCTAssertEqual(gate.pendingRequestID, requestID)
+        gate.reset()
+        do {
+            try await wait.value
+            XCTFail("Reset request unexpectedly reached loadfile")
+        } catch is CancellationError {
+            // Expected: close/shutdown cancels the pending request.
+        }
+    }
+
     func testPlayerTeardownModeUsesEnvironmentThenDefaults() {
         let suiteName = "OKVideoMacTests.PlayerTeardownMode.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -1673,12 +1794,15 @@ final class OKVideoMacTests: XCTestCase {
         store.markClientReady(requestID: requestID, playerID: playerID)
         store.markLoadfileIssued(requestID: requestID, playerID: playerID)
 
-        XCTAssertNil(store.markFirstFrame(playerID: playerID))
+        XCTAssertNil(store.markFirstRenderSwap(playerID: playerID))
 
         store.markFileLoaded(requestID: requestID, playerID: playerID)
         store.markFileLoaded(requestID: requestID, playerID: playerID)
-        XCTAssertEqual(store.markFirstFrame(playerID: playerID), requestID)
-        XCTAssertNil(store.markFirstFrame(playerID: playerID))
+        XCTAssertEqual(
+            store.markFirstRenderSwap(playerID: playerID),
+            requestID
+        )
+        XCTAssertNil(store.markFirstRenderSwap(playerID: playerID))
         XCTAssertNil(store.markTimelineProgress(playerID: playerID))
     }
 
@@ -1695,7 +1819,7 @@ final class OKVideoMacTests: XCTestCase {
             store.markTimelineProgress(playerID: playerID),
             requestID
         )
-        XCTAssertNil(store.markFirstFrame(playerID: playerID))
+        XCTAssertNil(store.markFirstRenderSwap(playerID: playerID))
     }
 
     func testPlaybackStartSignalResetsIndependentlyOfTracing() {

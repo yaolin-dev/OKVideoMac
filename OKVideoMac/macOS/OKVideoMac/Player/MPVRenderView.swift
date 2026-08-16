@@ -9,6 +9,83 @@ extension Notification.Name {
     )
 }
 
+/// Serializes playback startup against the native render-surface lifecycle.
+/// AppState owns this gate on the main actor while MPVOpenGLView is the only
+/// component allowed to publish readiness.
+@MainActor
+final class PlayerRenderSurfaceReadinessGate {
+    private struct PendingWait {
+        let requestID: UUID
+        let renderOwnerID: UUID
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
+    private(set) var readyRenderOwnerID: UUID?
+    private(set) var pendingRequestID: UUID?
+    private var pendingWait: PendingWait?
+
+    func waitUntilReady(
+        requestID: UUID,
+        renderOwnerID: UUID
+    ) async throws {
+        try Task.checkCancellation()
+        if readyRenderOwnerID == renderOwnerID {
+            return
+        }
+
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if readyRenderOwnerID == renderOwnerID {
+                    continuation.resume()
+                    return
+                }
+                pendingWait?.continuation.resume(
+                    throwing: CancellationError()
+                )
+                pendingWait = PendingWait(
+                    requestID: requestID,
+                    renderOwnerID: renderOwnerID,
+                    continuation: continuation
+                )
+                pendingRequestID = requestID
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancel(requestID: requestID)
+            }
+        }
+    }
+
+    func markReady(renderOwnerID: UUID) {
+        readyRenderOwnerID = renderOwnerID
+        guard let pendingWait,
+              pendingWait.renderOwnerID == renderOwnerID else { return }
+        self.pendingWait = nil
+        pendingRequestID = nil
+        pendingWait.continuation.resume()
+    }
+
+    func markUnavailable(renderOwnerID: UUID) {
+        if readyRenderOwnerID == renderOwnerID {
+            readyRenderOwnerID = nil
+        }
+    }
+
+    func reset() {
+        readyRenderOwnerID = nil
+        pendingWait?.continuation.resume(throwing: CancellationError())
+        pendingWait = nil
+        pendingRequestID = nil
+    }
+
+    private func cancel(requestID: UUID) {
+        guard pendingWait?.requestID == requestID else { return }
+        pendingWait?.continuation.resume(throwing: CancellationError())
+        pendingWait = nil
+        pendingRequestID = nil
+    }
+}
+
 /// Collapses render callbacks while a frame is already waiting on the main
 /// thread. libmpv may produce callbacks faster than AppKit can draw a 4K
 /// surface; queueing every callback makes buttons and sliders wait behind an
@@ -154,21 +231,46 @@ enum MPVRenderSafetyPolicy {
     }
 }
 
+enum MPVRenderSurfaceReadinessPolicy {
+    static func isReady(
+        isAttachedToWindow: Bool,
+        hasSuperview: Bool,
+        hasOpenGLContext: Bool,
+        hasRenderContext: Bool,
+        drawableWidth: Int32,
+        drawableHeight: Int32
+    ) -> Bool {
+        isAttachedToWindow
+            && hasSuperview
+            && hasOpenGLContext
+            && hasRenderContext
+            && drawableWidth > 0
+            && drawableHeight > 0
+    }
+}
+
 final class MPVOpenGLView: NSOpenGLView {
     private let player: MPVPlayerClient
-    private let renderOwnerID: String
+    private let renderOwnerID: UUID
     private let onError: (Error) -> Void
+    private let onSurfaceReady: (UUID) -> Void
+    private let onSurfaceUnavailable: (UUID) -> Void
     private var renderContext: OpaquePointer?
     private var callbackBox: MPVRenderCallbackBox?
     private var didReportRenderError = false
+    private var isSurfaceReady = false
 
     init(
         player: MPVPlayerClient,
-        onError: @escaping (Error) -> Void
+        onError: @escaping (Error) -> Void,
+        onSurfaceReady: @escaping (UUID) -> Void,
+        onSurfaceUnavailable: @escaping (UUID) -> Void
     ) {
         self.player = player
-        renderOwnerID = player.renderOwnerID.uuidString
+        renderOwnerID = player.renderOwnerID
         self.onError = onError
+        self.onSurfaceReady = onSurfaceReady
+        self.onSurfaceUnavailable = onSurfaceUnavailable
         let attributes: [NSOpenGLPixelFormatAttribute] = [
             99,     // NSOpenGLPFAOpenGLProfile
             0x3200, // NSOpenGLProfileVersion3_2Core
@@ -214,15 +316,32 @@ final class MPVOpenGLView: NSOpenGLView {
                 callback: mpvRenderUpdateCallback,
                 context: opaque
             )
+            evaluateSurfaceReadiness()
         } catch {
             report(error)
         }
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        evaluateSurfaceReadiness()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        evaluateSurfaceReadiness()
+    }
+
+    override func layout() {
+        super.layout()
+        evaluateSurfaceReadiness()
     }
 
     override func reshape() {
         super.reshape()
         guard window?.inLiveResize != true else { return }
         needsDisplay = true
+        evaluateSurfaceReadiness()
     }
 
     override func viewWillStartLiveResize() {
@@ -249,6 +368,7 @@ final class MPVOpenGLView: NSOpenGLView {
         openGLContext?.update()
         needsDisplay = true
         callbackBox?.requestDisplay()
+        evaluateSurfaceReadiness()
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -274,6 +394,7 @@ final class MPVOpenGLView: NSOpenGLView {
                 flipY: true
             )
             openGLContext.flushBuffer()
+            markSurfaceReadyAfterRenderProbe(framebufferSize: framebufferSize)
             player.reportSwap(renderContext)
         } catch {
             report(error)
@@ -299,6 +420,7 @@ final class MPVOpenGLView: NSOpenGLView {
     }
 
     func tearDown() {
+        markSurfaceUnavailable()
         guard let renderContext else { return }
         // Fence both queued libmpv wake-ups and AppKit draws before freeing the
         // native render context. `draw(_:)` may still be called once by the
@@ -325,8 +447,58 @@ final class MPVOpenGLView: NSOpenGLView {
 
     @objc private func playerWillShutdown(_ notification: Notification) {
         guard notification.userInfo?["renderOwnerID"] as? String
-                == renderOwnerID else { return }
+                == renderOwnerID.uuidString else { return }
         tearDown()
+    }
+
+    private func evaluateSurfaceReadiness() {
+        guard !isSurfaceReady,
+              openGLContext != nil,
+              renderContext != nil,
+              MPVRenderSafetyPolicy.framebufferSize(
+                  backingBounds: convertToBacking(bounds),
+                  isInLiveResize: window?.inLiveResize == true,
+                  isAttachedToWindow: window != nil
+              ) != nil else { return }
+        // `NSOpenGLView` has no standalone "drawable is ready" callback.
+        // Schedule an actual empty mpv render + drawable flush. Only that
+        // successful render probe may publish readiness and release loadfile.
+        needsDisplay = true
+    }
+
+    private func markSurfaceReadyAfterRenderProbe(
+        framebufferSize: (width: Int32, height: Int32)
+    ) {
+        guard !isSurfaceReady,
+              openGLContext != nil,
+              renderContext != nil,
+              MPVRenderSurfaceReadinessPolicy.isReady(
+                  isAttachedToWindow: window != nil,
+                  hasSuperview: superview != nil,
+                  hasOpenGLContext: true,
+                  hasRenderContext: true,
+                  drawableWidth: framebufferSize.width,
+                  drawableHeight: framebufferSize.height
+              ) else { return }
+        isSurfaceReady = true
+        PlayerExperimentLogger.lifecycle(
+            "render surface ready after render probe "
+                + "drawable=\(framebufferSize.width)x\(framebufferSize.height)",
+            playerID: renderOwnerID,
+            mode: player.teardownMode
+        )
+        onSurfaceReady(renderOwnerID)
+    }
+
+    private func markSurfaceUnavailable() {
+        guard isSurfaceReady else { return }
+        isSurfaceReady = false
+        PlayerExperimentLogger.lifecycle(
+            "render surface unavailable",
+            playerID: renderOwnerID,
+            mode: player.teardownMode
+        )
+        onSurfaceUnavailable(renderOwnerID)
     }
 
     private func report(_ error: Error) {
@@ -341,9 +513,16 @@ final class MPVOpenGLView: NSOpenGLView {
 struct MPVRenderView: NSViewRepresentable {
     let player: MPVPlayerClient
     let onError: (Error) -> Void
+    let onSurfaceReady: (UUID) -> Void
+    let onSurfaceUnavailable: (UUID) -> Void
 
     func makeNSView(context: Context) -> MPVOpenGLView {
-        MPVOpenGLView(player: player, onError: onError)
+        MPVOpenGLView(
+            player: player,
+            onError: onError,
+            onSurfaceReady: onSurfaceReady,
+            onSurfaceUnavailable: onSurfaceUnavailable
+        )
     }
 
     func updateNSView(_ nsView: MPVOpenGLView, context: Context) {}
