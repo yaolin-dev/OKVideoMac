@@ -5,7 +5,7 @@
 Android Bridge is an optional compatibility runtime for selected Java/Dex
 `csp_` providers. It is not a foundation for playback, Native providers,
 QuickJS, Node, Live TV, or XMLTV.
-This document describes the current OKVideoMac 0.3.41 (Build 63)
+This document describes the current OKVideoMac 0.3.41 (Build 64)
 implementation. The
 presence of the Bridge does not imply compatibility with every Java/Dex
 `csp_` Spider.

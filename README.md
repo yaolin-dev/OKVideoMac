@@ -4,7 +4,7 @@ English | [简体中文](README_zh-CN.md)
 
 OKVideoMac is a native macOS client for configurable video providers and live
 streams, with a SwiftUI interface and libmpv-based playback. The current public
-release is **0.3.41 (Build 63)** for Apple Silicon Macs running macOS 12 or
+release is **0.3.41 (Build 64)** for Apple Silicon Macs running macOS 12 or
 later.
 
 ## Highlights
@@ -49,27 +49,44 @@ dedicated `OKVideoMac_Runtime` AVD and installs the bundled Bridge APK
 automatically; users should not create the AVD or install the APK manually.
 See [Android Bridge Setup](OKVideoMac/macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP.md).
 
+## Screenshots
+
+![Home](Docs/Media/v0.3.41/home-hero.png)
+
+![Search](Docs/Media/v0.3.41/search.png)
+
+![Series detail](Docs/Media/v0.3.41/series-detail.png)
+
+![VOD playback](Docs/Media/v0.3.41/vod-playback.png)
+
+![Live channels](Docs/Media/v0.3.41/live-channels.png)
+
+![Live playback](Docs/Media/v0.3.41/live-playback.png)
+
+All screenshots use locally generated demo media. No third-party video source
+or real IPTV content is bundled with the project or shown in these images.
+
 ## Download and install
 
 Download the official DMG from
 [GitHub Releases](https://github.com/yaolin-dev/OKVideoMac/releases), open it, and
 drag `OKVideoMac.app` into Applications. The current
-`OKVideoMac-0.3.41-macOS-arm64.dmg` contains 0.3.41 (Build 63), signed with
+`OKVideoMac-0.3.41-macOS-arm64.dmg` contains 0.3.41 (Build 64), signed with
 Developer ID and notarized by Apple. Do not disable Gatekeeper or SIP to
 install the official build.
 
 ## Binary and source identity
 
-The final v0.3.41 binary and corresponding-source set are Build 63. The source
+The final v0.3.41 binary and corresponding-source set are Build 64. The source
 archives, index, manifest, licenses, checksums, SBOMs, and binary-bound records
 are tied to the exact `v0.3.41` release commit. See the
 [source release process](Docs/SOURCE_RELEASE_PROCESS.md) for the current
-Build 63 asset set.
+Build 64 asset set.
 
-Build 62 was an earlier pre-finalization candidate. Its findings remain
-available as a
-[Historical Build 62 Release Readiness Record](Docs/IMMUTABLE_RELEASE_READINESS.md);
-that snapshot is not the final v0.3.41 release state.
+Builds 62 and 63 were earlier pre-publication candidates. Build 62 findings
+remain available as a
+[Historical Build 62 Release Readiness Record](Docs/IMMUTABLE_RELEASE_READINESS.md).
+Those historical candidate records are not the final v0.3.41 release state.
 
 ## Content and configuration
 

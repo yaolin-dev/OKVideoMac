@@ -1,28 +1,60 @@
 # OKVideoMac App Icon Provenance
 
-Status: **VERIFIED OWNED** for OKVideoMac release provenance
+Status: **FINAL RELEASE IDENTITY VERIFIED; FINAL ARTWORK SOURCE PROVENANCE IS
+NOT ESTABLISHED BY THE RETAINED IMAGEGEN FILES**
 
 Date created: 2026-08-13
+Provenance boundary corrected: 2026-08-16
 
-## Rights and source statement
+## Final v0.3.41 runtime icon
 
-The Phase 2 icon was created specifically for OKVideoMac without any input
-image or third-party asset. It replaces the earlier icon whose authorship and
-license could not be proven. The generation brief expressly excluded Apple,
-FongMi, TVBox, YouTube, Netflix, VLC, QuickTime, other third-party marks, and
-copyrighted film imagery.
+OKVideoMac v0.3.41 Build 64 ships the red/coral icon with a white rounded
+aperture and play mark. Its source identity is the ten PNG files in:
 
-The project retains the original generation output and the 1024-pixel release
-master under `OKVideoMac/Assets/AppIcon/`. The asset catalog PNGs are
-deterministic size reductions of that master. No stock image, font, logo, or
-external design file is incorporated.
+```text
+OKVideoMac/macOS/OKVideoMac/Resources/Assets.xcassets/AppIcon.appiconset/
+```
 
-`VERIFIED OWNED` here means the project controls the generated output and its
-release provenance and has no identified third-party asset dependency. It is
-not a jurisdiction-specific legal opinion about copyrightability of
-AI-assisted works.
+Commit `ae7fa3d20c2feb46f53758f946d7b18cd239b76a` replaced those ten catalog
+PNGs and established the final runtime artwork. The same files are present in
+the v0.3.41 Build 63 pre-publication candidate commit at
+`b0b6fec221325dde0a20d742949a95548cf0e5e7` and remain unchanged on the Build 64
+mainline. Xcode selects the `AppIcon`
+catalog and compiles it into `AppIcon.icns` and `Assets.car` for the Build 64
+application bundle.
 
-## Generation record
+This confirms which artwork the release builds and ships. It does not, by
+itself, establish the creative or source-file provenance of the final red
+artwork.
+
+## Historical ImageGen source
+
+The following retained files document an earlier, intermediate icon-generation
+stage introduced in commit `8e05a3d344903295ff66de6cde52ca4ed7158b44`:
+
+```text
+OKVideoMac/Assets/AppIcon/OKVideoMac-AppIcon-ImageGen-source.png
+OKVideoMac/Assets/AppIcon/OKVideoMac-AppIcon-master-1024.png
+```
+
+They depict a deep-indigo tile with a teal/cyan ribbon and play motif. At the
+`8e05a3d` state, the AppIcon catalog PNGs were size reductions of the retained
+1024-pixel master. The original generation was created specifically for
+OKVideoMac without an input image or third-party asset; its brief expressly
+excluded Apple, FongMi, TVBox, YouTube, Netflix, VLC, QuickTime, other
+third-party marks, and copyrighted film imagery.
+
+These files are retained for historical traceability. They are not referenced
+by `AppIcon.appiconset/Contents.json`, the Xcode AppIcon selection, an icon
+generation script, packaging, or release scripts. They are not runtime assets
+and are not the final v0.3.41 icon.
+
+For this historical generated output, the project retains the no-input
+generation record and has no identified stock image, font, logo, or external
+design-file dependency. This is not a jurisdiction-specific legal opinion
+about copyrightability of AI-assisted works.
+
+## Historical generation record
 
 - Tool: Codex built-in `image_gen` tool (`imagegen` skill workflow).
 - Input images: none.
@@ -33,7 +65,7 @@ AI-assisted works.
 - Post-processing: selection of the single generated result and proportional
   resizing with macOS `sips`; no compositing or external material.
 
-## Prompt
+## Historical generation prompt
 
 ```text
 Use case: logo-brand
@@ -49,9 +81,17 @@ Constraints: entirely original composition; no Apple trademarks; no FongMi, TVBo
 Avoid: generic red play button, copied brand silhouettes, excessive detail, tiny decorative elements, transparent canvas
 ```
 
-## Asset mapping
+## Timeline and provenance boundary
 
-The files in `macOS/OKVideoMac/Resources/Assets.xcassets/AppIcon.appiconset/`
-are generated at 16, 32, 64, 128, 256, 512, and 1024 pixels from the retained
-1024px master. Duplicate logical sizes used by different macOS scale slots are
-expected to have identical hashes.
+- `8e05a3d`: added the blue ImageGen output and 1024-pixel master, and
+  generated the intermediate AppIcon catalog from that master.
+- `ae7fa3d`: replaced only the ten AppIcon catalog PNGs with the final red
+  runtime artwork; the blue source and master were retained unchanged.
+- `b0dc0e8`: advanced the application build number from 62 to 63.
+- `b0b6fec`: finalized the v0.3.41 Build 63 release state with the red AppIcon
+  catalog.
+
+Repository evidence confirms the identity and release path of the final red
+runtime icon. It does not establish the retained blue ImageGen output or master
+as the direct source of that red artwork, and no such derivation should be
+inferred from the retained historical files.

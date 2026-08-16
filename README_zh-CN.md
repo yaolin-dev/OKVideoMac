@@ -4,7 +4,7 @@
 
 OKVideoMac 是一款原生 macOS 客户端，支持可配置的视频 Provider 和直播流，
 采用 SwiftUI 界面并基于 libmpv 播放。当前公开版本为面向 macOS 12 或更高版本
-Apple Silicon Mac 的 **0.3.41（Build 63）**。
+Apple Silicon Mac 的 **0.3.41（Build 64）**。
 
 ## 亮点
 
@@ -44,23 +44,40 @@ OKVideoMac 会自行创建专用 `OKVideoMac_Runtime` AVD，并自动安装随 A
 Bridge APK；用户不应手工创建 AVD 或安装 APK。详见
 [Android Bridge 设置](OKVideoMac/macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP_zh-CN.md)。
 
+## 截图
+
+![首页](Docs/Media/v0.3.41/home-hero.png)
+
+![搜索](Docs/Media/v0.3.41/search.png)
+
+![剧集详情](Docs/Media/v0.3.41/series-detail.png)
+
+![点播播放](Docs/Media/v0.3.41/vod-playback.png)
+
+![直播频道](Docs/Media/v0.3.41/live-channels.png)
+
+![直播播放](Docs/Media/v0.3.41/live-playback.png)
+
+所有截图均使用本地生成的演示媒体；项目未捆绑第三方视频源或真实 IPTV 内容，
+这些截图中也未展示此类内容。
+
 ## 下载与安装
 
 请从 [GitHub Releases](https://github.com/yaolin-dev/OKVideoMac/releases)
 下载官方 DMG，打开后将 `OKVideoMac.app` 拖入“应用程序”文件夹。当前
-`OKVideoMac-0.3.41-macOS-arm64.dmg` 包含 0.3.41（Build 63），已使用
+`OKVideoMac-0.3.41-macOS-arm64.dmg` 包含 0.3.41（Build 64），已使用
 Developer ID 签名并经过 Apple 公证。安装正式版本时不要关闭 Gatekeeper 或 SIP。
 
 ## 二进制与源码对应关系
 
-最终 v0.3.41 二进制及其对应源码集均为 Build 63。源码归档、索引、manifest、
+最终 v0.3.41 二进制及其对应源码集均为 Build 64。源码归档、索引、manifest、
 许可证、校验和、SBOM 与 binary-bound 记录都绑定到 `v0.3.41` 的 exact release
-commit。当前 Build 63 资产集详见
+commit。当前 Build 64 资产集详见
 [源码发布流程](Docs/SOURCE_RELEASE_PROCESS.md)。
 
-Build 62 是更早的发布定版前候选。它的结论保留在
-[Build 62 历史发布准备记录](Docs/IMMUTABLE_RELEASE_READINESS.md)中；该历史快照
-不是最终 v0.3.41 的发布状态。
+Build 62 和 Build 63 是更早的公开发布前候选。Build 62 的结论保留在
+[Build 62 历史发布准备记录](Docs/IMMUTABLE_RELEASE_READINESS.md)中；该快照及
+其他历史候选记录都不是最终 v0.3.41 的发布状态。
 
 ## 内容与配置
 
