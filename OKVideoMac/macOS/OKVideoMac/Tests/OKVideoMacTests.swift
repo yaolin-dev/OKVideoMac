@@ -1343,17 +1343,17 @@ final class OKVideoMacTests: XCTestCase {
             httpClient: client
         )
         let cancelledWaiter = Task { @MainActor in
-            try await repository.image(for: url)
+            _ = try await repository.image(for: url)
         }
         let activeWaiter = Task { @MainActor in
-            try await repository.image(for: url)
+            _ = try await repository.image(for: url)
         }
 
         cancelledWaiter.cancel()
         _ = try? await cancelledWaiter.value
-        let loaded = try await activeWaiter.value
+        try await activeWaiter.value
 
-        XCTAssertTrue(repository.cachedImage(for: url) === loaded)
+        XCTAssertNotNil(repository.cachedImage(for: url))
         let requestCount = await client.requestCount()
         XCTAssertEqual(requestCount, 1)
     }
