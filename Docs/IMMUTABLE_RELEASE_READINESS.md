@@ -4,8 +4,9 @@
 >
 > This document records the pre-finalization Build 62 state as assessed on
 > 2026-08-13. Its original findings are retained unchanged as historical
-> engineering evidence and do not describe the final v0.3.41 release. The final
-> v0.3.41 release is Build 64; Build 63 was a later pre-publication candidate.
+> engineering evidence and do not describe the current v0.3.41 release. The
+> current v0.3.41 release is Build 65; Build 64 remains the prior immutable
+> public release, and Build 63 was a later pre-publication candidate.
 > The final binary, source-release, signing, notarization,
 > and publication state are defined by the current release metadata and release
 > documentation.

@@ -20,11 +20,11 @@ Phase 4 在 2026-08-12 已于以下环境完成验证：
 匹配、XCTest 不可用和依赖缺失而无法构建 App。该历史事实已被上述 Phase 4
 成功验证取代，不再代表当前源码状态。
 
-2026-08-16 的 0.3.41（Build 64）候选已通过 200 项 Xcode 集成测试（另有 1 项
-按设计跳过）、94 项 OKVideoKit 独立测试、arm64 Release 编译和 Android Release
-Bridge 离线构建。最终工程候选仍必须从 exact clean commit 重新运行下述
+2026-08-17 的 0.3.41（Build 65）候选已通过 212 项 Xcode 集成测试、94 项
+OKVideoKit 独立测试、arm64 Release 编译和 Android Release Bridge 离线构建。
+最终工程候选仍必须从 exact clean commit 重新运行下述
 `package-app.sh` Gate；此前 Build 62/63 的 App、ZIP、签名或公证结果不能代替
-本次候选验证。
+本次候选验证；Build 64 保留为上一版不可变公开发布。
 
 ## Current reproducibility caveats
 

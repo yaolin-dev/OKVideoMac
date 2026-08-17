@@ -2,7 +2,7 @@
 
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于
 配置格式、站点类型和运行时，而不是简单以 TVBox、FongMi、MiraPlay 或 CatPawOpen
-等生态名称判断。当前版本为 **0.3.41（Build 64）**，支持 **arm64**，最低系统为
+等生态名称判断。当前版本为 **0.3.41（Build 65）**，支持 **arm64**，最低系统为
 **macOS 12.0**。
 
 项目不内置内容源、账号、Cookie、DRM key 或私人服务配置。请只导入你有权使用
@@ -10,14 +10,14 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源�
 
 ## 当前版本
 
-- 当前版本：0.3.41（Build 64）
+- 当前版本：0.3.41（Build 65）
 - 最低系统：macOS 12.0
 - 支持架构：Apple Silicon / arm64
-- 发行验证：200 项 Xcode 集成测试通过（另有 1 项按设计跳过），94 项 OKVideoKit
+- 发行验证：212 项 Xcode 集成测试通过，94 项 OKVideoKit
   测试通过，arm64 Release
   与 Android Release Bridge 构建通过；正式 Release packaging 已验证 28 个
   Mach-O 的架构、部署目标、依赖闭包、签名和 Hardened Runtime
-- 对外分发：Build 64 已完成 Developer ID signing、Apple notarization、staple
+- 对外分发：Build 65 已完成 Developer ID signing、Apple notarization、staple
   和 Gatekeeper 实物验收
 
 ## 安装
@@ -33,7 +33,7 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源�
 
 ### Gatekeeper 与 macOS 安全
 
-0.3.41（Build 64）正式 DMG 已使用 Developer ID Application: Yao Lin
+0.3.41（Build 65）正式 DMG 已使用 Developer ID Application: Yao Lin
 （KGG363ABK9）签名，启用 Hardened Runtime，并通过 Apple notarization、staple
 和 Gatekeeper 验证。安装和运行不需要关闭任何 macOS 安全机制。
 
@@ -134,7 +134,8 @@ Build 62 阶段留存的历史工程准备记录见
 [`Docs/ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md`](../Docs/ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md)，
 同期 juniversalchardet 兼容性审计见
 [`Docs/JUNIVERSALCHARDET_ELIMINATION_AUDIT.md`](../Docs/JUNIVERSALCHARDET_ELIMINATION_AUDIT.md)。
-这些材料保留为历史工程证据；Build 62/63 均不是最终 Build 64 的发布状态，
+这些材料保留为历史工程证据；Build 62/63 均不是当前 Build 65 的发布状态，
+Build 64 则保留为上一版不可变公开发布，
 也不构成法律意见
 或“无风险”保证。
 
@@ -161,24 +162,24 @@ Git tag 指向的 exact release commit 才是项目源码基准；不要把移�
 `master` 或 `latest` 当作对应源码。正式 Release 应同时提供并由统一
 `SHA256SUMS` 绑定：
 
-- source release index：`OKVideoMac-0.3.41-build64-SOURCE_RELEASE_INDEX.json`；
+- source release index：`OKVideoMac-0.3.41-build65-SOURCE_RELEASE_INDEX.json`；
 - binary-to-source mapping：
   [`Docs/BINARY_SOURCE_MAPPING.md`](../Docs/BINARY_SOURCE_MAPPING.md)；
 - binary/source manifest：
-  `OKVideoMac-0.3.41-build64-SOURCE_RELEASE_MANIFEST.json`；
-- hashes：`OKVideoMac-0.3.41-build64-SHA256SUMS`；
+  `OKVideoMac-0.3.41-build65-SOURCE_RELEASE_MANIFEST.json`；
+- hashes：`OKVideoMac-0.3.41-build65-SHA256SUMS`；
 - macOS SPDX / CycloneDX：`OKVideoMac-macOS.spdx.json`、
   `OKVideoMac-macOS.cdx.json`；
 - Android SPDX / CycloneDX：`OKVideoMac-Android.spdx.json`、
   `OKVideoMac-Android.cdx.json`；
 - exact APK：`OKVideoMac-0.3.41-AndroidDexBridge-release.apk`；
-- exact project source：`OKVideoMac-0.3.41-build64-source.tar.gz`；
+- exact project source：`OKVideoMac-0.3.41-build65-source.tar.gz`；
 - third-party source package：
-  `OKVideoMac-0.3.41-build64-third-party-source.tar.gz`；
-- license package：`OKVideoMac-0.3.41-build64-licenses.tar.gz`；
+  `OKVideoMac-0.3.41-build65-third-party-source.tar.gz`；
+- license package：`OKVideoMac-0.3.41-build65-licenses.tar.gz`；
 - macOS artifact：`OKVideoMac-0.3.41-macOS-arm64.dmg`。
 
-当前 Build 64 文件清单与生成规则见
+当前 Build 65 文件清单与生成规则见
 [`Docs/SOURCE_RELEASE_PROCESS.md`](../Docs/SOURCE_RELEASE_PROCESS.md)。Build 62/63
 发布准备阶段的历史工程状态保留在
 [Historical Build 62 Release Readiness Record](../Docs/IMMUTABLE_RELEASE_READINESS.md)。

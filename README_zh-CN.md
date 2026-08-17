@@ -4,7 +4,7 @@
 
 OKVideoMac 是一款原生 macOS 客户端，支持可配置的视频 Provider 和直播流，
 采用 SwiftUI 界面并基于 libmpv 播放。当前公开版本为面向 macOS 12 或更高版本
-Apple Silicon Mac 的 **0.3.41（Build 64）**。
+Apple Silicon Mac 的 **0.3.41（Build 65）**。
 
 ## 亮点
 
@@ -65,19 +65,20 @@ Bridge APK；用户不应手工创建 AVD 或安装 APK。详见
 
 请从 [GitHub Releases](https://github.com/yaolin-dev/OKVideoMac/releases)
 下载官方 DMG，打开后将 `OKVideoMac.app` 拖入“应用程序”文件夹。当前
-`OKVideoMac-0.3.41-macOS-arm64.dmg` 包含 0.3.41（Build 64），已使用
+`OKVideoMac-0.3.41-macOS-arm64.dmg` 包含 0.3.41（Build 65），已使用
 Developer ID 签名并经过 Apple 公证。安装正式版本时不要关闭 Gatekeeper 或 SIP。
 
 ## 二进制与源码对应关系
 
-最终 v0.3.41 二进制及其对应源码集均为 Build 64。源码归档、索引、manifest、
-许可证、校验和、SBOM 与 binary-bound 记录都绑定到 `v0.3.41` 的 exact release
-commit。当前 Build 64 资产集详见
+当前 v0.3.41 二进制及其对应源码集均为 Build 65。源码归档、索引、manifest、
+许可证、校验和、SBOM 与 binary-bound 记录都绑定到 `v0.3.41-build65` 的 exact
+release commit。当前 Build 65 资产集详见
 [源码发布流程](Docs/SOURCE_RELEASE_PROCESS.md)。
 
-Build 62 和 Build 63 是更早的公开发布前候选。Build 62 的结论保留在
+Build 62 和 Build 63 是更早的公开发布前候选；Build 64 保留为上一版不可变公开
+发布。Build 62 的结论保留在
 [Build 62 历史发布准备记录](Docs/IMMUTABLE_RELEASE_READINESS.md)中；该快照及
-其他历史候选记录都不是最终 v0.3.41 的发布状态。
+其他历史候选记录都不是当前 v0.3.41 的发布状态。
 
 ## 内容与配置
 

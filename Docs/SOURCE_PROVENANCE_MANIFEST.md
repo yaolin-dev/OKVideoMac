@@ -1,4 +1,4 @@
-# OKVideoMac 0.3.41 (64) Source Provenance Manifest
+# OKVideoMac 0.3.41 (65) Source Provenance Manifest
 
 Manifest date: 2026-08-13
 Baseline audit: `Docs/THIRD_PARTY_LICENSE_AUDIT.md`
@@ -84,7 +84,7 @@ promoted to `VERIFIED`.
 ## Audited Release output inventory
 
 The stable native third-party hashes below freeze the audited inputs reused by
-0.3.41 (64). Some unchanged inputs were first audited for the Build 63 candidate.
+0.3.41 (65). Some unchanged inputs were first audited for the Build 63 candidate.
 Code signing or rebuilding can change output hashes even when source is
 unchanged. Therefore `package-app.sh` generates the authoritative hash of the
 27 stable nested Mach-O objects and the rebuilt APK inside each actual App at
@@ -156,7 +156,7 @@ intermediate and retained its no-input generation record, prompt, hashes, and
 catalog PNGs with the final red runtime artwork; it did not replace or establish
 a derivation from the retained blue source or master. The final red catalog's
 identity and release path are `VERIFIED` by `ae7fa3d`, the Build 63 candidate
-commit `b0b6fec`, and their unchanged presence on the Build 64 mainline. Its
+commit `b0b6fec`, and their unchanged presence through the Build 65 mainline. Its
 direct creative/source provenance remains `UNRESOLVED` from repository
 evidence. See
 `Docs/APP_ICON_PROVENANCE.md` for the detailed boundary.

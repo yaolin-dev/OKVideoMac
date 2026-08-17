@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 54;
+	objectVersion = 77;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -170,8 +170,8 @@
 			children = (
 				6C46BA484BEA09A1EFD0BA2A /* OKVideoKit */,
 			);
-			name = Packages;
-			sourceTree = SOURCE_ROOT;
+			path = Packages;
+			sourceTree = "<group>";
 		};
 		520E7D0E0A4E9E15A23DFC21 /* Resources */ = {
 			isa = PBXGroup;
@@ -342,6 +342,8 @@
 				AD9B7AC49E573C374D3C40C5 /* PBXTargetDependency */,
 			);
 			name = OKVideoMacTests;
+			packageProductDependencies = (
+			);
 			productName = OKVideoMacTests;
 			productReference = F10066822C02CE0E2210A0C9 /* OKVideoMacTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
@@ -386,7 +388,6 @@
 				};
 			};
 			buildConfigurationList = 7DF1D511FB3F80EF2828B41B /* Build configuration list for PBXProject "OKVideoMac" */;
-			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = "zh-Hans";
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -394,6 +395,12 @@
 				"zh-Hans",
 			);
 			mainGroup = 307E02B6EA0B01CCE3CA89AE;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				7724EF2268427DD0E6E288BC /* XCLocalSwiftPackageReference "Packages/OKVideoKit" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 35F0D091111A69DAA540AFBC /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -591,7 +598,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 64;
+				CURRENT_PROJECT_VERSION = 65;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -735,7 +742,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 64;
+				CURRENT_PROJECT_VERSION = 65;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -791,6 +798,13 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		7724EF2268427DD0E6E288BC /* XCLocalSwiftPackageReference "Packages/OKVideoKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/OKVideoKit;
+		};
+/* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		2C5893FD1E3264FC60A92F7D /* OKVideoCore */ = {

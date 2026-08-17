@@ -4,18 +4,18 @@ Each formal OKVideoMac binary must be published with a source set produced by
 `macOS/OKVideoMac/Scripts/create-source-release.sh` from the exact release Git
 commit. Moving branches and `latest` URLs are not corresponding-source links.
 
-For the final 0.3.41 release (Build 64), the generated set is:
+For the current 0.3.41 release (Build 65), the generated set is:
 
-- `OKVideoMac-0.3.41-build64-source.tar.gz`
-- `OKVideoMac-0.3.41-build64-third-party-source.tar.gz`
-- `OKVideoMac-0.3.41-build64-licenses.tar.gz`
-- `OKVideoMac-0.3.41-build64-SOURCE_RELEASE_INDEX.json`
-- `OKVideoMac-0.3.41-build64-SOURCE_RELEASE_MANIFEST.json`
-- `OKVideoMac-0.3.41-build64-SHA256SUMS`
+- `OKVideoMac-0.3.41-build65-source.tar.gz`
+- `OKVideoMac-0.3.41-build65-third-party-source.tar.gz`
+- `OKVideoMac-0.3.41-build65-licenses.tar.gz`
+- `OKVideoMac-0.3.41-build65-SOURCE_RELEASE_INDEX.json`
+- `OKVideoMac-0.3.41-build65-SOURCE_RELEASE_MANIFEST.json`
+- `OKVideoMac-0.3.41-build65-SHA256SUMS`
 - `OKVideoMac-0.3.41-macOS-arm64.zip` (copied beside the final manifest)
 - `OKVideoMac-0.3.41-AndroidDexBridge-release.apk`
 
-The final Build 64 release set also includes
+The current Build 65 release set also includes
 `OKVideoMac-0.3.41-macOS-arm64.dmg`, the macOS and Android SPDX/CycloneDX
 files (`OKVideoMac-macOS.spdx.json`, `OKVideoMac-macOS.cdx.json`,
 `OKVideoMac-Android.spdx.json`, and `OKVideoMac-Android.cdx.json`), and the
@@ -40,7 +40,7 @@ does not disguise exceptions: the missing original zlib 1.3.2 distfile and
 historical clang-11 input used by MacPorts libc++ remain explicit in the
 manifest and keep native provenance incomplete.
 
-For release 0.3.41 (64), the manifest records Xcode 16.2 and macOS SDK 15.2 as
+For release 0.3.41 (65), the manifest records Xcode 16.2 and macOS SDK 15.2 as
 the actual Phase 2 package builder. Xcode 14.2 remains the older supported
 macOS 12 baseline, but is not reported as the tool that produced this audited
 binary.
@@ -78,7 +78,8 @@ locked input is present in the cache. The script fails on a dirty worktree,
 unknown commit, binary/version mismatch, unavailable input, or any checksum
 mismatch.
 
-The frozen Build 64 project source archive remains the exact tagged source
+The frozen Build 65 project source archive remains the exact tagged source
 snapshot. It intentionally retains any pre-finalization engineering records
-that used earlier Build 62 or Build 63 terminology. Those historical records do
-not redefine the final Build 64 binary, source-release, tag, or manifest identity.
+that used earlier Build 62 or Build 63 terminology. Those historical records,
+and the prior immutable Build 64 public release, do not redefine the current
+Build 65 binary, source-release, tag, or manifest identity.

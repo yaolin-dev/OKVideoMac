@@ -8,7 +8,7 @@ Provenance boundary corrected: 2026-08-16
 
 ## Final v0.3.41 runtime icon
 
-OKVideoMac v0.3.41 Build 64 ships the red/coral icon with a white rounded
+OKVideoMac v0.3.41 Build 65 ships the red/coral icon with a white rounded
 aperture and play mark. Its source identity is the ten PNG files in:
 
 ```text
@@ -18,9 +18,9 @@ OKVideoMac/macOS/OKVideoMac/Resources/Assets.xcassets/AppIcon.appiconset/
 Commit `ae7fa3d20c2feb46f53758f946d7b18cd239b76a` replaced those ten catalog
 PNGs and established the final runtime artwork. The same files are present in
 the v0.3.41 Build 63 pre-publication candidate commit at
-`b0b6fec221325dde0a20d742949a95548cf0e5e7` and remain unchanged on the Build 64
+`b0b6fec221325dde0a20d742949a95548cf0e5e7` and remain unchanged through the Build 65
 mainline. Xcode selects the `AppIcon`
-catalog and compiles it into `AppIcon.icns` and `Assets.car` for the Build 64
+catalog and compiles it into `AppIcon.icns` and `Assets.car` for the Build 65
 application bundle.
 
 This confirms which artwork the release builds and ships. It does not, by

@@ -4,7 +4,7 @@ English | [简体中文](README_zh-CN.md)
 
 OKVideoMac is a native macOS client for configurable video providers and live
 streams, with a SwiftUI interface and libmpv-based playback. The current public
-release is **0.3.41 (Build 64)** for Apple Silicon Macs running macOS 12 or
+release is **0.3.41 (Build 65)** for Apple Silicon Macs running macOS 12 or
 later.
 
 ## Highlights
@@ -71,22 +71,23 @@ or real IPTV content is bundled with the project or shown in these images.
 Download the official DMG from
 [GitHub Releases](https://github.com/yaolin-dev/OKVideoMac/releases), open it, and
 drag `OKVideoMac.app` into Applications. The current
-`OKVideoMac-0.3.41-macOS-arm64.dmg` contains 0.3.41 (Build 64), signed with
+`OKVideoMac-0.3.41-macOS-arm64.dmg` contains 0.3.41 (Build 65), signed with
 Developer ID and notarized by Apple. Do not disable Gatekeeper or SIP to
 install the official build.
 
 ## Binary and source identity
 
-The final v0.3.41 binary and corresponding-source set are Build 64. The source
+The current v0.3.41 binary and corresponding-source set are Build 65. The source
 archives, index, manifest, licenses, checksums, SBOMs, and binary-bound records
-are tied to the exact `v0.3.41` release commit. See the
+are tied to the exact `v0.3.41-build65` release commit. See the
 [source release process](Docs/SOURCE_RELEASE_PROCESS.md) for the current
-Build 64 asset set.
+Build 65 asset set.
 
-Builds 62 and 63 were earlier pre-publication candidates. Build 62 findings
+Builds 62 and 63 were earlier pre-publication candidates, and Build 64 remains
+the prior immutable public release. Build 62 findings
 remain available as a
 [Historical Build 62 Release Readiness Record](Docs/IMMUTABLE_RELEASE_READINESS.md).
-Those historical candidate records are not the final v0.3.41 release state.
+Those historical candidate records are not the current v0.3.41 release state.
 
 ## Content and configuration
 

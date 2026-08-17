@@ -1,7 +1,7 @@
 # Compatibility
 
-- 对照版本：0.3.41（Build 64）
-- 最近更新：2026-08-16
+- 对照版本：0.3.41（Build 65）
+- 最近更新：2026-08-17
 - 当前交付目标：Apple Silicon / arm64 / macOS 12.0+
 
 ## 概述
@@ -253,8 +253,8 @@ OKVideoMac 实现了 CatVod/CatPaw 风格 Node 视频接口的兼容子集，包
 | macOS 12.0+ | Supported | Info.plist 和全部 Mach-O `minos` 由包体脚本验证 |
 | Intel Mac / Universal Binary | Unsupported | 当前只交付 arm64 |
 | 本地 Hardened Runtime 包 | Supported | ad-hoc 签名，仅主 App 使用开发期 Library Validation 例外 |
-| Developer ID 分发 | Supported | 0.3.41（Build 64）正式 DMG 已使用 Developer ID Application 签名，Hardened Runtime、secure timestamp 与权限边界验证通过 |
-| Notarization / Staple / Gatekeeper | Supported | 0.3.41（Build 64）App 与 DMG 的 Apple notarization、staple 和 Gatekeeper 验证通过 |
+| Developer ID 分发 | Supported | 0.3.41（Build 65）正式 DMG 已使用 Developer ID Application 签名，Hardened Runtime、secure timestamp 与权限边界验证通过 |
+| Notarization / Staple / Gatekeeper | Supported | 0.3.41（Build 65）App 与 DMG 的 Apple notarization、staple 和 Gatekeeper 验证通过 |
 | App Sandbox | Not Applicable | 当前为 Developer ID 外部分发目标；Sandbox 与 Hardened Runtime 是不同边界 |
 
 ## 明确不提供
