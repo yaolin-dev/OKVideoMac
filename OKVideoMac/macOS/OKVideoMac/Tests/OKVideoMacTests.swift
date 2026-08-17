@@ -1134,6 +1134,153 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testNodeRuntimeHomepageReloadPolicyRequiresEndpointReplacement() throws {
+        let first = try XCTUnwrap(URL(string: "http://127.0.0.1:58001/"))
+        let replacement = try XCTUnwrap(URL(string: "http://127.0.0.1:58002/"))
+
+        XCTAssertFalse(
+            NodeRuntimeHomepageReloadPolicy.shouldReload(
+                previousReadyEndpoint: nil,
+                currentReadyEndpoint: first,
+                usesNodeRuntime: true,
+                hasActiveConfiguration: true,
+                isConfigurationImportInProgress: false
+            )
+        )
+        XCTAssertFalse(
+            NodeRuntimeHomepageReloadPolicy.shouldReload(
+                previousReadyEndpoint: first,
+                currentReadyEndpoint: first,
+                usesNodeRuntime: true,
+                hasActiveConfiguration: true,
+                isConfigurationImportInProgress: false
+            )
+        )
+        XCTAssertTrue(
+            NodeRuntimeHomepageReloadPolicy.shouldReload(
+                previousReadyEndpoint: first,
+                currentReadyEndpoint: replacement,
+                usesNodeRuntime: true,
+                hasActiveConfiguration: true,
+                isConfigurationImportInProgress: false
+            )
+        )
+        XCTAssertFalse(
+            NodeRuntimeHomepageReloadPolicy.shouldReload(
+                previousReadyEndpoint: first,
+                currentReadyEndpoint: replacement,
+                usesNodeRuntime: false,
+                hasActiveConfiguration: true,
+                isConfigurationImportInProgress: false
+            )
+        )
+        XCTAssertFalse(
+            NodeRuntimeHomepageReloadPolicy.shouldReload(
+                previousReadyEndpoint: first,
+                currentReadyEndpoint: replacement,
+                usesNodeRuntime: true,
+                hasActiveConfiguration: true,
+                isConfigurationImportInProgress: true
+            )
+        )
+    }
+
+    func testEndpointReplacementRejectsStaleHomepageResult() {
+        let configurationID = UUID()
+        let identity = HomeContentIdentity(
+            configurationID: configurationID,
+            siteKey: "node-site"
+        )
+        let staleSession = UUID()
+        let replacementSession = UUID()
+
+        XCTAssertFalse(
+            HomeLoadResultPolicy.shouldAccept(
+                requestSessionID: staleSession,
+                currentSessionID: replacementSession,
+                requestedSiteKey: "node-site",
+                currentSiteKey: "node-site",
+                requestedIdentity: identity,
+                currentIdentity: identity
+            )
+        )
+        XCTAssertTrue(
+            HomeLoadResultPolicy.shouldAccept(
+                requestSessionID: replacementSession,
+                currentSessionID: replacementSession,
+                requestedSiteKey: "node-site",
+                currentSiteKey: "node-site",
+                requestedIdentity: identity,
+                currentIdentity: identity
+            )
+        )
+    }
+
+    @MainActor
+    func testImageRepositoryRetriesTemporaryFailureWithoutFailureCache() async throws {
+        let cacheDirectory = temporaryImageCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let url = try XCTUnwrap(URL(string: "https://images.example.invalid/transient"))
+        let client = ImageRepositoryHTTPClientProbe(
+            body: try makeTestImageData(),
+            failuresBeforeSuccess: 1
+        )
+        let repository = try makeImageRepository(
+            cacheDirectory: cacheDirectory,
+            httpClient: client
+        )
+
+        do {
+            _ = try await repository.image(for: url)
+            XCTFail("首次临时失败不应返回图片")
+        } catch {
+            XCTAssertNil(repository.cachedImage(for: url))
+        }
+        _ = try await repository.image(for: url)
+
+        XCTAssertNotNil(repository.cachedImage(for: url))
+        let requestCount = await client.requestCount()
+        XCTAssertEqual(requestCount, 2)
+    }
+
+    @MainActor
+    func testImageRepositoryDoesNotJoinStaleNodeProxyEndpointFailure() async throws {
+        let cacheDirectory = temporaryImageCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let staleURL = try makeNodeImageProxyURL(port: 58_799)
+        let readyURL = try makeNodeImageProxyURL(port: 61_008)
+        let client = NodeProxyEndpointTransitionHTTPClient(
+            stalePort: 58_799,
+            imageData: try makeTestImageData()
+        )
+        let repository = try makeImageRepository(
+            cacheDirectory: cacheDirectory,
+            httpClient: client
+        )
+
+        let staleTask = Task { @MainActor in
+            _ = try? await repository.image(for: staleURL)
+        }
+        var staleRequestStarted = false
+        for _ in 0..<10_000 {
+            if await client.requestCount() == 1 {
+                staleRequestStarted = true
+                break
+            }
+            await Task.yield()
+        }
+        XCTAssertTrue(staleRequestStarted)
+
+        let readyImage = try await repository.image(for: readyURL)
+        await staleTask.value
+
+        XCTAssertTrue(repository.cachedImage(for: readyURL) === readyImage)
+        let requestCount = await client.requestCount()
+        let requestedPorts = await client.requestedPorts()
+        XCTAssertEqual(requestCount, 2)
+        XCTAssertEqual(Set(requestedPorts), [58_799, 61_008])
+    }
+
     @MainActor
     func testImageRepositoryRejectsInvalidDataWithoutCaching() async throws {
         let cacheDirectory = temporaryImageCacheDirectory()
@@ -2394,23 +2541,159 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testAndroidBridgeNetworkRequiresConnectedWiFiAndDefaultRoute() {
+    func testAndroidBridgeNetworkUsesUsableDefaultRouteAsReadinessBoundary() {
         XCTAssertTrue(
             AndroidDexBridgeRuntime.networkLooksReady(
                 status: "Wifi is connected to \"AndroidWifi\"",
                 routes: "default via 10.0.2.2 dev wlan0"
             )
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             AndroidDexBridgeRuntime.networkLooksReady(
                 status: "Wifi is enabled\nWifi is disconnected",
                 routes: "default via 10.0.2.2 dev wlan0"
+            )
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.networkLooksReady(
+                status: "Wifi is disabled",
+                routes: "default via 192.0.2.1 dev eth0"
             )
         )
         XCTAssertFalse(
             AndroidDexBridgeRuntime.networkLooksReady(
                 status: "Wifi is connected to \"AndroidWifi\"",
                 routes: "10.0.2.0/24 dev wlan0"
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.networkLooksReady(
+                status: "Wifi is enabled",
+                routes: "default dev dummy0 scope link"
+            )
+        )
+    }
+
+    func testAndroidBridgeNetworkEvidenceHelpers() {
+        let routes = """
+        default via 10.0.2.2 dev wlan0 proto dhcp
+        10.0.2.0/24 dev wlan0 scope link
+        """
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.defaultGateway(from: routes),
+            "10.0.2.2"
+        )
+        XCTAssertTrue(AndroidDexBridgeRuntime.hasUsableDefaultRoute(routes))
+        XCTAssertTrue(AndroidDexBridgeRuntime.containsSecurityException(
+            "java.lang.SecurityException: Uid 2000 does not have access"
+        ))
+    }
+
+    func testAndroidRuntimeStagePreservesExactSixtyEightPercentBoundary() {
+        XCTAssertEqual(
+            AndroidRuntimeStartupStage.stage(for: 0.68),
+            .checkingEmulatorNetwork
+        )
+        XCTAssertEqual(
+            AndroidRuntimeStatus.starting(progress: 0.68).stage,
+            .checkingEmulatorNetwork
+        )
+    }
+
+    func testAndroidDiagnosticsSanitizeUnrelatedADBDevicesAndForwards() {
+        let devices = """
+        List of devices attached
+        emulator-5554 device product:sdk model:owned
+        R58M123 unauthorized usb:1-2 product:private model:phone
+        emulator-5556 offline transport_id:9
+        """
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.sanitizedADBDevices(
+                devices,
+                ownedSerial: "emulator-5554"
+            ),
+            [
+                "emulator-5554 state=device owned=true",
+                "<unrelated-device> state=unauthorized owned=false",
+                "<unrelated-device> state=offline owned=false"
+            ]
+        )
+        let forwards = """
+        emulator-5554 tcp:19978 tcp:9978
+        R58M123 tcp:42000 tcp:42000
+        """
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.sanitizedADBForwards(
+                forwards,
+                ownedSerial: "emulator-5554"
+            ),
+            ["emulator-5554 tcp:19978 tcp:9978"]
+        )
+    }
+
+    func testAndroidRuntimeErrorPresentationIsNotGenericSpiderFailure() throws {
+        let error = AndroidRuntimeFailureError(
+            record: AndroidRuntimeFailureRecord(
+                occurredAt: Date(),
+                stage: .checkingEmulatorNetwork,
+                category: .emulatorNetworkUnavailable,
+                message: "technical detail"
+            )
+        )
+        let presentation = try XCTUnwrap(
+            AndroidRuntimeUserFacingErrorMapper.presentation(for: error)
+        )
+        XCTAssertEqual(presentation.title, "Android 兼容环境启动失败")
+        XCTAssertTrue(presentation.message.contains("Emulator"))
+        XCTAssertFalse(presentation.message.contains("technical detail"))
+    }
+
+    func testAndroidLastFailureRemainsVisibleAfterOperationStops() throws {
+        let failure = AndroidRuntimeFailureRecord(
+            occurredAt: Date(),
+            stage: .checkingEmulatorNetwork,
+            category: .emulatorNetworkUnavailable,
+            message: "network evidence"
+        )
+
+        let status = try XCTUnwrap(
+            AndroidRuntimeFailureStatePolicy.status(
+                operationStatus: nil,
+                lastFailure: failure
+            )
+        )
+        XCTAssertEqual(status.phase, .failed)
+        XCTAssertEqual(status.stage, .checkingEmulatorNetwork)
+        XCTAssertTrue(status.detail.contains("network evidence"))
+    }
+
+    func testAndroidRecoveryIsBoundedAndSkipsKnownFailedCommand() {
+        XCTAssertEqual(
+            AndroidRuntimeRecoveryPolicy.networkObservationTimeout,
+            30
+        )
+        XCTAssertEqual(
+            AndroidRuntimeRecoveryPolicy.initialBridgeProbeAttempts,
+            30
+        )
+        XCTAssertEqual(
+            AndroidRuntimeRecoveryPolicy.recoveredBridgeProbeAttempts,
+            20
+        )
+        XCTAssertGreaterThan(
+            AndroidRuntimeRecoveryPolicy.bridgeProbePollNanoseconds,
+            0
+        )
+        XCTAssertFalse(
+            AndroidRuntimeRecoveryPolicy.shouldRetryKnownFailedNetworkCommand(
+                lastFailureStage: .checkingEmulatorNetwork,
+                networkRecoveryResult: "command_failed"
+            )
+        )
+        XCTAssertTrue(
+            AndroidRuntimeRecoveryPolicy.shouldRetryKnownFailedNetworkCommand(
+                lastFailureStage: .checkingEmulatorNetwork,
+                networkRecoveryResult: "timed_out"
             )
         )
     }
@@ -5283,18 +5566,32 @@ private actor ImageRepositoryHTTPClientProbe: HTTPClient {
     private let body: Data?
     private let error: HTTPClientError?
     private let delayNanoseconds: UInt64
+    private var failuresRemaining: Int
     private var count = 0
 
     init(body: Data, delayNanoseconds: UInt64 = 0) {
         self.body = body
         self.error = nil
         self.delayNanoseconds = delayNanoseconds
+        failuresRemaining = 0
+    }
+
+    init(
+        body: Data,
+        failuresBeforeSuccess: Int,
+        delayNanoseconds: UInt64 = 0
+    ) {
+        self.body = body
+        self.error = nil
+        self.delayNanoseconds = delayNanoseconds
+        failuresRemaining = max(0, failuresBeforeSuccess)
     }
 
     init(error: HTTPClientError, delayNanoseconds: UInt64 = 0) {
         self.body = nil
         self.error = error
         self.delayNanoseconds = delayNanoseconds
+        failuresRemaining = 0
     }
 
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
@@ -5304,6 +5601,10 @@ private actor ImageRepositoryHTTPClientProbe: HTTPClient {
         }
         if let error {
             throw error
+        }
+        if failuresRemaining > 0 {
+            failuresRemaining -= 1
+            throw HTTPClientError.statusCode(503)
         }
         return HTTPResponse(
             url: request.url,
@@ -5315,5 +5616,39 @@ private actor ImageRepositoryHTTPClientProbe: HTTPClient {
 
     func requestCount() -> Int {
         count
+    }
+}
+
+private actor NodeProxyEndpointTransitionHTTPClient: HTTPClient {
+    private let stalePort: Int
+    private let imageData: Data
+    private var ports: [Int] = []
+
+    init(stalePort: Int, imageData: Data) {
+        self.stalePort = stalePort
+        self.imageData = imageData
+    }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        let port = request.url.port ?? -1
+        ports.append(port)
+        if port == stalePort {
+            try await Task.sleep(nanoseconds: 150_000_000)
+            throw HTTPClientError.statusCode(503)
+        }
+        return HTTPResponse(
+            url: request.url,
+            statusCode: 200,
+            headers: ["Content-Type": "image/tiff"],
+            body: imageData
+        )
+    }
+
+    func requestCount() -> Int {
+        ports.count
+    }
+
+    func requestedPorts() -> [Int] {
+        ports
     }
 }

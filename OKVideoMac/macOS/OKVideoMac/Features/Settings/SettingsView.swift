@@ -548,13 +548,15 @@ struct SettingsView: View {
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = "OKVideoMac-Diagnostics.json"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            try state.exportDiagnostics(to: url)
-        } catch {
-            state.presentedError = UserFacingError(
-                title: "诊断导出失败",
-                message: error.localizedDescription
-            )
+        Task { @MainActor in
+            do {
+                try await state.exportDiagnostics(to: url)
+            } catch {
+                state.presentedError = UserFacingError(
+                    title: "诊断导出失败",
+                    message: error.localizedDescription
+                )
+            }
         }
     }
 }

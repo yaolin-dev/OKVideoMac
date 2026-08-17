@@ -78,6 +78,20 @@ struct NodeReleaseErrorPresentation: Equatable {
     let message: String
 }
 
+enum AndroidRuntimeUserFacingErrorMapper {
+    static func presentation(
+        for error: Error
+    ) -> NodeReleaseErrorPresentation? {
+        guard let runtimeError = error as? AndroidRuntimeFailureError else {
+            return nil
+        }
+        return .init(
+            title: runtimeError.userFacingTitle,
+            message: runtimeError.userFacingMessage
+        )
+    }
+}
+
 enum NodeUserFacingErrorMapper {
     static func presentation(for error: Error) -> NodeReleaseErrorPresentation? {
         if let nodeError = error as? NodeBundleRuntimeError {
@@ -245,6 +259,21 @@ enum HomeContentPublicationPolicy {
     }
 }
 
+enum HomeLoadResultPolicy {
+    static func shouldAccept(
+        requestSessionID: UUID,
+        currentSessionID: UUID,
+        requestedSiteKey: String,
+        currentSiteKey: String?,
+        requestedIdentity: HomeContentIdentity,
+        currentIdentity: HomeContentIdentity?
+    ) -> Bool {
+        requestSessionID == currentSessionID
+            && requestedSiteKey == currentSiteKey
+            && requestedIdentity == currentIdentity
+    }
+}
+
 enum HomeAutomaticRefreshPolicy {
     static func allowsRefresh(
         hasCompletedStartup: Bool,
@@ -254,6 +283,22 @@ enum HomeAutomaticRefreshPolicy {
         hasCompletedStartup
             && selectedSection == .home
             && !isHomeSearchPresented
+    }
+}
+
+enum NodeRuntimeHomepageReloadPolicy {
+    static func shouldReload(
+        previousReadyEndpoint: URL?,
+        currentReadyEndpoint: URL,
+        usesNodeRuntime: Bool,
+        hasActiveConfiguration: Bool,
+        isConfigurationImportInProgress: Bool
+    ) -> Bool {
+        usesNodeRuntime
+            && hasActiveConfiguration
+            && !isConfigurationImportInProgress
+            && previousReadyEndpoint != nil
+            && previousReadyEndpoint != currentReadyEndpoint
     }
 }
 
@@ -857,6 +902,7 @@ final class AppState: ObservableObject {
     private var configurationRefreshSessionID = UUID()
     private var nodeRuntimeStatusTask: Task<Void, Never>?
     private var activeNodeRuntimeEndpoint: URL?
+    private var lastReadyNodeRuntimeEndpoint: URL?
     private var nodeRuntimeUnavailableReason = "Node Runtime 尚未启动"
 
     static func bootstrap() -> AppState {
@@ -1347,12 +1393,21 @@ final class AppState: ObservableObject {
         homeLoadSessionID = UUID()
         let sessionID = homeLoadSessionID
         isHomeLoading = true
-        defer { isHomeLoading = false }
+        defer {
+            if homeLoadSessionID == sessionID {
+                isHomeLoading = false
+            }
+        }
         do {
             let loaded = try await provider.home()
-            guard homeLoadSessionID == sessionID,
-                  selectedSiteKey == key,
-                  currentHomeContentIdentity == contentIdentity else {
+            guard HomeLoadResultPolicy.shouldAccept(
+                requestSessionID: sessionID,
+                currentSessionID: homeLoadSessionID,
+                requestedSiteKey: key,
+                currentSiteKey: selectedSiteKey,
+                requestedIdentity: contentIdentity,
+                currentIdentity: currentHomeContentIdentity
+            ) else {
                 return
             }
             publishHomeContent(loaded, identity: contentIdentity)
@@ -3393,7 +3448,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    func exportDiagnostics(to url: URL) throws {
+    func exportDiagnostics(to url: URL) async throws {
         let sites = visibleSites.map { site -> [String: Any] in
             let api: String
             if let parsed = URL(string: site.api), parsed.scheme != nil {
@@ -3409,7 +3464,7 @@ final class AppState: ObservableObject {
                 "capability": providers[site.key]?.capability.rawValue ?? "unavailable"
             ]
         }
-        let report: [String: Any] = [
+        var report: [String: Any] = [
             "generatedAt": ISO8601DateFormatter().string(from: Date()),
             "appVersion": versionDescription,
             "system": systemDescription,
@@ -3424,6 +3479,14 @@ final class AppState: ObservableObject {
             "quickJSBundled": environment?.spiderRuntimeFactory != nil,
             "playerStatus": playerStatusDescription
         ]
+        let diagnosticEncoder = JSONEncoder()
+        diagnosticEncoder.dateEncodingStrategy = .iso8601
+        if let androidSnapshot = await environment?.androidDexBridge
+            .diagnosticSnapshot(),
+           let encoded = try? diagnosticEncoder.encode(androidSnapshot),
+           let object = try? JSONSerialization.jsonObject(with: encoded) {
+            report["androidRuntime"] = LogRedactor.json(object)
+        }
         do {
             let data = try JSONSerialization.data(
                 withJSONObject: report,
@@ -4148,8 +4211,8 @@ final class AppState: ObservableObject {
             androidRuntimeStatus = try await environment.androidDexBridge
                 .startRuntime()
         } catch {
-            let message = LogRedactor.text(error.localizedDescription)
-            androidRuntimeStatus = .failed(message)
+            androidRuntimeStatus = await environment.androidDexBridge
+                .runtimeStatus()
             show(error, title: "Android 兼容模块启动失败")
         }
     }
@@ -4180,8 +4243,8 @@ final class AppState: ObservableObject {
             androidRuntimeStatus = try await environment.androidDexBridge
                 .repairRuntime()
         } catch {
-            let message = LogRedactor.text(error.localizedDescription)
-            androidRuntimeStatus = .failed(message)
+            androidRuntimeStatus = await environment.androidDexBridge
+                .runtimeStatus()
             show(error, title: "Android 兼容模块修复失败")
         }
     }
@@ -4841,25 +4904,72 @@ final class AppState: ObservableObject {
     }
 
     private func applyNodeRuntimeStatus(_ status: NodeRuntimeStatus) {
+        let shouldReloadHome: Bool
         switch status {
         case .running(let endpoint):
+            shouldReloadHome = NodeRuntimeHomepageReloadPolicy.shouldReload(
+                previousReadyEndpoint: lastReadyNodeRuntimeEndpoint,
+                currentReadyEndpoint: endpoint,
+                usesNodeRuntime: activeConfigurationUsesNodeRuntime,
+                hasActiveConfiguration: activeConfiguration != nil,
+                isConfigurationImportInProgress: configurationImportOperationID != nil
+            )
+            lastReadyNodeRuntimeEndpoint = endpoint
             activeNodeRuntimeEndpoint = endpoint
             nodeRuntimeUnavailableReason = ""
         case .starting:
+            shouldReloadHome = false
             activeNodeRuntimeEndpoint = nil
             nodeRuntimeUnavailableReason = "Node Runtime 正在启动"
         case .restarting(let attempt, let reason):
+            shouldReloadHome = false
             activeNodeRuntimeEndpoint = nil
             nodeRuntimeUnavailableReason = "Node Runtime 正在第 \(attempt) 次恢复：\(reason)"
         case .failed(let reason):
+            shouldReloadHome = false
             activeNodeRuntimeEndpoint = nil
             nodeRuntimeUnavailableReason = reason
         case .stopped:
+            shouldReloadHome = false
             activeNodeRuntimeEndpoint = nil
             nodeRuntimeUnavailableReason = "Node Runtime 已停止"
         }
         if activeConfigurationUsesNodeRuntime, activeConfiguration != nil {
             rebuildProviders()
+        }
+        guard shouldReloadHome,
+              case .running(let endpoint) = status,
+              let configurationID = activeConfigurationRecord?.id,
+              let siteKey = selectedSiteKey else {
+            return
+        }
+        // Invalidate an older homepage request synchronously with endpoint
+        // publication. The replacement load starts below, but the old request
+        // must not get a chance to publish models containing the stale port.
+        homeLoadSessionID = UUID()
+        Task { @MainActor [weak self] in
+            guard let self,
+                  self.activeNodeRuntimeEndpoint == endpoint,
+                  self.activeConfigurationRecord?.id == configurationID,
+                  self.selectedSiteKey == siteKey else {
+                return
+            }
+            if let environment = self.environment {
+                await environment.nodeBundleRuntime.recordDiagnosticEvent(
+                    NodeDiagnosticEvent(
+                        category: .runtime,
+                        severity: .info,
+                        code: .runtimeHomepageReloadRequested,
+                        message: "Reloading homepage after Node runtime endpoint replacement",
+                        siteKey: siteKey,
+                        operation: "home"
+                    )
+                )
+            }
+            await self.loadSelectedSiteHome(
+                refreshConfigurationIfNeeded: false,
+                reportErrors: false
+            )
         }
     }
 
@@ -5850,6 +5960,14 @@ final class AppState: ObservableObject {
         for error: Error,
         title: String
     ) -> UserFacingError {
+        if let presentation = AndroidRuntimeUserFacingErrorMapper.presentation(
+            for: error
+        ) {
+            return UserFacingError(
+                title: presentation.title,
+                message: presentation.message
+            )
+        }
         if let presentation = NodeUserFacingErrorMapper.presentation(for: error) {
             return UserFacingError(
                 title: presentation.title,

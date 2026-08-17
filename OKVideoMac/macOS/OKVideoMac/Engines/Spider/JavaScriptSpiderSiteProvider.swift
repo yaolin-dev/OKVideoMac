@@ -1,4 +1,5 @@
 import Darwin
+import CryptoKit
 import Foundation
 import OKVideoCore
 
@@ -551,7 +552,7 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
     }
 }
 
-enum AndroidRuntimePhase: Equatable {
+enum AndroidRuntimePhase: Equatable, Sendable {
     case checking
     case unavailable
     case stopped
@@ -561,8 +562,251 @@ enum AndroidRuntimePhase: Equatable {
     case failed
 }
 
-struct AndroidRuntimeStatus: Equatable {
+enum AndroidRuntimeStartupStage: String, Codable, CaseIterable, Sendable {
+    case idle
+    case locatingSDK
+    case preparingAVD
+    case launchingEmulator
+    case waitingForADB
+    case waitingForAndroidBoot
+    case configuringPortForward
+    case checkingEmulatorNetwork
+    case installingBridge
+    case launchingBridge
+    case probingBridge
+    case ready
+    case stopping
+
+    var progress: Double? {
+        switch self {
+        case .idle: return 0
+        case .locatingSDK: return 0.03
+        case .preparingAVD: return 0.07
+        case .launchingEmulator: return 0.10
+        case .waitingForADB: return 0.18
+        case .waitingForAndroidBoot: return 0.32
+        case .configuringPortForward: return 0.55
+        case .checkingEmulatorNetwork: return 0.68
+        case .installingBridge: return 0.84
+        case .launchingBridge: return 0.88
+        case .probingBridge: return 0.92
+        case .ready: return 1
+        case .stopping: return nil
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .idle: return "等待启动"
+        case .locatingSDK: return "正在检查 Android SDK"
+        case .preparingAVD: return "正在准备专用 Android 环境"
+        case .launchingEmulator: return "正在启动 Android Emulator"
+        case .waitingForADB: return "正在等待专用 Emulator 连接"
+        case .waitingForAndroidBoot: return "正在等待 Android 系统启动"
+        case .configuringPortForward: return "正在配置 Bridge 端口映射"
+        case .checkingEmulatorNetwork: return "正在检查 Emulator 网络"
+        case .installingBridge: return "正在安装 Android Bridge"
+        case .launchingBridge: return "正在启动 Android Bridge"
+        case .probingBridge: return "正在等待 Android Bridge 响应"
+        case .ready: return "Android 兼容环境已就绪"
+        case .stopping: return "正在停止 Android Emulator"
+        }
+    }
+
+    static func stage(for progress: Double) -> AndroidRuntimeStartupStage {
+        allCases
+            .filter { $0.progress != nil && ($0.progress ?? 0) <= progress }
+            .max { ($0.progress ?? 0) < ($1.progress ?? 0) } ?? .idle
+    }
+}
+
+enum AndroidRuntimeFailureCategory: String, Codable, Sendable {
+    case sdkIncomplete
+    case adbUnavailable
+    case emulatorLaunchFailed
+    case emulatorLaunchTimedOut
+    case emulatorOwnershipMismatch
+    case androidBootTimedOut
+    case emulatorNetworkUnavailable
+    case bridgeAPKMissing
+    case bridgeInstallFailed
+    case bridgeLaunchFailed
+    case portForwardFailed
+    case hostPortConflict
+    case bridgeHealthTimedOut
+    case runtimeExited
+    case unknown
+}
+
+struct AndroidRuntimeFailureRecord: Codable, Equatable, Sendable {
+    let occurredAt: Date
+    let stage: AndroidRuntimeStartupStage
+    let category: AndroidRuntimeFailureCategory
+    let message: String
+}
+
+struct AndroidRuntimeStageRecord: Codable, Equatable, Sendable {
+    let stage: AndroidRuntimeStartupStage
+    let startedAt: Date
+    var completedAt: Date?
+    var duration: TimeInterval?
+    var error: String?
+}
+
+struct AndroidRuntimeEventRecord: Codable, Equatable, Sendable {
+    let timestamp: Date
+    let stage: AndroidRuntimeStartupStage
+    let event: String
+    let detail: String?
+}
+
+struct AndroidRuntimeCommandRecord: Codable, Equatable, Sendable {
+    let timestamp: Date
+    let category: String
+    let command: String
+    let exitCode: Int32
+    let stdout: String
+    let stderr: String
+    let duration: TimeInterval
+    let timedOut: Bool
+}
+
+struct AndroidToolCommandError: LocalizedError, Sendable {
+    let category: String
+    let exitCode: Int32
+    let stdout: String
+    let stderr: String
+    let duration: TimeInterval
+    let timedOut: Bool
+
+    var errorDescription: String? {
+        if timedOut {
+            return "Android 工具超时（\(category)，\(Self.durationText(duration))）"
+        }
+        let diagnostic = stderr.nonEmptyCommandOutput
+            ?? stdout.nonEmptyCommandOutput
+            ?? "无输出"
+        return "Android 工具失败（\(category)，exit=\(exitCode)）：\(String(diagnostic.prefix(1_000)))"
+    }
+
+    private static func durationText(_ duration: TimeInterval) -> String {
+        String(format: "%.2fs", duration)
+    }
+}
+
+private extension String {
+    var nonEmptyCommandOutput: String? {
+        let value = trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+}
+
+struct AndroidRuntimeDiagnosticSnapshot: Codable, Equatable, Sendable {
+    let runtimeState: String
+    let startupStage: AndroidRuntimeStartupStage
+    let progress: Double?
+    let stageStartedAt: Date?
+    let lastAttemptAt: Date?
+    let lastSuccessfulStartAt: Date?
+    let lastFailure: AndroidRuntimeFailureRecord?
+    let sdkDiscoverySource: String?
+    let sdkRoot: String?
+    let adbPath: String?
+    let adbExists: Bool
+    let adbExecutable: Bool
+    let adbVersion: String?
+    let emulatorPath: String?
+    let emulatorExists: Bool
+    let emulatorExecutable: Bool
+    let emulatorVersion: String?
+    let avdManagerPath: String?
+    let expectedAVDName: String
+    let avdExists: Bool
+    let avdPath: String
+    let systemImage: String?
+    let systemImageABI: String?
+    let emulatorPID: Int32?
+    let emulatorSerial: String?
+    let emulatorProcessRunning: Bool
+    let adbDeviceState: String?
+    let androidBootCompleted: Bool?
+    let bootWaitDuration: TimeInterval?
+    let ipAddresses: String?
+    let ipRoutes: String?
+    let defaultRoutePresent: Bool?
+    let wifiStatus: String?
+    let networkRecoveryAttempted: Bool
+    let networkRecoverySecurityException: Bool
+    let networkRecoveryDuration: TimeInterval?
+    let networkRecoveryResult: String?
+    let networkRecoveryCommand: AndroidRuntimeCommandRecord?
+    let connectivityProbeResult: String?
+    let androidCPUABI: String?
+    let androidSDKLevel: String?
+    let androidRelease: String?
+    let adbDevices: [String]
+    let adbForwards: [String]
+    let bridgeAPKPresentOnMac: Bool
+    let bridgeAPKHash: String?
+    let bridgePackageInstalled: Bool?
+    let bridgePackageVersion: Int?
+    let bridgeProcessRunning: Bool?
+    let bridgeComponentStartResult: String?
+    let hostPort: Int
+    let guestPort: Int
+    let hostPortOccupied: Bool?
+    let forwardPresent: Bool?
+    let forwardPointsToOwnedDevice: Bool?
+    let probeURL: String
+    let probeRetryCount: Int
+    let probeHTTPStatus: Int?
+    let probeErrorCategory: String?
+    let probeDuration: TimeInterval?
+    let stageHistory: [AndroidRuntimeStageRecord]
+    let timeline: [AndroidRuntimeEventRecord]
+    let recentCommands: [AndroidRuntimeCommandRecord]
+}
+
+struct AndroidRuntimeFailureError: LocalizedError, Sendable {
+    let record: AndroidRuntimeFailureRecord
+
+    var errorDescription: String? { record.message }
+
+    var userFacingTitle: String { "Android 兼容环境启动失败" }
+
+    var userFacingMessage: String {
+        switch record.category {
+        case .sdkIncomplete:
+            return "Android SDK 不完整，请在设置中选择包含 ADB、Emulator 和系统镜像的 SDK。"
+        case .adbUnavailable:
+            return "ADB 无法使用，无法连接专用 Android Emulator。"
+        case .emulatorLaunchFailed, .emulatorLaunchTimedOut, .runtimeExited:
+            return "Android Emulator 未能正常启动，请导出诊断后重试。"
+        case .emulatorOwnershipMismatch:
+            return "无法安全确认专用 Android Emulator，已停止操作其他设备。"
+        case .androidBootTimedOut:
+            return "Android 系统启动超时，兼容环境没有在预期时间内完成启动。"
+        case .emulatorNetworkUnavailable:
+            return "Android Emulator 没有建立可用网络，请检查网络后重试。"
+        case .bridgeAPKMissing, .bridgeInstallFailed:
+            return "Android Bridge 安装失败，请重新安装测试版或导出诊断。"
+        case .bridgeLaunchFailed:
+            return "Android Bridge 服务启动失败，请使用“修复”后重试。"
+        case .portForwardFailed:
+            return "ADB 端口映射失败，Android Bridge 无法连接到 Mac。"
+        case .hostPortConflict:
+            return "本机 Android Bridge 端口被占用，请关闭冲突程序后重试。"
+        case .bridgeHealthTimedOut:
+            return "Android 兼容服务未响应；Emulator 已启动，但 Bridge 尚未建立连接。"
+        case .unknown:
+            return "Android 兼容环境启动失败，请立即导出诊断信息。"
+        }
+    }
+}
+
+struct AndroidRuntimeStatus: Equatable, Sendable {
     let phase: AndroidRuntimePhase
+    let stage: AndroidRuntimeStartupStage
     let title: String
     let detail: String
     let progress: Double?
@@ -571,6 +815,7 @@ struct AndroidRuntimeStatus: Equatable {
 
     static let checking = AndroidRuntimeStatus(
         phase: .checking,
+        stage: .locatingSDK,
         title: "准备中",
         detail: "正在检查 Android 兼容环境…",
         progress: nil
@@ -579,6 +824,7 @@ struct AndroidRuntimeStatus: Equatable {
     static func unavailable(_ detail: String) -> AndroidRuntimeStatus {
         AndroidRuntimeStatus(
             phase: .unavailable,
+            stage: .locatingSDK,
             title: "需要处理",
             detail: detail,
             progress: nil
@@ -587,25 +833,41 @@ struct AndroidRuntimeStatus: Equatable {
 
     static let stopped = AndroidRuntimeStatus(
         phase: .stopped,
+        stage: .idle,
         title: "已停止",
         detail: "Java/Dex 站点需要时将自动启动",
         progress: nil
     )
 
     static func starting(
-        _ _: String = "首次启动可能需要 1–4 分钟",
+        _ detail: String = "首次启动可能需要 1–4 分钟",
         progress: Double = 0
     ) -> AndroidRuntimeStatus {
         AndroidRuntimeStatus(
             phase: .starting,
+            stage: .stage(for: progress),
             title: "准备中",
-            detail: "正在准备 Android 兼容环境…",
+            detail: detail,
             progress: min(max(progress, 0), 1)
+        )
+    }
+
+    static func starting(
+        stage: AndroidRuntimeStartupStage,
+        progress: Double? = nil
+    ) -> AndroidRuntimeStatus {
+        AndroidRuntimeStatus(
+            phase: .starting,
+            stage: stage,
+            title: "准备中",
+            detail: stage.title,
+            progress: progress ?? stage.progress
         )
     }
 
     static let running = AndroidRuntimeStatus(
         phase: .running,
+        stage: .ready,
         title: "已就绪",
         detail: "Java/Dex 站点可正常使用",
         progress: 1
@@ -613,18 +875,52 @@ struct AndroidRuntimeStatus: Equatable {
 
     static let stopping = AndroidRuntimeStatus(
         phase: .stopping,
+        stage: .stopping,
         title: "正在停止",
         detail: "正在关闭 Android 模拟器",
         progress: nil
     )
 
-    static func failed(_ detail: String) -> AndroidRuntimeStatus {
+    static func failed(
+        _ detail: String,
+        stage: AndroidRuntimeStartupStage = .idle
+    ) -> AndroidRuntimeStatus {
         AndroidRuntimeStatus(
             phase: .failed,
+            stage: stage,
             title: "需要处理",
-            detail: detail,
+            detail: "\(stage.title)：\(detail)",
             progress: nil
         )
+    }
+}
+
+enum AndroidRuntimeFailureStatePolicy {
+    static func status(
+        operationStatus: AndroidRuntimeStatus?,
+        lastFailure: AndroidRuntimeFailureRecord?
+    ) -> AndroidRuntimeStatus? {
+        if let operationStatus {
+            return operationStatus
+        }
+        guard let lastFailure else { return nil }
+        return .failed(lastFailure.message, stage: lastFailure.stage)
+    }
+}
+
+enum AndroidRuntimeRecoveryPolicy {
+    static let networkObservationTimeout: TimeInterval = 30
+    static let networkPollNanoseconds: UInt64 = 500_000_000
+    static let initialBridgeProbeAttempts = 30
+    static let recoveredBridgeProbeAttempts = 20
+    static let bridgeProbePollNanoseconds: UInt64 = 500_000_000
+
+    static func shouldRetryKnownFailedNetworkCommand(
+        lastFailureStage: AndroidRuntimeStartupStage?,
+        networkRecoveryResult: String?
+    ) -> Bool {
+        !(lastFailureStage == .checkingEmulatorNetwork
+            && networkRecoveryResult == "command_failed")
     }
 }
 
@@ -665,6 +961,10 @@ final class AndroidDexBridgeClient {
 
     func runtimeStatus() async -> AndroidRuntimeStatus {
         await runtime.status()
+    }
+
+    func diagnosticSnapshot() async -> AndroidRuntimeDiagnosticSnapshot {
+        await runtime.diagnosticSnapshot()
     }
 
     func startRuntime() async throws -> AndroidRuntimeStatus {
@@ -1286,7 +1586,39 @@ actor AndroidDexBridgeRuntime {
     private var lastNetworkCheck: Date?
     private var readinessTask: Task<Void, Error>?
     private var operationStatus: AndroidRuntimeStatus?
-    private var lastFailure: AndroidRuntimeStatus?
+    private var currentStage: AndroidRuntimeStartupStage = .idle
+    private var stageStartedAt: Date?
+    private var lastAttemptAt: Date?
+    private var lastSuccessfulStartAt: Date?
+    private var lastFailure: AndroidRuntimeFailureRecord?
+    private var stageHistory: [AndroidRuntimeStageRecord] = []
+    private var timeline: [AndroidRuntimeEventRecord] = []
+    private var recentCommands: [AndroidRuntimeCommandRecord] = []
+    private var lastObservedIdentity: AndroidRuntimeIdentity?
+    private var lastObservedToolchain: AndroidToolchain?
+    private var lastBootCompleted: Bool?
+    private var lastBootWaitDuration: TimeInterval?
+    private var lastIPAddressOutput: String?
+    private var lastIPRouteOutput: String?
+    private var lastDefaultRoutePresent: Bool?
+    private var lastWiFiStatus: String?
+    private var networkRecoveryAttempted = false
+    private var networkRecoverySecurityException = false
+    private var networkRecoveryDuration: TimeInterval?
+    private var networkRecoveryResult: String?
+    private var lastNetworkRecoveryCommand: AndroidRuntimeCommandRecord?
+    private var connectivityProbeResult: String?
+    private var lastADBDevices: [String] = []
+    private var lastADBForwards: [String] = []
+    private var lastBridgePackageInstalled: Bool?
+    private var lastBridgeVersionCode: Int?
+    private var lastBridgeProcessRunning: Bool?
+    private var lastBridgeComponentStartResult: String?
+    private var probeStartedAt: Date?
+    private var probeRetryCount = 0
+    private var probeHTTPStatus: Int?
+    private var probeErrorCategory: String?
+    private var probeDuration: TimeInterval?
 
     init(
         applicationSupportDirectory: URL? = nil,
@@ -1322,12 +1654,143 @@ actor AndroidDexBridgeRuntime {
         )
     }
 
-    func status() async -> AndroidRuntimeStatus {
-        if let operationStatus {
-            return operationStatus
+    private func transition(
+        to stage: AndroidRuntimeStartupStage,
+        progress: Double? = nil,
+        event: String = "started",
+        detail: String? = nil
+    ) {
+        let now = Date()
+        if currentStage != stage {
+            completeCurrentStage(at: now)
+            currentStage = stage
+            stageStartedAt = now
+            stageHistory.append(
+                AndroidRuntimeStageRecord(
+                    stage: stage,
+                    startedAt: now,
+                    completedAt: nil,
+                    duration: nil,
+                    error: nil
+                )
+            )
+            if stageHistory.count > 50 {
+                stageHistory.removeFirst(stageHistory.count - 50)
+            }
         }
-        if let lastFailure {
-            return lastFailure
+        appendEvent(stage: stage, event: event, detail: detail)
+        switch stage {
+        case .idle:
+            operationStatus = nil
+        case .ready:
+            operationStatus = .running
+        case .stopping:
+            operationStatus = .stopping
+        default:
+            operationStatus = .starting(
+                stage: stage,
+                progress: progress ?? stage.progress
+            )
+        }
+    }
+
+    private func completeCurrentStage(
+        at date: Date = Date(),
+        error: String? = nil
+    ) {
+        guard let index = stageHistory.indices.last,
+              stageHistory[index].completedAt == nil else { return }
+        stageHistory[index].completedAt = date
+        stageHistory[index].duration = date.timeIntervalSince(
+            stageHistory[index].startedAt
+        )
+        stageHistory[index].error = error
+    }
+
+    private func appendEvent(
+        stage: AndroidRuntimeStartupStage,
+        event: String,
+        detail: String? = nil
+    ) {
+        timeline.append(
+            AndroidRuntimeEventRecord(
+                timestamp: Date(),
+                stage: stage,
+                event: event,
+                detail: detail.map(LogRedactor.text)
+            )
+        )
+        if timeline.count > 100 {
+            timeline.removeFirst(timeline.count - 100)
+        }
+    }
+
+    private func classifiedFailure(
+        for error: Error,
+        stage: AndroidRuntimeStartupStage? = nil
+    ) -> AndroidRuntimeFailureError {
+        if let runtimeError = error as? AndroidRuntimeFailureError {
+            return runtimeError
+        }
+        let failedStage = stage ?? currentStage
+        let message = LogRedactor.text(error.localizedDescription)
+        let lowercased = message.lowercased()
+        let category: AndroidRuntimeFailureCategory
+        if lowercased.contains("所有权") || lowercased.contains("身份") {
+            category = .emulatorOwnershipMismatch
+        } else {
+            switch failedStage {
+            case .locatingSDK, .preparingAVD:
+                category = .sdkIncomplete
+            case .launchingEmulator:
+                category = lowercased.contains("超时")
+                    ? .emulatorLaunchTimedOut : .emulatorLaunchFailed
+            case .waitingForADB:
+                category = .adbUnavailable
+            case .waitingForAndroidBoot:
+                category = .androidBootTimedOut
+            case .configuringPortForward:
+                category = Self.isEmulatorPortConflict(message)
+                    ? .hostPortConflict : .portForwardFailed
+            case .checkingEmulatorNetwork:
+                category = .emulatorNetworkUnavailable
+            case .installingBridge:
+                category = lowercased.contains("缺少")
+                    ? .bridgeAPKMissing : .bridgeInstallFailed
+            case .launchingBridge:
+                category = .bridgeLaunchFailed
+            case .probingBridge:
+                category = .bridgeHealthTimedOut
+            case .idle, .ready, .stopping:
+                category = .unknown
+            }
+        }
+        return AndroidRuntimeFailureError(
+            record: AndroidRuntimeFailureRecord(
+                occurredAt: Date(),
+                stage: failedStage,
+                category: category,
+                message: message
+            )
+        )
+    }
+
+    private func preserveFailure(_ failure: AndroidRuntimeFailureError) {
+        lastFailure = failure.record
+        completeCurrentStage(error: failure.record.message)
+        appendEvent(
+            stage: failure.record.stage,
+            event: "failed",
+            detail: "\(failure.record.category.rawValue): \(failure.record.message)"
+        )
+    }
+
+    func status() async -> AndroidRuntimeStatus {
+        if let persisted = AndroidRuntimeFailureStatePolicy.status(
+            operationStatus: operationStatus,
+            lastFailure: lastFailure
+        ) {
+            return persisted
         }
 
         if fileManager.fileExists(atPath: manifestURL.path) {
@@ -1378,6 +1841,297 @@ actor AndroidDexBridgeRuntime {
         return .stopped
     }
 
+    func diagnosticSnapshot() async -> AndroidRuntimeDiagnosticSnapshot {
+        let identity = loadIdentity() ?? lastObservedIdentity
+        let toolchain = identity.flatMap {
+            resolver().toolchain(at: $0.sdkRoot)
+        } ?? resolver().resolve() ?? lastObservedToolchain
+        if let toolchain {
+            lastObservedToolchain = toolchain
+        }
+        if let identity {
+            lastObservedIdentity = identity
+        }
+
+        var adbVersion: String?
+        var emulatorVersion: String?
+        var deviceState: String?
+        var androidCPUABI: String?
+        var androidSDKLevel: String?
+        var androidRelease: String?
+        var processRunning = false
+        var forwardPresent: Bool?
+        var forwardOwned: Bool?
+
+        if let toolchain {
+            adbVersion = try? run(
+                toolchain.adb,
+                ["version"],
+                category: "diagnostic.adb.version",
+                timeout: 5
+            )
+            emulatorVersion = try? run(
+                toolchain.emulator,
+                ["-version"],
+                category: "diagnostic.emulator.version",
+                timeout: 5
+            )
+            if let devices = try? run(
+                toolchain.adb,
+                ["devices", "-l"],
+                category: "diagnostic.adb.devices",
+                timeout: 5
+            ) {
+                lastADBDevices = Self.sanitizedADBDevices(
+                    devices,
+                    ownedSerial: identity?.serial
+                )
+            }
+        }
+
+        if let identity, let toolchain {
+            processRunning = verifyProcessOwnership(
+                identity,
+                toolchain: toolchain
+            )
+            deviceState = try? run(
+                toolchain.adb,
+                ["-s", identity.serial, "get-state"],
+                category: "diagnostic.adb.get_state",
+                timeout: 5
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            if verifyOwnership(identity, toolchain: toolchain) {
+                if let boot = try? runVerifiedADB(
+                    identity,
+                    toolchain: toolchain,
+                    ["shell", "getprop", "sys.boot_completed"],
+                    category: "diagnostic.android.boot_completed",
+                    timeout: 5
+                ) {
+                    lastBootCompleted = boot.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    ) == "1"
+                }
+                androidCPUABI = try? runVerifiedADB(
+                    identity,
+                    toolchain: toolchain,
+                    ["shell", "getprop", "ro.product.cpu.abi"],
+                    category: "diagnostic.android.cpu_abi",
+                    timeout: 5
+                ).trimmingCharacters(in: .whitespacesAndNewlines)
+                androidSDKLevel = try? runVerifiedADB(
+                    identity,
+                    toolchain: toolchain,
+                    ["shell", "getprop", "ro.build.version.sdk"],
+                    category: "diagnostic.android.sdk_level",
+                    timeout: 5
+                ).trimmingCharacters(in: .whitespacesAndNewlines)
+                androidRelease = try? runVerifiedADB(
+                    identity,
+                    toolchain: toolchain,
+                    ["shell", "getprop", "ro.build.version.release"],
+                    category: "diagnostic.android.release",
+                    timeout: 5
+                ).trimmingCharacters(in: .whitespacesAndNewlines)
+                _ = observeNetwork(identity, toolchain: toolchain)
+                let installed = installedBridgeVersionCode(
+                    identity,
+                    toolchain: toolchain
+                )
+                lastBridgeVersionCode = installed
+                lastBridgePackageInstalled = installed != nil
+                if let bridgePID = try? runVerifiedADB(
+                    identity,
+                    toolchain: toolchain,
+                    ["shell", "pidof", "com.okvideomac.dexbridge"],
+                    category: "diagnostic.bridge.pidof",
+                    timeout: 5
+                ) {
+                    lastBridgeProcessRunning = !bridgePID.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    ).isEmpty
+                } else {
+                    lastBridgeProcessRunning = false
+                }
+                if let forwards = try? runVerifiedADB(
+                    identity,
+                    toolchain: toolchain,
+                    ["forward", "--list"],
+                    category: "diagnostic.adb.forwards",
+                    timeout: 5
+                ) {
+                    lastADBForwards = Self.sanitizedADBForwards(
+                        forwards,
+                        ownedSerial: identity.serial
+                    )
+                    forwardPresent = Self.portForwardExists(
+                        listing: forwards,
+                        device: identity.serial,
+                        host: BridgeServerPort.host,
+                        guest: BridgeServerPort.guest
+                    )
+                    forwardOwned = forwardPresent
+                }
+            }
+        }
+
+        let image = toolchain.flatMap {
+            resolver().installedSystemImages(in: $0).first
+        }
+        let apk = try? bridgeAPK()
+        let apkHash = apk.flatMap(Self.sha256Hex)
+        let configExists = fileManager.fileExists(
+            atPath: avdDirectory.appendingPathComponent("config.ini").path
+        )
+        let runtimeState: String
+        if let operationStatus {
+            runtimeState = String(describing: operationStatus.phase)
+        } else if ready {
+            runtimeState = "running"
+        } else if lastFailure != nil {
+            runtimeState = "failed"
+        } else if processRunning {
+            runtimeState = "starting"
+        } else {
+            runtimeState = "stopped"
+        }
+        return AndroidRuntimeDiagnosticSnapshot(
+            runtimeState: runtimeState,
+            startupStage: currentStage,
+            progress: operationStatus?.progress ?? currentStage.progress,
+            stageStartedAt: stageStartedAt,
+            lastAttemptAt: lastAttemptAt,
+            lastSuccessfulStartAt: lastSuccessfulStartAt,
+            lastFailure: lastFailure,
+            sdkDiscoverySource: toolchain.map(sdkDiscoverySource),
+            sdkRoot: toolchain.map { _ in "<sdk-root>" },
+            adbPath: toolchain.map { _ in "<sdk-root>/platform-tools/adb" },
+            adbExists: toolchain.map {
+                fileManager.fileExists(atPath: $0.adb.path)
+            } ?? false,
+            adbExecutable: toolchain.map {
+                fileManager.isExecutableFile(atPath: $0.adb.path)
+            } ?? false,
+            adbVersion: adbVersion.map(Self.firstDiagnosticLine),
+            emulatorPath: toolchain.map { _ in "<sdk-root>/emulator/emulator" },
+            emulatorExists: toolchain.map {
+                fileManager.fileExists(atPath: $0.emulator.path)
+            } ?? false,
+            emulatorExecutable: toolchain.map {
+                fileManager.isExecutableFile(atPath: $0.emulator.path)
+            } ?? false,
+            emulatorVersion: emulatorVersion.map(Self.firstDiagnosticLine),
+            avdManagerPath: toolchain?.avdManager.map { _ in
+                "<sdk-root>/cmdline-tools/<version>/bin/avdmanager"
+            },
+            expectedAVDName: Self.avdName,
+            avdExists: configExists,
+            avdPath: "<app-support>/AndroidRuntime/avd/\(Self.avdName).avd",
+            systemImage: image?.packageID,
+            systemImageABI: image?.architecture,
+            emulatorPID: identity?.pid,
+            emulatorSerial: identity?.serial,
+            emulatorProcessRunning: processRunning,
+            adbDeviceState: deviceState,
+            androidBootCompleted: lastBootCompleted,
+            bootWaitDuration: lastBootWaitDuration,
+            ipAddresses: lastIPAddressOutput,
+            ipRoutes: lastIPRouteOutput,
+            defaultRoutePresent: lastDefaultRoutePresent,
+            wifiStatus: lastWiFiStatus,
+            networkRecoveryAttempted: networkRecoveryAttempted,
+            networkRecoverySecurityException: networkRecoverySecurityException,
+            networkRecoveryDuration: networkRecoveryDuration,
+            networkRecoveryResult: networkRecoveryResult,
+            networkRecoveryCommand: lastNetworkRecoveryCommand,
+            connectivityProbeResult: connectivityProbeResult,
+            androidCPUABI: androidCPUABI,
+            androidSDKLevel: androidSDKLevel,
+            androidRelease: androidRelease,
+            adbDevices: lastADBDevices,
+            adbForwards: lastADBForwards,
+            bridgeAPKPresentOnMac: apk != nil,
+            bridgeAPKHash: apkHash,
+            bridgePackageInstalled: lastBridgePackageInstalled,
+            bridgePackageVersion: lastBridgeVersionCode,
+            bridgeProcessRunning: lastBridgeProcessRunning,
+            bridgeComponentStartResult: lastBridgeComponentStartResult,
+            hostPort: BridgeServerPort.host,
+            guestPort: BridgeServerPort.guest,
+            hostPortOccupied: lastFailure?.category == .hostPortConflict,
+            forwardPresent: forwardPresent,
+            forwardPointsToOwnedDevice: forwardOwned,
+            probeURL: "http://127.0.0.1:<bridge-port>/health",
+            probeRetryCount: probeRetryCount,
+            probeHTTPStatus: probeHTTPStatus,
+            probeErrorCategory: probeErrorCategory,
+            probeDuration: probeDuration,
+            stageHistory: stageHistory,
+            timeline: timeline,
+            recentCommands: recentCommands
+        )
+    }
+
+    private func sdkDiscoverySource(_ toolchain: AndroidToolchain) -> String {
+        let root = toolchain.sdkRoot.standardizedFileURL.path
+        if let selected = userSelectedSDKRoot,
+           URL(fileURLWithPath: selected).standardizedFileURL.path == root {
+            return "user-selected"
+        }
+        if baseEnvironment["ANDROID_HOME"].map({
+            URL(fileURLWithPath: $0).standardizedFileURL.path == root
+        }) == true {
+            return "ANDROID_HOME"
+        }
+        if root.hasPrefix(applicationSupportDirectory.standardizedFileURL.path) {
+            return "app-managed"
+        }
+        if root.hasPrefix(homeDirectory.standardizedFileURL.path) {
+            return "default-home"
+        }
+        return "PATH-or-external"
+    }
+
+    static func sanitizedADBDevices(
+        _ output: String,
+        ownedSerial: String?
+    ) -> [String] {
+        output.split(whereSeparator: \.isNewline).compactMap { rawLine in
+            let fields = rawLine.split(whereSeparator: \.isWhitespace)
+            guard fields.count >= 2,
+                  fields[0] != "List" else { return nil }
+            let serial = String(fields[0])
+            let state = String(fields[1])
+            return serial == ownedSerial
+                ? "\(serial) state=\(state) owned=true"
+                : "<unrelated-device> state=\(state) owned=false"
+        }
+    }
+
+    static func sanitizedADBForwards(
+        _ output: String,
+        ownedSerial: String
+    ) -> [String] {
+        output.split(whereSeparator: \.isNewline).compactMap { rawLine in
+            let line = String(rawLine).trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            guard line.hasPrefix("\(ownedSerial) ") else { return nil }
+            return line
+        }
+    }
+
+    private static func sha256Hex(_ url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private static func firstDiagnosticLine(_ output: String) -> String {
+        output.split(whereSeparator: \.isNewline).first.map(String.init)
+            ?? output
+    }
+
     func setUserSelectedSDKRoot(_ url: URL) {
         let normalized = url.standardizedFileURL.resolvingSymlinksInPath().path
         defaults.set(
@@ -1388,7 +2142,6 @@ actor AndroidDexBridgeRuntime {
         ready = false
         acceptsNewerBridge = false
         lastNetworkCheck = nil
-        lastFailure = nil
     }
 
     func start() async throws {
@@ -1396,6 +2149,11 @@ actor AndroidDexBridgeRuntime {
     }
 
     func repair() async throws {
+        let retryKnownFailedNetworkCommand = AndroidRuntimeRecoveryPolicy
+            .shouldRetryKnownFailedNetworkCommand(
+                lastFailureStage: lastFailure?.stage,
+                networkRecoveryResult: networkRecoveryResult
+            )
         ready = false
         acceptsNewerBridge = false
         lastNetworkCheck = nil
@@ -1403,12 +2161,14 @@ actor AndroidDexBridgeRuntime {
         activeTask?.cancel()
         _ = try? await activeTask?.value
         readinessTask = nil
-        lastFailure = nil
-        try await prepareRuntime(forceInstall: true)
+        try await prepareRuntime(
+            forceInstall: true,
+            retryKnownFailedNetworkCommand: retryKnownFailedNetworkCommand
+        )
     }
 
     func stop() async {
-        operationStatus = .stopping
+        transition(to: .stopping, event: "stop_requested")
         let task = readinessTask
         task?.cancel()
         readinessTask = nil
@@ -1416,10 +2176,14 @@ actor AndroidDexBridgeRuntime {
         ready = false
         acceptsNewerBridge = false
         lastNetworkCheck = nil
-        defer { operationStatus = nil }
+        defer {
+            completeCurrentStage()
+            currentStage = .idle
+            stageStartedAt = nil
+            operationStatus = nil
+        }
 
         guard let identity = loadIdentity() else {
-            lastFailure = nil
             return
         }
         guard let toolchain = resolver().toolchain(at: identity.sdkRoot),
@@ -1428,13 +2192,16 @@ actor AndroidDexBridgeRuntime {
                !deviceIsReachable(
                     identity,
                     toolchain: resolver().toolchain(at: identity.sdkRoot)
-               ) {
+                ) {
                 clearRuntimeRecord()
-                lastFailure = nil
             } else {
-                lastFailure = .failed(
-                    "无法安全确认 Android 实例所有权，已拒绝停止任何 Emulator"
+                let failure = classifiedFailure(
+                    for: AppError.spider(
+                        "无法安全确认 Android 实例所有权，已拒绝停止任何 Emulator"
+                    ),
+                    stage: .stopping
                 )
+                preserveFailure(failure)
             }
             return
         }
@@ -1449,7 +2216,6 @@ actor AndroidDexBridgeRuntime {
                 if processExecutablePath(pid: identity.pid) == nil,
                    !deviceIsReachable(identity, toolchain: toolchain) {
                     clearRuntimeRecord()
-                    lastFailure = nil
                     return
                 }
                 try? await Task.sleep(nanoseconds: 250_000_000)
@@ -1461,16 +2227,20 @@ actor AndroidDexBridgeRuntime {
                 if processExecutablePath(pid: identity.pid) == nil,
                    !deviceIsReachable(identity, toolchain: toolchain) {
                     clearRuntimeRecord()
-                    lastFailure = nil
                     return
                 }
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
-            lastFailure = .failed(
-                "专用 Android Emulator 未确认停止；已保留运行记录以防误操作"
+            preserveFailure(
+                classifiedFailure(
+                    for: AppError.spider(
+                        "专用 Android Emulator 未确认停止；已保留运行记录以防误操作"
+                    ),
+                    stage: .stopping
+                )
             )
         } catch {
-            lastFailure = .failed(LogRedactor.text(error.localizedDescription))
+            preserveFailure(classifiedFailure(for: error, stage: .stopping))
         }
     }
 
@@ -1502,7 +2272,6 @@ actor AndroidDexBridgeRuntime {
         if let readinessTask {
             return try await readinessTask.value
         }
-        lastFailure = nil
         let task = Task {
             try await prepareRuntime()
         }
@@ -1552,9 +2321,34 @@ actor AndroidDexBridgeRuntime {
         try await prepareRuntime()
     }
 
-    private func prepareRuntime(forceInstall: Bool = false) async throws {
-        operationStatus = .starting(progress: 0.03)
-        defer { operationStatus = nil }
+    private func prepareRuntime(
+        forceInstall: Bool = false,
+        retryKnownFailedNetworkCommand: Bool = true
+    ) async throws {
+        lastAttemptAt = Date()
+        lastBootCompleted = nil
+        lastBootWaitDuration = nil
+        lastIPAddressOutput = nil
+        lastIPRouteOutput = nil
+        lastDefaultRoutePresent = nil
+        lastWiFiStatus = nil
+        networkRecoveryAttempted = false
+        networkRecoverySecurityException = false
+        networkRecoveryDuration = nil
+        networkRecoveryResult = nil
+        lastNetworkRecoveryCommand = nil
+        connectivityProbeResult = nil
+        probeStartedAt = nil
+        probeRetryCount = 0
+        probeHTTPStatus = nil
+        probeErrorCategory = nil
+        probeDuration = nil
+        transition(to: .locatingSDK, event: "startup_requested")
+        defer {
+            if currentStage != .ready {
+                operationStatus = nil
+            }
+        }
         var activeIdentity: AndroidRuntimeIdentity?
         var activeToolchain: AndroidToolchain?
         do {
@@ -1602,15 +2396,20 @@ actor AndroidDexBridgeRuntime {
                     )
                 }
                 toolchain = resolved
+                lastObservedToolchain = toolchain
+                transition(to: .preparingAVD)
                 try ensureManagedAVD(toolchain)
-                operationStatus = .starting(progress: 0.10)
+                transition(to: .launchingEmulator)
                 identity = try await launchManagedEmulator(toolchain)
                 activeIdentity = identity
                 activeToolchain = toolchain
             }
+            lastObservedIdentity = identity
+            lastObservedToolchain = toolchain
 
-            operationStatus = .starting(progress: 0.18)
+            transition(to: .waitingForADB)
             try await waitForOwnership(identity, toolchain: toolchain)
+            transition(to: .waitingForAndroidBoot)
             try await waitForBoot(identity, toolchain: toolchain)
             try Task.checkCancellation()
 
@@ -1620,7 +2419,7 @@ actor AndroidDexBridgeRuntime {
                 activeIdentity = identity
             }
 
-            operationStatus = .starting(progress: 0.55)
+            transition(to: .configuringPortForward)
             let installedVersionCode = installedBridgeVersionCode(
                 identity,
                 toolchain: toolchain
@@ -1630,7 +2429,7 @@ actor AndroidDexBridgeRuntime {
             } ?? false
             try configurePortForwards(identity, toolchain: toolchain)
 
-            operationStatus = .starting(progress: 0.68)
+            transition(to: .checkingEmulatorNetwork)
             let networkWasRepaired: Bool
             if let lastNetworkCheck,
                Date().timeIntervalSince(lastNetworkCheck)
@@ -1639,7 +2438,8 @@ actor AndroidDexBridgeRuntime {
             } else {
                 networkWasRepaired = try await ensureEmulatorNetwork(
                     identity,
-                    toolchain: toolchain
+                    toolchain: toolchain,
+                    allowRecoveryCommand: retryKnownFailedNetworkCommand
                 )
             }
             if !forceInstall, !networkWasRepaired,
@@ -1652,34 +2452,73 @@ actor AndroidDexBridgeRuntime {
                 acceptsNewerBridge = hasNewerBridge
                 lastNetworkCheck = Date()
                 lastFailure = nil
+                lastSuccessfulStartAt = Date()
+                transition(to: .ready, event: "existing_bridge_ready")
                 return
             }
 
-            operationStatus = .starting(progress: 0.84)
+            transition(to: .installingBridge)
             let apk = try bridgeAPK()
             _ = try runVerifiedADB(
                 identity,
                 toolchain: toolchain,
-                ["install", "-r", apk.path]
+                ["install", "-r", apk.path],
+                category: "adb.bridge.install",
+                timeout: 120
             )
+            transition(to: .launchingBridge)
             try startBridge(identity, toolchain: toolchain)
-            for attempt in 0..<30 {
+            transition(to: .probingBridge)
+            for attempt in 0..<AndroidRuntimeRecoveryPolicy
+                .initialBridgeProbeAttempts {
                 try Task.checkCancellation()
-                operationStatus = .starting(
-                    progress: 0.92 + (Double(attempt) / 30 * 0.07)
-                )
+                probeRetryCount = attempt + 1
                 if await isHealthy(identity, toolchain: toolchain) {
                     ready = true
                     acceptsNewerBridge = false
                     lastNetworkCheck = Date()
                     lastFailure = nil
+                    lastSuccessfulStartAt = Date()
+                    transition(to: .ready, event: "bridge_ready")
                     return
                 }
-                try await Task.sleep(nanoseconds: 500_000_000)
+                try await Task.sleep(
+                    nanoseconds: AndroidRuntimeRecoveryPolicy
+                        .bridgeProbePollNanoseconds
+                )
             }
-            throw AppError.spider("Java/Dex Android 桥启动超时")
+
+            appendEvent(
+                stage: .probingBridge,
+                event: "bounded_bridge_recovery_started",
+                detail: "reconfigure forwards and restart the owned Bridge once"
+            )
+            try configurePortForwards(identity, toolchain: toolchain)
+            try startBridge(identity, toolchain: toolchain)
+            for attempt in 0..<AndroidRuntimeRecoveryPolicy
+                .recoveredBridgeProbeAttempts {
+                try Task.checkCancellation()
+                probeRetryCount = AndroidRuntimeRecoveryPolicy
+                    .initialBridgeProbeAttempts + attempt + 1
+                if await isHealthy(identity, toolchain: toolchain) {
+                    ready = true
+                    acceptsNewerBridge = false
+                    lastNetworkCheck = Date()
+                    lastFailure = nil
+                    lastSuccessfulStartAt = Date()
+                    transition(to: .ready, event: "bridge_recovered")
+                    return
+                }
+                try await Task.sleep(
+                    nanoseconds: AndroidRuntimeRecoveryPolicy
+                        .bridgeProbePollNanoseconds
+                )
+            }
+            throw AppError.spider("Java/Dex Android 桥启动超时（已执行一次有界恢复）")
         } catch {
             ready = false
+            let failure = classifiedFailure(for: error)
+            preserveFailure(failure)
             if let identity = activeIdentity,
                let toolchain = activeToolchain {
                 let cleaned = await cleanupFailedRuntime(
@@ -1687,15 +2526,14 @@ actor AndroidDexBridgeRuntime {
                     toolchain: toolchain
                 )
                 if !cleaned {
-                    lastFailure = .failed(
-                        "运行失败且无法安全确认实例所有权；需要重新初始化"
+                    appendEvent(
+                        stage: failure.record.stage,
+                        event: "cleanup_skipped_or_unconfirmed",
+                        detail: "无法安全确认实例所有权；保留原始失败分类"
                     )
                 }
             }
-            if lastFailure == nil {
-                lastFailure = .failed(LogRedactor.text(error.localizedDescription))
-            }
-            throw error
+            throw failure
         }
     }
 
@@ -1706,7 +2544,8 @@ actor AndroidDexBridgeRuntime {
         var listing = try runVerifiedADB(
             identity,
             toolchain: toolchain,
-            ["forward", "--list"]
+            ["forward", "--list"],
+            category: "adb.forward.list"
         )
         for forward in identity.forwards {
             if Self.portForwardExists(
@@ -1725,7 +2564,8 @@ actor AndroidDexBridgeRuntime {
                 _ = try runVerifiedADB(
                     identity,
                     toolchain: toolchain,
-                    ["forward", "--remove", "tcp:\(forward.hostPort)"]
+                    ["forward", "--remove", "tcp:\(forward.hostPort)"],
+                    category: "adb.forward.remove"
                 )
             }
             _ = try runVerifiedADB(
@@ -1734,12 +2574,14 @@ actor AndroidDexBridgeRuntime {
                 [
                     "forward", "tcp:\(forward.hostPort)",
                     "tcp:\(forward.devicePort)"
-                ]
+                ],
+                category: "adb.forward.create"
             )
             listing = try runVerifiedADB(
                 identity,
                 toolchain: toolchain,
-                ["forward", "--list"]
+                ["forward", "--list"],
+                category: "adb.forward.list"
             )
             guard Self.portForwardExists(
                 listing: listing,
@@ -1779,78 +2621,207 @@ actor AndroidDexBridgeRuntime {
 
     private func ensureEmulatorNetwork(
         _ identity: AndroidRuntimeIdentity,
-        toolchain: AndroidToolchain
+        toolchain: AndroidToolchain,
+        allowRecoveryCommand: Bool
     ) async throws -> Bool {
-        if networkLooksReady(identity, toolchain: toolchain) {
+        let unavailableSince = Date()
+        if observeNetwork(identity, toolchain: toolchain) {
             lastNetworkCheck = Date()
+            connectivityProbeResult = probeEmulatorGateway(
+                identity,
+                toolchain: toolchain
+            )
             return false
         }
 
-        _ = try? runVerifiedADB(
-            identity,
-            toolchain: toolchain,
-            [
-                "shell", "cmd", "wifi",
-                "clear-user-disabled-networks"
-            ]
+        networkRecoveryAttempted = true
+        appendEvent(
+            stage: .checkingEmulatorNetwork,
+            event: "network_unavailable",
+            detail: "bounded non-privileged recovery started"
         )
-        _ = try? runVerifiedADB(
-            identity,
-            toolchain: toolchain,
-            [
-                "shell", "cmd", "wifi",
-                "connect-network", "AndroidWifi", "open"
-            ]
-        )
+        if allowRecoveryCommand {
+            do {
+                _ = try runVerifiedADB(
+                    identity,
+                    toolchain: toolchain,
+                    [
+                        "shell", "cmd", "wifi",
+                        "connect-network", "AndroidWifi", "open"
+                    ],
+                    category: "adb.network.wifi.connect",
+                    timeout: 10
+                )
+                lastNetworkRecoveryCommand = recentCommands.last {
+                    $0.category == "adb.network.wifi.connect"
+                }
+            } catch {
+                lastNetworkRecoveryCommand = recentCommands.last {
+                    $0.category == "adb.network.wifi.connect"
+                }
+                let text = error.localizedDescription
+                networkRecoverySecurityException = Self.containsSecurityException(
+                    text
+                )
+                networkRecoveryDuration = Date().timeIntervalSince(
+                    unavailableSince
+                )
+                networkRecoveryResult = "command_failed"
+                appendEvent(
+                    stage: .checkingEmulatorNetwork,
+                    event: "network_recovery_command_failed",
+                    detail: text
+                )
+                throw error
+            }
+        } else {
+            appendEvent(
+                stage: .checkingEmulatorNetwork,
+                event: "known_failed_recovery_command_skipped",
+                detail: "Repair performs bounded observation without repeating the failed command"
+            )
+        }
 
-        for _ in 0..<60 {
+        let deadline = Date().addingTimeInterval(
+            AndroidRuntimeRecoveryPolicy.networkObservationTimeout
+        )
+        while Date() < deadline {
             try Task.checkCancellation()
-            if networkLooksReady(identity, toolchain: toolchain) {
+            if observeNetwork(identity, toolchain: toolchain) {
                 lastNetworkCheck = Date()
+                networkRecoveryDuration = Date().timeIntervalSince(
+                    unavailableSince
+                )
+                networkRecoveryResult = "available"
+                connectivityProbeResult = probeEmulatorGateway(
+                    identity,
+                    toolchain: toolchain
+                )
+                appendEvent(
+                    stage: .checkingEmulatorNetwork,
+                    event: "network_available_after_recovery",
+                    detail: connectivityProbeResult
+                )
                 return true
             }
-            try await Task.sleep(nanoseconds: 500_000_000)
+            try await Task.sleep(
+                nanoseconds: AndroidRuntimeRecoveryPolicy.networkPollNanoseconds
+            )
         }
+        networkRecoveryDuration = Date().timeIntervalSince(unavailableSince)
+        networkRecoveryResult = "timed_out"
+        connectivityProbeResult = "default_route_unavailable"
         throw AppError.spider("Java/Dex Android 运行时网络连接失败，请稍后重试")
     }
 
-    private func networkLooksReady(
+    private func observeNetwork(
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain
     ) -> Bool {
-        guard let status = try? runVerifiedADB(
+        let addresses = try? runVerifiedADB(
             identity,
             toolchain: toolchain,
-            ["shell", "cmd", "wifi", "status"]
-        ), let routes = try? runVerifiedADB(
+            ["shell", "ip", "addr"],
+            category: "adb.network.ip_addr",
+            timeout: 3
+        )
+        let routes = try? runVerifiedADB(
             identity,
             toolchain: toolchain,
-            ["shell", "ip", "route", "show", "table", "all"]
-        ) else {
-            return false
-        }
+            ["shell", "ip", "route", "show", "table", "all"],
+            category: "adb.network.ip_route",
+            timeout: 3
+        )
+        let status = (try? runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            ["shell", "cmd", "wifi", "status"],
+            category: "adb.network.wifi.status",
+            timeout: 3
+        )) ?? "<wifi-status-unavailable>"
+        lastIPAddressOutput = addresses.map(LogRedactor.text)
+        lastIPRouteOutput = routes.map(LogRedactor.text)
+        lastWiFiStatus = LogRedactor.text(status)
+        lastDefaultRoutePresent = routes.map(Self.hasUsableDefaultRoute)
+        guard let routes else { return false }
         return Self.networkLooksReady(status: status, routes: routes)
     }
 
     static func networkLooksReady(status: String, routes: String) -> Bool {
-        status.contains("Wifi is connected") && routes.contains("default via")
+        // Wi-Fi status is retained for diagnostics, but Ethernet/VPN-capable
+        // system images are ready when they have a real gateway route.
+        hasUsableDefaultRoute(routes)
+    }
+
+    static func hasUsableDefaultRoute(_ routes: String) -> Bool {
+        routes.split(whereSeparator: \.isNewline).contains { line in
+            let value = String(line)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            return value.hasPrefix("default ")
+                && value.contains(" via ")
+                && !value.contains(" dev dummy")
+        }
+    }
+
+    static func containsSecurityException(_ output: String) -> Bool {
+        output.range(of: "SecurityException", options: .caseInsensitive) != nil
+    }
+
+    private func probeEmulatorGateway(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) -> String {
+        guard let routes = lastIPRouteOutput,
+              let gateway = Self.defaultGateway(from: routes) else {
+            return "default_route_missing"
+        }
+        do {
+            _ = try runVerifiedADB(
+                identity,
+                toolchain: toolchain,
+                ["shell", "ping", "-c", "1", "-W", "2", gateway],
+                category: "adb.network.gateway_probe",
+                timeout: 5
+            )
+            return "gateway_reachable"
+        } catch {
+            return "default_route_available_gateway_probe_failed"
+        }
+    }
+
+    static func defaultGateway(from routes: String) -> String? {
+        for line in routes.split(whereSeparator: \.isNewline) {
+            let parts = line.split(whereSeparator: \.isWhitespace).map(String.init)
+            guard parts.first == "default",
+                  let via = parts.firstIndex(of: "via"),
+                  parts.indices.contains(via + 1) else { continue }
+            return parts[via + 1]
+        }
+        return nil
     }
 
     private func waitForBoot(
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain
     ) async throws {
+        let startedAt = Date()
         for _ in 0..<240 {
             try Task.checkCancellation()
             if let value = try? runVerifiedADB(
                 identity,
                 toolchain: toolchain,
-                ["shell", "getprop", "sys.boot_completed"]
+                ["shell", "getprop", "sys.boot_completed"],
+                category: "adb.boot.sys_boot_completed"
             ), value.trimmingCharacters(in: .whitespacesAndNewlines) == "1" {
+                lastBootCompleted = true
+                lastBootWaitDuration = Date().timeIntervalSince(startedAt)
                 return
             }
             try await Task.sleep(nanoseconds: 1_000_000_000)
         }
+        lastBootCompleted = false
+        lastBootWaitDuration = Date().timeIntervalSince(startedAt)
         throw AppError.spider("Java/Dex Android 运行时启动超过 240 秒")
     }
 
@@ -1894,7 +2865,11 @@ actor AndroidDexBridgeRuntime {
         toolchain: AndroidToolchain,
         acceptVersionMismatch: Bool = false
     ) async -> Bool {
+        if probeStartedAt == nil {
+            probeStartedAt = Date()
+        }
         guard verifyOwnership(identity, toolchain: toolchain) else {
+            probeErrorCategory = "ownership_mismatch"
             return false
         }
         guard let url = URL(
@@ -1908,17 +2883,33 @@ actor AndroidDexBridgeRuntime {
             let (data, response) = try await URLSession(
                 configuration: configuration
             ).data(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200,
+            let statusCode = (response as? HTTPURLResponse)?.statusCode
+            probeHTTPStatus = statusCode
+            probeDuration = probeStartedAt.map {
+                Date().timeIntervalSince($0)
+            }
+            guard statusCode == 200,
                   let object = try JSONSerialization.jsonObject(with: data)
                     as? [String: Any] else {
+                probeErrorCategory = "invalid_http_response"
                 return false
             }
-            return Self.healthMatches(
+            let matches = Self.healthMatches(
                 object,
                 generation: identity.generation,
                 acceptVersionMismatch: acceptVersionMismatch
             )
+            probeErrorCategory = matches ? nil : "identity_or_version_mismatch"
+            return matches
         } catch {
+            probeDuration = probeStartedAt.map {
+                Date().timeIntervalSince($0)
+            }
+            if let urlError = error as? URLError {
+                probeErrorCategory = "url_error_\(urlError.code.rawValue)"
+            } else {
+                probeErrorCategory = "transport_error"
+            }
             return false
         }
     }
@@ -2235,7 +3226,9 @@ actor AndroidDexBridgeRuntime {
     private func runVerifiedADB(
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain,
-        _ arguments: [String]
+        _ arguments: [String],
+        category: String = "adb.command",
+        timeout: TimeInterval = 30
     ) throws -> String {
         guard verifyOwnership(identity, toolchain: toolchain) else {
             throw AppError.spider(
@@ -2244,7 +3237,9 @@ actor AndroidDexBridgeRuntime {
         }
         return try run(
             toolchain.adb,
-            ["-s", identity.serial] + arguments
+            ["-s", identity.serial] + arguments,
+            category: category,
+            timeout: timeout
         )
     }
 
@@ -2272,14 +3267,15 @@ actor AndroidDexBridgeRuntime {
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain
     ) throws {
-        _ = try runVerifiedADB(
+        lastBridgeComponentStartResult = try runVerifiedADB(
             identity,
             toolchain: toolchain,
             [
                 "shell", "am", "start",
                 "-n", "com.okvideomac.dexbridge/.BridgeActivity",
                 "--es", "okvideomac_runtime_generation", identity.generation
-            ]
+            ],
+            category: "adb.bridge.start"
         )
     }
 
@@ -2399,31 +3395,177 @@ actor AndroidDexBridgeRuntime {
         _ executable: URL,
         _ arguments: [String],
         environment: [String: String]? = nil,
-        input: Data? = nil
+        input: Data? = nil,
+        category: String = "android.tool",
+        timeout: TimeInterval = 30
     ) throws -> String {
         let process = Process()
-        let output = Pipe()
+        let standardOutput = Pipe()
+        let standardError = Pipe()
         process.executableURL = executable
         process.arguments = arguments
         process.environment = environment
-        process.standardOutput = output
-        process.standardError = output
+        process.standardOutput = standardOutput
+        process.standardError = standardError
         let inputPipe = input.map { _ in Pipe() }
         process.standardInput = inputPipe
-        try process.run()
+        let completed = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in completed.signal() }
+        let startedAt = Date()
+        do {
+            try process.run()
+        } catch {
+            let duration = Date().timeIntervalSince(startedAt)
+            recordCommand(
+                timestamp: startedAt,
+                category: category,
+                exitCode: -1,
+                stdout: "",
+                stderr: error.localizedDescription,
+                duration: duration,
+                timedOut: false
+            )
+            throw error
+        }
         if let input, let inputPipe {
             inputPipe.fileHandleForWriting.write(input)
             try? inputPipe.fileHandleForWriting.close()
         }
-        process.waitUntilExit()
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        let text = String(data: data, encoding: .utf8) ?? ""
-        guard process.terminationStatus == 0 else {
-            throw AppError.spider(
-                "Android 工具失败：\(String(text.prefix(1_000)))"
+        let waitResult = completed.wait(timeout: .now() + timeout)
+        let timedOut = waitResult == .timedOut
+        if timedOut, process.isRunning {
+            process.terminate()
+            if completed.wait(timeout: .now() + 1) == .timedOut,
+               process.isRunning {
+                Darwin.kill(process.processIdentifier, SIGKILL)
+                _ = completed.wait(timeout: .now() + 1)
+            }
+        }
+        let stdoutData = standardOutput.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = standardError.fileHandleForReading.readDataToEndOfFile()
+        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+        let duration = Date().timeIntervalSince(startedAt)
+        let exitCode: Int32 = timedOut ? -1 : process.terminationStatus
+        recordCommand(
+            timestamp: startedAt,
+            category: category,
+            exitCode: exitCode,
+            stdout: stdout,
+            stderr: stderr,
+            duration: duration,
+            timedOut: timedOut
+        )
+        if Self.containsSecurityException(stdout + "\n" + stderr) {
+            networkRecoverySecurityException = true
+        }
+        guard !timedOut, exitCode == 0 else {
+            let safeStdout = sanitizedCommandOutput(
+                stdout,
+                category: category
+            )
+            let safeStderr = sanitizedCommandOutput(
+                stderr,
+                category: category
+            )
+            throw AndroidToolCommandError(
+                category: category,
+                exitCode: exitCode,
+                stdout: safeStdout,
+                stderr: safeStderr,
+                duration: duration,
+                timedOut: timedOut
             )
         }
-        return text
+        return stdout
+    }
+
+    private func recordCommand(
+        timestamp: Date,
+        category: String,
+        exitCode: Int32,
+        stdout: String,
+        stderr: String,
+        duration: TimeInterval,
+        timedOut: Bool
+    ) {
+        let isDiagnosticEvidence = category.hasPrefix("diagnostic.")
+            || category.hasPrefix("adb.network.")
+            || category.hasPrefix("adb.boot.")
+            || category.hasPrefix("adb.bridge.")
+            || category.hasPrefix("adb.forward.")
+        guard isDiagnosticEvidence else { return }
+        let safeStdout = sanitizedCommandOutput(stdout, category: category)
+        let safeStderr = sanitizedCommandOutput(stderr, category: category)
+        recentCommands.append(
+            AndroidRuntimeCommandRecord(
+                timestamp: timestamp,
+                category: category,
+                command: Self.safeCommandDescription(for: category),
+                exitCode: exitCode,
+                stdout: String(safeStdout.prefix(4_000)),
+                stderr: String(safeStderr.prefix(4_000)),
+                duration: duration,
+                timedOut: timedOut
+            )
+        )
+        if recentCommands.count > 40 {
+            recentCommands.removeFirst(recentCommands.count - 40)
+        }
+    }
+
+    private static func safeCommandDescription(for category: String) -> String {
+        switch category {
+        case "adb.network.wifi.connect":
+            return "adb -s <owned-serial> shell cmd wifi connect-network AndroidWifi open"
+        case "adb.network.wifi.status":
+            return "adb -s <owned-serial> shell cmd wifi status"
+        case "adb.network.ip_addr":
+            return "adb -s <owned-serial> shell ip addr"
+        case "adb.network.ip_route":
+            return "adb -s <owned-serial> shell ip route show table all"
+        case "adb.network.gateway_probe":
+            return "adb -s <owned-serial> shell ping <default-gateway>"
+        case "adb.boot.sys_boot_completed",
+             "diagnostic.android.boot_completed":
+            return "adb -s <owned-serial> shell getprop sys.boot_completed"
+        case "diagnostic.adb.get_state":
+            return "adb -s <owned-serial> get-state"
+        default:
+            return category
+        }
+    }
+
+    private func sanitizedCommandOutput(
+        _ output: String,
+        category: String
+    ) -> String {
+        if category == "diagnostic.adb.devices" {
+            return Self.sanitizedADBDevices(
+                output,
+                ownedSerial: lastObservedIdentity?.serial
+            ).joined(separator: "\n")
+        }
+        if category == "diagnostic.adb.forwards"
+            || category.hasPrefix("adb.forward.") {
+            guard let serial = lastObservedIdentity?.serial else { return "" }
+            return Self.sanitizedADBForwards(
+                output,
+                ownedSerial: serial
+            ).joined(separator: "\n")
+        }
+        var safe = LogRedactor.text(output)
+        if let sdkRoot = lastObservedToolchain?.sdkRoot.path {
+            safe = safe.replacingOccurrences(
+                of: sdkRoot,
+                with: "<sdk-root>"
+            )
+        }
+        safe = safe.replacingOccurrences(
+            of: applicationSupportDirectory.path,
+            with: "<app-support>"
+        )
+        return safe
     }
 }
 

@@ -49,6 +49,7 @@ enum NodeDiagnosticCode: String, Codable, Equatable, Sendable {
     case runtimeRestartScheduled = "NODE_RUNTIME_RESTART_SCHEDULED"
     case runtimeRestartExhausted = "NODE_RUNTIME_RESTART_EXHAUSTED"
     case runtimeEndpointInvalidated = "NODE_RUNTIME_ENDPOINT_INVALIDATED"
+    case runtimeHomepageReloadRequested = "NODE_RUNTIME_HOMEPAGE_RELOAD_REQUESTED"
     case runtimeUnavailable = "NODE_RUNTIME_UNAVAILABLE"
     case spiderRequestFailed = "NODE_SPIDER_REQUEST_FAILED"
     case spiderOutput = "NODE_SPIDER_OUTPUT"

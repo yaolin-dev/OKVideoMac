@@ -203,7 +203,7 @@ private struct LoadedImageData: Sendable {
 actor ImageDataRepository {
     private let cacheDirectory: URL
     private let httpClient: HTTPClient
-    private var inFlight: [ImageCacheIdentity: Task<Data, Error>] = [:]
+    private var inFlight: [URL: Task<Data, Error>] = [:]
 
     init(cacheDirectory: URL, httpClient: HTTPClient) throws {
         self.cacheDirectory = cacheDirectory
@@ -241,8 +241,7 @@ actor ImageDataRepository {
     }
 
     func downloadedData(for url: URL) async throws -> Data {
-        let identity = ImageCacheIdentity(url: url)
-        if let task = inFlight[identity] {
+        if let task = inFlight[url] {
             return try await task.value
         }
 
@@ -259,8 +258,8 @@ actor ImageDataRepository {
             )
             return response.body
         }
-        inFlight[identity] = task
-        defer { inFlight[identity] = nil }
+        inFlight[url] = task
+        defer { inFlight[url] = nil }
         return try await task.value
     }
 
@@ -306,7 +305,7 @@ actor ImageDataRepository {
 final class ImageRepository: Sendable {
     private let dataRepository: ImageDataRepository
     @MainActor private let memoryCache = ImageMemoryCache()
-    @MainActor private var inFlightImages: [ImageCacheIdentity: Task<Void, Error>] = [:]
+    @MainActor private var inFlightImages: [URL: Task<Void, Error>] = [:]
 
     init(dataRepository: ImageDataRepository) {
         self.dataRepository = dataRepository
@@ -319,11 +318,10 @@ final class ImageRepository: Sendable {
 
     @MainActor
     func image(for url: URL) async throws -> NSImage {
-        let identity = ImageCacheIdentity(url: url)
         if let cached = cachedImage(for: url) {
             return cached
         }
-        if let task = inFlightImages[identity] {
+        if let task = inFlightImages[url] {
             try await task.value
             return try cachedImageAfterLoad(for: url)
         }
@@ -331,8 +329,8 @@ final class ImageRepository: Sendable {
         let task = Task { @MainActor in
             try await loadAndCacheImage(for: url)
         }
-        inFlightImages[identity] = task
-        defer { inFlightImages[identity] = nil }
+        inFlightImages[url] = task
+        defer { inFlightImages[url] = nil }
         try await task.value
         return try cachedImageAfterLoad(for: url)
     }
