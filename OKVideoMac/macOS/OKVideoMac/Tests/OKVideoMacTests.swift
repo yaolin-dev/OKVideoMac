@@ -1359,6 +1359,50 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     @MainActor
+    func testImageRepositoryExplicitCancellationAllowsFreshReload() async throws {
+        let cacheDirectory = temporaryImageCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let url = try XCTUnwrap(URL(string: "https://images.example.invalid/quiesce"))
+        let client = ImageRepositoryHTTPClientProbe(
+            body: try makeTestImageData(),
+            delayNanoseconds: 150_000_000
+        )
+        let repository = try makeImageRepository(
+            cacheDirectory: cacheDirectory,
+            httpClient: client
+        )
+        let cancelledLoad = Task<Void, Error> { @MainActor in
+            _ = try await repository.image(for: url)
+        }
+
+        var requestStarted = false
+        for _ in 0..<10_000 {
+            if await client.requestCount() == 1 {
+                requestStarted = true
+                break
+            }
+            await Task.yield()
+        }
+        XCTAssertTrue(requestStarted)
+
+        await repository.cancelInFlightLoads()
+        do {
+            try await cancelledLoad.value
+            XCTFail("显式静默图片工作后，旧任务不应完成")
+        } catch is CancellationError {
+            // Expected: playback startup explicitly quiesced the old load.
+        } catch let error as HTTPClientError {
+            XCTAssertEqual(error, .cancelled)
+        }
+
+        _ = try await repository.image(for: url)
+
+        XCTAssertNotNil(repository.cachedImage(for: url))
+        let requestCount = await client.requestCount()
+        XCTAssertEqual(requestCount, 2)
+    }
+
+    @MainActor
     private func temporaryImageCacheDirectory() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -4173,6 +4217,116 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertNil(environment["SSH_AUTH_SOCK"])
     }
 
+    func testContractDetectorKeepsContractAAndFindsHostIntegratedContractB() throws {
+        let contractA = Data(
+            "module.exports={start(){},stop(){}};".utf8
+        )
+        let contractB = Data(
+            "catServerFactory;catDartServerPort();process.env.DEV_HTTP_PORT;".utf8
+        )
+
+        XCTAssertEqual(
+            try NodeRuntimeContractDetector.detect(validatedBundleData: contractA),
+            .service
+        )
+        XCTAssertEqual(
+            try NodeRuntimeContractDetector.detect(validatedBundleData: contractB),
+            .hostIntegrated
+        )
+    }
+
+    func testPartialContractBMarkersFailClosedWithoutExecutingBundle() {
+        let ambiguous = Data("void catServerFactory;".utf8)
+
+        XCTAssertThrowsError(
+            try NodeRuntimeContractDetector.detect(validatedBundleData: ambiguous)
+        ) { error in
+            XCTAssertEqual(error as? NodeBundleRuntimeError, .unsupportedHostContract)
+        }
+    }
+
+    func testContractBMinimumConfigurationIsDataOnlyAndSchemaValidated() throws {
+        let data = try ContractBConfigBuilder.buildMinimumConfiguration()
+        try ContractBConfigBuilder.validate(data)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        XCTAssertEqual(
+            ((object["sites"] as? [String: Any])?["list"] as? [Any])?.count,
+            0
+        )
+        XCTAssertEqual(
+            ((object["pans"] as? [String: Any])?["list"] as? [Any])?.count,
+            0
+        )
+    }
+
+    func testContractBConfigurationRejectsMissingRequiredCommonShape() {
+        XCTAssertThrowsError(
+            try ContractBConfigBuilder.validate(Data(#"{"sites":{"list":[]}}"#.utf8))
+        ) { error in
+            XCTAssertEqual(
+                error as? NodeBundleRuntimeError,
+                .configurationContractInvalid
+            )
+        }
+    }
+
+    func testContractBEnvironmentIsBoundedAndDoesNotPolluteContractA() throws {
+        let runtime = FileManager.default.temporaryDirectory
+            .appendingPathComponent("okvideo-contract-env")
+        let contractA = try NodeBundleRuntimeService.sanitizedNodeEnvironment(
+            bundlePath: runtime.appendingPathComponent("index.js"),
+            runtimeDirectory: runtime,
+            temporaryDirectory: runtime.appendingPathComponent("tmp")
+        )
+        let contractB = try NodeBundleRuntimeService.sanitizedNodeEnvironment(
+            bundlePath: runtime.appendingPathComponent("index.js"),
+            runtimeDirectory: runtime,
+            temporaryDirectory: runtime.appendingPathComponent("tmp"),
+            contractAdditions: [
+                "DEV_HTTP_PORT": "12345",
+                "OKVIDEO_CONTRACT_B_CONFIG_PATH": runtime
+                    .appendingPathComponent("config.json").path,
+                "OKVIDEO_CONTRACT_B_STATE_PATH": runtime
+                    .appendingPathComponent("state.json").path
+            ]
+        )
+
+        XCTAssertNil(contractA["DEV_HTTP_PORT"])
+        XCTAssertEqual(contractB["DEV_HTTP_PORT"], "12345")
+        XCTAssertNil(contractB["NODE_PATH"])
+        XCTAssertThrowsError(try NodeBundleRuntimeService.sanitizedNodeEnvironment(
+            bundlePath: runtime.appendingPathComponent("index.js"),
+            runtimeDirectory: runtime,
+            temporaryDirectory: runtime.appendingPathComponent("tmp"),
+            contractAdditions: ["NODE_PATH": "/tmp/injected"]
+        ))
+    }
+
+    func testContractBPortAllocationIsDynamicAndNonFixed() throws {
+        let first = try NodeRuntimeLoopbackPortAllocator.allocate()
+        let second = try NodeRuntimeLoopbackPortAllocator.allocate()
+
+        XCTAssertNotEqual(first, 9_988)
+        XCTAssertNotEqual(second, 9_988)
+        XCTAssertTrue((1...65_535).contains(first))
+        XCTAssertTrue((1...65_535).contains(second))
+    }
+
+    func testContractBListenerStateRejectsNonLoopbackHost() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("okvideo-contract-state-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let stateURL = root.appendingPathComponent("state.json")
+        try Data(
+            #"{"contract":"contract-b-host-integrated","phase":"listener-observed","host":"0.0.0.0","family":"IPv4","port":19000}"#.utf8
+        ).write(to: stateURL)
+
+        XCTAssertNil(ContractBListenerState.readValidated(from: stateURL))
+    }
+
     func testOrdinaryHTTPConfigurationIsOutsideNodeBundlePolicy() throws {
         let ordinary = try XCTUnwrap(URL(string: "http://example.invalid/config.json"))
         let node = try XCTUnwrap(URL(string: "http://example.invalid/index.js.md5"))
@@ -4728,7 +4882,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         _ = try await request.value
         requestCount = await client.requestCount
         let lastPort = await client.lastURL?.port
-        XCTAssertEqual(requestCount, 2)
+        XCTAssertEqual(requestCount, 3)
         XCTAssertEqual(lastPort, 18_002)
     }
 
@@ -4899,6 +5053,500 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         await service.stop()
     }
 
+    func testContractBStartPromiseDoesNotPublishReadyBeforeLoopbackListener() async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(
+                nodeContractBFixtureScript(
+                    startDelayMilliseconds: 250,
+                    startsAuxiliaryListener: true
+                ).utf8
+            )
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+
+        let startedAt = Date()
+        let endpoint: URL
+        do {
+            endpoint = try await service.ensureReady(from: fixture.sourceURL)
+        } catch {
+            let log = (try? runtimeLog(fixture: fixture)) ?? "<missing log>"
+            XCTFail("Contract B fixture failed: \(error)\n\(log)")
+            return
+        }
+        let elapsed = Date().timeIntervalSince(startedAt)
+
+        XCTAssertGreaterThanOrEqual(elapsed, 0.20)
+        XCTAssertEqual(endpoint.host, "127.0.0.1")
+        XCTAssertNotEqual(endpoint.port, 9_988)
+        let descriptor = try NodeBundleSourceDescriptor(url: fixture.sourceURL)
+        let stateURL = fixture.applicationSupportDirectory
+            .appendingPathComponent("NodeRuntime")
+            .appendingPathComponent(descriptor.cacheKey)
+            .appendingPathComponent("contract-b-state.json")
+        let state = try XCTUnwrap(ContractBListenerState.readValidated(from: stateURL))
+        XCTAssertEqual(state.host, "127.0.0.1")
+        XCTAssertEqual(state.port, endpoint.port)
+
+        let (configurationData, _) = try await URLSession.shared.data(
+            from: endpoint.appendingPathComponent("config")
+        )
+        let normalized = try NodeBundleRuntimeService.normalizeConfiguration(
+            configurationData
+        )
+        let configuration = try ConfigurationParser().parse(normalized)
+        XCTAssertEqual(configuration.sites.first?.key, "nodejs_contract_b")
+
+        let (auxiliaryData, _) = try await URLSession.shared.data(
+            from: endpoint.appendingPathComponent("auxiliary")
+        )
+        let auxiliaryAddress = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: auxiliaryData)
+                as? [String: Any]
+        )
+        XCTAssertEqual(auxiliaryAddress["address"] as? String, "127.0.0.1")
+        XCTAssertGreaterThan(auxiliaryAddress["port"] as? Int ?? 0, 0)
+
+        let log = try runtimeLog(fixture: fixture)
+        XCTAssertTrue(log.contains("NODE_RUNTIME_CONTRACT_DETECTED"))
+        XCTAssertTrue(log.contains("NODE_RUNTIME_HOST_ADAPTER_READY"))
+        XCTAssertTrue(log.contains("NODE_RUNTIME_LISTENER_OBSERVED"))
+        XCTAssertTrue(log.contains("NODE_RUNTIME_CAPABILITY_VALIDATED"))
+        await service.stop()
+    }
+
+    func testContractAColdStartupMarkerScanMicrobenchmark() async throws {
+        var startupMilliseconds: [Int] = []
+        for _ in 0..<3 {
+            let fixture = try makeLegacyCacheFixture(
+                script: Data(
+                    nodeReadinessFixtureScript(
+                        startDelayMilliseconds: 0
+                    ).utf8
+                )
+            )
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            let service = makeOfflineRuntime(
+                fixture: fixture,
+                nodeExecutableURL: try testNodeExecutableURL(),
+                readinessTimeout: 5,
+                readinessPollInterval: 0.02
+            )
+
+            let startedAt = Date()
+            let endpoint = try await service.ensureReady(from: fixture.sourceURL)
+            startupMilliseconds.append(
+                Int(Date().timeIntervalSince(startedAt) * 1_000)
+            )
+            XCTAssertEqual(endpoint.host, "127.0.0.1")
+            await service.stop()
+        }
+
+        let sorted = startupMilliseconds.sorted()
+        let minimum = try XCTUnwrap(sorted.first)
+        let maximum = try XCTUnwrap(sorted.last)
+        let median = sorted[sorted.count / 2]
+        let runs = startupMilliseconds.map { String($0) }.joined(separator: ",")
+        let report = "CONTRACT_A_COLD_STARTUP_MS runs=\(runs) min=\(minimum) median=\(median) max=\(maximum)"
+        print(report)
+    }
+
+    func testContractBUsesVerifiedNativeResponseSemanticsWithoutResponseGuard() async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(nodeContractBFixtureScript(
+                startDelayMilliseconds: 0,
+                emitsLateSecondWrite: true
+            ).utf8)
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+
+        let endpoint = try await service.ensureReady(from: fixture.sourceURL)
+        let (configurationData, _) = try await URLSession.shared.data(
+            from: endpoint.appendingPathComponent("config")
+        )
+        let normalized = try NodeBundleRuntimeService.normalizeConfiguration(
+            configurationData
+        )
+        XCTAssertNoThrow(try ConfigurationParser().parse(normalized))
+        guard case .running = await service.currentStatus() else {
+            return XCTFail("宿主已证明的 route rejection 后进程应保持运行")
+        }
+
+        let rejectionWasObserved = await waitUntil {
+            ((try? self.runtimeLog(fixture: fixture)) ?? "")
+                .contains("CONTRACT_B_UNHANDLED_REJECTION")
+        }
+        XCTAssertTrue(rejectionWasObserved)
+        await service.stop()
+    }
+
+    func testContractBReadinessTimeoutDoesNotTreatResolvedStartAsReady() async throws {
+        let script = #"""
+        'use strict';
+        void catServerFactory;
+        void catDartServerPort;
+        void process.env.DEV_HTTP_PORT;
+        module.exports = { start(config) { return Promise.resolve(config); }, stop() {} };
+        """#
+        let fixture = try makeLegacyCacheFixture(script: Data(script.utf8))
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 0.2,
+            readinessPollInterval: 0.01
+        )
+
+        do {
+            _ = try await service.ensureReady(from: fixture.sourceURL)
+            XCTFail("listener 和 capability 未就绪时不得发布 Ready")
+        } catch {
+            XCTAssertEqual(
+                error as? NodeBundleRuntimeError,
+                .contractBReadinessFailed
+            )
+        }
+        await service.stop()
+    }
+
+    func testContractBProcessExitBeforeReadyIsFailure() async throws {
+        let script = #"""
+        'use strict';
+        void catServerFactory;
+        void catDartServerPort;
+        void process.env.DEV_HTTP_PORT;
+        module.exports = { start(config) { process.exit(12); }, stop() {} };
+        """#
+        let fixture = try makeLegacyCacheFixture(script: Data(script.utf8))
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 1,
+            readinessPollInterval: 0.01
+        )
+
+        do {
+            _ = try await service.ensureReady(from: fixture.sourceURL)
+            XCTFail("提前退出的 Contract B 不得发布 Ready")
+        } catch {
+            guard case .failed = await service.currentStatus() else {
+                return XCTFail("early exit 后状态必须是 failed")
+            }
+        }
+        await service.stop()
+    }
+
+    func testContractBStopRestartClosesOldListenerAndAllocatesFreshEndpoint() async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(nodeContractBFixtureScript(startDelayMilliseconds: 0).utf8)
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+
+        let first = try await service.ensureReady(from: fixture.sourceURL)
+        await service.stop()
+        let stopped = await waitUntil {
+            do {
+                _ = try await URLSession.shared.data(
+                    from: first.appendingPathComponent("config")
+                )
+                return false
+            } catch {
+                return true
+            }
+        }
+        XCTAssertTrue(stopped)
+        let descriptor = try NodeBundleSourceDescriptor(url: fixture.sourceURL)
+        let runtimeDirectory = fixture.applicationSupportDirectory
+            .appendingPathComponent("NodeRuntime")
+            .appendingPathComponent(descriptor.cacheKey)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: runtimeDirectory.appendingPathComponent(
+                "contract-b-config.json"
+            ).path
+        ))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: runtimeDirectory.appendingPathComponent(
+                "contract-b-state.json"
+            ).path
+        ))
+
+        let second = try await service.ensureReady(from: fixture.sourceURL)
+        XCTAssertEqual(second.host, "127.0.0.1")
+        XCTAssertNotEqual(second.port, 9_988)
+        await service.stop()
+    }
+
+    func testContractBConcurrentRuntimesUseDistinctLoopbackPorts() async throws {
+        let script = Data(nodeContractBFixtureScript(startDelayMilliseconds: 0).utf8)
+        let firstFixture = try makeLegacyCacheFixture(script: script)
+        let secondFixture = try makeLegacyCacheFixture(script: script)
+        defer {
+            try? FileManager.default.removeItem(at: firstFixture.root)
+            try? FileManager.default.removeItem(at: secondFixture.root)
+        }
+        let executable = try testNodeExecutableURL()
+        let firstService = makeOfflineRuntime(
+            fixture: firstFixture,
+            nodeExecutableURL: executable,
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+        let secondService = makeOfflineRuntime(
+            fixture: secondFixture,
+            nodeExecutableURL: executable,
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+
+        async let first = firstService.ensureReady(from: firstFixture.sourceURL)
+        async let second = secondService.ensureReady(from: secondFixture.sourceURL)
+        let endpoints = try await [first, second]
+
+        XCTAssertEqual(endpoints[0].host, "127.0.0.1")
+        XCTAssertEqual(endpoints[1].host, "127.0.0.1")
+        XCTAssertNotEqual(endpoints[0].port, endpoints[1].port)
+        await firstService.stop()
+        await secondService.stop()
+    }
+
+    func testContractBErrorPresentationIsSpecificAndRedacted() {
+        let unsupported = NodeUserFacingErrorMapper.presentation(
+            for: NodeBundleRuntimeError.unsupportedHostContract
+        )
+        let invalidConfig = NodeUserFacingErrorMapper.presentation(
+            for: NodeBundleRuntimeError.configurationContractInvalid
+        )
+
+        XCTAssertEqual(unsupported?.title, "Node 兼容模式不受支持")
+        XCTAssertEqual(invalidConfig?.title, "Node 源配置无效")
+        XCTAssertFalse(unsupported?.message.contains("catServerFactory") ?? true)
+        XCTAssertFalse(invalidConfig?.message.contains("sites") ?? true)
+    }
+
+    func testRealContractBSamplesFromEnvironment() async throws {
+        guard let specification = ProcessInfo.processInfo.environment[
+            "OKVIDEO_CONTRACT_B_REAL_SAMPLES"
+        ], !specification.isEmpty else {
+            throw XCTSkip("Real Contract B samples were not supplied")
+        }
+        let samples = specification.split(separator: ";").map {
+            $0.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        }
+        XCTAssertGreaterThanOrEqual(samples.count, 2)
+
+        for fields in samples {
+            XCTAssertTrue((4...5).contains(fields.count))
+            guard (4...5).contains(fields.count) else { continue }
+            let name = fields[0]
+            let script = try Data(contentsOf: URL(fileURLWithPath: fields[1]))
+            XCTAssertEqual(NodeBundleRuntimeService.md5Hex(script), fields[2], name)
+            XCTAssertEqual(NodeBundleRuntimeService.sha256Hex(script), fields[3], name)
+            let fixture = try makeLegacyCacheFixture(script: script)
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            let service = makeOfflineRuntime(
+                fixture: fixture,
+                nodeExecutableURL: try testNodeExecutableURL(),
+                readinessTimeout: 10,
+                readinessPollInterval: 0.05
+            )
+            var validationStage = "runtime"
+            var observedEndpointPort: Int?
+            do {
+                let runtimeStartedAt = Date()
+                let endpoint = try await service.ensureReady(from: fixture.sourceURL)
+                let runtimeReadyMilliseconds = Int(
+                    Date().timeIntervalSince(runtimeStartedAt) * 1_000
+                )
+                XCTAssertEqual(endpoint.host, "127.0.0.1", name)
+                XCTAssertNotEqual(endpoint.port, 9_988, name)
+                validationStage = "config"
+                let configurationStartedAt = Date()
+                let (configurationData, _) = try await URLSession.shared.data(
+                    from: endpoint.appendingPathComponent("config")
+                )
+                let normalized = try NodeBundleRuntimeService.normalizeConfiguration(
+                    configurationData
+                )
+                let parsed = try ConfigurationParser().parse(normalized)
+                let configurationMilliseconds = Int(
+                    Date().timeIntervalSince(configurationStartedAt) * 1_000
+                )
+                XCTAssertFalse(parsed.sites.isEmpty, name)
+                let endpointPort = try XCTUnwrap(endpoint.port)
+                observedEndpointPort = endpointPort
+                let listeners = try systemListeners(on: endpointPort)
+                XCTAssertTrue(listeners.contains("127.0.0.1:"), "\(name): \(listeners)")
+                XCTAssertFalse(listeners.contains("*:\(endpointPort)"), "\(name): \(listeners)")
+                print(
+                    "REAL_SAMPLE_DISCOVERY name=\(name) "
+                        + "runtime_ready_ms=\(runtimeReadyMilliseconds) "
+                        + "config_ms=\(configurationMilliseconds) "
+                        + "sites=\(parsed.sites.map(\.key).joined(separator: ","))"
+                )
+
+                if fields.count == 5, !fields[4].isEmpty {
+                    validationStage = "site-selection"
+                    let site = try XCTUnwrap(
+                        parsed.sites.first(where: { $0.key == fields[4] })
+                    )
+                    var boundedSite = site
+                    boundedSite.timeout = min(site.timeout ?? 15, 15)
+                    let clientConfiguration = URLSessionConfiguration.ephemeral
+                    clientConfiguration.connectionProxyDictionary = [:]
+                    let provider = try NodeHTTPSpiderSiteProvider(
+                        site: boundedSite,
+                        baseURL: endpoint,
+                        httpClient: URLSessionHTTPClient(
+                            configuration: clientConfiguration
+                        ),
+                        ensureRuntimeReady: { endpoint }
+                    )
+                    validationStage = "home"
+                    let homeStartedAt = Date()
+                    let home = try await provider.home()
+                    let homeMilliseconds = Int(
+                        Date().timeIntervalSince(homeStartedAt) * 1_000
+                    )
+                    guard !home.categories.isEmpty else {
+                        throw AppError.spider("\(name) home returned no categories")
+                    }
+                    validationStage = "category"
+                    let categoryStartedAt = Date()
+                    var selectedCategoryPage: VideoPage?
+                    for category in home.categories.prefix(5) {
+                        let page = try await provider.category(
+                            id: category.id,
+                            page: 1,
+                            filters: [:]
+                        )
+                        if !page.items.isEmpty {
+                            selectedCategoryPage = page
+                            break
+                        }
+                    }
+                    let categoryMilliseconds = Int(
+                        Date().timeIntervalSince(categoryStartedAt) * 1_000
+                    )
+                    guard let categoryPage = selectedCategoryPage else {
+                        throw AppError.spider(
+                            "\(name) first five categories returned no items"
+                        )
+                    }
+                    let seed = try XCTUnwrap(
+                        home.recommendations.first ?? categoryPage.items.first
+                    )
+                    var summary = seed
+                    var searchMilliseconds = 0
+                    if boundedSite.searchable == 1 {
+                        validationStage = "search"
+                        let searchStartedAt = Date()
+                        let search = try await provider.search(
+                            keyword: seed.title,
+                            page: 1,
+                            quick: false
+                        )
+                        searchMilliseconds = Int(
+                            Date().timeIntervalSince(searchStartedAt) * 1_000
+                        )
+                        guard let searchSummary = search.items.first else {
+                            throw AppError.spider("\(name) search returned no items")
+                        }
+                        summary = searchSummary
+                    }
+                    validationStage = "detail"
+                    let detailStartedAt = Date()
+                    let detail = try await provider.detail(id: summary.videoID)
+                    let detailMilliseconds = Int(
+                        Date().timeIntervalSince(detailStartedAt) * 1_000
+                    )
+                    let source = try XCTUnwrap(detail.playSources.first)
+                    let episode = try XCTUnwrap(source.episodes.first)
+                    validationStage = "play"
+                    let playStartedAt = Date()
+                    let playback = try await provider.player(
+                        flag: source.name,
+                        episodeURL: episode.url
+                    )
+                    let playMilliseconds = Int(
+                        Date().timeIntervalSince(playStartedAt) * 1_000
+                    )
+                    XCTAssertFalse(playback.url.isEmpty, "\(name) play")
+                    let playbackURL = try XCTUnwrap(URL(string: playback.url))
+                    XCTAssertTrue(
+                        ["http", "https"].contains(
+                            playbackURL.scheme?.lowercased() ?? ""
+                        ),
+                        "\(name) play must remain actionable by the player"
+                    )
+                    print(
+                        "REAL_SAMPLE_BUSINESS_TIMING name=\(name) "
+                            + "home_ms=\(homeMilliseconds) "
+                            + "category_ms=\(categoryMilliseconds) "
+                            + "search_ms=\(searchMilliseconds) "
+                            + "detail_ms=\(detailMilliseconds) "
+                            + "play_ms=\(playMilliseconds)"
+                    )
+                }
+                print(
+                    "REAL_SAMPLE_RESULT name=\(name) loopback=PASS "
+                        + "config=PASS business=\(fields.count == 5 ? "PASS" : "NOT_REQUESTED")"
+                )
+            } catch {
+                XCTFail("\(name) stage=\(validationStage) failed: \(error)")
+            }
+            await service.stop()
+            if let observedEndpointPort {
+                let listenersAfterStop = try systemListeners(
+                    on: observedEndpointPort
+                )
+                XCTAssertTrue(
+                    listenersAfterStop.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    ).isEmpty,
+                    "\(name) old listener must close"
+                )
+            }
+            let descriptor = try NodeBundleSourceDescriptor(url: fixture.sourceURL)
+            let runtimeDirectory = fixture.applicationSupportDirectory
+                .appendingPathComponent("NodeRuntime")
+                .appendingPathComponent(descriptor.cacheKey)
+            XCTAssertFalse(FileManager.default.fileExists(
+                atPath: runtimeDirectory.appendingPathComponent(
+                    "contract-b-config.json"
+                ).path
+            ))
+            XCTAssertFalse(FileManager.default.fileExists(
+                atPath: runtimeDirectory.appendingPathComponent(
+                    "contract-b-state.json"
+                ).path
+            ))
+            let stoppedStatus = await service.currentStatus()
+            XCTAssertEqual(stoppedStatus, .stopped)
+            print(
+                "REAL_SAMPLE_CLEANUP name=\(name) process=STOPPED "
+                    + "listener=CLOSED temporary_files=REMOVED"
+            )
+        }
+    }
+
     private func waitUntil(
         _ predicate: @escaping () async -> Bool
     ) async -> Bool {
@@ -4907,6 +5555,21 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             await Task.yield()
         }
         return false
+    }
+
+    private func systemListeners(on port: Int) throws -> String {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        process.arguments = ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN"]
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        process.waitUntilExit()
+        return String(
+            decoding: output.fileHandleForReading.readDataToEndOfFile(),
+            as: UTF8.self
+        )
     }
 
     private func testNodeExecutableURL() throws -> URL {
@@ -4968,6 +5631,62 @@ final class NodeBundleCompatibilityTests: XCTestCase {
           },
           stop() {
             return new Promise((resolve) => server ? server.close(resolve) : resolve());
+          }
+        };
+        """#
+    }
+
+    private func nodeContractBFixtureScript(
+        startDelayMilliseconds: Int,
+        emitsLateSecondWrite: Bool = false,
+        startsAuxiliaryListener: Bool = false
+    ) -> String {
+        #"""
+        'use strict';
+        let server = null;
+        let auxiliary = null;
+        module.exports = {
+          start(config) {
+            if (!config || !config.sites || !Array.isArray(config.sites.list) ||
+                !config.pans || !Array.isArray(config.pans.list)) {
+              throw new Error('invalid fixture config');
+            }
+            if (catDartServerPort() !== 0) throw new Error('unexpected Dart bridge');
+            if (\#(startsAuxiliaryListener ? "true" : "false")) {
+              auxiliary = require('http').createServer((request, response) => {
+                response.end('auxiliary');
+              });
+              auxiliary.listen({port: 0, host: '0.0.0.0'});
+            }
+            setTimeout(() => {
+              server = catServerFactory((request, response) => {
+                response.setHeader('Content-Type', 'application/json');
+                if (request.url === '/config') {
+                  response.end(JSON.stringify({video:{sites:[{key:'nodejs_contract_b',name:'Contract B',type:3,api:'/spider/contract_b/3'}]}}));
+                  if (\#(emitsLateSecondWrite ? "true" : "false")) {
+                    Promise.resolve().then(() => {
+                      response.writeHead(200, {'Content-Type':'application/json'});
+                      response.end('{}');
+                    });
+                  }
+                } else if (request.url === '/spider/contract_b/3/home') {
+                  response.end(JSON.stringify({class:[],list:[]}));
+                } else if (request.url === '/auxiliary') {
+                  response.end(JSON.stringify(auxiliary && auxiliary.address()));
+                } else {
+                  response.statusCode = 404;
+                  response.end(JSON.stringify({error:'fixture-not-found'}));
+                }
+              });
+              server.listen({port: process.env.DEV_HTTP_PORT || 9988, host: '0.0.0.0'});
+            }, \#(startDelayMilliseconds));
+            return Promise.resolve();
+          },
+          stop() {
+            const closing = [server, auxiliary]
+              .filter((listener) => listener && listener.listening)
+              .map((listener) => new Promise((resolve) => listener.close(resolve)));
+            return Promise.all(closing);
           }
         };
         """#
@@ -5053,6 +5772,14 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
         let client = NodeProviderStubHTTPClient { request in
             XCTAssertEqual(request.method, .post)
+            if request.url.path.hasSuffix("/init") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
             if request.url.path.hasSuffix("/home") {
                 let body = try XCTUnwrap(request.body)
                 let object = try JSONDecoder().decode(JSONValue.self, from: body)
@@ -5083,6 +5810,81 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(home.recommendations.map(\.title), ["测试影片"])
     }
 
+    func testNodeProviderInitializesOnceBeforeConcurrentBusinessRequests() async throws {
+        let client = NodeLifecycleRecordingHTTPClient(initStatusCode: 200)
+        let baseURL = try XCTUnwrap(URL(string: "http://127.0.0.1:18988/"))
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: nodeLifecycleFixtureSite,
+            baseURL: baseURL,
+            httpClient: client
+        )
+
+        async let first = provider.home()
+        async let second = provider.home()
+        _ = try await [first, second]
+
+        let paths = await client.requestPaths()
+        XCTAssertEqual(paths.filter { $0.hasSuffix("/init") }.count, 1)
+        XCTAssertEqual(paths.first, "/spider/lifecycle/3/init")
+        XCTAssertEqual(paths.filter { $0.hasSuffix("/home") }.count, 2)
+    }
+
+    func testNodeProviderReinitializesWhenRuntimeEndpointChanges() async throws {
+        let firstURL = try XCTUnwrap(URL(string: "http://127.0.0.1:18988/"))
+        let secondURL = try XCTUnwrap(URL(string: "http://127.0.0.1:18989/"))
+        let endpoint = NodeRuntimeEndpointBox(firstURL)
+        let client = NodeLifecycleRecordingHTTPClient(initStatusCode: 200)
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: nodeLifecycleFixtureSite,
+            baseURL: firstURL,
+            httpClient: client,
+            ensureRuntimeReady: { await endpoint.current() }
+        )
+
+        _ = try await provider.home()
+        await endpoint.set(secondURL)
+        _ = try await provider.home()
+
+        let initializedPorts = await client.initializedPorts()
+        XCTAssertEqual(initializedPorts, [18_988, 18_989])
+    }
+
+    func testNodeProviderKeepsContractACompatibleWhenInitIsAbsent() async throws {
+        let client = NodeLifecycleRecordingHTTPClient(initStatusCode: 404)
+        let baseURL = try XCTUnwrap(URL(string: "http://127.0.0.1:18988/"))
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: nodeLifecycleFixtureSite,
+            baseURL: baseURL,
+            httpClient: client
+        )
+
+        let home = try await provider.home()
+
+        XCTAssertEqual(home.categories.map(\.name), ["电影"])
+        let initializedPorts = await client.initializedPorts()
+        XCTAssertEqual(initializedPorts, [18_988])
+    }
+
+    func testNodeProviderDoesNotSwallowInitFailure() async throws {
+        let client = NodeLifecycleRecordingHTTPClient(initStatusCode: 500)
+        let baseURL = try XCTUnwrap(URL(string: "http://127.0.0.1:18988/"))
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: nodeLifecycleFixtureSite,
+            baseURL: baseURL,
+            httpClient: client
+        )
+
+        do {
+            _ = try await provider.home()
+            XCTFail("init 失败后不得继续请求 home")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("init 失败"))
+        }
+        let paths = await client.requestPaths()
+        XCTAssertEqual(paths.filter { $0.hasSuffix("/init") }.count, 2)
+        XCTAssertFalse(paths.contains { $0.hasSuffix("/home") })
+    }
+
     func testNodeProviderSurfacesCloudLoginAsNativeWebAuthorization() async throws {
         let site = SiteConfiguration(
             key: "nodejs_mypan",
@@ -5093,6 +5895,14 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
         let client = NodeProviderStubHTTPClient { request in
             XCTAssertTrue(request.allowsNonSuccessfulStatus)
+            if request.url.path.hasSuffix("/init") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
             return HTTPResponse(
                 url: request.url,
                 statusCode: 500,
@@ -5440,6 +6250,72 @@ private actor NodeReadinessRecordingHTTPClient: HTTPClient {
     }
 }
 
+private let nodeLifecycleFixtureSite = SiteConfiguration(
+    key: "nodejs_lifecycle_fixture",
+    name: "Lifecycle Fixture",
+    type: 3,
+    api: "/spider/lifecycle/3",
+    extra: ["okNodeRuntime": .bool(true)]
+)
+
+private actor NodeRuntimeEndpointBox {
+    private var endpoint: URL
+
+    init(_ endpoint: URL) {
+        self.endpoint = endpoint
+    }
+
+    func current() -> URL {
+        endpoint
+    }
+
+    func set(_ endpoint: URL) {
+        self.endpoint = endpoint
+    }
+}
+
+private actor NodeLifecycleRecordingHTTPClient: HTTPClient {
+    private let initStatusCode: Int
+    private var requests: [URL] = []
+
+    init(initStatusCode: Int) {
+        self.initStatusCode = initStatusCode
+    }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        requests.append(request.url)
+        if request.url.path.hasSuffix("/init") {
+            try await Task.sleep(nanoseconds: 25_000_000)
+            return HTTPResponse(
+                url: request.url,
+                statusCode: initStatusCode,
+                headers: ["Content-Type": "application/json"],
+                body: initStatusCode == 500
+                    ? Data(#"{"error":"fixture init rejected"}"#.utf8)
+                    : Data(#"{}"#.utf8)
+            )
+        }
+        return HTTPResponse(
+            url: request.url,
+            statusCode: 200,
+            headers: ["Content-Type": "application/json"],
+            body: Data(
+                #"{"class":[{"type_id":"movie","type_name":"电影"}],"list":[]}"#.utf8
+            )
+        )
+    }
+
+    func requestPaths() -> [String] {
+        requests.map(\.path)
+    }
+
+    func initializedPorts() -> [Int] {
+        requests
+            .filter { $0.path.hasSuffix("/init") }
+            .compactMap(\.port)
+    }
+}
+
 private struct NodeProviderStubHTTPClient: HTTPClient {
     let handler: (HTTPRequest) throws -> HTTPResponse
 
@@ -5471,6 +6347,14 @@ private actor QuarkRefreshHTTPClient: HTTPClient {
                 statusCode: 200,
                 headers: ["Content-Type": "application/json"],
                 body: Data(#"{"data":{"stoken":"fresh-stoken"}}"#.utf8)
+            )
+        }
+        if request.url.path.hasSuffix("/init") {
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 404,
+                headers: [:],
+                body: Data()
             )
         }
         guard request.url.path.hasSuffix("/play") else {

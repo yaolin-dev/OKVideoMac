@@ -11,6 +11,7 @@
 		0DC49DC6E8989EB3C7FFADD2 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADFC0D6C3C9A30793D7813B3 /* AppState.swift */; };
 		0EBDF1072F01B5B03856512F /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 4027B9ADBDE079CA11AFB824 /* Localizable.strings */; };
 		15EC54A8AB04926723F01FFD /* MPVRenderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A119CE857C4037E4EA9BAB8 /* MPVRenderView.swift */; };
+		195449ECEC9D9787554618E1 /* NodeRuntimeContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = E497EB47C4C1AD4047675EFC /* NodeRuntimeContract.swift */; };
 		285AF5B7AA73E51C0BE0F632 /* NodeHTTPSpiderSiteProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 617A00084B74B412C7C3ACB9 /* NodeHTTPSpiderSiteProvider.swift */; };
 		34E5D648D9127134BBCC6933 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 689F4F5C0C244BA810946A34 /* PlayerView.swift */; };
 		3CE5EE6FA03482C30AE9FE0F /* WKWebSniffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C3F9E94B5A9587197666CC3 /* WKWebSniffer.swift */; };
@@ -81,6 +82,7 @@
 		D3D2A8AF3D0689F343F646E4 /* OKVideoMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OKVideoMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D6CD897F3EA6681258B14A99 /* AppParseExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppParseExecutor.swift; sourceTree = "<group>"; };
 		D7765776920879CB4CD0A540 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
+		E497EB47C4C1AD4047675EFC /* NodeRuntimeContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeRuntimeContract.swift; sourceTree = "<group>"; };
 		ED0F982CA57DBEA3A9CBF1FE /* LICENSE */ = {isa = PBXFileReference; path = LICENSE; sourceTree = "<group>"; };
 		EEE09C76DBAB9FF2328487B7 /* FavoritesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesView.swift; sourceTree = "<group>"; };
 		F10066822C02CE0E2210A0C9 /* OKVideoMacTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OKVideoMacTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -108,6 +110,7 @@
 				4E25C74DFB53809A9F2672CE /* JavaScriptSpiderSiteProvider.swift */,
 				A406AD3C9358F59A462C9AB8 /* NodeBundleRuntimeService.swift */,
 				617A00084B74B412C7C3ACB9 /* NodeHTTPSpiderSiteProvider.swift */,
+				E497EB47C4C1AD4047675EFC /* NodeRuntimeContract.swift */,
 				78A48458B942371BAE2A85FD /* QuickJSSpiderRuntime.swift */,
 			);
 			path = Spider;
@@ -530,6 +533,7 @@
 				15EC54A8AB04926723F01FFD /* MPVRenderView.swift in Sources */,
 				CA7782FAED307EC8B1B38D2D /* NodeBundleRuntimeService.swift in Sources */,
 				285AF5B7AA73E51C0BE0F632 /* NodeHTTPSpiderSiteProvider.swift in Sources */,
+				195449ECEC9D9787554618E1 /* NodeRuntimeContract.swift in Sources */,
 				3F316183E2F6BADC6631BC5D /* OKVideoMacApp.swift in Sources */,
 				34E5D648D9127134BBCC6933 /* PlayerView.swift in Sources */,
 				A079B159324210117BB52A09 /* QuickJSSpiderRuntime.swift in Sources */,

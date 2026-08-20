@@ -95,6 +95,26 @@ enum AndroidRuntimeUserFacingErrorMapper {
 enum NodeUserFacingErrorMapper {
     static func presentation(for error: Error) -> NodeReleaseErrorPresentation? {
         if let nodeError = error as? NodeBundleRuntimeError {
+            switch nodeError {
+            case .unsupportedHostContract:
+                return .init(
+                    title: "Node 兼容模式不受支持",
+                    message: "该内容源需要当前版本尚未支持的宿主能力，已停止加载。"
+                )
+            case .configurationContractInvalid:
+                return .init(
+                    title: "Node 源配置无效",
+                    message: "该源提供的运行配置不完整或格式不受支持。"
+                )
+            case .hostCapabilityUnavailable, .portAllocationFailed,
+                 .loopbackEnforcementFailed, .contractBReadinessFailed:
+                return .init(
+                    title: "Node Runtime 启动失败",
+                    message: "本地运行服务未能通过安全启动检查，请稍后重试。"
+                )
+            default:
+                break
+            }
             switch nodeError.diagnosticClassification.category {
             case .transport:
                 return .init(
@@ -2475,7 +2495,6 @@ final class AppState: ObservableObject {
         // explicitly before cloud URL resolution starts; otherwise its site
         // requests and result clustering compete with the player's cold-start
         // proxy traffic. Keep the accumulated results for a fast return.
-        cancelSearch()
         let sessionID = UUID()
         playbackRequestsResolving.insert(sessionID)
         defer {
@@ -2485,6 +2504,10 @@ final class AppState: ObservableObject {
             requestID: sessionID,
             mode: environment.player.mode
         )
+        cancelSearch()
+        let imageQuiesceTask = Task { @MainActor in
+            await environment.imageRepository.cancelInFlightLoads()
+        }
         playbackSessionID = sessionID
         activePlayerRequestID = sessionID
         playbackQualitySwitchSessionID = UUID()
@@ -2652,6 +2675,11 @@ final class AppState: ObservableObject {
                               self.playbackSessionID == sessionID else {
                             throw CancellationError()
                         }
+                        // Image cancellation is started at the click boundary,
+                        // but overlaps player preparation and URL resolution.
+                        // Preserve the hard boundary before loadfile so poster
+                        // work cannot compete with first-frame decode.
+                        await imageQuiesceTask.value
                         try await self.loadResolvedPlayback(
                             media,
                             detail: detail,

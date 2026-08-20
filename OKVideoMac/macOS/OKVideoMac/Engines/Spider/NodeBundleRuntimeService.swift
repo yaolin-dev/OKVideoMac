@@ -39,6 +39,11 @@ enum NodeDiagnosticCode: String, Codable, Equatable, Sendable {
     case cacheMigrationSucceeded = "NODE_CACHE_MIGRATION_SUCCEEDED"
     case cacheMigrationFailed = "NODE_CACHE_MIGRATION_FAILED"
     case runtimeLaunchStarted = "NODE_RUNTIME_LAUNCH_STARTED"
+    case runtimeContractDetected = "NODE_RUNTIME_CONTRACT_DETECTED"
+    case runtimeHostAdapterReady = "NODE_RUNTIME_HOST_ADAPTER_READY"
+    case runtimeConfigurationValidated = "NODE_RUNTIME_CONFIGURATION_VALIDATED"
+    case runtimeListenerObserved = "NODE_RUNTIME_LISTENER_OBSERVED"
+    case runtimeCapabilityValidated = "NODE_RUNTIME_CAPABILITY_VALIDATED"
     case runtimeStartRequested = "NODE_RUNTIME_START_REQUESTED"
     case runtimeStartupJoined = "NODE_RUNTIME_STARTUP_JOINED"
     case runtimeReadinessWaiting = "NODE_RUNTIME_READINESS_WAITING"
@@ -511,6 +516,12 @@ enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
     case nodeLaunchFailed(String)
     case nodeExitedUnexpectedly(String)
     case endpointUnavailable(String)
+    case unsupportedHostContract
+    case configurationContractInvalid
+    case hostCapabilityUnavailable
+    case portAllocationFailed
+    case loopbackEnforcementFailed
+    case contractBReadinessFailed
 
     var errorDescription: String? {
         switch self {
@@ -540,6 +551,18 @@ enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
             return "Node 运行进程意外退出：\(detail)"
         case .endpointUnavailable(let detail):
             return "Node 服务端点不可用：\(detail)"
+        case .unsupportedHostContract:
+            return "Node 运行协议不受支持"
+        case .configurationContractInvalid:
+            return "Node 源配置不完整或格式不受支持"
+        case .hostCapabilityUnavailable:
+            return "Node 宿主能力初始化失败"
+        case .portAllocationFailed:
+            return "Node 本地服务端口分配失败"
+        case .loopbackEnforcementFailed:
+            return "Node 本地服务未通过回环地址安全校验"
+        case .contractBReadinessFailed:
+            return "Node 本地服务能力校验失败"
         }
     }
 
@@ -573,7 +596,10 @@ enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
             return .init(category: .cache, code: .cacheMigrationFailed)
         case .invalidCacheMetadata:
             return .init(category: .cache, code: .cacheInvalidMetadata)
-        case .bundledNodeMissing, .invalidNodeEnvironment, .nodeLaunchFailed:
+        case .bundledNodeMissing, .invalidNodeEnvironment, .nodeLaunchFailed,
+             .unsupportedHostContract, .configurationContractInvalid,
+             .hostCapabilityUnavailable, .portAllocationFailed,
+             .loopbackEnforcementFailed, .contractBReadinessFailed:
             return .init(category: .runtime, code: .runtimeLaunchFailed)
         case .nodeExitedUnexpectedly:
             return .init(category: .runtime, code: .runtimeExited)
@@ -800,6 +826,7 @@ actor NodeBundleRuntimeService {
     private var activeDiagnosticWriter: NodeDiagnosticLogWriter?
     private var diagnosticWriters: [String: NodeDiagnosticLogWriter] = [:]
     private var activeBundleCacheKey: String?
+    private var activeContractCleanupURLs: [URL] = []
     private var serviceBaseURL: URL?
     private var status: NodeRuntimeStatus = .stopped
     private var statusContinuations: [UUID: AsyncStream<NodeRuntimeStatus>.Continuation] = [:]
@@ -918,10 +945,9 @@ actor NodeBundleRuntimeService {
         )
     }
 
-    /// Returns only after the selected bundle's localhost `/health` endpoint
-    /// has answered with the expected runtime identity. Every Node business
-    /// request uses this point-of-use barrier; process existence alone is not
-    /// considered ready.
+    /// Returns only after the selected contract's readiness policy succeeds.
+    /// Contract A retains its `/health` identity check; Contract B requires an
+    /// observed loopback listener plus a validated `/config` capability.
     func ensureReady(from sourceURL: URL) async throws -> URL {
         let descriptor = try NodeBundleSourceDescriptor(url: sourceURL)
         return try await ensureReady(
@@ -1066,9 +1092,10 @@ actor NodeBundleRuntimeService {
         bundlePath: URL,
         runtimeDirectory: URL,
         temporaryDirectory: URL,
-        parentPID: Int32 = ProcessInfo.processInfo.processIdentifier
+        parentPID: Int32 = ProcessInfo.processInfo.processIdentifier,
+        contractAdditions: [String: String] = [:]
     ) throws -> [String: String] {
-        let environment = [
+        var environment = [
             "HOST": "127.0.0.1",
             "PORT": "0",
             "NODE_ENV": "production",
@@ -1080,6 +1107,17 @@ actor NodeBundleRuntimeService {
             "OKVIDEO_BUNDLE_PATH": bundlePath.path,
             "OKVIDEO_PARENT_PID": String(parentPID)
         ]
+        let allowedContractBNames = Set([
+            "DEV_HTTP_PORT",
+            "OKVIDEO_CONTRACT_B_CONFIG_PATH",
+            "OKVIDEO_CONTRACT_B_STATE_PATH"
+        ])
+        guard Set(contractAdditions.keys).isSubset(of: allowedContractBNames) else {
+            throw NodeBundleRuntimeError.invalidNodeEnvironment(
+                "Contract 注入了未授权环境变量"
+            )
+        }
+        environment.merge(contractAdditions) { _, addition in addition }
         let forbiddenNames = environment.keys.filter {
             $0 == "NODE_OPTIONS"
                 || $0 == "NODE_PATH"
@@ -1923,6 +1961,13 @@ actor NodeBundleRuntimeService {
 
     private func startProcess(_ bundle: CachedBundle) async throws -> URL {
         try validateBundleForExecution(bundle)
+        let validatedBundleData = try Data(
+            contentsOf: bundle.scriptURL,
+            options: .mappedIfSafe
+        )
+        let contract = try NodeRuntimeContractDetector.detect(
+            validatedBundleData: validatedBundleData
+        )
         let nodeExecutable = try nodeExecutableURL()
         let launcherURL = bundle.runtimeDirectory.appendingPathComponent("launcher.js")
         let writer = diagnosticWriters[bundle.cacheKey] ?? NodeDiagnosticLogWriter(
@@ -1939,7 +1984,52 @@ actor NodeBundleRuntimeService {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        try Data(Self.launcherScript.utf8).write(to: launcherURL, options: .atomic)
+        let launchPlan = try NodeRuntimeContractFactory.makePlan(
+            contract: contract,
+            runtimeDirectory: bundle.runtimeDirectory
+        )
+        activeContractCleanupURLs = launchPlan.cleanupURLs
+        writer.write(
+            NodeDiagnosticEvent(
+                timestamp: now(),
+                category: .runtime,
+                severity: .info,
+                code: .runtimeContractDetected,
+                message: "Node runtime contract selected: \(contract.rawValue)",
+                sourceID: bundle.sourceID,
+                cacheKey: bundle.cacheKey,
+                trustState: bundle.trustState.diagnosticState
+            )
+        )
+        if contract == .hostIntegrated {
+            writer.write(
+                NodeDiagnosticEvent(
+                    timestamp: now(),
+                    category: .runtime,
+                    severity: .info,
+                    code: .runtimeConfigurationValidated,
+                    message: "Contract B minimum host configuration validated",
+                    sourceID: bundle.sourceID,
+                    cacheKey: bundle.cacheKey
+                )
+            )
+            writer.write(
+                NodeDiagnosticEvent(
+                    timestamp: now(),
+                    category: .runtime,
+                    severity: .info,
+                    code: .runtimeHostAdapterReady,
+                    message: "Contract B bounded host adapter prepared",
+                    sourceID: bundle.sourceID,
+                    cacheKey: bundle.cacheKey,
+                    localPort: launchPlan.environmentAdditions["DEV_HTTP_PORT"].flatMap(Int.init)
+                )
+            )
+        }
+        try Data(launchPlan.launcherScript.utf8).write(
+            to: launcherURL,
+            options: .atomic
+        )
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o600],
             ofItemAtPath: launcherURL.path
@@ -1975,7 +2065,8 @@ actor NodeBundleRuntimeService {
         process.environment = try Self.sanitizedNodeEnvironment(
             bundlePath: bundle.scriptURL,
             runtimeDirectory: bundle.runtimeDirectory,
-            temporaryDirectory: temporaryDirectory
+            temporaryDirectory: temporaryDirectory,
+            contractAdditions: launchPlan.environmentAdditions
         )
         process.standardOutput = pipe
         process.standardError = pipe
@@ -2048,18 +2139,57 @@ actor NodeBundleRuntimeService {
                     "进程在服务就绪前提前退出"
                 )
             }
-            if let port = portCapture.port,
+            let port: Int?
+            switch launchPlan.contract {
+            case .service:
+                port = portCapture.port
+            case .hostIntegrated:
+                port = launchPlan.stateFileURL
+                    .flatMap(ContractBListenerState.readValidated(from:))?
+                    .port
+            }
+            if let port,
                let baseURL = URL(string: "http://127.0.0.1:\(port)/"),
-               await isHealthy(baseURL) {
+               await isReady(baseURL, policy: launchPlan.readinessPolicy) {
                 serviceBaseURL = baseURL
                 publish(.running(baseURL))
+                if launchPlan.contract == .hostIntegrated {
+                    writer.write(
+                        NodeDiagnosticEvent(
+                            timestamp: now(),
+                            category: .runtime,
+                            severity: .info,
+                            code: .runtimeListenerObserved,
+                            message: "Contract B loopback listener observed",
+                            sourceID: bundle.sourceID,
+                            cacheKey: bundle.cacheKey,
+                            nodePID: process.processIdentifier,
+                            localPort: port
+                        )
+                    )
+                    writer.write(
+                        NodeDiagnosticEvent(
+                            timestamp: now(),
+                            category: .runtime,
+                            severity: .info,
+                            code: .runtimeCapabilityValidated,
+                            message: "Contract B configuration capability validated",
+                            sourceID: bundle.sourceID,
+                            cacheKey: bundle.cacheKey,
+                            nodePID: process.processIdentifier,
+                            localPort: port
+                        )
+                    )
+                }
                 writer.write(
                     NodeDiagnosticEvent(
                         timestamp: now(),
                         category: .runtime,
                         severity: .info,
                         code: .runtimeReady,
-                        message: "Node runtime health check succeeded",
+                        message: launchPlan.contract == .service
+                            ? "Node runtime health check succeeded"
+                            : "Node runtime host capability check succeeded",
                         sourceID: bundle.sourceID,
                         cacheKey: bundle.cacheKey,
                         trustState: bundle.trustState.diagnosticState,
@@ -2067,7 +2197,11 @@ actor NodeBundleRuntimeService {
                         localPort: port
                     )
                 )
-                startHealthMonitor(generation: generation, baseURL: baseURL)
+                startHealthMonitor(
+                    generation: generation,
+                    baseURL: baseURL,
+                    readinessPolicy: launchPlan.readinessPolicy
+                )
                 return baseURL
             }
             try await Task.sleep(
@@ -2088,26 +2222,49 @@ actor NodeBundleRuntimeService {
                 cacheKey: bundle.cacheKey
             )
         )
+        if launchPlan.contract == .hostIntegrated {
+            throw NodeBundleRuntimeError.contractBReadinessFailed
+        }
         throw NodeBundleRuntimeError.nodeLaunchFailed("资源服务启动超时")
     }
 
-    private func isHealthy(_ baseURL: URL) async -> Bool {
+    private func isReady(
+        _ baseURL: URL,
+        policy: NodeRuntimeReadinessPolicy
+    ) async -> Bool {
         do {
+            let path: String
+            let maximumResponseBytes: Int
+            switch policy {
+            case .serviceHealthIdentity:
+                path = "health"
+                maximumResponseBytes = 1_024
+            case .hostIntegratedConfiguration:
+                path = "config"
+                maximumResponseBytes = Self.maximumConfigurationSize
+            }
             let response = try await localHTTPClient.send(
                 HTTPRequest(
-                    url: baseURL.appendingPathComponent("health"),
+                    url: baseURL.appendingPathComponent(path),
                     timeout: 2,
-                    maximumResponseBytes: 1_024,
+                    maximumResponseBytes: maximumResponseBytes,
                     maximumRedirects: 0,
                     retryPolicy: .none
                 )
             )
-            guard let object = try JSONSerialization.jsonObject(with: response.body)
-                as? [String: Any] else {
-                return false
+            switch policy {
+            case .serviceHealthIdentity:
+                guard let object = try JSONSerialization.jsonObject(with: response.body)
+                    as? [String: Any] else {
+                    return false
+                }
+                return object["ok"] as? Bool == true
+                    && object["name"] as? String == "CatVodSpiderios"
+            case .hostIntegratedConfiguration:
+                let normalized = try Self.normalizeConfiguration(response.body)
+                _ = try ConfigurationParser().parse(normalized)
+                return true
             }
-            return object["ok"] as? Bool == true
-                && object["name"] as? String == "CatVodSpiderios"
         } catch {
             return false
         }
@@ -2125,6 +2282,7 @@ actor NodeBundleRuntimeService {
         outputPipe = nil
         process = nil
         activeBundleCacheKey = nil
+        removeActiveContractArtifacts()
         serviceBaseURL = nil
         if let newStatus {
             publish(newStatus)
@@ -2152,6 +2310,7 @@ actor NodeBundleRuntimeService {
         outputPipe = nil
         process = nil
         activeBundleCacheKey = nil
+        removeActiveContractArtifacts()
         serviceBaseURL = nil
         healthMonitorTask?.cancel()
         healthMonitorTask = nil
@@ -2167,14 +2326,28 @@ actor NodeBundleRuntimeService {
         scheduleRestart(reason: detail)
     }
 
-    private func startHealthMonitor(generation: UUID, baseURL: URL) {
+    private func removeActiveContractArtifacts() {
+        for url in activeContractCleanupURLs {
+            try? FileManager.default.removeItem(at: url)
+        }
+        activeContractCleanupURLs = []
+    }
+
+    private func startHealthMonitor(
+        generation: UUID,
+        baseURL: URL,
+        readinessPolicy: NodeRuntimeReadinessPolicy
+    ) {
         healthMonitorTask?.cancel()
         healthMonitorTask = Task { [weak self] in
             var consecutiveFailures = 0
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 guard !Task.isCancelled, let self else { return }
-                let healthy = await self.isHealthy(baseURL)
+                let healthy = await self.isReady(
+                    baseURL,
+                    policy: readinessPolicy
+                )
                 if healthy {
                     consecutiveFailures = 0
                 } else {
@@ -2340,39 +2513,4 @@ actor NodeBundleRuntimeService {
         return Int(text[range])
     }
 
-    private static let launcherScript = #"""
-    'use strict';
-    const bundlePath = process.env.OKVIDEO_BUNDLE_PATH;
-    const parentPID = Number(process.env.OKVIDEO_PARENT_PID || 0);
-    let runtime = null;
-    let stopping = false;
-
-    async function shutdown(code) {
-      if (stopping) return;
-      stopping = true;
-      try {
-        if (runtime && typeof runtime.stop === 'function') await runtime.stop();
-      } catch (_) {}
-      process.exit(code);
-    }
-
-    process.on('SIGTERM', () => { void shutdown(0); });
-    process.on('SIGINT', () => { void shutdown(0); });
-    setInterval(() => {
-      if (!parentPID) return;
-      try { process.kill(parentPID, 0); }
-      catch (_) { void shutdown(0); }
-    }, 1000);
-
-    try {
-      runtime = require(bundlePath);
-      Promise.resolve(runtime.start()).catch((error) => {
-        console.error(error);
-        void shutdown(1);
-      });
-    } catch (error) {
-      console.error(error);
-      void shutdown(1);
-    }
-    """#
 }

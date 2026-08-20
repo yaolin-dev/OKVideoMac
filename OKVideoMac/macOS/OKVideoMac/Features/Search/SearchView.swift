@@ -10,30 +10,37 @@ struct SearchView: View {
     @State private var showingSearchScope = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            if let folder = state.currentSearchFolder {
-                SearchFolderBrowser(
-                    page: folder,
-                    path: state.searchFolderPath
-                )
-                .environmentObject(state)
-            } else if state.searchResults.isEmpty {
-                VStack(spacing: 12) {
-                    EmptyStateView(
-                        systemImage: "magnifyingglass",
-                        title: emptyStateTitle,
-                        message: emptyStateMessage
-                    )
-                    if !state.searchFailures.isEmpty {
-                        SearchFailureSummary(
-                            failures: state.searchFailures
+        Group {
+            if state.isPlayerPresented {
+                Color.clear
+                    .accessibilityHidden(true)
+            } else {
+                VStack(spacing: 0) {
+                    if let folder = state.currentSearchFolder {
+                        SearchFolderBrowser(
+                            page: folder,
+                            path: state.searchFolderPath
                         )
-                        .padding(.horizontal)
-                        .padding(.bottom)
+                        .environmentObject(state)
+                    } else if state.searchResults.isEmpty {
+                        VStack(spacing: 12) {
+                            EmptyStateView(
+                                systemImage: "magnifyingglass",
+                                title: emptyStateTitle,
+                                message: emptyStateMessage
+                            )
+                            if !state.searchFailures.isEmpty {
+                                SearchFailureSummary(
+                                    failures: state.searchFailures
+                                )
+                                .padding(.horizontal)
+                                .padding(.bottom)
+                            }
+                        }
+                    } else {
+                        searchResults
                     }
                 }
-            } else {
-                searchResults
             }
         }
         .navigationTitle("搜索结果")

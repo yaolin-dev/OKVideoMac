@@ -1,6 +1,59 @@
 import Foundation
 import OKVideoCore
 
+private actor NodeSiteInitializationGate {
+    private enum State {
+        case initializing([CheckedContinuation<Void, Error>])
+        case initialized
+    }
+
+    private var states: [String: State] = [:]
+
+    func ensureInitialized(
+        at baseURL: URL,
+        using operation: () async throws -> Void
+    ) async throws {
+        let endpointKey = baseURL.absoluteString
+        switch states[endpointKey] {
+        case .initialized:
+            return
+        case .initializing:
+            try await withCheckedThrowingContinuation { continuation in
+                guard case .initializing(var waiters) = states[endpointKey] else {
+                    continuation.resume()
+                    return
+                }
+                waiters.append(continuation)
+                states[endpointKey] = .initializing(waiters)
+            }
+            return
+        case nil:
+            states[endpointKey] = .initializing([])
+        }
+
+        do {
+            try await operation()
+            let waiters = waiters(for: endpointKey)
+            states[endpointKey] = .initialized
+            waiters.forEach { $0.resume() }
+        } catch {
+            let waiters = waiters(for: endpointKey)
+            states.removeValue(forKey: endpointKey)
+            waiters.forEach { $0.resume(throwing: error) }
+            throw error
+        }
+    }
+
+    private func waiters(
+        for endpointKey: String
+    ) -> [CheckedContinuation<Void, Error>] {
+        guard case .initializing(let waiters) = states[endpointKey] else {
+            return []
+        }
+        return waiters
+    }
+}
+
 struct NodeRuntimeUnavailableSiteProvider: SiteProvider {
     let site: SiteConfiguration
     let capability: SiteCapability = .javaScriptSpider
@@ -192,6 +245,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     private let httpClient: HTTPClient
     private let diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)?
     private let ensureRuntimeReady: (@Sendable () async throws -> URL)?
+    private let initializationGate = NodeSiteInitializationGate()
 
     var configurationWebsiteURL: URL {
         baseURL.appendingPathComponent("website")
@@ -559,6 +613,11 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         for attempt in 0..<attempts {
             do {
                 let readyBaseURL = try await runtimeBaseURL()
+                try await initializationGate.ensureInitialized(
+                    at: readyBaseURL
+                ) {
+                    try await initializeSite(at: readyBaseURL, headers: headers)
+                }
                 let apiURL = try ResourceResolver.resolve(
                     site.api,
                     relativeTo: readyBaseURL
@@ -640,6 +699,38 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             }
         }
         throw AppError.spider("Node 站点 \(site.name) 的 \(method) 请求失败")
+    }
+
+    private func initializeSite(
+        at readyBaseURL: URL,
+        headers: HTTPHeaders
+    ) async throws {
+        let apiURL = try ResourceResolver.resolve(
+            site.api,
+            relativeTo: readyBaseURL
+        )
+        let endpoint = apiURL.appendingPathComponent("init")
+        let response = try await httpClient.send(
+            HTTPRequest(
+                url: endpoint,
+                method: .post,
+                headers: headers,
+                body: Data("{}".utf8),
+                timeout: min(TimeInterval(site.timeout ?? 60), 15),
+                maximumResponseBytes: 1 * 1_024 * 1_024,
+                retryPolicy: .none,
+                allowsNonSuccessfulStatus: true
+            )
+        )
+        if (200...299).contains(response.statusCode)
+            || response.statusCode == 404
+            || response.statusCode == 405 {
+            return
+        }
+        let value = try? JSONDecoder().decode(JSONValue.self, from: response.body)
+        let message = value.flatMap(Self.serverMessage)
+            ?? "HTTP 状态码 \(response.statusCode)"
+        throw AppError.spider("\(site.name) init 失败：\(message)")
     }
 
     private var isConfigurationCenter: Bool {
