@@ -27,15 +27,21 @@ public final class StandardSiteProvider: SiteProvider {
 
     public func home() async throws -> SiteHome {
         let response = try await request(parameters: [:])
+        let summaries = UpstreamResponseDecoder.summaries(
+            from: response.videos,
+            site: site,
+            baseURL: configurationBaseURL
+        )
         return SiteHome(
             categories: filteredCategories(response.categories).filter {
+                $0.resolvedContentKind != .unsupported
+            },
+            recommendations: summaries.filter {
                 $0.resolvedContentKind == .media
             },
-            recommendations: UpstreamResponseDecoder.mediaSummaries(
-                from: response.videos,
-                site: site,
-                baseURL: configurationBaseURL
-            )
+            actionItems: summaries.filter {
+                $0.resolvedContentKind == .action
+            }.map(SiteActionItem.init(summary:))
         )
     }
 

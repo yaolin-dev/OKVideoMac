@@ -57,22 +57,38 @@ struct HomeView: View {
                 message: "当前 Mac 版本暂时无法运行这个站点，请从工具栏选择其他站点。"
             )
         } else if let home = state.siteHome {
-            if home.recommendations.isEmpty && home.categories.isEmpty {
+            if home.recommendations.isEmpty
+                && mediaCategories.isEmpty
+                && home.actionItems.isEmpty {
                 EmptyStateView(
                     systemImage: "tray",
-                    title: "站点没有返回内容",
+                    title: "站点没有返回可播放内容",
                     message: "可以刷新重试，或检查配置和站点状态。"
                 )
             } else {
                 GeometryReader { viewport in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 20) {
-                            if !home.categories.isEmpty {
+                            if !home.recommendations.isEmpty
+                                || !mediaCategories.isEmpty {
                                 Text("分类")
                                     .font(.title2)
                                 ScrollView(.horizontal, showsIndicators: false) {
                                     HStack {
-                                        ForEach(home.categories) { category in
+                                        if !home.recommendations.isEmpty {
+                                            Button("推荐") {
+                                                filterSelection = [:]
+                                                state.clearCategory()
+                                            }
+                                            .buttonStyle(
+                                                HomeCategoryButtonStyle(
+                                                    isSelected:
+                                                        state.homePresentationSelection
+                                                        == .recommendation
+                                                )
+                                            )
+                                        }
+                                        ForEach(mediaCategories) { category in
                                             Button(category.name) {
                                                 filterSelection = Dictionary(
                                                     uniqueKeysWithValues: category.filters.compactMap {
@@ -98,6 +114,28 @@ struct HomeView: View {
                                     }
                                     .padding(.horizontal, 4)
                                     .padding(.vertical, 8)
+                                }
+                            }
+                            if !home.actionItems.isEmpty {
+                                Text("功能")
+                                    .font(.title2)
+                                LazyVGrid(
+                                    columns: [
+                                        GridItem(
+                                            .adaptive(minimum: 240, maximum: 360),
+                                            spacing: 12
+                                        )
+                                    ],
+                                    alignment: .leading,
+                                    spacing: 12
+                                ) {
+                                    ForEach(home.actionItems) { item in
+                                        HomeActionCard(item: item) {
+                                            Task {
+                                                await state.performHomeAction(item)
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             if let category = selectedCategory {
@@ -134,23 +172,23 @@ struct HomeView: View {
                                 } else {
                                     ProgressView("正在加载分类…")
                                 }
-                            } else if !home.recommendations.isEmpty {
+                            } else if state.homePresentationSelection
+                                == .recommendation,
+                                !home.recommendations.isEmpty {
+                                Text("推荐")
+                                    .font(.title2)
                                 VideoGrid(items: home.recommendations) { summary in
                                     Task { await state.loadDetail(summary) }
                                 }
-                            } else if !home.categories.isEmpty {
-                                Label(
-                                    "从上方选择一个分类以加载内容",
-                                    systemImage: "rectangle.stack"
-                                )
-                                .foregroundColor(.secondary)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 40)
                             }
                         }
                         .padding()
                     }
                     .coordinateSpace(name: categoryScrollCoordinateSpace)
+                }
+                .onAppear(perform: synchronizeFilterSelection)
+                .onChange(of: state.selectedCategoryID) { _ in
+                    synchronizeFilterSelection()
                 }
             }
         } else if state.isHomeLoading || !state.hasCompletedStartup {
@@ -173,7 +211,17 @@ struct HomeView: View {
 
     private var selectedCategory: VideoCategory? {
         guard let id = state.selectedCategoryID else { return nil }
-        return state.siteHome?.categories.first { $0.id == id }
+        return mediaCategories.first { $0.id == id }
+    }
+
+    private var mediaCategories: [VideoCategory] {
+        state.siteHome?.categories.filter {
+            $0.resolvedContentKind == .media
+        } ?? []
+    }
+
+    private func synchronizeFilterSelection() {
+        filterSelection = state.selectedCategoryFilters
     }
 
     private func filterControls(_ category: VideoCategory) -> some View {
@@ -248,6 +296,11 @@ struct HomeToolbarView: View {
                         .accessibilityLabel("切换点播源")
                     }
 
+                    SourceSwitchFeedbackView(
+                        feedback: state.configurationSwitchFeedback,
+                        compact: true
+                    )
+
                     if !state.visibleSites.isEmpty {
                         Picker(
                             "站点",
@@ -314,6 +367,99 @@ struct HomeToolbarView: View {
             return
         }
         state.searchFromHome(keyword)
+    }
+}
+
+struct SourceSwitchFeedbackView: View {
+    let feedback: ConfigurationSwitchFeedback
+    var compact = false
+
+    var body: some View {
+        Group {
+            switch feedback {
+            case .idle:
+                EmptyView()
+            case .switching(_, let name):
+                HStack(spacing: 5) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("正在切换到 \(name)…")
+                }
+                .accessibilityLabel("正在切换到 \(name)")
+            case .success(_, let name):
+                Label("已切换到 \(name)", systemImage: "checkmark.circle.fill")
+                    .foregroundColor(.green)
+            case .failure(_, let name, let message):
+                if compact {
+                    Label(
+                        "切换 \(name) 失败",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .foregroundColor(.red)
+                    .help(message)
+                } else {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label(
+                            "切换 \(name) 失败",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .foregroundColor(.red)
+                        Text(message)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+        }
+        .font(.caption)
+        .lineLimit(1)
+        .frame(maxWidth: compact ? 190 : nil, alignment: .leading)
+    }
+}
+
+private struct HomeActionCard: View {
+    let item: SiteActionItem
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.title2)
+                    .foregroundColor(.accentColor)
+                    .frame(width: 34, height: 34)
+                    .background(Color.accentColor.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.title)
+                        .font(.headline)
+                        .foregroundColor(.primary)
+                    if let remarks = item.remarks,
+                       !remarks.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(remarks)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                    } else {
+                        Text("功能操作")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.secondary)
+            }
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("功能：\(item.title)")
     }
 }
 

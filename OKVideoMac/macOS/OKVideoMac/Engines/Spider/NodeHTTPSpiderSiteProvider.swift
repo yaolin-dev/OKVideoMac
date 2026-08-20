@@ -233,9 +233,19 @@ enum QuarkEpisodeReference {
 }
 
 final class NodeHTTPSpiderSiteProvider: SiteProvider {
+    private struct HostMessage: Decodable {
+        struct Options: Decodable {
+            let url: String
+        }
+
+        let action: String
+        let opt: Options
+    }
+
     private struct InvocationResult {
         let value: JSONValue
         let baseURL: URL
+        let hostMessage: HostMessage?
     }
 
     let site: SiteConfiguration
@@ -303,7 +313,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         let allowed = Set(site.categories)
         return SiteHome(
             categories: result.categories.filter { allowed.contains($0.name) },
-            recommendations: result.recommendations
+            recommendations: result.recommendations,
+            actionItems: result.actionItems
         )
     }
 
@@ -357,11 +368,16 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         let invocation = try await invoke(
             method: "detail",
             body: [
-                "id": .array([.string(id)]),
+                "id": .string(id),
                 "ids": .array([.string(id)])
             ],
             maximumAttempts: 2
         )
+        if let hostMessage = invocation.hostMessage {
+            throw try webAuthorizationRequired(
+                hostMessage: hostMessage
+            )
+        }
         return try SpiderResponseMapper.selection(
             invocation.value,
             site: site,
@@ -571,10 +587,16 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     }
 
     func action(_ action: String) async throws -> JSONValue {
-        return try await invoke(
+        let invocation = try await invoke(
             method: "action",
             body: ["action": .string(action)]
-        ).value
+        )
+        if let hostMessage = invocation.hostMessage {
+            throw try webAuthorizationRequired(
+                hostMessage: hostMessage
+            )
+        }
+        return invocation.value
     }
 
     private func invoke(
@@ -631,7 +653,10 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 guard !(200...299).contains(response.statusCode) else {
                     return InvocationResult(
                         value: value,
-                        baseURL: readyBaseURL
+                        baseURL: readyBaseURL,
+                        hostMessage: Self.decodeHostMessage(
+                            response.headers["X-OKVideo-Host-Message"]
+                        )
                     )
                 }
                 let message = Self.serverMessage(from: value)
@@ -719,6 +744,35 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             title: site.name.replacingOccurrences(of: "|", with: " "),
             message: message
         )
+    }
+
+    private func webAuthorizationRequired(
+        hostMessage: HostMessage
+    ) throws -> NodeWebAuthorizationRequired {
+        guard hostMessage.action == "openInternalWebview",
+              let url = URL(string: hostMessage.opt.url),
+              url.scheme?.lowercased() == "http",
+              ["127.0.0.1", "localhost", "::1"].contains(
+                url.host?.lowercased() ?? ""
+              ),
+              url.port != nil else {
+            throw AppError.spider("Node 站点请求了不受支持的宿主操作")
+        }
+        return NodeWebAuthorizationRequired(
+            websiteURL: url,
+            title: site.name.replacingOccurrences(of: "|", with: " "),
+            message: "请在内置页面中完成此功能。"
+        )
+    }
+
+    private static func decodeHostMessage(_ encoded: String?) -> HostMessage? {
+        guard let encoded,
+              encoded.utf8.count <= 8 * 1_024,
+              let data = Data(base64Encoded: encoded),
+              data.count <= 4 * 1_024 else {
+            return nil
+        }
+        return try? JSONDecoder().decode(HostMessage.self, from: data)
     }
 
     private func retryDelay(after attempt: Int) async throws {

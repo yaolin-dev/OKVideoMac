@@ -158,6 +158,12 @@ struct ConfigurationView: View {
 
             Divider()
 
+            SourceSwitchFeedbackView(
+                feedback: state.configurationSwitchFeedback
+            )
+            .padding(.horizontal)
+            .padding(.top, 8)
+
             if state.configurations.isEmpty {
                 EmptyStateView(
                     systemImage: "doc.badge.plus",
@@ -182,6 +188,11 @@ struct ConfigurationView: View {
 
     @ViewBuilder
     private var embeddedContent: some View {
+        SourceSwitchFeedbackView(
+            feedback: state.configurationSwitchFeedback
+        )
+        .padding(.bottom, 4)
+
         SettingsSectionTitle("导入与更新")
         SettingsCard {
             SettingsControlRow(

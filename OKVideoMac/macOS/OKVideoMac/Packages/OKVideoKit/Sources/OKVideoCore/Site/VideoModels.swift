@@ -107,6 +107,64 @@ public struct VideoSummary: Codable, Equatable, Hashable, Identifiable, Sendable
     }
 }
 
+/// A structural home operation. It is intentionally separate from
+/// `VideoSummary` so presentation cannot accidentally send it through movie
+/// detail or playback UI.
+public struct SiteActionItem: Codable, Equatable, Hashable, Identifiable, Sendable {
+    public var id: String { "\(siteKey)::action::\(itemID)" }
+    public var siteKey: String
+    public var siteName: String
+    public var itemID: String
+    public var title: String
+    public var remarks: String?
+    public var tag: String?
+    public var action: String?
+
+    public init(
+        siteKey: String,
+        siteName: String,
+        itemID: String,
+        title: String,
+        remarks: String? = nil,
+        tag: String? = nil,
+        action: String? = nil
+    ) {
+        self.siteKey = siteKey
+        self.siteName = siteName
+        self.itemID = itemID
+        self.title = title
+        self.remarks = remarks
+        self.tag = tag
+        self.action = action
+    }
+
+    public init(summary: VideoSummary) {
+        self.init(
+            siteKey: summary.siteKey,
+            siteName: summary.siteName,
+            itemID: summary.videoID,
+            title: summary.title,
+            remarks: summary.remarks,
+            tag: summary.tag,
+            action: summary.action
+        )
+    }
+
+    /// Compatibility adapter for existing provider detail/action selection.
+    public var selectionSummary: VideoSummary {
+        VideoSummary(
+            siteKey: siteKey,
+            siteName: siteName,
+            videoID: itemID,
+            title: title,
+            remarks: remarks,
+            tag: tag,
+            action: action,
+            contentKind: .action
+        )
+    }
+}
+
 public struct VideoDetail: Codable, Equatable, Sendable {
     public var summary: VideoSummary
     public var area: String?
@@ -190,10 +248,43 @@ public struct VideoPage: Equatable, Sendable {
 public struct SiteHome: Codable, Equatable, Sendable {
     public var categories: [VideoCategory]
     public var recommendations: [VideoSummary]
+    public var actionItems: [SiteActionItem]
 
-    public init(categories: [VideoCategory], recommendations: [VideoSummary]) {
+    public init(
+        categories: [VideoCategory],
+        recommendations: [VideoSummary],
+        actionItems: [SiteActionItem] = []
+    ) {
         self.categories = categories
         self.recommendations = recommendations
+        self.actionItems = actionItems
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case categories
+        case recommendations
+        case actionItems
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        categories = try values.decode([VideoCategory].self, forKey: .categories)
+        recommendations = try values.decode(
+            [VideoSummary].self,
+            forKey: .recommendations
+        )
+        // Existing persisted home snapshots predate action presentation.
+        actionItems = try values.decodeIfPresent(
+            [SiteActionItem].self,
+            forKey: .actionItems
+        ) ?? []
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(categories, forKey: .categories)
+        try values.encode(recommendations, forKey: .recommendations)
+        try values.encode(actionItems, forKey: .actionItems)
     }
 }
 
@@ -261,6 +352,7 @@ public protocol SiteProvider {
     ) async throws -> VideoPage
     func select(id: String) async throws -> SiteSelectionResult
     func select(summary: VideoSummary) async throws -> SiteSelectionResult
+    func select(action item: SiteActionItem) async throws -> SiteSelectionResult
     func detail(id: String) async throws -> VideoDetail
     func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult
@@ -270,6 +362,10 @@ public protocol SiteProvider {
 public extension SiteProvider {
     func select(summary: VideoSummary) async throws -> SiteSelectionResult {
         try await select(id: summary.videoID)
+    }
+
+    func select(action item: SiteActionItem) async throws -> SiteSelectionResult {
+        try await select(summary: item.selectionSummary)
     }
 
     func select(id: String) async throws -> SiteSelectionResult {

@@ -294,6 +294,76 @@ enum HomeLoadResultPolicy {
     }
 }
 
+enum HomePresentationSelection: Equatable, Sendable {
+    case recommendation
+    case category(String)
+    case actions
+    case empty
+}
+
+enum HomePresentationPolicy {
+    static func selection(
+        for home: SiteHome,
+        preserving selectedCategoryID: String?
+    ) -> HomePresentationSelection {
+        let mediaCategories = home.categories.filter {
+            $0.resolvedContentKind == .media
+        }
+        if let selectedCategoryID,
+           mediaCategories.contains(where: { $0.id == selectedCategoryID }) {
+            return .category(selectedCategoryID)
+        }
+        if !home.recommendations.isEmpty {
+            return .recommendation
+        }
+        if let category = mediaCategories.first {
+            return .category(category.id)
+        }
+        if !home.actionItems.isEmpty || firstActionCategory(in: home) != nil {
+            return .actions
+        }
+        return .empty
+    }
+
+    static func firstActionCategory(in home: SiteHome) -> VideoCategory? {
+        home.categories.first { $0.resolvedContentKind == .action }
+    }
+
+    static func actionItems(
+        from page: VideoPage,
+        inheritedFrom category: VideoCategory
+    ) -> [SiteActionItem] {
+        guard category.resolvedContentKind == .action else { return [] }
+        return page.items.compactMap { summary in
+            guard summary.resolvedContentKind != .unsupported else { return nil }
+            return SiteActionItem(summary: summary)
+        }
+    }
+
+    static func defaultFilters(for category: VideoCategory) -> [String: String] {
+        Dictionary(
+            uniqueKeysWithValues: category.filters.compactMap { filter in
+                filter.options.first.map { (filter.id, $0.value) }
+            }
+        )
+    }
+}
+
+enum CategoryLoadResultPolicy {
+    static func shouldAccept(
+        requestSessionID: UUID,
+        currentSessionID: UUID,
+        requestedSiteKey: String,
+        currentSiteKey: String?,
+        requestedIdentity: HomeContentIdentity,
+        currentIdentity: HomeContentIdentity?
+    ) -> Bool {
+        requestSessionID == currentSessionID
+            && requestedSiteKey == currentSiteKey
+            && requestedIdentity == currentIdentity
+    }
+}
+
 enum HomeAutomaticRefreshPolicy {
     static func allowsRefresh(
         hasCompletedStartup: Bool,
@@ -516,6 +586,12 @@ private enum PendingNodeOperation {
 
 private enum AppStateTiming {
     static let automaticConfigurationRefreshInterval: TimeInterval = 30 * 60
+}
+
+private enum HomePreparationLoadBehavior: Equatable {
+    case none
+    case background
+    case awaited
 }
 
 private enum LiveSettingsKey {
@@ -795,6 +871,60 @@ struct ConfigurationActivationToken: Equatable, Sendable {
     let configurationID: UUID
 }
 
+enum ConfigurationSwitchFeedback: Equatable, Sendable {
+    case idle
+    case switching(ConfigurationActivationToken, targetName: String)
+    case success(ConfigurationActivationToken, targetName: String)
+    case failure(
+        ConfigurationActivationToken,
+        targetName: String,
+        message: String
+    )
+
+    var targetName: String? {
+        switch self {
+        case .idle:
+            return nil
+        case .switching(_, let name), .success(_, let name):
+            return name
+        case .failure(_, let name, _):
+            return name
+        }
+    }
+}
+
+enum ConfigurationSwitchFeedbackPolicy {
+    static func switching(
+        token: ConfigurationActivationToken,
+        targetName: String
+    ) -> ConfigurationSwitchFeedback {
+        .switching(token, targetName: targetName)
+    }
+
+    static func success(
+        current: ConfigurationSwitchFeedback,
+        token: ConfigurationActivationToken,
+        targetName: String,
+        ownsCurrentRequest: Bool
+    ) -> ConfigurationSwitchFeedback {
+        ownsCurrentRequest
+            ? .success(token, targetName: targetName)
+            : current
+    }
+
+    static func failure(
+        current: ConfigurationSwitchFeedback,
+        token: ConfigurationActivationToken,
+        targetName: String,
+        message: String,
+        ownsCurrentRequest: Bool
+    ) -> ConfigurationSwitchFeedback {
+        ownsCurrentRequest
+            ? .failure(token, targetName: targetName, message: message)
+            : current
+    }
+}
+
 struct ConfigurationActivationRequestTracker: Sendable {
     private(set) var generation: UInt64 = 0
     private(set) var requestedConfigurationID: UUID?
@@ -856,13 +986,18 @@ final class AppState: ObservableObject {
     @Published private(set) var activeConfigurationRecord: StoredConfiguration?
     @Published private(set) var activeConfiguration: FongMiConfiguration?
     @Published private(set) var requestedConfigurationID: UUID?
+    @Published private(set) var configurationSwitchFeedback:
+        ConfigurationSwitchFeedback = .idle
     @Published private(set) var selectedSiteKey: String?
     @Published private(set) var siteHome: SiteHome?
     @Published private(set) var isHomeLoading = false
     @Published private(set) var homeLoadErrorMessage: String?
     @Published private(set) var hasCompletedStartup = false
     @Published private(set) var selectedCategoryID: String?
+    @Published private(set) var selectedCategoryFilters: [String: String] = [:]
     @Published private(set) var categoryPage: VideoPage?
+    @Published private(set) var homePresentationSelection:
+        HomePresentationSelection = .empty
     @Published var searchKeyword = ""
     @Published private(set) var searchResults: [VideoSummary] = []
     @Published private(set) var searchClusters: [SearchResultCluster] = []
@@ -1044,7 +1179,7 @@ final class AppState: ObservableObject {
             try await loadSettings()
             await prepareActiveConfigurationHome(
                 reportLoadErrors: false,
-                loadInBackground: false
+                loadBehavior: .none
             )
             try await reloadUserData()
             startPlayerEventLoop()
@@ -1303,7 +1438,9 @@ final class AppState: ObservableObject {
                     for: self.currentHomeContentIdentity
                 )
                 self.selectedCategoryID = nil
+                self.selectedCategoryFilters = [:]
                 self.categoryPage = nil
+                self.homePresentationSelection = .empty
                 self.categoryPaginationError = nil
                 return true
             } catch {
@@ -1350,6 +1487,10 @@ final class AppState: ObservableObject {
 
         let token = configurationActivationTracker.begin(id)
         requestedConfigurationID = id
+        configurationSwitchFeedback = ConfigurationSwitchFeedbackPolicy.switching(
+            token: token,
+            targetName: record.name
+        )
         configurationActivationTask?.cancel()
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -1402,19 +1543,41 @@ final class AppState: ObservableObject {
             }
             await loadSearchSiteScope()
             try ensureConfigurationActivationIsCurrent(token)
-            await prepareActiveConfigurationHome()
+            let didPrepareHome = await prepareActiveConfigurationHome(
+                reportLoadErrors: false,
+                loadBehavior: .awaited
+            )
+            guard didPrepareHome else {
+                throw AppError.site(
+                    homeLoadErrorMessage ?? "首页内容初始化失败"
+                )
+            }
             try ensureConfigurationActivationIsCurrent(token)
             try await reloadHistory()
             try ensureConfigurationActivationIsCurrent(token)
+            configurationSwitchFeedback = ConfigurationSwitchFeedbackPolicy.success(
+                current: configurationSwitchFeedback,
+                token: token,
+                targetName: record.name,
+                ownsCurrentRequest: configurationActivationTracker.owns(token)
+            )
         } catch {
+            let ownsCurrentRequest = configurationActivationTracker.owns(token)
             guard ConfigurationActivationErrorPolicy.shouldPresent(
                 error,
-                ownsCurrentRequest: configurationActivationTracker.owns(token)
+                ownsCurrentRequest: ownsCurrentRequest
             ) else {
                 // A newer source selection owns the UI and any eventual error.
                 return
             }
-            show(error, title: "切换配置失败")
+            let presentation = userFacingError(for: error, title: "切换配置失败")
+            configurationSwitchFeedback = ConfigurationSwitchFeedbackPolicy.failure(
+                current: configurationSwitchFeedback,
+                token: token,
+                targetName: record.name,
+                message: presentation.message,
+                ownsCurrentRequest: ownsCurrentRequest
+            )
         }
     }
 
@@ -1488,7 +1651,9 @@ final class AppState: ObservableObject {
         rebuildProviders()
         selectedSiteKey = supportedSites.first?.key
         selectedCategoryID = nil
+        selectedCategoryFilters = [:]
         categoryPage = nil
+        homePresentationSelection = .empty
         categoryPaginationError = nil
         discardHomeContentIfNeeded(for: currentHomeContentIdentity)
     }
@@ -1526,18 +1691,29 @@ final class AppState: ObservableObject {
         selectedSiteKey = key
         discardHomeContentIfNeeded(for: currentHomeContentIdentity)
         selectedCategoryID = nil
+        selectedCategoryFilters = [:]
         categoryPage = nil
+        homePresentationSelection = .empty
         await persistSelectedSitePreference(key)
         await restoreCachedSiteHome()
         await loadSelectedSiteHome()
     }
 
+    @discardableResult
     func loadCategory(
         id: String,
         page: Int = 1,
-        filters: [String: String] = [:]
-    ) async {
-        guard let key = selectedSiteKey, let provider = providers[key] else { return }
+        filters: [String: String] = [:],
+        reportErrors: Bool = true
+    ) async -> Bool {
+        guard let key = selectedSiteKey,
+              let provider = providers[key],
+              let contentIdentity = currentHomeContentIdentity,
+              siteHome?.categories.contains(where: {
+                  $0.id == id && $0.resolvedContentKind == .media
+              }) == true else {
+            return false
+        }
         let sessionID: UUID
         let loadingNextPage = page > 1
         if loadingNextPage {
@@ -1545,7 +1721,7 @@ final class AppState: ObservableObject {
                   selectedCategoryID == id,
                   categoryPage?.pagination.page == page - 1,
                   categoryPage?.pagination.hasMore == true else {
-                return
+                return false
             }
             sessionID = categoryLoadSessionID
             isLoadingNextCategoryPage = true
@@ -1554,21 +1730,32 @@ final class AppState: ObservableObject {
             categoryLoadSessionID = UUID()
             sessionID = categoryLoadSessionID
             selectedCategoryID = id
+            selectedCategoryFilters = filters
             categoryPage = nil
+            homePresentationSelection = .category(id)
             isLoadingNextCategoryPage = false
             categoryPaginationError = nil
             isLoading = true
         }
         defer {
-            if loadingNextPage {
-                isLoadingNextCategoryPage = false
-            } else {
-                isLoading = false
+            if categoryLoadSessionID == sessionID {
+                if loadingNextPage {
+                    isLoadingNextCategoryPage = false
+                } else {
+                    isLoading = false
+                }
             }
         }
         do {
             let loaded = try await provider.category(id: id, page: page, filters: filters)
-            guard categoryLoadSessionID == sessionID else { return }
+            guard CategoryLoadResultPolicy.shouldAccept(
+                requestSessionID: sessionID,
+                currentSessionID: categoryLoadSessionID,
+                requestedSiteKey: key,
+                currentSiteKey: selectedSiteKey,
+                requestedIdentity: contentIdentity,
+                currentIdentity: currentHomeContentIdentity
+            ) else { return false }
             selectedCategoryID = id
             categoryPage = VideoPageMerger.merge(
                 current: page > 1 ? categoryPage : nil,
@@ -1576,8 +1763,19 @@ final class AppState: ObservableObject {
                 requestedPage: page
             )
             categoryPaginationError = nil
+            return true
         } catch let authorization as NodeWebAuthorizationRequired {
-            guard categoryLoadSessionID == sessionID else { return }
+            guard CategoryLoadResultPolicy.shouldAccept(
+                requestSessionID: sessionID,
+                currentSessionID: categoryLoadSessionID,
+                requestedSiteKey: key,
+                currentSiteKey: selectedSiteKey,
+                requestedIdentity: contentIdentity,
+                currentIdentity: currentHomeContentIdentity
+            ) else { return false }
+            if !loadingNextPage {
+                homeLoadErrorMessage = authorization.localizedDescription
+            }
             presentNodeConfiguration(
                 authorization,
                 pending: .category(
@@ -1587,13 +1785,25 @@ final class AppState: ObservableObject {
                     filters: filters
                 )
             )
+            return false
         } catch {
-            guard categoryLoadSessionID == sessionID else { return }
+            guard CategoryLoadResultPolicy.shouldAccept(
+                requestSessionID: sessionID,
+                currentSessionID: categoryLoadSessionID,
+                requestedSiteKey: key,
+                currentSiteKey: selectedSiteKey,
+                requestedIdentity: contentIdentity,
+                currentIdentity: currentHomeContentIdentity
+            ) else { return false }
             if loadingNextPage {
                 categoryPaginationError = error.localizedDescription
             } else {
-                show(error, title: "分类加载失败")
+                homeLoadErrorMessage = error.localizedDescription
+                if reportErrors {
+                    show(error, title: "分类加载失败")
+                }
             }
+            return false
         }
     }
 
@@ -1602,13 +1812,108 @@ final class AppState: ObservableObject {
         isLoadingNextCategoryPage = false
         categoryPaginationError = nil
         selectedCategoryID = nil
+        selectedCategoryFilters = [:]
         categoryPage = nil
+        homePresentationSelection = siteHome.map {
+            HomePresentationPolicy.selection(for: $0, preserving: nil)
+        } ?? .empty
     }
 
+    @discardableResult
+    private func loadActionCategory(
+        id: String,
+        filters: [String: String],
+        reportErrors: Bool
+    ) async -> Bool {
+        guard let key = selectedSiteKey,
+              let provider = providers[key],
+              let contentIdentity = currentHomeContentIdentity,
+              let actionCategory = siteHome?.categories.first(where: {
+                  $0.id == id && $0.resolvedContentKind == .action
+              }) else {
+            return false
+        }
+        categoryLoadSessionID = UUID()
+        let sessionID = categoryLoadSessionID
+        selectedCategoryID = nil
+        selectedCategoryFilters = [:]
+        categoryPage = nil
+        homePresentationSelection = .actions
+        isLoadingNextCategoryPage = false
+        categoryPaginationError = nil
+        isLoading = true
+        defer {
+            if categoryLoadSessionID == sessionID {
+                isLoading = false
+            }
+        }
+        do {
+            let loaded = try await provider.category(
+                id: id,
+                page: 1,
+                filters: filters
+            )
+            guard CategoryLoadResultPolicy.shouldAccept(
+                requestSessionID: sessionID,
+                currentSessionID: categoryLoadSessionID,
+                requestedSiteKey: key,
+                currentSiteKey: selectedSiteKey,
+                requestedIdentity: contentIdentity,
+                currentIdentity: currentHomeContentIdentity
+            ), var updatedHome = siteHome,
+              homeContentIdentity == contentIdentity else {
+                return false
+            }
+            updatedHome.actionItems = HomePresentationPolicy.actionItems(
+                from: loaded,
+                inheritedFrom: actionCategory
+            )
+            publishHomeContent(updatedHome, identity: contentIdentity)
+            await cacheSiteHome(updatedHome, identity: contentIdentity)
+            homeLoadErrorMessage = nil
+            return true
+        } catch let authorization as NodeWebAuthorizationRequired {
+            guard CategoryLoadResultPolicy.shouldAccept(
+                requestSessionID: sessionID,
+                currentSessionID: categoryLoadSessionID,
+                requestedSiteKey: key,
+                currentSiteKey: selectedSiteKey,
+                requestedIdentity: contentIdentity,
+                currentIdentity: currentHomeContentIdentity
+            ) else { return false }
+            homeLoadErrorMessage = authorization.localizedDescription
+            presentNodeConfiguration(
+                authorization,
+                pending: .category(
+                    siteKey: key,
+                    id: id,
+                    page: 1,
+                    filters: filters
+                )
+            )
+            return false
+        } catch {
+            guard CategoryLoadResultPolicy.shouldAccept(
+                requestSessionID: sessionID,
+                currentSessionID: categoryLoadSessionID,
+                requestedSiteKey: key,
+                currentSiteKey: selectedSiteKey,
+                requestedIdentity: contentIdentity,
+                currentIdentity: currentHomeContentIdentity
+            ) else { return false }
+            homeLoadErrorMessage = error.localizedDescription
+            if reportErrors {
+                show(error, title: "功能内容加载失败")
+            }
+            return false
+        }
+    }
+
+    @discardableResult
     func loadSelectedSiteHome(
         refreshConfigurationIfNeeded: Bool = true,
         reportErrors: Bool = true
-    ) async {
+    ) async -> Bool {
         if refreshConfigurationIfNeeded {
             _ = await refreshActiveConfigurationIfNeeded()
         }
@@ -1617,7 +1922,7 @@ final class AppState: ObservableObject {
               provider.capability != .unsupportedSpider,
               let contentIdentity = currentHomeContentIdentity else {
             isHomeLoading = false
-            return
+            return selectedSiteKey == nil
         }
         homeLoadSessionID = UUID()
         let sessionID = homeLoadSessionID
@@ -1637,17 +1942,25 @@ final class AppState: ObservableObject {
                 requestedIdentity: contentIdentity,
                 currentIdentity: currentHomeContentIdentity
             ) else {
-                return
+                return false
             }
             publishHomeContent(loaded, identity: contentIdentity)
             homeLoadErrorMessage = nil
-            await cacheSiteHome(loaded, siteKey: key)
+            await cacheSiteHome(loaded, identity: contentIdentity)
+            let didApplyPresentation = await applyHomePresentation(
+                loaded,
+                identity: contentIdentity,
+                reportCategoryErrors: reportErrors
+            )
+            guard didApplyPresentation else { return false }
+            return true
         } catch {
-            guard homeLoadSessionID == sessionID else { return }
+            guard homeLoadSessionID == sessionID else { return false }
             homeLoadErrorMessage = error.localizedDescription
             if reportErrors {
                 show(error, title: "站点加载失败")
             }
+            return false
         }
     }
 
@@ -1678,6 +1991,10 @@ final class AppState: ObservableObject {
     }
 
     func loadDetail(_ summary: VideoSummary) async {
+        if summary.resolvedContentKind == .action {
+            await performHomeAction(SiteActionItem(summary: summary))
+            return
+        }
         if summary.isFolder {
             openSearchFolder(summary, replacingPath: true)
             return
@@ -1749,6 +2066,58 @@ final class AppState: ObservableObject {
             guard detailLoadSessionID == sessionID else { return }
             pendingDetailSummary = nil
             show(error, title: "详情加载失败")
+        }
+    }
+
+    func performHomeAction(_ item: SiteActionItem) async {
+        guard let provider = providers[item.siteKey] else {
+            show(
+                AppError.site("该功能所属站点当前不可用"),
+                title: item.title
+            )
+            return
+        }
+        if let action = item.action?.nonEmpty {
+            await performSiteAction(
+                action,
+                title: item.title,
+                provider: provider
+            )
+            return
+        }
+
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            switch try await provider.select(action: item) {
+            case .detail:
+                presentedError = UserFacingError(
+                    title: item.title,
+                    message: "该入口是功能操作，未作为影视详情打开。"
+                )
+            case .action(let result):
+                if Self.shouldWaitForCloudAuthorization(
+                    capability: provider.capability
+                ), let authorization = await waitForCloudAuthorization() {
+                    await presentCloudAuthorization(authorization, pending: nil)
+                } else {
+                    presentedError = UserFacingError(
+                        title: item.title,
+                        message: Self.siteActionMessage(result)
+                            ?? (Self.shouldWaitForCloudAuthorization(
+                                capability: provider.capability
+                            )
+                                ? Self.unconfirmedSiteActionMessage
+                                : Self.unsupportedSiteActionMessage)
+                    )
+                }
+            }
+        } catch let authorization as NodeWebAuthorizationRequired {
+            presentNodeConfiguration(authorization, pending: nil)
+        } catch let authorization as AndroidBridgeUIRequired {
+            await presentCloudAuthorization(authorization.state, pending: nil)
+        } catch {
+            show(error, title: "\(item.title)失败")
         }
     }
 
@@ -1831,7 +2200,7 @@ final class AppState: ObservableObject {
             let message = Self.siteActionMessage(result)
                 ?? (provider.capability == .javaDexSpider
                     ? Self.unconfirmedSiteActionMessage
-                    : "操作已完成。")
+                    : Self.unsupportedSiteActionMessage)
             presentedError = UserFacingError(title: title, message: message)
         } catch let authorization as NodeWebAuthorizationRequired {
             presentNodeConfiguration(authorization, pending: nil)
@@ -2136,6 +2505,9 @@ final class AppState: ObservableObject {
 
     static let unconfirmedSiteActionMessage =
         "未检测到网盘设置或授权界面，当前操作尚未完成。请稍后重试。"
+
+    static let unsupportedSiteActionMessage =
+        "站点未提供可执行的宿主操作，当前功能尚未完成。"
 
     static func shouldWaitForCloudAuthorization(
         capability: SiteCapability
@@ -3773,6 +4145,7 @@ final class AppState: ObservableObject {
         configurationActivationTask?.cancel()
         configurationActivationTask = nil
         requestedConfigurationID = nil
+        configurationSwitchFeedback = .idle
 
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -5274,31 +5647,44 @@ final class AppState: ObservableObject {
         selectedSiteKey = preferredKey
     }
 
+    @discardableResult
     private func prepareActiveConfigurationHome(
         reportLoadErrors: Bool = true,
-        loadInBackground: Bool = true
-    ) async {
+        loadBehavior: HomePreparationLoadBehavior = .background
+    ) async -> Bool {
         homeLoadSessionID = UUID()
         categoryLoadSessionID = UUID()
         selectedCategoryID = nil
+        selectedCategoryFilters = [:]
         categoryPage = nil
+        homePresentationSelection = .empty
         categoryPaginationError = nil
         homeLoadErrorMessage = nil
         await restoreSelectedSitePreference()
         discardHomeContentIfNeeded(for: currentHomeContentIdentity)
-        await restoreCachedSiteHome()
-        guard loadInBackground else {
+        await restoreCachedSiteHome(loadsCategoryContent: false)
+        guard loadBehavior != .none else {
             isHomeLoading = false
-            return
+            return true
         }
         guard let key = selectedSiteKey,
               siteCapability(for: key) != .unsupportedSpider else {
             isHomeLoading = false
-            return
+            return true
         }
-        isHomeLoading = true
-        Task { [weak self] in
-            await self?.loadSelectedSiteHome(
+        switch loadBehavior {
+        case .none:
+            return true
+        case .background:
+            isHomeLoading = true
+            Task { [weak self] in
+                await self?.loadSelectedSiteHome(
+                    reportErrors: reportLoadErrors
+                )
+            }
+            return true
+        case .awaited:
+            return await loadSelectedSiteHome(
                 reportErrors: reportLoadErrors
             )
         }
@@ -5313,7 +5699,9 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func restoreCachedSiteHome() async {
+    private func restoreCachedSiteHome(
+        loadsCategoryContent: Bool = false
+    ) async {
         guard let environment,
               let configurationID = activeConfigurationRecord?.id,
               let siteKey = selectedSiteKey,
@@ -5330,6 +5718,11 @@ final class AppState: ObservableObject {
             return
         }
         publishHomeContent(cached, identity: contentIdentity)
+        _ = await applyHomePresentation(
+            cached,
+            identity: contentIdentity,
+            loadsCategoryContent: loadsCategoryContent
+        )
     }
 
     private var currentHomeContentIdentity: HomeContentIdentity? {
@@ -5370,15 +5763,90 @@ final class AppState: ObservableObject {
         siteHome = home
     }
 
-    private func cacheSiteHome(_ home: SiteHome, siteKey: String) async {
+    private func applyHomePresentation(
+        _ home: SiteHome,
+        identity: HomeContentIdentity,
+        loadsCategoryContent: Bool = true,
+        reportCategoryErrors: Bool = true
+    ) async -> Bool {
+        guard currentHomeContentIdentity == identity,
+              homeContentIdentity == identity else {
+            return false
+        }
+        let selection = HomePresentationPolicy.selection(
+            for: home,
+            preserving: selectedCategoryID
+        )
+        homePresentationSelection = selection
+        switch selection {
+        case .recommendation:
+            clearCategory()
+            return true
+        case .category(let id):
+            guard let category = home.categories.first(where: {
+                $0.id == id && $0.resolvedContentKind == .media
+            }) else { return false }
+            let filters = selectedCategoryID == id
+                ? selectedCategoryFilters
+                : HomePresentationPolicy.defaultFilters(for: category)
+            if loadsCategoryContent {
+                return await loadCategory(
+                    id: id,
+                    filters: filters,
+                    reportErrors: reportCategoryErrors
+                )
+            } else {
+                categoryLoadSessionID = UUID()
+                isLoadingNextCategoryPage = false
+                categoryPaginationError = nil
+                selectedCategoryID = id
+                selectedCategoryFilters = filters
+                categoryPage = nil
+                return true
+            }
+        case .actions:
+            categoryLoadSessionID = UUID()
+            isLoadingNextCategoryPage = false
+            categoryPaginationError = nil
+            selectedCategoryID = nil
+            selectedCategoryFilters = [:]
+            categoryPage = nil
+            guard home.actionItems.isEmpty,
+                  let actionCategory = HomePresentationPolicy.firstActionCategory(
+                    in: home
+                  ) else {
+                return true
+            }
+            guard loadsCategoryContent else { return true }
+            return await loadActionCategory(
+                id: actionCategory.id,
+                filters: HomePresentationPolicy.defaultFilters(
+                    for: actionCategory
+                ),
+                reportErrors: reportCategoryErrors
+            )
+        case .empty:
+            categoryLoadSessionID = UUID()
+            isLoadingNextCategoryPage = false
+            categoryPaginationError = nil
+            selectedCategoryID = nil
+            selectedCategoryFilters = [:]
+            categoryPage = nil
+            return true
+        }
+    }
+
+    private func cacheSiteHome(
+        _ home: SiteHome,
+        identity: HomeContentIdentity
+    ) async {
         guard let environment,
-              let configurationID = activeConfigurationRecord?.id,
               let data = try? JSONEncoder().encode(home) else { return }
         try? await environment.database.setSetting(
             .string(data.base64EncodedString()),
             forKey: homeCacheSettingKey(
-                configurationID: configurationID,
-                siteKey: siteKey
+                configurationID: identity.configurationID,
+                siteKey: identity.siteKey
             )
         )
     }

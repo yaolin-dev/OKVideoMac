@@ -576,7 +576,8 @@ struct PlayerView: View {
                 .shadow(color: .black.opacity(0.82), radius: 4, y: 1)
 
             HStack(spacing: 12) {
-                if state.playbackResolutionState != .playing {
+                if state.playbackResolutionState != .playing,
+                   !shouldShowStatusOverlay {
                     statusPill
                         .layoutPriority(1)
                 }

@@ -484,16 +484,25 @@ public enum SpiderResponseMapper {
             }
                 ? .action
                 : nil
+        let summaries = UpstreamResponseDecoder.summaries(
+            from: recommendationResponse.videos,
+            site: site,
+            baseURL: baseURL,
+            inheritedContentKind: inheritedKind
+        )
         return SiteHome(
+            // Preserve structural category semantics. Presentation decides
+            // which categories are media navigation and never sends action
+            // categories through the category/movie path.
             categories: home.categories.filter {
+                $0.resolvedContentKind != .unsupported
+            },
+            recommendations: summaries.filter {
                 $0.resolvedContentKind == .media
             },
-            recommendations: UpstreamResponseDecoder.mediaSummaries(
-                from: recommendationResponse.videos,
-                site: site,
-                baseURL: baseURL,
-                inheritedContentKind: inheritedKind
-            )
+            actionItems: summaries.filter {
+                $0.resolvedContentKind == .action
+            }.map(SiteActionItem.init(summary:))
         )
     }
 

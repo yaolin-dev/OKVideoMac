@@ -135,7 +135,8 @@ final class JavaScriptSpiderSiteProvider: SiteProvider {
             let allowed = Set(site.categories)
             return SiteHome(
                 categories: result.categories.filter { allowed.contains($0.name) },
-                recommendations: result.recommendations
+                recommendations: result.recommendations,
+                actionItems: result.actionItems
             )
         }
         return result
@@ -155,10 +156,29 @@ final class JavaScriptSpiderSiteProvider: SiteProvider {
     }
 
     func detail(id: String) async throws -> VideoDetail {
-        try SpiderResponseMapper.detail(
+        switch try await select(id: id) {
+        case .detail(let detail):
+            return detail
+        case .action:
+            throw AppError.spider("该卡片执行的是设置操作，不包含影视详情")
+        }
+    }
+
+    func select(id: String) async throws -> SiteSelectionResult {
+        try SpiderResponseMapper.selection(
             await session.detail(id: id),
             site: site,
             baseURL: baseURL
+        )
+    }
+
+    func select(summary: VideoSummary) async throws -> SiteSelectionResult {
+        try SpiderResponseMapper.selection(
+            await session.detail(id: summary.videoID),
+            site: site,
+            baseURL: baseURL,
+            fallbackSummary: summary,
+            allowsPlaceholderAction: summary.resolvedContentKind == .action
         )
     }
 
@@ -361,7 +381,8 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
             let allowed = Set(site.categories)
             return SiteHome(
                 categories: result.categories.filter { allowed.contains($0.name) },
-                recommendations: result.recommendations
+                recommendations: result.recommendations,
+                actionItems: result.actionItems
             )
         }
         return result
@@ -420,6 +441,19 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
             await invoke(method: "detail", arguments: [.array([.string(id)])]),
             site: site,
             baseURL: baseURL
+        )
+    }
+
+    func select(summary: VideoSummary) async throws -> SiteSelectionResult {
+        try SpiderResponseMapper.selection(
+            await invoke(
+                method: "detail",
+                arguments: [.array([.string(summary.videoID)])]
+            ),
+            site: site,
+            baseURL: baseURL,
+            fallbackSummary: summary,
+            allowsPlaceholderAction: summary.resolvedContentKind == .action
         )
     }
 

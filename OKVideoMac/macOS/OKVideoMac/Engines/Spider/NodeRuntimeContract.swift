@@ -211,6 +211,7 @@ enum NodeRuntimeContractFactory {
     const managedListener = Symbol('okvideo-managed-listener');
     const listeners = new Set();
     const originalNetListen = net.Server.prototype.listen;
+    const activeBusinessRequests = new Set();
 
     function writeState(state) {
       const temporary = statePath + '.tmp-' + process.pid;
@@ -281,12 +282,109 @@ enum NodeRuntimeContractFactory {
       return loopbackListen(this, args);
     };
 
-    globalThis.catDartServerPort = function catDartServerPort() { return 0; };
+    function isPrivateOrLoopbackIPv4(hostname) {
+      if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') {
+        return true;
+      }
+      const parts = hostname.split('.').map(Number);
+      if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+        return false;
+      }
+      return parts[0] === 10 ||
+        (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+        (parts[0] === 192 && parts[1] === 168);
+    }
+
+    function normalizeOwnedLoopbackURL(rawValue) {
+      if (typeof rawValue !== 'string' || rawValue.length === 0 || rawValue.length > 2048) {
+        return null;
+      }
+      let parsed;
+      try { parsed = new URL(rawValue); }
+      catch (_) { return null; }
+      if (parsed.protocol !== 'http:' || !isPrivateOrLoopbackIPv4(parsed.hostname)) {
+        return null;
+      }
+      const port = Number(parsed.port || 80);
+      const ownsPort = Array.from(listeners).some((listener) => {
+        const address = listener.address();
+        return address && typeof address !== 'string' && address.port === port;
+      });
+      if (!ownsPort) return null;
+      parsed.hostname = '127.0.0.1';
+      return parsed.toString();
+    }
+
+    function acceptHostMessage(value) {
+      if (!value || value.action !== 'openInternalWebview' ||
+          !value.opt || typeof value.opt !== 'object') {
+        return null;
+      }
+      const url = normalizeOwnedLoopbackURL(value.opt.url);
+      if (!url) return null;
+      const message = { action: 'openInternalWebview', opt: { url } };
+      return message;
+    }
+
+    function receiveHostMessage(request, response) {
+      let body = '';
+      request.setEncoding('utf8');
+      request.on('data', (chunk) => {
+        if (body.length <= 16 * 1024) body += chunk;
+        if (body.length > 16 * 1024) request.destroy();
+      });
+      request.on('end', () => {
+        let accepted = null;
+        try { accepted = acceptHostMessage(JSON.parse(body)); }
+        catch (_) {}
+        const candidates = Array.from(activeBusinessRequests).filter(
+          (context) => !context.response.headersSent && !context.hostMessage
+        );
+        if (accepted && candidates.length === 1) {
+          candidates[0].hostMessage = accepted;
+        } else {
+          accepted = null;
+        }
+        response.statusCode = accepted ? 200 : 400;
+        response.setHeader('Content-Type', 'application/json; charset=utf-8');
+        response.end(accepted ? '{"ok":true}' : '{"ok":false}');
+      });
+    }
+
+    function attachHostMessageHeader(context) {
+      if (context.response.headersSent || !context.hostMessage || context.attached) return;
+      const encoded = Buffer.from(JSON.stringify(context.hostMessage), 'utf8').toString('base64');
+      context.attached = true;
+      context.response.setHeader('X-OKVideo-Host-Message', encoded);
+    }
+
+    globalThis.catDartServerPort = function catDartServerPort() {
+      return Number(process.env.DEV_HTTP_PORT || 0);
+    };
     globalThis.catServerFactory = function catServerFactory(handler) {
       if (typeof handler !== 'function') {
         throw new Error('contract-b server factory arguments rejected');
       }
       const server = http.createServer((request, response) => {
+        if (request.method === 'POST' && request.url === '/msg') {
+          receiveHostMessage(request, response);
+          return;
+        }
+        const context = { response, hostMessage: null, attached: false };
+        if (request.method === 'POST') activeBusinessRequests.add(context);
+        const removeContext = () => activeBusinessRequests.delete(context);
+        response.once('finish', removeContext);
+        response.once('close', removeContext);
+        const originalWriteHead = response.writeHead;
+        const originalEnd = response.end;
+        response.writeHead = function controlledWriteHead(...args) {
+          attachHostMessageHeader(context);
+          return originalWriteHead.apply(response, args);
+        };
+        response.end = function controlledEnd(...args) {
+          attachHostMessageHeader(context);
+          return originalEnd.apply(response, args);
+        };
         handler(request, response);
       });
       server[managedListener] = true;

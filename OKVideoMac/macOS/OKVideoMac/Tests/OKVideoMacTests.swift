@@ -108,6 +108,59 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testConfigurationSwitchFeedbackOnlyLatestRequestCanComplete() {
+        var tracker = ConfigurationActivationRequestTracker()
+        let tokenA = tracker.begin(UUID())
+        let tokenB = tracker.begin(UUID())
+        var feedback = ConfigurationSwitchFeedbackPolicy.switching(
+            token: tokenB,
+            targetName: "Source B"
+        )
+
+        feedback = ConfigurationSwitchFeedbackPolicy.success(
+            current: feedback,
+            token: tokenA,
+            targetName: "Source A",
+            ownsCurrentRequest: tracker.owns(tokenA)
+        )
+        XCTAssertEqual(
+            feedback,
+            .switching(tokenB, targetName: "Source B")
+        )
+
+        feedback = ConfigurationSwitchFeedbackPolicy.success(
+            current: feedback,
+            token: tokenB,
+            targetName: "Source B",
+            ownsCurrentRequest: tracker.owns(tokenB)
+        )
+        XCTAssertEqual(feedback, .success(tokenB, targetName: "Source B"))
+    }
+
+    func testConfigurationSwitchFeedbackReportsLatestFailureWithoutModalState() {
+        var tracker = ConfigurationActivationRequestTracker()
+        let token = tracker.begin(UUID())
+        let switching = ConfigurationSwitchFeedbackPolicy.switching(
+            token: token,
+            targetName: "Broken Source"
+        )
+
+        XCTAssertEqual(
+            ConfigurationSwitchFeedbackPolicy.failure(
+                current: switching,
+                token: token,
+                targetName: "Broken Source",
+                message: "Unable to load home",
+                ownsCurrentRequest: tracker.owns(token)
+            ),
+            .failure(
+                token,
+                targetName: "Broken Source",
+                message: "Unable to load home"
+            )
+        )
+    }
+
     func testConfigurationActivationRuntimeCleanupIsOwnedByLatestNonNodeTarget() {
         XCTAssertTrue(
             ConfigurationActivationRuntimePolicy.shouldStopNodeRuntime(
@@ -979,6 +1032,220 @@ final class OKVideoMacTests: XCTestCase {
                 currentIdentity: nil,
                 incomingHome: home,
                 incomingIdentity: identity
+            )
+        )
+    }
+
+    func testHomePresentationUsesRealFeedAsRecommendationDefault() {
+        let home = SiteHome(
+            categories: [VideoCategory(id: "movie", name: "电影")],
+            recommendations: [
+                VideoSummary(
+                    siteKey: "site",
+                    siteName: "站点",
+                    videoID: "featured",
+                    title: "首页推荐"
+                )
+            ]
+        )
+
+        XCTAssertEqual(
+            HomePresentationPolicy.selection(for: home, preserving: nil),
+            .recommendation
+        )
+    }
+
+    func testHomePresentationFallsBackToFirstMediaCategoryWithoutFeed() {
+        let home = SiteHome(
+            categories: [
+                VideoCategory(
+                    id: "settings",
+                    name: "配置",
+                    contentKind: .action
+                ),
+                VideoCategory(id: "movie", name: "电影"),
+                VideoCategory(id: "series", name: "剧集")
+            ],
+            recommendations: []
+        )
+
+        XCTAssertEqual(
+            HomePresentationPolicy.selection(for: home, preserving: nil),
+            .category("movie")
+        )
+    }
+
+    func testHomePresentationPreservesValidSelectionAndFallsBackWhenRemoved() {
+        let original = SiteHome(
+            categories: [
+                VideoCategory(id: "movie", name: "电影"),
+                VideoCategory(id: "series", name: "剧集")
+            ],
+            recommendations: [
+                VideoSummary(
+                    siteKey: "site",
+                    siteName: "站点",
+                    videoID: "featured",
+                    title: "首页推荐"
+                )
+            ]
+        )
+        XCTAssertEqual(
+            HomePresentationPolicy.selection(
+                for: original,
+                preserving: "series"
+            ),
+            .category("series")
+        )
+
+        let refreshed = SiteHome(
+            categories: [VideoCategory(id: "movie", name: "电影")],
+            recommendations: [
+                VideoSummary(
+                    siteKey: "site",
+                    siteName: "站点",
+                    videoID: "featured",
+                    title: "首页推荐"
+                )
+            ]
+        )
+        XCTAssertEqual(
+            HomePresentationPolicy.selection(
+                for: refreshed,
+                preserving: "series"
+            ),
+            .recommendation
+        )
+    }
+
+    func testHomePresentationUsesActionsWithoutPretendingTheyAreMovies() {
+        let home = SiteHome(
+            categories: [
+                VideoCategory(
+                    id: "settings",
+                    name: "配置",
+                    contentKind: .action
+                )
+            ],
+            recommendations: [],
+            actionItems: [
+                SiteActionItem(
+                    siteKey: "site",
+                    siteName: "站点",
+                    itemID: "danmaku",
+                    title: "弹幕服务"
+                )
+            ]
+        )
+
+        XCTAssertEqual(
+            HomePresentationPolicy.selection(for: home, preserving: nil),
+            .actions
+        )
+    }
+
+    func testHomePresentationLoadsStructuralActionCategoryWhenItemsAreNotInline() {
+        let home = SiteHome(
+            categories: [
+                VideoCategory(
+                    id: "settings",
+                    name: "配置",
+                    contentKind: .action
+                )
+            ],
+            recommendations: []
+        )
+
+        XCTAssertEqual(
+            HomePresentationPolicy.selection(for: home, preserving: nil),
+            .actions
+        )
+        XCTAssertEqual(
+            HomePresentationPolicy.firstActionCategory(in: home)?.id,
+            "settings"
+        )
+    }
+
+    func testActionCategoryPageInheritsStructuralActionSemantics() {
+        let category = VideoCategory(
+            id: "settings",
+            name: "配置",
+            contentKind: .action
+        )
+        let page = VideoPage(
+            items: [
+                VideoSummary(
+                    siteKey: "site",
+                    siteName: "站点",
+                    videoID: "action-item",
+                    title: "功能入口",
+                    contentKind: .action
+                ),
+                VideoSummary(
+                    siteKey: "site",
+                    siteName: "站点",
+                    videoID: "movie-item",
+                    title: "普通影片",
+                    contentKind: .media
+                ),
+                VideoSummary(
+                    siteKey: "site",
+                    siteName: "站点",
+                    videoID: "unsupported-item",
+                    title: "不可用入口",
+                    contentKind: .unsupported
+                )
+            ],
+            pagination: Pagination(page: 1, pageCount: 1)
+        )
+
+        XCTAssertEqual(
+            HomePresentationPolicy.actionItems(
+                from: page,
+                inheritedFrom: category
+            ).map(\.itemID),
+            ["action-item", "movie-item"]
+        )
+    }
+
+    func testHomePresentationIsEmptyWhenEveryCategoryIsUnsupported() {
+        let home = SiteHome(
+            categories: [
+                VideoCategory(
+                    id: "unsupported",
+                    name: "不可用入口",
+                    contentKind: .unsupported
+                )
+            ],
+            recommendations: []
+        )
+
+        XCTAssertEqual(
+            HomePresentationPolicy.selection(for: home, preserving: nil),
+            .empty
+        )
+    }
+
+    func testCategoryLoadResultRejectsStaleConfigurationResponse() {
+        let siteKey = "shared-site"
+        let oldIdentity = HomeContentIdentity(
+            configurationID: UUID(),
+            siteKey: siteKey
+        )
+        let currentIdentity = HomeContentIdentity(
+            configurationID: UUID(),
+            siteKey: siteKey
+        )
+        let session = UUID()
+
+        XCTAssertFalse(
+            CategoryLoadResultPolicy.shouldAccept(
+                requestSessionID: session,
+                currentSessionID: session,
+                requestedSiteKey: siteKey,
+                currentSiteKey: siteKey,
+                requestedIdentity: oldIdentity,
+                currentIdentity: currentIdentity
             )
         )
     }
@@ -3334,6 +3601,13 @@ final class OKVideoMacTests: XCTestCase {
             AppState.unconfirmedSiteActionMessage,
             "操作已完成。"
         )
+        XCTAssertNotEqual(
+            AppState.unsupportedSiteActionMessage,
+            "操作已完成。"
+        )
+        XCTAssertTrue(
+            AppState.unsupportedSiteActionMessage.contains("尚未完成")
+        )
     }
 
     @MainActor
@@ -5241,6 +5515,51 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         await service.stop()
     }
 
+    func testContractBBridgesOwnedInternalWebviewActionOnTheBusinessResponse() async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(
+                nodeContractBFixtureScript(startDelayMilliseconds: 0).utf8
+            )
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+
+        let endpoint: URL
+        do {
+            endpoint = try await service.ensureReady(from: fixture.sourceURL)
+        } catch {
+            let log = (try? runtimeLog(fixture: fixture)) ?? "<missing log>"
+            XCTFail("Contract B host action fixture failed: \(error)\n\(log)")
+            return
+        }
+        var request = URLRequest(
+            url: endpoint.appendingPathComponent("host-action")
+        )
+        request.httpMethod = "POST"
+        let (_, response) = try await URLSession.shared.data(for: request)
+        let http = try XCTUnwrap(response as? HTTPURLResponse)
+        let encoded = try XCTUnwrap(
+            http.value(forHTTPHeaderField: "X-OKVideo-Host-Message")
+        )
+        let data = try XCTUnwrap(Data(base64Encoded: encoded))
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let options = try XCTUnwrap(object["opt"] as? [String: Any])
+        let url = try XCTUnwrap(URL(string: options["url"] as? String ?? ""))
+
+        XCTAssertEqual(object["action"] as? String, "openInternalWebview")
+        XCTAssertEqual(url.host, "127.0.0.1")
+        XCTAssertEqual(url.port, endpoint.port)
+        XCTAssertEqual(url.path, "/website")
+        await service.stop()
+    }
+
     func testContractAColdStartupMarkerScanMicrobenchmark() async throws {
         var startupMilliseconds: [Int] = []
         for _ in 0..<3 {
@@ -5772,7 +6091,9 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                 !config.pans || !Array.isArray(config.pans.list)) {
               throw new Error('invalid fixture config');
             }
-            if (catDartServerPort() !== 0) throw new Error('unexpected Dart bridge');
+            if (catDartServerPort() !== Number(process.env.DEV_HTTP_PORT)) {
+              throw new Error('unexpected Dart bridge port');
+            }
             if (\#(startsAuxiliaryListener ? "true" : "false")) {
               auxiliary = require('http').createServer((request, response) => {
                 response.end('auxiliary');
@@ -5794,6 +6115,20 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                   response.end(JSON.stringify({class:[],list:[]}));
                 } else if (request.url === '/auxiliary') {
                   response.end(JSON.stringify(auxiliary && auxiliary.address()));
+                } else if (request.url === '/host-action') {
+                  const hostPort = catDartServerPort();
+                  fetch(`http://127.0.0.1:${hostPort}/msg`, {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({
+                      action: 'openInternalWebview',
+                      opt: {url: `http://192.168.1.88:${hostPort}/website`}
+                    })
+                  }).then(() => response.end(JSON.stringify({ok:true})))
+                    .catch(() => {
+                      response.statusCode = 500;
+                      response.end(JSON.stringify({ok:false}));
+                    });
                 } else {
                   response.statusCode = 404;
                   response.end(JSON.stringify({error:'fixture-not-found'}));
@@ -6056,7 +6391,73 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         }
     }
 
-    func testNodeHomeFiltersProtocolSettingCategoryWithoutSourceSpecificRules() async throws {
+    func testNodeProviderPresentsValidatedContractBInternalWebviewAction() async throws {
+        let site = SiteConfiguration(
+            key: "nodejs_generic_action",
+            name: "Generic|Action",
+            type: 4,
+            api: "/spider/generic/4",
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let hostMessage = Data(
+            #"{"action":"openInternalWebview","opt":{"url":"http://127.0.0.1:18988/website"}}"#.utf8
+        ).base64EncodedString()
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.path.hasSuffix("/init") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            XCTAssertTrue(request.url.path.hasSuffix("/detail"))
+            let body = try XCTUnwrap(request.body)
+            let value = try JSONDecoder().decode(JSONValue.self, from: body)
+            XCTAssertEqual(
+                value.objectValue?["id"],
+                .string("arbitrary-action")
+            )
+            XCTAssertEqual(
+                value.objectValue?["ids"],
+                .array([.string("arbitrary-action")])
+            )
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: [
+                    "Content-Type": "application/json",
+                    "X-OKVideo-Host-Message": hostMessage
+                ],
+                body: Data(#"{"list":[{"vod_name":"","vod_content":""}]}"#.utf8)
+            )
+        }
+        let baseURL = try XCTUnwrap(URL(string: "http://127.0.0.1:18988/"))
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: baseURL,
+            httpClient: client
+        )
+        let action = SiteActionItem(
+            siteKey: site.key,
+            siteName: site.name,
+            itemID: "arbitrary-action",
+            title: "任意功能"
+        )
+
+        do {
+            _ = try await provider.select(action: action)
+            XCTFail("宿主内部页面操作应交给现有内置 Web 配置流程")
+        } catch let authorization as NodeWebAuthorizationRequired {
+            XCTAssertEqual(
+                authorization.websiteURL.absoluteString,
+                "http://127.0.0.1:18988/website"
+            )
+            XCTAssertEqual(authorization.title, "Generic Action")
+        }
+    }
+
+    func testNodeHomePreservesProtocolSettingCategoryWithoutSourceSpecificRules() async throws {
         let site = SiteConfiguration(
             key: "nodejs_generic_fixture",
             name: "Generic Fixture",
@@ -6095,8 +6496,10 @@ final class NodeBundleCompatibilityTests: XCTestCase {
 
         let home = try await provider.home()
 
-        XCTAssertTrue(home.categories.isEmpty)
+        XCTAssertEqual(home.categories.map(\.id), ["setting"])
+        XCTAssertEqual(home.categories.first?.resolvedContentKind, .action)
         XCTAssertTrue(home.recommendations.isEmpty)
+        XCTAssertEqual(home.actionItems.map(\.itemID), ["arbitrary-action"])
     }
 
     func testNodePlayerRewritesRuntimeProxyToLoopback() async throws {

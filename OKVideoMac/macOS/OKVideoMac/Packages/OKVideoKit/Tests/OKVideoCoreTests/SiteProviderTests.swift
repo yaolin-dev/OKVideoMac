@@ -274,7 +274,7 @@ final class SiteProviderTests: XCTestCase {
         XCTAssertTrue(home.recommendations.isEmpty)
     }
 
-    func testSpiderHomeFiltersProtocolSettingEntriesWithoutTextHeuristics() throws {
+    func testSpiderHomePreservesProtocolSettingEntriesAsActions() throws {
         let site = SiteConfiguration(
             key: "generic-node-site",
             name: "Generic Node Site",
@@ -291,8 +291,10 @@ final class SiteProviderTests: XCTestCase {
             baseURL: nil
         )
 
-        XCTAssertTrue(home.categories.isEmpty)
+        XCTAssertEqual(home.categories.map(\.resolvedContentKind), [.action])
         XCTAssertTrue(home.recommendations.isEmpty)
+        XCTAssertEqual(home.actionItems.map(\.title), ["任意操作卡片"])
+        XCTAssertEqual(home.actionItems.map(\.itemID), ["config-center"])
     }
 
     func testSpiderHomeKeepsMediaWhoseTextOrIdentifierLooksFunctional() throws {
@@ -577,6 +579,19 @@ final class SiteProviderTests: XCTestCase {
         )
 
         XCTAssertEqual(summary.action, "LoginShow")
+        XCTAssertEqual(summary.resolvedContentKind, .action)
+    }
+
+    func testLegacySiteHomeCacheDecodesWithoutActionItems() throws {
+        let data = Data(
+            #"{"categories":[],"recommendations":[]}"#.utf8
+        )
+
+        let home = try JSONDecoder().decode(SiteHome.self, from: data)
+
+        XCTAssertTrue(home.categories.isEmpty)
+        XCTAssertTrue(home.recommendations.isEmpty)
+        XCTAssertTrue(home.actionItems.isEmpty)
     }
 
     func testBlankDetailPlaceholderIsRecognizedAsAction() throws {
