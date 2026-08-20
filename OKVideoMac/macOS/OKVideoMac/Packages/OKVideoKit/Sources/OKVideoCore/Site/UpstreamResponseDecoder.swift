@@ -24,6 +24,7 @@ struct UpstreamVideo {
     var tag: String?
     var action: String?
     var contentKind: VideoContentKind
+    var isCategoryNavigation: Bool
 }
 
 /// Interprets only protocol metadata. Human-facing names, poster URLs, and
@@ -151,7 +152,8 @@ enum UpstreamResponseDecoder {
                 remarks: video.remarks,
                 year: video.year,
                 categoryName: video.typeName,
-                tag: video.tag,
+                tag: video.tag?.nonEmptyValue
+                    ?? (video.isCategoryNavigation ? "folder" : nil),
                 action: video.action,
                 contentKind: contentKind == .media ? nil : contentKind
             )
@@ -273,8 +275,38 @@ enum UpstreamResponseDecoder {
                     categoryID: categoryID,
                     action: action,
                     tag: tag
+                ),
+                // Contract-B discovery factories serialize valid `cate`
+                // callbacks as structural navigation metadata, including an
+                // empty object. Nil and blank string forms are normalized out;
+                // display names, source keys, and identifier shapes are never
+                // consulted.
+                isCategoryNavigation: normalizedCategoryNavigation(
+                    object["cate"]
                 )
             )
+        }
+    }
+
+    /// A serialized category callback is commonly represented as an object.
+    /// String forms are accepted only after whitespace normalization. Null,
+    /// empty, and whitespace-only values carry no navigation semantics.
+    private static func normalizedCategoryNavigation(
+        _ value: JSONValue?
+    ) -> Bool {
+        switch value {
+        case .object:
+            return true
+        case .string(let value):
+            return !value.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ).isEmpty
+        case .bool(let value):
+            return value
+        case .array(let values):
+            return !values.isEmpty
+        case .integer, .number, .null, nil:
+            return false
         }
     }
 
@@ -538,6 +570,8 @@ public enum SpiderResponseMapper {
             return detail
         case .action:
             throw AppError.spider("Spider 返回了设置操作结果，而不是影视详情")
+        case .search:
+            throw AppError.spider("Spider 返回了发现条目，而不是影视详情")
         }
     }
 
@@ -603,10 +637,33 @@ public enum SpiderResponseMapper {
         if let message = response.message {
             throw AppError.spider(message)
         }
+        if response.videos.isEmpty, let fallbackSummary {
+            guard let query = searchableQuery(from: fallbackSummary.title) else {
+                throw AppError.contentUnavailable(
+                    "当前内容源未提供可打开的详情"
+                )
+            }
+            return .search(query)
+        }
         if !response.videos.isEmpty {
             throw AppError.spider("Spider 详情响应缺少可识别的影视信息")
         }
         throw AppError.spider("Spider 详情响应没有有效项目")
+    }
+
+    private static func searchableQuery(from title: String) -> String? {
+        let query = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty,
+              query.rangeOfCharacter(from: .alphanumerics) != nil else {
+            return nil
+        }
+        let sentinel = query.lowercased()
+        guard !["n/a", "na", "null", "undefined", "untitled"].contains(
+            sentinel
+        ) else {
+            return nil
+        }
+        return query
     }
 
     private static func detailPayloadIsRecoverable(_ video: UpstreamVideo) -> Bool {
@@ -815,7 +872,8 @@ private final class XMLVideoParserDelegate: NSObject, XMLParserDelegate {
                         categoryID: categoryID,
                         action: action,
                         tag: tag
-                    )
+                    ),
+                    isCategoryNavigation: false
                 )
             )
             currentVideo = nil

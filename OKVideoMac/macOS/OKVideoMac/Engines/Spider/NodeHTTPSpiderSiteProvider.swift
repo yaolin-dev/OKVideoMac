@@ -350,6 +350,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         case .detail(let detail): return detail
         case .action:
             throw AppError.spider("该卡片执行的是设置操作，不包含影视详情")
+        case .search:
+            throw AppError.spider("该卡片只提供发现信息，不包含影视详情")
         }
     }
 

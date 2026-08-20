@@ -717,18 +717,7 @@ private struct SearchFolderGrid: View {
                     onSelect(item)
                 } label: {
                     VStack(alignment: .leading, spacing: 7) {
-                        if item.isFolder {
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 8)
-                                    .fill(Color.accentColor.opacity(0.1))
-                                Image(systemName: "folder.fill")
-                                    .font(.system(size: 48))
-                                    .foregroundColor(.accentColor)
-                            }
-                            .aspectRatio(2 / 3, contentMode: .fit)
-                        } else {
-                            VideoPosterView(item: item)
-                        }
+                        VideoPosterView(item: item)
                         Text(item.title)
                             .font(.headline)
                             .lineLimit(2)

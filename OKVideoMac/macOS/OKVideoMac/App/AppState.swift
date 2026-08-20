@@ -143,12 +143,18 @@ enum NodeUserFacingErrorMapper {
                 )
             }
         }
-        if let appError = error as? AppError,
-           case .spider = appError {
-            return .init(
-                title: "内容源请求失败",
-                message: "当前站点暂时无响应，请稍后重试或更换站点。"
-            )
+        if let appError = error as? AppError {
+            switch appError {
+            case .contentUnavailable(let message):
+                return .init(title: "无法打开内容", message: message)
+            case .spider:
+                return .init(
+                    title: "内容源请求失败",
+                    message: "当前站点返回了无法处理的结果，请稍后重试或更换站点。"
+                )
+            default:
+                break
+            }
         }
         return nil
     }
@@ -173,6 +179,7 @@ struct CloudAuthorizationPrompt: Identifiable, Equatable {
 
 struct NodeWebPresentation: Identifiable, Equatable {
     let id: UUID
+    let sourceIdentity: HomeContentIdentity
     let url: URL
     let title: String
     let message: String
@@ -255,9 +262,64 @@ enum SearchSiteScopePolicy {
     }
 }
 
+enum SearchLaunchContext: Equatable, Sendable {
+    case manual
+    case discoveryFallback
+}
+
+enum SearchProviderSelectionPolicy {
+    static func effectiveSiteKeys(
+        context: SearchLaunchContext,
+        scope: SearchSiteScope,
+        options: [SearchScopeSiteOption]
+    ) -> Set<String> {
+        switch context {
+        case .manual:
+            return SearchSiteScopePolicy.effectiveSiteKeys(
+                scope: scope,
+                options: options
+            )
+        case .discoveryFallback:
+            // A discovery card represents a title, not an instruction to
+            // search only the site that supplied the metadata. Respect the
+            // protocol's searchable/hidden/runtime flags, but deliberately
+            // ignore the user's manual-search subset for this one launch.
+            return Set(options.lazy.filter(\.isSearchable).map(\.key))
+        }
+    }
+}
+
 struct HomeContentIdentity: Equatable, Sendable {
     let configurationID: UUID
     let siteKey: String
+}
+
+enum NodeAuthorizationRetryPolicy {
+    static func shouldRetry(
+        pendingIdentity: HomeContentIdentity,
+        presentationIdentity: HomeContentIdentity,
+        activeConfigurationID: UUID?,
+        selectedSiteKey: String?,
+        requiresSelectedHomeSource: Bool,
+        availableSiteKeys: Set<String>
+    ) -> Bool {
+        pendingIdentity == presentationIdentity
+            && activeConfigurationID == pendingIdentity.configurationID
+            && availableSiteKeys.contains(pendingIdentity.siteKey)
+            && (!requiresSelectedHomeSource
+                || selectedSiteKey == pendingIdentity.siteKey)
+    }
+}
+
+enum CloudAuthorizationRetryPolicy {
+    static func isCurrent(
+        sourceIdentity: HomeContentIdentity,
+        activeConfigurationID: UUID?,
+        availableSiteKeys: Set<String>
+    ) -> Bool {
+        activeConfigurationID == sourceIdentity.configurationID
+            && availableSiteKeys.contains(sourceIdentity.siteKey)
+    }
 }
 
 enum HomeContentPublicationPolicy {
@@ -346,6 +408,26 @@ enum HomePresentationPolicy {
                 filter.options.first.map { (filter.id, $0.value) }
             }
         )
+    }
+}
+
+enum HomeSiteRolePolicy {
+    static func isContentHome(_ home: SiteHome) -> Bool {
+        !home.recommendations.isEmpty
+            || home.categories.contains {
+                $0.resolvedContentKind == .media
+            }
+    }
+}
+
+enum HomeLandingSitePolicy {
+    static func defaultSiteKey(
+        from sites: [SiteConfiguration]
+    ) -> String? {
+        // `indexs` is protocol metadata declaring an indexed/home site. It is
+        // a stable structural signal and avoids interpreting source names,
+        // keys, domains, or localized category titles.
+        sites.first(where: { $0.indexs == 1 })?.key ?? sites.first?.key
     }
 }
 
@@ -554,6 +636,11 @@ private struct PendingCloudPlayback {
     var origin: PlaybackRequestOrigin = .direct
 }
 
+private struct CloudAuthorizationContext {
+    let sourceIdentity: HomeContentIdentity
+    var pendingPlayback: PendingCloudPlayback?
+}
+
 enum PlaybackRequestOrigin: Equatable, Sendable {
     case direct
     case history
@@ -575,13 +662,43 @@ private struct PlayerEpisodePresentationCache {
 
 private enum PendingNodeOperation {
     case category(
+        identity: HomeContentIdentity,
         siteKey: String,
         id: String,
         page: Int,
         filters: [String: String]
     )
-    case detail(VideoSummary)
-    case playback(PendingCloudPlayback)
+    case detail(identity: HomeContentIdentity, summary: VideoSummary)
+    case siteAction(
+        identity: HomeContentIdentity,
+        action: String,
+        title: String
+    )
+    case homeAction(identity: HomeContentIdentity, item: SiteActionItem)
+    case playback(
+        identity: HomeContentIdentity,
+        playback: PendingCloudPlayback
+    )
+
+    var sourceIdentity: HomeContentIdentity {
+        switch self {
+        case .category(let identity, _, _, _, _),
+             .detail(let identity, _),
+             .siteAction(let identity, _, _),
+             .homeAction(let identity, _),
+             .playback(let identity, _):
+            return identity
+        }
+    }
+
+    var requiresSelectedHomeSource: Bool {
+        switch self {
+        case .category, .siteAction, .homeAction:
+            return true
+        case .detail, .playback:
+            return false
+        }
+    }
 }
 
 private enum AppStateTiming {
@@ -1090,7 +1207,7 @@ final class AppState: ObservableObject {
     private var liveSourceEPGTasks: [UUID: Task<Void, Never>] = [:]
     private var playerEpisodePresentationCache: PlayerEpisodePresentationCache?
     private var playerEpisodePreparationTask: Task<Void, Never>?
-    private var pendingCloudPlayback: PendingCloudPlayback?
+    private var cloudAuthorizationContext: CloudAuthorizationContext?
     private var pendingNodeOperation: PendingNodeOperation?
     private var playbackSessionID = UUID()
     private var activePlayerRequestID = UUID()
@@ -1325,7 +1442,9 @@ final class AppState: ObservableObject {
                 }
             }
             rebuildProviders()
-            selectedSiteKey = supportedSites.first?.key
+            selectedSiteKey = HomeLandingSitePolicy.defaultSiteKey(
+                from: supportedSites
+            )
             await loadSearchSiteScope()
             await prepareActiveConfigurationHome()
             try await reloadHistory()
@@ -1623,6 +1742,7 @@ final class AppState: ObservableObject {
     private func commitConfigurationActivation(
         _ prepared: PreparedConfigurationActivation
     ) {
+        invalidateCloudAuthorization(nextIdentity: nil)
         resetSearchForConfigurationChange()
         configurationRefreshSessionID = UUID()
         configurationRefreshTask?.cancel()
@@ -1649,7 +1769,9 @@ final class AppState: ObservableObject {
             ? "Node Runtime 未用于当前配置"
             : ""
         rebuildProviders()
-        selectedSiteKey = supportedSites.first?.key
+        selectedSiteKey = HomeLandingSitePolicy.defaultSiteKey(
+            from: supportedSites
+        )
         selectedCategoryID = nil
         selectedCategoryFilters = [:]
         categoryPage = nil
@@ -1682,6 +1804,12 @@ final class AppState: ObservableObject {
     }
 
     func selectSite(_ key: String) async {
+        invalidatePendingNodeHomeOperation(nextSiteKey: key)
+        invalidateCloudAuthorization(
+            nextIdentity: activeConfigurationRecord.map {
+                HomeContentIdentity(configurationID: $0.id, siteKey: key)
+            }
+        )
         homeLoadSessionID = UUID()
         categoryLoadSessionID = UUID()
         isLoadingNextCategoryPage = false
@@ -1694,7 +1822,6 @@ final class AppState: ObservableObject {
         selectedCategoryFilters = [:]
         categoryPage = nil
         homePresentationSelection = .empty
-        await persistSelectedSitePreference(key)
         await restoreCachedSiteHome()
         await loadSelectedSiteHome()
     }
@@ -1779,6 +1906,7 @@ final class AppState: ObservableObject {
             presentNodeConfiguration(
                 authorization,
                 pending: .category(
+                    identity: contentIdentity,
                     siteKey: key,
                     id: id,
                     page: page,
@@ -1885,6 +2013,7 @@ final class AppState: ObservableObject {
             presentNodeConfiguration(
                 authorization,
                 pending: .category(
+                    identity: contentIdentity,
                     siteKey: key,
                     id: id,
                     page: 1,
@@ -1947,6 +2076,9 @@ final class AppState: ObservableObject {
             publishHomeContent(loaded, identity: contentIdentity)
             homeLoadErrorMessage = nil
             await cacheSiteHome(loaded, identity: contentIdentity)
+            if HomeSiteRolePolicy.isContentHome(loaded) {
+                await persistSelectedSitePreference(key)
+            }
             let didApplyPresentation = await applyHomePresentation(
                 loaded,
                 identity: contentIdentity,
@@ -2003,7 +2135,7 @@ final class AppState: ObservableObject {
             selectedDetail = nil
             pendingDetailSummary = nil
             presentHomeSearch()
-            search(summary.title)
+            search(summary.title, context: .discoveryFallback)
             return
         }
         guard let provider = providers[summary.siteKey] else {
@@ -2034,11 +2166,19 @@ final class AppState: ObservableObject {
             switch selection {
             case .detail(let detail):
                 selectedDetail = detail
+            case .search(let query):
+                selectedDetail = nil
+                presentHomeSearch()
+                search(query, context: .discoveryFallback)
             case .action(let result):
                 if Self.shouldWaitForCloudAuthorization(
                     capability: provider.capability
                 ), let authorization = await waitForCloudAuthorization() {
-                    await presentCloudAuthorization(authorization, pending: nil)
+                    await presentCloudAuthorization(
+                        authorization,
+                        pending: nil,
+                        siteKey: summary.siteKey
+                    )
                 } else {
                     presentedError = UserFacingError(
                         title: summary.title,
@@ -2054,14 +2194,30 @@ final class AppState: ObservableObject {
         } catch let authorization as NodeWebAuthorizationRequired {
             guard detailLoadSessionID == sessionID else { return }
             pendingDetailSummary = nil
+            guard let identity = activeSourceIdentity(
+                for: summary.siteKey
+            ) else {
+                show(
+                    AppError.site("该详情所属配置已经发生变化"),
+                    title: "详情加载失败"
+                )
+                return
+            }
             presentNodeConfiguration(
                 authorization,
-                pending: .detail(summary)
+                pending: .detail(
+                    identity: identity,
+                    summary: summary
+                )
             )
         } catch let authorization as AndroidBridgeUIRequired {
             guard detailLoadSessionID == sessionID else { return }
             pendingDetailSummary = nil
-            await presentCloudAuthorization(authorization.state, pending: nil)
+            await presentCloudAuthorization(
+                authorization.state,
+                pending: nil,
+                siteKey: summary.siteKey
+            )
         } catch {
             guard detailLoadSessionID == sessionID else { return }
             pendingDetailSummary = nil
@@ -2099,7 +2255,11 @@ final class AppState: ObservableObject {
                 if Self.shouldWaitForCloudAuthorization(
                     capability: provider.capability
                 ), let authorization = await waitForCloudAuthorization() {
-                    await presentCloudAuthorization(authorization, pending: nil)
+                    await presentCloudAuthorization(
+                        authorization,
+                        pending: nil,
+                        siteKey: item.siteKey
+                    )
                 } else {
                     presentedError = UserFacingError(
                         title: item.title,
@@ -2111,11 +2271,28 @@ final class AppState: ObservableObject {
                                 : Self.unsupportedSiteActionMessage)
                     )
                 }
+            case .search(let query):
+                presentHomeSearch()
+                search(query, context: .discoveryFallback)
             }
         } catch let authorization as NodeWebAuthorizationRequired {
-            presentNodeConfiguration(authorization, pending: nil)
+            guard let identity = activeSourceIdentity(for: item.siteKey) else {
+                show(
+                    AppError.site("该功能所属配置已经发生变化"),
+                    title: item.title
+                )
+                return
+            }
+            presentNodeConfiguration(
+                authorization,
+                pending: .homeAction(identity: identity, item: item)
+            )
         } catch let authorization as AndroidBridgeUIRequired {
-            await presentCloudAuthorization(authorization.state, pending: nil)
+            await presentCloudAuthorization(
+                authorization.state,
+                pending: nil,
+                siteKey: item.siteKey
+            )
         } catch {
             show(error, title: "\(item.title)失败")
         }
@@ -2194,7 +2371,11 @@ final class AppState: ObservableObject {
             let result = try await provider.action(action)
             if provider.capability == .javaDexSpider,
                let state = await waitForCloudAuthorization() {
-                await presentCloudAuthorization(state, pending: nil)
+                await presentCloudAuthorization(
+                    state,
+                    pending: nil,
+                    siteKey: provider.site.key
+                )
                 return
             }
             let message = Self.siteActionMessage(result)
@@ -2203,9 +2384,29 @@ final class AppState: ObservableObject {
                     : Self.unsupportedSiteActionMessage)
             presentedError = UserFacingError(title: title, message: message)
         } catch let authorization as NodeWebAuthorizationRequired {
-            presentNodeConfiguration(authorization, pending: nil)
+            guard let identity = activeSourceIdentity(
+                for: provider.site.key
+            ) else {
+                show(
+                    AppError.site("该功能所属配置已经发生变化"),
+                    title: title
+                )
+                return
+            }
+            presentNodeConfiguration(
+                authorization,
+                pending: .siteAction(
+                    identity: identity,
+                    action: action,
+                    title: title
+                )
+            )
         } catch let authorization as AndroidBridgeUIRequired {
-            await presentCloudAuthorization(authorization.state, pending: nil)
+            await presentCloudAuthorization(
+                authorization.state,
+                pending: nil,
+                siteKey: provider.site.key
+            )
         } catch {
             show(error, title: "\(title)失败")
         }
@@ -2213,11 +2414,12 @@ final class AppState: ObservableObject {
 
     private func presentNodeConfiguration(
         _ authorization: NodeWebAuthorizationRequired,
-        pending: PendingNodeOperation?
+        pending: PendingNodeOperation
     ) {
         pendingNodeOperation = pending
         nodeWebPresentation = NodeWebPresentation(
             id: UUID(),
+            sourceIdentity: pending.sourceIdentity,
             url: authorization.websiteURL,
             title: authorization.title.nonEmpty ?? "网盘配置中心",
             message: authorization.message,
@@ -2244,24 +2446,123 @@ final class AppState: ObservableObject {
 
     func completeNodeConfigurationAndRetry() async {
         let pending = pendingNodeOperation
+        let presentation = nodeWebPresentation
         pendingNodeOperation = nil
         nodeWebPresentation = nil
+        guard let pending, let presentation else { return }
+        let identity = pending.sourceIdentity
+        guard NodeAuthorizationRetryPolicy.shouldRetry(
+            pendingIdentity: identity,
+            presentationIdentity: presentation.sourceIdentity,
+            activeConfigurationID: activeConfigurationRecord?.id,
+            selectedSiteKey: selectedSiteKey,
+            requiresSelectedHomeSource: pending.requiresSelectedHomeSource,
+            availableSiteKeys: Set(providers.keys)
+        ) else {
+            presentedError = UserFacingError(
+                title: "配置已切换",
+                message: "来源或配置已经发生变化，未重放之前的操作。"
+            )
+            return
+        }
         switch pending {
-        case .category(let siteKey, let id, let page, let filters):
-            guard selectedSiteKey == siteKey else { return }
+        case .category(_, let siteKey, let id, let page, let filters):
+            guard siteKey == identity.siteKey else { return }
             await loadCategory(id: id, page: page, filters: filters)
-        case .detail(let summary):
+        case .detail(_, let summary):
+            guard summary.siteKey == identity.siteKey else { return }
             await loadDetail(summary)
-        case .playback(let playback):
+        case .siteAction(_, let action, let title):
+            guard let provider = providers[identity.siteKey] else { return }
+            await performSiteAction(
+                action,
+                title: title,
+                provider: provider
+            )
+        case .homeAction(_, let item):
+            guard item.siteKey == identity.siteKey else { return }
+            await performHomeAction(item)
+        case .playback(_, let playback):
+            guard playback.detail.summary.siteKey == identity.siteKey else {
+                return
+            }
             await startPlayback(
                 detail: playback.detail,
                 source: playback.source,
                 episode: playback.episode,
                 origin: playback.origin
             )
-        case nil:
-            break
         }
+    }
+
+    private func activeSourceIdentity(
+        for siteKey: String
+    ) -> HomeContentIdentity? {
+        guard let configurationID = activeConfigurationRecord?.id,
+              providers[siteKey] != nil else {
+            return nil
+        }
+        return HomeContentIdentity(
+            configurationID: configurationID,
+            siteKey: siteKey
+        )
+    }
+
+    private func invalidatePendingNodeHomeOperation(nextSiteKey: String) {
+        guard let pending = pendingNodeOperation,
+              pending.requiresSelectedHomeSource,
+              pending.sourceIdentity.siteKey != nextSiteKey else {
+            return
+        }
+        pendingNodeOperation = nil
+        nodeWebPresentation = nil
+    }
+
+    private func invalidateCloudAuthorization(
+        nextIdentity: HomeContentIdentity?
+    ) {
+        guard let context = cloudAuthorizationContext,
+              context.sourceIdentity != nextIdentity else {
+            return
+        }
+        clearCloudAuthorization(
+            resetBridgeUI: true,
+            markPendingPlaybackCancelled: false
+        )
+    }
+
+    private func clearCloudAuthorization(
+        resetBridgeUI: Bool,
+        markPendingPlaybackCancelled: Bool
+    ) {
+        let androidDexBridge = environment?.androidDexBridge
+        let hadPendingPlayback = cloudAuthorizationContext?.pendingPlayback != nil
+        cloudAuthorizationSessionID = UUID()
+        cloudAuthorizationPollTask?.cancel()
+        cloudAuthorizationPollTask = nil
+        cloudAuthorizationPrompt = nil
+        cloudAuthorizationInput = ""
+        cloudAuthorizationContext = nil
+        if markPendingPlaybackCancelled, hadPendingPlayback {
+            let message = "已取消网盘授权"
+            playbackResolutionState = .failed
+            playbackFailureSummary = message
+            playerSnapshot.status = .failed(message)
+        }
+        guard resetBridgeUI else { return }
+        Task {
+            try? await androidDexBridge?.resetAuthorizationUI()
+        }
+    }
+
+    private func isCurrentCloudAuthorizationContext(
+        _ context: CloudAuthorizationContext
+    ) -> Bool {
+        CloudAuthorizationRetryPolicy.isCurrent(
+            sourceIdentity: context.sourceIdentity,
+            activeConfigurationID: activeConfigurationRecord?.id,
+            availableSiteKeys: Set(providers.keys)
+        )
     }
 
     private func waitForCloudAuthorization() async -> AndroidBridgeUIState? {
@@ -2287,7 +2588,12 @@ final class AppState: ObservableObject {
     }
 
     func submitCloudAuthorization(action: CloudAuthorizationAction) async {
-        guard let environment else { return }
+        guard let environment,
+              let context = cloudAuthorizationContext,
+              isCurrentCloudAuthorizationContext(context) else {
+            invalidateCloudAuthorization(nextIdentity: nil)
+            return
+        }
         isLoading = true
         defer { isLoading = false }
         do {
@@ -2315,6 +2621,11 @@ final class AppState: ObservableObject {
     }
 
     func submitCloudCredential() async {
+        guard let context = cloudAuthorizationContext,
+              isCurrentCloudAuthorizationContext(context) else {
+            invalidateCloudAuthorization(nextIdentity: nil)
+            return
+        }
         guard let environment,
               let prompt = cloudAuthorizationPrompt,
               prompt.credentialPush,
@@ -2345,29 +2656,22 @@ final class AppState: ObservableObject {
     }
 
     func cancelCloudAuthorization() {
-        let androidDexBridge = environment?.androidDexBridge
-        cloudAuthorizationSessionID = UUID()
-        cloudAuthorizationPollTask?.cancel()
-        cloudAuthorizationPollTask = nil
-        cloudAuthorizationPrompt = nil
-        cloudAuthorizationInput = ""
-        if pendingCloudPlayback != nil {
-            let message = "已取消网盘授权"
-            playbackResolutionState = .failed
-            playbackFailureSummary = message
-            playerSnapshot.status = .failed(message)
-        }
-        pendingCloudPlayback = nil
-        Task {
-            // The Android dialog is a real native window. Merely hiding the
-            // SwiftUI layer leaves it stacked behind the app and causes the
-            // next detail/play call to receive the wrong provider prompt.
-            try? await androidDexBridge?.resetAuthorizationUI()
-        }
+        // The Android dialog is a real native window. Merely hiding the
+        // SwiftUI layer leaves it stacked behind the app and causes the next
+        // detail/play call to receive the wrong provider prompt.
+        clearCloudAuthorization(
+            resetBridgeUI: true,
+            markPendingPlaybackCancelled: true
+        )
     }
 
     func refreshCloudAuthorization() async {
-        guard let environment else { return }
+        guard let environment,
+              let context = cloudAuthorizationContext,
+              isCurrentCloudAuthorizationContext(context) else {
+            invalidateCloudAuthorization(nextIdentity: nil)
+            return
+        }
         do {
             let state = try await environment.androidDexBridge.uiState()
             guard state.isAuthorizationPrompt else {
@@ -2383,11 +2687,20 @@ final class AppState: ObservableObject {
 
     private func presentCloudAuthorization(
         _ state: AndroidBridgeUIState,
-        pending: PendingCloudPlayback?
+        pending: PendingCloudPlayback?,
+        siteKey: String
     ) async {
-        if let pending {
-            pendingCloudPlayback = pending
+        guard let identity = activeSourceIdentity(for: siteKey) else {
+            show(
+                AppError.site("该授权所属配置已经发生变化"),
+                title: "网盘授权失败"
+            )
+            return
         }
+        cloudAuthorizationContext = CloudAuthorizationContext(
+            sourceIdentity: identity,
+            pendingPlayback: pending
+        )
         await updateCloudAuthorizationPrompt(state)
         startCloudAuthorizationPolling()
     }
@@ -2450,6 +2763,8 @@ final class AppState: ObservableObject {
                 guard let self,
                       self.cloudAuthorizationSessionID == sessionID,
                       self.cloudAuthorizationPrompt != nil,
+                      let context = self.cloudAuthorizationContext,
+                      self.isCurrentCloudAuthorizationContext(context),
                       let environment = self.environment else {
                     return
                 }
@@ -2461,7 +2776,7 @@ final class AppState: ObservableObject {
                     if state.isAuthorizationPrompt {
                         hiddenPollCount = 0
                         if state.authenticated == true,
-                           self.pendingCloudPlayback != nil {
+                           context.pendingPlayback != nil {
                             await self.finishCloudAuthorizationAndRetry()
                             return
                         }
@@ -2486,14 +2801,21 @@ final class AppState: ObservableObject {
     }
 
     private func finishCloudAuthorizationAndRetry() async {
+        let context = cloudAuthorizationContext
         cloudAuthorizationSessionID = UUID()
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = nil
         cloudAuthorizationPrompt = nil
         cloudAuthorizationInput = ""
-        let pending = pendingCloudPlayback
-        pendingCloudPlayback = nil
-        if let pending {
+        cloudAuthorizationContext = nil
+        guard let context,
+              isCurrentCloudAuthorizationContext(context) else {
+            return
+        }
+        if let pending = context.pendingPlayback {
+            guard pending.detail.summary.siteKey == context.sourceIdentity.siteKey else {
+                return
+            }
             await startPlayback(
                 detail: pending.detail,
                 source: pending.source,
@@ -2786,6 +3108,13 @@ final class AppState: ObservableObject {
     }
 
     func search(_ keyword: String) {
+        search(keyword, context: .manual)
+    }
+
+    private func search(
+        _ keyword: String,
+        context: SearchLaunchContext
+    ) {
         searchTask?.cancel()
         let sessionID = UUID()
         searchSessionID = sessionID
@@ -2807,11 +3136,14 @@ final class AppState: ObservableObject {
         searchKeyword = trimmed
         guard !trimmed.isEmpty else { return }
 
-        let selectedKeys = SearchSiteScopePolicy.effectiveSiteKeys(
+        let selectedKeys = SearchProviderSelectionPolicy.effectiveSiteKeys(
+            context: context,
             scope: searchSiteScope,
             options: searchScopeSiteOptions
         )
-        if searchSiteScope.mode == .custom, selectedKeys.isEmpty {
+        if context == .manual,
+           searchSiteScope.mode == .custom,
+           selectedKeys.isEmpty {
             show(
                 AppError.configuration("当前自定义搜索范围没有可用站点，请重新选择。"),
                 title: "搜索范围不可用"
@@ -3202,10 +3534,18 @@ final class AppState: ObservableObject {
                     }
                 } catch let authorization as NodeWebAuthorizationRequired {
                     guard playbackSessionID == sessionID else { return }
+                    guard let identity = activeSourceIdentity(
+                        for: detail.summary.siteKey
+                    ) else {
+                        playbackResolutionState = .failed
+                        playbackFailureSummary = "播放所属配置已经发生变化"
+                        return
+                    }
                     presentNodeConfiguration(
                         authorization,
                         pending: .playback(
-                            PendingCloudPlayback(
+                            identity: identity,
+                            playback: PendingCloudPlayback(
                                 detail: detail,
                                 source: source,
                                 episode: episode,
@@ -3223,7 +3563,8 @@ final class AppState: ObservableObject {
                             source: source,
                             episode: episode,
                             origin: origin
-                        )
+                        ),
+                        siteKey: detail.summary.siteKey
                     )
                     return
                 } catch {
@@ -4159,7 +4500,7 @@ final class AppState: ObservableObject {
             await self.environment?.player.shutdown()
             await self.environment?.nodeBundleRuntime.stop()
             self.pendingPlayback = nil
-            self.pendingCloudPlayback = nil
+            self.cloudAuthorizationContext = nil
             self.pendingHistoryWrite = nil
         }
         shutdownTask = task
@@ -5398,7 +5739,9 @@ final class AppState: ObservableObject {
         activeConfiguration = try ConfigurationParser().parse(record.rawData)
         rebuildProviders()
         if !supportedSites.contains(where: { $0.key == selectedSiteKey }) {
-            selectedSiteKey = supportedSites.first?.key
+            selectedSiteKey = HomeLandingSitePolicy.defaultSiteKey(
+                from: supportedSites
+            )
         }
     }
 
@@ -5614,6 +5957,8 @@ final class AppState: ObservableObject {
     }
 
     private func resetSearchForConfigurationChange() {
+        pendingNodeOperation = nil
+        nodeWebPresentation = nil
         cancelSearch()
         searchResults = []
         searchClusters = []
@@ -5641,7 +5986,13 @@ final class AppState: ObservableObject {
                 forKey: selectedSiteSettingKey(for: configurationID)
               ),
               case .string(let preferredKey) = value,
-              supportedSites.contains(where: { $0.key == preferredKey }) else {
+              supportedSites.contains(where: { $0.key == preferredKey }),
+              let cached = await cachedSiteHome(
+                configurationID: configurationID,
+                siteKey: preferredKey
+              ),
+              HomeSiteRolePolicy.isContentHome(cached),
+              activeConfigurationRecord?.id == configurationID else {
             return
         }
         selectedSiteKey = preferredKey
@@ -5702,19 +6053,14 @@ final class AppState: ObservableObject {
     private func restoreCachedSiteHome(
         loadsCategoryContent: Bool = false
     ) async {
-        guard let environment,
-              let configurationID = activeConfigurationRecord?.id,
+        guard let configurationID = activeConfigurationRecord?.id,
               let siteKey = selectedSiteKey,
               let contentIdentity = currentHomeContentIdentity,
-              let value = try? await environment.database.setting(
-                forKey: homeCacheSettingKey(
-                    configurationID: configurationID,
-                    siteKey: siteKey
-                )
+              let cached = await cachedSiteHome(
+                configurationID: configurationID,
+                siteKey: siteKey
               ),
-              case .string(let encoded) = value,
-              let data = Data(base64Encoded: encoded),
-              let cached = try? JSONDecoder().decode(SiteHome.self, from: data) else {
+              currentHomeContentIdentity == contentIdentity else {
             return
         }
         publishHomeContent(cached, identity: contentIdentity)
@@ -5723,6 +6069,24 @@ final class AppState: ObservableObject {
             identity: contentIdentity,
             loadsCategoryContent: loadsCategoryContent
         )
+    }
+
+    private func cachedSiteHome(
+        configurationID: UUID,
+        siteKey: String
+    ) async -> SiteHome? {
+        guard let environment,
+              let value = try? await environment.database.setting(
+                forKey: homeCacheSettingKey(
+                    configurationID: configurationID,
+                    siteKey: siteKey
+                )
+              ),
+              case .string(let encoded) = value,
+              let data = Data(base64Encoded: encoded) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(SiteHome.self, from: data)
     }
 
     private var currentHomeContentIdentity: HomeContentIdentity? {

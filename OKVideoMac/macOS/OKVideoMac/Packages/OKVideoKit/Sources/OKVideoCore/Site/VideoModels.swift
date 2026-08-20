@@ -199,6 +199,9 @@ public struct VideoDetail: Codable, Equatable, Sendable {
 public enum SiteSelectionResult: Equatable, Sendable {
     case detail(VideoDetail)
     case action(JSONValue)
+    /// The selected card is discovery metadata rather than a provider-owned
+    /// detail. The host should continue through its existing search flow.
+    case search(String)
 }
 
 public struct PlaySource: Codable, Equatable, Hashable, Identifiable, Sendable {

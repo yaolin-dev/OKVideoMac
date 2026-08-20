@@ -854,6 +854,100 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testDiscoveryFallbackSearchesEveryStructurallySearchableSite() {
+        let options = [
+            SearchScopeSiteOption(
+                key: "renamed-content-a",
+                name: "Arbitrary A",
+                unavailableReason: nil
+            ),
+            SearchScopeSiteOption(
+                key: "renamed-content-b",
+                name: "Arbitrary B",
+                unavailableReason: nil
+            ),
+            SearchScopeSiteOption(
+                key: "renamed-action-site",
+                name: "Arbitrary Utility",
+                unavailableReason: "站点声明不支持搜索"
+            )
+        ]
+        let manualSubset = SearchSiteScope(
+            mode: .custom,
+            selectedSiteKeys: ["renamed-content-a"]
+        )
+
+        XCTAssertEqual(
+            SearchProviderSelectionPolicy.effectiveSiteKeys(
+                context: .manual,
+                scope: manualSubset,
+                options: options
+            ),
+            ["renamed-content-a"]
+        )
+        XCTAssertEqual(
+            SearchProviderSelectionPolicy.effectiveSiteKeys(
+                context: .discoveryFallback,
+                scope: manualSubset,
+                options: options
+            ),
+            ["renamed-content-a", "renamed-content-b"]
+        )
+    }
+
+    func testHomeLandingUsesStructuralIndexMetadataAfterAllLabelsChange() {
+        let utility = SiteConfiguration(
+            key: "opaque-utility-key",
+            name: "Completely Renamed Utility",
+            type: 3,
+            api: "https://changed.invalid/runtime/a",
+            indexs: 0,
+            searchable: 0
+        )
+        let content = SiteConfiguration(
+            key: "opaque-content-key",
+            name: "Completely Renamed Content",
+            type: 3,
+            api: "https://different.invalid/runtime/b",
+            indexs: 1
+        )
+
+        XCTAssertEqual(
+            HomeLandingSitePolicy.defaultSiteKey(from: [utility, content]),
+            content.key
+        )
+    }
+
+    func testOnlyMediaHomeCanBecomePersistedLandingSite() {
+        let actionHome = SiteHome(
+            categories: [
+                VideoCategory(
+                    id: "opaque-operation",
+                    name: "Renamed Operation",
+                    contentKind: .action
+                )
+            ],
+            recommendations: [],
+            actionItems: [
+                SiteActionItem(
+                    siteKey: "opaque-site",
+                    siteName: "Renamed Site",
+                    itemID: "opaque-action",
+                    title: "Renamed Action"
+                )
+            ]
+        )
+        let contentHome = SiteHome(
+            categories: [
+                VideoCategory(id: "opaque-media", name: "Renamed Category")
+            ],
+            recommendations: []
+        )
+
+        XCTAssertFalse(HomeSiteRolePolicy.isContentHome(actionHome))
+        XCTAssertTrue(HomeSiteRolePolicy.isContentHome(contentHome))
+    }
+
     @MainActor
     func testSearchScopeSettingKeysAreIsolatedByConfiguration() {
         let first = UUID()
@@ -1277,6 +1371,90 @@ final class OKVideoMacTests: XCTestCase {
                 hasCompletedStartup: true,
                 selectedSection: .home,
                 isHomeSearchPresented: true
+            )
+        )
+    }
+
+    func testNodeAuthorizationRetryRemainsBoundToOriginalSourceIdentity() {
+        let configurationID = UUID()
+        let original = HomeContentIdentity(
+            configurationID: configurationID,
+            siteKey: "source-before-rename"
+        )
+        let anotherSource = HomeContentIdentity(
+            configurationID: configurationID,
+            siteKey: "source-after-switch"
+        )
+
+        XCTAssertTrue(
+            NodeAuthorizationRetryPolicy.shouldRetry(
+                pendingIdentity: original,
+                presentationIdentity: original,
+                activeConfigurationID: configurationID,
+                selectedSiteKey: original.siteKey,
+                requiresSelectedHomeSource: true,
+                availableSiteKeys: [original.siteKey, anotherSource.siteKey]
+            )
+        )
+        XCTAssertFalse(
+            NodeAuthorizationRetryPolicy.shouldRetry(
+                pendingIdentity: original,
+                presentationIdentity: original,
+                activeConfigurationID: configurationID,
+                selectedSiteKey: anotherSource.siteKey,
+                requiresSelectedHomeSource: true,
+                availableSiteKeys: [original.siteKey, anotherSource.siteKey]
+            )
+        )
+        XCTAssertFalse(
+            NodeAuthorizationRetryPolicy.shouldRetry(
+                pendingIdentity: original,
+                presentationIdentity: anotherSource,
+                activeConfigurationID: configurationID,
+                selectedSiteKey: original.siteKey,
+                requiresSelectedHomeSource: false,
+                availableSiteKeys: [original.siteKey, anotherSource.siteKey]
+            )
+        )
+        XCTAssertFalse(
+            NodeAuthorizationRetryPolicy.shouldRetry(
+                pendingIdentity: original,
+                presentationIdentity: original,
+                activeConfigurationID: UUID(),
+                selectedSiteKey: original.siteKey,
+                requiresSelectedHomeSource: false,
+                availableSiteKeys: [original.siteKey]
+            )
+        )
+    }
+
+    func testCloudAuthorizationRetryRemainsBoundToOriginalSourceIdentity() {
+        let configurationID = UUID()
+        let original = HomeContentIdentity(
+            configurationID: configurationID,
+            siteKey: "provider-key-before-rename"
+        )
+        let renamedKey = "provider-key-after-rename"
+
+        XCTAssertTrue(
+            CloudAuthorizationRetryPolicy.isCurrent(
+                sourceIdentity: original,
+                activeConfigurationID: configurationID,
+                availableSiteKeys: [original.siteKey, renamedKey]
+            )
+        )
+        XCTAssertFalse(
+            CloudAuthorizationRetryPolicy.isCurrent(
+                sourceIdentity: original,
+                activeConfigurationID: UUID(),
+                availableSiteKeys: [original.siteKey]
+            )
+        )
+        XCTAssertFalse(
+            CloudAuthorizationRetryPolicy.isCurrent(
+                sourceIdentity: original,
+                activeConfigurationID: configurationID,
+                availableSiteKeys: [renamedKey]
             )
         )
     }
@@ -1715,6 +1893,89 @@ final class OKVideoMacTests: XCTestCase {
             let requestCount = await client.requestCount()
             XCTAssertEqual(requestCount, 1)
         }
+    }
+
+    @MainActor
+    func testImageRepositoryRetriesRejectedRemoteImageWithSameOriginReferer() async throws {
+        let cacheDirectory = temporaryImageCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let url = try XCTUnwrap(
+            URL(string: "https://assets.changed.example.test/poster.webp")
+        )
+        let client = ImageRefererFallbackHTTPClient(
+            imageData: try makeTestImageData(),
+            initialStatus: 418
+        )
+        let repository = try makeImageRepository(
+            cacheDirectory: cacheDirectory,
+            httpClient: client
+        )
+
+        _ = try await repository.image(for: url)
+
+        let requests = await client.capturedRequests()
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertNil(requests[0].headers["Referer"])
+        XCTAssertEqual(
+            requests[1].headers["Referer"],
+            "https://assets.changed.example.test/"
+        )
+    }
+
+    @MainActor
+    func testImageRepositoryDoesNotOverrideExplicitReferer() async throws {
+        let cacheDirectory = temporaryImageCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let url = try XCTUnwrap(
+            URL(
+                string: "https://images.renamed.example.test/poster.webp"
+                    + "@Referer=https://origin.changed.example.test/"
+            )
+        )
+        let client = ImageRefererFallbackHTTPClient(
+            imageData: try makeTestImageData(),
+            initialStatus: 418
+        )
+        let repository = try makeImageRepository(
+            cacheDirectory: cacheDirectory,
+            httpClient: client
+        )
+
+        _ = try await repository.image(for: url)
+
+        let requests = await client.capturedRequests()
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(
+            requests[0].headers["Referer"],
+            "https://origin.changed.example.test/"
+        )
+    }
+
+    @MainActor
+    func testImageRepositoryRefererFallbackPreservesSecondHTTPStatus() async throws {
+        let cacheDirectory = temporaryImageCacheDirectory()
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let url = try XCTUnwrap(
+            URL(string: "https://media.unrelated.example.test/poster.webp")
+        )
+        let client = ImageRefererFallbackHTTPClient(
+            imageData: try makeTestImageData(),
+            initialStatus: 418,
+            fallbackStatus: 403
+        )
+        let repository = try makeImageRepository(
+            cacheDirectory: cacheDirectory,
+            httpClient: client
+        )
+
+        do {
+            _ = try await repository.image(for: url)
+            XCTFail("第二次 HTTP 拒绝必须原样抛出")
+        } catch {
+            XCTAssertEqual(error as? HTTPClientError, .statusCode(403))
+        }
+        let requests = await client.capturedRequests()
+        XCTAssertEqual(requests.count, 2)
     }
 
     @MainActor
@@ -7040,6 +7301,44 @@ private actor ImageRepositoryHTTPClientProbe: HTTPClient {
 
     func requestCount() -> Int {
         count
+    }
+}
+
+private actor ImageRefererFallbackHTTPClient: HTTPClient {
+    private let imageData: Data
+    private let initialStatus: Int
+    private let fallbackStatus: Int?
+    private var requests: [HTTPRequest] = []
+
+    init(
+        imageData: Data,
+        initialStatus: Int,
+        fallbackStatus: Int? = nil
+    ) {
+        self.imageData = imageData
+        self.initialStatus = initialStatus
+        self.fallbackStatus = fallbackStatus
+    }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        requests.append(request)
+        let hasReferer = request.headers["Referer"]?.isEmpty == false
+        if !hasReferer {
+            throw HTTPClientError.statusCode(initialStatus)
+        }
+        if let fallbackStatus {
+            throw HTTPClientError.statusCode(fallbackStatus)
+        }
+        return HTTPResponse(
+            url: request.url,
+            statusCode: 200,
+            headers: ["Content-Type": "image/tiff"],
+            body: imageData
+        )
+    }
+
+    func capturedRequests() -> [HTTPRequest] {
+        requests
     }
 }
 

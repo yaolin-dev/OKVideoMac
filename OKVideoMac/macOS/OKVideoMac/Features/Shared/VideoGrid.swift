@@ -138,7 +138,27 @@ struct VideoPosterView: View {
     let item: VideoSummary
 
     var body: some View {
-        PosterView(url: item.posterURL)
+        Group {
+            if item.posterURL != nil {
+                PosterView(url: item.posterURL)
+            } else if item.isFolder {
+                categoryNavigationPoster
+            } else {
+                PosterView(url: nil)
+            }
+        }
+            .overlay(alignment: .topTrailing) {
+                if item.isFolder, item.posterURL != nil {
+                    Image(systemName: "rectangle.stack.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(6)
+                        .background(Color.black.opacity(0.62))
+                        .clipShape(Circle())
+                        .padding(7)
+                        .accessibilityLabel("分类导航")
+                }
+            }
             .overlay(alignment: .bottomTrailing) {
                 if let rating = VideoCardMetadata.ratingText(
                     from: item.remarks
@@ -155,6 +175,24 @@ struct VideoPosterView: View {
                         .accessibilityLabel("评分 \(rating)")
                 }
             }
+    }
+
+    private var categoryNavigationPoster: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.accentColor.opacity(0.1))
+            VStack(spacing: 10) {
+                Image(systemName: "rectangle.stack.fill")
+                    .font(.system(size: 34, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+                Text("分类导航")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .aspectRatio(2 / 3, contentMode: .fit)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("分类导航")
     }
 }
 

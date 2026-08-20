@@ -258,16 +258,30 @@ actor ImageDataRepository {
         let loadID = UUID()
         let task = Task<Data, Error> {
             let imageRequest = InlineImageRequest.parse(url)
-            let response = try await httpClient.send(
-                HTTPRequest(
+            do {
+                return try await sendImageRequest(
                     url: imageRequest.url,
-                    headers: imageRequest.headers,
-                    timeout: 20,
-                    maximumResponseBytes: 10 * 1_024 * 1_024,
-                    retryPolicy: HTTPRetryPolicy(maximumRetries: 1)
+                    headers: imageRequest.headers
                 )
-            )
-            return response.body
+            } catch let error as HTTPClientError {
+                guard case .statusCode(let statusCode) = error,
+                      [401, 403, 418].contains(statusCode),
+                      !Self.hasReferer(in: imageRequest.headers),
+                      let referer = Self.sameOriginReferer(
+                        for: imageRequest.url
+                      ) else {
+                    throw error
+                }
+                var fallbackHeaders = imageRequest.headers
+                fallbackHeaders["Referer"] = referer
+                // This is the only compatibility fallback. If it fails, the
+                // HTTP client's original typed error (including status code)
+                // is propagated unchanged.
+                return try await sendImageRequest(
+                    url: imageRequest.url,
+                    headers: fallbackHeaders
+                )
+            }
         }
         inFlight[url] = InFlightImageDataLoad(id: loadID, task: task)
         defer {
@@ -276,6 +290,44 @@ actor ImageDataRepository {
             }
         }
         return try await task.value
+    }
+
+    private func sendImageRequest(
+        url: URL,
+        headers: HTTPHeaders
+    ) async throws -> Data {
+        let response = try await httpClient.send(
+            HTTPRequest(
+                url: url,
+                headers: headers,
+                timeout: 20,
+                maximumResponseBytes: 10 * 1_024 * 1_024,
+                retryPolicy: HTTPRetryPolicy(maximumRetries: 0)
+            )
+        )
+        return response.body
+    }
+
+    private static func hasReferer(in headers: HTTPHeaders) -> Bool {
+        guard let value = headers["Referer"] else {
+            return false
+        }
+        return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func sameOriginReferer(for url: URL) -> String? {
+        guard let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              let host = url.host?.lowercased(),
+              !["127.0.0.1", "localhost", "::1"].contains(host) else {
+            return nil
+        }
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = host
+        components.port = url.port
+        components.path = "/"
+        return components.url?.absoluteString
     }
 
     func cancelInFlightLoads() {

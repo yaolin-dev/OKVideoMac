@@ -657,6 +657,115 @@ final class SiteProviderTests: XCTestCase {
         XCTAssertEqual(detail.playSources.first?.episodes.count, 1)
     }
 
+    func testSuccessfulEmptyDetailReturnsOneShotSearchSelection() throws {
+        let site = SiteConfiguration(
+            key: "renamed-source",
+            name: "Renamed Source",
+            type: 3,
+            api: "https://runtime.example.test/spider/arbitrary/3"
+        )
+        let fallback = VideoSummary(
+            siteKey: site.key,
+            siteName: site.name,
+            videoID: "opaque-item-927",
+            title: "  Arbitrary Film  "
+        )
+
+        XCTAssertEqual(
+            try SpiderResponseMapper.selection(
+                .object([:]),
+                site: site,
+                baseURL: nil,
+                fallbackSummary: fallback,
+                allowsPlaceholderAction: false
+            ),
+            .search("Arbitrary Film")
+        )
+        XCTAssertEqual(fallback.resolvedContentKind, .media)
+    }
+
+    func testSuccessfulEmptyDetailRejectsUnsearchableFallbackTitle() throws {
+        let site = SiteConfiguration(
+            key: "another-source",
+            name: "Another Source",
+            type: 3,
+            api: "https://changed.example.test/spider/opaque/3"
+        )
+
+        for title in ["", "   ", "---", "…", "untitled"] {
+            XCTAssertThrowsError(
+                try SpiderResponseMapper.selection(
+                    .object([:]),
+                    site: site,
+                    baseURL: nil,
+                    fallbackSummary: VideoSummary(
+                        siteKey: site.key,
+                        siteName: site.name,
+                        videoID: UUID().uuidString,
+                        title: title
+                    ),
+                    allowsPlaceholderAction: false
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? AppError,
+                    .contentUnavailable("当前内容源未提供可打开的详情")
+                )
+            }
+        }
+    }
+
+    func testCategoryNavigationRequiresNormalizedCateValue() throws {
+        let site = SiteConfiguration(
+            key: "source-after-rename",
+            name: "Source After Rename",
+            type: 3,
+            api: "https://different-domain.example.test/spider/site/3"
+        )
+        let page = try SpiderResponseMapper.page(
+            .object([
+                "list": .array([
+                    .object([
+                        "vod_id": .string("opaque-a"),
+                        "vod_name": .string("Object Callback"),
+                        "vod_pic": .string(
+                            "https://images.changed.example.test/object.webp"
+                        ),
+                        "cate": .object([:])
+                    ]),
+                    .object([
+                        "vod_id": .string("opaque-b"),
+                        "vod_name": .string("Null Callback"),
+                        "cate": .null
+                    ]),
+                    .object([
+                        "vod_id": .string("opaque-c"),
+                        "vod_name": .string("Blank Callback"),
+                        "cate": .string("   \n")
+                    ]),
+                    .object([
+                        "vod_id": .string("opaque-d"),
+                        "vod_name": .string("Named Callback"),
+                        "cate": .string(" callback ")
+                    ]),
+                    .object([
+                        "vod_id": .string("opaque-e"),
+                        "vod_name": .string("No Callback")
+                    ])
+                ])
+            ]),
+            site: site,
+            baseURL: nil,
+            page: 1
+        )
+
+        XCTAssertEqual(page.items.map(\.isFolder), [true, false, false, true, false])
+        XCTAssertEqual(
+            page.items.first?.posterURL?.absoluteString,
+            "https://images.changed.example.test/object.webp"
+        )
+    }
+
     func testContentSiteBlankDetailPlaceholderIsNotAnAction() throws {
         let site = SiteConfiguration(
             key: "node-content",
