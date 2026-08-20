@@ -23,6 +23,43 @@ struct UpstreamVideo {
     var playURL: String?
     var tag: String?
     var action: String?
+    var contentKind: VideoContentKind
+}
+
+/// Interprets only protocol metadata. Human-facing names, poster URLs, and
+/// identifiers that merely happen to look like URLs are deliberately ignored.
+enum ProtocolContentSemantics {
+    private static let actionIdentifiers: Set<String> = [
+        "action", "actions", "configuration", "config", "menu", "operation",
+        "operations", "service", "services", "setting", "settings", "tool",
+        "tools"
+    ]
+
+    private static let unsupportedIdentifiers: Set<String> = [
+        "unsupported"
+    ]
+
+    static func kind(
+        categoryID: String?,
+        action: String?,
+        tag: String?
+    ) -> VideoContentKind {
+        if action?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            return .action
+        }
+        for value in [tag, categoryID].compactMap({ $0 }) {
+            let identifier = value.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ).lowercased()
+            if actionIdentifiers.contains(identifier) {
+                return .action
+            }
+            if unsupportedIdentifiers.contains(identifier) {
+                return .unsupported
+            }
+        }
+        return .media
+    }
 }
 
 enum UpstreamResponseDecoder {
@@ -82,7 +119,8 @@ enum UpstreamResponseDecoder {
     static func summaries(
         from videos: [UpstreamVideo],
         site: SiteConfiguration,
-        baseURL: URL?
+        baseURL: URL?,
+        inheritedContentKind: VideoContentKind? = nil
     ) -> [VideoSummary] {
         videos.compactMap { video in
             guard video.id != "-1001", !video.name.isEmpty else {
@@ -101,6 +139,9 @@ enum UpstreamResponseDecoder {
                 identifier = "msearch:\(site.key):\(video.name)"
             }
             let posterURL = video.picture.flatMap { try? ResourceResolver.resolve($0, relativeTo: baseURL) }
+            let contentKind = video.contentKind == .media
+                ? (inheritedContentKind ?? .media)
+                : video.contentKind
             return VideoSummary(
                 siteKey: site.key,
                 siteName: site.name,
@@ -111,9 +152,24 @@ enum UpstreamResponseDecoder {
                 year: video.year,
                 categoryName: video.typeName,
                 tag: video.tag,
-                action: video.action
+                action: video.action,
+                contentKind: contentKind == .media ? nil : contentKind
             )
         }
+    }
+
+    static func mediaSummaries(
+        from videos: [UpstreamVideo],
+        site: SiteConfiguration,
+        baseURL: URL?,
+        inheritedContentKind: VideoContentKind? = nil
+    ) -> [VideoSummary] {
+        summaries(
+            from: videos,
+            site: site,
+            baseURL: baseURL,
+            inheritedContentKind: inheritedContentKind
+        ).filter { $0.resolvedContentKind == .media }
     }
 
     static func detail(
@@ -151,7 +207,17 @@ enum UpstreamResponseDecoder {
                   !name.isEmpty else {
                 return nil
             }
-            return VideoCategory(id: id, name: name, filters: filters[id] ?? [])
+            let contentKind = ProtocolContentSemantics.kind(
+                categoryID: id,
+                action: string(object["action"]),
+                tag: string(object["tag"])
+            )
+            return VideoCategory(
+                id: id,
+                name: name,
+                filters: filters[id] ?? [],
+                contentKind: contentKind == .media ? nil : contentKind
+            )
         }
     }
 
@@ -185,6 +251,9 @@ enum UpstreamResponseDecoder {
         guard case .array(let items) = value else { return [] }
         return items.compactMap { item in
             guard case .object(let object) = item else { return nil }
+            let categoryID = string(object["type_id"])
+            let tag = string(object["vod_tag"]) ?? string(object["tag"])
+            let action = string(object["action"])
             return UpstreamVideo(
                 id: string(object["vod_id"]) ?? string(object["id"]) ?? "",
                 name: string(object["vod_name"]) ?? string(object["name"]) ?? "",
@@ -198,8 +267,13 @@ enum UpstreamResponseDecoder {
                 content: string(object["vod_content"]) ?? string(object["des"]),
                 playFrom: string(object["vod_play_from"]),
                 playURL: string(object["vod_play_url"]),
-                tag: string(object["vod_tag"]) ?? string(object["tag"]),
-                action: string(object["action"])
+                tag: tag,
+                action: action,
+                contentKind: ProtocolContentSemantics.kind(
+                    categoryID: categoryID,
+                    action: action,
+                    tag: tag
+                )
             )
         }
     }
@@ -392,23 +466,33 @@ public enum SpiderResponseMapper {
             baseURL: baseURL,
             allowEmpty: true
         )
-        let recommendations: [UpstreamVideo]
+        let recommendationResponse: UpstreamResponse
         if let homeVideoValue {
-            recommendations = try decode(
+            recommendationResponse = try decode(
                 homeVideoValue,
                 site: site,
                 baseURL: baseURL,
                 allowEmpty: true
-            ).videos
+            )
         } else {
-            recommendations = home.videos
+            recommendationResponse = home
         }
+        let inheritedKind: VideoContentKind? =
+            !recommendationResponse.categories.isEmpty
+            && recommendationResponse.categories.allSatisfy {
+                $0.resolvedContentKind != .media
+            }
+                ? .action
+                : nil
         return SiteHome(
-            categories: home.categories,
-            recommendations: UpstreamResponseDecoder.summaries(
-                from: recommendations,
+            categories: home.categories.filter {
+                $0.resolvedContentKind == .media
+            },
+            recommendations: UpstreamResponseDecoder.mediaSummaries(
+                from: recommendationResponse.videos,
                 site: site,
-                baseURL: baseURL
+                baseURL: baseURL,
+                inheritedContentKind: inheritedKind
             )
         )
     }
@@ -426,7 +510,7 @@ public enum SpiderResponseMapper {
             allowEmpty: true
         )
         return VideoPage(
-            items: UpstreamResponseDecoder.summaries(
+            items: UpstreamResponseDecoder.mediaSummaries(
                 from: response.videos,
                 site: site,
                 baseURL: baseURL
@@ -457,6 +541,8 @@ public enum SpiderResponseMapper {
     ) throws -> SiteSelectionResult {
         let response = try decode(value, site: site, baseURL: baseURL)
         if let video = response.videos.first(where: {
+            $0.contentKind == .media
+                &&
             !$0.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }) {
@@ -468,7 +554,8 @@ public enum SpiderResponseMapper {
                 )
             )
         }
-        if let fallbackSummary,
+        if fallbackSummary?.resolvedContentKind != .action,
+           let fallbackSummary,
            var video = response.videos.first(where: {
                detailPayloadIsRecoverable($0)
            }) {
@@ -492,8 +579,9 @@ public enum SpiderResponseMapper {
                 )
             )
         }
-        if response.videos.contains(where: {
-            $0.action?.nonEmptyValue != nil
+        if fallbackSummary?.resolvedContentKind == .action
+            || response.videos.contains(where: {
+            $0.contentKind == .action || $0.action?.nonEmptyValue != nil
         }) {
             return .action(value)
         }
@@ -513,7 +601,8 @@ public enum SpiderResponseMapper {
     }
 
     private static func detailPayloadIsRecoverable(_ video: UpstreamVideo) -> Bool {
-        guard video.action?.nonEmptyValue == nil else { return false }
+        guard video.contentKind == .media,
+              video.action?.nonEmptyValue == nil else { return false }
         return [
             video.typeName,
             video.picture,
@@ -694,6 +783,9 @@ private final class XMLVideoParserDelegate: NSObject, XMLParserDelegate {
             currentVideo?[name] = value
         }
         if name == "video", let video = currentVideo {
+            let categoryID = video["type_id"]
+            let tag = video["vod_tag"] ?? video["tag"]
+            let action = video["action"]
             videos.append(
                 UpstreamVideo(
                     id: video["id"] ?? video["vod_id"] ?? "",
@@ -708,8 +800,13 @@ private final class XMLVideoParserDelegate: NSObject, XMLParserDelegate {
                     content: video["des"] ?? video["vod_content"],
                     playFrom: video["dl"] ?? video["vod_play_from"],
                     playURL: video["dd"] ?? video["vod_play_url"],
-                    tag: video["vod_tag"] ?? video["tag"],
-                    action: video["action"]
+                    tag: tag,
+                    action: action,
+                    contentKind: ProtocolContentSemantics.kind(
+                        categoryID: categoryID,
+                        action: action,
+                        tag: tag
+                    )
                 )
             )
             currentVideo = nil

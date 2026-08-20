@@ -72,15 +72,6 @@ struct HomeView: View {
                                     .font(.title2)
                                 ScrollView(.horizontal, showsIndicators: false) {
                                     HStack {
-                                        Button("推荐") {
-                                            filterSelection = [:]
-                                            state.clearCategory()
-                                        }
-                                        .buttonStyle(
-                                            HomeCategoryButtonStyle(
-                                                isSelected: state.selectedCategoryID == nil
-                                            )
-                                        )
                                         ForEach(home.categories) { category in
                                             Button(category.name) {
                                                 filterSelection = Dictionary(
@@ -144,11 +135,17 @@ struct HomeView: View {
                                     ProgressView("正在加载分类…")
                                 }
                             } else if !home.recommendations.isEmpty {
-                                Text("推荐")
-                                    .font(.title2)
                                 VideoGrid(items: home.recommendations) { summary in
                                     Task { await state.loadDetail(summary) }
                                 }
+                            } else if !home.categories.isEmpty {
+                                Label(
+                                    "从上方选择一个分类以加载内容",
+                                    systemImage: "rectangle.stack"
+                                )
+                                .foregroundColor(.secondary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 40)
                             }
                         }
                         .padding()
@@ -219,35 +216,63 @@ struct HomeToolbarView: View {
 
     var body: some View {
         if !state.isHomeSearchPresented,
-           state.activeConfiguration != nil,
-           !state.visibleSites.isEmpty {
+           state.activeConfiguration != nil {
             HStack(spacing: 10) {
                 HStack(spacing: 6) {
-                    Image(systemName: "network")
-                        .foregroundColor(.secondary)
-                    Picker(
-                        "站点",
-                        selection: Binding(
-                            get: { state.selectedSiteKey ?? "" },
-                            set: { key in
-                                Task { await state.selectSite(key) }
-                            }
-                        )
-                    ) {
-                        ForEach(state.visibleSites) { site in
-                            Text(
-                                HomeSitePresentation.displayName(
-                                    siteName: site.name,
-                                    capability: state.siteCapability(for: site.key)
+                    if !state.configurations.isEmpty {
+                        Menu {
+                            ForEach(state.configurations) { record in
+                                Button {
+                                    Task {
+                                        await state.activateConfiguration(record.id)
+                                    }
+                                } label: {
+                                    if state.configurationMenuSelectionID == record.id {
+                                        Label(record.name, systemImage: "checkmark")
+                                    } else {
+                                        Text(record.name)
+                                    }
+                                }
+                                .disabled(
+                                    state.activeConfigurationRecord?.id == record.id
+                                        && !state.isSwitchingConfiguration
                                 )
-                            )
-                            .tag(site.key)
+                            }
+                        } label: {
+                            Image(systemName: "play.rectangle.on.rectangle")
+                                .foregroundColor(.secondary)
                         }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("切换点播源")
+                        .accessibilityLabel("切换点播源")
                     }
-                    .labelsHidden()
-                    .frame(width: 210)
+
+                    if !state.visibleSites.isEmpty {
+                        Picker(
+                            "站点",
+                            selection: Binding(
+                                get: { state.selectedSiteKey ?? "" },
+                                set: { key in
+                                    Task { await state.selectSite(key) }
+                                }
+                            )
+                        ) {
+                            ForEach(state.visibleSites) { site in
+                                Text(
+                                    HomeSitePresentation.displayName(
+                                        siteName: site.name,
+                                        capability: state.siteCapability(for: site.key)
+                                    )
+                                )
+                                .tag(site.key)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 210)
+                        .help("选择内容站点，共 \(state.visibleSites.count) 个")
+                    }
                 }
-                .help("选择内容站点，共 \(state.visibleSites.count) 个")
 
                 TextField("搜索全部站点", text: $state.searchKeyword)
                     .textFieldStyle(.roundedBorder)
@@ -259,6 +284,8 @@ struct HomeToolbarView: View {
                     Label("搜索", systemImage: "magnifyingglass")
                 }
                 .disabled(
+                    state.visibleSites.isEmpty
+                        ||
                     state.searchKeyword
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                         .isEmpty

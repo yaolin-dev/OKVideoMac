@@ -1,14 +1,36 @@
 import Foundation
 
+/// Protocol-level meaning of an item returned by a site.
+///
+/// `nil` on persisted legacy models means media. Non-media values are only
+/// assigned from structural fields such as category identifiers, `action`, or
+/// `tag`; display titles and URLs never participate in this classification.
+public enum VideoContentKind: String, Codable, Equatable, Hashable, Sendable {
+    case media
+    case action
+    case unsupported
+}
+
 public struct VideoCategory: Codable, Equatable, Hashable, Identifiable, Sendable {
     public var id: String
     public var name: String
     public var filters: [VideoFilter]
+    public var contentKind: VideoContentKind?
 
-    public init(id: String, name: String, filters: [VideoFilter] = []) {
+    public init(
+        id: String,
+        name: String,
+        filters: [VideoFilter] = [],
+        contentKind: VideoContentKind? = nil
+    ) {
         self.id = id
         self.name = name
         self.filters = filters
+        self.contentKind = contentKind
+    }
+
+    public var resolvedContentKind: VideoContentKind {
+        contentKind ?? .media
     }
 }
 
@@ -47,6 +69,7 @@ public struct VideoSummary: Codable, Equatable, Hashable, Identifiable, Sendable
     public var categoryName: String?
     public var tag: String?
     public var action: String?
+    public var contentKind: VideoContentKind?
 
     public init(
         siteKey: String,
@@ -58,7 +81,8 @@ public struct VideoSummary: Codable, Equatable, Hashable, Identifiable, Sendable
         year: String? = nil,
         categoryName: String? = nil,
         tag: String? = nil,
-        action: String? = nil
+        action: String? = nil,
+        contentKind: VideoContentKind? = nil
     ) {
         self.siteKey = siteKey
         self.siteName = siteName
@@ -70,6 +94,11 @@ public struct VideoSummary: Codable, Equatable, Hashable, Identifiable, Sendable
         self.categoryName = categoryName
         self.tag = tag
         self.action = action
+        self.contentKind = contentKind
+    }
+
+    public var resolvedContentKind: VideoContentKind {
+        contentKind ?? .media
     }
 
     public var isFolder: Bool {

@@ -8,6 +8,127 @@ import OKVideoPersistence
 @testable import OKVideoMac
 
 final class OKVideoMacTests: XCTestCase {
+    func testConfigurationActivationTrackerLatestRequestWinsABC() {
+        var tracker = ConfigurationActivationRequestTracker()
+        let configurationA = UUID()
+        let configurationB = UUID()
+        let configurationC = UUID()
+
+        let tokenA = tracker.begin(configurationA)
+        let tokenB = tracker.begin(configurationB)
+        let tokenC = tracker.begin(configurationC)
+
+        XCTAssertFalse(tracker.owns(tokenA))
+        XCTAssertFalse(tracker.owns(tokenB))
+        XCTAssertTrue(tracker.owns(tokenC))
+        XCTAssertEqual(tracker.requestedConfigurationID, configurationC)
+
+        tracker.finish(tokenA)
+        tracker.finish(tokenB)
+        XCTAssertEqual(tracker.requestedConfigurationID, configurationC)
+        tracker.finish(tokenC)
+        XCTAssertNil(tracker.requestedConfigurationID)
+    }
+
+    func testConfigurationActivationTrackerLatestRequestWinsABA() {
+        var tracker = ConfigurationActivationRequestTracker()
+        let configurationA = UUID()
+        let configurationB = UUID()
+
+        let firstA = tracker.begin(configurationA)
+        let tokenB = tracker.begin(configurationB)
+        let finalA = tracker.begin(configurationA)
+
+        XCTAssertFalse(tracker.owns(firstA))
+        XCTAssertFalse(tracker.owns(tokenB))
+        XCTAssertTrue(tracker.owns(finalA))
+
+        tracker.finish(firstA)
+        tracker.finish(tokenB)
+        XCTAssertEqual(tracker.requestedConfigurationID, configurationA)
+        tracker.finish(finalA)
+        XCTAssertNil(tracker.requestedConfigurationID)
+    }
+
+    func testConfigurationActivationTrackerLatestRequestWinsBAB() {
+        var tracker = ConfigurationActivationRequestTracker()
+        let configurationA = UUID()
+        let configurationB = UUID()
+
+        let firstB = tracker.begin(configurationB)
+        let tokenA = tracker.begin(configurationA)
+        let finalB = tracker.begin(configurationB)
+
+        XCTAssertFalse(tracker.owns(firstB))
+        XCTAssertFalse(tracker.owns(tokenA))
+        XCTAssertTrue(tracker.owns(finalB))
+        XCTAssertEqual(tracker.requestedConfigurationID, configurationB)
+    }
+
+    func testConfigurationActivationTrackerLatestRequestWinsABCAC() {
+        var tracker = ConfigurationActivationRequestTracker()
+        let configurationA = UUID()
+        let configurationB = UUID()
+        let configurationC = UUID()
+
+        let tokens = [
+            tracker.begin(configurationA),
+            tracker.begin(configurationB),
+            tracker.begin(configurationC),
+            tracker.begin(configurationA),
+            tracker.begin(configurationC)
+        ]
+
+        XCTAssertTrue(tokens.dropLast().allSatisfy { !tracker.owns($0) })
+        XCTAssertTrue(tracker.owns(tokens[4]))
+        XCTAssertEqual(tracker.requestedConfigurationID, configurationC)
+    }
+
+    func testConfigurationActivationErrorPolicySilencesExpectedCancellation() {
+        XCTAssertFalse(
+            ConfigurationActivationErrorPolicy.shouldPresent(
+                CancellationError(),
+                ownsCurrentRequest: true
+            )
+        )
+        XCTAssertFalse(
+            ConfigurationActivationErrorPolicy.shouldPresent(
+                AppError.configuration("stale failure"),
+                ownsCurrentRequest: false
+            )
+        )
+    }
+
+    func testConfigurationActivationErrorPolicyPresentsLatestRealFailure() {
+        XCTAssertTrue(
+            ConfigurationActivationErrorPolicy.shouldPresent(
+                AppError.configuration("latest failure"),
+                ownsCurrentRequest: true
+            )
+        )
+    }
+
+    func testConfigurationActivationRuntimeCleanupIsOwnedByLatestNonNodeTarget() {
+        XCTAssertTrue(
+            ConfigurationActivationRuntimePolicy.shouldStopNodeRuntime(
+                targetEndpoint: nil,
+                ownsCurrentRequest: true
+            )
+        )
+        XCTAssertFalse(
+            ConfigurationActivationRuntimePolicy.shouldStopNodeRuntime(
+                targetEndpoint: nil,
+                ownsCurrentRequest: false
+            )
+        )
+        XCTAssertFalse(
+            ConfigurationActivationRuntimePolicy.shouldStopNodeRuntime(
+                targetEndpoint: URL(string: "http://127.0.0.1:12345"),
+                ownsCurrentRequest: true
+            )
+        )
+    }
+
     func testImportURLNormalizationOnlyTrimsEdges() throws {
         let exact = "https://user:pass@example.invalid/a%20b/config.js.md5?q=x%2By#fragment"
         let raw = " \t\n\(exact)\r\n "
@@ -5935,17 +6056,35 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         }
     }
 
-    func testNodeConfigurationCenterUsesEmbeddedWebsiteWithoutHTTPAction() async throws {
+    func testNodeHomeFiltersProtocolSettingCategoryWithoutSourceSpecificRules() async throws {
         let site = SiteConfiguration(
-            key: "nodejs_baseset",
-            name: "配置|中心",
+            key: "nodejs_generic_fixture",
+            name: "Generic Fixture",
             type: 4,
-            api: "/spider/baseset/4",
+            api: "/spider/generic/4",
             extra: ["okNodeRuntime": .bool(true)]
         )
-        let client = NodeProviderStubHTTPClient { _ in
-            XCTFail("配置中心不应请求未实现的 spider action")
-            throw HTTPClientError.statusCode(500)
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.path.hasSuffix("/init") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            XCTAssertTrue(
+                request.url.path.hasSuffix("/home")
+                    || request.url.path.hasSuffix("/homeVod")
+            )
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(
+                    #"{"class":[{"type_id":"setting","type_name":"任意功能"}],"list":[{"vod_id":"arbitrary-action","vod_name":"任意卡片"}]}"#.utf8
+                )
+            )
         }
         let baseURL = try XCTUnwrap(URL(string: "http://127.0.0.1:18988/"))
         let provider = try NodeHTTPSpiderSiteProvider(
@@ -5954,12 +6093,10 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             httpClient: client
         )
 
-        do {
-            _ = try await provider.action("node-web-configuration")
-            XCTFail("应该打开内嵌配置站点")
-        } catch let authorization as NodeWebAuthorizationRequired {
-            XCTAssertEqual(authorization.websiteURL.path, "/website")
-        }
+        let home = try await provider.home()
+
+        XCTAssertTrue(home.categories.isEmpty)
+        XCTAssertTrue(home.recommendations.isEmpty)
     }
 
     func testNodePlayerRewritesRuntimeProxyToLoopback() async throws {

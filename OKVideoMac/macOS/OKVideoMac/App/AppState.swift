@@ -790,6 +790,59 @@ private struct PendingPlaybackStartupGate {
     let timeoutTask: Task<Void, Never>
 }
 
+struct ConfigurationActivationToken: Equatable, Sendable {
+    let generation: UInt64
+    let configurationID: UUID
+}
+
+struct ConfigurationActivationRequestTracker: Sendable {
+    private(set) var generation: UInt64 = 0
+    private(set) var requestedConfigurationID: UUID?
+
+    mutating func begin(_ configurationID: UUID) -> ConfigurationActivationToken {
+        generation &+= 1
+        requestedConfigurationID = configurationID
+        return ConfigurationActivationToken(
+            generation: generation,
+            configurationID: configurationID
+        )
+    }
+
+    func owns(_ token: ConfigurationActivationToken) -> Bool {
+        generation == token.generation
+            && requestedConfigurationID == token.configurationID
+    }
+
+    mutating func finish(_ token: ConfigurationActivationToken) {
+        guard owns(token) else { return }
+        requestedConfigurationID = nil
+    }
+}
+
+enum ConfigurationActivationErrorPolicy {
+    static func shouldPresent(
+        _ error: Error,
+        ownsCurrentRequest: Bool
+    ) -> Bool {
+        ownsCurrentRequest && !(error is CancellationError)
+    }
+}
+
+enum ConfigurationActivationRuntimePolicy {
+    static func shouldStopNodeRuntime(
+        targetEndpoint: URL?,
+        ownsCurrentRequest: Bool
+    ) -> Bool {
+        ownsCurrentRequest && targetEndpoint == nil
+    }
+}
+
+private struct PreparedConfigurationActivation {
+    var record: StoredConfiguration
+    let configuration: FongMiConfiguration
+    let nodeRuntimeEndpoint: URL?
+}
+
 @MainActor
 final class AppState: ObservableObject {
     let navigation = AppNavigationState()
@@ -802,6 +855,7 @@ final class AppState: ObservableObject {
     @Published private(set) var configurations: [StoredConfiguration] = []
     @Published private(set) var activeConfigurationRecord: StoredConfiguration?
     @Published private(set) var activeConfiguration: FongMiConfiguration?
+    @Published private(set) var requestedConfigurationID: UUID?
     @Published private(set) var selectedSiteKey: String?
     @Published private(set) var siteHome: SiteHome?
     @Published private(set) var isHomeLoading = false
@@ -878,6 +932,9 @@ final class AppState: ObservableObject {
     private let environment: AppEnvironment?
     private let playerRenderSurfaceGate = PlayerRenderSurfaceReadinessGate()
     private var configurationImportOperationID: UUID?
+    private var configurationActivationTracker =
+        ConfigurationActivationRequestTracker()
+    private var configurationActivationTask: Task<Void, Never>?
     private var providers: [String: SiteProvider] = [:]
     private var searchTask: Task<Void, Never>?
     private var searchSessionID = UUID()
@@ -1266,22 +1323,174 @@ final class AppState: ObservableObject {
         return changed
     }
 
+    var configurationMenuSelectionID: UUID? {
+        requestedConfigurationID ?? activeConfigurationRecord?.id
+    }
+
+    var isSwitchingConfiguration: Bool {
+        requestedConfigurationID != nil
+    }
+
+    /// Shared activation entry point used by both Settings and the Home
+    /// toolbar. Every request receives a generation; a newer request cancels
+    /// the previous waiter and is the only generation allowed to publish or
+    /// surface an error.
     func activateConfiguration(_ id: UUID) async {
+        guard environment != nil,
+              let record = configurations.first(where: { $0.id == id }) else {
+            return
+        }
+        if activeConfigurationRecord?.id == id,
+           requestedConfigurationID == nil {
+            return
+        }
+        if requestedConfigurationID == id {
+            return
+        }
+
+        let token = configurationActivationTracker.begin(id)
+        requestedConfigurationID = id
+        configurationActivationTask?.cancel()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performConfigurationActivation(record, token: token)
+        }
+        configurationActivationTask = task
+        await task.value
+    }
+
+    private func performConfigurationActivation(
+        _ record: StoredConfiguration,
+        token: ConfigurationActivationToken
+    ) async {
         guard let environment else { return }
+        defer {
+            if configurationActivationTracker.owns(token) {
+                configurationActivationTracker.finish(token)
+                requestedConfigurationID = nil
+                configurationActivationTask = nil
+            }
+        }
+
         do {
-            try await environment.database.activateConfiguration(id: id)
-            resetSearchForConfigurationChange()
-            configurations = try await environment.database.configurations()
-            activeConfigurationRecord = try await environment.database.activeConfiguration()
-            selectedSiteKey = nil
-            try await prepareActiveNodeConfigurationIfNeeded()
-            try loadActiveConfigurationContent()
+            let prepared = try await prepareConfigurationActivation(record)
+            try ensureConfigurationActivationIsCurrent(token)
+
+            if prepared.record != record {
+                try await environment.database.saveConfiguration(prepared.record)
+                try ensureConfigurationActivationIsCurrent(token)
+            }
+
+            // Persistence is intentionally the final awaited step before the
+            // synchronous model commit. A stale generation may finish this
+            // tiny transaction, but it cannot publish; the current generation
+            // always owns the final persisted and visible selection.
+            try await environment.database.activateConfiguration(id: record.id)
+            try ensureConfigurationActivationIsCurrent(token)
+
+            commitConfigurationActivation(prepared)
+            if ConfigurationActivationRuntimePolicy.shouldStopNodeRuntime(
+                targetEndpoint: prepared.nodeRuntimeEndpoint,
+                ownsCurrentRequest: configurationActivationTracker.owns(token)
+            ) {
+                // This is cleanup owned by the latest committed non-Node
+                // selection, never by a stale task. The actor call is queued
+                // before MainActor can accept another selection, so a newer
+                // Node startup can only begin after this stop completes.
+                await environment.nodeBundleRuntime.stop()
+                try ensureConfigurationActivationIsCurrent(token)
+            }
             await loadSearchSiteScope()
+            try ensureConfigurationActivationIsCurrent(token)
             await prepareActiveConfigurationHome()
+            try ensureConfigurationActivationIsCurrent(token)
             try await reloadHistory()
+            try ensureConfigurationActivationIsCurrent(token)
         } catch {
+            guard ConfigurationActivationErrorPolicy.shouldPresent(
+                error,
+                ownsCurrentRequest: configurationActivationTracker.owns(token)
+            ) else {
+                // A newer source selection owns the UI and any eventual error.
+                return
+            }
             show(error, title: "切换配置失败")
         }
+    }
+
+    private func prepareConfigurationActivation(
+        _ record: StoredConfiguration
+    ) async throws -> PreparedConfigurationActivation {
+        guard let environment else {
+            throw AppError.configuration("应用环境尚未初始化")
+        }
+        if record.sourceKind == .remote,
+           let sourceValue = record.sourceValue,
+           let sourceURL = URL(string: sourceValue),
+           NodeBundleRuntimeService.supports(sourceURL) {
+            let loaded = try await environment.nodeBundleRuntime
+                .loadConfiguration(from: sourceURL)
+            try Task.checkCancellation()
+            var updated = record
+            updated.baseURL = loaded.baseURL
+            updated.rawData = loaded.rawData
+            updated.updatedAt = loaded.loadedAt
+            return PreparedConfigurationActivation(
+                record: updated,
+                configuration: loaded.configuration,
+                nodeRuntimeEndpoint: loaded.baseURL
+            )
+        }
+        return PreparedConfigurationActivation(
+            record: record,
+            configuration: try ConfigurationParser().parse(record.rawData),
+            nodeRuntimeEndpoint: nil
+        )
+    }
+
+    private func ensureConfigurationActivationIsCurrent(
+        _ token: ConfigurationActivationToken
+    ) throws {
+        try Task.checkCancellation()
+        guard configurationActivationTracker.owns(token) else {
+            throw CancellationError()
+        }
+    }
+
+    private func commitConfigurationActivation(
+        _ prepared: PreparedConfigurationActivation
+    ) {
+        resetSearchForConfigurationChange()
+        configurationRefreshSessionID = UUID()
+        configurationRefreshTask?.cancel()
+        configurationRefreshTask = nil
+        homeLoadSessionID = UUID()
+        categoryLoadSessionID = UUID()
+        detailLoadSessionID = UUID()
+
+        var activeRecord = prepared.record
+        activeRecord.isActive = true
+        configurations = configurations.map { existing in
+            if existing.id == activeRecord.id {
+                return activeRecord
+            }
+            var inactive = existing
+            inactive.isActive = false
+            return inactive
+        }
+        activeConfigurationRecord = activeRecord
+        activeConfiguration = prepared.configuration
+        lastAutomaticConfigurationRefreshAttemptAt = activeRecord.updatedAt
+        activeNodeRuntimeEndpoint = prepared.nodeRuntimeEndpoint
+        nodeRuntimeUnavailableReason = prepared.nodeRuntimeEndpoint == nil
+            ? "Node Runtime 未用于当前配置"
+            : ""
+        rebuildProviders()
+        selectedSiteKey = supportedSites.first?.key
+        selectedCategoryID = nil
+        categoryPage = nil
+        categoryPaginationError = nil
+        discardHomeContentIfNeeded(for: currentHomeContentIdentity)
     }
 
     func deleteConfiguration(_ id: UUID) async {
@@ -3561,6 +3770,9 @@ final class AppState: ObservableObject {
         playerEventTask = nil
         nodeRuntimeStatusTask?.cancel()
         nodeRuntimeStatusTask = nil
+        configurationActivationTask?.cancel()
+        configurationActivationTask = nil
+        requestedConfigurationID = nil
 
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -4932,6 +5144,12 @@ final class AppState: ObservableObject {
     }
 
     private func applyNodeRuntimeStatus(_ status: NodeRuntimeStatus) {
+        if isSwitchingConfiguration {
+            if case .running(let endpoint) = status {
+                lastReadyNodeRuntimeEndpoint = endpoint
+            }
+            return
+        }
         let shouldReloadHome: Bool
         switch status {
         case .running(let endpoint):

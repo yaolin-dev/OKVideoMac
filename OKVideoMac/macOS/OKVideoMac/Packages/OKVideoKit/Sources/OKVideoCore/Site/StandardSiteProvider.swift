@@ -28,8 +28,10 @@ public final class StandardSiteProvider: SiteProvider {
     public func home() async throws -> SiteHome {
         let response = try await request(parameters: [:])
         return SiteHome(
-            categories: filteredCategories(response.categories),
-            recommendations: UpstreamResponseDecoder.summaries(
+            categories: filteredCategories(response.categories).filter {
+                $0.resolvedContentKind == .media
+            },
+            recommendations: UpstreamResponseDecoder.mediaSummaries(
                 from: response.videos,
                 site: site,
                 baseURL: configurationBaseURL
@@ -62,7 +64,7 @@ public final class StandardSiteProvider: SiteProvider {
 
         let response = try await request(parameters: parameters)
         return VideoPage(
-            items: UpstreamResponseDecoder.summaries(
+            items: UpstreamResponseDecoder.mediaSummaries(
                 from: response.videos,
                 site: site,
                 baseURL: configurationBaseURL
@@ -105,7 +107,7 @@ public final class StandardSiteProvider: SiteProvider {
         }
         let response = try await request(parameters: parameters)
         return VideoPage(
-            items: UpstreamResponseDecoder.summaries(
+            items: UpstreamResponseDecoder.mediaSummaries(
                 from: response.videos,
                 site: site,
                 baseURL: configurationBaseURL

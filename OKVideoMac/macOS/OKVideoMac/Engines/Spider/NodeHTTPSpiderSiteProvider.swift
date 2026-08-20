@@ -293,19 +293,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             body: [:],
             maximumAttempts: 2
         )
-        var result = try SpiderResponseMapper.home(
+        let result = try SpiderResponseMapper.home(
             home.value,
             homeVideoValue: homeVideo?.value,
             site: site,
             baseURL: home.baseURL
         )
-        if isConfigurationCenter {
-            result.recommendations = result.recommendations.map { summary in
-                var summary = summary
-                summary.action = "node-web-configuration"
-                return summary
-            }
-        }
         guard !site.categories.isEmpty else { return result }
         let allowed = Set(site.categories)
         return SiteHome(
@@ -361,14 +354,6 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         id: String,
         fallbackSummary: VideoSummary?
     ) async throws -> SiteSelectionResult {
-        if isConfigurationCenter,
-           id == "config-center" || id == "node-web-configuration" {
-            let readyBaseURL = try await runtimeBaseURL()
-            throw webAuthorizationRequired(
-                message: "在内置配置中心中管理网盘登录与扫码授权。",
-                baseURL: readyBaseURL
-            )
-        }
         let invocation = try await invoke(
             method: "detail",
             body: [
@@ -382,7 +367,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             site: site,
             baseURL: invocation.baseURL,
             fallbackSummary: fallbackSummary,
-            allowsPlaceholderAction: isConfigurationCenter
+            allowsPlaceholderAction:
+                fallbackSummary?.resolvedContentKind == .action
         )
     }
 
@@ -585,15 +571,6 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     }
 
     func action(_ action: String) async throws -> JSONValue {
-        if action == "node-web-configuration"
-            || action == "config-center"
-            || action.contains("/website") {
-            let readyBaseURL = try await runtimeBaseURL()
-            throw webAuthorizationRequired(
-                message: "在内置配置中心中管理网盘登录与扫码授权。",
-                baseURL: readyBaseURL
-            )
-        }
         return try await invoke(
             method: "action",
             body: ["action": .string(action)]
@@ -731,11 +708,6 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         let message = value.flatMap(Self.serverMessage)
             ?? "HTTP 状态码 \(response.statusCode)"
         throw AppError.spider("\(site.name) init 失败：\(message)")
-    }
-
-    private var isConfigurationCenter: Bool {
-        site.key == "nodejs_baseset"
-            || site.api.contains("/spider/baseset/")
     }
 
     private func webAuthorizationRequired(

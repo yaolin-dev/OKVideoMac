@@ -274,6 +274,82 @@ final class SiteProviderTests: XCTestCase {
         XCTAssertTrue(home.recommendations.isEmpty)
     }
 
+    func testSpiderHomeFiltersProtocolSettingEntriesWithoutTextHeuristics() throws {
+        let site = SiteConfiguration(
+            key: "generic-node-site",
+            name: "Generic Node Site",
+            type: 4,
+            api: "/spider/generic/4"
+        )
+
+        let home = try SpiderResponseMapper.home(
+            .string(
+                #"{"class":[{"type_id":"setting","type_name":"任意功能入口"}],"list":[{"vod_id":"config-center","vod_name":"任意操作卡片","vod_pic":"https://example.invalid/poster.jpg"}]}"#
+            ),
+            homeVideoValue: nil,
+            site: site,
+            baseURL: nil
+        )
+
+        XCTAssertTrue(home.categories.isEmpty)
+        XCTAssertTrue(home.recommendations.isEmpty)
+    }
+
+    func testSpiderHomeKeepsMediaWhoseTextOrIdentifierLooksFunctional() throws {
+        let site = SiteConfiguration(
+            key: "semantic-media",
+            name: "Semantic Media",
+            type: 3,
+            api: "csp_SemanticMedia"
+        )
+
+        let home = try SpiderResponseMapper.home(
+            .string(
+                #"{"class":[{"type_id":"https://example.invalid/category","type_name":"设置中心电影"}],"list":[{"vod_id":"https://example.invalid/detail/1","vod_name":"配置中心往事","type_id":"https://example.invalid/category","vod_pic":"https://example.invalid/poster.jpg"}]}"#
+            ),
+            homeVideoValue: nil,
+            site: site,
+            baseURL: nil
+        )
+
+        XCTAssertEqual(home.categories.map(\.name), ["设置中心电影"])
+        XCTAssertEqual(home.recommendations.map(\.title), ["配置中心往事"])
+        XCTAssertEqual(
+            home.recommendations.first?.videoID,
+            "https://example.invalid/detail/1"
+        )
+    }
+
+    func testSpiderHomePreservesExplicitRecommendationCategoryOnlyWhenProvided() throws {
+        let site = SiteConfiguration(
+            key: "recommendation-semantics",
+            name: "Recommendation Semantics",
+            type: 3,
+            api: "csp_Recommendation"
+        )
+        let explicit = try SpiderResponseMapper.home(
+            .string(
+                #"{"class":[{"type_id":"recommend","type_name":"推荐"}],"list":[]}"#
+            ),
+            homeVideoValue: nil,
+            site: site,
+            baseURL: nil
+        )
+        let absent = try SpiderResponseMapper.home(
+            .string(
+                #"{"class":[{"type_id":"movie","type_name":"电影"}],"list":[{"vod_id":"home-feed-1","vod_name":"首页影片"}]}"#
+            ),
+            homeVideoValue: nil,
+            site: site,
+            baseURL: nil
+        )
+
+        XCTAssertEqual(explicit.categories.map(\.name), ["推荐"])
+        XCTAssertEqual(absent.categories.map(\.name), ["电影"])
+        XCTAssertFalse(absent.categories.contains { $0.name == "推荐" })
+        XCTAssertEqual(absent.recommendations.map(\.title), ["首页影片"])
+    }
+
     func testPromotionalPlaceholderIsExcludedAndMissingIDsRemainDiscoverable() throws {
         let site = SiteConfiguration(
             key: "discovery",
