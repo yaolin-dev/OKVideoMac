@@ -6,6 +6,8 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/build-environment.sh"
 
 BUILD_ROOT="$OKVIDEOMAC_BUILD_ROOT/libmpv"
+INSTALL_PREFIX="/opt/okvideomac/libmpv"
+INSTALL_STAGE="$OKVIDEOMAC_BUILD_ROOT/libmpv-install-stage"
 SOURCE_ROOT="$OKVIDEOMAC_BUILD_ROOT/Source"
 DOWNLOAD_ROOT="$OKVIDEOMAC_BUILD_ROOT/Downloads"
 ARCHIVE="$DOWNLOAD_ROOT/mpv-v0.41.0.tar.gz"
@@ -69,9 +71,9 @@ if ! grep -q "sources += files('osdep/utils-mac.c')" "$SOURCE_DIR/meson.build"; 
   /usr/bin/patch -d "$SOURCE_DIR" -p1 -i "$PATCH_FILE"
 fi
 
-rm -rf "$MESON_BUILD_DIR"
+rm -rf "$MESON_BUILD_DIR" "$INSTALL_STAGE"
 MACOSX_DEPLOYMENT_TARGET=12.0 /opt/local/bin/meson setup "$MESON_BUILD_DIR" "$SOURCE_DIR" \
-  --prefix "$BUILD_ROOT" \
+  --prefix "$INSTALL_PREFIX" \
   --buildtype release \
   -Dcplayer=false \
   -Dlibmpv=true \
@@ -94,7 +96,11 @@ MACOSX_DEPLOYMENT_TARGET=12.0 /opt/local/bin/meson setup "$MESON_BUILD_DIR" "$SO
   -Dcoreaudio=enabled
 
 MACOSX_DEPLOYMENT_TARGET=12.0 /opt/local/bin/meson compile -C "$MESON_BUILD_DIR"
-/opt/local/bin/meson install -C "$MESON_BUILD_DIR"
+DESTDIR="$INSTALL_STAGE" /opt/local/bin/meson install -C "$MESON_BUILD_DIR"
+rm -rf "$BUILD_ROOT"
+mkdir -p "$BUILD_ROOT"
+cp -R "$INSTALL_STAGE$INSTALL_PREFIX/." "$BUILD_ROOT/"
+rm -rf "$INSTALL_STAGE"
 mkdir -p "$BUILD_ROOT/licenses"
 cp "$SOURCE_DIR/LICENSE.GPL" "$BUILD_ROOT/licenses/mpv-GPL-2.0-or-later.txt"
 cp "$SOURCE_DIR/LICENSE.LGPL" "$BUILD_ROOT/licenses/mpv-LGPL-2.1-or-later.txt"

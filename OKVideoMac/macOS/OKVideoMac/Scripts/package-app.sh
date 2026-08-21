@@ -197,6 +197,7 @@ xcodebuild \
   -destination 'platform=macOS,arch=arm64' \
   -derivedDataPath "$DERIVED_DATA" \
   CODE_SIGNING_ALLOWED=NO \
+  ENABLE_CODE_COVERAGE=NO \
   clean build
 
 if [[ ! -d "$APP_SOURCE" ]]; then
