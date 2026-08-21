@@ -145,9 +145,7 @@ struct HomeView: View {
                                 Text(category.name)
                                     .font(.title2)
                                 if let page = state.categoryPage {
-                                    VideoGrid(items: page.items) { summary in
-                                        Task { await state.loadDetail(summary) }
-                                    }
+                                    homeItemGrid(page.items)
                                     if page.pagination.hasMore {
                                         AutomaticPageLoader(
                                             isLoading: state.isLoadingNextCategoryPage,
@@ -177,9 +175,7 @@ struct HomeView: View {
                                 !home.recommendations.isEmpty {
                                 Text("推荐")
                                     .font(.title2)
-                                VideoGrid(items: home.recommendations) { summary in
-                                    Task { await state.loadDetail(summary) }
-                                }
+                                homeItemGrid(home.recommendations)
                             }
                         }
                         .padding()
@@ -222,6 +218,52 @@ struct HomeView: View {
 
     private func synchronizeFilterSelection() {
         filterSelection = state.selectedCategoryFilters
+    }
+
+    @ViewBuilder
+    private func homeItemGrid(_ items: [VideoSummary]) -> some View {
+        let actionItems = items
+            .filter { $0.resolvedContentKind == .action }
+            .map(SiteActionItem.init(summary:))
+        let mediaItems = items.filter { $0.resolvedContentKind == .media }
+
+        if !actionItems.isEmpty {
+            LazyVGrid(
+                columns: [
+                    GridItem(.adaptive(minimum: 240, maximum: 360), spacing: 12)
+                ],
+                alignment: .leading,
+                spacing: 12
+            ) {
+                ForEach(actionItems) { item in
+                    HomeActionCard(item: item) {
+                        Task { await state.performHomeAction(item) }
+                    }
+                }
+            }
+        }
+
+        if !mediaItems.isEmpty {
+            if HomeItemPresentationPolicy.prefersCompactCards(mediaItems) {
+                LazyVGrid(
+                    columns: [
+                        GridItem(.adaptive(minimum: 240, maximum: 360), spacing: 12)
+                    ],
+                    alignment: .leading,
+                    spacing: 12
+                ) {
+                    ForEach(mediaItems) { summary in
+                        HomeCompactItemCard(summary: summary) {
+                            Task { await state.loadDetail(summary) }
+                        }
+                    }
+                }
+            } else {
+                VideoGrid(items: mediaItems) { summary in
+                    Task { await state.loadDetail(summary) }
+                }
+            }
+        }
     }
 
     private func filterControls(_ category: VideoCategory) -> some View {
@@ -458,6 +500,64 @@ private struct HomeActionCard: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("功能：\(item.title)")
+    }
+}
+
+enum HomeItemPresentationPolicy {
+    /// A provider that supplies no artwork should not produce a wall of fake
+    /// poster placeholders. This is presentation-only: the provider remains
+    /// the semantic owner of whether an item is media or an action.
+    static func prefersCompactCards(_ items: [VideoSummary]) -> Bool {
+        !items.isEmpty && items.allSatisfy { $0.posterURL == nil }
+    }
+}
+
+private struct HomeCompactItemCard: View {
+    let summary: VideoSummary
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: summary.isFolder ? "folder" : "rectangle.stack")
+                    .font(.title2)
+                    .foregroundColor(.accentColor)
+                    .frame(width: 34, height: 34)
+                    .background(Color.accentColor.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(summary.title)
+                        .font(.headline)
+                        .foregroundColor(.primary)
+                        .lineLimit(2)
+                    if let remarks = summary.remarks?.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    ), !remarks.isEmpty {
+                        Text(remarks)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                    } else {
+                        Text(summary.isFolder ? "目录" : "内容入口")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.secondary)
+            }
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(summary.title)
     }
 }
 

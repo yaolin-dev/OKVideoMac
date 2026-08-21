@@ -164,16 +164,37 @@ enum NodeUserFacingErrorMapper {
 struct CloudAuthorizationAction: Identifiable, Equatable {
     let id: String
     let title: String
+    let role: String?
+    let generation: Int?
+
+    init(
+        id: String,
+        title: String,
+        role: String? = nil,
+        generation: Int? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.role = role
+        self.generation = generation
+    }
+}
+
+enum CloudInteractionKind: String, Equatable {
+    case configuration
+    case authorization
 }
 
 struct CloudAuthorizationPrompt: Identifiable, Equatable {
     let id: UUID
     var title: String
+    var interactionKind: CloudInteractionKind
     var status: String?
     var phase: String?
     var provider: String?
     var hasTextInput: Bool
     var credentialPush: Bool
+    var allowsRetry: Bool
     var actions: [CloudAuthorizationAction]
     var snapshot: Data?
 }
@@ -355,6 +376,61 @@ enum CloudAuthorizationRetryPolicy {
     ) -> Bool {
         activeConfigurationID == sourceIdentity.configurationID
             && availableSiteKeys.contains(sourceIdentity.siteKey)
+    }
+}
+
+enum CloudAuthorizationCompletionPolicy {
+    static func shouldComplete(
+        authenticated: Bool,
+        interactionKind: CloudInteractionKind,
+        hasObservedPrompt: Bool,
+        hasObservedQRCode: Bool,
+        hiddenPollCount: Int
+    ) -> Bool {
+        if authenticated { return true }
+        guard hasObservedPrompt else { return false }
+        switch interactionKind {
+        case .configuration:
+            // Ordinary chooser/confirmation dialogs complete by returning to
+            // the host. They must not be forced through an auth-only status
+            // check that their Spider never publishes.
+            return hiddenPollCount >= 3
+        case .authorization:
+            // For QR flows the original Spider invocation remains alive and
+            // the next playback/home refresh verifies the resulting session.
+            // A short debounce avoids treating dialog replacement as success.
+            return hasObservedQRCode && hiddenPollCount >= 6
+        }
+    }
+}
+
+enum CloudAuthorizationPollingPolicy {
+    static let maximumHiddenPollCount = 40
+    static let maximumUnchangedSubmissionInterval: TimeInterval = 8
+
+    static func shouldTimeOut(
+        hiddenPollCount: Int,
+        maximumHiddenPollCount: Int = maximumHiddenPollCount
+    ) -> Bool {
+        hiddenPollCount >= max(1, maximumHiddenPollCount)
+    }
+
+    static func shouldFailUnchangedSubmission(
+        elapsed: TimeInterval,
+        submittedGeneration: Int?,
+        currentGeneration: Int?,
+        hasObservedTransition: Bool,
+        isVisible: Bool,
+        maximumInterval: TimeInterval = maximumUnchangedSubmissionInterval
+    ) -> Bool {
+        guard isVisible,
+              !hasObservedTransition,
+              let submittedGeneration,
+              let currentGeneration,
+              submittedGeneration == currentGeneration else {
+            return false
+        }
+        return elapsed >= max(0, maximumInterval)
     }
 }
 
@@ -735,9 +811,36 @@ private struct PendingCloudPlayback {
     var origin: PlaybackRequestOrigin = .direct
 }
 
+private enum PendingCloudOperation {
+    case playback(PendingCloudPlayback)
+    case detail(VideoSummary)
+    case homeAction(SiteActionItem)
+    case siteAction(action: String, title: String)
+
+    var pendingPlayback: PendingCloudPlayback? {
+        guard case .playback(let playback) = self else { return nil }
+        return playback
+    }
+
+    var interactionKind: CloudInteractionKind {
+        switch self {
+        case .playback:
+            return .authorization
+        case .detail, .homeAction, .siteAction:
+            return .configuration
+        }
+    }
+}
+
 private struct CloudAuthorizationContext {
     let sourceIdentity: HomeContentIdentity
-    var pendingPlayback: PendingCloudPlayback?
+    let operationID: UUID
+    var operation: PendingCloudOperation
+    var submittedAt: Date?
+    var submittedGeneration: Int?
+    var hasObservedPrompt: Bool
+    var hasObservedQRCode: Bool
+    var hasObservedPostSubmissionTransition: Bool
 }
 
 enum PlaybackRequestOrigin: Equatable, Sendable {
@@ -1148,6 +1251,18 @@ enum ConfigurationSwitchFeedbackPolicy {
             ? .failure(token, targetName: targetName, message: message)
             : current
     }
+
+    static func shouldDismiss(
+        _ feedback: ConfigurationSwitchFeedback,
+        token: ConfigurationActivationToken
+    ) -> Bool {
+        switch feedback {
+        case .success(let current, _), .failure(let current, _, _):
+            return current == token
+        case .idle, .switching:
+            return false
+        }
+    }
 }
 
 struct ConfigurationActivationRequestTracker: Sendable {
@@ -1320,6 +1435,7 @@ final class AppState: ObservableObject {
     private var configurationActivationTracker =
         ConfigurationActivationRequestTracker()
     private var configurationActivationTask: Task<Void, Never>?
+    private var configurationSwitchFeedbackDismissTask: Task<Void, Never>?
     private var providers: [String: SiteProvider] = [:]
     private var searchTask: Task<Void, Never>?
     private var searchSessionGate = SearchSessionGate()
@@ -1737,6 +1853,11 @@ final class AppState: ObservableObject {
         }
         if activeConfigurationRecord?.id == id,
            requestedConfigurationID == nil {
+            // Re-selecting the already active source is also an explicit
+            // acknowledgement of any earlier failed switch attempt.
+            configurationSwitchFeedbackDismissTask?.cancel()
+            configurationSwitchFeedbackDismissTask = nil
+            configurationSwitchFeedback = .idle
             return
         }
         if requestedConfigurationID == id {
@@ -1744,6 +1865,8 @@ final class AppState: ObservableObject {
         }
 
         let token = configurationActivationTracker.begin(id)
+        configurationSwitchFeedbackDismissTask?.cancel()
+        configurationSwitchFeedbackDismissTask = nil
         requestedConfigurationID = id
         configurationSwitchFeedback = ConfigurationSwitchFeedbackPolicy.switching(
             token: token,
@@ -1763,6 +1886,7 @@ final class AppState: ObservableObject {
         token: ConfigurationActivationToken
     ) async {
         guard let environment else { return }
+        var didCommitConfiguration = false
         defer {
             if configurationActivationTracker.owns(token) {
                 configurationActivationTracker.finish(token)
@@ -1788,6 +1912,7 @@ final class AppState: ObservableObject {
             try ensureConfigurationActivationIsCurrent(token)
 
             commitConfigurationActivation(prepared)
+            didCommitConfiguration = true
             if ConfigurationActivationRuntimePolicy.shouldStopNodeRuntime(
                 targetEndpoint: prepared.nodeRuntimeEndpoint,
                 ownsCurrentRequest: configurationActivationTracker.owns(token)
@@ -1801,16 +1926,15 @@ final class AppState: ObservableObject {
             }
             await loadSearchSiteScope()
             try ensureConfigurationActivationIsCurrent(token)
-            let didPrepareHome = await prepareActiveConfigurationHome(
+            _ = await prepareActiveConfigurationHome(
                 reportLoadErrors: false,
                 loadBehavior: .awaited,
                 entryReason: .configurationSwitch
             )
-            guard didPrepareHome else {
-                throw AppError.site(
-                    homeLoadErrorMessage ?? "首页内容初始化失败"
-                )
-            }
+            // Configuration activation and the selected site's network health
+            // are separate facts. Once the configuration/provider graph has
+            // committed, a home request failure belongs to the site UI and
+            // must not turn the configuration switch into a persistent error.
             try ensureConfigurationActivationIsCurrent(token)
             try await reloadHistory()
             try ensureConfigurationActivationIsCurrent(token)
@@ -1820,6 +1944,7 @@ final class AppState: ObservableObject {
                 targetName: record.name,
                 ownsCurrentRequest: configurationActivationTracker.owns(token)
             )
+            scheduleConfigurationSwitchFeedbackDismissal(for: token)
         } catch {
             let ownsCurrentRequest = configurationActivationTracker.owns(token)
             guard ConfigurationActivationErrorPolicy.shouldPresent(
@@ -1827,6 +1952,19 @@ final class AppState: ObservableObject {
                 ownsCurrentRequest: ownsCurrentRequest
             ) else {
                 // A newer source selection owns the UI and any eventual error.
+                return
+            }
+            if didCommitConfiguration {
+                // The selected configuration is already the persisted and
+                // visible authority. Failures from home/history refresh are
+                // follow-up data errors, not configuration-switch failures.
+                configurationSwitchFeedback = ConfigurationSwitchFeedbackPolicy.success(
+                    current: configurationSwitchFeedback,
+                    token: token,
+                    targetName: record.name,
+                    ownsCurrentRequest: ownsCurrentRequest
+                )
+                scheduleConfigurationSwitchFeedbackDismissal(for: token)
                 return
             }
             let presentation = userFacingError(for: error, title: "切换配置失败")
@@ -1837,6 +1975,32 @@ final class AppState: ObservableObject {
                 message: presentation.message,
                 ownsCurrentRequest: ownsCurrentRequest
             )
+            // The detailed failure remains available in the home load state;
+            // do not leave a stale red marker beside the source picker for the
+            // rest of the app session.
+            scheduleConfigurationSwitchFeedbackDismissal(for: token)
+        }
+    }
+
+    private func scheduleConfigurationSwitchFeedbackDismissal(
+        for token: ConfigurationActivationToken
+    ) {
+        configurationSwitchFeedbackDismissTask?.cancel()
+        configurationSwitchFeedbackDismissTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+            } catch {
+                return
+            }
+            guard let self,
+                  ConfigurationSwitchFeedbackPolicy.shouldDismiss(
+                    self.configurationSwitchFeedback,
+                    token: token
+                  ) else {
+                return
+            }
+            self.configurationSwitchFeedback = .idle
+            self.configurationSwitchFeedbackDismissTask = nil
         }
     }
 
@@ -2356,19 +2520,24 @@ final class AppState: ObservableObject {
                 ), let authorization = await waitForCloudAuthorization() {
                     await presentCloudAuthorization(
                         authorization,
-                        pending: nil,
+                        operation: .detail(summary),
                         siteKey: summary.siteKey
                     )
                 } else {
-                    presentedError = UserFacingError(
-                        title: summary.title,
-                        message: Self.siteActionMessage(result)
-                            ?? (Self.shouldWaitForCloudAuthorization(
-                                capability: provider.capability
-                            )
-                                ? Self.unconfirmedSiteActionMessage
-                                : "站点返回了无法识别的操作结果，请重试或切换来源。")
-                    )
+                    if provider.capability == .javaDexSpider,
+                       Self.siteActionMessage(result) == nil {
+                        await presentUnconfirmedCloudAuthorization(
+                            title: summary.title,
+                            siteKey: summary.siteKey,
+                            operation: .detail(summary)
+                        )
+                    } else {
+                        presentedError = UserFacingError(
+                            title: summary.title,
+                            message: Self.siteActionMessage(result)
+                                ?? "站点返回了无法识别的操作结果，请重试或切换来源。"
+                        )
+                    }
                 }
             }
         } catch let authorization as NodeWebAuthorizationRequired {
@@ -2395,7 +2564,7 @@ final class AppState: ObservableObject {
             pendingDetailSummary = nil
             await presentCloudAuthorization(
                 authorization.state,
-                pending: nil,
+                operation: .detail(summary),
                 siteKey: summary.siteKey
             )
         } catch {
@@ -2437,19 +2606,24 @@ final class AppState: ObservableObject {
                 ), let authorization = await waitForCloudAuthorization() {
                     await presentCloudAuthorization(
                         authorization,
-                        pending: nil,
+                        operation: .homeAction(item),
                         siteKey: item.siteKey
                     )
                 } else {
-                    presentedError = UserFacingError(
-                        title: item.title,
-                        message: Self.siteActionMessage(result)
-                            ?? (Self.shouldWaitForCloudAuthorization(
-                                capability: provider.capability
-                            )
-                                ? Self.unconfirmedSiteActionMessage
-                                : Self.unsupportedSiteActionMessage)
-                    )
+                    if provider.capability == .javaDexSpider,
+                       Self.siteActionMessage(result) == nil {
+                        await presentUnconfirmedCloudAuthorization(
+                            title: item.title,
+                            siteKey: item.siteKey,
+                            operation: .homeAction(item)
+                        )
+                    } else {
+                        presentedError = UserFacingError(
+                            title: item.title,
+                            message: Self.siteActionMessage(result)
+                                ?? Self.unsupportedSiteActionMessage
+                        )
+                    }
                 }
             case .search(let query):
                 presentHomeSearch()
@@ -2470,7 +2644,7 @@ final class AppState: ObservableObject {
         } catch let authorization as AndroidBridgeUIRequired {
             await presentCloudAuthorization(
                 authorization.state,
-                pending: nil,
+                operation: .homeAction(item),
                 siteKey: item.siteKey
             )
         } catch {
@@ -2553,16 +2727,23 @@ final class AppState: ObservableObject {
                let state = await waitForCloudAuthorization() {
                 await presentCloudAuthorization(
                     state,
-                    pending: nil,
+                    operation: .siteAction(action: action, title: title),
                     siteKey: provider.site.key
                 )
                 return
             }
-            let message = Self.siteActionMessage(result)
-                ?? (provider.capability == .javaDexSpider
-                    ? Self.unconfirmedSiteActionMessage
-                    : Self.unsupportedSiteActionMessage)
-            presentedError = UserFacingError(title: title, message: message)
+            if provider.capability == .javaDexSpider,
+               Self.siteActionMessage(result) == nil {
+                await presentUnconfirmedCloudAuthorization(
+                    title: title,
+                    siteKey: provider.site.key,
+                    operation: .siteAction(action: action, title: title)
+                )
+            } else {
+                let message = Self.siteActionMessage(result)
+                    ?? Self.unsupportedSiteActionMessage
+                presentedError = UserFacingError(title: title, message: message)
+            }
         } catch let authorization as NodeWebAuthorizationRequired {
             guard let identity = activeSourceIdentity(
                 for: provider.site.key
@@ -2584,12 +2765,50 @@ final class AppState: ObservableObject {
         } catch let authorization as AndroidBridgeUIRequired {
             await presentCloudAuthorization(
                 authorization.state,
-                pending: nil,
+                operation: .siteAction(action: action, title: title),
                 siteKey: provider.site.key
             )
         } catch {
             show(error, title: "\(title)失败")
         }
+    }
+
+    private func presentUnconfirmedCloudAuthorization(
+        title: String,
+        siteKey: String,
+        operation: PendingCloudOperation
+    ) async {
+        guard let identity = activeSourceIdentity(for: siteKey) else {
+            show(
+                AppError.site("该配置操作所属配置已经发生变化"),
+                title: title
+            )
+            return
+        }
+        cloudAuthorizationContext = CloudAuthorizationContext(
+            sourceIdentity: identity,
+            operationID: UUID(),
+            operation: operation,
+            submittedAt: nil,
+            submittedGeneration: nil,
+            hasObservedPrompt: false,
+            hasObservedQRCode: false,
+            hasObservedPostSubmissionTransition: false
+        )
+        cloudAuthorizationPrompt = CloudAuthorizationPrompt(
+            id: UUID(),
+            title: title,
+            interactionKind: operation.interactionKind,
+            status: "命令已经发送，正在等待站点创建下一步操作界面…",
+            phase: "waiting",
+            provider: nil,
+            hasTextInput: false,
+            credentialPush: false,
+            allowsRetry: false,
+            actions: [],
+            snapshot: nil
+        )
+        startCloudAuthorizationPolling()
     }
 
     private func presentNodeConfiguration(
@@ -2716,7 +2935,8 @@ final class AppState: ObservableObject {
         markPendingPlaybackCancelled: Bool
     ) {
         let androidDexBridge = environment?.androidDexBridge
-        let hadPendingPlayback = cloudAuthorizationContext?.pendingPlayback != nil
+        let hadPendingPlayback = cloudAuthorizationContext?
+            .operation.pendingPlayback != nil
         cloudAuthorizationSessionID = UUID()
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = nil
@@ -2745,13 +2965,19 @@ final class AppState: ObservableObject {
         )
     }
 
+    private var cloudInteractionLabel: String {
+        let kind = cloudAuthorizationPrompt?.interactionKind
+            ?? cloudAuthorizationContext?.operation.interactionKind
+        return kind == .authorization ? "网盘授权" : "配置操作"
+    }
+
     private func waitForCloudAuthorization() async -> AndroidBridgeUIState? {
         guard let environment else { return nil }
         // Some configuration spiders create their Android login dialog after
         // returning the placeholder detail response. Keep observing long
         // enough to catch that asynchronous hand-off before reporting that no
         // setup UI appeared.
-        for attempt in 0..<24 {
+        for attempt in 0..<8 {
             if attempt > 0 {
                 do {
                     try await Task.sleep(nanoseconds: 250_000_000)
@@ -2778,25 +3004,46 @@ final class AppState: ObservableObject {
         defer { isLoading = false }
         do {
             let text = cloudAuthorizationInput.nonEmpty
-            guard try await environment.androidDexBridge.submitUI(
+            let result = try await environment.androidDexBridge.submitUI(
                 text: text,
                 button: action.title,
                 controlID: action.id.hasPrefix("legacy:")
                     ? nil
-                    : action.id
-            ) else {
+                    : action.id,
+                generation: action.generation
+            )
+            if result.stale {
+                if let state = try? await environment.androidDexBridge.uiState(),
+                   state.isAuthorizationPrompt {
+                    await updateCloudAuthorizationPrompt(state)
+                }
+                throw AppError.spider("操作界面已经更新，请使用刷新后的按钮继续")
+            }
+            guard result.clicked else {
                 throw AppError.spider(
                     "后台授权窗口中没有找到“\(action.title)”按钮"
                 )
+            }
+            if var current = cloudAuthorizationContext,
+               current.operationID == context.operationID {
+                current.submittedAt = Date()
+                current.submittedGeneration = action.generation
+                    ?? result.generation
+                current.hasObservedPostSubmissionTransition = false
+                cloudAuthorizationContext = current
             }
             try await Task.sleep(nanoseconds: 250_000_000)
             if let state = try? await environment.androidDexBridge.uiState(),
                state.isAuthorizationPrompt {
                 await updateCloudAuthorizationPrompt(state)
+            } else if var prompt = cloudAuthorizationPrompt {
+                prompt.status = "正在打开下一步授权界面…"
+                prompt.phase = "transitioning"
+                cloudAuthorizationPrompt = prompt
             }
             startCloudAuthorizationPolling()
         } catch {
-            show(error, title: "网盘授权失败")
+            show(error, title: "\(cloudInteractionLabel)失败")
         }
     }
 
@@ -2861,25 +3108,70 @@ final class AppState: ObservableObject {
             await updateCloudAuthorizationPrompt(state)
             startCloudAuthorizationPolling()
         } catch {
-            show(error, title: "无法刷新网盘授权")
+            show(error, title: "无法刷新\(cloudInteractionLabel)")
+        }
+    }
+
+    func retryCloudAuthorizationOperation() async {
+        guard let environment,
+              let context = cloudAuthorizationContext,
+              isCurrentCloudAuthorizationContext(context),
+              cloudAuthorizationPrompt?.allowsRetry == true else {
+            return
+        }
+        let operation = context.operation
+        let siteKey = context.sourceIdentity.siteKey
+        clearCloudAuthorization(
+            resetBridgeUI: false,
+            markPendingPlaybackCancelled: false
+        )
+        try? await environment.androidDexBridge.resetAuthorizationUI()
+
+        switch operation {
+        case .playback(let pending):
+            guard pending.detail.summary.siteKey == siteKey else { return }
+            await startPlayback(
+                detail: pending.detail,
+                source: pending.source,
+                episode: pending.episode,
+                origin: pending.origin
+            )
+        case .detail(let summary):
+            guard summary.siteKey == siteKey else { return }
+            await loadDetail(summary)
+        case .homeAction(let item):
+            guard item.siteKey == siteKey else { return }
+            await performHomeAction(item)
+        case .siteAction(let action, let title):
+            guard let provider = providers[siteKey] else {
+                show(AppError.site("该功能所属站点当前不可用"), title: title)
+                return
+            }
+            await performSiteAction(action, title: title, provider: provider)
         }
     }
 
     private func presentCloudAuthorization(
         _ state: AndroidBridgeUIState,
-        pending: PendingCloudPlayback?,
+        operation: PendingCloudOperation,
         siteKey: String
     ) async {
         guard let identity = activeSourceIdentity(for: siteKey) else {
             show(
-                AppError.site("该授权所属配置已经发生变化"),
-                title: "网盘授权失败"
+                AppError.site("该操作所属配置已经发生变化"),
+                title: "\(operation.interactionKind == .authorization ? "网盘授权" : "配置操作")失败"
             )
             return
         }
         cloudAuthorizationContext = CloudAuthorizationContext(
             sourceIdentity: identity,
-            pendingPlayback: pending
+            operationID: UUID(),
+            operation: operation,
+            submittedAt: nil,
+            submittedGeneration: nil,
+            hasObservedPrompt: true,
+            hasObservedQRCode: false,
+            hasObservedPostSubmissionTransition: false
         )
         await updateCloudAuthorizationPrompt(state)
         startCloudAuthorizationPolling()
@@ -2893,10 +3185,29 @@ final class AppState: ObservableObject {
         // Some providers rotate an expired QR code without replacing the
         // Android dialog. Read the small local image on every QR poll and only
         // publish when its bytes actually change.
-        let snapshot = state.isQRCode && !credentialPush
-            ? (try? await environment?.androidDexBridge.uiSnapshot())
-                ?? previous?.snapshot
+        let rawSnapshot = state.imageCount > 0 && !credentialPush
+            ? try? await environment?.androidDexBridge.uiSnapshot()
             : nil
+        let snapshot = AndroidBridgeQRCodePolicy.validatedSnapshot(rawSnapshot)
+        let hasVerifiedQRCode = snapshot != nil
+        let interactionKind: CloudInteractionKind = hasVerifiedQRCode
+            || credentialPush
+            || cloudAuthorizationContext?.operation.interactionKind
+                == .authorization
+            ? .authorization
+            : .configuration
+        let phase = credentialPush
+            ? "credentials"
+            : hasVerifiedQRCode
+                ? "qr"
+                : state.inputCount > 0
+                    ? "credentials"
+                    : "chooser"
+        if hasVerifiedQRCode,
+           var context = cloudAuthorizationContext {
+            context.hasObservedQRCode = true
+            cloudAuthorizationContext = context
+        }
         let upstreamStatus = state.texts?
             .first(where: {
                 !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -2912,14 +3223,22 @@ final class AppState: ObservableObject {
             : upstreamStatus
         let updated = CloudAuthorizationPrompt(
             id: previous?.id ?? UUID(),
-            title: state.title.nonEmpty ?? "网盘授权",
+            title: state.title.nonEmpty
+                ?? (interactionKind == .authorization ? "网盘授权" : "配置操作"),
+            interactionKind: interactionKind,
             status: status,
-            phase: state.phase,
+            phase: phase,
             provider: state.provider,
             hasTextInput: state.inputCount > 0 || credentialPush,
             credentialPush: credentialPush,
+            allowsRetry: false,
             actions: state.actionableControls.map {
-                CloudAuthorizationAction(id: $0.id, title: $0.title)
+                CloudAuthorizationAction(
+                    id: $0.id,
+                    title: $0.title,
+                    role: $0.role,
+                    generation: state.generation
+                )
             },
             snapshot: snapshot
         )
@@ -2955,20 +3274,81 @@ final class AppState: ObservableObject {
                     }
                     if state.isAuthorizationPrompt {
                         hiddenPollCount = 0
-                        if state.authenticated == true,
-                           context.pendingPlayback != nil {
+                        if var current = self.cloudAuthorizationContext,
+                           current.operationID == context.operationID {
+                            current.hasObservedPrompt = true
+                            if let submittedGeneration = current.submittedGeneration,
+                               state.generation != submittedGeneration {
+                                current.hasObservedPostSubmissionTransition = true
+                            }
+                            self.cloudAuthorizationContext = current
+                        }
+                        if let current = self.cloudAuthorizationContext,
+                           current.operationID == context.operationID,
+                           let submittedAt = current.submittedAt,
+                           self.cloudAuthorizationPrompt?.interactionKind
+                            == .authorization,
+                           CloudAuthorizationPollingPolicy
+                            .shouldFailUnchangedSubmission(
+                                elapsed: Date().timeIntervalSince(submittedAt),
+                                submittedGeneration: current.submittedGeneration,
+                                currentGeneration: state.generation,
+                                hasObservedTransition: current
+                                    .hasObservedPostSubmissionTransition,
+                                isVisible: state.visible
+                            ), var prompt = self.cloudAuthorizationPrompt {
+                            prompt.status = "站点收到点击，但授权界面没有进入下一步。请重试；若仍失败，请刷新配置后再试。"
+                            prompt.phase = "failed"
+                            prompt.allowsRetry = true
+                            self.cloudAuthorizationPrompt = prompt
+                            return
+                        }
+                        if CloudAuthorizationCompletionPolicy.shouldComplete(
+                            authenticated: state.authenticated == true,
+                            interactionKind: self.cloudAuthorizationPrompt?
+                                .interactionKind
+                                ?? context.operation.interactionKind,
+                            hasObservedPrompt: self.cloudAuthorizationContext?
+                                .hasObservedPrompt == true,
+                            hasObservedQRCode: self.cloudAuthorizationContext?
+                                .hasObservedQRCode == true,
+                            hiddenPollCount: hiddenPollCount
+                        ) {
                             await self.finishCloudAuthorizationAndRetry()
                             return
                         }
                         await self.updateCloudAuthorizationPrompt(state)
                     } else {
                         hiddenPollCount += 1
-                        // QR dialogs are created and replaced asynchronously.
-                        // Requiring three seconds of absence avoids treating a
-                        // normal dialog transition as a completed login.
-                        if hiddenPollCount >= 6 {
+                        if CloudAuthorizationCompletionPolicy.shouldComplete(
+                            authenticated: false,
+                            interactionKind: self.cloudAuthorizationPrompt?
+                                .interactionKind
+                                ?? context.operation.interactionKind,
+                            hasObservedPrompt: self.cloudAuthorizationContext?
+                                .hasObservedPrompt == true,
+                            hasObservedQRCode: self.cloudAuthorizationContext?
+                                .hasObservedQRCode == true,
+                            hiddenPollCount: hiddenPollCount
+                        ) {
                             await self.finishCloudAuthorizationAndRetry()
                             return
+                        } else if CloudAuthorizationPollingPolicy.shouldTimeOut(
+                            hiddenPollCount: hiddenPollCount
+                        ), var prompt = self.cloudAuthorizationPrompt {
+                            let observed = self.cloudAuthorizationContext?
+                                .hasObservedPrompt == true
+                            prompt.status = observed
+                                ? "操作窗口已关闭，但站点没有返回可验证的结果。请重试，或关闭后重新执行该操作。"
+                                : "站点未能创建下一步操作界面，操作没有完成。请检查网络后重试。"
+                            prompt.phase = "failed"
+                            prompt.allowsRetry = true
+                            self.cloudAuthorizationPrompt = prompt
+                            return
+                        } else if hiddenPollCount == 10,
+                                  var prompt = self.cloudAuthorizationPrompt {
+                            prompt.status = "仍在等待站点创建下一步操作界面…"
+                            self.cloudAuthorizationPrompt = prompt
                         }
                     }
                 } catch {
@@ -2992,7 +3372,8 @@ final class AppState: ObservableObject {
               isCurrentCloudAuthorizationContext(context) else {
             return
         }
-        if let pending = context.pendingPlayback {
+        switch context.operation {
+        case .playback(let pending):
             guard pending.detail.summary.siteKey == context.sourceIdentity.siteKey else {
                 return
             }
@@ -3002,6 +3383,25 @@ final class AppState: ObservableObject {
                 episode: pending.episode,
                 origin: pending.origin
             )
+        case .detail(let summary):
+            guard summary.siteKey == context.sourceIdentity.siteKey else { return }
+            if summary.resolvedContentKind == .action,
+               selectedSection == .home,
+               selectedSiteKey == context.sourceIdentity.siteKey {
+                await loadSelectedSiteHome(refreshConfigurationIfNeeded: false)
+            } else {
+                await loadDetail(summary)
+            }
+        case .homeAction:
+            if selectedSection == .home,
+               selectedSiteKey == context.sourceIdentity.siteKey {
+                await loadSelectedSiteHome(refreshConfigurationIfNeeded: false)
+            }
+        case .siteAction:
+            if selectedSection == .home,
+               selectedSiteKey == context.sourceIdentity.siteKey {
+                await loadSelectedSiteHome(refreshConfigurationIfNeeded: false)
+            }
         }
     }
 
@@ -3052,9 +3452,31 @@ final class AppState: ObservableObject {
     }
 
     func openHistory(_ item: HistoryRecord) async {
-        guard item.configurationID == activeConfigurationRecord?.id else {
+        switch Self.historyConfigurationResolution(
+            record: item,
+            activeConfigurationID: activeConfigurationRecord?.id,
+            availableConfigurationIDs: Set(configurations.map(\.id))
+        ) {
+        case .current:
+            break
+        case .switchTo(let configurationID):
+            await activateConfiguration(configurationID)
+            guard activeConfigurationRecord?.id == configurationID else {
+                show(
+                    AppError.site("无法切换到这条历史记录所属的点播配置"),
+                    title: "历史播放失败"
+                )
+                return
+            }
+        case .unavailable:
             show(
-                AppError.site("该历史记录不属于当前点播配置，请切换回原配置后播放"),
+                AppError.site("这条历史记录所属的点播配置已被删除，无法安全恢复原来源"),
+                title: "历史播放失败"
+            )
+            return
+        case .legacy:
+            show(
+                AppError.site("这是一条没有配置身份的旧版历史记录，无法安全判断原来源"),
                 title: "历史播放失败"
             )
             return
@@ -3767,7 +4189,9 @@ final class AppState: ObservableObject {
                                 sourceName: historyRecord?.sourceName
                                     ?? source.name,
                                 episodeName: historyRecord?.episodeName
-                                    ?? episode.name
+                                    ?? episode.name,
+                                episodeReference: historyRecord?.episodeReference
+                                    ?? episode.url
                             )
                         )
                         candidateDetail = refreshed.detail
@@ -3794,11 +4218,13 @@ final class AppState: ObservableObject {
                     } catch let authorization as AndroidBridgeUIRequired {
                         await presentCloudAuthorization(
                             authorization.state,
-                            pending: PendingCloudPlayback(
-                                detail: detail,
-                                source: source,
-                                episode: episode,
-                                origin: origin
+                            operation: .playback(
+                                PendingCloudPlayback(
+                                    detail: detail,
+                                    source: source,
+                                    episode: episode,
+                                    origin: origin
+                                )
                             ),
                             siteKey: detail.summary.siteKey
                         )
@@ -3863,11 +4289,13 @@ final class AppState: ObservableObject {
                     guard playbackSessionID == sessionID else { return }
                     await presentCloudAuthorization(
                         authorization.state,
-                        pending: PendingCloudPlayback(
-                            detail: candidateDetail,
-                            source: candidateSource,
-                            episode: candidateEpisode,
-                            origin: origin
+                        operation: .playback(
+                            PendingCloudPlayback(
+                                detail: candidateDetail,
+                                source: candidateSource,
+                                episode: candidateEpisode,
+                                origin: origin
+                            )
                         ),
                         siteKey: candidateDetail.summary.siteKey
                     )
@@ -3947,13 +4375,19 @@ final class AppState: ObservableObject {
                         attemptsInCandidate = max(attemptsInCandidate, attempt.number)
                         attempt.number += completedAttempts
                         currentPlaybackAttempt = attempt
-                        playbackFailureSummary = message
+                        playbackFailureSummary = Self.playbackFailureMessage(
+                            message,
+                            validationPolicy: result.validationPolicy
+                        )
                     case .resolved:
                         playbackFailureSummary = nil
                         pendingPlayback = nil
                         return
                     case .failed(let message):
-                        candidateFailure = message
+                        candidateFailure = Self.playbackFailureMessage(
+                            message,
+                            validationPolicy: result.validationPolicy
+                        )
                     case .cancelled:
                         throw CancellationError()
                     }
@@ -4008,6 +4442,22 @@ final class AppState: ObservableObject {
             flag: flag,
             episodeURL: episodeURL
         )
+    }
+
+    static func playbackFailureMessage(
+        _ message: String,
+        validationPolicy: SitePlaybackResult.ValidationPolicy
+    ) -> String {
+        guard validationPolicy == .playerAuthoritative else { return message }
+        let lower = message.lowercased()
+        if lower.contains("loading failed")
+            || lower.contains("http 状态码 401")
+            || lower.contains("http 状态码 403")
+            || lower.contains("http status 401")
+            || lower.contains("http status 403") {
+            return "媒体请求被拒绝，网盘授权或临时播放地址可能已失效。已完成一次同资源刷新；请重新授权后再试。"
+        }
+        return message
     }
 
     @discardableResult
@@ -4804,6 +5254,8 @@ final class AppState: ObservableObject {
         nodeRuntimeStatusTask = nil
         configurationActivationTask?.cancel()
         configurationActivationTask = nil
+        configurationSwitchFeedbackDismissTask?.cancel()
+        configurationSwitchFeedbackDismissTask = nil
         requestedConfigurationID = nil
         configurationSwitchFeedback = .idle
 
@@ -5820,12 +6272,35 @@ final class AppState: ObservableObject {
         update(&searchFolderPath[index])
     }
 
-    static func historyRecords(
-        _ records: [HistoryRecord],
-        for configurationID: UUID?
-    ) -> [HistoryRecord] {
-        guard let configurationID else { return [] }
-        return records.filter { $0.configurationID == configurationID }
+    enum HistoryConfigurationResolution: Equatable {
+        case current
+        case switchTo(UUID)
+        case unavailable
+        case legacy
+    }
+
+    static func historyConfigurationResolution(
+        record: HistoryRecord,
+        activeConfigurationID: UUID?,
+        availableConfigurationIDs: Set<UUID>
+    ) -> HistoryConfigurationResolution {
+        guard let configurationID = record.configurationID else {
+            return .legacy
+        }
+        if configurationID == activeConfigurationID {
+            return .current
+        }
+        return availableConfigurationIDs.contains(configurationID)
+            ? .switchTo(configurationID)
+            : .unavailable
+    }
+
+    func historyConfigurationName(for record: HistoryRecord) -> String {
+        guard let configurationID = record.configurationID else {
+            return "旧版记录"
+        }
+        return configurations.first(where: { $0.id == configurationID })?.name
+            ?? "原配置已删除"
     }
 
     static func historyPlaybackSelection(
@@ -6838,6 +7313,14 @@ final class AppState: ObservableObject {
                 ?? Date.distantPast
         )
         try await reloadHistory()
+    }
+
+    static func historyRecords(
+        _ records: [HistoryRecord],
+        for configurationID: UUID?
+    ) -> [HistoryRecord] {
+        guard let configurationID else { return [] }
+        return records.filter { $0.configurationID == configurationID }
     }
 
     private func reloadHistory() async throws {

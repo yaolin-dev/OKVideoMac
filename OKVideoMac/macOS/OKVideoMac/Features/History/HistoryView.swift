@@ -138,7 +138,11 @@ struct HistoryView: View {
                     .font(.headline)
                     .lineLimit(1)
                 Text(
-                    [item.sourceName, item.episodeName]
+                    [
+                        state.historyConfigurationName(for: item),
+                        item.sourceName,
+                        item.episodeName
+                    ]
                         .compactMap { $0 }
                         .joined(separator: " · ")
                 )

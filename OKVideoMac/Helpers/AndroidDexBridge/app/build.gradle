@@ -15,8 +15,8 @@ android {
         // dialogs with a null Context. Keep compiling with the current SDK,
         // but declare the compatibility level expected by those packages.
         targetSdk = 27
-        versionCode = 27
-        versionName = "0.3.15"
+        versionCode = 29
+        versionName = "0.3.17"
     }
 
     buildTypes {

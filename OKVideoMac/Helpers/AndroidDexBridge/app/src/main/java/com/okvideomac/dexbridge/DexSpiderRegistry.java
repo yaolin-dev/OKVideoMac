@@ -134,9 +134,10 @@ final class DexSpiderRegistry {
             String method
     ) {
         if (!"detail".equals(method) && !"action".equals(method)) return false;
-        String api = payload.optString("api", "").toLowerCase(Locale.ROOT);
-        String siteKey = payload.optString("siteKey", "").toLowerCase(Locale.ROOT);
-        return api.contains("config") || siteKey.contains("config");
+        // The host owns action semantics and sends this request-scoped signal.
+        // Never infer configuration behavior from source keys, API class
+        // names, domains, or localized labels.
+        return payload.optBoolean("monitorsAuthorization", false);
     }
 
     private Object invokePlayer(

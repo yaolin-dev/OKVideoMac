@@ -17,18 +17,27 @@ public final class BridgeActionActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         current = new WeakReference<>(this);
+        // Legacy configuration spiders call Init.context().finish(). Point
+        // that global at this disposable Activity so the persistent bridge
+        // host underneath survives the handoff.
+        com.github.catvod.Init.set(this);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         current = new WeakReference<>(this);
+        com.github.catvod.Init.set(this);
     }
 
     @Override
     protected void onDestroy() {
         BridgeActionActivity activity = current.get();
         if (activity == this) current.clear();
+        android.content.Context host = BridgeActivity.hostContext();
+        com.github.catvod.Init.set(
+                host == null ? getApplicationContext() : host
+        );
         super.onDestroy();
     }
 

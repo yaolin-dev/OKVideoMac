@@ -135,6 +135,18 @@ final class OKVideoMacTests: XCTestCase {
             ownsCurrentRequest: tracker.owns(tokenB)
         )
         XCTAssertEqual(feedback, .success(tokenB, targetName: "Source B"))
+        XCTAssertTrue(
+            ConfigurationSwitchFeedbackPolicy.shouldDismiss(
+                feedback,
+                token: tokenB
+            )
+        )
+        XCTAssertFalse(
+            ConfigurationSwitchFeedbackPolicy.shouldDismiss(
+                feedback,
+                token: tokenA
+            )
+        )
     }
 
     func testConfigurationSwitchFeedbackReportsLatestFailureWithoutModalState() {
@@ -145,18 +157,25 @@ final class OKVideoMacTests: XCTestCase {
             targetName: "Broken Source"
         )
 
-        XCTAssertEqual(
-            ConfigurationSwitchFeedbackPolicy.failure(
+        let failure = ConfigurationSwitchFeedbackPolicy.failure(
                 current: switching,
                 token: token,
                 targetName: "Broken Source",
                 message: "Unable to load home",
                 ownsCurrentRequest: tracker.owns(token)
-            ),
+            )
+        XCTAssertEqual(
+            failure,
             .failure(
                 token,
                 targetName: "Broken Source",
                 message: "Unable to load home"
+            )
+        )
+        XCTAssertTrue(
+            ConfigurationSwitchFeedbackPolicy.shouldDismiss(
+                failure,
+                token: token
             )
         )
     }
@@ -1594,6 +1613,136 @@ final class OKVideoMacTests: XCTestCase {
                 sourceIdentity: original,
                 activeConfigurationID: configurationID,
                 availableSiteKeys: [renamedKey]
+            )
+        )
+    }
+
+    func testCloudInteractionCompletionDistinguishesConfigurationAndAuthorization() {
+        XCTAssertFalse(
+            CloudAuthorizationCompletionPolicy.shouldComplete(
+                authenticated: false,
+                interactionKind: .configuration,
+                hasObservedPrompt: false,
+                hasObservedQRCode: false,
+                hiddenPollCount: 600
+            )
+        )
+        XCTAssertFalse(
+            CloudAuthorizationCompletionPolicy.shouldComplete(
+                authenticated: false,
+                interactionKind: .configuration,
+                hasObservedPrompt: true,
+                hasObservedQRCode: false,
+                hiddenPollCount: 2
+            )
+        )
+        XCTAssertTrue(
+            CloudAuthorizationCompletionPolicy.shouldComplete(
+                authenticated: false,
+                interactionKind: .configuration,
+                hasObservedPrompt: true,
+                hasObservedQRCode: false,
+                hiddenPollCount: 3
+            )
+        )
+        XCTAssertTrue(
+            CloudAuthorizationCompletionPolicy.shouldComplete(
+                authenticated: true,
+                interactionKind: .authorization,
+                hasObservedPrompt: true,
+                hasObservedQRCode: false,
+                hiddenPollCount: 0
+            )
+        )
+        XCTAssertFalse(
+            CloudAuthorizationCompletionPolicy.shouldComplete(
+                authenticated: false,
+                interactionKind: .authorization,
+                hasObservedPrompt: true,
+                hasObservedQRCode: false,
+                hiddenPollCount: 600
+            )
+        )
+        XCTAssertTrue(
+            CloudAuthorizationCompletionPolicy.shouldComplete(
+                authenticated: false,
+                interactionKind: .authorization,
+                hasObservedPrompt: true,
+                hasObservedQRCode: true,
+                hiddenPollCount: 6
+            )
+        )
+    }
+
+    func testBlankImageIsNotPublishedAsQRCode() {
+        XCTAssertNil(
+            AndroidBridgeQRCodePolicy.validatedSnapshot(
+                Data(repeating: 0xFF, count: 1_024)
+            )
+        )
+        XCTAssertNil(AndroidBridgeQRCodePolicy.validatedSnapshot(nil))
+    }
+
+    func testPosterlessHomeItemsUseCompactPresentation() {
+        let posterless = VideoSummary(
+            siteKey: "site",
+            siteName: "Site",
+            videoID: "config",
+            title: "通用配置"
+        )
+        let poster = VideoSummary(
+            siteKey: "site",
+            siteName: "Site",
+            videoID: "movie",
+            title: "Movie",
+            posterURL: URL(string: "https://example.invalid/poster.jpg")
+        )
+        XCTAssertTrue(HomeItemPresentationPolicy.prefersCompactCards([posterless]))
+        XCTAssertFalse(HomeItemPresentationPolicy.prefersCompactCards([posterless, poster]))
+        XCTAssertFalse(HomeItemPresentationPolicy.prefersCompactCards([]))
+    }
+
+    func testCloudAuthorizationHiddenPollingHasBoundedTimeout() {
+        XCTAssertFalse(
+            CloudAuthorizationPollingPolicy.shouldTimeOut(
+                hiddenPollCount: 39,
+                maximumHiddenPollCount: 40
+            )
+        )
+        XCTAssertTrue(
+            CloudAuthorizationPollingPolicy.shouldTimeOut(
+                hiddenPollCount: 40,
+                maximumHiddenPollCount: 40
+            )
+        )
+    }
+
+    func testCloudAuthorizationSubmittedControlMustAdvanceItsUIGeneration() {
+        XCTAssertFalse(
+            CloudAuthorizationPollingPolicy.shouldFailUnchangedSubmission(
+                elapsed: 7.9,
+                submittedGeneration: 12,
+                currentGeneration: 12,
+                hasObservedTransition: false,
+                isVisible: true
+            )
+        )
+        XCTAssertTrue(
+            CloudAuthorizationPollingPolicy.shouldFailUnchangedSubmission(
+                elapsed: 8,
+                submittedGeneration: 12,
+                currentGeneration: 12,
+                hasObservedTransition: false,
+                isVisible: true
+            )
+        )
+        XCTAssertFalse(
+            CloudAuthorizationPollingPolicy.shouldFailUnchangedSubmission(
+                elapsed: 20,
+                submittedGeneration: 12,
+                currentGeneration: 13,
+                hasObservedTransition: true,
+                isVisible: true
             )
         )
     }
@@ -3202,13 +3351,14 @@ final class OKVideoMacTests: XCTestCase {
               "imageCount": 0,
               "buttons": ["停用中", "停用中"],
               "controls": [
-                {"id": "button:0", "title": "停用中"},
-                {"id": "button:1", "title": "停用中"}
+                {"id": "view:103", "title": "我的夸父-未登录", "enabled": true, "role": "button"},
+                {"id": "view:104", "title": "停用中", "enabled": false, "role": "status"}
               ],
               "texts": ["网盘配置"],
               "phase": "chooser",
               "provider": "quark",
-              "authenticated": false
+              "authenticated": false,
+              "generation": 7
             }
             """.data(using: .utf8)
         )
@@ -3220,11 +3370,13 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(state.isAuthorizationPrompt)
         XCTAssertEqual(
             state.actionableControls.map(\.id),
-            ["button:0", "button:1"]
+            ["view:103"]
         )
+        XCTAssertEqual(state.actionableControls.first?.role, "button")
+        XCTAssertEqual(state.generation, 7)
     }
 
-    func testAndroidBridgeLegacyAuthorizationStateStillDecodes() throws {
+    func testAndroidBridgeLegacyImageDoesNotImplyQRCode() throws {
         let data = try XCTUnwrap(
             """
             {
@@ -3241,7 +3393,7 @@ final class OKVideoMacTests: XCTestCase {
             from: data
         )
 
-        XCTAssertTrue(state.isQRCode)
+        XCTAssertFalse(state.isQRCode)
         XCTAssertTrue(state.isAuthorizationPrompt)
         XCTAssertTrue(state.actionableControls.isEmpty)
     }
@@ -3348,6 +3500,52 @@ final class OKVideoMacTests: XCTestCase {
 
         XCTAssertTrue(state.hasVisibleAuthorizationContent)
         XCTAssertFalse(state.isAuthorizationPrompt)
+    }
+
+    func testAndroidPlaybackContractMergesHeadersWithPlayerResultPrecedence() {
+        let result = AndroidDexSpiderSiteProvider.applyingPlaybackRequestContract(
+            to: SitePlaybackResult(
+                url: "https://media.example.invalid/video",
+                needsParsing: false,
+                flag: "百度",
+                headers: [
+                    "Referer": "https://player.example.invalid/",
+                    "Authorization": "Bearer short-lived"
+                ]
+            ),
+            siteHeaders: [
+                "Referer": "https://site.example.invalid/",
+                "User-Agent": "Fixture Agent"
+            ]
+        )
+
+        XCTAssertEqual(
+            result.headers["Referer"],
+            "https://player.example.invalid/"
+        )
+        XCTAssertEqual(result.headers["User-Agent"], "Fixture Agent")
+        XCTAssertEqual(
+            result.headers["Authorization"],
+            "Bearer short-lived"
+        )
+        XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
+    }
+
+    @MainActor
+    func testAuthoritativePlaybackFailureExplainsAuthorizationFailure() {
+        XCTAssertTrue(
+            AppState.playbackFailureMessage(
+                "播放错误：loading failed",
+                validationPolicy: .playerAuthoritative
+            ).contains("重新授权")
+        )
+        XCTAssertEqual(
+            AppState.playbackFailureMessage(
+                "普通地址不可达",
+                validationPolicy: .preflight
+            ),
+            "普通地址不可达"
+        )
     }
 
     func testPlaybackFallbackPreservesProviderOrderWithoutDisplayNameRules() {
@@ -3708,7 +3906,7 @@ final class OKVideoMacTests: XCTestCase {
     func testAndroidBridgeHealthRequiresCurrentGeneration() {
         let current: [String: Any] = [
             "ok": true,
-            "version": "0.3.15",
+            "version": "0.3.17",
             "generation": "current-generation"
         ]
         XCTAssertTrue(
@@ -3725,7 +3923,7 @@ final class OKVideoMacTests: XCTestCase {
         )
         XCTAssertFalse(
             AndroidDexBridgeRuntime.healthMatches(
-                ["ok": true, "version": "0.3.15"],
+                ["ok": true, "version": "0.3.17"],
                 generation: "current-generation"
             )
         )
@@ -4023,38 +4221,102 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     @MainActor
-    func testHistoryIsScopedToActiveOnDemandConfiguration() {
+    func testHistoryConfigurationResolutionSwitchesOnlyToAvailableOwner() {
         let first = UUID()
         let second = UUID()
-        let records = [
-            HistoryRecord(
-                configurationID: first,
-                siteKey: "same-key",
-                videoID: "1",
-                title: "First"
-            ),
-            HistoryRecord(
-                configurationID: second,
-                siteKey: "same-key",
-                videoID: "1",
-                title: "Second"
-            ),
-            HistoryRecord(
-                siteKey: "same-key",
-                videoID: "legacy",
-                title: "Legacy"
-            )
-        ]
+        let current = HistoryRecord(
+            configurationID: first,
+            siteKey: "same-key",
+            videoID: "1",
+            title: "Current"
+        )
+        let inactive = HistoryRecord(
+            configurationID: second,
+            siteKey: "same-key",
+            videoID: "1",
+            title: "Inactive"
+        )
+        let missing = HistoryRecord(
+            configurationID: UUID(),
+            siteKey: "same-key",
+            videoID: "missing",
+            title: "Missing"
+        )
+        let legacy = HistoryRecord(
+            siteKey: "same-key",
+            videoID: "legacy",
+            title: "Legacy"
+        )
 
         XCTAssertEqual(
-            AppState.historyRecords(records, for: first).map(\.title),
-            ["First"]
+            AppState.historyConfigurationResolution(
+                record: current,
+                activeConfigurationID: first,
+                availableConfigurationIDs: [first, second]
+            ),
+            .current
         )
         XCTAssertEqual(
-            AppState.historyRecords(records, for: second).map(\.title),
-            ["Second"]
+            AppState.historyConfigurationResolution(
+                record: inactive,
+                activeConfigurationID: first,
+                availableConfigurationIDs: [first, second]
+            ),
+            .switchTo(second)
         )
-        XCTAssertTrue(AppState.historyRecords(records, for: nil).isEmpty)
+        XCTAssertEqual(
+            AppState.historyConfigurationResolution(
+                record: missing,
+                activeConfigurationID: first,
+                availableConfigurationIDs: [first, second]
+            ),
+            .unavailable
+        )
+        XCTAssertEqual(
+            AppState.historyConfigurationResolution(
+                record: legacy,
+                activeConfigurationID: first,
+                availableConfigurationIDs: [first, second]
+            ),
+            .legacy
+        )
+    }
+
+    @MainActor
+    func testVisibleHistoryIsScopedToActiveConfiguration() {
+        let first = UUID()
+        let second = UUID()
+        let firstRecord = HistoryRecord(
+            configurationID: first,
+            siteKey: "shared-site-key",
+            videoID: "first",
+            title: "First"
+        )
+        let secondRecord = HistoryRecord(
+            configurationID: second,
+            siteKey: "shared-site-key",
+            videoID: "second",
+            title: "Second"
+        )
+        let legacyRecord = HistoryRecord(
+            siteKey: "shared-site-key",
+            videoID: "legacy",
+            title: "Legacy"
+        )
+
+        XCTAssertEqual(
+            AppState.historyRecords(
+                [secondRecord, legacyRecord, firstRecord],
+                for: first
+            ),
+            [firstRecord]
+        )
+        XCTAssertTrue(
+            AppState.historyRecords(
+                [firstRecord, secondRecord],
+                for: nil
+            ).isEmpty
+        )
     }
 
     @MainActor

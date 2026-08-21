@@ -2,6 +2,7 @@ package com.okvideomac.dexbridge;
 
 import android.app.Activity;
 import android.content.Context;
+import android.content.ContextWrapper;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -31,6 +32,8 @@ public final class BridgeActivity extends Activity {
     private static volatile WeakReference<BridgeActivity> current =
             new WeakReference<>(null);
     private static volatile String selectedProvider = "";
+    private static volatile long uiGeneration = 0L;
+    private static volatile String lastUISignature = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -69,11 +72,16 @@ public final class BridgeActivity extends Activity {
     }
 
     private static void updateRuntimeGeneration(Intent intent) {
-        BridgeServer.setRuntimeGeneration(
-                intent == null
-                        ? ""
-                        : intent.getStringExtra("okvideomac_runtime_generation")
+        if (intent == null) return;
+        String generation = intent.getStringExtra(
+                "okvideomac_runtime_generation"
         );
+        // Internal handoff/reorder intents do not carry a generation. They
+        // must never erase the generation established by the Mac runtime or
+        // the next health check will incorrectly restart a healthy bridge.
+        if (generation != null && !generation.isEmpty()) {
+            BridgeServer.setRuntimeGeneration(generation);
+        }
     }
 
     static Context hostContext() {
@@ -142,8 +150,6 @@ public final class BridgeActivity extends Activity {
             String title = "";
             int inputCount = 0;
             int imageCount = 0;
-            int buttonIndex = 0;
-            int clickableIndex = 0;
             View root = activeRoot(rootViews());
             if (root != null) {
                 for (View view : flattened(root)) {
@@ -154,21 +160,33 @@ public final class BridgeActivity extends Activity {
                         imageCount++;
                     } else if (view instanceof Button) {
                         String label = textOf((TextView) view);
-                        if (!label.isEmpty()) {
-                            String id = "button:" + buttonIndex++;
+                        if (!label.isEmpty()
+                                && view.isEnabled()
+                                && view.isClickable()) {
+                            String id = stableControlID(view);
                             JSONObject control = new JSONObject();
                             control.put("id", id);
                             control.put("title", label);
+                            control.put("enabled", true);
+                            control.put("role", "button");
                             controls.put(control);
                             buttons.put(label);
+                        } else if (!label.isEmpty()) {
+                            // Disabled buttons in legacy Spider dialogs are
+                            // status badges (for example "停用中"), not host
+                            // actions. Preserve their text without exposing a
+                            // clickable SwiftUI control.
+                            texts.put(label);
                         }
-                    } else if (view.isClickable()) {
+                    } else if (view.isClickable() && view.isEnabled()) {
                         String label = labelOf(view);
                         if (!label.isEmpty()) {
-                            String id = "clickable:" + clickableIndex++;
+                            String id = stableControlID(view);
                             JSONObject control = new JSONObject();
                             control.put("id", id);
                             control.put("title", label);
+                            control.put("enabled", true);
+                            control.put("role", "clickable");
                             controls.put(control);
                             buttons.put(label);
                         }
@@ -200,6 +218,11 @@ public final class BridgeActivity extends Activity {
                         : "选择网盘登录方式";
             }
             boolean visible = root != null && hasContent;
+            String signature = uiSignature(root, controls, texts, inputCount, imageCount);
+            if (!signature.equals(lastUISignature)) {
+                lastUISignature = signature;
+                uiGeneration++;
+            }
             String authenticatedProvider = authenticatedProvider(
                     selectedProvider,
                     buttons,
@@ -219,6 +242,7 @@ public final class BridgeActivity extends Activity {
             state.put("provider", selectedProvider);
             state.put("credentialPush", credentialPush);
             state.put("remoteInput", remoteInput);
+            state.put("generation", uiGeneration);
             state.put(
                     "authenticated",
                     !authenticatedProvider.isEmpty()
@@ -230,9 +254,18 @@ public final class BridgeActivity extends Activity {
     static JSONObject submitUI(
             String text,
             String buttonText,
-            String controlId
+            String controlId,
+            Integer expectedGeneration
     ) throws Exception {
         return onUIThread(() -> {
+            if (expectedGeneration != null
+                    && expectedGeneration.intValue() != uiGeneration) {
+                JSONObject result = new JSONObject();
+                result.put("clicked", false);
+                result.put("stale", true);
+                result.put("generation", uiGeneration);
+                return result;
+            }
             View root = activeRoot(rootViews());
             if (root == null) {
                 JSONObject result = new JSONObject();
@@ -246,20 +279,18 @@ public final class BridgeActivity extends Activity {
                 }
             }
             boolean clicked = false;
-            int buttonIndex = 0;
-            int clickableIndex = 0;
+            boolean matched = false;
             for (View view : views) {
-                if (!view.isShown() || !view.isClickable()) continue;
+                if (!view.isShown() || !view.isClickable() || !view.isEnabled()) continue;
                 boolean isButton = view instanceof Button;
                 String label = isButton
                         ? textOf((Button) view)
                         : labelOf(view);
                 if (label.isEmpty()) continue;
-                String id = isButton
-                        ? "button:" + buttonIndex++
-                        : "clickable:" + clickableIndex++;
+                String id = stableControlID(view);
                 if ((controlId != null && controlId.equals(id))
                         || (controlId == null && label.equals(buttonText))) {
+                    matched = true;
                     rememberProvider(label);
                     clicked = view.performClick();
                     break;
@@ -267,6 +298,8 @@ public final class BridgeActivity extends Activity {
             }
             JSONObject result = new JSONObject();
             result.put("clicked", clicked);
+            result.put("stale", controlId != null && !matched);
+            result.put("generation", uiGeneration);
             return result;
         });
     }
@@ -304,6 +337,34 @@ public final class BridgeActivity extends Activity {
         });
     }
 
+    static JSONObject dismissUI() throws Exception {
+        return onUIThread(() -> {
+            View root = activeRoot(rootViews());
+            Activity owner = root == null ? null : activityFrom(root.getContext());
+            if (owner == null) owner = current.get();
+            boolean dismissed = owner != null
+                    && !owner.isFinishing()
+                    && !owner.isDestroyed();
+            if (dismissed) owner.onBackPressed();
+            JSONObject result = new JSONObject();
+            result.put("dismissed", dismissed);
+            return result;
+        });
+    }
+
+    private static Activity activityFrom(Context context) {
+        Context currentContext = context;
+        while (currentContext instanceof ContextWrapper) {
+            if (currentContext instanceof Activity) {
+                return (Activity) currentContext;
+            }
+            Context base = ((ContextWrapper) currentContext).getBaseContext();
+            if (base == currentContext) break;
+            currentContext = base;
+        }
+        return currentContext instanceof Activity ? (Activity) currentContext : null;
+    }
+
     private static List<View> rootViews() throws Exception {
         Class<?> type = Class.forName("android.view.WindowManagerGlobal");
         Method getInstance = type.getDeclaredMethod("getInstance");
@@ -322,16 +383,49 @@ public final class BridgeActivity extends Activity {
     }
 
     private static View activeRoot(List<View> roots) {
+        View fallback = null;
         for (int index = roots.size() - 1; index >= 0; index--) {
             View root = roots.get(index);
             if (root.getWindowVisibility() == View.VISIBLE
                     && root.isShown()
                     && root.getWidth() > 0
                     && root.getHeight() > 0) {
-                return root;
+                if (fallback == null) fallback = root;
+                if (hasMeaningfulContent(root)) return root;
             }
         }
-        return null;
+        return fallback;
+    }
+
+    private static boolean hasMeaningfulContent(View root) {
+        for (View view : flattened(root)) {
+            if (!view.isShown()) continue;
+            if (view instanceof EditText || view instanceof ImageView) return true;
+            if (view instanceof TextView && !textOf((TextView) view).isEmpty()) return true;
+            if (view.isClickable() && view.isEnabled() && !labelOf(view).isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String stableControlID(View view) {
+        return "view:" + Integer.toUnsignedString(System.identityHashCode(view));
+    }
+
+    private static String uiSignature(
+            View root,
+            JSONArray controls,
+            JSONArray texts,
+            int inputCount,
+            int imageCount
+    ) {
+        return (root == null ? "hidden" : Integer.toUnsignedString(
+                System.identityHashCode(root)))
+                + "|" + controls.toString()
+                + "|" + texts.toString()
+                + "|" + inputCount
+                + "|" + imageCount;
     }
 
     private static List<View> flattened(View root) {

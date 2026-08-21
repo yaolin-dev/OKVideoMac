@@ -968,6 +968,70 @@ final class SiteProviderTests: XCTestCase {
         )
     }
 
+    func testPlaybackRefreshDisambiguatesDuplicateTitlesByResourceIdentity() async throws {
+        let expectedSource = PlaySource(
+            name: "UC",
+            episodes: [
+                PlayEpisode(
+                    name: "目标文件",
+                    url: "opaque-provider-reference",
+                    referenceIdentity: "resource-42"
+                )
+            ],
+            referenceIdentity: "provider-line-42"
+        )
+        let unrelated = Self.refreshDetail(
+            id: "duplicate-a",
+            title: "同名影片",
+            sourceIdentity: "unrelated-line"
+        )
+        let expected = VideoDetail(
+            summary: Self.refreshSummary(id: "duplicate-b", title: "同名影片"),
+            playSources: [expectedSource]
+        )
+        let provider = RefreshPlaybackSiteProvider(
+            details: [
+                "stale-id": unrelated,
+                "duplicate-a": unrelated,
+                "duplicate-b": expected
+            ],
+            searchPage: VideoPage(
+                items: [
+                    Self.refreshSummary(id: "duplicate-a", title: "同名影片"),
+                    Self.refreshSummary(id: "duplicate-b", title: "同名影片")
+                ],
+                pagination: Pagination(page: 1, pageCount: 1)
+            ),
+            playerResult: SitePlaybackResult(
+                url: "https://fresh.invalid/media",
+                needsParsing: false,
+                flag: "UC"
+            )
+        )
+
+        let refreshed = try await provider.refreshPlayback(
+            PlaybackRefreshRequest(
+                videoID: "stale-id",
+                title: "同名影片",
+                sourceIdentity: "provider-line-42",
+                resourceIdentity: "resource-42",
+                sourceName: "UC",
+                episodeName: "目标文件",
+                episodeReference: "opaque-provider-reference"
+            )
+        )
+
+        XCTAssertEqual(refreshed.detail.summary.videoID, "duplicate-b")
+        XCTAssertEqual(
+            refreshed.episode.stableIdentity,
+            expectedSource.episodes[0].stableIdentity
+        )
+        XCTAssertEqual(
+            provider.playerRequests,
+            ["UC::opaque-provider-reference"]
+        )
+    }
+
     func testPlaybackRefreshNeverFallsThroughToUnrelatedResource() async throws {
         let unrelated = Self.refreshDetail(
             id: "fresh-id",

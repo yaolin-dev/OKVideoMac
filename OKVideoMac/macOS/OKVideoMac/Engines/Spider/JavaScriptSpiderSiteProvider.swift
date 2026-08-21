@@ -1,4 +1,5 @@
 import Darwin
+import CoreImage
 import CryptoKit
 import Foundation
 import OKVideoCore
@@ -6,6 +7,26 @@ import OKVideoCore
 struct AndroidBridgeUIControl: Decodable, Equatable, Identifiable {
     let id: String
     let title: String
+    let enabled: Bool?
+    let role: String?
+
+    init(
+        id: String,
+        title: String,
+        enabled: Bool? = true,
+        role: String? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.enabled = enabled
+        self.role = role
+    }
+}
+
+struct AndroidBridgeUISubmitResult: Equatable {
+    let clicked: Bool
+    let stale: Bool
+    let generation: Int?
 }
 
 struct AndroidBridgeUIState: Decodable, Equatable {
@@ -21,21 +42,24 @@ struct AndroidBridgeUIState: Decodable, Equatable {
     let authenticated: Bool?
     let credentialPush: Bool?
     let remoteInput: Bool?
+    let generation: Int?
 
     var actionableControls: [AndroidBridgeUIControl] {
         if let controls, !controls.isEmpty {
-            return controls
+            return controls.filter { $0.enabled != false }
         }
         return buttons.enumerated().map {
             AndroidBridgeUIControl(
                 id: "legacy:\($0.offset)",
-                title: $0.element
+                title: $0.element,
+                enabled: true,
+                role: "legacy"
             )
         }
     }
 
     var isQRCode: Bool {
-        !isRemoteInputQRCode && (phase == "qr" || imageCount > 0)
+        !isRemoteInputQRCode && phase == "qr" && imageCount > 0
     }
 
     var isRemoteInputQRCode: Bool {
@@ -51,7 +75,6 @@ struct AndroidBridgeUIState: Decodable, Equatable {
         if credentialPush == true {
             return true
         }
-        guard isQRCode else { return false }
         return texts?.contains { text in
             let lower = text.lowercased()
             return text.contains("微信扫码推送")
@@ -80,6 +103,28 @@ struct AndroidBridgeUIState: Decodable, Equatable {
         return inputCount > 0
             || imageCount > 0
             || !actionableControls.isEmpty
+    }
+}
+
+enum AndroidBridgeQRCodePolicy {
+    /// Android dialogs frequently contain decorative or empty ImageViews. Only
+    /// publish an image as a login QR code when Core Image can decode an
+    /// actual QR payload from it.
+    static func validatedSnapshot(_ data: Data?) -> Data? {
+        guard let data,
+              let image = CIImage(data: data),
+              let detector = CIDetector(
+                ofType: CIDetectorTypeQRCode,
+                context: nil,
+                options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]
+              ),
+              detector.features(in: image).contains(where: { feature in
+                  guard let qr = feature as? CIQRCodeFeature else { return false }
+                  return qr.messageString?.isEmpty == false
+              }) else {
+            return nil
+        }
+        return data
     }
 }
 
@@ -625,6 +670,23 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         result.subtitles = result.subtitles.map {
             URL(string: bridge.hostReachableProxyURL($0.absoluteString)) ?? $0
         }
+        // Android spiders can return authenticated and short-lived media. Keep
+        // site defaults, let the play response override them, and make the
+        // actual player load authoritative so a generic probe cannot consume
+        // or reject a valid one-shot URL first.
+        return Self.applyingPlaybackRequestContract(
+            to: result,
+            siteHeaders: HTTPHeaders(site.header)
+        )
+    }
+
+    static func applyingPlaybackRequestContract(
+        to input: SitePlaybackResult,
+        siteHeaders: HTTPHeaders
+    ) -> SitePlaybackResult {
+        var result = input
+        result.headers = siteHeaders.merging(result.headers)
+        result.validationPolicy = .playerAuthoritative
         return result
     }
 
@@ -1029,6 +1091,7 @@ final class AndroidDexBridgeClient {
         let jarMD5: String
         let method: String
         let arguments: [JSONValue]
+        let monitorsAuthorization: Bool
     }
 
     private struct Response: Decodable {
@@ -1039,9 +1102,11 @@ final class AndroidDexBridgeClient {
 
     private let runtime: AndroidDexBridgeRuntime
     private let session: URLSession
+    private let interactionSession: URLSession
     private let invokeURL = URL(string: "http://127.0.0.1:19978/v1/invoke")!
     private let uiStateURL = URL(string: "http://127.0.0.1:19978/v1/ui/state")!
     private let uiSubmitURL = URL(string: "http://127.0.0.1:19978/v1/ui/submit")!
+    private let uiDismissURL = URL(string: "http://127.0.0.1:19978/v1/ui/dismiss")!
     private let uiSnapshotURL = URL(string: "http://127.0.0.1:19978/v1/ui/snapshot")!
     private let authPushURL = URL(string: "http://127.0.0.1:19978/v1/auth/push")!
 
@@ -1053,6 +1118,13 @@ final class AndroidDexBridgeClient {
         configuration.httpMaximumConnectionsPerHost = 20
         configuration.connectionProxyDictionary = [:]
         session = URLSession(configuration: configuration)
+
+        let interactionConfiguration = URLSessionConfiguration.ephemeral
+        interactionConfiguration.timeoutIntervalForRequest = 600
+        interactionConfiguration.timeoutIntervalForResource = 600
+        interactionConfiguration.httpMaximumConnectionsPerHost = 8
+        interactionConfiguration.connectionProxyDictionary = [:]
+        interactionSession = URLSession(configuration: interactionConfiguration)
     }
 
     func runtimeStatus() async -> AndroidRuntimeStatus {
@@ -1231,7 +1303,8 @@ final class AndroidDexBridgeClient {
                 jarURL: jar.url.absoluteString,
                 jarMD5: jar.md5,
                 method: method,
-                arguments: arguments
+                arguments: arguments,
+                monitorsAuthorization: monitorsAuthorization
             )
         )
         let (data, urlResponse): (Data, URLResponse)
@@ -1323,8 +1396,9 @@ final class AndroidDexBridgeClient {
     func submitUI(
         text: String?,
         button: String,
-        controlID: String?
-    ) async throws -> Bool {
+        controlID: String?,
+        generation: Int? = nil
+    ) async throws -> AndroidBridgeUISubmitResult {
         try await runtime.ensureReady()
         var request = URLRequest(url: uiSubmitURL)
         request.httpMethod = "POST"
@@ -1334,7 +1408,8 @@ final class AndroidDexBridgeClient {
             withJSONObject: [
                 "text": (text as Any?) ?? NSNull(),
                 "button": button,
-                "controlID": (controlID as Any?) ?? NSNull()
+                "controlID": (controlID as Any?) ?? NSNull(),
+                "generation": (generation as Any?) ?? NSNull()
             ] as [String: Any]
         )
         let (data, response) = try await session.data(for: request)
@@ -1343,7 +1418,11 @@ final class AndroidDexBridgeClient {
                 as? [String: Any] else {
             throw AppError.spider("无法提交网盘授权操作")
         }
-        return object["clicked"] as? Bool == true
+        return AndroidBridgeUISubmitResult(
+            clicked: object["clicked"] as? Bool == true,
+            stale: object["stale"] as? Bool == true,
+            generation: object["generation"] as? Int
+        )
     }
 
     func uiSnapshot() async throws -> Data {
@@ -1394,12 +1473,79 @@ final class AndroidDexBridgeClient {
     }
 
     func resetAuthorizationUI() async throws {
-        try await runtime.resetAuthorizationUI()
+        try await runtime.ensureReady()
+        var request = URLRequest(url: uiDismissURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 5
+        let (_, response) = try await session.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw AppError.spider("无法关闭当前网盘授权界面")
+        }
     }
 
-    private enum InvokeOutcome {
-        case response(Data, URLResponse)
-        case authorization(AndroidBridgeUIState)
+    private final class InvokeRace: @unchecked Sendable {
+        typealias Output = (Data, URLResponse)
+
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<Output, Error>?
+        private var invocation: Task<Void, Never>?
+        private var monitor: Task<Void, Never>?
+        private var isResolved = false
+        private var keepsInvocationAlive = false
+
+        func begin(_ continuation: CheckedContinuation<Output, Error>) {
+            lock.lock()
+            self.continuation = continuation
+            lock.unlock()
+        }
+
+        func setInvocation(_ task: Task<Void, Never>) {
+            lock.lock()
+            invocation = task
+            let shouldCancel = isResolved && !keepsInvocationAlive
+            lock.unlock()
+            if shouldCancel { task.cancel() }
+        }
+
+        func setMonitor(_ task: Task<Void, Never>) {
+            lock.lock()
+            monitor = task
+            let shouldCancel = isResolved
+            lock.unlock()
+            if shouldCancel { task.cancel() }
+        }
+
+        func resolve(
+            _ result: Result<Output, Error>,
+            keepInvocationAlive: Bool
+        ) {
+            let continuation: CheckedContinuation<Output, Error>?
+            let invocation: Task<Void, Never>?
+            let monitor: Task<Void, Never>?
+            lock.lock()
+            guard !isResolved else {
+                lock.unlock()
+                return
+            }
+            isResolved = true
+            keepsInvocationAlive = keepInvocationAlive
+            continuation = self.continuation
+            self.continuation = nil
+            invocation = self.invocation
+            monitor = self.monitor
+            lock.unlock()
+
+            monitor?.cancel()
+            if !keepInvocationAlive { invocation?.cancel() }
+            continuation?.resume(with: result)
+        }
+
+        func cancel() {
+            resolve(
+                .failure(CancellationError()),
+                keepInvocationAlive: false
+            )
+        }
     }
 
     static func shouldMonitorAuthorization(
@@ -1412,37 +1558,60 @@ final class AndroidDexBridgeClient {
     private func sendMonitoringAuthorization(
         _ request: URLRequest
     ) async throws -> (Data, URLResponse) {
-        try await withThrowingTaskGroup(of: InvokeOutcome.self) { group in
-            group.addTask { [session] in
-                let (data, response) = try await session.data(for: request)
-                return .response(data, response)
-            }
-            group.addTask { [weak self] in
-                for _ in 0..<300 {
-                    try Task.checkCancellation()
-                    try await Task.sleep(nanoseconds: 250_000_000)
-                    guard let self else { throw CancellationError() }
-                    // invoke() has already prepared the runtime. Poll the
-                    // bridge endpoint directly so a normal authorization wait
-                    // does not repeat emulator/ADB health checks four times a
-                    // second.
-                    if let state = try? await self.fetchUIState(),
-                       state.isAuthorizationPrompt {
-                        return .authorization(state)
+        var interactiveRequest = request
+        interactiveRequest.timeoutInterval = 600
+        // This task deliberately has an independent lifetime. When Android
+        // presents native UI, macOS returns control to SwiftUI, but the Spider
+        // invocation still owns that dialog and must remain connected until
+        // the user finishes it. Cancelling this request used to tear down the
+        // dialog socket and made QR scans or ordinary selections fail.
+        let race = InvokeRace()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                race.begin(continuation)
+                let invocation = Task { [interactionSession] in
+                    do {
+                        let output = try await interactionSession.data(
+                            for: interactiveRequest
+                        )
+                        race.resolve(
+                            .success(output),
+                            keepInvocationAlive: false
+                        )
+                    } catch {
+                        race.resolve(
+                            .failure(error),
+                            keepInvocationAlive: false
+                        )
                     }
                 }
-                throw AppError.spider("等待 Java/Dex 响应超时")
+                race.setInvocation(invocation)
+                let monitor = Task { [weak self] in
+                    for _ in 0..<2_400 {
+                        guard !Task.isCancelled else { return }
+                        try? await Task.sleep(nanoseconds: 250_000_000)
+                        guard !Task.isCancelled, let self else { return }
+                        // invoke() has already prepared the runtime. Poll the
+                        // bridge endpoint directly so UI observation does not
+                        // repeat emulator/ADB health checks.
+                        if let state = try? await self.fetchUIState(),
+                           state.isAuthorizationPrompt {
+                            race.resolve(
+                                .failure(AndroidBridgeUIRequired(state: state)),
+                                keepInvocationAlive: true
+                            )
+                            return
+                        }
+                    }
+                    race.resolve(
+                        .failure(AppError.spider("等待 Java/Dex 响应超时")),
+                        keepInvocationAlive: false
+                    )
+                }
+                race.setMonitor(monitor)
             }
-            guard let first = try await group.next() else {
-                throw AppError.spider("Java/Dex 桥没有返回响应")
-            }
-            group.cancelAll()
-            switch first {
-            case .response(let data, let response):
-                return (data, response)
-            case .authorization(let state):
-                throw AndroidBridgeUIRequired(state: state)
-            }
+        } onCancel: {
+            race.cancel()
         }
     }
 
@@ -1693,8 +1862,8 @@ struct AndroidRuntimeIdentity: Codable, Equatable, Sendable {
 }
 
 actor AndroidDexBridgeRuntime {
-    private static let bridgeVersion = "0.3.15"
-    private static let bridgeVersionCode = 27
+    private static let bridgeVersion = "0.3.17"
+    private static let bridgeVersionCode = 29
     private static let networkCheckInterval: TimeInterval = 30
     private static let manifestSchema = 1
     private static let avdName = "OKVideoMac_Runtime"

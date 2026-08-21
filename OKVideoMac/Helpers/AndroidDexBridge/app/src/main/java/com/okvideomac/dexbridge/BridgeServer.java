@@ -21,6 +21,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -56,6 +57,7 @@ final class BridgeServer {
             "user-agent",
             "referer",
             "cookie",
+            "authorization",
             "origin",
             "accept",
             "accept-language"
@@ -125,7 +127,7 @@ final class BridgeServer {
                 if ("GET".equals(method) && "/health".equals(target)) {
                     JSONObject health = new JSONObject();
                     health.put("ok", true);
-                    health.put("version", "0.3.15");
+                    health.put("version", "0.3.17");
                     health.put("generation", runtimeGeneration);
                     writeJSON(output, 200, health);
                     return;
@@ -148,6 +150,10 @@ final class BridgeServer {
                     writeBytes(output, 200, "image/png", BridgeActivity.snapshotUI());
                     return;
                 }
+                if ("POST".equals(method) && "/v1/ui/dismiss".equals(target)) {
+                    writeJSON(output, 200, BridgeActivity.dismissUI());
+                    return;
+                }
                 if (target.startsWith("/proxy")
                         && ("GET".equals(method)
                         || "HEAD".equals(method)
@@ -155,6 +161,20 @@ final class BridgeServer {
                     Map<String, String> params = parseQuery(target);
                     params.putAll(headers);
                     Object[] response = DexSpiderRegistry.get(context).proxy(params);
+                    Log.i(
+                            TAG,
+                            "Spider proxy request="
+                                    + UUID.randomUUID().toString().substring(0, 8)
+                                    + " status="
+                                    + (response != null && response.length > 0
+                                            ? String.valueOf(response[0])
+                                            : "missing")
+                                    + " range=" + headers.containsKey("range")
+                                    + " cookie=" + headers.containsKey("cookie")
+                                    + " referer=" + headers.containsKey("referer")
+                                    + " authorization="
+                                    + headers.containsKey("authorization")
+                    );
                     writeProxy(output, response, "HEAD".equals(method));
                     return;
                 }
@@ -176,6 +196,10 @@ final class BridgeServer {
                                     payload.has("controlID")
                                             && !payload.isNull("controlID")
                                             ? payload.optString("controlID", null)
+                                            : null,
+                                    payload.has("generation")
+                                            && !payload.isNull("generation")
+                                            ? payload.optInt("generation")
                                             : null
                             )
                     );
@@ -344,11 +368,15 @@ final class BridgeServer {
             boolean headersOnly
     ) throws IOException {
         URI upstream = requireRemoteMediaURI(rawURL);
+        String requestID = UUID.randomUUID().toString().substring(0, 8);
         Request.Builder request = new Request.Builder().url(upstream.toString());
+        StringBuilder forwardedNames = new StringBuilder();
         for (String name : FORWARDED_MEDIA_REQUEST_HEADERS) {
             String value = clientHeaders.get(name);
             if (value != null && !value.trim().isEmpty()) {
                 request.header(name, value);
+                if (forwardedNames.length() > 0) forwardedNames.append(',');
+                forwardedNames.append(name);
             }
         }
         // Avoid OkHttp's transparent gzip conversion. Byte offsets and
@@ -361,6 +389,16 @@ final class BridgeServer {
         }
 
         try (Response response = MEDIA_CLIENT.newCall(request.build()).execute()) {
+            Log.i(
+                    TAG,
+                    "Media request=" + requestID
+                            + " hostHash=" + Integer.toHexString(
+                                    upstream.getHost().toLowerCase(Locale.ROOT).hashCode()
+                            )
+                            + " status=" + response.code()
+                            + " method=" + (headersOnly ? "HEAD" : "GET")
+                            + " headers=" + forwardedNames
+            );
             ResponseBody responseBody = response.body();
             String contentType = response.header(
                     "Content-Type",

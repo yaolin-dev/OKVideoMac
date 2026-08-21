@@ -446,7 +446,14 @@ struct CloudAuthorizationView: View {
 
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
-                    Label("网盘授权", systemImage: "externaldrive.badge.person.crop")
+                    Label(
+                        prompt.interactionKind == .authorization
+                            ? "网盘授权"
+                            : "配置操作",
+                        systemImage: prompt.interactionKind == .authorization
+                            ? "externaldrive.badge.person.crop"
+                            : "slider.horizontal.3"
+                    )
                         .font(.title2.bold())
                     Spacer()
                     Button {
@@ -503,6 +510,23 @@ struct CloudAuthorizationView: View {
                         .frame(width: 280, height: 220)
                         Spacer()
                     }
+                } else if prompt.phase == "waiting"
+                    || prompt.phase == "transitioning" {
+                    HStack(spacing: 10) {
+                        AppActivityIndicator(size: .small)
+                        Text("正在等待下一步操作界面")
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 18)
+                } else if prompt.phase == "failed" {
+                    Label(
+                        "配置操作尚未完成",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .foregroundColor(.orange)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 12)
                 }
 
                 if let status = prompt.status, !status.isEmpty {
@@ -562,6 +586,14 @@ struct CloudAuthorizationView: View {
                 }
 
                 HStack {
+                    if prompt.allowsRetry {
+                        Button {
+                            Task { await state.retryCloudAuthorizationOperation() }
+                        } label: {
+                            Label("重试", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
                     Spacer()
                     Button("关闭") {
                         state.cancelCloudAuthorization()

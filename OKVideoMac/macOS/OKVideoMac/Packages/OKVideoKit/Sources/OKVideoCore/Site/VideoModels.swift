@@ -514,6 +514,9 @@ public struct PlaybackRefreshRequest: Equatable, Sendable {
     public var resourceIdentity: String
     public var sourceName: String?
     public var episodeName: String?
+    /// Provider-owned opaque episode reference captured when playback was
+    /// originally resolved. Hosts persist and compare it, but never parse it.
+    public var episodeReference: String?
 
     public init(
         videoID: String,
@@ -521,7 +524,8 @@ public struct PlaybackRefreshRequest: Equatable, Sendable {
         sourceIdentity: String,
         resourceIdentity: String,
         sourceName: String? = nil,
-        episodeName: String? = nil
+        episodeName: String? = nil,
+        episodeReference: String? = nil
     ) {
         self.videoID = videoID
         self.title = title
@@ -529,6 +533,7 @@ public struct PlaybackRefreshRequest: Equatable, Sendable {
         self.resourceIdentity = resourceIdentity
         self.sourceName = sourceName
         self.episodeName = episodeName
+        self.episodeReference = episodeReference
     }
 }
 
@@ -611,6 +616,25 @@ public extension SiteProvider {
             if structuralMatches.count == 1 {
                 return structuralMatches[0]
             }
+            if let episodeReference = request.episodeReference?.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ), !episodeReference.isEmpty {
+                let referenceMatches: [(PlaySource, PlayEpisode)] = detail
+                    .playSources.flatMap { source in
+                    source.episodes.compactMap { episode in
+                        guard episode.url == episodeReference else { return nil }
+                        if source.stableIdentity == request.sourceIdentity
+                            || request.sourceName == nil
+                            || source.name == request.sourceName {
+                            return (source, episode)
+                        }
+                        return nil
+                    }
+                }
+                if referenceMatches.count == 1 {
+                    return referenceMatches[0]
+                }
+            }
             let displayMatches = detail.playSources.flatMap { source in
                 source.episodes.compactMap { episode in
                     source.name == request.sourceName
@@ -645,14 +669,33 @@ public extension SiteProvider {
                     ]
                 ) == .orderedSame
             }
-            guard exactMatches.count == 1 else {
+            guard !exactMatches.isEmpty else {
                 throw AppError.playback("无法从当前搜索结果唯一定位原历史内容")
             }
-            detail = try await self.detail(id: exactMatches[0].videoID)
-            guard let searchedMatch = matchingPlayback(in: detail) else {
-                throw AppError.playback("无法从最新详情唯一匹配原历史线路")
+
+            // Duplicate titles are normal for cloud-drive search results. The
+            // resource identity, not title uniqueness, decides which result is
+            // safe to refresh. Bound detail fan-out to keep recovery finite.
+            var matchingDetails: [(VideoDetail, PlaySource, PlayEpisode)] = []
+            for summary in exactMatches.prefix(20) {
+                guard let candidateDetail = try? await self.detail(
+                    id: summary.videoID
+                ), let candidate = matchingPlayback(in: candidateDetail) else {
+                    continue
+                }
+                matchingDetails.append(
+                    (candidateDetail, candidate.0, candidate.1)
+                )
             }
-            selected = searchedMatch
+            guard matchingDetails.count == 1,
+                  let refreshed = matchingDetails.first else {
+                if matchingDetails.isEmpty {
+                    throw AppError.playback("无法从最新详情唯一匹配原历史线路")
+                }
+                throw AppError.playback("多个同名结果均匹配原历史资源，无法安全自动选择")
+            }
+            detail = refreshed.0
+            selected = (refreshed.1, refreshed.2)
         }
         let result = try await player(
             flag: selected.0.name,
