@@ -46,7 +46,7 @@
     {
       "component": "libass",
       "version": "0.17.5",
-      "upstream": "https://github.com/libass/libass/releases/download/0.17.5/libass-0.17.5.tar.gz",
+      "upstream": "https://github.com/libass/libass/archive/refs/tags/0.17.5.tar.gz",
       "source_sha256": "fa286fc9ee1ba3b932703a3df7b8474d01dc8abe29ec69b6fa68781dc4bf7acc",
       "license": "ISC",
       "build_system": "Autotools",

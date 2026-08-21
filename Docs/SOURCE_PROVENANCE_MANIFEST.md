@@ -46,7 +46,7 @@ those inputs; therefore they remain `PARTIAL`.
 | Component | Version | Fixed source archive | SHA-256 | Known build evidence / output | License | Status |
 | --- | --- | --- | --- | --- | --- | --- |
 | FFmpeg family | 7.1.4 | `https://ffmpeg.org/releases/ffmpeg-7.1.4.tar.xz` | `71f4aac3573ed9060489cb62526a6c7dda815ae10993789611acd7be9fa9fbf4` | binary configuration proves LGPL path and flags described in `THIRD_PARTY_NOTICES.md`; six dylibs listed below | `LGPL-2.1-or-later` build | `PARTIAL` |
-| libass | 0.17.5 | `https://github.com/libass/libass/releases/download/0.17.5/libass-0.17.5.tar.gz` | `fa286fc9ee1ba3b932703a3df7b8474d01dc8abe29ec69b6fa68781dc4bf7acc` | retained source; `libass.9.dylib` metadata matches | `ISC` | `PARTIAL` |
+| libass | 0.17.5 | `https://github.com/libass/libass/archive/refs/tags/0.17.5.tar.gz` | `fa286fc9ee1ba3b932703a3df7b8474d01dc8abe29ec69b6fa68781dc4bf7acc` | retained source; `libass.9.dylib` metadata matches | `ISC` | `PARTIAL` |
 | HarfBuzz | 14.2.1 | `https://github.com/harfbuzz/harfbuzz/releases/download/14.2.1/harfbuzz-14.2.1.tar.xz` | `a54a5d8e9380a41fbb762ce367bcbf7704792dfca0d93f1bbca86c5a57902e0e` | retained source; `libharfbuzz.0.dylib` metadata matches | `MIT` | `PARTIAL` |
 
 Phase 2 adds `ThirdParty/native-lock.json` and isolated build recipes. FFmpeg
