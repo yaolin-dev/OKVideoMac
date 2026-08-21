@@ -111,6 +111,8 @@ install_name_tool -id '@rpath/libmpv.dylib' "$LIBMPV_PATH"
 BRIDGE_SOURCE="$PROJECT_DIR/Native/MPVBridge/OKMPVBridge.c"
 BRIDGE_OUTPUT="$BUILD_ROOT/lib/libOKMPVBridge.dylib"
 BRIDGE_SMOKE="$BUILD_ROOT/bin/mpv-bridge-smoke"
+FFMPEG_CFLAGS=( $("$PKG_CONFIG" --cflags libavformat libavcodec libavutil) )
+FFMPEG_LIBS=( $("$PKG_CONFIG" --libs libavformat libavcodec libavutil) )
 mkdir -p "$(dirname "$BRIDGE_OUTPUT")"
 MACOSX_DEPLOYMENT_TARGET=12.0 clang \
   -arch arm64 \
@@ -120,13 +122,12 @@ MACOSX_DEPLOYMENT_TARGET=12.0 clang \
   -Werror \
   -dynamiclib \
   -mmacosx-version-min=12.0 \
+  "${FFMPEG_CFLAGS[@]}" \
   -I"$BUILD_ROOT/include" \
   "$BRIDGE_SOURCE" \
   -L"$(dirname "$LIBMPV_PATH")" \
   -lmpv \
-  -lavformat \
-  -lavcodec \
-  -lavutil \
+  "${FFMPEG_LIBS[@]}" \
   -Wl,-install_name,@rpath/libOKMPVBridge.dylib \
   -Wl,-rpath,@loader_path \
   -o "$BRIDGE_OUTPUT"
