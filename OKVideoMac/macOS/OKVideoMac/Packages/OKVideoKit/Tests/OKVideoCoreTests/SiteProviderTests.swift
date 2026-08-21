@@ -765,6 +765,70 @@ final class SiteProviderTests: XCTestCase {
         )
     }
 
+    func testActionPagePreservesAllCardsUnderExplicitActionCategory() throws {
+        let site = SiteConfiguration(
+            key: "renamed-action-source",
+            name: "Renamed Action Source",
+            type: 4,
+            api: "/spider/renamed/4"
+        )
+        let page = try SpiderResponseMapper.actionPage(
+            .object([
+                "list": .array([
+                    .object([
+                        "vod_id": .string("configure-account"),
+                        "vod_name": .string("账户设置"),
+                        "action": .string("configure")
+                    ]),
+                    .object([
+                        "vod_id": .string("ordinary-movie"),
+                        "vod_name": .string("普通影片"),
+                        "vod_play_url": .string("第一集$https://media.example/1.m3u8")
+                    ])
+                ]),
+                "page": .integer(1),
+                "pagecount": .integer(1)
+            ]),
+            site: site,
+            baseURL: URL(string: "http://127.0.0.1:18988/"),
+            page: 1
+        )
+
+        XCTAssertEqual(
+            page.items.map(\.videoID),
+            ["configure-account", "ordinary-movie"]
+        )
+        XCTAssertTrue(page.items.allSatisfy {
+            $0.resolvedContentKind == .action
+        })
+    }
+
+    func testPlayerAcceptsPluralHeadersAndCanonicalHeaderWins() throws {
+        let site = SiteConfiguration(
+            key: "header-source",
+            name: "Header Source",
+            type: 4,
+            api: "/spider/header/4"
+        )
+        let result = try SpiderResponseMapper.player(
+            .object([
+                "parse": .integer(0),
+                "url": .string("https://media.example/movie.mp4"),
+                "headers": .object([
+                    "Referer": .string("https://plural.example/"),
+                    "Cookie": .string("session=fixture")
+                ]),
+                "header": .object([
+                    "Referer": .string("https://canonical.example/")
+                ])
+            ]),
+            site: site
+        )
+
+        XCTAssertEqual(result.headers["Referer"], "https://canonical.example/")
+        XCTAssertEqual(result.headers["Cookie"], "session=fixture")
+    }
+
     func testContentSiteBlankDetailPlaceholderIsNotAnAction() throws {
         let site = SiteConfiguration(
             key: "node-content",

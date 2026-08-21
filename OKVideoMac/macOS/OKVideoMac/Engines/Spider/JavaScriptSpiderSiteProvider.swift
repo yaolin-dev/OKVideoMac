@@ -395,6 +395,32 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         page: Int,
         filters: [String: String]
     ) async throws -> VideoPage {
+        try SpiderResponseMapper.page(
+            await categoryValue(id: id, page: page, filters: filters),
+            site: site,
+            baseURL: baseURL,
+            page: page
+        )
+    }
+
+    func actionCategory(
+        id: String,
+        page: Int,
+        filters: [String: String]
+    ) async throws -> VideoPage {
+        try SpiderResponseMapper.actionPage(
+            await categoryValue(id: id, page: page, filters: filters),
+            site: site,
+            baseURL: baseURL,
+            page: page
+        )
+    }
+
+    private func categoryValue(
+        id: String,
+        page: Int,
+        filters: [String: String]
+    ) async throws -> JSONValue {
         let filterValues = Dictionary(
             uniqueKeysWithValues: filters.map { ($0.key, JSONValue.string($0.value)) }
         )
@@ -410,10 +436,12 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
             method: "category",
             arguments: arguments
         )
-        if page == 1, value.nonEmptySpiderValue == nil {
+        if Self.shouldRetryCategory(page: page, value: value) {
             // Guard spiders can retain a failed upstream delegate. Recreate
             // the site and replay its normal home lifecycle once before
-            // accepting an empty first page.
+            // accepting an empty first page. A decoded `{ list: [] }` is also
+            // a failed first-page result for these spiders; limiting recovery
+            // to one replay keeps legitimately empty categories bounded.
             _ = try? await invoke(method: "destroy", arguments: [])
             _ = try? await loadHomeValues()
             value = try await invoke(
@@ -421,12 +449,26 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
                 arguments: arguments
             )
         }
-        return try SpiderResponseMapper.page(
-            value,
-            site: site,
-            baseURL: baseURL,
-            page: page
-        )
+        return value
+    }
+
+    static func shouldRetryCategory(page: Int, value: JSONValue) -> Bool {
+        guard page <= 1 else { return false }
+        if value.nonEmptySpiderValue == nil { return true }
+        switch value {
+        case .array(let values):
+            return values.isEmpty
+        case .object(let object):
+            for key in ["list", "data", "videos"] {
+                guard let nested = object[key] else { continue }
+                if case .array(let values) = nested, values.isEmpty {
+                    return true
+                }
+            }
+            return false
+        default:
+            return false
+        }
     }
 
     func detail(id: String) async throws -> VideoDetail {
@@ -458,6 +500,20 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
             baseURL: baseURL,
             fallbackSummary: summary,
             allowsPlaceholderAction: summary.resolvedContentKind == .action
+        )
+    }
+
+    func select(action item: SiteActionItem) async throws -> SiteSelectionResult {
+        try SpiderResponseMapper.selection(
+            await invoke(
+                method: "detail",
+                arguments: [.array([.string(item.itemID)])],
+                monitorsAuthorization: true
+            ),
+            site: site,
+            baseURL: baseURL,
+            fallbackSummary: item.selectionSummary,
+            allowsPlaceholderAction: true
         )
     }
 
@@ -578,14 +634,16 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
 
     private func invoke(
         method: String,
-        arguments: [JSONValue]
+        arguments: [JSONValue],
+        monitorsAuthorization: Bool = false
     ) async throws -> JSONValue {
         try await bridge.invoke(
             site: site,
             jarReference: jarReference,
             baseURL: baseURL,
             method: method,
-            arguments: arguments
+            arguments: arguments,
+            monitorsAuthorization: monitorsAuthorization
         )
     }
 }
@@ -1144,12 +1202,13 @@ final class AndroidDexBridgeClient {
         jarReference: String,
         baseURL: URL?,
         method: String,
-        arguments: [JSONValue]
+        arguments: [JSONValue],
+        monitorsAuthorization explicitAuthorizationAction: Bool = false
     ) async throws -> JSONValue {
         try await runtime.ensureReady()
         let monitorsAuthorization = Self.shouldMonitorAuthorization(
             for: method,
-            site: site
+            explicitAuthorizationAction: explicitAuthorizationAction
         )
         if monitorsAuthorization,
            let staleState = try? await uiState(),
@@ -1188,6 +1247,10 @@ final class AndroidDexBridgeClient {
         do {
             response = try JSONDecoder().decode(Response.self, from: data)
         } catch {
+            if monitorsAuthorization,
+               let state = await authorizationStateAfterFailedInvocation() {
+                throw AndroidBridgeUIRequired(state: state)
+            }
             let text = String(data: data, encoding: .utf8) ?? ""
             throw AppError.spider(
                 "Java/Dex 桥响应无效（HTTP \(httpResponse.statusCode)）："
@@ -1195,6 +1258,10 @@ final class AndroidDexBridgeClient {
             )
         }
         guard response.ok, (200..<300).contains(httpResponse.statusCode) else {
+            if monitorsAuthorization,
+               let state = await authorizationStateAfterFailedInvocation() {
+                throw AndroidBridgeUIRequired(state: state)
+            }
             throw AppError.spider(
                 Self.userFacingBridgeError(
                     response.error
@@ -1203,6 +1270,38 @@ final class AndroidDexBridgeClient {
             )
         }
         return response.result ?? .null
+    }
+
+    private func authorizationStateAfterFailedInvocation()
+        async -> AndroidBridgeUIState? {
+        // Some Android spiders render their authorization dialog and then
+        // immediately fail the synthetic detail call. In that ordering the
+        // HTTP response can beat the 250 ms monitor poll. Give the already
+        // requested UI a short bounded grace period before surfacing the
+        // bridge error so the authorization state remains authoritative.
+        await Self.waitForAuthorizationStateAfterFailure {
+            try? await self.fetchUIState()
+        }
+    }
+
+    static func waitForAuthorizationStateAfterFailure(
+        attempts: Int = 8,
+        pollIntervalNanoseconds: UInt64 = 100_000_000,
+        poll: () async -> AndroidBridgeUIState?
+    ) async -> AndroidBridgeUIState? {
+        guard attempts > 0 else { return nil }
+        for attempt in 0..<attempts {
+            if let state = await poll(), state.isAuthorizationPrompt {
+                return state
+            }
+            guard attempt + 1 < attempts else { break }
+            if pollIntervalNanoseconds > 0 {
+                try? await Task.sleep(
+                    nanoseconds: pollIntervalNanoseconds
+                )
+            }
+        }
+        return nil
     }
 
     func uiState() async throws -> AndroidBridgeUIState {
@@ -1305,13 +1404,9 @@ final class AndroidDexBridgeClient {
 
     static func shouldMonitorAuthorization(
         for method: String,
-        site: SiteConfiguration
+        explicitAuthorizationAction: Bool = false
     ) -> Bool {
-        if method == "play" || method == "action" { return true }
-        guard method == "detail" else { return false }
-        let api = site.api.lowercased()
-        let key = site.key.lowercased()
-        return api.contains("config") || key.contains("config")
+        explicitAuthorizationAction || method == "play" || method == "action"
     }
 
     private func sendMonitoringAuthorization(

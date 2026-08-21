@@ -438,8 +438,15 @@ public struct PlaybackResolver {
                         )
                     }
                     continuation.yield(.state(.validating))
-                    guard try await mediaProbe.validate(url: parsed.url, headers: parsed.headers) else {
-                        throw AppError.parsing("媒体探测未通过")
+                    let requiresPreflight = parser != nil
+                        || candidate.result.validationPolicy == .preflight
+                    if requiresPreflight {
+                        guard try await mediaProbe.validate(
+                            url: parsed.url,
+                            headers: parsed.headers
+                        ) else {
+                            throw AppError.parsing("媒体探测未通过")
+                        }
                     }
                     let resolved = ResolvedMedia(
                         url: parsed.url,

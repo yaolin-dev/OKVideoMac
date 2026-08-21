@@ -2,6 +2,8 @@ import OKVideoCore
 import SwiftUI
 
 struct AppActivityIndicatorLifecycle: Equatable {
+    static let cycleDuration: TimeInterval = 0.85
+
     private(set) var isVisible = false
     private(set) var reduceMotion = false
 
@@ -20,6 +22,13 @@ struct AppActivityIndicatorLifecycle: Equatable {
 
     mutating func disappear() {
         isVisible = false
+    }
+
+    func rotationDegrees(at date: Date) -> Double {
+        guard isAnimating else { return 0 }
+        let elapsed = date.timeIntervalSinceReferenceDate
+            .truncatingRemainder(dividingBy: Self.cycleDuration)
+        return elapsed / Self.cycleDuration * 360
     }
 }
 
@@ -57,9 +66,12 @@ struct AppActivityIndicator: View {
     }
 
     var body: some View {
-        ZStack {
-            Circle()
-                .stroke(tint.opacity(0.20), lineWidth: size.lineWidth)
+        TimelineView(
+            .animation(
+                minimumInterval: 1.0 / 60.0,
+                paused: !lifecycle.isAnimating
+            )
+        ) { timeline in
             Circle()
                 .trim(from: 0.08, to: 0.76)
                 .stroke(
@@ -69,15 +81,9 @@ struct AppActivityIndicator: View {
                         lineCap: .round
                     )
                 )
+                .frame(width: size.diameter, height: size.diameter)
                 .rotationEffect(
-                    .degrees(lifecycle.isAnimating ? 360 : 0)
-                )
-                .animation(
-                    lifecycle.isAnimating
-                        ? .linear(duration: 0.85)
-                            .repeatForever(autoreverses: false)
-                        : nil,
-                    value: lifecycle.isAnimating
+                    .degrees(lifecycle.rotationDegrees(at: timeline.date))
                 )
         }
         .frame(width: size.diameter, height: size.diameter)

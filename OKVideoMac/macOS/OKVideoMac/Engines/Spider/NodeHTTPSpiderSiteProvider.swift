@@ -368,6 +368,14 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         if let hostMessage = invocation.hostMessage {
             throw try webAuthorizationRequired(hostMessage: hostMessage)
         }
+        if awaitsHostAction {
+            return try SpiderResponseMapper.actionPage(
+                invocation.value,
+                site: site,
+                baseURL: invocation.baseURL,
+                page: page
+            )
+        }
         return try SpiderResponseMapper.page(
             invocation.value,
             site: site,
@@ -509,7 +517,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                     ),
                     needsParsing: false,
                     flag: flag,
-                    headers: HTTPHeaders(site.header)
+                    headers: HTTPHeaders(site.header),
+                    validationPolicy: .playerAuthoritative
                 )
             }
             throw error
@@ -536,6 +545,11 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             invocation.value,
             site: site
         )
+        // Site-level headers (for example Referer/User-Agent) are part of the
+        // provider contract. Player-response headers override them, but must
+        // not replace the whole request context.
+        result.headers = HTTPHeaders(site.header).merging(result.headers)
+        result.validationPolicy = .playerAuthoritative
         result.url = normalizePlaybackURL(
             result.url,
             baseURL: invocation.baseURL

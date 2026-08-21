@@ -2,6 +2,41 @@ import XCTest
 @testable import OKVideoCore
 
 final class PlaybackResolverTests: XCTestCase {
+    func testPlayerAuthoritativeDirectMediaBypassesGenericPreflight() async {
+        let resolver = PlaybackResolver(
+            parseExecutor: FixtureParseExecutor(results: [:]),
+            mediaProbe: FixtureMediaProbe(validURLs: [])
+        )
+        let result = SitePlaybackResult(
+            url: "https://authenticated.example.invalid/movie.mp4",
+            needsParsing: false,
+            flag: "authenticated",
+            headers: ["Cookie": "session=fixture"],
+            validationPolicy: .playerAuthoritative
+        )
+        let request = PlaybackResolutionRequest(
+            candidates: [
+                PlaybackCandidate(
+                    siteKey: "node",
+                    siteName: "Node",
+                    sourceName: "Authenticated",
+                    episodeName: "Episode 1",
+                    result: result
+                )
+            ],
+            parsers: []
+        )
+
+        let events = await collect(resolver.resolve(request))
+
+        XCTAssertTrue(events.contains { event in
+            guard case .resolved(let media) = event else { return false }
+            return media.url.absoluteString
+                == "https://authenticated.example.invalid/movie.mp4"
+                && media.headers["Cookie"] == "session=fixture"
+        })
+    }
+
     func testAndroidCloudOriginalProxyBypassesBrokenRangePreflight() async throws {
         let probe = DefaultMediaProbe(httpClient: FailingProbeHTTPClient())
         let url = try XCTUnwrap(

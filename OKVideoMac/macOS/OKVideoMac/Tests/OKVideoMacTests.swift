@@ -1338,6 +1338,109 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testEmptyActionCategoryKeepsGenericSelectableFallback() {
+        let category = VideoCategory(
+            id: "settings-entry",
+            name: "配置入口",
+            contentKind: .action
+        )
+        let fallback = SiteActionItem(
+            siteKey: "site",
+            siteName: "站点",
+            itemID: category.id,
+            title: category.name
+        )
+
+        XCTAssertEqual(
+            HomePresentationPolicy.actionItems(
+                from: VideoPage(
+                    items: [],
+                    pagination: Pagination(page: 1, pageCount: 1)
+                ),
+                inheritedFrom: category,
+                fallback: fallback
+            ),
+            [fallback]
+        )
+    }
+
+    func testCachedActionHomeRestoresSelectableFallbackBeforeNetworkLoad() {
+        let cached = SiteHome(
+            categories: [
+                VideoCategory(
+                    id: "settings-entry",
+                    name: "配置入口",
+                    contentKind: .action
+                )
+            ],
+            recommendations: []
+        )
+
+        let restored = HomePresentationPolicy.addingActionCategoryFallback(
+            to: cached,
+            siteKey: "site",
+            siteName: "站点"
+        )
+
+        XCTAssertEqual(restored.actionItems.count, 1)
+        XCTAssertEqual(restored.actionItems.first?.itemID, "settings-entry")
+        XCTAssertEqual(restored.actionItems.first?.title, "配置入口")
+        XCTAssertEqual(
+            HomePresentationPolicy.selection(for: restored, preserving: nil),
+            .actions
+        )
+    }
+
+    func testSingletonEmptyCategoryPromotesByStructureWithoutNamesOrIDs() {
+        let home = SiteHome(
+            categories: [
+                VideoCategory(
+                    id: "opaque-entry-741",
+                    name: "Arbitrary provider entry"
+                )
+            ],
+            recommendations: []
+        )
+        let page = VideoPage(
+            items: [],
+            pagination: Pagination(page: 1, pageCount: 1)
+        )
+
+        let promoted = HomePresentationPolicy
+            .promotingSingletonEmptyCategoryToAction(
+                in: home,
+                categoryID: "opaque-entry-741",
+                page: page
+            )
+
+        XCTAssertEqual(
+            promoted?.categories.first?.resolvedContentKind,
+            .action
+        )
+    }
+
+    func testEmptyMediaCategoryDoesNotPromoteWhenHomeHasOtherContent() {
+        let home = SiteHome(
+            categories: [
+                VideoCategory(id: "empty", name: "空分类"),
+                VideoCategory(id: "movies", name: "电影")
+            ],
+            recommendations: []
+        )
+        let page = VideoPage(
+            items: [],
+            pagination: Pagination(page: 1, pageCount: 1)
+        )
+
+        XCTAssertNil(
+            HomePresentationPolicy.promotingSingletonEmptyCategoryToAction(
+                in: home,
+                categoryID: "empty",
+                page: page
+            )
+        )
+    }
+
     func testHomePresentationIsEmptyWhenEveryCategoryIsUnsupported() {
         let home = SiteHome(
             categories: [
@@ -3817,49 +3920,106 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testAndroidDexMonitorsAuthorizationForSettingsAndPlaybackCalls() {
-        let contentSite = SiteConfiguration(
-            key: "content",
-            name: "Content",
-            type: 3,
-            api: "csp_Content"
-        )
-        let configurationSite = SiteConfiguration(
-            key: "provider_config",
-            name: "Provider settings",
-            type: 3,
-            api: "csp_Config"
-        )
-        XCTAssertFalse(
-            AndroidDexBridgeClient.shouldMonitorAuthorization(
-                for: "detail",
-                site: contentSite
+    func testAndroidDexEmptyFirstCategoryRequiresSingleSpiderRecovery() {
+        XCTAssertTrue(
+            AndroidDexSpiderSiteProvider.shouldRetryCategory(
+                page: 1,
+                value: .object(["list": .array([])])
             )
         )
         XCTAssertTrue(
-            AndroidDexBridgeClient.shouldMonitorAuthorization(
-                for: "detail",
-                site: configurationSite
-            )
-        )
-        XCTAssertTrue(
-            AndroidDexBridgeClient.shouldMonitorAuthorization(
-                for: "action",
-                site: contentSite
-            )
-        )
-        XCTAssertTrue(
-            AndroidDexBridgeClient.shouldMonitorAuthorization(
-                for: "play",
-                site: contentSite
+            AndroidDexSpiderSiteProvider.shouldRetryCategory(
+                page: 1,
+                value: .string(" \n")
             )
         )
         XCTAssertFalse(
-            AndroidDexBridgeClient.shouldMonitorAuthorization(
-                for: "search",
-                site: contentSite
+            AndroidDexSpiderSiteProvider.shouldRetryCategory(
+                page: 2,
+                value: .object(["list": .array([])])
             )
         )
+        XCTAssertFalse(
+            AndroidDexSpiderSiteProvider.shouldRetryCategory(
+                page: 1,
+                value: .object([
+                    "list": .array([.object(["vod_id": .string("1")])])
+                ])
+            )
+        )
+    }
+
+    func testAndroidDexAuthorizationMonitoringUsesStructuralActionContext() {
+        XCTAssertFalse(
+            AndroidDexBridgeClient.shouldMonitorAuthorization(
+                for: "detail"
+            )
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeClient.shouldMonitorAuthorization(
+                for: "detail",
+                explicitAuthorizationAction: true
+            )
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeClient.shouldMonitorAuthorization(
+                for: "action"
+            )
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeClient.shouldMonitorAuthorization(
+                for: "play"
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeClient.shouldMonitorAuthorization(
+                for: "search"
+            )
+        )
+    }
+
+    func testAndroidDexFailedInvocationAllowsLateAuthorizationUIToWin()
+        async throws {
+        let hidden = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: Data(
+                """
+                {
+                  "visible": false,
+                  "title": "",
+                  "inputCount": 0,
+                  "imageCount": 0,
+                  "buttons": []
+                }
+                """.utf8
+            )
+        )
+        let authorization = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: Data(
+                """
+                {
+                  "visible": true,
+                  "title": "请选择网盘",
+                  "inputCount": 0,
+                  "imageCount": 0,
+                  "buttons": ["百度网盘"]
+                }
+                """.utf8
+            )
+        )
+        var states = [hidden, authorization]
+
+        let resolved = await AndroidDexBridgeClient
+            .waitForAuthorizationStateAfterFailure(
+                attempts: 2,
+                pollIntervalNanoseconds: 0
+            ) {
+                states.removeFirst()
+            }
+
+        XCTAssertEqual(resolved, authorization)
+        XCTAssertTrue(states.isEmpty)
     }
 
     @MainActor
@@ -4906,9 +5066,20 @@ final class OKVideoMacTests: XCTestCase {
         var lifecycle = AppActivityIndicatorLifecycle()
         lifecycle.appear(reduceMotion: false)
         XCTAssertTrue(lifecycle.isAnimating)
+        let first = lifecycle.rotationDegrees(
+            at: Date(timeIntervalSinceReferenceDate: 0.1)
+        )
+        let second = lifecycle.rotationDegrees(
+            at: Date(timeIntervalSinceReferenceDate: 0.2)
+        )
+        XCTAssertNotEqual(first, second)
 
         lifecycle.disappear()
         XCTAssertFalse(lifecycle.isAnimating)
+        XCTAssertEqual(
+            lifecycle.rotationDegrees(at: Date()),
+            0
+        )
 
         lifecycle.appear(reduceMotion: true)
         XCTAssertFalse(lifecycle.isAnimating)
@@ -7300,6 +7471,101 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             )
             XCTAssertEqual(authorization.title, "Unrelated Display Label")
         }
+    }
+
+    func testNodeActionCategoryPreservesArbitraryConfigurationCard() async throws {
+        let site = SiteConfiguration(
+            key: "renamed_bundle_action_page",
+            name: "Unrelated Action Page",
+            type: 4,
+            api: "/spider/renamed/73",
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.path.hasSuffix("/init") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            if request.url.path.contains("/__okvideo/host-message/") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 204,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            XCTAssertTrue(request.url.path.hasSuffix("/category"))
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(
+                    #"{"list":[{"vod_id":"opaque-card","vod_name":"任意配置卡片","action":"configure"}],"page":1,"pagecount":1}"#.utf8
+                )
+            )
+        }
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        let page = try await provider.actionCategory(
+            id: "opaque-category",
+            page: 1,
+            filters: [:]
+        )
+
+        XCTAssertEqual(page.items.map(\.videoID), ["opaque-card"])
+        XCTAssertEqual(page.items.first?.resolvedContentKind, .action)
+    }
+
+    func testNodePlayerMergesSiteAndResponseHeadersAndUsesPlayerValidation() async throws {
+        let site = SiteConfiguration(
+            key: "renamed_authenticated_source",
+            name: "Authenticated Source",
+            type: 4,
+            api: "/spider/authenticated/4",
+            header: [
+                "User-Agent": "Site Agent",
+                "Referer": "https://site.example/"
+            ],
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.path.hasSuffix("/init") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(
+                    #"{"parse":0,"url":"https://media.example/movie.mp4","header":{"Referer":"https://response.example/","Cookie":"session=fixture"}}"#.utf8
+                )
+            )
+        }
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        let result = try await provider.player(flag: "直链", episodeURL: "episode")
+
+        XCTAssertEqual(result.headers["User-Agent"], "Site Agent")
+        XCTAssertEqual(result.headers["Referer"], "https://response.example/")
+        XCTAssertEqual(result.headers["Cookie"], "session=fixture")
+        XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
     }
 
     func testNodeHomeDoesNotInferActionFromCategoryIdentifier() async throws {

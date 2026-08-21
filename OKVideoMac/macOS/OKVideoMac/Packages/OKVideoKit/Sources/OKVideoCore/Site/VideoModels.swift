@@ -466,6 +466,14 @@ public struct PlaybackQuality: Equatable, Hashable, Identifiable, Sendable {
 }
 
 public struct SitePlaybackResult: Equatable, Sendable {
+    public enum ValidationPolicy: Equatable, Sendable {
+        /// Use the generic HEAD/range reachability probe before loading.
+        case preflight
+        /// The provider produced an authenticated or short-lived resource;
+        /// the player load is the only authoritative validity check.
+        case playerAuthoritative
+    }
+
     public var url: String
     public var needsParsing: Bool
     public var playURL: String?
@@ -474,6 +482,7 @@ public struct SitePlaybackResult: Equatable, Sendable {
     public var format: String?
     public var subtitles: [URL]
     public var qualities: [PlaybackQuality]
+    public var validationPolicy: ValidationPolicy
 
     public init(
         url: String,
@@ -483,7 +492,8 @@ public struct SitePlaybackResult: Equatable, Sendable {
         headers: HTTPHeaders = [:],
         format: String? = nil,
         subtitles: [URL] = [],
-        qualities: [PlaybackQuality] = []
+        qualities: [PlaybackQuality] = [],
+        validationPolicy: ValidationPolicy = .preflight
     ) {
         self.url = url
         self.needsParsing = needsParsing
@@ -493,6 +503,7 @@ public struct SitePlaybackResult: Equatable, Sendable {
         self.format = format
         self.subtitles = subtitles
         self.qualities = qualities
+        self.validationPolicy = validationPolicy
     }
 }
 

@@ -303,7 +303,11 @@ enum UpstreamResponseDecoder {
             )
         }
         let needsParsing = integer(object["parse"]) == 1 || integer(object["jx"]) == 1
-        let headers = decodeHeaders(object["header"])
+        // Contract-B spiders in the wild use both `header` (FongMi) and
+        // `headers` (common Node convention). Preserve both spellings and let
+        // the canonical singular form win when the same field is present.
+        let headers = HTTPHeaders(decodeHeaders(object["headers"]))
+            .merging(HTTPHeaders(decodeHeaders(object["header"])))
         var subtitles: [URL] = []
         if case .array(let rawSubtitles) = object["subs"] {
             subtitles = rawSubtitles.compactMap { item in
@@ -317,7 +321,7 @@ enum UpstreamResponseDecoder {
             needsParsing: needsParsing,
             playURL: string(object["playUrl"]),
             flag: string(object["flag"]) ?? "",
-            headers: HTTPHeaders(headers),
+            headers: headers,
             format: string(object["format"]),
             subtitles: subtitles,
             qualities: qualities
@@ -539,6 +543,32 @@ public enum SpiderResponseMapper {
                 site: site,
                 baseURL: baseURL
             ),
+            pagination: Pagination(page: page, pageCount: response.pageCount)
+        )
+    }
+
+    /// Maps a category that the provider has already classified as an action
+    /// surface. A regular page intentionally keeps media only; using it here
+    /// erases configuration cards before the host can present them.
+    public static func actionPage(
+        _ value: JSONValue,
+        site: SiteConfiguration,
+        baseURL: URL?,
+        page: Int
+    ) throws -> VideoPage {
+        let response = try decode(
+            value,
+            site: site,
+            baseURL: baseURL,
+            allowEmpty: true
+        )
+        return VideoPage(
+            items: UpstreamResponseDecoder.summaries(
+                from: response.videos,
+                site: site,
+                baseURL: baseURL,
+                inheritedContentKind: .action
+            ).filter { $0.resolvedContentKind == .action },
             pagination: Pagination(page: page, pageCount: response.pageCount)
         )
     }

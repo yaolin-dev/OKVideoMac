@@ -429,13 +429,66 @@ enum HomePresentationPolicy {
 
     static func actionItems(
         from page: VideoPage,
-        inheritedFrom category: VideoCategory
+        inheritedFrom category: VideoCategory,
+        fallback: SiteActionItem? = nil
     ) -> [SiteActionItem] {
         guard category.resolvedContentKind == .action else { return [] }
-        return page.items.compactMap { summary in
+        let items: [SiteActionItem] = page.items.compactMap { summary in
             guard summary.resolvedContentKind != .unsupported else { return nil }
             return SiteActionItem(summary: summary)
         }
+        if !items.isEmpty {
+            return items
+        }
+        return fallback.map { [$0] } ?? []
+    }
+
+    static func addingActionCategoryFallback(
+        to home: SiteHome,
+        siteKey: String,
+        siteName: String
+    ) -> SiteHome {
+        guard home.actionItems.isEmpty,
+              let category = firstActionCategory(in: home) else {
+            return home
+        }
+        var updated = home
+        updated.actionItems = [
+            SiteActionItem(
+                siteKey: siteKey,
+                siteName: siteName,
+                itemID: category.id,
+                title: category.name,
+                remarks: "打开配置功能"
+            )
+        ]
+        return updated
+    }
+
+    /// Some protocol implementations expose a configuration-only shell as a
+    /// single category, but omit the optional `action` marker.  Do not infer
+    /// from its display name or identifier.  Instead, wait until the provider
+    /// has confirmed that the category's complete first page is empty, then
+    /// preserve the only structural entry as a user-invoked action.  The
+    /// detail request remains the authority for whether a host action exists.
+    static func promotingSingletonEmptyCategoryToAction(
+        in home: SiteHome,
+        categoryID: String,
+        page: VideoPage
+    ) -> SiteHome? {
+        guard home.recommendations.isEmpty,
+              home.actionItems.isEmpty,
+              home.categories.count == 1,
+              home.categories[0].id == categoryID,
+              home.categories[0].resolvedContentKind == .media,
+              page.items.isEmpty,
+              page.pagination.page == 1,
+              !page.pagination.hasMore else {
+            return nil
+        }
+        var updated = home
+        updated.categories[0].contentKind = .action
+        return updated
     }
 
     static func defaultFilters(for category: VideoCategory) -> [String: String] {
@@ -1972,6 +2025,37 @@ final class AppState: ObservableObject {
                 requestedIdentity: contentIdentity,
                 currentIdentity: currentHomeContentIdentity
             ) else { return false }
+            if page == 1,
+               let home = siteHome,
+               let promoted = HomePresentationPolicy
+                .promotingSingletonEmptyCategoryToAction(
+                    in: home,
+                    categoryID: id,
+                    page: loaded
+                ) {
+                publishHomeContent(promoted, identity: contentIdentity)
+                if let publishedHome = siteHome {
+                    await cacheSiteHome(
+                        publishedHome,
+                        identity: contentIdentity
+                    )
+                }
+                selectedCategoryID = nil
+                selectedCategoryFilters = [:]
+                categoryPage = nil
+                homePresentationSelection = .actions
+                categoryPaginationError = nil
+                // The ordinary category mapper intentionally keeps media
+                // only. If its first page consisted entirely of protocol
+                // action cards, the structural promotion above is the point
+                // where we can safely replay the category through the action
+                // mapper and preserve those upstream actions.
+                return await loadActionCategory(
+                    id: id,
+                    filters: filters,
+                    reportErrors: reportErrors
+                )
+            }
             selectedCategoryID = id
             categoryPage = VideoPageMerger.merge(
                 current: page > 1 ? categoryPage : nil,
@@ -2083,7 +2167,14 @@ final class AppState: ObservableObject {
             }
             updatedHome.actionItems = HomePresentationPolicy.actionItems(
                 from: loaded,
-                inheritedFrom: actionCategory
+                inheritedFrom: actionCategory,
+                fallback: SiteActionItem(
+                    siteKey: provider.site.key,
+                    siteName: provider.site.name,
+                    itemID: actionCategory.id,
+                    title: actionCategory.name,
+                    remarks: "打开配置功能"
+                )
             )
             publishHomeContent(updatedHome, identity: contentIdentity)
             await cacheSiteHome(updatedHome, identity: contentIdentity)
@@ -3631,11 +3722,13 @@ final class AppState: ObservableObject {
             )
             var failures: [String] = []
             var completedAttempts = 0
-            var historyResolvedRequests = Set<String>()
+            var resolvedRequests = Set<String>()
             // User line selection is authoritative. Automatic attempts may use
             // configured parsers for that resource, but never silently move to
-            // another provider line by array order.
-            let targetCount = origin.isHistory ? 2 : 1
+            // another provider line by array order. One same-resource refresh
+            // is allowed for both direct and history playback so short-lived
+            // URLs and authorization context can be rebuilt after a 401/403.
+            let targetCount = 2
 
             for targetIndex in 0..<targetCount {
                 try Task.checkCancellation()
@@ -3647,78 +3740,74 @@ final class AppState: ObservableObject {
                 let candidateSource: PlaySource
                 let candidateEpisode: PlayEpisode
                 let refreshedPlaybackResult: SitePlaybackResult?
-                if let historyRecord = origin.historyRecord {
-                    if targetIndex == 0 {
-                        candidateDetail = detail
-                        candidateSource = source
-                        candidateEpisode = episode
-                        refreshedPlaybackResult = nil
-                    } else {
-                        // History retry is a true same-resource refresh. Fetch
-                        // current detail again so expiring episode references,
-                        // provider state, headers, and authorization context can
-                        // all be rebuilt. Repeating player() with the same old
-                        // episode reference is not a refresh.
-                        do {
-                            let reference = historyRecord.playbackReference
-                            let refreshed = try await provider.refreshPlayback(
-                                PlaybackRefreshRequest(
-                                    videoID: historyRecord.videoID,
-                                    title: historyRecord.title,
-                                    sourceIdentity: reference?.sourceIdentity
-                                        ?? source.stableIdentity,
-                                    resourceIdentity: reference?.resourceIdentity
-                                        ?? episode.stableIdentity,
-                                    sourceName: historyRecord.sourceName
-                                        ?? source.name,
-                                    episodeName: historyRecord.episodeName
-                                        ?? episode.name
-                                )
-                            )
-                            candidateDetail = refreshed.detail
-                            candidateSource = refreshed.source
-                            candidateEpisode = refreshed.episode
-                            refreshedPlaybackResult = refreshed.playbackResult
-                        } catch let authorization as NodeWebAuthorizationRequired {
-                            guard let identity = activeSourceIdentity(
-                                for: detail.summary.siteKey
-                            ) else { return }
-                            presentNodeConfiguration(
-                                authorization,
-                                pending: .playback(
-                                    identity: identity,
-                                    playback: PendingCloudPlayback(
-                                        detail: detail,
-                                        source: source,
-                                        episode: episode,
-                                        origin: origin
-                                    )
-                                )
-                            )
-                            return
-                        } catch let authorization as AndroidBridgeUIRequired {
-                            await presentCloudAuthorization(
-                                authorization.state,
-                                pending: PendingCloudPlayback(
-                                    detail: detail,
-                                    source: source,
-                                    episode: episode,
-                                    origin: origin
-                                ),
-                                siteKey: detail.summary.siteKey
-                            )
-                            return
-                        } catch {
-                            failures.append("重新获取历史详情失败：\(error.localizedDescription)")
-                            playbackFailureSummary = error.localizedDescription
-                            break
-                        }
-                    }
-                } else {
+                if targetIndex == 0 {
                     candidateDetail = detail
                     candidateSource = source
                     candidateEpisode = episode
                     refreshedPlaybackResult = nil
+                } else {
+                    // A retry is a true same-resource refresh. Fetch current
+                    // detail again so expiring episode references, provider
+                    // state, headers, and authorization context can all be
+                    // rebuilt. Repeating player() with the old episode value
+                    // is not a refresh.
+                    do {
+                        let historyRecord = origin.historyRecord
+                        let reference = historyRecord?.playbackReference
+                        let refreshed = try await provider.refreshPlayback(
+                            PlaybackRefreshRequest(
+                                videoID: historyRecord?.videoID
+                                    ?? detail.summary.videoID,
+                                title: historyRecord?.title
+                                    ?? detail.summary.title,
+                                sourceIdentity: reference?.sourceIdentity
+                                    ?? source.stableIdentity,
+                                resourceIdentity: reference?.resourceIdentity
+                                    ?? episode.stableIdentity,
+                                sourceName: historyRecord?.sourceName
+                                    ?? source.name,
+                                episodeName: historyRecord?.episodeName
+                                    ?? episode.name
+                            )
+                        )
+                        candidateDetail = refreshed.detail
+                        candidateSource = refreshed.source
+                        candidateEpisode = refreshed.episode
+                        refreshedPlaybackResult = refreshed.playbackResult
+                    } catch let authorization as NodeWebAuthorizationRequired {
+                        guard let identity = activeSourceIdentity(
+                            for: detail.summary.siteKey
+                        ) else { return }
+                        presentNodeConfiguration(
+                            authorization,
+                            pending: .playback(
+                                identity: identity,
+                                playback: PendingCloudPlayback(
+                                    detail: detail,
+                                    source: source,
+                                    episode: episode,
+                                    origin: origin
+                                )
+                            )
+                        )
+                        return
+                    } catch let authorization as AndroidBridgeUIRequired {
+                        await presentCloudAuthorization(
+                            authorization.state,
+                            pending: PendingCloudPlayback(
+                                detail: detail,
+                                source: source,
+                                episode: episode,
+                                origin: origin
+                            ),
+                            siteKey: detail.summary.siteKey
+                        )
+                        return
+                    } catch {
+                        failures.append("重新获取播放详情失败：\(error.localizedDescription)")
+                        playbackFailureSummary = error.localizedDescription
+                        break
+                    }
                 }
 
                 currentPlaybackAttempt = PlaybackAttempt(
@@ -3792,16 +3881,15 @@ final class AppState: ObservableObject {
                     continue
                 }
 
-                // A history retry exists only to refresh an expiring URL or
-                // request context for the same stable resource. If the
-                // provider returns the identical address, do not submit the
+                // The retry exists only to refresh an expiring URL or request
+                // context for the same stable resource. If the provider
+                // returns the identical address and headers, do not submit the
                 // same known-failing request again.
                 let requestSignature = ([result.url] + result.headers.dictionary
                     .map { "\($0.key.lowercased()):\($0.value)" }
                     .sorted())
                     .joined(separator: "\n")
-                if origin.isHistory,
-                   !historyResolvedRequests.insert(requestSignature).inserted {
+                if !resolvedRequests.insert(requestSignature).inserted {
                     failures.append("\(candidateSource.name)：重新解析仍返回相同地址和请求上下文")
                     playbackFailureSummary = "重新解析仍返回相同地址和请求上下文"
                     continue
@@ -6508,14 +6596,22 @@ final class AppState: ObservableObject {
         _ home: SiteHome,
         identity: HomeContentIdentity
     ) {
+        let siteName = providers[identity.siteKey]?.site.name
+            ?? visibleSites.first(where: { $0.key == identity.siteKey })?.name
+            ?? identity.siteKey
+        let publishedHome = HomePresentationPolicy.addingActionCategoryFallback(
+            to: home,
+            siteKey: identity.siteKey,
+            siteName: siteName
+        )
         guard HomeContentPublicationPolicy.shouldPublish(
             currentHome: siteHome,
             currentIdentity: homeContentIdentity,
-            incomingHome: home,
+            incomingHome: publishedHome,
             incomingIdentity: identity
         ) else { return }
         homeContentIdentity = identity
-        siteHome = home
+        siteHome = publishedHome
     }
 
     private func applyHomePresentation(
