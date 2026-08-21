@@ -1,6 +1,124 @@
 import OKVideoCore
 import SwiftUI
 
+struct AppActivityIndicatorLifecycle: Equatable {
+    private(set) var isVisible = false
+    private(set) var reduceMotion = false
+
+    var isAnimating: Bool {
+        isVisible && !reduceMotion
+    }
+
+    mutating func appear(reduceMotion: Bool) {
+        isVisible = true
+        self.reduceMotion = reduceMotion
+    }
+
+    mutating func updateReduceMotion(_ reduceMotion: Bool) {
+        self.reduceMotion = reduceMotion
+    }
+
+    mutating func disappear() {
+        isVisible = false
+    }
+}
+
+struct AppActivityIndicator: View {
+    enum Size {
+        case mini
+        case small
+        case regular
+
+        var diameter: CGFloat {
+            switch self {
+            case .mini: return 12
+            case .small: return 16
+            case .regular: return 28
+            }
+        }
+
+        var lineWidth: CGFloat {
+            switch self {
+            case .mini: return 1.5
+            case .small: return 2
+            case .regular: return 3
+            }
+        }
+    }
+
+    let size: Size
+    let tint: Color
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var lifecycle = AppActivityIndicatorLifecycle()
+
+    init(size: Size = .regular, tint: Color = .accentColor) {
+        self.size = size
+        self.tint = tint
+    }
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(tint.opacity(0.20), lineWidth: size.lineWidth)
+            Circle()
+                .trim(from: 0.08, to: 0.76)
+                .stroke(
+                    tint,
+                    style: StrokeStyle(
+                        lineWidth: size.lineWidth,
+                        lineCap: .round
+                    )
+                )
+                .rotationEffect(
+                    .degrees(lifecycle.isAnimating ? 360 : 0)
+                )
+                .animation(
+                    lifecycle.isAnimating
+                        ? .linear(duration: 0.85)
+                            .repeatForever(autoreverses: false)
+                        : nil,
+                    value: lifecycle.isAnimating
+                )
+        }
+        .frame(width: size.diameter, height: size.diameter)
+        .fixedSize()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("正在加载")
+        .onAppear {
+            lifecycle.appear(reduceMotion: reduceMotion)
+        }
+        .onDisappear {
+            lifecycle.disappear()
+        }
+        .onChange(of: reduceMotion) { newValue in
+            lifecycle.updateReduceMotion(newValue)
+        }
+    }
+}
+
+struct AppActivityLabel: View {
+    let title: String
+    let size: AppActivityIndicator.Size
+
+    init(
+        _ title: String,
+        size: AppActivityIndicator.Size = .regular
+    ) {
+        self.title = title
+        self.size = size
+    }
+
+    var body: some View {
+        VStack(spacing: 9) {
+            AppActivityIndicator(size: size)
+            Text(title)
+                .font(.callout)
+                .foregroundColor(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
 struct VideoGrid: View {
     let items: [VideoSummary]
     let onSelect: (VideoSummary) -> Void
@@ -217,8 +335,7 @@ struct AutomaticPageLoader: View {
                 .help(errorMessage ?? "下一页加载失败")
             } else if hasTriggered {
                 HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
+                    AppActivityIndicator(size: .small)
                     Text("正在准备下一页…")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -325,7 +442,7 @@ struct PosterView: View {
                         .scaledToFit()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } placeholder: {
-                    ProgressView()
+                    AppActivityIndicator(size: .regular)
                 }
             } else {
                 placeholder

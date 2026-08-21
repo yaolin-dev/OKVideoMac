@@ -111,6 +111,7 @@ struct SearchView: View {
             .help("停止当前搜索")
 
             SearchProgressIndicator(
+                firstPageCompleted: state.searchFirstPageCompletedSiteCount,
                 completed: state.searchCompletedSiteCount,
                 total: state.searchTotalSiteCount
             )
@@ -138,6 +139,13 @@ struct SearchView: View {
                         totalSiteCount: state.searchTotalSiteCount,
                         resultSiteCount: state.searchSiteOptions.count,
                         isSearching: state.isSearching,
+                        maximumRetainedCandidates:
+                            state.searchMaximumRetainedCandidates,
+                        maximumResultsPerSite:
+                            state.searchMaximumResultsPerSite,
+                        didDiscardCandidates:
+                            state.searchDidDiscardCandidates,
+                        termination: state.searchTermination,
                         sortOrder: $sortOrder,
                         mergesDuplicateTitles: $mergesDuplicateTitles
                     )
@@ -209,13 +217,28 @@ struct SearchView: View {
             return "输入关键词后将并发搜索当前范围内已启用的站点。"
         }
         if state.isSearching {
-            return "已完成 \(state.searchCompletedSiteCount)/"
-                + "\(state.searchTotalSiteCount) 个站点，结果会增量显示。"
+            return "首批已完成 \(state.searchFirstPageCompletedSiteCount)/"
+                + "\(state.searchTotalSiteCount) 个站点；后台补充已完成 "
+                + "\(state.searchCompletedSiteCount)/"
+                + "\(state.searchTotalSiteCount)，结果会增量显示。"
         }
         return state.searchFailures.isEmpty
-            ? "当前搜索范围内没有站点返回匹配内容。"
+            ? emptyCompletionMessage
             : "\(state.searchFailures.count) 个站点搜索失败，"
                 + "其余站点没有返回结果。"
+    }
+
+    private var emptyCompletionMessage: String {
+        switch state.searchTermination {
+        case .deadlineReached:
+            return "搜索已到达 25 秒截止时间，没有站点返回匹配内容。"
+        case .cancelled:
+            return "搜索已取消。"
+        case .supersededByNewSearch:
+            return "本次搜索已被新搜索替代。"
+        default:
+            return "当前搜索范围内没有站点返回匹配内容。"
+        }
     }
 }
 
@@ -306,6 +329,7 @@ private struct SearchSiteSidebar: View {
 }
 
 private struct SearchProgressIndicator: View {
+    let firstPageCompleted: Int
     let completed: Int
     let total: Int
 
@@ -316,16 +340,19 @@ private struct SearchProgressIndicator: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text("正在搜索 \(completed) / \(total)")
+            Text("首批 \(firstPageCompleted) / \(total) · 完成 \(completed) / \(total)")
                 .font(.caption2.monospacedDigit())
                 .foregroundColor(.secondary)
             ProgressView(value: progress)
                 .progressViewStyle(.linear)
         }
-        .frame(width: 132)
+        .frame(width: 190)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("搜索进度")
-        .accessibilityValue("已完成 \(completed) / \(total) 个站点")
+        .accessibilityValue(
+            "首批已完成 \(firstPageCompleted) / \(total) 个站点，"
+                + "后台补充已完成 \(completed) / \(total) 个站点"
+        )
     }
 }
 
@@ -542,6 +569,10 @@ private struct SearchResultToolbar: View {
     let totalSiteCount: Int
     let resultSiteCount: Int
     let isSearching: Bool
+    let maximumRetainedCandidates: Int
+    let maximumResultsPerSite: Int
+    let didDiscardCandidates: Bool
+    let termination: MultiSiteSearchTermination?
     @Binding var sortOrder: SearchResultSortOrder
     @Binding var mergesDuplicateTitles: Bool
 
@@ -553,6 +584,9 @@ private struct SearchResultToolbar: View {
                 Text(summary)
                     .font(.caption)
                     .foregroundColor(.secondary)
+                Text(retentionSummary)
+                    .font(.caption2)
+                    .foregroundColor(didDiscardCandidates ? .orange : .secondary)
             }
 
             Spacer(minLength: 12)
@@ -581,6 +615,35 @@ private struct SearchResultToolbar: View {
             return "\(resultSummary) · 已搜索 \(completedSiteCount) / \(totalSiteCount) 个站点"
         }
         return "\(resultSummary) · \(resultSiteCount) 个站点有结果"
+            + terminationSuffix
+    }
+
+    private var retentionSummary: String {
+        if didDiscardCandidates, rawResultCount >= maximumRetainedCandidates {
+            return "已展示相关度最高的前 \(maximumRetainedCandidates) 条"
+                + " · 每站最多 \(maximumResultsPerSite) 条"
+        }
+        if didDiscardCandidates {
+            return "已按相关度保留 \(rawResultCount) 条"
+                + " · 每站最多 \(maximumResultsPerSite) 条，超额结果已裁剪"
+        }
+        return "最多展示相关度最高的前 \(maximumRetainedCandidates) 条"
+            + " · 每站最多 \(maximumResultsPerSite) 条"
+    }
+
+    private var terminationSuffix: String {
+        switch termination {
+        case .completedWithProviderFailures:
+            return " · 部分站点失败"
+        case .deadlineReached:
+            return " · 已到达 25 秒截止时间"
+        case .cancelled:
+            return " · 已取消"
+        case .supersededByNewSearch:
+            return " · 已被新搜索替代"
+        default:
+            return ""
+        }
     }
 }
 
@@ -633,8 +696,7 @@ private struct SearchFolderBrowser: View {
                 Spacer()
 
                 if page.isLoading {
-                    ProgressView()
-                        .controlSize(.small)
+                    AppActivityIndicator(size: .small)
                 }
                 Text(page.folder.siteName)
                     .font(.caption)
@@ -662,7 +724,7 @@ private struct SearchFolderBrowser: View {
                 }
             }
         } else if page.isLoading, page.items.isEmpty {
-            ProgressView("正在展开网盘目录…")
+            AppActivityLabel("正在展开网盘目录…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if page.items.isEmpty {
             EmptyStateView(
@@ -859,11 +921,9 @@ enum SearchResultPresentation {
     ) -> Bool {
         switch sortOrder {
         case .relevance:
-            let leftScore = relevanceScore(lhs.element.title, keyword: keyword)
-            let rightScore = relevanceScore(rhs.element.title, keyword: keyword)
-            return leftScore == rightScore
-                ? lhs.offset < rhs.offset
-                : leftScore > rightScore
+            // MultiSiteSearch is the single semantic owner of relevance.
+            // Clustering preserves its retained-pool order.
+            return lhs.offset < rhs.offset
         case .sourceCount:
             return lhs.element.sources.count == rhs.element.sources.count
                 ? lhs.offset < rhs.offset
@@ -882,26 +942,6 @@ enum SearchResultPresentation {
                 ? lhs.offset < rhs.offset
                 : comparison == .orderedAscending
         }
-    }
-
-    private static func relevanceScore(_ title: String, keyword: String) -> Int {
-        let foldedTitle = folded(title)
-        let foldedKeyword = folded(keyword)
-        guard !foldedKeyword.isEmpty else { return 0 }
-        if foldedTitle == foldedKeyword { return 3 }
-        if foldedTitle.hasPrefix(foldedKeyword) { return 2 }
-        if foldedTitle.contains(foldedKeyword) { return 1 }
-        return 0
-    }
-
-    private static func folded(_ value: String) -> String {
-        value
-            .folding(
-                options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
-                locale: .current
-            )
-            .precomposedStringWithCanonicalMapping
-            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func yearValue(_ year: String?) -> Int {

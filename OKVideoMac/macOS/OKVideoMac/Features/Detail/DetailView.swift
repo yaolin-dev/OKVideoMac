@@ -25,8 +25,7 @@ struct DetailLoadingView: View {
                             .foregroundColor(.secondary)
                     }
                     HStack(spacing: 10) {
-                        ProgressView()
-                            .controlSize(.small)
+                        AppActivityIndicator(size: .small)
                         Text("正在加载详情和播放线路…")
                             .foregroundColor(.secondary)
                     }
@@ -39,7 +38,7 @@ struct DetailLoadingView: View {
             Divider()
 
             VStack(spacing: 12) {
-                ProgressView()
+                AppActivityIndicator(size: .regular)
                 Text("内容载入后会自动显示选集")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -324,8 +323,7 @@ struct DetailView: View {
     private var episodeContent: some View {
         if isPreparingEpisodes {
             VStack(spacing: 10) {
-                ProgressView()
-                    .controlSize(.small)
+                AppActivityIndicator(size: .small)
                 Text("正在整理 \(selectedSource?.episodes.count ?? 0) 集…")
                     .font(.caption)
                     .foregroundColor(.secondary)

@@ -409,8 +409,7 @@ private struct ConfigurationImportSheet: View {
             Spacer()
             if let importPhase {
                 HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
+                    AppActivityIndicator(size: .small)
                     Text(importPhase.title)
                         .font(.callout)
                         .foregroundColor(.secondary)
@@ -427,8 +426,7 @@ private struct ConfigurationImportSheet: View {
                 } label: {
                     if isSubmitting {
                         HStack(spacing: 6) {
-                            ProgressView()
-                                .controlSize(.small)
+                            AppActivityIndicator(size: .small)
                             Text("导入中")
                         }
                     } else {

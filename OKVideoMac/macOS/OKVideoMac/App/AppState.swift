@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 import OKVideoCore
 import OKVideoPersistence
@@ -201,6 +202,8 @@ enum SearchSiteScopeMode: String, CaseIterable, Identifiable, Sendable {
 }
 
 struct SearchSiteScope: Equatable, Sendable {
+    static let schemaVersion = 2
+
     var mode: SearchSiteScopeMode
     var selectedSiteKeys: Set<String>
 
@@ -211,12 +214,24 @@ struct SearchSiteScope: Equatable, Sendable {
         self.selectedSiteKeys = selectedSiteKeys
     }
 
-    init?(setting: JSONValue) {
+    init?(
+        setting: JSONValue,
+        expectedConfigurationFingerprint: String
+    ) {
         guard case .object(let object) = setting,
               let rawMode = object["mode"]?.stringValue,
               let mode = SearchSiteScopeMode(rawValue: rawMode) else {
             return nil
         }
+        if case .integer(let storedVersion)? = object["version"],
+           storedVersion < 1 || storedVersion > Int64(Self.schemaVersion) {
+            return nil
+        }
+        // The setting key is already configuration-scoped. A fingerprint
+        // change means sites were added/removed or edited; it must not expand a
+        // saved custom subset to every site. Keep the keys and rewrite the
+        // current fingerprint after loading.
+        _ = expectedConfigurationFingerprint
         let keys: Set<String>
         if case .array(let values)? = object["selectedSiteKeys"] {
             keys = Set(values.compactMap(\.stringValue))
@@ -226,13 +241,34 @@ struct SearchSiteScope: Equatable, Sendable {
         self.init(mode: mode, selectedSiteKeys: keys)
     }
 
-    var settingValue: JSONValue {
+    func settingValue(configurationFingerprint: String) -> JSONValue {
         .object([
+            "version": .integer(Int64(Self.schemaVersion)),
+            "configurationFingerprint": .string(configurationFingerprint),
             "mode": .string(mode.rawValue),
             "selectedSiteKeys": .array(
                 selectedSiteKeys.sorted().map(JSONValue.string)
             )
         ])
+    }
+}
+
+enum SearchConfigurationFingerprint {
+    static func make(sites: [SiteConfiguration]) -> String {
+        let canonical = sites.map { site in
+            [
+                site.key,
+                String(site.type),
+                site.api,
+                String(site.hide),
+                String(site.indexs),
+                String(site.searchable),
+                String(site.quickSearch)
+            ].joined(separator: "\u{1f}")
+        }.sorted().joined(separator: "\u{1e}")
+        return SHA256.hash(data: Data(canonical.utf8)).map {
+            String(format: "%02x", $0)
+        }.joined()
     }
 }
 
@@ -428,6 +464,16 @@ enum HomeLandingSitePolicy {
         // a stable structural signal and avoids interpreting source names,
         // keys, domains, or localized category titles.
         sites.first(where: { $0.indexs == 1 })?.key ?? sites.first?.key
+    }
+}
+
+enum HomeEntryReason: Equatable, Sendable {
+    case applicationRestore
+    case configurationSwitch
+    case manualReload
+
+    var restoresPersistedSite: Bool {
+        self == .applicationRestore
     }
 }
 
@@ -643,7 +689,16 @@ private struct CloudAuthorizationContext {
 
 enum PlaybackRequestOrigin: Equatable, Sendable {
     case direct
-    case history
+    case history(HistoryRecord)
+
+    var historyRecord: HistoryRecord? {
+        guard case .history(let record) = self else { return nil }
+        return record
+    }
+
+    var isHistory: Bool {
+        historyRecord != nil
+    }
 }
 
 private struct PlayerEpisodePresentationCacheKey: Equatable, Sendable {
@@ -1090,6 +1145,23 @@ private struct PreparedConfigurationActivation {
     let nodeRuntimeEndpoint: URL?
 }
 
+struct SearchSessionGate: Equatable {
+    private(set) var currentID = UUID()
+
+    mutating func begin() -> UUID {
+        currentID = UUID()
+        return currentID
+    }
+
+    mutating func invalidate() {
+        currentID = UUID()
+    }
+
+    func accepts(_ sessionID: UUID) -> Bool {
+        currentID == sessionID
+    }
+}
+
 @MainActor
 final class AppState: ObservableObject {
     let navigation = AppNavigationState()
@@ -1119,8 +1191,16 @@ final class AppState: ObservableObject {
     @Published private(set) var searchResults: [VideoSummary] = []
     @Published private(set) var searchClusters: [SearchResultCluster] = []
     @Published private(set) var searchFailures: [SearchFailure] = []
+    @Published private(set) var searchFirstPageCompletedSiteCount = 0
     @Published private(set) var searchCompletedSiteCount = 0
     @Published private(set) var searchTotalSiteCount = 0
+    @Published private(set) var searchReceivedCandidateCount = 0
+    @Published private(set) var searchMaximumRetainedCandidates = 500
+    @Published private(set) var searchMaximumResultsPerSite = 40
+    @Published private(set) var searchDidDiscardCandidates = false
+    @Published private(set) var searchTermination: MultiSiteSearchTermination?
+    @Published private(set) var previousSearchTermination:
+        MultiSiteSearchTermination?
     @Published private(set) var isSearching = false
     @Published private(set) var searchSiteScope: SearchSiteScope = .all
     @Published private(set) var activeSearchSiteKeys: Set<String> = []
@@ -1189,7 +1269,7 @@ final class AppState: ObservableObject {
     private var configurationActivationTask: Task<Void, Never>?
     private var providers: [String: SiteProvider] = [:]
     private var searchTask: Task<Void, Never>?
-    private var searchSessionID = UUID()
+    private var searchSessionGate = SearchSessionGate()
     private var detailLoadSessionID = UUID()
     private var homeLoadSessionID = UUID()
     private var homeContentIdentity: HomeContentIdentity?
@@ -1296,7 +1376,8 @@ final class AppState: ObservableObject {
             try await loadSettings()
             await prepareActiveConfigurationHome(
                 reportLoadErrors: false,
-                loadBehavior: .none
+                loadBehavior: .none,
+                entryReason: .applicationRestore
             )
             try await reloadUserData()
             startPlayerEventLoop()
@@ -1312,7 +1393,10 @@ final class AppState: ObservableObject {
                     show(error, title: "Node Runtime 启动失败")
                 }
             }
-            await prepareActiveConfigurationHome(reportLoadErrors: false)
+            await prepareActiveConfigurationHome(
+                reportLoadErrors: false,
+                entryReason: .applicationRestore
+            )
         } catch {
             isHomeLoading = false
             show(error, title: "启动失败")
@@ -1446,7 +1530,9 @@ final class AppState: ObservableObject {
                 from: supportedSites
             )
             await loadSearchSiteScope()
-            await prepareActiveConfigurationHome()
+            await prepareActiveConfigurationHome(
+                entryReason: .configurationSwitch
+            )
             try await reloadHistory()
             return .success
         } catch is CancellationError {
@@ -1664,7 +1750,8 @@ final class AppState: ObservableObject {
             try ensureConfigurationActivationIsCurrent(token)
             let didPrepareHome = await prepareActiveConfigurationHome(
                 reportLoadErrors: false,
-                loadBehavior: .awaited
+                loadBehavior: .awaited,
+                entryReason: .configurationSwitch
             )
             guard didPrepareHome else {
                 throw AppError.site(
@@ -1795,7 +1882,9 @@ final class AppState: ObservableObject {
                 try await prepareActiveNodeConfigurationIfNeeded()
                 try loadActiveConfigurationContent()
                 await loadSearchSiteScope()
-                await prepareActiveConfigurationHome()
+                await prepareActiveConfigurationHome(
+                    entryReason: .configurationSwitch
+                )
                 try await reloadHistory()
             }
         } catch {
@@ -1976,7 +2065,7 @@ final class AppState: ObservableObject {
             }
         }
         do {
-            let loaded = try await provider.category(
+            let loaded = try await provider.actionCategory(
                 id: id,
                 page: 1,
                 filters: filters
@@ -2919,7 +3008,7 @@ final class AppState: ObservableObject {
                     detail: detail,
                     source: selection.source,
                     episode: selection.episode,
-                    origin: .history
+                    origin: .history(item)
                 )
                 return
             }
@@ -2946,7 +3035,7 @@ final class AppState: ObservableObject {
                 detail: context.detail,
                 source: context.source,
                 episode: context.episode,
-                origin: .history
+                origin: .history(item)
             )
             return
         }
@@ -2982,7 +3071,7 @@ final class AppState: ObservableObject {
                         detail: detail,
                         source: selection.source,
                         episode: selection.episode,
-                        origin: .history
+                        origin: .history(item)
                     )
                     return
                 }
@@ -3082,7 +3171,7 @@ final class AppState: ObservableObject {
             detail: context.detail,
             source: context.source,
             episode: context.episode,
-            origin: .history
+            origin: .history(item)
         )
         playbackResolutionState = .restoringHistory
         currentPlaybackAttempt = nil
@@ -3115,14 +3204,22 @@ final class AppState: ObservableObject {
         _ keyword: String,
         context: SearchLaunchContext
     ) {
+        if isSearching {
+            previousSearchTermination = .supersededByNewSearch
+        }
         searchTask?.cancel()
-        let sessionID = UUID()
-        searchSessionID = sessionID
+        let sessionID = searchSessionGate.begin()
         searchResults = []
         searchClusters = []
         searchFailures = []
+        searchFirstPageCompletedSiteCount = 0
         searchCompletedSiteCount = 0
         searchTotalSiteCount = 0
+        searchReceivedCandidateCount = 0
+        searchMaximumRetainedCandidates = 500
+        searchMaximumResultsPerSite = 40
+        searchDidDiscardCandidates = false
+        searchTermination = nil
         isSearching = false
         activeSearchSiteKeys = []
         selectedSearchSiteKey = nil
@@ -3163,26 +3260,65 @@ final class AppState: ObservableObject {
             keyword: trimmed
         )
         searchTask = Task { [weak self] in
+            var firstPageCompletedSiteKeys = Set<String>()
+            var completedSiteKeys = Set<String>()
+            var pendingSnapshot: MultiSiteSearchSnapshot?
+            var lastSnapshotRefresh = Date.distantPast
+
+            let applySnapshot: (MultiSiteSearchSnapshot) -> Void = { [weak self] snapshot in
+                guard let self,
+                      self.searchSessionGate.accepts(sessionID) else { return }
+                // MultiSiteSearch is the semantic owner of relevance,
+                // retention, eviction and per-site diversity. AppState only
+                // publishes its authoritative retained snapshot.
+                self.searchResults = snapshot.items
+                self.searchClusters = SearchResultAggregator.cluster(snapshot.items)
+                self.searchReceivedCandidateCount = snapshot.receivedCandidateCount
+                self.searchMaximumRetainedCandidates =
+                    snapshot.maximumRetainedCandidates
+                self.searchMaximumResultsPerSite = snapshot.maximumResultsPerSite
+                self.searchDidDiscardCandidates = snapshot.didDiscardCandidates
+            }
+
             for await event in stream {
                 guard let self,
-                      self.searchSessionID == sessionID else {
+                      self.searchSessionGate.accepts(sessionID) else {
                     return
                 }
                 switch event {
-                case .results(_, let items):
-                    self.searchCompletedSiteCount += 1
-                    let existing = Set(self.searchResults.map(\.id))
-                    self.searchResults.append(contentsOf: items.filter { !existing.contains($0.id) })
-                    self.searchClusters = SearchResultAggregator.cluster(self.searchResults)
+                case .snapshot(let snapshot):
+                    pendingSnapshot = snapshot
+                    let now = Date()
+                    if now.timeIntervalSince(lastSnapshotRefresh) >= 0.12 {
+                        applySnapshot(snapshot)
+                        pendingSnapshot = nil
+                        lastSnapshotRefresh = now
+                    }
                 case .failure(let failure):
-                    self.searchCompletedSiteCount += 1
                     self.searchFailures.append(failure)
-                case .completed:
+                case .siteFirstPageCompleted(let siteKey):
+                    if firstPageCompletedSiteKeys.insert(siteKey).inserted {
+                        self.searchFirstPageCompletedSiteCount =
+                            firstPageCompletedSiteKeys.count
+                    }
+                case .siteCompleted(let siteKey):
+                    if completedSiteKeys.insert(siteKey).inserted {
+                        self.searchCompletedSiteCount = completedSiteKeys.count
+                    }
+                case .finished(let termination):
+                    if let pendingSnapshot {
+                        applySnapshot(pendingSnapshot)
+                    }
+                    self.searchTermination = termination
                     self.isSearching = false
                 }
             }
-            if self?.searchSessionID == sessionID {
+            if self?.searchSessionGate.accepts(sessionID) == true {
+                if let pendingSnapshot {
+                    applySnapshot(pendingSnapshot)
+                }
                 self?.isSearching = false
+                self?.searchTask = nil
             }
         }
     }
@@ -3215,7 +3351,10 @@ final class AppState: ObservableObject {
     }
 
     func cancelSearch() {
-        searchSessionID = UUID()
+        if isSearching {
+            searchTermination = .cancelled
+        }
+        searchSessionGate.invalidate()
         searchTask?.cancel()
         searchTask = nil
         isSearching = false
@@ -3243,7 +3382,11 @@ final class AppState: ObservableObject {
         }
         do {
             try await environment.database.setSetting(
-                scope.settingValue,
+                scope.settingValue(
+                    configurationFingerprint: SearchConfigurationFingerprint.make(
+                        sites: activeConfiguration?.sites ?? []
+                    )
+                ),
                 forKey: Self.searchScopeSettingKey(for: configurationID)
             )
             guard activeConfigurationRecord?.id == configurationID else {
@@ -3481,9 +3624,6 @@ final class AppState: ObservableObject {
             guard detail.playSources.contains(where: { $0.id == source.id }) else {
                 throw AppError.playback("当前线路不在详情数据中")
             }
-            let episodeIndex = source.episodes.firstIndex(
-                where: { $0.id == episode.id }
-            )
             let httpClient = configuredHTTPClient(environment: environment)
             let resolver = PlaybackResolver(
                 parseExecutor: AppParseExecutor(httpClient: httpClient),
@@ -3491,26 +3631,98 @@ final class AppState: ObservableObject {
             )
             var failures: [String] = []
             var completedAttempts = 0
+            var historyResolvedRequests = Set<String>()
+            // User line selection is authoritative. Automatic attempts may use
+            // configured parsers for that resource, but never silently move to
+            // another provider line by array order.
+            let targetCount = origin.isHistory ? 2 : 1
 
-            for candidateSource in Self.orderedPlaybackSources(
-                detail.playSources,
-                selectedSourceID: source.id
-            ) {
+            for targetIndex in 0..<targetCount {
                 try Task.checkCancellation()
                 guard playbackSessionID == sessionID else {
                     throw CancellationError()
                 }
-                let candidateEpisode = candidateSource.episodes.first(
-                    where: { $0.name == episode.name }
-                ) ?? episodeIndex.flatMap { index in
-                    candidateSource.episodes.indices.contains(index)
-                        ? candidateSource.episodes[index]
-                        : nil
+
+                let candidateDetail: VideoDetail
+                let candidateSource: PlaySource
+                let candidateEpisode: PlayEpisode
+                let refreshedPlaybackResult: SitePlaybackResult?
+                if let historyRecord = origin.historyRecord {
+                    if targetIndex == 0 {
+                        candidateDetail = detail
+                        candidateSource = source
+                        candidateEpisode = episode
+                        refreshedPlaybackResult = nil
+                    } else {
+                        // History retry is a true same-resource refresh. Fetch
+                        // current detail again so expiring episode references,
+                        // provider state, headers, and authorization context can
+                        // all be rebuilt. Repeating player() with the same old
+                        // episode reference is not a refresh.
+                        do {
+                            let reference = historyRecord.playbackReference
+                            let refreshed = try await provider.refreshPlayback(
+                                PlaybackRefreshRequest(
+                                    videoID: historyRecord.videoID,
+                                    title: historyRecord.title,
+                                    sourceIdentity: reference?.sourceIdentity
+                                        ?? source.stableIdentity,
+                                    resourceIdentity: reference?.resourceIdentity
+                                        ?? episode.stableIdentity,
+                                    sourceName: historyRecord.sourceName
+                                        ?? source.name,
+                                    episodeName: historyRecord.episodeName
+                                        ?? episode.name
+                                )
+                            )
+                            candidateDetail = refreshed.detail
+                            candidateSource = refreshed.source
+                            candidateEpisode = refreshed.episode
+                            refreshedPlaybackResult = refreshed.playbackResult
+                        } catch let authorization as NodeWebAuthorizationRequired {
+                            guard let identity = activeSourceIdentity(
+                                for: detail.summary.siteKey
+                            ) else { return }
+                            presentNodeConfiguration(
+                                authorization,
+                                pending: .playback(
+                                    identity: identity,
+                                    playback: PendingCloudPlayback(
+                                        detail: detail,
+                                        source: source,
+                                        episode: episode,
+                                        origin: origin
+                                    )
+                                )
+                            )
+                            return
+                        } catch let authorization as AndroidBridgeUIRequired {
+                            await presentCloudAuthorization(
+                                authorization.state,
+                                pending: PendingCloudPlayback(
+                                    detail: detail,
+                                    source: source,
+                                    episode: episode,
+                                    origin: origin
+                                ),
+                                siteKey: detail.summary.siteKey
+                            )
+                            return
+                        } catch {
+                            failures.append("重新获取历史详情失败：\(error.localizedDescription)")
+                            playbackFailureSummary = error.localizedDescription
+                            break
+                        }
+                    }
+                } else {
+                    candidateDetail = detail
+                    candidateSource = source
+                    candidateEpisode = episode
+                    refreshedPlaybackResult = nil
                 }
-                guard let candidateEpisode else { continue }
 
                 currentPlaybackAttempt = PlaybackAttempt(
-                    siteName: detail.summary.siteName,
+                    siteName: candidateDetail.summary.siteName,
                     sourceName: candidateSource.name,
                     episodeName: candidateEpisode.name,
                     parserName: nil,
@@ -3523,19 +3735,23 @@ final class AppState: ObservableObject {
 
                 let result: SitePlaybackResult
                 do {
-                    result = try await requestSitePlayback(
-                        provider: provider,
-                        flag: candidateSource.name,
-                        episodeURL: candidateEpisode.url,
-                        sessionID: sessionID
-                    )
+                    if let refreshedPlaybackResult {
+                        result = refreshedPlaybackResult
+                    } else {
+                        result = try await requestSitePlayback(
+                            provider: provider,
+                            flag: candidateSource.name,
+                            episodeURL: candidateEpisode.url,
+                            sessionID: sessionID
+                        )
+                    }
                     guard playbackSessionID == sessionID else {
                         throw CancellationError()
                     }
                 } catch let authorization as NodeWebAuthorizationRequired {
                     guard playbackSessionID == sessionID else { return }
                     guard let identity = activeSourceIdentity(
-                        for: detail.summary.siteKey
+                        for: candidateDetail.summary.siteKey
                     ) else {
                         playbackResolutionState = .failed
                         playbackFailureSummary = "播放所属配置已经发生变化"
@@ -3546,9 +3762,9 @@ final class AppState: ObservableObject {
                         pending: .playback(
                             identity: identity,
                             playback: PendingCloudPlayback(
-                                detail: detail,
-                                source: source,
-                                episode: episode,
+                                detail: candidateDetail,
+                                source: candidateSource,
+                                episode: candidateEpisode,
                                 origin: origin
                             )
                         )
@@ -3559,12 +3775,12 @@ final class AppState: ObservableObject {
                     await presentCloudAuthorization(
                         authorization.state,
                         pending: PendingCloudPlayback(
-                            detail: detail,
-                            source: source,
-                            episode: episode,
+                            detail: candidateDetail,
+                            source: candidateSource,
+                            episode: candidateEpisode,
                             origin: origin
                         ),
-                        siteKey: detail.summary.siteKey
+                        siteKey: candidateDetail.summary.siteKey
                     )
                     return
                 } catch {
@@ -3576,9 +3792,24 @@ final class AppState: ObservableObject {
                     continue
                 }
 
+                // A history retry exists only to refresh an expiring URL or
+                // request context for the same stable resource. If the
+                // provider returns the identical address, do not submit the
+                // same known-failing request again.
+                let requestSignature = ([result.url] + result.headers.dictionary
+                    .map { "\($0.key.lowercased()):\($0.value)" }
+                    .sorted())
+                    .joined(separator: "\n")
+                if origin.isHistory,
+                   !historyResolvedRequests.insert(requestSignature).inserted {
+                    failures.append("\(candidateSource.name)：重新解析仍返回相同地址和请求上下文")
+                    playbackFailureSummary = "重新解析仍返回相同地址和请求上下文"
+                    continue
+                }
+
                 let candidate = PlaybackCandidate(
-                    siteKey: detail.summary.siteKey,
-                    siteName: detail.summary.siteName,
+                    siteKey: candidateDetail.summary.siteKey,
+                    siteName: candidateDetail.summary.siteName,
                     sourceName: candidateSource.name,
                     episodeName: candidateEpisode.name,
                     result: result
@@ -3604,9 +3835,9 @@ final class AppState: ObservableObject {
                         await imageQuiesceTask.value
                         try await self.loadResolvedPlayback(
                             media,
-                            detail: detail,
-                            source: source,
-                            episode: episode,
+                            detail: candidateDetail,
+                            source: candidateSource,
+                            episode: candidateEpisode,
                             playbackResult: result,
                             sessionID: sessionID
                         )
@@ -5420,29 +5651,9 @@ final class AppState: ObservableObject {
         }) else { return [] }
         let selected = sources[selectedIndex]
         var output = [selected]
-
-        // Original cloud-drive sources are commonly listed after their smart
-        // counterpart. If the local original proxy fails, retry the matching
-        // smart source before unrelated lines, regardless of list order.
-        if selected.name.contains("原") {
-            let family = cloudSourceFamily(selected.name)
-            output.append(contentsOf: sources.filter {
-                $0.id != selected.id
-                    && $0.name.contains("智")
-                    && cloudSourceFamily($0.name) == family
-            })
-        }
-
         output.append(contentsOf: sources.dropFirst(selectedIndex + 1))
         output.append(contentsOf: sources.prefix(selectedIndex))
-        var seen = Set<String>()
-        return output.filter { seen.insert($0.id).inserted }
-    }
-
-    nonisolated private static func cloudSourceFamily(_ name: String) -> String {
-        String(name.filter { character in
-            character != "原" && character != "智" && !character.isNumber
-        })
+        return output
     }
 
     private func openSearchFolder(
@@ -5533,22 +5744,43 @@ final class AppState: ObservableObject {
         in detail: VideoDetail,
         record: HistoryRecord
     ) -> (source: PlaySource, episode: PlayEpisode)? {
-        let matchingSources: [PlaySource]
-        if let sourceName = record.sourceName?.nonEmpty {
-            matchingSources = detail.playSources.filter {
+        let structuralSources = record.playbackReference.map { reference in
+            detail.playSources.filter {
+                $0.stableIdentity == reference.sourceIdentity
+            }
+        } ?? []
+        let namedSources = record.sourceName?.nonEmpty.map { sourceName in
+            detail.playSources.filter {
                 $0.name.compare(
                     sourceName,
                     options: [.caseInsensitive, .widthInsensitive]
                 ) == .orderedSame
             }
-        } else {
-            matchingSources = detail.playSources
-        }
+        } ?? []
+        let preferredSources = structuralSources.isEmpty
+            ? namedSources
+            : structuralSources
 
-        let remainingSources = detail.playSources.filter {
-            !matchingSources.contains($0)
+        if let resourceIdentity = record.playbackReference?.resourceIdentity {
+            let preferredMatches = playbackMatches(
+                in: preferredSources,
+                resourceIdentity: resourceIdentity
+            )
+            if preferredMatches.count == 1 {
+                return preferredMatches[0]
+            }
+
+            // A provider may reorganize or rename a source. Cross-source
+            // recovery is safe only when the stable resource is globally
+            // unique; ambiguity must never be resolved by list order.
+            let globalMatches = playbackMatches(
+                in: detail.playSources,
+                resourceIdentity: resourceIdentity
+            )
+            if globalMatches.count == 1 {
+                return globalMatches[0]
+            }
         }
-        let orderedSources = matchingSources + remainingSources
 
         // Cloud and scripted providers commonly rewrite the visible filename
         // while retaining the same opaque episode token. The token is the
@@ -5557,13 +5789,23 @@ final class AppState: ObservableObject {
             let normalizedReference = episodeReference.trimmingCharacters(
                 in: .whitespacesAndNewlines
             )
-            for source in orderedSources {
-                if let episode = source.episodes.first(where: {
+            let preferredMatches = preferredSources.compactMap { source in
+                source.episodes.first(where: {
                     $0.url.trimmingCharacters(in: .whitespacesAndNewlines)
                         == normalizedReference
-                }) {
-                    return (source, episode)
-                }
+                }).map { (source, $0) }
+            }
+            if preferredMatches.count == 1 {
+                return preferredMatches[0]
+            }
+            let globalMatches = detail.playSources.compactMap { source in
+                source.episodes.first(where: {
+                    $0.url.trimmingCharacters(in: .whitespacesAndNewlines)
+                        == normalizedReference
+                }).map { (source, $0) }
+            }
+            if globalMatches.count == 1 {
+                return globalMatches[0]
             }
 
             // Quark episode URLs contain an expiring stoken. When detail has
@@ -5572,38 +5814,28 @@ final class AppState: ObservableObject {
             if let identity = QuarkEpisodeReference.identity(
                 from: normalizedReference
             ) {
-                for source in orderedSources {
-                    if let episode = source.episodes.first(where: {
+                let matches = detail.playSources.compactMap { source in
+                    source.episodes.first(where: {
                         QuarkEpisodeReference.identity(from: $0.url) == identity
-                    }) {
-                        return (source, episode)
-                    }
+                    }).map { (source, $0) }
+                }
+                if matches.count == 1 {
+                    return matches[0]
                 }
             }
         }
 
         if let episodeName = record.episodeName?.nonEmpty {
-            for source in matchingSources {
-                if let episode = source.episodes.first(where: {
+            let exactMatches = preferredSources.compactMap { source in
+                source.episodes.first(where: {
                     $0.name.compare(
                         episodeName,
                         options: [.caseInsensitive, .widthInsensitive]
                     ) == .orderedSame
-                }) {
-                    return (source, episode)
-                }
+                }).map { (source, $0) }
             }
-
-            // A source may be renamed while episode names remain stable.
-            for source in remainingSources {
-                if let episode = source.episodes.first(where: {
-                    $0.name.compare(
-                        episodeName,
-                        options: [.caseInsensitive, .widthInsensitive]
-                    ) == .orderedSame
-                }) {
-                    return (source, episode)
-                }
+            if exactMatches.count == 1 {
+                return exactMatches[0]
             }
 
             // Only use numbers explicitly encoded by both names. This never
@@ -5613,8 +5845,8 @@ final class AppState: ObservableObject {
                 for: PlayEpisode(name: episodeName, url: "history-identity")
             )
             if let recordedEpisode = recordedPresentation.episodeNumber {
-                for source in orderedSources {
-                    if let episode = source.episodes.first(where: { candidate in
+                let numberedMatches = preferredSources.compactMap { source in
+                    source.episodes.first(where: { candidate in
                         let presentation = EpisodeNameParser.presentation(
                             for: candidate
                         )
@@ -5627,19 +5859,106 @@ final class AppState: ObservableObject {
                                 || presentation.seasonNumber == recordedSeason
                         }
                         return true
-                    }) {
-                        return (source, episode)
-                    }
+                    }).map { (source, $0) }
+                }
+                if numberedMatches.count == 1 {
+                    return numberedMatches[0]
                 }
             }
         }
 
-        if matchingSources.count == 1,
-           matchingSources[0].episodes.count == 1,
-           let episode = matchingSources[0].episodes.first {
-            return (matchingSources[0], episode)
+        if preferredSources.count == 1,
+           preferredSources[0].episodes.count == 1,
+           let episode = preferredSources[0].episodes.first {
+            return (preferredSources[0], episode)
         }
         return nil
+    }
+
+    private static func playbackMatches(
+        in sources: [PlaySource],
+        resourceIdentity: String
+    ) -> [(source: PlaySource, episode: PlayEpisode)] {
+        sources.flatMap { source in
+            source.episodes.compactMap { episode in
+                episode.stableIdentity == resourceIdentity
+                    ? (source, episode)
+                    : nil
+            }
+        }
+    }
+
+    static func historyPlaybackReference(
+        source: PlaySource,
+        episode: PlayEpisode,
+        headers: HTTPHeaders
+    ) -> HistoryPlaybackReference {
+        HistoryPlaybackReference(
+            sourceIdentity: source.stableIdentity,
+            resourceIdentity: episode.stableIdentity,
+            replayHeaders: safeHistoryReplayHeaders(headers)
+        )
+    }
+
+    static func historyRecord(
+        _ record: HistoryRecord,
+        matches source: PlaySource,
+        episode: PlayEpisode
+    ) -> Bool {
+        if let reference = record.playbackReference {
+            return reference.sourceIdentity == source.stableIdentity
+                && reference.resourceIdentity == episode.stableIdentity
+        }
+        return record.sourceName == source.name
+            && record.episodeName == episode.name
+    }
+
+    /// A clicked history row is the authority for the initial seek. Refreshed
+    /// provider detail may legitimately change its video/source/episode
+    /// identity, so the load stage must not use those refreshed values to find
+    /// the same row again.
+    static func historyResumePosition(
+        from record: HistoryRecord?
+    ) -> TimeInterval? {
+        guard let record,
+              record.position.isFinite,
+              record.duration.isFinite,
+              record.position > 0,
+              record.duration == 0 || record.position < record.duration - 20 else {
+            return nil
+        }
+        return record.position
+    }
+
+    private static func safeHistoryReplayHeaders(
+        _ headers: HTTPHeaders
+    ) -> [String: String] {
+        var output: [String: String] = [:]
+        for name in ["User-Agent", "Origin", "Referer"] {
+            guard let value = headers[name]?.nonEmpty else { continue }
+            if name == "User-Agent" {
+                output[name] = String(value.prefix(512))
+            } else if let sanitized = sanitizedHistoryHeaderURL(value) {
+                output[name] = sanitized
+            }
+        }
+        return output
+    }
+
+    private static func sanitizedHistoryHeaderURL(_ value: String) -> String? {
+        guard var components = URLComponents(string: value),
+              components.scheme?.isEmpty == false else {
+            return nil
+        }
+        let sensitiveFragments = [
+            "auth", "cookie", "credential", "expire", "key", "password",
+            "secret", "sign", "stoken", "timestamp", "token"
+        ]
+        components.queryItems = components.queryItems?.filter { item in
+            let name = item.name.lowercased()
+            return !sensitiveFragments.contains { name.contains($0) }
+        }
+        return components.string
     }
 
     static func historyPlaybackContext(
@@ -5693,7 +6012,9 @@ final class AppState: ObservableObject {
         )
         let media = ResolvedMedia(
             url: url,
-            headers: [:],
+            headers: HTTPHeaders(
+                record.playbackReference?.replayHeaders ?? [:]
+            ),
             siteKey: record.siteKey,
             sourceName: context.source.name,
             episodeName: context.episode.name
@@ -5705,22 +6026,54 @@ final class AppState: ObservableObject {
         in items: [VideoSummary],
         record: HistoryRecord
     ) -> VideoSummary? {
-        if let exact = items.first(where: {
+        guard let query = historySearchQuery(for: record.title) else {
+            return nil
+        }
+        let exactMatches = items.filter {
             $0.title.compare(
-                record.title,
+                query,
                 options: [
                     .caseInsensitive,
                     .widthInsensitive,
                     .diacriticInsensitive
                 ]
             ) == .orderedSame
-        }) {
-            return exact
         }
-        return items.first {
-            $0.title.localizedCaseInsensitiveContains(record.title)
-                || record.title.localizedCaseInsensitiveContains($0.title)
+        if exactMatches.count == 1 {
+            return exactMatches[0]
         }
+        if !exactMatches.isEmpty {
+            return nil
+        }
+
+        let partialMatches = items.filter {
+            guard let candidate = historySearchQuery(for: $0.title) else {
+                return false
+            }
+            return candidate.localizedCaseInsensitiveContains(query)
+                || query.localizedCaseInsensitiveContains(candidate)
+        }
+        return partialMatches.count == 1 ? partialMatches[0] : nil
+    }
+
+    static func historySearchQuery(for title: String) -> String? {
+        guard let query = title.nonEmpty,
+              query.unicodeScalars.contains(where: {
+                  CharacterSet.alphanumerics.contains($0)
+              }) else {
+            return nil
+        }
+        let placeholder = query.folding(
+            options: [.caseInsensitive, .widthInsensitive],
+            locale: .current
+        ).lowercased()
+        guard ![
+            "unknown", "untitled", "null", "undefined", "n/a",
+            "无标题", "未命名"
+        ].contains(placeholder) else {
+            return nil
+        }
+        return query
     }
 
     private func loadActiveConfigurationContent() throws {
@@ -5949,11 +6302,45 @@ final class AppState: ObservableObject {
             searchSiteScope = .all
             return
         }
-        let value = try? await environment.database.setting(
-            forKey: Self.searchScopeSettingKey(for: configurationID)
-        )
+        let settingKey = Self.searchScopeSettingKey(for: configurationID)
+        let value: JSONValue?
+        do {
+            value = try await environment.database.setting(forKey: settingKey)
+        } catch {
+            guard activeConfigurationRecord?.id == configurationID else { return }
+            searchSiteScope = SearchSiteScope(mode: .custom)
+            show(error, title: "无法读取搜索范围")
+            return
+        }
         guard activeConfigurationRecord?.id == configurationID else { return }
-        searchSiteScope = value.flatMap(SearchSiteScope.init(setting:)) ?? .all
+        let fingerprint = SearchConfigurationFingerprint.make(
+            sites: activeConfiguration?.sites ?? []
+        )
+        guard let value else {
+            searchSiteScope = .all
+            return
+        }
+        guard let decoded = SearchSiteScope(
+            setting: value,
+            expectedConfigurationFingerprint: fingerprint
+        ) else {
+            searchSiteScope = SearchSiteScope(mode: .custom)
+            show(
+                AppError.database("已保存的搜索范围格式无效，请重新选择站点"),
+                title: "搜索范围未自动扩大"
+            )
+            return
+        }
+        searchSiteScope = decoded
+        let normalized = decoded.settingValue(
+            configurationFingerprint: fingerprint
+        )
+        if normalized != value {
+            try? await environment.database.setSetting(
+                normalized,
+                forKey: settingKey
+            )
+        }
     }
 
     private func resetSearchForConfigurationChange() {
@@ -5963,6 +6350,7 @@ final class AppState: ObservableObject {
         searchResults = []
         searchClusters = []
         searchFailures = []
+        searchFirstPageCompletedSiteCount = 0
         searchCompletedSiteCount = 0
         searchTotalSiteCount = 0
         activeSearchSiteKeys = []
@@ -6001,7 +6389,8 @@ final class AppState: ObservableObject {
     @discardableResult
     private func prepareActiveConfigurationHome(
         reportLoadErrors: Bool = true,
-        loadBehavior: HomePreparationLoadBehavior = .background
+        loadBehavior: HomePreparationLoadBehavior = .background,
+        entryReason: HomeEntryReason = .manualReload
     ) async -> Bool {
         homeLoadSessionID = UUID()
         categoryLoadSessionID = UUID()
@@ -6011,7 +6400,9 @@ final class AppState: ObservableObject {
         homePresentationSelection = .empty
         categoryPaginationError = nil
         homeLoadErrorMessage = nil
-        await restoreSelectedSitePreference()
+        if entryReason.restoresPersistedSite {
+            await restoreSelectedSitePreference()
+        }
         discardHomeContentIfNeeded(for: currentHomeContentIdentity)
         await restoreCachedSiteHome(loadsCategoryContent: false)
         guard loadBehavior != .none else {
@@ -6824,20 +7215,13 @@ final class AppState: ObservableObject {
         guard playbackSessionID == sessionID else {
             throw CancellationError()
         }
-        let existing = history.first {
+        let authoritativeHistoryRecord = pendingPlayback?.origin.historyRecord
+        let existing = authoritativeHistoryRecord ?? history.first {
             $0.siteKey == detail.summary.siteKey
                 && $0.videoID == detail.summary.videoID
-                && $0.sourceName == source.name
-                && $0.episodeName == episode.name
+                && Self.historyRecord($0, matches: source, episode: episode)
         }
-        let startPosition: TimeInterval?
-        if let existing,
-           existing.position > 0,
-           existing.duration == 0 || existing.position < existing.duration - 20 {
-            startPosition = existing.position
-        } else {
-            startPosition = nil
-        }
+        let startPosition = Self.historyResumePosition(from: existing)
         let playback = ActivePlaybackContext(
             detail: detail,
             source: source,
@@ -6935,6 +7319,11 @@ final class AppState: ObservableObject {
                     playback.episode.url
                 ),
                 mediaReference: playback.media.url.absoluteString,
+                playbackReference: Self.historyPlaybackReference(
+                    source: playback.source,
+                    episode: playback.episode,
+                    headers: playback.media.headers
+                ),
                 position: position,
                 duration: duration
             ),

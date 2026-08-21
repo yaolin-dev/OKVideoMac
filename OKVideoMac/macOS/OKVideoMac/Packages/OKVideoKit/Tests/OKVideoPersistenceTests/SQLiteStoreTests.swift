@@ -209,6 +209,34 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(remaining.first?.episodeReference, "episode-reference")
     }
 
+    func testHistoryPlaybackReferenceRoundTripsWithoutSensitiveHeaders() async throws {
+        let store = try makeStore()
+        let reference = HistoryPlaybackReference(
+            sourceIdentity: "stable-source",
+            resourceIdentity: "stable-resource",
+            replayHeaders: [
+                "User-Agent": "Fixture/1.0",
+                "Referer": "https://example.invalid/watch/17"
+            ]
+        )
+        let record = HistoryRecord(
+            siteKey: "renamed-site",
+            videoID: "renamed-video",
+            title: "Fixture",
+            sourceName: "Display Only",
+            episodeName: "Episode Display Only",
+            playbackReference: reference
+        )
+
+        try await store.saveHistory(record, incognito: false)
+        let history = try await store.history()
+        let stored = try XCTUnwrap(history.first)
+
+        XCTAssertEqual(stored.playbackReference, reference)
+        XCTAssertEqual(stored.playbackReference?.sourceIdentity, "stable-source")
+        XCTAssertEqual(stored.playbackReference?.resourceIdentity, "stable-resource")
+    }
+
     func testHistoryKeepsSameSiteAndVideoSeparateAcrossConfigurations() async throws {
         let store = try makeStore()
         let first = UUID()
@@ -315,6 +343,36 @@ final class SQLiteStoreTests: XCTestCase {
         )
         let configurations = try await result.store.configurations()
         XCTAssertEqual(configurations, [])
+    }
+
+    func testHealthyDatabaseOpenFailureIsNotQuarantined() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OKVideoMacRecoveryTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let databaseURL = directory.appendingPathComponent("test.sqlite3")
+        let connection = try SQLiteConnection(url: databaseURL)
+        try connection.execute("CREATE TABLE preserved_user_data (value TEXT NOT NULL)")
+        try connection.execute("INSERT INTO preserved_user_data VALUES ('preserved')")
+        try connection.execute("PRAGMA user_version = 999")
+        connection.close()
+
+        XCTAssertThrowsError(try SQLiteStore.openRecovering(databaseURL: databaseURL))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: databaseURL.path))
+        let quarantines = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix("Corrupt-") }
+        XCTAssertEqual(quarantines, [])
+
+        let verification = try SQLiteConnection(url: databaseURL)
+        XCTAssertEqual(
+            try verification.scalarInt("SELECT COUNT(*) FROM preserved_user_data"),
+            1
+        )
+        verification.close()
     }
 
     func testConcurrentWritesAreSerialized() async throws {

@@ -274,7 +274,7 @@ final class SiteProviderTests: XCTestCase {
         XCTAssertTrue(home.recommendations.isEmpty)
     }
 
-    func testSpiderHomePreservesProtocolSettingEntriesAsActions() throws {
+    func testSpiderHomeDoesNotGuessActionsFromCategoryOrItemIdentifiers() throws {
         let site = SiteConfiguration(
             key: "generic-node-site",
             name: "Generic Node Site",
@@ -291,10 +291,9 @@ final class SiteProviderTests: XCTestCase {
             baseURL: nil
         )
 
-        XCTAssertEqual(home.categories.map(\.resolvedContentKind), [.action])
-        XCTAssertTrue(home.recommendations.isEmpty)
-        XCTAssertEqual(home.actionItems.map(\.title), ["任意操作卡片"])
-        XCTAssertEqual(home.actionItems.map(\.itemID), ["config-center"])
+        XCTAssertEqual(home.categories.map(\.resolvedContentKind), [.media])
+        XCTAssertEqual(home.recommendations.map(\.title), ["任意操作卡片"])
+        XCTAssertTrue(home.actionItems.isEmpty)
     }
 
     func testSpiderHomeKeepsMediaWhoseTextOrIdentifierLooksFunctional() throws {
@@ -834,6 +833,149 @@ final class SiteProviderTests: XCTestCase {
         }
     }
 
+    func testPlaybackRefreshSearchesAfterStaleDetailLosesResource() async throws {
+        let oldSource = PlaySource(
+            name: "旧线路名",
+            episodes: [
+                PlayEpisode(
+                    name: "旧集名",
+                    url: "https://old.invalid/play?id=7&token=expired",
+                    referenceIdentity: "episode-7"
+                )
+            ],
+            referenceIdentity: "provider-line-7"
+        )
+        let refreshedSource = PlaySource(
+            name: "新线路名",
+            episodes: [
+                PlayEpisode(
+                    name: "新集名",
+                    url: "https://new.invalid/play?id=7&token=fresh",
+                    referenceIdentity: "episode-7"
+                )
+            ],
+            referenceIdentity: "provider-line-7"
+        )
+        let provider = RefreshPlaybackSiteProvider(
+            details: [
+                "stale-id": Self.refreshDetail(
+                    id: "stale-id",
+                    title: "同名旧条目",
+                    sourceIdentity: "unrelated-line"
+                ),
+                "fresh-id": VideoDetail(
+                    summary: Self.refreshSummary(id: "fresh-id", title: "目标影片"),
+                    playSources: [refreshedSource]
+                )
+            ],
+            searchPage: VideoPage(
+                items: [Self.refreshSummary(id: "fresh-id", title: "目标影片")],
+                pagination: Pagination(page: 1, pageCount: 1)
+            ),
+            playerResult: SitePlaybackResult(
+                url: "https://new.invalid/signed?id=7",
+                needsParsing: false,
+                flag: "新线路名",
+                headers: ["Authorization": "Bearer refreshed"]
+            )
+        )
+
+        let refreshed = try await provider.refreshPlayback(
+            PlaybackRefreshRequest(
+                videoID: "stale-id",
+                title: "目标影片",
+                sourceIdentity: oldSource.stableIdentity,
+                resourceIdentity: oldSource.episodes[0].stableIdentity,
+                sourceName: oldSource.name,
+                episodeName: oldSource.episodes[0].name
+            )
+        )
+
+        XCTAssertEqual(refreshed.detail.summary.videoID, "fresh-id")
+        XCTAssertEqual(refreshed.source.name, "新线路名")
+        XCTAssertEqual(refreshed.episode.name, "新集名")
+        XCTAssertEqual(
+            refreshed.playbackResult.headers["Authorization"],
+            "Bearer refreshed"
+        )
+        XCTAssertEqual(
+            provider.playerRequests,
+            ["新线路名::https://new.invalid/play?id=7&token=fresh"]
+        )
+    }
+
+    func testPlaybackRefreshNeverFallsThroughToUnrelatedResource() async throws {
+        let unrelated = Self.refreshDetail(
+            id: "fresh-id",
+            title: "目标影片",
+            sourceIdentity: "different-line"
+        )
+        let provider = RefreshPlaybackSiteProvider(
+            details: ["stale-id": unrelated, "fresh-id": unrelated],
+            searchPage: VideoPage(
+                items: [Self.refreshSummary(id: "fresh-id", title: "目标影片")],
+                pagination: Pagination(page: 1, pageCount: 1)
+            ),
+            playerResult: SitePlaybackResult(
+                url: "https://should-not-play.invalid/video",
+                needsParsing: false,
+                flag: "other"
+            )
+        )
+
+        do {
+            _ = try await provider.refreshPlayback(
+                PlaybackRefreshRequest(
+                    videoID: "stale-id",
+                    title: "目标影片",
+                    sourceIdentity: "missing-source",
+                    resourceIdentity: "missing-resource",
+                    sourceName: "旧线路",
+                    episodeName: "旧集"
+                )
+            )
+            XCTFail("同资源无法定位时不应静默切换到其他线路")
+        } catch {
+            XCTAssertEqual(
+                error as? AppError,
+                .playback("无法从最新详情唯一匹配原历史线路")
+            )
+        }
+        XCTAssertTrue(provider.playerRequests.isEmpty)
+    }
+
+    private static func refreshSummary(id: String, title: String) -> VideoSummary {
+        VideoSummary(
+            siteKey: "refresh-fixture",
+            siteName: "Refresh Fixture",
+            videoID: id,
+            title: title
+        )
+    }
+
+    private static func refreshDetail(
+        id: String,
+        title: String,
+        sourceIdentity: String
+    ) -> VideoDetail {
+        VideoDetail(
+            summary: refreshSummary(id: id, title: title),
+            playSources: [
+                PlaySource(
+                    name: "其他线路",
+                    episodes: [
+                        PlayEpisode(
+                            name: "其他集",
+                            url: "https://other.invalid/play?id=99",
+                            referenceIdentity: "other-episode"
+                        )
+                    ],
+                    referenceIdentity: sourceIdentity
+                )
+            ]
+        )
+    }
+
     private static func response(_ json: String) -> HTTPResponse {
         HTTPResponse(
             url: URL(string: "https://example.invalid/config/api")!,
@@ -841,6 +983,66 @@ final class SiteProviderTests: XCTestCase {
             headers: ["Content-Type": "application/json"],
             body: Data(json.utf8)
         )
+    }
+}
+
+private final class RefreshPlaybackSiteProvider: SiteProvider {
+    let site = SiteConfiguration(
+        key: "refresh-fixture",
+        name: "Refresh Fixture",
+        type: 1,
+        api: "https://example.invalid/api"
+    )
+    let capability: SiteCapability = .standardJSON
+    let details: [String: VideoDetail]
+    let searchPage: VideoPage
+    let playerResult: SitePlaybackResult
+    private(set) var playerRequests: [String] = []
+
+    init(
+        details: [String: VideoDetail],
+        searchPage: VideoPage,
+        playerResult: SitePlaybackResult
+    ) {
+        self.details = details
+        self.searchPage = searchPage
+        self.playerResult = playerResult
+    }
+
+    func home() async throws -> SiteHome {
+        SiteHome(categories: [], recommendations: [])
+    }
+
+    func category(
+        id: String,
+        page: Int,
+        filters: [String: String]
+    ) async throws -> VideoPage {
+        VideoPage(items: [], pagination: Pagination(page: page, pageCount: 1))
+    }
+
+    func select(id: String) async throws -> SiteSelectionResult {
+        .detail(try await detail(id: id))
+    }
+
+    func detail(id: String) async throws -> VideoDetail {
+        guard let detail = details[id] else {
+            throw AppError.contentUnavailable("fixture detail missing")
+        }
+        return detail
+    }
+
+    func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
+        searchPage
+    }
+
+    func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
+        playerRequests.append("\(flag)::\(episodeURL)")
+        return playerResult
+    }
+
+    func action(_ action: String) async throws -> JSONValue {
+        .null
     }
 }
 

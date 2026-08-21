@@ -83,7 +83,7 @@ struct LiveView: View {
                 sourceName: source.name
             )
         } else if state.isLoading {
-            ProgressView("正在加载直播源…")
+            AppActivityLabel("正在加载直播源…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             EmptyStateView(
@@ -228,8 +228,7 @@ struct LiveView: View {
     ) -> some View {
         HStack(spacing: 8) {
             if showsProgress {
-                ProgressView()
-                    .controlSize(.mini)
+                AppActivityIndicator(size: .mini)
             } else {
                 Image(systemName: systemImage)
             }
@@ -340,8 +339,7 @@ struct LiveToolbarView: View {
                         .frame(width: 220)
                 }
             } else if state.isLoading {
-                ProgressView()
-                    .controlSize(.small)
+                AppActivityIndicator(size: .small)
                     .help("正在加载直播源")
             }
         }
@@ -459,8 +457,7 @@ struct LiveToolbarView: View {
     @ViewBuilder
     private func refreshControl(sourceID: UUID) -> some View {
         if state.isLoading {
-            ProgressView()
-                .controlSize(.small)
+            AppActivityIndicator(size: .small)
                 .help("正在刷新直播源")
         } else {
             Button {
@@ -927,8 +924,7 @@ struct LiveSourceImportSheet: View {
             Spacer()
             if let importPhase {
                 HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
+                    AppActivityIndicator(size: .small)
                     Text(importPhase.title)
                         .font(.callout)
                         .foregroundColor(.secondary)
@@ -947,8 +943,7 @@ struct LiveSourceImportSheet: View {
                 } label: {
                     if isSubmitting {
                         HStack(spacing: 6) {
-                            ProgressView()
-                                .controlSize(.small)
+                            AppActivityIndicator(size: .small)
                             Text("添加中")
                         }
                     } else {

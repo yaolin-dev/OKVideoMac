@@ -495,7 +495,7 @@ struct CloudAuthorizationView: View {
                     HStack {
                         Spacer()
                         VStack(spacing: 10) {
-                            ProgressView()
+                            AppActivityIndicator(size: .regular)
                             Text("正在生成二维码…")
                                 .font(.caption)
                                 .foregroundColor(.secondary)

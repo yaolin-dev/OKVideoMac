@@ -98,6 +98,29 @@ public struct FavoriteRecord: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+public struct HistoryPlaybackReference: Codable, Equatable, Sendable {
+    public static let currentVersion = 2
+
+    public var version: Int
+    public var sourceIdentity: String
+    public var resourceIdentity: String
+    /// Only non-sensitive request context may be persisted here. Cookie and
+    /// Authorization are intentionally reacquired from the provider.
+    public var replayHeaders: [String: String]
+
+    public init(
+        version: Int = currentVersion,
+        sourceIdentity: String,
+        resourceIdentity: String,
+        replayHeaders: [String: String] = [:]
+    ) {
+        self.version = version
+        self.sourceIdentity = sourceIdentity
+        self.resourceIdentity = resourceIdentity
+        self.replayHeaders = replayHeaders
+    }
+}
+
 public struct HistoryRecord: Codable, Equatable, Identifiable, Sendable {
     public var id: String {
         "\(configurationID?.uuidString.lowercased() ?? "legacy")::\(siteKey)::\(videoID)"
@@ -116,6 +139,7 @@ public struct HistoryRecord: Codable, Equatable, Identifiable, Sendable {
     public var episodeName: String?
     public var episodeReference: String?
     public var mediaReference: String?
+    public var playbackReference: HistoryPlaybackReference?
     public var position: TimeInterval
     public var duration: TimeInterval
     public var watchedAt: Date
@@ -130,6 +154,7 @@ public struct HistoryRecord: Codable, Equatable, Identifiable, Sendable {
         episodeName: String? = nil,
         episodeReference: String? = nil,
         mediaReference: String? = nil,
+        playbackReference: HistoryPlaybackReference? = nil,
         position: TimeInterval = 0,
         duration: TimeInterval = 0,
         watchedAt: Date = Date()
@@ -143,6 +168,7 @@ public struct HistoryRecord: Codable, Equatable, Identifiable, Sendable {
         self.episodeName = episodeName
         self.episodeReference = episodeReference
         self.mediaReference = mediaReference
+        self.playbackReference = playbackReference
         self.position = max(0, position)
         self.duration = max(0, duration)
         self.watchedAt = watchedAt

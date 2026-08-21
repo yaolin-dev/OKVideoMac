@@ -595,11 +595,7 @@ struct PlayerView: View {
     private var statusPill: some View {
         HStack(spacing: 7) {
             if !isFailed {
-                ProgressView()
-                    .controlSize(.mini)
-                    .progressViewStyle(
-                        CircularProgressViewStyle(tint: .white)
-                    )
+                AppActivityIndicator(size: .mini, tint: .white)
             }
             Text(state.playbackStageDescription)
                 .lineLimit(1)
@@ -629,11 +625,7 @@ struct PlayerView: View {
                         .font(.system(size: 34))
                         .foregroundColor(.orange)
                 } else {
-                    ProgressView()
-                        .controlSize(.large)
-                        .progressViewStyle(
-                            CircularProgressViewStyle(tint: .white)
-                        )
+                    AppActivityIndicator(size: .regular, tint: .white)
                 }
 
                 Text(state.playbackStageDescription)
@@ -1033,8 +1025,7 @@ struct PlayerView: View {
 
                 if state.isPlayerEpisodeListPreparing {
                     HStack(spacing: 9) {
-                        ProgressView()
-                            .controlSize(.small)
+                        AppActivityIndicator(size: .small, tint: .white)
                         Text("正在整理分集…")
                             .font(.caption)
                             .foregroundColor(.white.opacity(0.62))

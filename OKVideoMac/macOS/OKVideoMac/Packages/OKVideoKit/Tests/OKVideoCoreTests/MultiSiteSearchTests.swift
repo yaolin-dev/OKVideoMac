@@ -2,8 +2,14 @@ import XCTest
 @testable import OKVideoCore
 
 final class MultiSiteSearchTests: XCTestCase {
-    func testDefaultConcurrencyMatchesFongMiLargeSearchPool() {
-        XCTAssertEqual(MultiSiteSearch().maximumConcurrency, 20)
+    func testDefaultSearchBudgetIsBoundedForDesktopResources() {
+        XCTAssertEqual(MultiSiteSearch().maximumConcurrency, 12)
+        XCTAssertEqual(MultiSiteSearch().siteTimeout, 20)
+        XCTAssertEqual(MultiSiteSearch().overallDeadline, 25)
+        XCTAssertEqual(MultiSiteSearch().maximumPagesPerSite, 3)
+        XCTAssertEqual(MultiSiteSearch().maximumResultsPerSite, 40)
+        XCTAssertEqual(MultiSiteSearch().maximumRetainedCandidates, 500)
+        XCTAssertEqual(MultiSiteSearch().maximumDeepPageSites, 12)
     }
 
     func testSearchIsolatesFailureAndDeduplicatesSiteResults() async {
@@ -27,14 +33,15 @@ final class MultiSiteSearchTests: XCTestCase {
             events.append(event)
         }
 
-        XCTAssertTrue(events.contains(.results(siteKey: "good", items: [
-            VideoSummary(siteKey: "good", siteName: "Good", videoID: "1", title: "One")
-        ])))
+        XCTAssertEqual(
+            finalSnapshot(in: events)?.items,
+            [VideoSummary(siteKey: "good", siteName: "Good", videoID: "1", title: "One")]
+        )
         XCTAssertTrue(events.contains { event in
             guard case .failure(let failure) = event else { return false }
             return failure.siteKey == "bad"
         })
-        XCTAssertEqual(events.last, .completed)
+        XCTAssertEqual(events.last, .finished(.completedWithProviderFailures))
     }
 
     func testCrossSiteSameTitleAndYearIsClusteredWithoutLosingSources() {
@@ -134,10 +141,10 @@ final class MultiSiteSearchTests: XCTestCase {
             events.append(event)
         }
 
-        XCTAssertEqual(events, [.completed])
+        XCTAssertEqual(events, [.finished(.completed)])
     }
 
-    func testResultsKeepProviderOrderAndSitesEmitByCompletionOrder() async {
+    func testRetainedSnapshotKeepsCompletionOrderWithinSameRelevanceTier() async {
         let slow = SearchFixtureProvider(
             site: SiteConfiguration(
                 key: "slow",
@@ -178,17 +185,20 @@ final class MultiSiteSearchTests: XCTestCase {
             ])
         )
 
-        var resultEvents: [(String, [String])] = []
+        var snapshots: [MultiSiteSearchSnapshot] = []
         for await event in MultiSiteSearch(maximumConcurrency: 2).search(
             providers: [slow, fast],
             keyword: "fixture"
         ) {
-            guard case .results(let siteKey, let items) = event else { continue }
-            resultEvents.append((siteKey, items.map(\.videoID)))
+            guard case .snapshot(let snapshot) = event else { continue }
+            snapshots.append(snapshot)
         }
 
-        XCTAssertEqual(resultEvents.map(\.0), ["fast", "slow"])
-        XCTAssertEqual(resultEvents.last?.1, ["2", "1"])
+        XCTAssertEqual(snapshots.first?.items.map(\.siteKey), ["fast"])
+        XCTAssertEqual(
+            snapshots.last?.items.map(\.videoID),
+            ["9", "2", "1"]
+        )
     }
 
     func testSlowSiteTimesOutWithoutBlockingCompletion() async {
@@ -216,7 +226,7 @@ final class MultiSiteSearchTests: XCTestCase {
             return failure.siteKey == "slow"
                 && failure.message.contains("搜索超时")
         })
-        XCTAssertEqual(events.last, .completed)
+        XCTAssertEqual(events.last, .finished(.completedWithProviderFailures))
     }
 
     func testTimeoutDoesNotWaitForProviderThatIgnoresCancellation() async {
@@ -249,11 +259,9 @@ final class MultiSiteSearchTests: XCTestCase {
             return failure.siteKey == uncooperative.site.key
                 && failure.message.contains("搜索超时")
         })
-        XCTAssertTrue(events.contains(.results(
-            siteKey: fast.site.key,
-            items: []
-        )))
-        XCTAssertEqual(events.last, .completed)
+        XCTAssertTrue(events.contains(.siteCompleted(siteKey: fast.site.key)))
+        XCTAssertTrue(events.contains(.siteFirstPageCompleted(siteKey: fast.site.key)))
+        XCTAssertEqual(events.last, .finished(.completedWithProviderFailures))
     }
 
     func testJavaDexSearchUsesBridgeLengthTimeout() async {
@@ -285,8 +293,8 @@ final class MultiSiteSearchTests: XCTestCase {
         }
 
         XCTAssertTrue(events.contains { event in
-            guard case .results(let siteKey, let items) = event else { return false }
-            return siteKey == "dex" && items.map(\.videoID) == ["1"]
+            guard case .snapshot(let snapshot) = event else { return false }
+            return snapshot.items.map(\.videoID) == ["1"]
         })
         XCTAssertFalse(events.contains { event in
             guard case .failure(let failure) = event else { return false }
@@ -307,7 +315,7 @@ final class MultiSiteSearchTests: XCTestCase {
                 base: 30,
                 capability: .javaDexSpider
             ),
-            75
+            30
         )
     }
 
@@ -316,60 +324,169 @@ final class MultiSiteSearchTests: XCTestCase {
         let provider = PagedSearchFixtureProvider(recorder: recorder)
 
         var resultIDs: [String] = []
+        var firstPageCompletedCount = 0
         for await event in MultiSiteSearch(
             maximumConcurrency: 1,
             maximumPagesPerSite: 6
         ).search(providers: [provider], keyword: "fixture") {
-            guard case .results(_, let items) = event else { continue }
-            resultIDs = items.map(\.videoID)
+            switch event {
+            case .snapshot(let snapshot):
+                resultIDs = snapshot.items.map(\.videoID)
+            case .siteFirstPageCompleted:
+                firstPageCompletedCount += 1
+            default:
+                break
+            }
         }
 
         let requestedPages = await recorder.pages
         XCTAssertEqual(resultIDs, ["1", "2", "3"])
         XCTAssertEqual(requestedPages, [1, 2, 3])
+        XCTAssertEqual(firstPageCompletedCount, 1)
     }
 
-    func testMovingWindowStartsQueuedSiteBeforeSlowPeerFinishes() async {
-        let slow = SearchFixtureProvider(
-            site: SiteConfiguration(
-                key: "slow",
-                name: "Slow",
-                type: 1,
-                api: "https://example.invalid"
-            ),
-            result: .success([]),
-            delayNanoseconds: 300_000_000
-        )
-        let fast = SearchFixtureProvider(
-            site: SiteConfiguration(
-                key: "fast",
-                name: "Fast",
-                type: 1,
-                api: "https://example.invalid"
-            ),
-            result: .success([]),
-            delayNanoseconds: 30_000_000
-        )
-        let queued = SearchFixtureProvider(
-            site: SiteConfiguration(
-                key: "queued",
-                name: "Queued",
-                type: 1,
-                api: "https://example.invalid"
-            ),
-            result: .success([])
-        )
-
-        var completedKeys: [String] = []
-        for await event in MultiSiteSearch(maximumConcurrency: 2).search(
-            providers: [slow, fast, queued],
-            keyword: "fixture"
-        ) {
-            guard case .results(let siteKey, _) = event else { continue }
-            completedKeys.append(siteKey)
+    func testEveryEligibleProviderGetsFirstPageRequestOpportunity() async {
+        let recorder = FirstPageInvocationRecorder()
+        let providers: [SiteProvider] = (0..<20).map {
+            FirstPageRecordingProvider(index: $0, recorder: recorder)
         }
 
-        XCTAssertEqual(completedKeys, ["fast", "queued", "slow"])
+        for await _ in MultiSiteSearch(
+            maximumConcurrency: 1,
+            siteTimeout: 1,
+            overallDeadline: 1
+        ).search(providers: providers, keyword: "fixture") {}
+
+        let invokedKeys = await recorder.keys
+        XCTAssertEqual(invokedKeys, Set((0..<20).map { "site-\($0)" }))
+    }
+
+    func testFirstPageRetainsAtMostFortyResultsFromOneSite() async {
+        let provider = SearchFixtureProvider(
+            site: fixtureSite(key: "bulk"),
+            result: .success(makeItems(siteKey: "bulk", count: 75))
+        )
+
+        let events = await collect(
+            MultiSiteSearch().search(providers: [provider], keyword: "fixture")
+        )
+        let snapshot = finalSnapshot(in: events)
+
+        XCTAssertEqual(snapshot?.items.count, 40)
+        XCTAssertEqual(snapshot?.maximumResultsPerSite, 40)
+        XCTAssertEqual(snapshot?.didDiscardCandidates, true)
+    }
+
+    func testRetainedCandidatePoolNeverExceedsFiveHundred() async {
+        let providers: [SiteProvider] = (0..<15).map { siteIndex in
+            let key = "site-\(siteIndex)"
+            return SearchFixtureProvider(
+                site: fixtureSite(key: key),
+                result: .success(makeItems(siteKey: key, count: 60))
+            )
+        }
+
+        let events = await collect(
+            MultiSiteSearch().search(providers: providers, keyword: "fixture")
+        )
+        let snapshot = finalSnapshot(in: events)
+        let siteCounts = Dictionary(grouping: snapshot?.items ?? [], by: \.siteKey)
+
+        XCTAssertEqual(snapshot?.items.count, 500)
+        XCTAssertTrue(siteCounts.values.allSatisfy { $0.count <= 40 })
+        XCTAssertEqual(snapshot?.didDiscardCandidates, true)
+    }
+
+    func testLateExactMatchReplacesRetainedLowRelevanceResult() async {
+        let early = SearchFixtureProvider(
+            site: fixtureSite(key: "early"),
+            result: .success(
+                makeItems(siteKey: "early", count: 10, titlePrefix: "无关内容")
+            )
+        )
+        let late = SearchFixtureProvider(
+            site: fixtureSite(key: "late"),
+            result: .success([
+                VideoSummary(
+                    siteKey: "late",
+                    siteName: "late",
+                    videoID: "exact",
+                    title: "机器人总动员"
+                )
+            ]),
+            delayNanoseconds: 50_000_000
+        )
+
+        let events = await collect(
+            MultiSiteSearch(
+                maximumResultsPerSite: 10,
+                maximumRetainedCandidates: 10
+            ).search(providers: [early, late], keyword: "机器人总动员")
+        )
+        let snapshot = finalSnapshot(in: events)
+
+        XCTAssertEqual(snapshot?.items.count, 10)
+        XCTAssertEqual(snapshot?.items.first?.videoID, "exact")
+        XCTAssertFalse(snapshot?.items.contains { $0.videoID == "9" } ?? true)
+    }
+
+    func testOneSiteCannotMonopolizeRetainedPool() async {
+        let dominant = SearchFixtureProvider(
+            site: fixtureSite(key: "dominant"),
+            result: .success(makeItems(siteKey: "dominant", count: 100))
+        )
+        let diverse = SearchFixtureProvider(
+            site: fixtureSite(key: "diverse"),
+            result: .success(makeItems(siteKey: "diverse", count: 20)),
+            delayNanoseconds: 40_000_000
+        )
+
+        let events = await collect(
+            MultiSiteSearch(
+                maximumResultsPerSite: 40,
+                maximumRetainedCandidates: 50
+            ).search(providers: [dominant, diverse], keyword: "fixture")
+        )
+        let items = finalSnapshot(in: events)?.items ?? []
+        let counts = Dictionary(grouping: items, by: \.siteKey)
+
+        XCTAssertEqual(items.count, 50)
+        XCTAssertLessThanOrEqual(counts["dominant"]?.count ?? 0, 40)
+        XCTAssertGreaterThan(counts["diverse"]?.count ?? 0, 0)
+    }
+
+    func testGlobalDeadlineStopsSearchAndReportsDeadlineState() async {
+        let startedAt = Date()
+        let events = await collect(
+            MultiSiteSearch(
+                siteTimeout: 5,
+                overallDeadline: 0.05
+            ).search(
+                providers: [UncooperativeSearchFixtureProvider()],
+                keyword: "fixture"
+            )
+        )
+
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 0.3)
+        XCTAssertEqual(events.last, .finished(.deadlineReached))
+    }
+
+    func testOnlyTopTwelveFirstPageProvidersReceiveDeepRequests() async {
+        let recorder = DeepPageInvocationRecorder()
+        let providers: [SiteProvider] = (0..<15).map {
+            DeepPageRecordingProvider(index: $0, recorder: recorder)
+        }
+
+        for await _ in MultiSiteSearch(
+            maximumConcurrency: 12,
+            overallDeadline: 2,
+            maximumPagesPerSite: 2,
+            maximumDeepPageSites: 12
+        ).search(providers: providers, keyword: "fixture") {}
+
+        let deepKeys = await recorder.deepPageKeys
+        XCTAssertEqual(deepKeys.count, 12)
+        XCTAssertEqual(deepKeys, Set((0..<12).map { "deep-\($0)" }))
     }
 
     func testCancellingConsumerCancelsInFlightProviderSearch() async throws {
@@ -397,6 +514,248 @@ final class MultiSiteSearchTests: XCTestCase {
         }
         let didCancel = await recorder.cancelled
         XCTAssertTrue(didCancel)
+    }
+
+    func testCancelRejectsLateUncooperativeProviderResult() async throws {
+        let recorder = SearchEventRecorder()
+        let stream = MultiSiteSearch(
+            siteTimeout: 5,
+            overallDeadline: 5
+        ).search(
+            providers: [UncooperativeResultSearchFixtureProvider()],
+            keyword: "fixture"
+        )
+        let consumer = Task {
+            for await event in stream {
+                await recorder.record(event)
+            }
+        }
+
+        try await Task.sleep(nanoseconds: 20_000_000)
+        consumer.cancel()
+        await consumer.value
+        try await Task.sleep(nanoseconds: 600_000_000)
+
+        let events = await recorder.events
+        XCTAssertFalse(events.contains { event in
+            if case .snapshot = event { return true }
+            return false
+        })
+    }
+
+    private func collect(
+        _ stream: AsyncStream<MultiSiteSearchEvent>
+    ) async -> [MultiSiteSearchEvent] {
+        var events: [MultiSiteSearchEvent] = []
+        for await event in stream {
+            events.append(event)
+        }
+        return events
+    }
+
+    private func finalSnapshot(
+        in events: [MultiSiteSearchEvent]
+    ) -> MultiSiteSearchSnapshot? {
+        events.reversed().compactMap { event in
+            guard case .snapshot(let snapshot) = event else { return nil }
+            return snapshot
+        }.first
+    }
+
+    private func fixtureSite(key: String) -> SiteConfiguration {
+        SiteConfiguration(
+            key: key,
+            name: key,
+            type: 1,
+            api: "https://example.invalid"
+        )
+    }
+
+    private func makeItems(
+        siteKey: String,
+        count: Int,
+        titlePrefix: String = "fixture"
+    ) -> [VideoSummary] {
+        (0..<count).map { index in
+            VideoSummary(
+                siteKey: siteKey,
+                siteName: siteKey,
+                videoID: "\(index)",
+                title: "\(titlePrefix) \(index)"
+            )
+        }
+    }
+}
+
+private actor FirstPageInvocationRecorder {
+    private(set) var keys: Set<String> = []
+
+    func record(_ key: String) {
+        keys.insert(key)
+    }
+}
+
+private actor DeepPageInvocationRecorder {
+    private(set) var deepPageKeys: Set<String> = []
+
+    func record(siteKey: String, page: Int) {
+        if page > 1 {
+            deepPageKeys.insert(siteKey)
+        }
+    }
+}
+
+private actor SearchEventRecorder {
+    private(set) var events: [MultiSiteSearchEvent] = []
+
+    func record(_ event: MultiSiteSearchEvent) {
+        events.append(event)
+    }
+}
+
+private struct FirstPageRecordingProvider: SiteProvider {
+    let site: SiteConfiguration
+    let recorder: FirstPageInvocationRecorder
+    let capability: SiteCapability = .standardJSON
+
+    init(index: Int, recorder: FirstPageInvocationRecorder) {
+        site = SiteConfiguration(
+            key: "site-\(index)",
+            name: "Site \(index)",
+            type: 1,
+            api: "https://example.invalid"
+        )
+        self.recorder = recorder
+    }
+
+    func home() async throws -> SiteHome {
+        SiteHome(categories: [], recommendations: [])
+    }
+
+    func category(
+        id: String,
+        page: Int,
+        filters: [String: String]
+    ) async throws -> VideoPage {
+        VideoPage(items: [], pagination: Pagination(page: page, pageCount: 0))
+    }
+
+    func detail(id: String) async throws -> VideoDetail {
+        throw AppError.site("unused")
+    }
+
+    func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
+        await recorder.record(site.key)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        return VideoPage(
+            items: [],
+            pagination: Pagination(page: page, pageCount: 1)
+        )
+    }
+
+    func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
+        throw AppError.site("unused")
+    }
+}
+
+private struct DeepPageRecordingProvider: SiteProvider {
+    let site: SiteConfiguration
+    let recorder: DeepPageInvocationRecorder
+    let capability: SiteCapability = .standardJSON
+
+    init(index: Int, recorder: DeepPageInvocationRecorder) {
+        site = SiteConfiguration(
+            key: "deep-\(index)",
+            name: "Deep \(index)",
+            type: 1,
+            api: "https://example.invalid"
+        )
+        self.recorder = recorder
+    }
+
+    func home() async throws -> SiteHome {
+        SiteHome(categories: [], recommendations: [])
+    }
+
+    func category(
+        id: String,
+        page: Int,
+        filters: [String: String]
+    ) async throws -> VideoPage {
+        VideoPage(items: [], pagination: Pagination(page: page, pageCount: 0))
+    }
+
+    func detail(id: String) async throws -> VideoDetail {
+        throw AppError.site("unused")
+    }
+
+    func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
+        await recorder.record(siteKey: site.key, page: page)
+        return VideoPage(
+            items: [
+                VideoSummary(
+                    siteKey: site.key,
+                    siteName: site.name,
+                    videoID: "\(page)",
+                    title: "fixture \(page)"
+                )
+            ],
+            pagination: Pagination(page: page, pageCount: 2)
+        )
+    }
+
+    func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
+        throw AppError.site("unused")
+    }
+}
+
+private struct UncooperativeResultSearchFixtureProvider: SiteProvider {
+    let site = SiteConfiguration(
+        key: "late-result",
+        name: "Late Result",
+        type: 1,
+        api: "https://example.invalid"
+    )
+    let capability: SiteCapability = .standardJSON
+
+    func home() async throws -> SiteHome {
+        SiteHome(categories: [], recommendations: [])
+    }
+
+    func category(
+        id: String,
+        page: Int,
+        filters: [String: String]
+    ) async throws -> VideoPage {
+        VideoPage(items: [], pagination: Pagination(page: page, pageCount: 0))
+    }
+
+    func detail(id: String) async throws -> VideoDetail {
+        throw AppError.site("unused")
+    }
+
+    func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+                continuation.resume(
+                    returning: VideoPage(
+                        items: [
+                            VideoSummary(
+                                siteKey: site.key,
+                                siteName: site.name,
+                                videoID: "late",
+                                title: keyword
+                            )
+                        ],
+                        pagination: Pagination(page: page, pageCount: 1)
+                    )
+                )
+            }
+        }
+    }
+
+    func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
+        throw AppError.site("unused")
     }
 }
 

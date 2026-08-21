@@ -402,8 +402,7 @@ struct SettingsView: View {
                                         .foregroundColor(.secondary)
                                 }
                             } else {
-                                ProgressView()
-                                    .controlSize(.small)
+                                AppActivityIndicator(size: .small)
                             }
                         }
 
@@ -847,8 +846,7 @@ private struct LiveSourceSettingsPane: View {
         switch status {
         case .checking(let completed, let total):
             HStack(spacing: 6) {
-                ProgressView()
-                    .controlSize(.mini)
+                AppActivityIndicator(size: .mini)
                 Text("正在后台检测频道 \(completed)/\(total)")
             }
             .font(.caption2)

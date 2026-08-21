@@ -133,6 +133,12 @@ enum NodeRuntimeContractFactory {
             let config = try ContractBConfigBuilder.buildMinimumConfiguration()
             let configURL = runtimeDirectory.appendingPathComponent("contract-b-config.json")
             let stateURL = runtimeDirectory.appendingPathComponent("contract-b-state.json")
+            // The profile belongs to the verified Node bundle identity because
+            // `runtimeDirectory` is derived from the descriptor cache key. It
+            // deliberately survives process restarts, unlike listener state.
+            let profileURL = runtimeDirectory.appendingPathComponent(
+                "contract-b-profile.json"
+            )
             let port = try NodeRuntimeLoopbackPortAllocator.allocate()
             do {
                 try config.write(to: configURL, options: .atomic)
@@ -152,7 +158,8 @@ enum NodeRuntimeContractFactory {
                 environmentAdditions: [
                     "DEV_HTTP_PORT": String(port),
                     "OKVIDEO_CONTRACT_B_CONFIG_PATH": configURL.path,
-                    "OKVIDEO_CONTRACT_B_STATE_PATH": stateURL.path
+                    "OKVIDEO_CONTRACT_B_STATE_PATH": stateURL.path,
+                    "OKVIDEO_CONTRACT_B_PROFILE_PATH": profileURL.path
                 ],
                 readinessPolicy: .hostIntegratedConfiguration,
                 stateFileURL: stateURL,
@@ -201,17 +208,26 @@ enum NodeRuntimeContractFactory {
     'use strict';
     const fs = require('fs');
     const http = require('http');
+    const https = require('https');
     const net = require('net');
+    const crypto = require('crypto');
+    const { AsyncLocalStorage } = require('async_hooks');
     const bundlePath = process.env.OKVIDEO_BUNDLE_PATH;
     const configPath = process.env.OKVIDEO_CONTRACT_B_CONFIG_PATH;
     const statePath = process.env.OKVIDEO_CONTRACT_B_STATE_PATH;
+    const profilePath = process.env.OKVIDEO_CONTRACT_B_PROFILE_PATH;
     const parentPID = Number(process.env.OKVIDEO_PARENT_PID || 0);
     let runtime = null;
     let stopping = false;
     const managedListener = Symbol('okvideo-managed-listener');
     const listeners = new Set();
     const originalNetListen = net.Server.prototype.listen;
-    const activeBusinessRequests = new Set();
+    const invocationStorage = new AsyncLocalStorage();
+    const invocations = new Map();
+    const invocationTTLMilliseconds = 5000;
+    const originalFetch = globalThis.fetch;
+    const originalHTTPRequest = http.request;
+    const originalHTTPSRequest = https.request;
 
     function writeState(state) {
       const temporary = statePath + '.tmp-' + process.pid;
@@ -326,27 +342,224 @@ enum NodeRuntimeContractFactory {
       return message;
     }
 
+    function normalizedInvocationID(value) {
+      if (Array.isArray(value)) value = value[0];
+      if (typeof value !== 'string' || value.length < 8 || value.length > 128 ||
+          !/^[A-Za-z0-9._-]+$/.test(value)) {
+        return null;
+      }
+      return value;
+    }
+
+    function invocationIDFromRequest(request) {
+      return normalizedInvocationID(request.headers['x-okvideo-invocation-id']);
+    }
+
+    function scheduleInvocationRemoval(context) {
+      if (context.removalTimer) clearTimeout(context.removalTimer);
+      context.removalTimer = setTimeout(() => {
+        if (invocations.get(context.id) !== context) return;
+        invocations.delete(context.id);
+        for (const waiter of context.waiters.splice(0)) waiter(null);
+      }, invocationTTLMilliseconds);
+      if (typeof context.removalTimer.unref === 'function') context.removalTimer.unref();
+    }
+
+    function deliverHostMessage(response, message) {
+      response.setHeader('Content-Type', 'application/json; charset=utf-8');
+      response.statusCode = 200;
+      response.end(JSON.stringify(message));
+    }
+
+    function publishHostMessage(context, message) {
+      if (!context || context.hostMessage || context.consumed) return false;
+      context.hostMessage = message;
+      for (const waiter of context.waiters.splice(0)) waiter(message);
+      return true;
+    }
+
+    function pollHostMessage(request, response, invocationID, waitMilliseconds) {
+      const context = invocations.get(invocationID);
+      if (!context || context.consumed) {
+        response.statusCode = 404;
+        response.end();
+        return;
+      }
+      if (context.hostMessage) {
+        const message = context.hostMessage;
+        context.consumed = true;
+        deliverHostMessage(response, message);
+        scheduleInvocationRemoval(context);
+        return;
+      }
+      const boundedWait = Math.max(0, Math.min(waitMilliseconds, 2000));
+      if (boundedWait === 0) {
+        response.statusCode = 204;
+        response.end();
+        return;
+      }
+      let completed = false;
+      const finish = (message) => {
+        if (completed || response.destroyed) return;
+        completed = true;
+        clearTimeout(timer);
+        const index = context.waiters.indexOf(finish);
+        if (index >= 0) context.waiters.splice(index, 1);
+        if (message) {
+          context.consumed = true;
+          deliverHostMessage(response, message);
+        } else {
+          response.statusCode = 204;
+          response.end();
+        }
+        scheduleInvocationRemoval(context);
+      };
+      const timer = setTimeout(() => finish(null), boundedWait);
+      context.waiters.push(finish);
+      response.once('close', () => finish(null));
+    }
+
+    function correlatedRequest(originalRequest, defaultProtocol) {
+      return function requestWithInvocation(...args) {
+        const invocationID = invocationStorage.getStore();
+        if (!invocationID) return originalRequest.apply(this, args);
+        let parsed = null;
+        let optionsIndex = 0;
+        try {
+          if (typeof args[0] === 'string' || args[0] instanceof URL) {
+            parsed = new URL(args[0]);
+            optionsIndex = 1;
+          } else if (args[0] && typeof args[0] === 'object') {
+            const options = args[0];
+            const host = options.hostname || options.host;
+            if (host) {
+              parsed = new URL(
+                (options.protocol || defaultProtocol) + '//' + host +
+                (options.path || '/')
+              );
+            }
+          }
+        } catch (_) {}
+        if (!parsed || parsed.pathname !== '/msg' ||
+            !isPrivateOrLoopbackIPv4(parsed.hostname)) {
+          return originalRequest.apply(this, args);
+        }
+        const existing = args[optionsIndex];
+        const options = existing && typeof existing === 'object' &&
+          !(existing instanceof URL)
+          ? Object.assign({}, existing)
+          : {};
+        const headers = Object.assign({}, options.headers || {});
+        for (const name of Object.keys(headers)) {
+          if (name.toLowerCase() === 'x-okvideo-invocation-id') delete headers[name];
+        }
+        headers['X-OKVideo-Invocation-ID'] = invocationID;
+        options.headers = headers;
+        if (optionsIndex === 0) args[0] = options;
+        else if (existing && typeof existing === 'object' &&
+                 !(existing instanceof URL)) args[optionsIndex] = options;
+        else args.splice(optionsIndex, 0, options);
+        return originalRequest.apply(this, args);
+      };
+    }
+
+    http.request = correlatedRequest(originalHTTPRequest, 'http:');
+    https.request = correlatedRequest(originalHTTPSRequest, 'https:');
+
+    if (typeof originalFetch === 'function') {
+      globalThis.fetch = function correlatedFetch(input, init) {
+        const invocationID = invocationStorage.getStore();
+        if (!invocationID) return originalFetch(input, init);
+        let parsed = null;
+        try {
+          const raw = typeof input === 'string' || input instanceof URL
+            ? input
+            : input && input.url;
+          parsed = new URL(raw);
+        } catch (_) {}
+        if (!parsed || parsed.pathname !== '/msg' ||
+            !isPrivateOrLoopbackIPv4(parsed.hostname)) {
+          return originalFetch(input, init);
+        }
+        const options = Object.assign({}, init || {});
+        const headers = new Headers(
+          options.headers || (input && input.headers) || undefined
+        );
+        headers.set('X-OKVideo-Invocation-ID', invocationID);
+        options.headers = headers;
+        return originalFetch(input, options);
+      };
+    }
+
+    function isPlainObject(value) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+      const prototype = Object.getPrototypeOf(value);
+      return prototype === Object.prototype || prototype === null;
+    }
+
+    function readProfile() {
+      try {
+        const stat = fs.statSync(profilePath);
+        if (!stat.isFile() || stat.size > 1024 * 1024) return {};
+        const value = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
+        return isPlainObject(value) ? value : {};
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function writeProfile(value) {
+      if (!isPlainObject(value)) return false;
+      const encoded = JSON.stringify(value);
+      if (Buffer.byteLength(encoded, 'utf8') > 1024 * 1024) return false;
+      const temporary = profilePath + '.tmp-' + process.pid;
+      try {
+        fs.writeFileSync(temporary, encoded, { mode: 0o600 });
+        fs.renameSync(temporary, profilePath);
+        return true;
+      } catch (_) {
+        try { fs.unlinkSync(temporary); } catch (_) {}
+        return false;
+      }
+    }
+
     function receiveHostMessage(request, response) {
       let body = '';
+      let exceededLimit = false;
       request.setEncoding('utf8');
       request.on('data', (chunk) => {
-        if (body.length <= 16 * 1024) body += chunk;
-        if (body.length > 16 * 1024) request.destroy();
+        if (exceededLimit) return;
+        body += chunk;
+        if (Buffer.byteLength(body, 'utf8') > 1024 * 1024) {
+          exceededLimit = true;
+          body = '';
+        }
       });
       request.on('end', () => {
-        let accepted = null;
-        try { accepted = acceptHostMessage(JSON.parse(body)); }
-        catch (_) {}
-        const candidates = Array.from(activeBusinessRequests).filter(
-          (context) => !context.response.headersSent && !context.hostMessage
-        );
-        if (accepted && candidates.length === 1) {
-          candidates[0].hostMessage = accepted;
-        } else {
-          accepted = null;
+        let value = null;
+        if (!exceededLimit) {
+          try { value = JSON.parse(body); }
+          catch (_) {}
         }
-        response.statusCode = accepted ? 200 : 400;
         response.setHeader('Content-Type', 'application/json; charset=utf-8');
+
+        if (value && value.action === 'queryProfile') {
+          response.statusCode = 200;
+          response.end(JSON.stringify(readProfile()));
+          return;
+        }
+        if (value && value.action === 'saveProfile') {
+          const saved = writeProfile(value.opt);
+          response.statusCode = saved ? 200 : 400;
+          response.end(saved ? '{"ok":true}' : '{"ok":false}');
+          return;
+        }
+
+        let accepted = acceptHostMessage(value);
+        const invocationID = invocationIDFromRequest(request);
+        const context = invocationID ? invocations.get(invocationID) : null;
+        if (!accepted || !publishHostMessage(context, accepted)) accepted = null;
+        response.statusCode = accepted ? 200 : 400;
         response.end(accepted ? '{"ok":true}' : '{"ok":false}');
       });
     }
@@ -355,6 +568,7 @@ enum NodeRuntimeContractFactory {
       if (context.response.headersSent || !context.hostMessage || context.attached) return;
       const encoded = Buffer.from(JSON.stringify(context.hostMessage), 'utf8').toString('base64');
       context.attached = true;
+      context.consumed = true;
       context.response.setHeader('X-OKVideo-Host-Message', encoded);
     }
 
@@ -370,11 +584,39 @@ enum NodeRuntimeContractFactory {
           receiveHostMessage(request, response);
           return;
         }
-        const context = { response, hostMessage: null, attached: false };
-        if (request.method === 'POST') activeBusinessRequests.add(context);
-        const removeContext = () => activeBusinessRequests.delete(context);
-        response.once('finish', removeContext);
-        response.once('close', removeContext);
+        const requestURL = new URL(request.url || '/', 'http://127.0.0.1');
+        const pollPrefix = '/__okvideo/host-message/';
+        if (request.method === 'GET' && requestURL.pathname.startsWith(pollPrefix)) {
+          const invocationID = normalizedInvocationID(
+            decodeURIComponent(requestURL.pathname.slice(pollPrefix.length))
+          );
+          if (!invocationID) {
+            response.statusCode = 400;
+            response.end();
+            return;
+          }
+          pollHostMessage(
+            request,
+            response,
+            invocationID,
+            Number(requestURL.searchParams.get('wait') || 0)
+          );
+          return;
+        }
+        const invocationID = invocationIDFromRequest(request) || crypto.randomUUID();
+        const context = {
+          id: invocationID,
+          response,
+          hostMessage: null,
+          attached: false,
+          consumed: false,
+          waiters: [],
+          removalTimer: null
+        };
+        invocations.set(invocationID, context);
+        response.setHeader('X-OKVideo-Invocation-ID', invocationID);
+        response.once('finish', () => scheduleInvocationRemoval(context));
+        response.once('close', () => scheduleInvocationRemoval(context));
         const originalWriteHead = response.writeHead;
         const originalEnd = response.end;
         response.writeHead = function controlledWriteHead(...args) {
@@ -385,7 +627,7 @@ enum NodeRuntimeContractFactory {
           attachHostMessageHeader(context);
           return originalEnd.apply(response, args);
         };
-        handler(request, response);
+        invocationStorage.run(invocationID, () => handler(request, response));
       });
       server[managedListener] = true;
       return server;

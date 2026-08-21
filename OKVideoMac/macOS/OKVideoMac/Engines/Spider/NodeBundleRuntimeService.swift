@@ -1110,7 +1110,8 @@ actor NodeBundleRuntimeService {
         let allowedContractBNames = Set([
             "DEV_HTTP_PORT",
             "OKVIDEO_CONTRACT_B_CONFIG_PATH",
-            "OKVIDEO_CONTRACT_B_STATE_PATH"
+            "OKVIDEO_CONTRACT_B_STATE_PATH",
+            "OKVIDEO_CONTRACT_B_PROFILE_PATH"
         ])
         guard Set(contractAdditions.keys).isSubset(of: allowedContractBNames) else {
             throw NodeBundleRuntimeError.invalidNodeEnvironment(

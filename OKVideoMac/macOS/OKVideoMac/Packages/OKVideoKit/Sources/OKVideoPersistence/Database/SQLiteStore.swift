@@ -9,7 +9,7 @@ public actor SQLiteStore:
     HistoryRepository,
     SettingsRepository
 {
-    public static let currentSchemaVersion = 4
+    public static let currentSchemaVersion = 5
 
     private let connection: SQLiteConnection
     public let databaseURL: URL
@@ -45,10 +45,20 @@ public actor SQLiteStore:
                 store: try SQLiteStore(databaseURL: databaseURL),
                 quarantinedDatabaseDirectory: nil
             )
-        } catch {
+        } catch let openingError {
             let fileManager = FileManager.default
             guard fileManager.fileExists(atPath: databaseURL.path) else {
-                throw error
+                throw openingError
+            }
+
+            // Opening can fail for reasons that do not imply corruption, such
+            // as a busy database, a newer schema, a migration error, or a
+            // transient filesystem failure. Moving a healthy database in any
+            // of those cases makes all user data appear to disappear. Only
+            // quarantine after a read-only SQLite integrity check positively
+            // identifies corrupt/not-a-database content.
+            guard confirmedCorruption(at: databaseURL) else {
+                throw openingError
             }
 
             let quarantine = databaseURL.deletingLastPathComponent()
@@ -78,11 +88,159 @@ public actor SQLiteStore:
                     "数据库损坏且无法隔离到 \(quarantine.lastPathComponent)：\(error.localizedDescription)"
                 )
             }
+
+            // WAL recovery can make a database that initially reported
+            // SQLITE_CORRUPT readable once its three files have been moved as
+            // one set. Do not replace such a healthy user database with an
+            // empty one. Restore the complete set and retry the normal open;
+            // if that still fails, preserve the files and surface the original
+            // failure instead of silently discarding visible user data.
+            let quarantinedDatabaseURL = quarantine
+                .appendingPathComponent(databaseURL.lastPathComponent)
+            if confirmedHealthy(at: quarantinedDatabaseURL) {
+                do {
+                    for candidate in candidates {
+                        let quarantinedCandidate = quarantine
+                            .appendingPathComponent(candidate.lastPathComponent)
+                        guard fileManager.fileExists(atPath: quarantinedCandidate.path) else {
+                            continue
+                        }
+                        try fileManager.moveItem(
+                            at: quarantinedCandidate,
+                            to: candidate
+                        )
+                    }
+                    try? fileManager.removeItem(at: quarantine)
+                } catch {
+                    throw AppError.database(
+                        "数据库隔离后校验完整，但恢复失败：\(error.localizedDescription)"
+                    )
+                }
+                do {
+                    return OpenResult(
+                        store: try SQLiteStore(databaseURL: databaseURL),
+                        quarantinedDatabaseDirectory: nil
+                    )
+                } catch {
+                    throw openingError
+                }
+            }
             return OpenResult(
                 store: try SQLiteStore(databaseURL: databaseURL),
                 quarantinedDatabaseDirectory: quarantine
             )
         }
+    }
+
+    private static func confirmedCorruption(at databaseURL: URL) -> Bool {
+        var handle: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            databaseURL.path,
+            &handle,
+            SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        defer {
+            if let handle {
+                sqlite3_close(handle)
+            }
+        }
+
+        if isCorruptionResult(openResult) {
+            return true
+        }
+        guard openResult == SQLITE_OK, let handle else {
+            return false
+        }
+
+        sqlite3_extended_result_codes(handle, 1)
+        var statement: OpaquePointer?
+        let prepareResult = sqlite3_prepare_v2(
+            handle,
+            "PRAGMA quick_check",
+            -1,
+            &statement,
+            nil
+        )
+        if isCorruptionResult(prepareResult) {
+            return true
+        }
+        guard prepareResult == SQLITE_OK, let statement else {
+            return false
+        }
+        defer { sqlite3_finalize(statement) }
+
+        var sawResult = false
+        var sawIntegrityFailure = false
+        while true {
+            let stepResult = sqlite3_step(statement)
+            if stepResult == SQLITE_ROW {
+                sawResult = true
+                guard let pointer = sqlite3_column_text(statement, 0) else {
+                    return false
+                }
+                if String(cString: pointer) != "ok" {
+                    sawIntegrityFailure = true
+                }
+            } else if stepResult == SQLITE_DONE {
+                return sawResult && sawIntegrityFailure
+            } else if isCorruptionResult(stepResult) {
+                return true
+            } else {
+                return false
+            }
+        }
+    }
+
+    private static func confirmedHealthy(at databaseURL: URL) -> Bool {
+        var handle: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            databaseURL.path,
+            &handle,
+            SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        defer {
+            if let handle {
+                sqlite3_close(handle)
+            }
+        }
+        guard openResult == SQLITE_OK, let handle else {
+            return false
+        }
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            handle,
+            "PRAGMA quick_check",
+            -1,
+            &statement,
+            nil
+        ) == SQLITE_OK, let statement else {
+            return false
+        }
+        defer { sqlite3_finalize(statement) }
+
+        var sawResult = false
+        while true {
+            switch sqlite3_step(statement) {
+            case SQLITE_ROW:
+                guard let pointer = sqlite3_column_text(statement, 0),
+                      String(cString: pointer) == "ok" else {
+                    return false
+                }
+                sawResult = true
+            case SQLITE_DONE:
+                return sawResult
+            default:
+                return false
+            }
+        }
+    }
+
+    private static func isCorruptionResult(_ result: Int32) -> Bool {
+        let primaryResult = result & 0xff
+        return primaryResult == SQLITE_CORRUPT || primaryResult == SQLITE_NOTADB
     }
 
     public func saveConfiguration(_ configuration: StoredConfiguration) throws {
@@ -311,13 +469,16 @@ public actor SQLiteStore:
 
     public func saveHistory(_ history: HistoryRecord, incognito: Bool) throws {
         guard !incognito else { return }
+        let playbackReference = try history.playbackReference.map {
+            String(decoding: try JSONEncoder().encode($0), as: UTF8.self)
+        }
         try connection.execute(
             """
             INSERT INTO history (
                 configuration_id, site_key, video_id, title, poster_url, source_name,
                 episode_name, episode_reference, media_reference,
-                position, duration, watched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                position, duration, watched_at, playback_reference
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(configuration_id, site_key, video_id) DO UPDATE SET
                 title = excluded.title,
                 poster_url = excluded.poster_url,
@@ -327,7 +488,8 @@ public actor SQLiteStore:
                 media_reference = excluded.media_reference,
                 position = excluded.position,
                 duration = excluded.duration,
-                watched_at = excluded.watched_at
+                watched_at = excluded.watched_at,
+                playback_reference = excluded.playback_reference
             """,
             bindings: [
                 .text(history.configurationID?.uuidString.lowercased() ?? ""),
@@ -341,7 +503,8 @@ public actor SQLiteStore:
                 .optional(Self.safeMediaReference(history.mediaReference)),
                 .double(history.position),
                 .double(history.duration),
-                .double(history.watchedAt.timeIntervalSince1970)
+                .double(history.watchedAt.timeIntervalSince1970),
+                .optional(playbackReference)
             ]
         )
     }
@@ -352,7 +515,7 @@ public actor SQLiteStore:
             """
             SELECT configuration_id, site_key, video_id, title, poster_url, source_name,
                    episode_name, episode_reference, media_reference,
-                   position, duration, watched_at
+                   position, duration, watched_at, playback_reference
             FROM history
             ORDER BY watched_at DESC
             """
@@ -369,6 +532,12 @@ public actor SQLiteStore:
                     episodeName: self.connection.text(statement, 6),
                     episodeReference: self.connection.text(statement, 7),
                     mediaReference: self.connection.text(statement, 8),
+                    playbackReference: self.connection.text(statement, 12)
+                        .flatMap { $0.data(using: .utf8) }
+                        .flatMap { try? JSONDecoder().decode(
+                            HistoryPlaybackReference.self,
+                            from: $0
+                        ) },
                     position: sqlite3_column_double(statement, 9),
                     duration: sqlite3_column_double(statement, 10),
                     watchedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 11))
@@ -617,6 +786,14 @@ public actor SQLiteStore:
                     "CREATE INDEX history_configuration_watched_at ON history(configuration_id, watched_at DESC)"
                 )
                 try connection.execute("PRAGMA user_version = 4")
+            }
+        }
+        if version < 5 {
+            try connection.transaction {
+                try connection.execute(
+                    "ALTER TABLE history ADD COLUMN playback_reference TEXT"
+                )
+                try connection.execute("PRAGMA user_version = 5")
             }
         }
     }

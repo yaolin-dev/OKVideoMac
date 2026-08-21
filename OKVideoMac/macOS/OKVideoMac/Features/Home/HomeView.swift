@@ -20,7 +20,7 @@ struct HomeView: View {
     @ViewBuilder
     private var homeContent: some View {
         if !state.hasCompletedStartup && state.activeConfiguration == nil {
-            ProgressView("正在恢复上次内容…")
+            AppActivityLabel("正在恢复上次内容…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if state.activeConfiguration == nil {
             VStack(spacing: 18) {
@@ -170,7 +170,7 @@ struct HomeView: View {
                                         )
                                     }
                                 } else {
-                                    ProgressView("正在加载分类…")
+                                    AppActivityLabel("正在加载分类…")
                                 }
                             } else if state.homePresentationSelection
                                 == .recommendation,
@@ -192,7 +192,7 @@ struct HomeView: View {
                 }
             }
         } else if state.isHomeLoading || !state.hasCompletedStartup {
-            ProgressView("正在加载站点…")
+            AppActivityLabel("正在加载站点…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let message = state.homeLoadErrorMessage {
             EmptyStateView(
@@ -345,8 +345,7 @@ struct HomeToolbarView: View {
                 )
 
                 if state.isLoading || state.isHomeLoading {
-                    ProgressView()
-                        .controlSize(.small)
+                    AppActivityIndicator(size: .small)
                 }
 
                 Button {
@@ -381,8 +380,7 @@ struct SourceSwitchFeedbackView: View {
                 EmptyView()
             case .switching(_, let name):
                 HStack(spacing: 5) {
-                    ProgressView()
-                        .controlSize(.small)
+                    AppActivityIndicator(size: .small)
                     Text("正在切换到 \(name)…")
                 }
                 .accessibilityLabel("正在切换到 \(name)")

@@ -30,16 +30,6 @@ struct UpstreamVideo {
 /// Interprets only protocol metadata. Human-facing names, poster URLs, and
 /// identifiers that merely happen to look like URLs are deliberately ignored.
 enum ProtocolContentSemantics {
-    private static let actionIdentifiers: Set<String> = [
-        "action", "actions", "configuration", "config", "menu", "operation",
-        "operations", "service", "services", "setting", "settings", "tool",
-        "tools"
-    ]
-
-    private static let unsupportedIdentifiers: Set<String> = [
-        "unsupported"
-    ]
-
     static func kind(
         categoryID: String?,
         action: String?,
@@ -48,16 +38,9 @@ enum ProtocolContentSemantics {
         if action?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
             return .action
         }
-        for value in [tag, categoryID].compactMap({ $0 }) {
-            let identifier = value.trimmingCharacters(
-                in: .whitespacesAndNewlines
-            ).lowercased()
-            if actionIdentifiers.contains(identifier) {
-                return .action
-            }
-            if unsupportedIdentifiers.contains(identifier) {
-                return .unsupported
-            }
+        if tag?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare("unsupported") == .orderedSame {
+            return .unsupported
         }
         return .media
     }

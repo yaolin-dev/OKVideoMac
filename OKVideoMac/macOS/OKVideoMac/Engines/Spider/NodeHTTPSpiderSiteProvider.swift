@@ -323,6 +323,33 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         page: Int,
         filters: [String: String]
     ) async throws -> VideoPage {
+        try await category(
+            id: id,
+            page: page,
+            filters: filters,
+            awaitsHostAction: false
+        )
+    }
+
+    func actionCategory(
+        id: String,
+        page: Int,
+        filters: [String: String]
+    ) async throws -> VideoPage {
+        try await category(
+            id: id,
+            page: page,
+            filters: filters,
+            awaitsHostAction: true
+        )
+    }
+
+    private func category(
+        id: String,
+        page: Int,
+        filters: [String: String],
+        awaitsHostAction: Bool
+    ) async throws -> VideoPage {
         let values = filters.mapValues(JSONValue.string)
         let invocation = try await invoke(
             method: "category",
@@ -335,8 +362,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 "extend": .object(values),
                 "filters": .object(values)
             ],
-            maximumAttempts: 2
+            maximumAttempts: 2,
+            hostMessageWaitMilliseconds: awaitsHostAction ? 1_000 : 0
         )
+        if let hostMessage = invocation.hostMessage {
+            throw try webAuthorizationRequired(hostMessage: hostMessage)
+        }
         return try SpiderResponseMapper.page(
             invocation.value,
             site: site,
@@ -360,12 +391,25 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     }
 
     func select(summary: VideoSummary) async throws -> SiteSelectionResult {
-        try await select(id: summary.videoID, fallbackSummary: summary)
+        try await select(
+            id: summary.videoID,
+            fallbackSummary: summary,
+            awaitsHostAction: summary.resolvedContentKind == .action
+        )
+    }
+
+    func select(action item: SiteActionItem) async throws -> SiteSelectionResult {
+        try await select(
+            id: item.itemID,
+            fallbackSummary: item.selectionSummary,
+            awaitsHostAction: true
+        )
     }
 
     private func select(
         id: String,
-        fallbackSummary: VideoSummary?
+        fallbackSummary: VideoSummary?,
+        awaitsHostAction: Bool = false
     ) async throws -> SiteSelectionResult {
         let invocation = try await invoke(
             method: "detail",
@@ -373,7 +417,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 "id": .string(id),
                 "ids": .array([.string(id)])
             ],
-            maximumAttempts: 2
+            maximumAttempts: 2,
+            hostMessageWaitMilliseconds: awaitsHostAction ? 1_000 : 0
         )
         if let hostMessage = invocation.hostMessage {
             throw try webAuthorizationRequired(
@@ -591,7 +636,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     func action(_ action: String) async throws -> JSONValue {
         let invocation = try await invoke(
             method: "action",
-            body: ["action": .string(action)]
+            body: ["action": .string(action)],
+            hostMessageWaitMilliseconds: 1_000
         )
         if let hostMessage = invocation.hostMessage {
             throw try webAuthorizationRequired(
@@ -604,7 +650,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     private func invoke(
         method: String,
         body: [String: JSONValue],
-        maximumAttempts: Int = 1
+        maximumAttempts: Int = 1,
+        hostMessageWaitMilliseconds: Int = 0
     ) async throws -> InvocationResult {
         let requestBody = try JSONEncoder().encode(JSONValue.object(body))
         var headers = HTTPHeaders(site.header)
@@ -625,6 +672,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 )
                 let endpoint = apiURL.appendingPathComponent(method)
                 lastEndpoint = endpoint
+                let invocationID = UUID().uuidString.lowercased()
+                headers["X-OKVideo-Invocation-ID"] = invocationID
                 let response = try await httpClient.send(
                     HTTPRequest(
                         url: endpoint,
@@ -653,12 +702,27 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                     }
                 }
                 guard !(200...299).contains(response.statusCode) else {
+                    let immediateHostMessage = Self.decodeHostMessage(
+                        response.headers["X-OKVideo-Host-Message"]
+                    )
+                    let hostMessage: HostMessage?
+                    if let immediateHostMessage {
+                        hostMessage = immediateHostMessage
+                    } else if hostMessageWaitMilliseconds > 0 {
+                        hostMessage = try await awaitHostMessage(
+                            invocationID: response.headers[
+                                "X-OKVideo-Invocation-ID"
+                            ] ?? invocationID,
+                            baseURL: readyBaseURL,
+                            waitMilliseconds: hostMessageWaitMilliseconds
+                        )
+                    } else {
+                        hostMessage = nil
+                    }
                     return InvocationResult(
                         value: value,
                         baseURL: readyBaseURL,
-                        hostMessage: Self.decodeHostMessage(
-                            response.headers["X-OKVideo-Host-Message"]
-                        )
+                        hostMessage: hostMessage
                     )
                 }
                 let message = Self.serverMessage(from: value)
@@ -703,6 +767,57 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             }
         }
         throw AppError.spider("Node 站点 \(site.name) 的 \(method) 请求失败")
+    }
+
+    private func awaitHostMessage(
+        invocationID: String,
+        baseURL: URL,
+        waitMilliseconds: Int
+    ) async throws -> HostMessage? {
+        let allowed = CharacterSet.alphanumerics.union(
+            CharacterSet(charactersIn: "._-")
+        )
+        guard invocationID.rangeOfCharacter(from: allowed.inverted) == nil,
+              (8...128).contains(invocationID.count) else {
+            throw AppError.spider("Node 宿主操作关联标识无效")
+        }
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent(
+                "__okvideo/host-message/\(invocationID)"
+            ),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [
+            URLQueryItem(
+                name: "wait",
+                value: String(min(max(waitMilliseconds, 0), 2_000))
+            )
+        ]
+        guard let endpoint = components?.url else {
+            throw AppError.spider("Node 宿主操作轮询地址无效")
+        }
+        let response = try await httpClient.send(
+            HTTPRequest(
+                url: endpoint,
+                method: .get,
+                timeout: TimeInterval(waitMilliseconds) / 1_000 + 2,
+                maximumResponseBytes: 8 * 1_024,
+                retryPolicy: .none,
+                allowsNonSuccessfulStatus: true
+            )
+        )
+        guard response.statusCode == 200 else {
+            if response.statusCode == 204 || response.statusCode == 404 {
+                return nil
+            }
+            throw AppError.spider(
+                "Node 宿主操作轮询失败：HTTP 状态码 \(response.statusCode)"
+            )
+        }
+        guard response.body.count <= 4 * 1_024 else {
+            throw AppError.spider("Node 宿主操作响应过大")
+        }
+        return try? JSONDecoder().decode(HostMessage.self, from: response.body)
     }
 
     private func initializeSite(
