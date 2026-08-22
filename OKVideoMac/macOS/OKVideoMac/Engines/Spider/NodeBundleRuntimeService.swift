@@ -367,7 +367,9 @@ final class NodeDiagnosticLogWriter: @unchecked Sendable {
 
     private func writeNodeLine(_ data: Data) {
         let raw = String(decoding: data, as: UTF8.self)
-        let sanitized = String(LogRedactor.text(raw).prefix(64 * 1_024))
+        let sanitized = String(
+            Self.sanitizedNodeOutput(raw).prefix(64 * 1_024)
+        )
         write(
             NodeDiagnosticEvent(
                 category: .spiderSite,
@@ -375,6 +377,27 @@ final class NodeDiagnosticLogWriter: @unchecked Sendable {
                 code: .spiderOutput,
                 message: sanitized
             )
+        )
+    }
+
+    /// Runtime proxy URLs may carry an opaque, encoded request context in a
+    /// query item whose name is chosen by the third-party bundle. Generic log
+    /// redaction cannot safely enumerate those names, so diagnostic output
+    /// retains the proxy route while dropping its entire query capability.
+    private static func sanitizedNodeOutput(_ raw: String) -> String {
+        LogRedactor.text(redactingRuntimeProxyQueries(in: raw))
+    }
+
+    private static func redactingRuntimeProxyQueries(in text: String) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?i)(/proxy/[^?\s<>\"']+)\?[^\s<>\"']+"#
+        ) else {
+            return text
+        }
+        return regex.stringByReplacingMatches(
+            in: text,
+            range: NSRange(text.startIndex..., in: text),
+            withTemplate: "$1?<redacted>"
         )
     }
 

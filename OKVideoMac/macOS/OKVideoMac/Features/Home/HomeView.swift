@@ -135,6 +135,7 @@ struct HomeView: View {
                                                 await state.performHomeAction(item)
                                             }
                                         }
+                                        .disabled(state.isConfigurationInteractionActive)
                                     }
                                 }
                             }
@@ -239,6 +240,7 @@ struct HomeView: View {
                     HomeActionCard(item: item) {
                         Task { await state.performHomeAction(item) }
                     }
+                    .disabled(state.isConfigurationInteractionActive)
                 }
             }
         }
@@ -427,16 +429,33 @@ struct SourceSwitchFeedbackView: View {
                 }
                 .accessibilityLabel("正在切换到 \(name)")
             case .success(_, let name):
-                Label("已切换到 \(name)", systemImage: "checkmark.circle.fill")
+                if compact {
+                    Label("已切换", systemImage: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .layoutPriority(2)
+                        .help("已切换到 \(name)")
+                        .accessibilityLabel(Text("已切换到 \(name)"))
+                } else {
+                    Label(
+                        "已切换到 \(name)",
+                        systemImage: "checkmark.circle.fill"
+                    )
                     .foregroundColor(.green)
+                }
             case .failure(_, let name, let message):
                 if compact {
                     Label(
-                        "切换 \(name) 失败",
+                        "切换失败",
                         systemImage: "exclamationmark.triangle.fill"
                     )
                     .foregroundColor(.red)
-                    .help(message)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .layoutPriority(2)
+                    .help("切换到 \(name) 失败：\(message)")
+                    .accessibilityLabel(
+                        Text("切换到 \(name) 失败：\(message)")
+                    )
                 } else {
                     VStack(alignment: .leading, spacing: 2) {
                         Label(

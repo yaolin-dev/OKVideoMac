@@ -829,6 +829,57 @@ final class SiteProviderTests: XCTestCase {
         XCTAssertEqual(result.headers["Cookie"], "session=fixture")
     }
 
+    func testPlayerReadsExplicitProviderStableResourceDescriptor() throws {
+        let value: JSONValue = .object([
+            "parse": .integer(0),
+            "url": .string("http://127.0.0.1:18988/src/down/ephemeral"),
+            "providerResourceReference": .object([
+                "schemaVersion": .integer(1),
+                "providerVersion": .integer(1),
+                "stableResourceLocator": .string("node-item-42-file-7"),
+                "stability": .string("providerStable")
+            ])
+        ])
+
+        XCTAssertEqual(
+            SpiderResponseMapper.providerPlaybackResourceDescriptor(value),
+            ProviderPlaybackResourceDescriptor(
+                schemaVersion: 1,
+                providerVersion: 1,
+                stableResourceLocator: "node-item-42-file-7",
+                stability: .providerStable
+            )
+        )
+    }
+
+    func testPlayerRejectsImplicitOrSensitiveProviderResourceDescriptor() {
+        let implicit: JSONValue = .object([
+            "url": .string("http://127.0.0.1:18988/src/down/ephemeral")
+        ])
+        XCTAssertNil(
+            SpiderResponseMapper.providerPlaybackResourceDescriptor(implicit)
+        )
+
+        for locator in [
+            "https://media.example.invalid/signed/item-42",
+            "node-item-42-token-secret",
+            #"{"fileId":"42"}"#
+        ] {
+            let value: JSONValue = .object([
+                "url": .string("http://127.0.0.1:18988/src/down/ephemeral"),
+                "providerResourceReference": .object([
+                    "schemaVersion": .integer(1),
+                    "providerVersion": .integer(1),
+                    "stableResourceLocator": .string(locator),
+                    "stability": .string("providerStable")
+                ])
+            ])
+            XCTAssertNil(
+                SpiderResponseMapper.providerPlaybackResourceDescriptor(value)
+            )
+        }
+    }
+
     func testContentSiteBlankDetailPlaceholderIsNotAnAction() throws {
         let site = SiteConfiguration(
             key: "node-content",

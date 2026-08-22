@@ -4,32 +4,377 @@ import CryptoKit
 import Foundation
 import OKVideoCore
 
-struct AndroidBridgeUIControl: Decodable, Equatable, Identifiable {
+struct AndroidBridgeUIControl: Decodable, Equatable, Identifiable, Sendable {
     let id: String
     let title: String
     let enabled: Bool?
+    let clickable: Bool?
     let role: String?
 
     init(
         id: String,
         title: String,
         enabled: Bool? = true,
+        clickable: Bool? = true,
         role: String? = nil
     ) {
         self.id = id
         self.title = title
         self.enabled = enabled
+        self.clickable = clickable
         self.role = role
     }
 }
 
-struct AndroidBridgeUISubmitResult: Equatable {
+/// A request-owned description of one native Android configuration surface.
+///
+/// This is intentionally provider-neutral. A chooser, ordering form, cookie
+/// reset and login QR code are different phases of a configuration operation;
+/// they are not all authorization prompts merely because Android rendered them.
+struct ConfigurationInteraction: Equatable, Identifiable, Sendable {
+    enum ActionKind: String, Equatable, Sendable {
+        case command
+        case immediate
+        case toggle
+        case ordering
+        case configuration
+        case authorization
+        case webSetting
+        case nativeSetting
+        case playback
+    }
+
+    enum Phase: String, Equatable, Sendable {
+        case invoking
+        case choice
+        case form
+        case qrCode
+        case transitioning
+        case reattaching
+        case status
+        case completed
+        case failed
+        case cancelled
+    }
+
+    enum Outcome: String, Equatable, Sendable {
+        case pending
+        case succeeded
+        case failed
+        case cancelled
+    }
+
+    enum QRRole: String, Equatable, Sendable {
+        case none
+        /// The bridge reports a QR phase, but the image has not decoded yet.
+        case candidate
+        case login
+        case remoteInputHelper
+        case credentialPush
+    }
+
+    struct Control: Equatable, Identifiable, Sendable {
+        enum Role: String, Equatable, Sendable {
+            case action
+            case cancel
+            case link
+            case status
+            case unknown
+        }
+
+        let id: String
+        let title: String
+        let enabled: Bool
+        let clickable: Bool
+        let role: Role
+    }
+
+    let id: UUID
+    let actionKind: ActionKind
+    let phase: Phase
+    let outcome: Outcome
+    let title: String
+    let provider: String?
+    let generation: Int?
+    let controls: [Control]
+    let qrRole: QRRole
+    let qrImage: Data?
+}
+
+/// The terminal provider response associated with one interaction request.
+/// Keeping this value separate from the transient UI snapshot lets a caller
+/// present native UI immediately without losing the eventual Spider result.
+struct ConfigurationInteractionTerminalResponse: Equatable, Sendable {
+    let requestID: UUID
+    let outcome: ConfigurationInteraction.Outcome
+    let providerResult: JSONValue?
+    let error: String?
+    let httpStatusCode: Int?
+    /// `nil` means the compatibility bridge did not report refresh state.
+    /// Callers must not interpret it as either true or false.
+    let refreshPerformed: Bool?
+}
+
+/// Request-scoped bridge handle. The HTTP invocation and every later state,
+/// snapshot, submit, verification and cancellation request use the same ID.
+/// The invocation continues after the first UI generation is presented; its
+/// final response is cached instead of being discarded by a first-wins race.
+final class InteractionHandle: @unchecked Sendable, Identifiable {
+    typealias StateProvider = @Sendable (UUID) async throws
+        -> AndroidBridgeUIState
+    typealias SnapshotProvider = @Sendable (UUID) async throws -> Data
+    typealias SubmitProvider = @Sendable (
+        UUID,
+        String?,
+        String,
+        String?,
+        Int?
+    ) async throws -> AndroidBridgeUISubmitResult
+    typealias VerifyProvider = @Sendable (
+        UUID,
+        Bool,
+        String?,
+        Bool?
+    ) async throws -> ConfigurationInteractionTerminalResponse
+    typealias CancelProvider = @Sendable (UUID) async throws -> Void
+
+    private actor State {
+        var latestInteraction: ConfigurationInteraction?
+        var terminalResult:
+            Result<ConfigurationInteractionTerminalResponse, Error>?
+        var waiters: [
+            CheckedContinuation<ConfigurationInteractionTerminalResponse, Error>
+        ] = []
+
+        func record(_ interaction: ConfigurationInteraction) {
+            latestInteraction = interaction
+        }
+
+        func latest() -> ConfigurationInteraction? {
+            latestInteraction
+        }
+
+        @discardableResult
+        func finish(
+            _ result: Result<ConfigurationInteractionTerminalResponse, Error>
+        ) -> Bool {
+            guard terminalResult == nil else { return false }
+            terminalResult = result
+            let currentWaiters = waiters
+            waiters.removeAll()
+            currentWaiters.forEach { $0.resume(with: result) }
+            return true
+        }
+
+        func terminalResponseIfAvailable() throws
+            -> ConfigurationInteractionTerminalResponse? {
+            guard let terminalResult else { return nil }
+            return try terminalResult.get()
+        }
+
+        func terminalResponse() async throws
+            -> ConfigurationInteractionTerminalResponse {
+            if let terminalResult {
+                return try terminalResult.get()
+            }
+            return try await withCheckedThrowingContinuation { continuation in
+                waiters.append(continuation)
+            }
+        }
+    }
+
+    let id: UUID
+    let actionKind: ConfigurationInteraction.ActionKind
+
+    private let state = State()
+    private let stateProvider: StateProvider?
+    private let snapshotProvider: SnapshotProvider?
+    private let submitProvider: SubmitProvider?
+    private let verifyProvider: VerifyProvider?
+    private let cancelProvider: CancelProvider?
+    private var invocationTask: Task<Void, Never>?
+
+    init(
+        id: UUID = UUID(),
+        actionKind: ConfigurationInteraction.ActionKind,
+        stateProvider: StateProvider? = nil,
+        snapshotProvider: SnapshotProvider? = nil,
+        submitProvider: SubmitProvider? = nil,
+        verifyProvider: VerifyProvider? = nil,
+        cancelProvider: CancelProvider? = nil,
+        operation: @escaping @Sendable () async throws
+            -> ConfigurationInteractionTerminalResponse
+    ) {
+        self.id = id
+        self.actionKind = actionKind
+        self.stateProvider = stateProvider
+        self.snapshotProvider = snapshotProvider
+        self.submitProvider = submitProvider
+        self.verifyProvider = verifyProvider
+        self.cancelProvider = cancelProvider
+        let state = self.state
+        invocationTask = Task {
+            do {
+                await state.finish(.success(try await operation()))
+            } catch {
+                await state.finish(.failure(error))
+            }
+        }
+    }
+
+    func record(_ interaction: ConfigurationInteraction) async {
+        guard interaction.id == id else { return }
+        await state.record(interaction)
+    }
+
+    func latestInteraction() async -> ConfigurationInteraction? {
+        await state.latest()
+    }
+
+    func finalResponse() async throws
+        -> ConfigurationInteractionTerminalResponse {
+        try await state.terminalResponse()
+    }
+
+    func currentState() async throws -> AndroidBridgeUIState {
+        guard let stateProvider else {
+            throw AppError.spider("当前桥不支持请求级配置状态")
+        }
+        return try await stateProvider(id)
+    }
+
+    func snapshot() async throws -> Data {
+        guard let snapshotProvider else {
+            throw AppError.spider("当前桥不支持请求级配置快照")
+        }
+        return try await snapshotProvider(id)
+    }
+
+    @discardableResult
+    func submit(
+        text: String?,
+        button: String,
+        controlID: String?,
+        generation: Int?
+    ) async throws -> AndroidBridgeUISubmitResult {
+        guard let submitProvider else {
+            throw AppError.spider("当前桥不支持请求级配置提交")
+        }
+        return try await submitProvider(
+            id,
+            text,
+            button,
+            controlID,
+            generation
+        )
+    }
+
+    /// Completes a UI-backed operation only after the host has verified the
+    /// provider's resulting state. `actualRefreshPerformed` must be supplied
+    /// only when the host really performed and observed that refresh.
+    @discardableResult
+    func verify(
+        succeeded: Bool,
+        error: String? = nil,
+        actualRefreshPerformed: Bool? = nil,
+        providerResultGraceNanoseconds: UInt64 = 3_000_000_000
+    ) async throws -> ConfigurationInteractionTerminalResponse {
+        let verification: ConfigurationInteractionTerminalResponse
+        do {
+            guard let verifyProvider else {
+                throw AppError.spider("当前桥不支持请求级配置验证")
+            }
+            verification = try await verifyProvider(
+                id,
+                succeeded,
+                error,
+                actualRefreshPerformed
+            )
+            guard verification.requestID == id else {
+                throw AppError.spider("配置操作验证结果与当前请求不匹配")
+            }
+        } catch {
+            // Verification is one producer of this request's terminal state,
+            // not a second completion path in AppState. Publish its failure
+            // through the same atomic owner used by the original invocation
+            // so a late provider success cannot flip a failure back to
+            // success. The single terminal observer presents the error.
+            let installedFailure = await state.finish(.failure(error))
+            if installedFailure {
+                cancel()
+            }
+            return try await state.terminalResponse()
+        }
+
+        // Successful verification is provider-state evidence, but it does not
+        // contain the value being produced by the still-running `/v1/invoke`.
+        // Give that exact invocation a short bounded chance to win terminal
+        // ownership. Otherwise a nil verification result could make AppState
+        // retry the operation while the original worker is about to return its
+        // authoritative detail/action/playback value.
+        if verification.outcome == .succeeded,
+           providerResultGraceNanoseconds > 0 {
+            let startedAt = DispatchTime.now().uptimeNanoseconds
+            while DispatchTime.now().uptimeNanoseconds - startedAt
+                    < providerResultGraceNanoseconds {
+                if let providerTerminal = try await state
+                    .terminalResponseIfAvailable() {
+                    return providerTerminal
+                }
+                try Task.checkCancellation()
+                let elapsed = DispatchTime.now().uptimeNanoseconds - startedAt
+                let remaining = providerResultGraceNanoseconds > elapsed
+                    ? providerResultGraceNanoseconds - elapsed
+                    : 0
+                guard remaining > 0 else { break }
+                try await Task.sleep(
+                    nanoseconds: min(50_000_000, remaining)
+                )
+            }
+        }
+
+        // The provider worker did not publish a terminal value within the
+        // grace period (or verification explicitly failed). Atomically install
+        // the verified response as the one fallback terminal. If the provider
+        // won the boundary race, `finish` returns false and its value remains
+        // authoritative. Publishing through State wakes the single AppState
+        // terminal observer; the verification caller must not deliver a second
+        // completion independently.
+        let installedVerification = await state.finish(.success(verification))
+        if installedVerification {
+            cancel()
+        }
+        return try await state.terminalResponse()
+    }
+
+    func cancel() {
+        invocationTask?.cancel()
+        guard let cancelProvider else { return }
+        let requestID = id
+        Task {
+            try? await cancelProvider(requestID)
+        }
+    }
+    /// Cancels the provider worker and waits for the request-scoped bridge to
+    /// acknowledge the cancellation before the host starts another action.
+    func cancelAndWait() async {
+        invocationTask?.cancel()
+        guard let cancelProvider else { return }
+        try? await cancelProvider(id)
+    }
+}
+
+struct AndroidBridgeUISubmitResult: Equatable, Sendable {
     let clicked: Bool
     let stale: Bool
     let generation: Int?
 }
 
-struct AndroidBridgeUIState: Decodable, Equatable {
+struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
+    let interactionID: String?
+    let revision: Int?
+    let kind: String?
+    let method: String?
     let visible: Bool
     let title: String
     let inputCount: Int
@@ -43,23 +388,54 @@ struct AndroidBridgeUIState: Decodable, Equatable {
     let credentialPush: Bool?
     let remoteInput: Bool?
     let generation: Int?
+    let outcome: String?
+    let terminal: Bool?
+    let hostUnavailable: Bool?
+    let verificationPerformed: Bool?
+    let refreshPerformed: Bool?
+    let error: String?
+    /// Opaque request owner minted by the macOS host and bound by the Bridge
+    /// to one configuration/site/JAR tuple. These fields are optional so an
+    /// older Bridge can still render read-only state, but credential
+    /// submission is unavailable without the complete binding.
+    var providerOwnerID: String? = nil
+    var configurationID: String? = nil
+    var siteKey: String? = nil
+    var actionContract: JSONValue? = nil
+
+    var interactionGeneration: Int? {
+        generation ?? revision
+    }
 
     var actionableControls: [AndroidBridgeUIControl] {
         if let controls, !controls.isEmpty {
-            return controls.filter { $0.enabled != false }
+            return controls.filter {
+                $0.enabled != false && $0.clickable != false
+            }
         }
         return buttons.enumerated().map {
             AndroidBridgeUIControl(
                 id: "legacy:\($0.offset)",
                 title: $0.element,
                 enabled: true,
+                clickable: true,
                 role: "legacy"
             )
         }
     }
 
     var isQRCode: Bool {
-        !isRemoteInputQRCode && phase == "qr" && imageCount > 0
+        // The request-scoped bridge reports its lifecycle phase
+        // (`awaitingUser`) at the top level. Accept that structural phase in
+        // addition to the legacy QR phase, but never infer QR from an image
+        // alone. The snapshot must still decode before it becomes a login QR.
+        let normalizedPhase = phase?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return !isRemoteInputQRCode
+            && imageCount > 0
+            && ["qr", "qrcode", "qr_code", "awaitinguser", "awaiting_user"]
+                .contains(normalizedPhase)
     }
 
     var isRemoteInputQRCode: Bool {
@@ -72,15 +448,22 @@ struct AndroidBridgeUIState: Decodable, Equatable {
     }
 
     var isCredentialPush: Bool {
-        if credentialPush == true {
-            return true
+        // Credential handling is a security boundary. Only the bridge's
+        // structured role and a request-scoped submission contract may select
+        // this path. Provider text/images are untrusted presentation content
+        // and must never change input type or choose a JAR implicitly.
+        guard credentialPush == true,
+              providerOwnerID?.nonEmptyBridgeValue != nil,
+              configurationID?.nonEmptyBridgeValue != nil,
+              siteKey?.nonEmptyBridgeValue != nil,
+              case .object(let contract) = actionContract,
+              case .object(let submission)? = contract["credentialSubmission"],
+              case .object = submission["parameters"],
+              submission["credentialField"]?.stringValue?
+                .nonEmptyBridgeValue != nil else {
+            return false
         }
-        return texts?.contains { text in
-            let lower = text.lowercased()
-            return text.contains("微信扫码推送")
-                || (text.contains("推送")
-                && (lower.contains("cookie") || lower.contains("token")))
-        } == true
+        return true
     }
 
     var hasVisibleAuthorizationContent: Bool {
@@ -103,6 +486,161 @@ struct AndroidBridgeUIState: Decodable, Equatable {
         return inputCount > 0
             || imageCount > 0
             || !actionableControls.isEmpty
+    }
+
+    func configurationInteraction(
+        requestID: UUID,
+        actionKind: ConfigurationInteraction.ActionKind,
+        validatedQRCode: Data? = nil
+    ) -> ConfigurationInteraction {
+        let normalizedPhase = phase?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let normalizedOutcome = outcome?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let declaredActionKind: ConfigurationInteraction.ActionKind = {
+            guard let kind else {
+                return actionKind
+            }
+            let rawKind = kind.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !rawKind.isEmpty else { return actionKind }
+            if let exact = ConfigurationInteraction.ActionKind(
+                rawValue: rawKind
+            ) {
+                return exact
+            }
+            switch rawKind.lowercased() {
+            case "websetting", "web_setting": return .webSetting
+            case "nativesetting", "native_setting": return .nativeSetting
+            case "command": return .command
+            case "immediate": return .immediate
+            case "toggle": return .toggle
+            case "ordering", "order": return .ordering
+            case "configuration", "config": return .configuration
+            case "authorization", "authorisation", "auth":
+                return .authorization
+            case "playback", "play": return .playback
+            default: return actionKind
+            }
+        }()
+        let qrRole: ConfigurationInteraction.QRRole
+        if isRemoteInputQRCode {
+            qrRole = .remoteInputHelper
+        } else if isCredentialPush {
+            qrRole = .credentialPush
+        } else if validatedQRCode != nil,
+                  declaredActionKind == .authorization {
+            qrRole = .login
+        } else if validatedQRCode != nil {
+            // A QR-shaped bitmap can also be an ordering preview, remote-input
+            // helper, donation code, or other configuration content. Keep it
+            // visible without changing the provider-declared action kind.
+            qrRole = .candidate
+        } else if normalizedPhase == "qr", imageCount > 0 {
+            qrRole = .candidate
+        } else {
+            qrRole = .none
+        }
+
+        let interactionPhase: ConfigurationInteraction.Phase
+        switch normalizedPhase {
+        case "started", "invoking":
+            interactionPhase = .invoking
+        case "awaitinguser", "awaiting_user":
+            if validatedQRCode != nil {
+                interactionPhase = .qrCode
+            } else if inputCount > 0 {
+                interactionPhase = .form
+            } else if !actionableControls.isEmpty {
+                interactionPhase = .choice
+            } else {
+                interactionPhase = .status
+            }
+        case "chooser", "choice", "select":
+            interactionPhase = .choice
+        case "credentials", "credential", "form", "input":
+            interactionPhase = .form
+        case "qr", "qrcode", "qr_code":
+            interactionPhase = validatedQRCode == nil
+                ? .transitioning
+                : .qrCode
+        case "transitioning", "loading", "waiting", "processing":
+            interactionPhase = .transitioning
+        case "reattaching":
+            interactionPhase = .reattaching
+        case "completed", "success", "succeeded":
+            interactionPhase = .completed
+        case "failed", "error", "hostunavailable":
+            interactionPhase = .failed
+        case "cancelled", "canceled", "superseded":
+            interactionPhase = .cancelled
+        default:
+            if inputCount > 0 {
+                interactionPhase = .form
+            } else if !actionableControls.isEmpty {
+                interactionPhase = .choice
+            } else {
+                interactionPhase = .status
+            }
+        }
+
+        let resolvedOutcome: ConfigurationInteraction.Outcome
+        switch normalizedOutcome {
+        case "completed", "success", "succeeded":
+            resolvedOutcome = .succeeded
+        case "failed", "error":
+            resolvedOutcome = .failed
+        case "cancelled", "canceled", "superseded":
+            resolvedOutcome = .cancelled
+        case "none", "stay":
+            resolvedOutcome = .pending
+        default:
+            switch interactionPhase {
+            case .completed:
+                resolvedOutcome = .succeeded
+            case .failed:
+                resolvedOutcome = .failed
+            case .cancelled:
+                resolvedOutcome = .cancelled
+            default:
+                resolvedOutcome = .pending
+            }
+        }
+
+        return ConfigurationInteraction(
+            id: requestID,
+            actionKind: declaredActionKind,
+            phase: interactionPhase,
+            outcome: resolvedOutcome,
+            title: title,
+            provider: provider,
+            generation: interactionGeneration,
+            controls: actionableControls.map { control in
+                ConfigurationInteraction.Control(
+                    id: control.id,
+                    title: control.title,
+                    enabled: control.enabled != false,
+                    clickable: control.clickable != false,
+                    role: Self.interactionControlRole(control.role)
+                )
+            },
+            qrRole: qrRole,
+            qrImage: validatedQRCode
+        )
+    }
+
+    private static func interactionControlRole(
+        _ rawRole: String?
+    ) -> ConfigurationInteraction.Control.Role {
+        switch rawRole?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() {
+        case "button", "action", "clickable", "legacy": return .action
+        case "cancel", "dismiss": return .cancel
+        case "link": return .link
+        case "status", "label": return .status
+        default: return .unknown
+        }
     }
 }
 
@@ -130,6 +668,18 @@ enum AndroidBridgeQRCodePolicy {
 
 struct AndroidBridgeUIRequired: Error {
     let state: AndroidBridgeUIState
+    let interaction: ConfigurationInteraction?
+    let handle: InteractionHandle?
+
+    init(
+        state: AndroidBridgeUIState,
+        interaction: ConfigurationInteraction? = nil,
+        handle: InteractionHandle? = nil
+    ) {
+        self.state = state
+        self.interaction = interaction
+        self.handle = handle
+    }
 }
 
 final class JavaScriptSpiderSiteProvider: SiteProvider {
@@ -212,7 +762,7 @@ final class JavaScriptSpiderSiteProvider: SiteProvider {
     }
 
     func select(id: String) async throws -> SiteSelectionResult {
-        try SpiderResponseMapper.selection(
+        return try SpiderResponseMapper.selection(
             await session.detail(id: id),
             site: site,
             baseURL: baseURL
@@ -220,7 +770,7 @@ final class JavaScriptSpiderSiteProvider: SiteProvider {
     }
 
     func select(summary: VideoSummary) async throws -> SiteSelectionResult {
-        try SpiderResponseMapper.selection(
+        return try SpiderResponseMapper.selection(
             await session.detail(id: summary.videoID),
             site: site,
             baseURL: baseURL,
@@ -345,12 +895,14 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
     let site: SiteConfiguration
     let capability: SiteCapability = .javaDexSpider
 
+    private let configurationIdentity: String
     private let baseURL: URL?
     private let jarReference: String
     private let bridge: AndroidDexBridgeClient
 
     init(
         site: SiteConfiguration,
+        configurationID: UUID,
         jarReference: String,
         baseURL: URL?,
         bridge: AndroidDexBridgeClient
@@ -361,6 +913,7 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
             )
         }
         self.site = site
+        configurationIdentity = configurationID.uuidString.lowercased()
         self.jarReference = jarReference
         self.baseURL = baseURL
         self.bridge = bridge
@@ -549,11 +1102,38 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
     }
 
     func select(action item: SiteActionItem) async throws -> SiteSelectionResult {
-        try SpiderResponseMapper.selection(
+        try await select(action: item, interactionID: nil)
+    }
+
+    /// Executes a host-owned configuration request with the exact interaction
+    /// identifier that AppState reserved. Action-backed cards and detail-backed
+    /// cards share this path so neither can create an unrelated bridge request.
+    func select(
+        action item: SiteActionItem,
+        interactionID: UUID?
+    ) async throws -> SiteSelectionResult {
+        if let rawAction = item.action {
+            let action = rawAction.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !action.isEmpty else {
+                throw AppError.spider("配置动作内容为空")
+            }
+            return .action(
+                try await invoke(
+                    method: "action",
+                    arguments: [.string(action)],
+                    monitorsAuthorization: true,
+                    interactionKind: Self.interactionActionKind(tag: item.tag),
+                    interactionID: interactionID
+                )
+            )
+        }
+        return try SpiderResponseMapper.selection(
             await invoke(
                 method: "detail",
                 arguments: [.array([.string(item.itemID)])],
-                monitorsAuthorization: true
+                monitorsAuthorization: true,
+                interactionKind: Self.interactionActionKind(tag: item.tag),
+                interactionID: interactionID
             ),
             site: site,
             baseURL: baseURL,
@@ -650,34 +1230,248 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
     }
 
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
-        var result = try SpiderResponseMapper.player(
-            await invoke(
+        try await requestPlayer(
+            flag: flag,
+            episodeURL: episodeURL,
+            refreshPlayback: false
+        )
+    }
+
+    func refreshPlayback(
+        _ request: PlaybackRefreshRequest
+    ) async throws -> RefreshedSitePlayback {
+        if let reference = request.providerResourceReference,
+           acceptsPlaybackResourceReference(reference),
+           let sourceName = request.sourceName.map({
+               $0.trimmingCharacters(in: .whitespacesAndNewlines)
+           }),
+           !sourceName.isEmpty {
+            let result = try await requestPlayer(
+                flag: sourceName,
+                episodeURL: reference.stableResourceLocator,
+                refreshPlayback: true
+            )
+            let episodeName = request.episodeName.map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            }.flatMap { $0.isEmpty ? nil : $0 } ?? "历史分集"
+            let episode = PlayEpisode(
+                name: episodeName,
+                url: reference.stableResourceLocator,
+                referenceIdentity: reference.episodeIdentity
+            )
+            let source = PlaySource(
+                name: sourceName,
+                episodes: [episode],
+                referenceIdentity: reference.sourceIdentity
+            )
+            return RefreshedSitePlayback(
+                detail: VideoDetail(
+                    summary: VideoSummary(
+                        siteKey: site.key,
+                        siteName: site.name,
+                        videoID: request.videoID,
+                        title: request.title
+                    ),
+                    playSources: [source]
+                ),
+                source: source,
+                episode: episode,
+                playbackResult: result
+            )
+        }
+        let selected = try await resolvePlaybackRefreshSelection(request)
+        let result = try await requestPlayer(
+            flag: selected.source.name,
+            episodeURL: selected.episode.url,
+            refreshPlayback: true
+        )
+        return RefreshedSitePlayback(
+            detail: selected.detail,
+            source: selected.source,
+            episode: selected.episode,
+            playbackResult: result
+        )
+    }
+
+    private func requestPlayer(
+        flag: String,
+        episodeURL: String,
+        refreshPlayback: Bool
+    ) async throws -> SitePlaybackResult {
+        let providerValue = try await invoke(
                 method: "play",
-                arguments: [.string(flag), .string(episodeURL), .array([])]
-            ),
+                arguments: [.string(flag), .string(episodeURL), .array([])],
+                refreshPlayback: refreshPlayback
+            )
+        return try playbackResult(
+            from: providerValue,
+            flag: flag,
+            episodeURL: episodeURL
+        )
+    }
+
+    /// Maps the terminal value from the exact Bridge invocation that produced
+    /// an interaction. AppState uses this instead of issuing a second `play`
+    /// request after authorization, preserving the provider's authoritative
+    /// media-session capability.
+    func playbackResult(
+        from providerValue: JSONValue,
+        flag: String,
+        episodeURL: String
+    ) throws -> SitePlaybackResult {
+        var result = try SpiderResponseMapper.player(
+            providerValue,
             site: site
         )
-        result.url = bridge.hostReachableProxyURL(result.url)
-        result.qualities = result.qualities.map {
+        result = Self.applyingPlaybackRequestContract(
+            to: result,
+            siteHeaders: HTTPHeaders(site.header)
+        )
+        let needsParsing = result.needsParsing
+        let rewriteMediaURL: (String) -> String = { rawURL in
+            needsParsing
+                ? self.bridge.hostReachableProxyURL(rawURL)
+                : self.bridge.hostReachableMediaURL(rawURL)
+        }
+        result.url = rewriteMediaURL(result.url)
+        result.qualities = result.qualities.map { quality in
             PlaybackQuality(
-                name: $0.name,
-                url: bridge.hostReachableProxyURL($0.url)
+                name: quality.name,
+                url: rewriteMediaURL(quality.url)
             )
         }
         if let playURL = result.playURL {
-            result.playURL = bridge.hostReachableProxyURL(playURL)
+            result.playURL = rewriteMediaURL(playURL)
         }
         result.subtitles = result.subtitles.map {
             URL(string: bridge.hostReachableProxyURL($0.absoluteString)) ?? $0
         }
-        // Android spiders can return authenticated and short-lived media. Keep
-        // site defaults, let the play response override them, and make the
-        // actual player load authoritative so a generic probe cannot consume
-        // or reject a valid one-shot URL first.
-        return Self.applyingPlaybackRequestContract(
-            to: result,
-            siteHeaders: HTTPHeaders(site.header)
+
+        let resourceReference = Self.playbackResourceReference(
+            site: site,
+            configurationIdentity: configurationIdentity,
+            flag: flag,
+            episodeURL: episodeURL
         )
+        let providerSessionID = AndroidDexBridgeClient
+            .providerMediaSessionID(from: result.url)
+        let handoff = Self.playbackHandoff(from: providerValue)
+        let handoffMatchesURL = providerSessionID != nil
+            && handoff?.mediaSessionID == providerSessionID
+        let isLoopback = AndroidDexBridgeClient.isLoopbackURL(result.url)
+        let runtimeSessionID = providerSessionID ?? UUID().uuidString
+        // A scoped bridge capability owns all upstream request headers. Do not
+        // duplicate Cookie, Authorization or signed URL context in the Mac
+        // playback object. Compatibility bridges still require the old header
+        // path and are explicitly marked as such below.
+        if providerSessionID != nil {
+            result.headers = [:]
+        }
+        result.resourceReference = resourceReference
+        result.mediaSession = PlaybackMediaSession(
+            sessionID: runtimeSessionID,
+            transport: Self.playbackSessionTransport(
+                mediaURL: result.url,
+                providerSessionID: providerSessionID
+            ),
+            mediaURL: result.url,
+            headers: result.headers,
+            authorizationContextReference: providerSessionID,
+            proxyRequestID: providerSessionID ?? UUID().uuidString,
+            upstreamResourceFingerprint: handoffMatchesURL
+                ? handoff?.upstreamFingerprint
+                : nil,
+            refreshPerformed: handoffMatchesURL
+                ? handoff?.refreshPerformed
+                : nil,
+            expiresAt: nil,
+            redirectPolicy: isLoopback ? .follow : .providerDefined,
+            rangePolicy: isLoopback ? .forward : .providerDefined,
+            resourceReference: resourceReference
+        )
+        return result
+    }
+
+    func acceptsPlaybackResourceReference(
+        _ reference: PlaybackResourceReference
+    ) -> Bool {
+        if let expiresAt = reference.expiresAt, expiresAt <= Date() {
+            return false
+        }
+        let locator = reference.stableResourceLocator.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let sourceIdentity = reference.sourceIdentity.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let episodeIdentity = reference.episodeIdentity.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        return reference.schemaVersion == 1
+            && reference.configurationIdentity == configurationIdentity
+            && reference.siteIdentity == site.key
+            && reference.providerKind == "android-dex-spider"
+            && reference.providerVersion == 1
+            && !locator.isEmpty
+            && !sourceIdentity.isEmpty
+            && !episodeIdentity.isEmpty
+    }
+
+    struct PlaybackHandoff: Equatable, Sendable {
+        let mediaSessionID: String
+        let upstreamFingerprint: String?
+        let refreshPerformed: Bool?
+    }
+
+    /// Reads only the bridge-owned, non-secret handoff metadata. Signed URLs,
+    /// nested media URLs and header values are deliberately ignored here.
+    static func playbackHandoff(from value: JSONValue) -> PlaybackHandoff? {
+        guard let object = value.objectValue,
+              let mediaSessionID = object["mediaSessionID"]?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !mediaSessionID.isEmpty else {
+            return nil
+        }
+        let fingerprint = object["upstreamFingerprint"]?.stringValue.flatMap {
+            validatedUpstreamFingerprint($0)
+        }
+        let refreshPerformed: Bool?
+        if case .bool(let value)? = object["refreshPerformed"] {
+            refreshPerformed = value
+        } else {
+            refreshPerformed = nil
+        }
+        return PlaybackHandoff(
+            mediaSessionID: mediaSessionID,
+            upstreamFingerprint: fingerprint,
+            refreshPerformed: refreshPerformed
+        )
+    }
+
+    static func validatedUpstreamFingerprint(_ rawValue: String) -> String? {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.count == 64,
+              value == value.lowercased(),
+              value.unicodeScalars.allSatisfy({ scalar in
+                  (48...57).contains(scalar.value)
+                      || (97...102).contains(scalar.value)
+              }) else {
+            return nil
+        }
+        return value
+    }
+
+    static func playbackSessionTransport(
+        mediaURL: String,
+        providerSessionID: String?
+    ) -> PlaybackMediaSession.Transport {
+        if providerSessionID?.isEmpty == false {
+            return .providerLoopback
+        }
+        if AndroidDexBridgeClient.isLoopbackURL(mediaURL) {
+            return .compatibilityLoopback
+        }
+        return .compatibilityDirect
     }
 
     static func applyingPlaybackRequestContract(
@@ -690,23 +1484,92 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         return result
     }
 
+    static func playbackResourceReference(
+        site: SiteConfiguration,
+        configurationIdentity: String,
+        flag: String,
+        episodeURL: String
+    ) -> PlaybackResourceReference {
+        PlaybackResourceReference(
+            configurationIdentity: configurationIdentity,
+            siteIdentity: site.key,
+            providerKind: "android-dex-spider",
+            providerVersion: 1,
+            // Provider protocol data is kept intact and opaque. No source
+            // name, domain, card ID or URL fragment controls behavior here.
+            stableResourceLocator: episodeURL,
+            sourceIdentity: PlaybackReferenceIdentity.source(
+                explicitIdentity: "android-dex-source:\(site.key):\(flag)",
+                episodes: []
+            ),
+            episodeIdentity: PlaybackReferenceIdentity.episode(
+                name: "",
+                reference: episodeURL
+            ),
+            stability: .providerReplay,
+            expiresAt: nil
+        )
+    }
+
     func action(_ action: String) async throws -> JSONValue {
         try await invoke(method: "action", arguments: [.string(action)])
+    }
+
+    func action(
+        _ action: String,
+        interactionID: UUID
+    ) async throws -> JSONValue {
+        try await invoke(
+            method: "action",
+            arguments: [.string(action)],
+            monitorsAuthorization: true,
+            interactionKind: .configuration,
+            interactionID: interactionID
+        )
     }
 
     private func invoke(
         method: String,
         arguments: [JSONValue],
-        monitorsAuthorization: Bool = false
+        monitorsAuthorization: Bool = false,
+        interactionKind: ConfigurationInteraction.ActionKind? = nil,
+        refreshPlayback: Bool = false,
+        interactionID: UUID? = nil
     ) async throws -> JSONValue {
         try await bridge.invoke(
             site: site,
+            configurationID: configurationIdentity,
             jarReference: jarReference,
             baseURL: baseURL,
             method: method,
             arguments: arguments,
-            monitorsAuthorization: monitorsAuthorization
+            monitorsAuthorization: monitorsAuthorization,
+            interactionKind: interactionKind,
+            refreshPlayback: refreshPlayback,
+            requestedInteractionID: interactionID
         )
+    }
+
+    /// Maps only provider protocol metadata. Source keys, display titles,
+    /// action IDs and domains are intentionally absent from this decision.
+    static func interactionActionKind(
+        tag: String?
+    ) -> ConfigurationInteraction.ActionKind {
+        switch tag?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() {
+        case "command": return .command
+        case "toggle": return .toggle
+        case "order", "ordering": return .ordering
+        // Only the provider protocol's explicit authorization kind may enter
+        // the authorization lifecycle. Presentation hints such as `qr` or
+        // `credential` are not an authority boundary: ordinary configuration
+        // actions can contain images and text inputs too.
+        case "authorization", "authorisation", "auth":
+            return .authorization
+        case "web": return .webSetting
+        case "native": return .nativeSetting
+        default: return .configuration
+        }
     }
 }
 
@@ -791,6 +1654,8 @@ enum AndroidRuntimeFailureCategory: String, Codable, Sendable {
     case bridgeLaunchFailed
     case portForwardFailed
     case hostPortConflict
+    case bridgeIdentityMismatch
+    case bridgeVersionMismatch
     case bridgeHealthTimedOut
     case runtimeExited
     case unknown
@@ -854,6 +1719,11 @@ struct AndroidToolCommandError: LocalizedError, Sendable {
 
 private extension String {
     var nonEmptyCommandOutput: String? {
+        let value = trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+
+    var nonEmptyBridgeValue: String? {
         let value = trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : value
     }
@@ -954,8 +1824,12 @@ struct AndroidRuntimeFailureError: LocalizedError, Sendable {
             return "ADB 端口映射失败，Android Bridge 无法连接到 Mac。"
         case .hostPortConflict:
             return "本机 Android Bridge 端口被占用，请关闭冲突程序后重试。"
+        case .bridgeIdentityMismatch:
+            return "检测到的 Android Bridge 不属于当前启动实例；已拒绝连接，请重新启动兼容环境。"
+        case .bridgeVersionMismatch:
+            return "Android Bridge 与当前 App 版本不一致；请使用“修复”重新安装当前 Bridge。"
         case .bridgeHealthTimedOut:
-            return "Android 兼容服务未响应；Emulator 已启动，但 Bridge 尚未建立连接。"
+            return "Android Bridge 未在限定时间内建立连接；本次启动已失败，请重试或使用“修复”。"
         case .unknown:
             return "Android 兼容环境启动失败，请立即导出诊断信息。"
         }
@@ -1082,8 +1956,9 @@ enum AndroidRuntimeRecoveryPolicy {
     }
 }
 
-final class AndroidDexBridgeClient {
+final class AndroidDexBridgeClient: @unchecked Sendable {
     private struct Request: Encodable {
+        let configurationID: String
         let siteKey: String
         let api: String
         let ext: String
@@ -1091,13 +1966,66 @@ final class AndroidDexBridgeClient {
         let jarMD5: String
         let method: String
         let arguments: [JSONValue]
+        /// Request-scoped site headers are sent only for playback so the
+        /// provider VM can attach them to its opaque media capability. They
+        /// are never copied into playback history or diagnostic output.
+        let siteHeaders: [String: String]?
         let monitorsAuthorization: Bool
+        let interactionID: String?
+        let interactionKind: String?
+        /// Host-declared semantics only. The Bridge may return a richer,
+        /// provider-authored contract after it captures the actual UI. The
+        /// host never manufactures credential parameters from labels.
+        let providerOwnerID: String
+        let actionContract: JSONValue?
+        /// Present only for an explicit same-resource refresh. New bridge
+        /// builds bypass their short playback handoff cache when this is true;
+        /// old builds safely ignore the additional JSON field.
+        let refreshPlayback: Bool?
+    }
+
+    private struct CredentialPushRequest: Encodable {
+        let interactionID: String
+        let configurationID: String
+        let siteKey: String
+        let providerOwnerID: String
+        let actionContract: JSONValue
+        let credential: String
     }
 
     private struct Response: Decodable {
         let ok: Bool
         let result: JSONValue?
         let error: String?
+        let interactionID: String?
+        let interaction: InteractionResponse?
+        let refreshPerformed: Bool?
+    }
+
+    private struct InteractionResponse: Decodable, Sendable {
+        let interactionID: String?
+        let revision: Int?
+        let kind: String?
+        let method: String?
+        let phase: String?
+        let outcome: String?
+        let terminal: Bool?
+        let hostUnavailable: Bool?
+        let verificationPerformed: Bool?
+        let error: String?
+        let refreshPerformed: Bool?
+    }
+
+    private enum MonitoredInvocation: Sendable {
+        case completed(
+            ConfigurationInteractionTerminalResponse,
+            InteractionHandle
+        )
+        case presented(
+            AndroidBridgeUIState,
+            ConfigurationInteraction,
+            InteractionHandle
+        )
     }
 
     private let runtime: AndroidDexBridgeRuntime
@@ -1200,6 +2128,59 @@ final class AndroidDexBridgeClient {
         return components.url?.absoluteString ?? rawURL
     }
 
+    /// Converts a direct provider media URL into a Mac-reachable loopback
+    /// capability. New bridge builds already return `/proxy/media/{session}`;
+    /// legacy builds are wrapped by the maintained `/v1/media` endpoint.
+    /// Parsing URLs are intentionally handled by `hostReachableProxyURL`
+    /// instead because they are not yet media resources.
+    func hostReachableMediaURL(_ rawURL: String) -> String {
+        let rewritten = hostReachableProxyURL(rawURL)
+        guard let components = URLComponents(string: rewritten),
+              ["http", "https"].contains(
+                  components.scheme?.lowercased() ?? ""
+              ) else {
+            return rewritten
+        }
+        if Self.isLoopbackHost(components.host) {
+            return rewritten
+        }
+        return Self.bridgeMediaProxyURL(for: rewritten) ?? rewritten
+    }
+
+    static func providerMediaSessionID(from rawURL: String) -> String? {
+        guard let components = URLComponents(string: rawURL),
+              isLoopbackHost(components.host) else { return nil }
+        for prefix in ["/proxy/media/", "/v1/media-sessions/"]
+            where components.path.hasPrefix(prefix) {
+            let value = String(components.path.dropFirst(prefix.count))
+            if !value.isEmpty, !value.contains("/") { return value }
+        }
+        return nil
+    }
+
+    static func isLoopbackMediaURL(_ rawURL: String) -> Bool {
+        guard let components = URLComponents(string: rawURL) else {
+            return false
+        }
+        return isLoopbackHost(components.host)
+            && (components.path.hasPrefix("/proxy/media/")
+                || components.path.hasPrefix("/v1/media-sessions/")
+                || components.path == "/v1/media")
+    }
+
+    static func isLoopbackURL(_ rawURL: String) -> Bool {
+        guard let components = URLComponents(string: rawURL) else {
+            return false
+        }
+        return isLoopbackHost(components.host)
+    }
+
+    private static func isLoopbackHost(_ host: String?) -> Bool {
+        ["127.0.0.1", "localhost", "::1"].contains(
+            host?.lowercased() ?? ""
+        )
+    }
+
     private static func bridgeMediaProxyURL(
         from kaiserComponents: URLComponents
     ) -> String? {
@@ -1229,12 +2210,15 @@ final class AndroidDexBridgeClient {
             rawUpstream = encodedUpstream.removingPercentEncoding
                 ?? encodedUpstream
         }
+        return bridgeMediaProxyURL(for: rawUpstream)
+    }
+
+    private static func bridgeMediaProxyURL(for rawUpstream: String) -> String? {
         guard let upstream = URLComponents(string: rawUpstream),
-        ["http", "https"].contains(upstream.scheme?.lowercased() ?? ""),
-        let upstreamHost = upstream.host?.lowercased(),
-        !["127.0.0.1", "localhost", "::1"].contains(upstreamHost) else {
-            return nil
-        }
+              ["http", "https"].contains(
+                  upstream.scheme?.lowercased() ?? ""
+              ),
+              !isLoopbackHost(upstream.host) else { return nil }
         // URLComponents normalizes any unescaped Unicode path returned by a
         // Spider before it is nested into the bridge query parameter.
         guard let normalizedUpstream = upstream.url?.absoluteString else {
@@ -1271,18 +2255,32 @@ final class AndroidDexBridgeClient {
 
     func invoke(
         site: SiteConfiguration,
+        configurationID: String,
         jarReference: String,
         baseURL: URL?,
         method: String,
         arguments: [JSONValue],
-        monitorsAuthorization explicitAuthorizationAction: Bool = false
+        monitorsAuthorization explicitAuthorizationAction: Bool = false,
+        interactionKind explicitInteractionKind:
+            ConfigurationInteraction.ActionKind? = nil,
+        refreshPlayback: Bool = false,
+        requestedInteractionID: UUID? = nil
     ) async throws -> JSONValue {
         try await runtime.ensureReady()
         let monitorsAuthorization = Self.shouldMonitorAuthorization(
             for: method,
             explicitAuthorizationAction: explicitAuthorizationAction
         )
+        let actionKind = explicitInteractionKind
+            ?? Self.interactionActionKind(
+                method: method,
+                explicitConfigurationAction: explicitAuthorizationAction
+            )
+        let interactionID = monitorsAuthorization
+            ? requestedInteractionID ?? UUID()
+            : nil
         if monitorsAuthorization,
+           requestedInteractionID == nil,
            let staleState = try? await uiState(),
            staleState.isAuthorizationPrompt {
             // A dialog belongs to the operation that created it. If it was
@@ -1292,11 +2290,18 @@ final class AndroidDexBridgeClient {
             try await resetAuthorizationUI()
         }
         let jar = try Self.jarParts(jarReference, baseURL: baseURL)
+        let providerOwnerID = Self.providerOwnerID(
+            configurationID: configurationID,
+            siteKey: site.key,
+            jarURL: jar.url,
+            jarMD5: jar.md5
+        )
         var request = URLRequest(url: invokeURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(
             Request(
+                configurationID: configurationID,
                 siteKey: site.key,
                 api: site.api,
                 ext: try Self.extString(site.ext),
@@ -1304,48 +2309,307 @@ final class AndroidDexBridgeClient {
                 jarMD5: jar.md5,
                 method: method,
                 arguments: arguments,
-                monitorsAuthorization: monitorsAuthorization
+                siteHeaders: Self.requestScopedPlaybackHeaders(
+                    method: method,
+                    siteHeaders: site.header
+                ),
+                monitorsAuthorization: monitorsAuthorization,
+                interactionID: interactionID?.uuidString,
+                interactionKind: interactionID == nil
+                    ? nil
+                    : actionKind.rawValue,
+                providerOwnerID: providerOwnerID,
+                actionContract: .object([
+                    "actionKind": .string(actionKind.rawValue)
+                ]),
+                refreshPlayback: refreshPlayback ? true : nil
             )
         )
-        let (data, urlResponse): (Data, URLResponse)
+        let terminalResponse: ConfigurationInteractionTerminalResponse
+        var interactionHandle: InteractionHandle?
         if monitorsAuthorization {
-            (data, urlResponse) = try await sendMonitoringAuthorization(request)
-        } else {
-            (data, urlResponse) = try await session.data(for: request)
-        }
-        guard let httpResponse = urlResponse as? HTTPURLResponse else {
-            throw AppError.spider("Java/Dex 桥没有返回 HTTP 响应")
-        }
-        let response: Response
-        do {
-            response = try JSONDecoder().decode(Response.self, from: data)
-        } catch {
-            if monitorsAuthorization,
-               let state = await authorizationStateAfterFailedInvocation() {
-                throw AndroidBridgeUIRequired(state: state)
+            switch try await sendMonitoringInteraction(
+                request,
+                requestID: interactionID!,
+                actionKind: actionKind
+            ) {
+            case .completed(let terminal, let handle):
+                terminalResponse = terminal
+                interactionHandle = handle
+            case .presented(let state, let interaction, let handle):
+                throw AndroidBridgeUIRequired(
+                    state: state,
+                    interaction: interaction,
+                    handle: handle
+                )
             }
-            let text = String(data: data, encoding: .utf8) ?? ""
-            throw AppError.spider(
-                "Java/Dex 桥响应无效（HTTP \(httpResponse.statusCode)）："
-                    + String(text.prefix(500))
+        } else {
+            let requestID = UUID()
+            let (data, response) = try await session.data(for: request)
+            terminalResponse = Self.decodeTerminalResponse(
+                requestID: requestID,
+                data: data,
+                response: response
             )
         }
-        guard response.ok, (200..<300).contains(httpResponse.statusCode) else {
+
+        guard terminalResponse.outcome == .succeeded else {
             if monitorsAuthorization,
-               let state = await authorizationStateAfterFailedInvocation() {
-                throw AndroidBridgeUIRequired(state: state)
+               let state = await authorizationStateAfterFailedInvocation(
+                   interactionID: terminalResponse.requestID
+               ) {
+                let qrSnapshot = await validatedQRCodeSnapshot(
+                    for: state,
+                    interactionID: terminalResponse.requestID
+                )
+                let resolvedActionKind = interactionHandle?.actionKind
+                    ?? actionKind
+                let interaction = state.configurationInteraction(
+                    requestID: terminalResponse.requestID,
+                    actionKind: resolvedActionKind,
+                    validatedQRCode: qrSnapshot
+                )
+                await interactionHandle?.record(interaction)
+                throw AndroidBridgeUIRequired(
+                    state: state,
+                    interaction: interaction,
+                    handle: interactionHandle
+                )
             }
             throw AppError.spider(
                 Self.userFacingBridgeError(
-                    response.error
-                        ?? "Java/Dex 桥 HTTP \(httpResponse.statusCode)"
+                    terminalResponse.error
+                        ?? terminalResponse.httpStatusCode.map {
+                            "Java/Dex 桥 HTTP \($0)"
+                        }
+                        ?? "Java/Dex 桥没有返回有效结果"
                 )
             )
         }
-        return response.result ?? .null
+        return terminalResponse.providerResult ?? .null
     }
 
-    private func authorizationStateAfterFailedInvocation()
+    static func requestScopedPlaybackHeaders(
+        method: String,
+        siteHeaders: [String: String]
+    ) -> [String: String]? {
+        guard method == "play", !siteHeaders.isEmpty else { return nil }
+        return siteHeaders
+    }
+
+    private static func interactionActionKind(
+        method: String,
+        explicitConfigurationAction: Bool
+    ) -> ConfigurationInteraction.ActionKind {
+        if method == "play" {
+            return .playback
+        }
+        if explicitConfigurationAction || method == "action" {
+            return .configuration
+        }
+        return .configuration
+    }
+
+    static func decodeTerminalResponse(
+        requestID: UUID,
+        data: Data,
+        response: URLResponse,
+        requiresScopedIdentity: Bool = false,
+        allowsImmediateAuthoritativeResult: Bool = false
+    ) -> ConfigurationInteractionTerminalResponse {
+        guard let httpResponse = response as? HTTPURLResponse else {
+            return ConfigurationInteractionTerminalResponse(
+                requestID: requestID,
+                outcome: .failed,
+                providerResult: nil,
+                error: "Java/Dex 桥没有返回 HTTP 响应",
+                httpStatusCode: nil,
+                refreshPerformed: nil
+            )
+        }
+        let bridgeResponse: Response
+        do {
+            bridgeResponse = try JSONDecoder().decode(Response.self, from: data)
+        } catch {
+            let text = String(data: data, encoding: .utf8) ?? ""
+            return ConfigurationInteractionTerminalResponse(
+                requestID: requestID,
+                outcome: .failed,
+                providerResult: nil,
+                error: "Java/Dex 桥响应无效（HTTP \(httpResponse.statusCode)）："
+                    + String(text.prefix(500)),
+                httpStatusCode: httpResponse.statusCode,
+                refreshPerformed: nil
+            )
+        }
+        let transportSucceeded = bridgeResponse.ok
+            && (200..<300).contains(httpResponse.statusCode)
+        let returnedInteractionID = bridgeResponse.interaction?.interactionID
+            ?? bridgeResponse.interactionID
+        guard Self.interactionIdentifier(
+            returnedInteractionID,
+            matches: requestID,
+            allowsMissing: !requiresScopedIdentity
+        ) else {
+            return ConfigurationInteractionTerminalResponse(
+                requestID: requestID,
+                outcome: .failed,
+                providerResult: nil,
+                error: "Java/Dex 桥返回了其他配置操作的结果",
+                httpStatusCode: httpResponse.statusCode,
+                refreshPerformed: nil
+            )
+        }
+        let outcome: ConfigurationInteraction.Outcome
+        if bridgeResponse.interaction == nil,
+           (httpResponse.statusCode == 202 || requiresScopedIdentity),
+           !(allowsImmediateAuthoritativeResult
+             && bridgeResponse.result != nil
+             && bridgeResponse.result != .null) {
+            // A request-owned worker can acknowledge the invocation before
+            // Android attaches its native surface. A transport-level success
+            // (including HTTP 202 Accepted) without a scoped terminal object
+            // is therefore pending, never a manufactured business completion.
+            // The only exception is an explicitly declared immediate action
+            // carrying a non-null result.
+            outcome = .pending
+        } else {
+            outcome = interactionOutcome(
+                bridgeResponse.interaction,
+                transportSucceeded: transportSucceeded
+            )
+        }
+        return ConfigurationInteractionTerminalResponse(
+            requestID: requestID,
+            outcome: outcome,
+            providerResult: bridgeResponse.result,
+            error: outcome == .failed
+                ? bridgeResponse.interaction?.error ?? bridgeResponse.error
+                : nil,
+            httpStatusCode: httpResponse.statusCode,
+            refreshPerformed: bridgeResponse.interaction?.refreshPerformed
+                ?? bridgeResponse.refreshPerformed
+        )
+    }
+
+    private static func interactionOutcome(
+        _ interaction: InteractionResponse?,
+        transportSucceeded: Bool
+    ) -> ConfigurationInteraction.Outcome {
+        guard transportSucceeded else { return .failed }
+        guard let interaction else { return .succeeded }
+        if interaction.hostUnavailable == true { return .pending }
+        let outcome = interaction.outcome?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let phase = interaction.phase?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch outcome {
+        case "completed", "success", "succeeded": return .succeeded
+        case "failed", "error": return .failed
+        case "hostunavailable", "stay", "none": return .pending
+        case "cancelled", "canceled", "superseded": return .cancelled
+        default: break
+        }
+        switch phase {
+        case "completed", "success", "succeeded": return .succeeded
+        case "failed", "error": return .failed
+        case "hostunavailable", "reattaching": return .pending
+        case "cancelled", "canceled", "superseded": return .cancelled
+        default:
+            // A scoped Bridge response explicitly marked nonterminal remains
+            // pending. The request handle will await its actual state endpoint
+            // rather than manufacturing success from the first UI snapshot.
+            return interaction.terminal == true ? .failed : .pending
+        }
+    }
+
+    private static func awaitTerminalInteraction(
+        initial: ConfigurationInteractionTerminalResponse,
+        requestID: UUID,
+        session: URLSession
+    ) async throws -> ConfigurationInteractionTerminalResponse {
+        guard initial.outcome == .pending else { return initial }
+        let url = interactionURL(requestID, suffix: "state")
+        var lastError: Error?
+        for _ in 0..<2_400 {
+            try Task.checkCancellation()
+            do {
+                var request = URLRequest(url: url)
+                request.timeoutInterval = 5
+                let (data, response) = try await session.data(for: request)
+                guard let httpResponse = response as? HTTPURLResponse,
+                      (200..<300).contains(httpResponse.statusCode) else {
+                    throw AppError.spider("无法读取配置操作终态")
+                }
+                let interaction = try JSONDecoder().decode(
+                    InteractionResponse.self,
+                    from: data
+                )
+                guard interactionIdentifier(
+                    interaction.interactionID,
+                    matches: requestID,
+                    allowsMissing: false
+                ) else {
+                    throw AppError.spider("配置操作状态与当前请求不匹配")
+                }
+                let outcome = interactionOutcome(
+                    interaction,
+                    transportSucceeded: true
+                )
+                if outcome != .pending {
+                    return ConfigurationInteractionTerminalResponse(
+                        requestID: requestID,
+                        outcome: outcome,
+                        providerResult: initial.providerResult,
+                        error: outcome == .failed
+                            ? interaction.error ?? initial.error
+                            : nil,
+                        httpStatusCode: httpResponse.statusCode,
+                        refreshPerformed: interaction.refreshPerformed
+                            ?? initial.refreshPerformed
+                    )
+                }
+                lastError = nil
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // A short bridge restart or Activity transition must not lose
+                // the request-owned provider response. Keep polling within the
+                // same bounded interaction deadline.
+                lastError = error
+            }
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        throw lastError ?? AppError.spider("等待配置操作完成超时")
+    }
+
+    private static func interactionURL(
+        _ interactionID: UUID,
+        suffix: String
+    ) -> URL {
+        URL(
+            string: "http://127.0.0.1:19978/v1/interactions/"
+                + interactionID.uuidString
+                + "/\(suffix)"
+        )!
+    }
+
+    private static func interactionIdentifier(
+        _ rawValue: String?,
+        matches requestID: UUID,
+        allowsMissing: Bool = false
+    ) -> Bool {
+        guard let rawValue else {
+            return allowsMissing
+        }
+        return UUID(uuidString: rawValue) == requestID
+    }
+
+    private func authorizationStateAfterFailedInvocation(
+        interactionID: UUID?
+    )
         async -> AndroidBridgeUIState? {
         // Some Android spiders render their authorization dialog and then
         // immediately fail the synthetic detail call. In that ordering the
@@ -1353,12 +2617,12 @@ final class AndroidDexBridgeClient {
         // requested UI a short bounded grace period before surfacing the
         // bridge error so the authorization state remains authoritative.
         await Self.waitForAuthorizationStateAfterFailure {
-            try? await self.fetchUIState()
+            try? await self.fetchUIState(interactionID: interactionID)
         }
     }
 
     static func waitForAuthorizationStateAfterFailure(
-        attempts: Int = 8,
+        attempts: Int = 20,
         pollIntervalNanoseconds: UInt64 = 100_000_000,
         poll: () async -> AndroidBridgeUIState?
     ) async -> AndroidBridgeUIState? {
@@ -1377,19 +2641,37 @@ final class AndroidDexBridgeClient {
         return nil
     }
 
-    func uiState() async throws -> AndroidBridgeUIState {
+    func uiState(interactionID: UUID? = nil) async throws
+        -> AndroidBridgeUIState {
         try await runtime.ensureReady()
-        return try await fetchUIState()
+        return try await fetchUIState(interactionID: interactionID)
     }
 
-    private func fetchUIState() async throws -> AndroidBridgeUIState {
-        var request = URLRequest(url: uiStateURL)
+    private func fetchUIState(interactionID: UUID? = nil) async throws
+        -> AndroidBridgeUIState {
+        let url = interactionID.map {
+            Self.interactionURL($0, suffix: "state")
+        } ?? uiStateURL
+        var request = URLRequest(url: url)
         request.timeoutInterval = 5
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await bridgeData(
+            for: request,
+            legacyURL: nil
+        )
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw AppError.spider("无法读取网盘授权界面")
         }
-        return try JSONDecoder().decode(AndroidBridgeUIState.self, from: data)
+        let state = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: data
+        )
+        if let interactionID {
+            guard let returnedID = state.interactionID,
+                  UUID(uuidString: returnedID) == interactionID else {
+                throw AppError.spider("配置界面状态与当前请求不匹配")
+            }
+        }
+        return state
     }
 
     @discardableResult
@@ -1397,10 +2679,14 @@ final class AndroidDexBridgeClient {
         text: String?,
         button: String,
         controlID: String?,
-        generation: Int? = nil
+        generation: Int? = nil,
+        interactionID: UUID? = nil
     ) async throws -> AndroidBridgeUISubmitResult {
         try await runtime.ensureReady()
-        var request = URLRequest(url: uiSubmitURL)
+        let url = interactionID.map {
+            Self.interactionURL($0, suffix: "submit")
+        } ?? uiSubmitURL
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 5
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1412,7 +2698,10 @@ final class AndroidDexBridgeClient {
                 "generation": (generation as Any?) ?? NSNull()
             ] as [String: Any]
         )
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await bridgeData(
+            for: request,
+            legacyURL: nil
+        )
         guard (response as? HTTPURLResponse)?.statusCode == 200,
               let object = try JSONSerialization.jsonObject(with: data)
                 as? [String: Any] else {
@@ -1425,11 +2714,22 @@ final class AndroidDexBridgeClient {
         )
     }
 
-    func uiSnapshot() async throws -> Data {
+    func uiSnapshot(interactionID: UUID? = nil) async throws -> Data {
         try await runtime.ensureReady()
-        var request = URLRequest(url: uiSnapshotURL)
+        return try await fetchUISnapshot(interactionID: interactionID)
+    }
+
+    private func fetchUISnapshot(interactionID: UUID? = nil) async throws
+        -> Data {
+        let url = interactionID.map {
+            Self.interactionURL($0, suffix: "snapshot")
+        } ?? uiSnapshotURL
+        var request = URLRequest(url: url)
         request.timeoutInterval = 5
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await bridgeData(
+            for: request,
+            legacyURL: nil
+        )
         guard (response as? HTTPURLResponse)?.statusCode == 200,
               !data.isEmpty else {
             throw AppError.spider("无法读取网盘扫码界面")
@@ -1437,13 +2737,35 @@ final class AndroidDexBridgeClient {
         return data
     }
 
-    func pushCredential(provider: String, credential: String) async throws {
-        let normalizedProvider = provider
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        let supportedProviders = ["baidu", "quark", "uc", "ali", "bili"]
-        guard supportedProviders.contains(normalizedProvider) else {
-            throw AppError.spider("当前网盘类型不支持本机凭据提交")
+    private func validatedQRCodeSnapshot(
+        for state: AndroidBridgeUIState,
+        interactionID: UUID? = nil
+    ) async -> Data? {
+        guard state.isQRCode,
+              let snapshot = try? await fetchUISnapshot(
+                  interactionID: interactionID
+              ) else {
+            return nil
+        }
+        return AndroidBridgeQRCodePolicy.validatedSnapshot(snapshot)
+    }
+
+    func pushCredential(
+        interactionID: UUID,
+        configurationID: UUID,
+        siteKey: String,
+        providerOwnerID: String,
+        actionContract: JSONValue,
+        credential: String
+    ) async throws {
+        guard siteKey.nonEmptyBridgeValue != nil,
+              providerOwnerID.nonEmptyBridgeValue != nil,
+              case .object(let contract) = actionContract,
+              case .object(let submission)? = contract["credentialSubmission"],
+              case .object = submission["parameters"],
+              submission["credentialField"]?.stringValue?
+                .nonEmptyBridgeValue != nil else {
+            throw AppError.spider("站点没有提供可验证的凭据提交合约")
         }
         guard !credential
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1456,11 +2778,15 @@ final class AndroidDexBridgeClient {
         request.httpMethod = "POST"
         request.timeoutInterval = 10
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(
-            withJSONObject: [
-                "provider": normalizedProvider,
-                "credential": credential
-            ]
+        request.httpBody = try JSONEncoder().encode(
+            CredentialPushRequest(
+                interactionID: interactionID.uuidString,
+                configurationID: configurationID.uuidString.lowercased(),
+                siteKey: siteKey,
+                providerOwnerID: providerOwnerID,
+                actionContract: actionContract,
+                credential: credential
+            )
         )
         let (data, response) = try await session.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200,
@@ -1472,26 +2798,110 @@ final class AndroidDexBridgeClient {
         }
     }
 
-    func resetAuthorizationUI() async throws {
+    func resetAuthorizationUI(interactionID: UUID? = nil) async throws {
         try await runtime.ensureReady()
-        var request = URLRequest(url: uiDismissURL)
+        let url = interactionID.map {
+            Self.interactionURL($0, suffix: "cancel")
+        } ?? uiDismissURL
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 5
-        let (_, response) = try await session.data(for: request)
+        let (_, response) = try await bridgeData(
+            for: request,
+            legacyURL: nil
+        )
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw AppError.spider("无法关闭当前网盘授权界面")
         }
     }
 
-    private final class InvokeRace: @unchecked Sendable {
-        typealias Output = (Data, URLResponse)
+    /// Marks a request-scoped native interaction terminal only after the host
+    /// has independently verified the resulting provider state. The bridge
+    /// never manufactures `refreshPerformed`; it is omitted unless the caller
+    /// supplies a value observed from a real same-resource refresh.
+    func verifyInteraction(
+        interactionID: UUID,
+        succeeded: Bool,
+        error: String? = nil,
+        actualRefreshPerformed: Bool? = nil
+    ) async throws -> ConfigurationInteractionTerminalResponse {
+        try await runtime.ensureReady()
+        var payload: [String: Any] = [
+            "outcome": succeeded ? "completed" : "failed",
+            "succeeded": succeeded
+        ]
+        if let error { payload["error"] = error }
+        if let actualRefreshPerformed {
+            payload["refreshPerformed"] = actualRefreshPerformed
+        }
+        var request = URLRequest(
+            url: Self.interactionURL(interactionID, suffix: "verify")
+        )
+        request.httpMethod = "POST"
+        request.timeoutInterval = 5
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200..<300).contains(httpResponse.statusCode) else {
+            throw AppError.spider("无法验证当前配置操作结果")
+        }
+        let interaction = try JSONDecoder().decode(
+            InteractionResponse.self,
+            from: data
+        )
+        guard Self.interactionIdentifier(
+            interaction.interactionID,
+            matches: interactionID,
+            allowsMissing: false
+        ) else {
+            throw AppError.spider("配置操作验证结果与当前请求不匹配")
+        }
+        let outcome = Self.interactionOutcome(
+            interaction,
+            transportSucceeded: true
+        )
+        guard outcome != .pending else {
+            throw AppError.spider("配置操作验证后仍未进入终态")
+        }
+        return ConfigurationInteractionTerminalResponse(
+            requestID: interactionID,
+            outcome: outcome,
+            providerResult: nil,
+            error: outcome == .failed ? interaction.error ?? error : nil,
+            httpStatusCode: httpResponse.statusCode,
+            refreshPerformed: interaction.refreshPerformed
+        )
+    }
+
+    /// Request-scoped endpoints are preferred whenever the installed bridge
+    /// supports them. Older bridge packages expose only the `latest` UI
+    /// routes; fall back exclusively when the scoped route is unavailable,
+    /// never when a real scoped interaction reports a business failure.
+    private func bridgeData(
+        for request: URLRequest,
+        legacyURL: URL?
+    ) async throws -> (Data, URLResponse) {
+        let result = try await session.data(for: request)
+        guard let legacyURL,
+              let status = (result.1 as? HTTPURLResponse)?.statusCode,
+              [404, 405, 501].contains(status) else {
+            return result
+        }
+        var legacyRequest = request
+        legacyRequest.url = legacyURL
+        return try await session.data(for: legacyRequest)
+    }
+
+    private final class InteractionObservationGate: @unchecked Sendable {
+        typealias Output = MonitoredInvocation
 
         private let lock = NSLock()
         private var continuation: CheckedContinuation<Output, Error>?
-        private var invocation: Task<Void, Never>?
+        private var terminalObserver: Task<Void, Never>?
         private var monitor: Task<Void, Never>?
         private var isResolved = false
-        private var keepsInvocationAlive = false
+        private var keepsTerminalObserverAlive = false
 
         func begin(_ continuation: CheckedContinuation<Output, Error>) {
             lock.lock()
@@ -1499,10 +2909,10 @@ final class AndroidDexBridgeClient {
             lock.unlock()
         }
 
-        func setInvocation(_ task: Task<Void, Never>) {
+        func setTerminalObserver(_ task: Task<Void, Never>) {
             lock.lock()
-            invocation = task
-            let shouldCancel = isResolved && !keepsInvocationAlive
+            terminalObserver = task
+            let shouldCancel = isResolved && !keepsTerminalObserverAlive
             lock.unlock()
             if shouldCancel { task.cancel() }
         }
@@ -1517,10 +2927,10 @@ final class AndroidDexBridgeClient {
 
         func resolve(
             _ result: Result<Output, Error>,
-            keepInvocationAlive: Bool
+            keepTerminalObserverAlive: Bool
         ) {
             let continuation: CheckedContinuation<Output, Error>?
-            let invocation: Task<Void, Never>?
+            let terminalObserver: Task<Void, Never>?
             let monitor: Task<Void, Never>?
             lock.lock()
             guard !isResolved else {
@@ -1528,22 +2938,24 @@ final class AndroidDexBridgeClient {
                 return
             }
             isResolved = true
-            keepsInvocationAlive = keepInvocationAlive
+            keepsTerminalObserverAlive = keepTerminalObserverAlive
             continuation = self.continuation
             self.continuation = nil
-            invocation = self.invocation
+            terminalObserver = self.terminalObserver
             monitor = self.monitor
+            self.terminalObserver = nil
+            self.monitor = nil
             lock.unlock()
 
             monitor?.cancel()
-            if !keepInvocationAlive { invocation?.cancel() }
+            if !keepTerminalObserverAlive { terminalObserver?.cancel() }
             continuation?.resume(with: result)
         }
 
         func cancel() {
             resolve(
                 .failure(CancellationError()),
-                keepInvocationAlive: false
+                keepTerminalObserverAlive: false
             )
         }
     }
@@ -1555,37 +2967,101 @@ final class AndroidDexBridgeClient {
         explicitAuthorizationAction || method == "play" || method == "action"
     }
 
-    private func sendMonitoringAuthorization(
-        _ request: URLRequest
-    ) async throws -> (Data, URLResponse) {
-        var interactiveRequest = request
-        interactiveRequest.timeoutInterval = 600
-        // This task deliberately has an independent lifetime. When Android
-        // presents native UI, macOS returns control to SwiftUI, but the Spider
-        // invocation still owns that dialog and must remain connected until
-        // the user finishes it. Cancelling this request used to tear down the
-        // dialog socket and made QR scans or ordinary selections fail.
-        let race = InvokeRace()
+    private func sendMonitoringInteraction(
+        _ request: URLRequest,
+        requestID: UUID,
+        actionKind: ConfigurationInteraction.ActionKind
+    ) async throws -> MonitoredInvocation {
+        var preparedRequest = request
+        preparedRequest.timeoutInterval = 600
+        let interactiveRequest = preparedRequest
+        let handle = InteractionHandle(
+            id: requestID,
+            actionKind: actionKind,
+            stateProvider: { [weak self] interactionID in
+                guard let self else {
+                    throw CancellationError()
+                }
+                return try await self.uiState(interactionID: interactionID)
+            },
+            snapshotProvider: { [weak self] interactionID in
+                guard let self else {
+                    throw CancellationError()
+                }
+                return try await self.uiSnapshot(
+                    interactionID: interactionID
+                )
+            },
+            submitProvider: {
+                [weak self] interactionID, text, button, controlID, generation in
+                guard let self else {
+                    throw CancellationError()
+                }
+                return try await self.submitUI(
+                    text: text,
+                    button: button,
+                    controlID: controlID,
+                    generation: generation,
+                    interactionID: interactionID
+                )
+            },
+            verifyProvider: {
+                [weak self] interactionID, succeeded, error, refreshPerformed in
+                guard let self else {
+                    throw CancellationError()
+                }
+                return try await self.verifyInteraction(
+                    interactionID: interactionID,
+                    succeeded: succeeded,
+                    error: error,
+                    actualRefreshPerformed: refreshPerformed
+                )
+            },
+            cancelProvider: { [weak self] interactionID in
+                guard let self else { return }
+                try await self.resetAuthorizationUI(
+                    interactionID: interactionID
+                )
+            }
+        ) { [interactionSession] in
+            let (data, response) = try await interactionSession.data(
+                for: interactiveRequest
+            )
+            let initial = Self.decodeTerminalResponse(
+                requestID: requestID,
+                data: data,
+                response: response,
+                requiresScopedIdentity: true,
+                allowsImmediateAuthoritativeResult: actionKind == .immediate
+            )
+            return try await Self.awaitTerminalInteraction(
+                initial: initial,
+                requestID: requestID,
+                session: interactionSession
+            )
+        }
+        // The handle, rather than the first observer, owns the invocation. A
+        // UI generation may be returned immediately while the same handle
+        // continues to cache the provider's eventual terminal response.
+        let gate = InteractionObservationGate()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                race.begin(continuation)
-                let invocation = Task { [interactionSession] in
+                gate.begin(continuation)
+                let terminalObserver = Task {
                     do {
-                        let output = try await interactionSession.data(
-                            for: interactiveRequest
-                        )
-                        race.resolve(
-                            .success(output),
-                            keepInvocationAlive: false
+                        let terminal = try await handle.finalResponse()
+                        gate.resolve(
+                            .success(.completed(terminal, handle)),
+                            keepTerminalObserverAlive: false
                         )
                     } catch {
-                        race.resolve(
+                        gate.resolve(
                             .failure(error),
-                            keepInvocationAlive: false
+                            keepTerminalObserverAlive: false
                         )
                     }
                 }
-                race.setInvocation(invocation)
+                gate.setTerminalObserver(terminalObserver)
                 let monitor = Task { [weak self] in
                     for _ in 0..<2_400 {
                         guard !Task.isCancelled else { return }
@@ -1594,24 +3070,41 @@ final class AndroidDexBridgeClient {
                         // invoke() has already prepared the runtime. Poll the
                         // bridge endpoint directly so UI observation does not
                         // repeat emulator/ADB health checks.
-                        if let state = try? await self.fetchUIState(),
+                        if let state = try? await self.fetchUIState(
+                            interactionID: requestID
+                        ),
                            state.isAuthorizationPrompt {
-                            race.resolve(
-                                .failure(AndroidBridgeUIRequired(state: state)),
-                                keepInvocationAlive: true
+                            let snapshot = await self
+                                .validatedQRCodeSnapshot(
+                                    for: state,
+                                    interactionID: requestID
+                                )
+                            let interaction = state.configurationInteraction(
+                                requestID: requestID,
+                                actionKind: actionKind,
+                                validatedQRCode: snapshot
+                            )
+                            await handle.record(interaction)
+                            gate.resolve(
+                                .success(
+                                    .presented(state, interaction, handle)
+                                ),
+                                keepTerminalObserverAlive: true
                             )
                             return
                         }
                     }
-                    race.resolve(
+                    handle.cancel()
+                    gate.resolve(
                         .failure(AppError.spider("等待 Java/Dex 响应超时")),
-                        keepInvocationAlive: false
+                        keepTerminalObserverAlive: false
                     )
                 }
-                race.setMonitor(monitor)
+                gate.setMonitor(monitor)
             }
         } onCancel: {
-            race.cancel()
+            handle.cancel()
+            gate.cancel()
         }
     }
 
@@ -1631,6 +3124,37 @@ final class AndroidDexBridgeClient {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             : ""
         return (resolved, md5)
+    }
+
+    /// Stable but opaque owner for one configuration/site/JAR capability.
+    /// Each field is UTF-8 length-prefixed before hashing so concatenation
+    /// cannot alias (`ab`+`c` versus `a`+`bc`). Android treats the result as an
+    /// opaque capability and independently binds it to the exact loaded JAR.
+    static func providerOwnerID(
+        configurationID: String,
+        siteKey: String,
+        jarURL: URL,
+        jarMD5: String
+    ) -> String {
+        let jarIdentity = jarMD5.nonEmptyBridgeValue?.lowercased()
+            ?? jarURL.absoluteString
+        let fields = [
+            configurationID.lowercased(),
+            siteKey,
+            jarIdentity
+        ]
+        var material = Data()
+        for field in fields {
+            let bytes = Data(field.utf8)
+            material.append(Data(String(bytes.count).utf8))
+            material.append(0x3a) // ':'
+            material.append(bytes)
+            material.append(0x00)
+        }
+        let digest = SHA256.hash(data: material)
+        return "android-owner-v1:" + digest.map {
+            String(format: "%02x", $0)
+        }.joined()
     }
 
     private static func extString(_ value: JSONValue?) throws -> String {
@@ -1861,9 +3385,18 @@ struct AndroidRuntimeIdentity: Codable, Equatable, Sendable {
     let launchedAt: Date
 }
 
+enum AndroidBridgeHealthValidation: String, Equatable, Sendable {
+    case healthy
+    case serviceNotReady = "bridge_not_ready"
+    case generationMissing = "bridge_generation_missing"
+    case generationMismatch = "bridge_generation_mismatch"
+    case versionMissing = "bridge_version_missing"
+    case versionMismatch = "bridge_version_mismatch"
+}
+
 actor AndroidDexBridgeRuntime {
-    private static let bridgeVersion = "0.3.17"
-    private static let bridgeVersionCode = 29
+    static let bridgeVersion = "0.3.18"
+    static let bridgeVersionCode = 30
     private static let networkCheckInterval: TimeInterval = 30
     private static let manifestSchema = 1
     private static let avdName = "OKVideoMac_Runtime"
@@ -2038,7 +3571,12 @@ actor AndroidDexBridgeRuntime {
         let message = LogRedactor.text(error.localizedDescription)
         let lowercased = message.lowercased()
         let category: AndroidRuntimeFailureCategory
-        if lowercased.contains("所有权") || lowercased.contains("身份") {
+        if failedStage == .probingBridge,
+           let bridgeCategory = Self.bridgeFailureCategory(
+               for: probeErrorCategory
+           ) {
+            category = bridgeCategory
+        } else if lowercased.contains("所有权") || lowercased.contains("身份") {
             category = .emulatorOwnershipMismatch
         } else {
             switch failedStage {
@@ -2077,6 +3615,63 @@ actor AndroidDexBridgeRuntime {
         )
     }
 
+    static func bridgeFailureCategory(
+        for probeErrorCategory: String?
+    ) -> AndroidRuntimeFailureCategory? {
+        switch probeErrorCategory {
+        case AndroidBridgeHealthValidation.generationMissing.rawValue,
+             AndroidBridgeHealthValidation.generationMismatch.rawValue:
+            return .bridgeIdentityMismatch
+        case AndroidBridgeHealthValidation.versionMissing.rawValue,
+             AndroidBridgeHealthValidation.versionMismatch.rawValue:
+            return .bridgeVersionMismatch
+        default:
+            return nil
+        }
+    }
+
+    static func terminalBridgeProbeMessage(
+        for probeErrorCategory: String?
+    ) -> String {
+        switch bridgeFailureCategory(for: probeErrorCategory) {
+        case .bridgeIdentityMismatch:
+            return "Android Bridge 实例身份不匹配；已拒绝把非本次启动的 Bridge 标记为已连接"
+        case .bridgeVersionMismatch:
+            return "Android Bridge 版本不匹配（宿主要求 \(bridgeVersion)）；已拒绝把不兼容的 Bridge 标记为已连接"
+        default:
+            return "Java/Dex Android 桥启动超时（已执行一次有界恢复）"
+        }
+    }
+
+    static func managedRuntimeFailureCategory(
+        processPresent: Bool,
+        processOwned: Bool,
+        deviceRequired: Bool,
+        deviceReachable: Bool,
+        deviceOwned: Bool
+    ) -> AndroidRuntimeFailureCategory? {
+        if !processPresent {
+            return .runtimeExited
+        }
+        if !processOwned {
+            return .emulatorOwnershipMismatch
+        }
+        if deviceRequired && !deviceReachable {
+            return .adbUnavailable
+        }
+        if deviceReachable && !deviceOwned {
+            return .emulatorOwnershipMismatch
+        }
+        return nil
+    }
+
+    static func failedRuntimeRecordCanBeCleared(
+        processPresent: Bool,
+        deviceReachable: Bool
+    ) -> Bool {
+        !processPresent && !deviceReachable
+    }
+
     private func preserveFailure(_ failure: AndroidRuntimeFailureError) {
         lastFailure = failure.record
         completeCurrentStage(error: failure.record.message)
@@ -2106,11 +3701,11 @@ actor AndroidDexBridgeRuntime {
                 guard verifyDeviceOwnership(identity, toolchain: toolchain) else {
                     return .starting(progress: 0.45)
                 }
-                if await isHealthy(
+                if (try? await isHealthy(
                     identity,
                     toolchain: toolchain,
                     acceptVersionMismatch: true
-                ) {
+                )) == true {
                     ready = true
                     acceptsNewerBridge = true
                     lastNetworkCheck = Date()
@@ -2561,7 +4156,7 @@ actor AndroidDexBridgeRuntime {
                     < Self.networkCheckInterval {
                 return
             }
-            if await isHealthy(
+            if try await isHealthy(
                 identity,
                 toolchain: toolchain,
                 acceptVersionMismatch: acceptsNewerBridge
@@ -2606,7 +4201,7 @@ actor AndroidDexBridgeRuntime {
         try configurePortForwards(identity, toolchain: toolchain)
         try startBridge(identity, toolchain: toolchain)
         for _ in 0..<20 {
-            if await isHealthy(
+            if try await isHealthy(
                 identity,
                 toolchain: toolchain,
                 acceptVersionMismatch: acceptsNewerBridge
@@ -2745,7 +4340,7 @@ actor AndroidDexBridgeRuntime {
                 )
             }
             if !forceInstall, !networkWasRepaired,
-               await isHealthy(
+               try await isHealthy(
                     identity,
                     toolchain: toolchain,
                     acceptVersionMismatch: hasNewerBridge
@@ -2775,7 +4370,7 @@ actor AndroidDexBridgeRuntime {
                 .initialBridgeProbeAttempts {
                 try Task.checkCancellation()
                 probeRetryCount = attempt + 1
-                if await isHealthy(identity, toolchain: toolchain) {
+                if try await isHealthy(identity, toolchain: toolchain) {
                     ready = true
                     acceptsNewerBridge = false
                     lastNetworkCheck = Date()
@@ -2802,7 +4397,7 @@ actor AndroidDexBridgeRuntime {
                 try Task.checkCancellation()
                 probeRetryCount = AndroidRuntimeRecoveryPolicy
                     .initialBridgeProbeAttempts + attempt + 1
-                if await isHealthy(identity, toolchain: toolchain) {
+                if try await isHealthy(identity, toolchain: toolchain) {
                     ready = true
                     acceptsNewerBridge = false
                     lastNetworkCheck = Date()
@@ -2816,7 +4411,9 @@ actor AndroidDexBridgeRuntime {
                         .bridgeProbePollNanoseconds
                 )
             }
-            throw AppError.spider("Java/Dex Android 桥启动超时（已执行一次有界恢复）")
+            throw AppError.spider(
+                Self.terminalBridgeProbeMessage(for: probeErrorCategory)
+            )
         } catch {
             ready = false
             let failure = classifiedFailure(for: error)
@@ -3110,6 +4707,11 @@ actor AndroidDexBridgeRuntime {
         let startedAt = Date()
         for _ in 0..<240 {
             try Task.checkCancellation()
+            try validateManagedRuntime(
+                identity,
+                toolchain: toolchain,
+                deviceRequired: true
+            )
             if let value = try? runVerifiedADB(
                 identity,
                 toolchain: toolchain,
@@ -3166,14 +4768,15 @@ actor AndroidDexBridgeRuntime {
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain,
         acceptVersionMismatch: Bool = false
-    ) async -> Bool {
+    ) async throws -> Bool {
         if probeStartedAt == nil {
             probeStartedAt = Date()
         }
-        guard verifyOwnership(identity, toolchain: toolchain) else {
-            probeErrorCategory = "ownership_mismatch"
-            return false
-        }
+        try validateManagedRuntime(
+            identity,
+            toolchain: toolchain,
+            deviceRequired: true
+        )
         guard let url = URL(
             string: "http://127.0.0.1:\(BridgeServerPort.host)/health"
         ) else { return false }
@@ -3196,13 +4799,14 @@ actor AndroidDexBridgeRuntime {
                 probeErrorCategory = "invalid_http_response"
                 return false
             }
-            let matches = Self.healthMatches(
+            let validation = Self.healthValidation(
                 object,
                 generation: identity.generation,
                 acceptVersionMismatch: acceptVersionMismatch
             )
-            probeErrorCategory = matches ? nil : "identity_or_version_mismatch"
-            return matches
+            probeErrorCategory = validation == .healthy
+                ? nil : validation.rawValue
+            return validation == .healthy
         } catch {
             probeDuration = probeStartedAt.map {
                 Date().timeIntervalSince($0)
@@ -3221,12 +4825,34 @@ actor AndroidDexBridgeRuntime {
         generation: String,
         acceptVersionMismatch: Bool = false
     ) -> Bool {
-        object["ok"] as? Bool == true
-            && object["generation"] as? String == generation
-            && (
-                object["version"] as? String == bridgeVersion
-                    || acceptVersionMismatch
-            )
+        healthValidation(
+            object,
+            generation: generation,
+            acceptVersionMismatch: acceptVersionMismatch
+        ) == .healthy
+    }
+
+    static func healthValidation(
+        _ object: [String: Any],
+        generation: String,
+        acceptVersionMismatch: Bool = false
+    ) -> AndroidBridgeHealthValidation {
+        guard object["ok"] as? Bool == true else {
+            return .serviceNotReady
+        }
+        guard let actualGeneration = object["generation"] as? String else {
+            return .generationMissing
+        }
+        guard actualGeneration == generation else {
+            return .generationMismatch
+        }
+        guard let actualVersion = object["version"] as? String else {
+            return .versionMissing
+        }
+        guard actualVersion == bridgeVersion || acceptVersionMismatch else {
+            return .versionMismatch
+        }
+        return .healthy
     }
 
     static func avdName(from emulatorConsoleOutput: String) -> String? {
@@ -3444,17 +5070,62 @@ actor AndroidDexBridgeRuntime {
     ) async throws {
         for _ in 0..<120 {
             try Task.checkCancellation()
-            guard verifyProcessOwnership(identity, toolchain: toolchain) else {
-                throw AppError.spider(
-                    "Android Emulator 进程身份校验失败；已拒绝继续操作"
-                )
-            }
-            if verifyDeviceOwnership(identity, toolchain: toolchain) {
+            if try validateManagedRuntime(
+                identity,
+                toolchain: toolchain,
+                deviceRequired: false
+            ) {
                 return
             }
             try await Task.sleep(nanoseconds: 500_000_000)
         }
         throw AppError.spider("等待专用 Android Emulator 设备身份超时")
+    }
+
+    @discardableResult
+    private func validateManagedRuntime(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain,
+        deviceRequired: Bool
+    ) throws -> Bool {
+        let processPresent = processExecutablePath(pid: identity.pid) != nil
+        let processOwned = processPresent
+            && verifyProcessOwnership(identity, toolchain: toolchain)
+        let deviceReachable = deviceIsReachable(
+            identity,
+            toolchain: toolchain
+        )
+        let deviceOwned = deviceReachable
+            && verifyDeviceOwnership(identity, toolchain: toolchain)
+        guard let category = Self.managedRuntimeFailureCategory(
+            processPresent: processPresent,
+            processOwned: processOwned,
+            deviceRequired: deviceRequired,
+            deviceReachable: deviceReachable,
+            deviceOwned: deviceOwned
+        ) else {
+            return deviceOwned
+        }
+
+        let message: String
+        switch category {
+        case .runtimeExited:
+            message = "专用 Android Emulator 进程已退出"
+        case .adbUnavailable:
+            message = "专用 Android Emulator 设备已断开"
+        case .emulatorOwnershipMismatch:
+            message = "专用 Android Emulator 所有权校验失败；已拒绝继续操作"
+        default:
+            message = "专用 Android Emulator 生命周期校验失败"
+        }
+        throw AndroidRuntimeFailureError(
+            record: AndroidRuntimeFailureRecord(
+                occurredAt: Date(),
+                stage: currentStage,
+                category: category,
+                message: message
+            )
+        )
     }
 
     private func verifyOwnership(
@@ -3613,6 +5284,18 @@ actor AndroidDexBridgeRuntime {
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain
     ) async -> Bool {
+        let processPresent = processExecutablePath(pid: identity.pid) != nil
+        let deviceReachable = deviceIsReachable(
+            identity,
+            toolchain: toolchain
+        )
+        if Self.failedRuntimeRecordCanBeCleared(
+            processPresent: processPresent,
+            deviceReachable: deviceReachable
+        ) {
+            clearRuntimeRecord()
+            return true
+        }
         guard verifyOwnership(identity, toolchain: toolchain) else {
             return false
         }

@@ -1,5 +1,7 @@
+import CryptoKit
 import Foundation
 import OKVideoCore
+import Security
 
 private actor NodeSiteInitializationGate {
     private enum State {
@@ -87,6 +89,222 @@ struct NodeWebAuthorizationRequired: Error, LocalizedError, Equatable {
     var errorDescription: String? { message }
 }
 
+protocol QuarkPasscodeStoring {
+    func passcode(for account: String) -> String?
+
+    @discardableResult
+    func store(_ passcode: String, for account: String) -> Bool
+}
+
+struct QuarkKeychainPasscodeStore: QuarkPasscodeStoring {
+    private static let service = "com.okvideomac.quark-history-passcode.v1"
+
+    func passcode(for account: String) -> String? {
+        var query = baseQuery(account: account)
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        query[kSecReturnData] = true
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    @discardableResult
+    func store(_ passcode: String, for account: String) -> Bool {
+        let valueData = Data(passcode.utf8)
+        let query = baseQuery(account: account)
+        let updateStatus = SecItemUpdate(
+            query as CFDictionary,
+            [kSecValueData: valueData] as CFDictionary
+        )
+        if updateStatus == errSecSuccess {
+            return true
+        }
+        guard updateStatus == errSecItemNotFound else {
+            return false
+        }
+
+        var item = query
+        item[kSecValueData] = valueData
+        item[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
+    }
+
+    private func baseQuery(account: String) -> [CFString: Any] {
+        [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: Self.service,
+            kSecAttrAccount: account,
+            kSecAttrSynchronizable: false
+        ]
+    }
+}
+
+/// The downloaded Node bundle owns the meaning of an episode value, but many
+/// Contract-B bundles do not yet publish an explicit durable resource
+/// descriptor. Keep that opaque input in Keychain and expose only a versioned
+/// digest to history. This lets the same Node provider recreate a fresh media
+/// URL/proxy session without persisting signed URLs, cookies or play tokens.
+struct NodePlaybackReplay: Codable, Equatable {
+    let flag: String
+    let episodeURL: String
+}
+
+protocol NodePlaybackReplayStoring {
+    func replay(for locator: String) -> NodePlaybackReplay?
+
+    @discardableResult
+    func store(_ replay: NodePlaybackReplay, for locator: String) -> Bool
+
+    @discardableResult
+    func removeReplay(for locator: String) -> Bool
+}
+
+struct NodePlaybackKeychainReplayStore: NodePlaybackReplayStoring {
+    private static let service = "com.okvideomac.node-playback-replay.v1"
+
+    func replay(for locator: String) -> NodePlaybackReplay? {
+        var query = baseQuery(account: locator)
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        query[kSecReturnData] = true
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else {
+            return nil
+        }
+        return try? JSONDecoder().decode(NodePlaybackReplay.self, from: data)
+    }
+
+    @discardableResult
+    func store(_ replay: NodePlaybackReplay, for locator: String) -> Bool {
+        guard let valueData = try? JSONEncoder().encode(replay) else {
+            return false
+        }
+        let query = baseQuery(account: locator)
+        let updateStatus = SecItemUpdate(
+            query as CFDictionary,
+            [kSecValueData: valueData] as CFDictionary
+        )
+        if updateStatus == errSecSuccess {
+            return true
+        }
+        guard updateStatus == errSecItemNotFound else {
+            return false
+        }
+
+        var item = query
+        item[kSecValueData] = valueData
+        item[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
+    }
+
+    @discardableResult
+    func removeReplay(for locator: String) -> Bool {
+        let status = SecItemDelete(baseQuery(account: locator) as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
+    }
+
+    private func baseQuery(account: String) -> [CFString: Any] {
+        [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: Self.service,
+            kSecAttrAccount: account,
+            kSecAttrSynchronizable: false
+        ]
+    }
+}
+
+enum NodePlaybackReplayReference {
+    static let prefix = "nhr1"
+    private static let maximumFlagByteCount = 4_096
+    private static let maximumEpisodeByteCount = 65_536
+
+    static func locator(
+        configurationIdentity: String,
+        siteIdentity: String,
+        replay: NodePlaybackReplay
+    ) -> String? {
+        guard !replay.flag.isEmpty,
+              !replay.episodeURL.isEmpty,
+              replay.flag.utf8.count <= maximumFlagByteCount,
+              replay.episodeURL.utf8.count <= maximumEpisodeByteCount else {
+            return nil
+        }
+        var data = Data()
+        for value in [
+            configurationIdentity,
+            siteIdentity,
+            replay.flag,
+            replay.episodeURL
+        ] {
+            let bytes = Data(value.utf8)
+            var count = UInt64(bytes.count).bigEndian
+            withUnsafeBytes(of: &count) { data.append(contentsOf: $0) }
+            data.append(bytes)
+        }
+        let digest = SHA256.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "\(prefix).\(digest)"
+    }
+
+    static func isLocator(_ value: String) -> Bool {
+        guard value.hasPrefix("\(prefix).") else { return false }
+        let digest = value.dropFirst(prefix.count + 1)
+        return digest.count == 64 && digest.allSatisfy { $0.isHexDigit }
+    }
+}
+
+/// Provider-published stable locators may still be credentials (for example a
+/// refresh token or JWT). Persist only this configuration/site/provider-bound
+/// digest; the original value remains in the ThisDeviceOnly replay store.
+enum NodeProviderLocatorReference {
+    static let prefix = "npr1"
+    private static let providerKind = "node-http-spider"
+    private static let maximumLocatorByteCount = 65_536
+
+    static func locator(
+        configurationIdentity: String,
+        siteIdentity: String,
+        schemaVersion: Int,
+        providerVersion: Int,
+        replay: NodePlaybackReplay
+    ) -> String? {
+        guard !replay.flag.isEmpty,
+              !replay.episodeURL.isEmpty,
+              replay.episodeURL.utf8.count <= maximumLocatorByteCount else {
+            return nil
+        }
+        var data = Data()
+        for value in [
+            configurationIdentity,
+            siteIdentity,
+            providerKind,
+            String(schemaVersion),
+            String(providerVersion),
+            replay.flag,
+            replay.episodeURL
+        ] {
+            let bytes = Data(value.utf8)
+            var count = UInt64(bytes.count).bigEndian
+            withUnsafeBytes(of: &count) { data.append(contentsOf: $0) }
+            data.append(bytes)
+        }
+        let digest = SHA256.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "\(prefix).\(digest)"
+    }
+
+    static func isLocator(_ value: String) -> Bool {
+        guard value.hasPrefix("\(prefix).") else { return false }
+        let digest = value.dropFirst(prefix.count + 1)
+        return digest.count == 64 && digest.allSatisfy { $0.isHexDigit }
+    }
+}
+
 /// The Node bundle embeds Quark's short-lived share authorization inside the
 /// opaque episode URL. Keep the codec in the host app so an expired `stoken`
 /// can be refreshed without modifying a downloaded third-party bundle.
@@ -100,6 +318,11 @@ enum QuarkEpisodeReference {
     static let shareTokenURL = URL(
         string: "https://drive.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc"
     )!
+
+    /// URL-free and JSON-free so the durable locator passes the shared
+    /// persistence boundary. Each identity component is UTF-8 hex encoded;
+    /// the prefix carries the schema version without exposing credentials.
+    static let durableReferencePrefix = "qhr1"
 
     static func identity(from rawValue: String) -> Identity? {
         guard let payload = payload(from: rawValue),
@@ -127,18 +350,24 @@ enum QuarkEpisodeReference {
         in rawValue: String,
         with stoken: String
     ) throws -> String {
-        guard let outerData = Data(
-            base64Encoded: rawValue,
-            options: .ignoreUnknownCharacters
-        ),
-        var outer = try JSONSerialization.jsonObject(with: outerData)
-            as? [String: Any],
-        var token = try JSONSerialization.jsonObject(
-            with: Data((outer["playToken"] as? String ?? "").utf8)
-        ) as? [String: Any] else {
+        guard let identity = identity(from: rawValue) else {
             throw AppError.playback("夸克分集令牌格式无效，无法刷新分享授权")
         }
-        token["stoken"] = stoken
+        let normalizedStoken = stoken.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !normalizedStoken.isEmpty else {
+            throw AppError.playback("夸克分享令牌编码失败")
+        }
+
+        // Rebuild the smallest token understood by Node /play. Never copy
+        // arbitrary fields from a historical/runtime playToken into a new
+        // capability.
+        let token: [String: Any] = [
+            "fid": identity.fileID,
+            "shareId": identity.shareID,
+            "stoken": normalizedStoken
+        ]
         let tokenData = try JSONSerialization.data(
             withJSONObject: token,
             options: [.sortedKeys, .withoutEscapingSlashes]
@@ -146,7 +375,12 @@ enum QuarkEpisodeReference {
         guard let tokenString = String(data: tokenData, encoding: .utf8) else {
             throw AppError.playback("夸克分享令牌编码失败")
         }
-        outer["playToken"] = tokenString
+        let outer: [String: Any] = [
+            "fileId": identity.fileID,
+            "playToken": tokenString,
+            "providerId": identity.providerID,
+            "shareId": identity.shareID
+        ]
         let data = try JSONSerialization.data(
             withJSONObject: outer,
             options: [.sortedKeys, .withoutEscapingSlashes]
@@ -154,23 +388,54 @@ enum QuarkEpisodeReference {
         return data.base64EncodedString()
     }
 
-    /// History keeps the stable share/file identity but deliberately omits the
-    /// expiring stoken. The provider reacquires it before the next playback.
-    static func durableHistoryReference(_ rawValue: String) -> String {
-        guard identity(from: rawValue) != nil else { return rawValue }
-        return (try? replacingStoken(in: rawValue, with: "")) ?? rawValue
+    /// History keeps only the versioned provider/share/file identity. A share
+    /// passcode is stored separately under a hashed Keychain account and all
+    /// other runtime playToken fields are discarded.
+    static func durableHistoryReference(
+        _ rawValue: String,
+        passcodeStore: QuarkPasscodeStoring = QuarkKeychainPasscodeStore()
+    ) -> String {
+        guard let identity = identity(from: rawValue) else { return rawValue }
+        if let passcode = embeddedPasscode(from: rawValue),
+           !passcode.isEmpty {
+            _ = passcodeStore.store(
+                passcode,
+                for: credentialAccount(for: identity)
+            )
+        }
+        return durableReference(for: identity)
     }
 
     static func passcode(from rawValue: String) -> String {
+        embeddedPasscode(from: rawValue) ?? ""
+    }
+
+    static func credentialAccount(for identity: Identity) -> String {
+        let identityData = Data(
+            [
+                durableReferencePrefix,
+                identity.providerID.lowercased(),
+                identity.shareID,
+                identity.fileID
+            ]
+                .joined(separator: "\u{0}")
+                .utf8
+        )
+        return SHA256.hash(data: identityData)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    static func embeddedPasscode(from rawValue: String) -> String? {
         guard let outerData = Data(
             base64Encoded: rawValue,
             options: .ignoreUnknownCharacters
         ),
         let outer = try? JSONSerialization.jsonObject(with: outerData)
             as? [String: Any] else {
-            return ""
+            return nil
         }
-        if let value = firstString(
+        if let value = firstPresentString(
             in: outer,
             keys: ["passcode", "passCode", "password", "pwd"]
         ) {
@@ -180,12 +445,12 @@ enum QuarkEpisodeReference {
               let token = try? JSONSerialization.jsonObject(
                 with: Data(playToken.utf8)
               ) as? [String: Any] else {
-            return ""
+            return nil
         }
-        return firstString(
+        return firstPresentString(
             in: token,
             keys: ["passcode", "passCode", "password", "pwd"]
-        ) ?? ""
+        )
     }
 
     private struct Payload {
@@ -196,6 +461,9 @@ enum QuarkEpisodeReference {
     }
 
     private static func payload(from rawValue: String) -> Payload? {
+        if let durablePayload = durablePayload(from: rawValue) {
+            return durablePayload
+        }
         guard let data = Data(
             base64Encoded: rawValue,
             options: .ignoreUnknownCharacters
@@ -223,12 +491,71 @@ enum QuarkEpisodeReference {
         )
     }
 
-    private static func firstString(
+    private static func durableReference(for identity: Identity) -> String {
+        [
+            durableReferencePrefix,
+            hexEncoded(identity.providerID.lowercased()),
+            hexEncoded(identity.shareID),
+            hexEncoded(identity.fileID)
+        ].joined(separator: ".")
+    }
+
+    private static func durablePayload(from rawValue: String) -> Payload? {
+        let components = rawValue.split(
+            separator: ".",
+            omittingEmptySubsequences: false
+        )
+        guard components.count == 4,
+              components[0] == Substring(durableReferencePrefix),
+              let providerID = hexDecoded(components[1]),
+              let shareID = hexDecoded(components[2]),
+              let fileID = hexDecoded(components[3]),
+              !providerID.isEmpty,
+              !shareID.isEmpty,
+              !fileID.isEmpty else {
+            return nil
+        }
+        return Payload(
+            providerID: providerID,
+            shareID: shareID,
+            fileID: fileID,
+            stoken: ""
+        )
+    }
+
+    private static func hexEncoded(_ value: String) -> String {
+        Data(value.utf8)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private static func hexDecoded(_ value: Substring) -> String? {
+        guard !value.isEmpty, value.count.isMultiple(of: 2) else {
+            return nil
+        }
+        var bytes = Data()
+        var index = value.startIndex
+        while index < value.endIndex {
+            let next = value.index(index, offsetBy: 2)
+            guard let byte = UInt8(value[index..<next], radix: 16) else {
+                return nil
+            }
+            bytes.append(byte)
+            index = next
+        }
+        return String(data: bytes, encoding: .utf8)
+    }
+
+    private static func firstPresentString(
         in object: [String: Any],
         keys: [String]
     ) -> String? {
-        keys.compactMap { object[$0] as? String }
-            .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        for key in keys {
+            if let value = object[key] as? String {
+                return value.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return nil
     }
 }
 
@@ -255,6 +582,9 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     private let httpClient: HTTPClient
     private let diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)?
     private let ensureRuntimeReady: (@Sendable () async throws -> URL)?
+    private let quarkPasscodeStore: QuarkPasscodeStoring
+    private let playbackReplayStore: NodePlaybackReplayStoring
+    private let configurationIdentity: String?
     private let initializationGate = NodeSiteInitializationGate()
 
     var configurationWebsiteURL: URL {
@@ -280,7 +610,11 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         baseURL: URL,
         httpClient: HTTPClient,
         diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)? = nil,
-        ensureRuntimeReady: (@Sendable () async throws -> URL)? = nil
+        ensureRuntimeReady: (@Sendable () async throws -> URL)? = nil,
+        quarkPasscodeStore: QuarkPasscodeStoring = QuarkKeychainPasscodeStore(),
+        playbackReplayStore: NodePlaybackReplayStoring =
+            NodePlaybackKeychainReplayStore(),
+        configurationIdentity: String? = nil
     ) throws {
         guard Self.canHandle(site: site, baseURL: baseURL) else {
             throw AppError.spider("NodeHTTPSpiderSiteProvider 站点配置无效")
@@ -290,6 +624,14 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         self.httpClient = httpClient
         self.diagnosticReporter = diagnosticReporter
         self.ensureRuntimeReady = ensureRuntimeReady
+        self.quarkPasscodeStore = quarkPasscodeStore
+        self.playbackReplayStore = playbackReplayStore
+        let normalizedConfigurationIdentity = configurationIdentity?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        self.configurationIdentity = normalizedConfigurationIdentity?.isEmpty == false
+            ? normalizedConfigurationIdentity
+            : nil
     }
 
     func home() async throws -> SiteHome {
@@ -525,6 +867,188 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         }
     }
 
+    func refreshPlayback(
+        _ request: PlaybackRefreshRequest
+    ) async throws -> RefreshedSitePlayback {
+        let requestedSourceName = request.sourceName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let reference = request.providerResourceReference,
+           (NodePlaybackReplayReference.isLocator(
+               reference.stableResourceLocator
+           ) || NodeProviderLocatorReference.isLocator(
+               reference.stableResourceLocator
+           )),
+           reference.configurationIdentity == configurationIdentity,
+           reference.siteIdentity == site.key,
+           reference.providerKind == "node-http-spider",
+           playbackReplayStore.replay(
+               for: reference.stableResourceLocator
+           ) == nil {
+            // A replay locator is only a device-local Keychain handle. It is
+            // intentionally impossible to turn the digest back into a raw
+            // episode capability. Do not feed it to the runtime or fall back
+            // to an ambiguous title search when that Keychain item is gone.
+            throw AppError.playback(
+                "该历史记录的本机安全资源引用已失效，请从搜索结果重新打开一次以修复"
+            )
+        }
+        if let reference = request.providerResourceReference,
+           acceptsPlaybackResourceReference(reference) {
+            let replay = playbackReplay(for: reference)
+            let sourceName = requestedSourceName.flatMap {
+                $0.isEmpty ? nil : $0
+            } ?? replay?.flag
+            guard let sourceName, !sourceName.isEmpty else {
+                // An explicit provider locator may need a runtime source flag.
+                // Without either the persisted replay flag or a display/source
+                // name, the only safe compatibility path is the normal
+                // selection resolver below.
+                return try await refreshPlaybackBySelection(request)
+            }
+            var result = try await player(
+                flag: replay?.flag ?? sourceName,
+                episodeURL: replay?.episodeURL
+                    ?? reference.stableResourceLocator
+            )
+            // The accepted locator is the identity that authorized this
+            // same-resource refresh. A compatibility bundle may omit its
+            // descriptor and the host adapter may temporarily derive an
+            // `nhr1` handle from the replay request; neither is evidence that
+            // the durable resource identity changed. Preserve the accepted
+            // reference after successful direct replay.
+            result.resourceReference = reference
+            result.mediaSession?.resourceReference = reference
+            result.mediaSession?.refreshPerformed = true
+            let requestedEpisodeName = request.episodeName?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let episodeName: String
+            if let requestedEpisodeName, !requestedEpisodeName.isEmpty {
+                episodeName = requestedEpisodeName
+            } else {
+                episodeName = "历史分集"
+            }
+            let episode = PlayEpisode(
+                name: episodeName,
+                url: reference.stableResourceLocator,
+                referenceIdentity: reference.episodeIdentity
+            )
+            let source = PlaySource(
+                name: sourceName,
+                episodes: [episode],
+                referenceIdentity: reference.sourceIdentity
+            )
+            return RefreshedSitePlayback(
+                detail: VideoDetail(
+                    summary: VideoSummary(
+                        siteKey: site.key,
+                        siteName: site.name,
+                        videoID: request.videoID,
+                        title: request.title
+                    ),
+                    playSources: [source]
+                ),
+                source: source,
+                episode: episode,
+                playbackResult: result
+            )
+        }
+
+        return try await refreshPlaybackBySelection(request)
+    }
+
+    private func refreshPlaybackBySelection(
+        _ request: PlaybackRefreshRequest
+    ) async throws -> RefreshedSitePlayback {
+        let selected = try await resolvePlaybackRefreshSelection(request)
+        let result = try await player(
+            flag: selected.source.name,
+            episodeURL: selected.episode.url
+        )
+        return RefreshedSitePlayback(
+            detail: selected.detail,
+            source: selected.source,
+            episode: selected.episode,
+            playbackResult: result
+        )
+    }
+
+    func acceptsPlaybackResourceReference(
+        _ reference: PlaybackResourceReference
+    ) -> Bool {
+        guard let configurationIdentity else {
+            return false
+        }
+        if let expiresAt = reference.expiresAt, expiresAt <= Date() {
+            return false
+        }
+        let locator = reference.stableResourceLocator.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard reference.schemaVersion == 1
+            && reference.configurationIdentity == configurationIdentity
+            && reference.siteIdentity == site.key
+            && reference.providerKind == "node-http-spider"
+            && reference.providerVersion == 1
+            && reference.stability == .providerStable
+            && !reference.sourceIdentity.isEmpty
+            && !reference.episodeIdentity.isEmpty,
+              locator == reference.stableResourceLocator,
+              PlaybackPersistencePolicy.sanitizedProviderResourceReference(
+                  reference
+              ) == reference else {
+            return false
+        }
+        // `nhr1` is the device-local secure replay adapter and `qhr1` is the
+        // legacy Quark adapter. All other values are accepted only as
+        // sanitized provider-owned locators issued through the explicit
+        // player-response descriptor contract.
+        if NodePlaybackReplayReference.isLocator(locator) {
+            guard let replay = playbackReplayStore.replay(for: locator),
+                  NodePlaybackReplayReference.locator(
+                      configurationIdentity: configurationIdentity,
+                      siteIdentity: site.key,
+                      replay: replay
+                  ) == locator else {
+                return false
+            }
+            let sourceIdentity = PlaybackReferenceIdentity.source(
+                explicitIdentity: "node-http-source:\(site.key):\(replay.flag)",
+                episodes: []
+            )
+            let episodeIdentity = PlaybackReferenceIdentity.episode(
+                explicitIdentity: "node-http-replay:\(locator)",
+                name: "",
+                reference: ""
+            )
+            return reference.sourceIdentity == sourceIdentity
+                && reference.episodeIdentity == episodeIdentity
+        }
+        if NodeProviderLocatorReference.isLocator(locator) {
+            guard let replay = playbackReplayStore.replay(for: locator),
+                  NodeProviderLocatorReference.locator(
+                      configurationIdentity: configurationIdentity,
+                      siteIdentity: site.key,
+                      schemaVersion: reference.schemaVersion,
+                      providerVersion: reference.providerVersion,
+                      replay: replay
+                  ) == locator else {
+                return false
+            }
+            let sourceIdentity = PlaybackReferenceIdentity.source(
+                explicitIdentity: "node-http-source:\(site.key):\(replay.flag)",
+                episodes: []
+            )
+            let episodeIdentity = PlaybackReferenceIdentity.episode(
+                explicitIdentity: "node-http-provider:\(locator)",
+                name: "",
+                reference: ""
+            )
+            return reference.sourceIdentity == sourceIdentity
+                && reference.episodeIdentity == episodeIdentity
+        }
+        return QuarkEpisodeReference.identity(from: locator) != nil
+    }
+
     private func resolvePlayer(
         flag: String,
         episodeURL: String
@@ -550,6 +1074,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         // not replace the whole request context.
         result.headers = HTTPHeaders(site.header).merging(result.headers)
         result.validationPolicy = .playerAuthoritative
+        result.resourceReference = playbackResourceReference(
+            flag: flag,
+            episodeURL: episodeURL,
+            providerDescriptor: SpiderResponseMapper
+                .providerPlaybackResourceDescriptor(invocation.value)
+        )
         result.url = normalizePlaybackURL(
             result.url,
             baseURL: invocation.baseURL
@@ -563,6 +1093,11 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 )
             )
         }
+        result.url = preferredProviderLocalTransportURL(
+            selectedURL: result.url,
+            qualities: result.qualities,
+            baseURL: invocation.baseURL
+        )
         result.subtitles = result.subtitles.map { subtitle in
             URL(string: normalizePlaybackURL(
                 subtitle.absoluteString,
@@ -570,7 +1105,178 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             ))
                 ?? subtitle
         }
+        if isOwnedByRuntime(result.url, baseURL: invocation.baseURL) {
+            guard let reference = result.resourceReference,
+                  acceptsPlaybackResourceReference(reference) else {
+                // A localhost URL is a short-lived capability owned by this
+                // exact Node runtime. Without a provider-bound durable replay
+                // reference, a later load failure would degrade into title
+                // search and could select a different same-named cloud file.
+                // Fail closed at the /play boundary instead.
+                throw AppError.playback(
+                    "无法创建当前播放资源的本机安全引用，请重新打开或检查钥匙串"
+                )
+            }
+        }
+        if let reference = result.resourceReference {
+            result.mediaSession = playbackMediaSession(
+                result: result,
+                reference: reference,
+                baseURL: invocation.baseURL
+            )
+        }
         return result
+    }
+
+    private func playbackResourceReference(
+        flag: String,
+        episodeURL: String,
+        providerDescriptor: ProviderPlaybackResourceDescriptor?
+    ) -> PlaybackResourceReference? {
+        guard let configurationIdentity else {
+            return nil
+        }
+
+        if let providerDescriptor {
+            let replay = NodePlaybackReplay(
+                flag: flag,
+                episodeURL: providerDescriptor.stableResourceLocator
+            )
+            guard let locator = NodeProviderLocatorReference.locator(
+                configurationIdentity: configurationIdentity,
+                siteIdentity: site.key,
+                schemaVersion: providerDescriptor.schemaVersion,
+                providerVersion: providerDescriptor.providerVersion,
+                replay: replay
+            ), playbackReplayStore.store(replay, for: locator) else {
+                return nil
+            }
+            let reference = PlaybackResourceReference(
+                schemaVersion: providerDescriptor.schemaVersion,
+                configurationIdentity: configurationIdentity,
+                siteIdentity: site.key,
+                providerKind: "node-http-spider",
+                providerVersion: providerDescriptor.providerVersion,
+                stableResourceLocator: locator,
+                sourceIdentity: PlaybackReferenceIdentity.source(
+                    explicitIdentity: "node-http-source:\(site.key):\(flag)",
+                    episodes: []
+                ),
+                episodeIdentity: PlaybackReferenceIdentity.episode(
+                    explicitIdentity: "node-http-provider:\(locator)",
+                    name: "",
+                    reference: ""
+                ),
+                stability: providerDescriptor.stability,
+                expiresAt: nil
+            )
+            return PlaybackPersistencePolicy
+                .sanitizedProviderResourceReference(reference)
+        }
+
+        if QuarkEpisodeReference.identity(from: episodeURL) != nil {
+            let durableLocator = QuarkEpisodeReference.durableHistoryReference(
+                episodeURL,
+                passcodeStore: quarkPasscodeStore
+            )
+            guard QuarkEpisodeReference.requiresShareTokenRefresh(durableLocator) else {
+                return nil
+            }
+            return PlaybackResourceReference(
+                configurationIdentity: configurationIdentity,
+                siteIdentity: site.key,
+                providerKind: "node-http-spider",
+                providerVersion: 1,
+                stableResourceLocator: durableLocator,
+                sourceIdentity: PlaybackReferenceIdentity.source(
+                    explicitIdentity: "node-http-source:\(site.key):\(flag)",
+                    episodes: []
+                ),
+                episodeIdentity: PlaybackReferenceIdentity.episode(
+                    explicitIdentity: "node-http-quark:\(durableLocator)",
+                    name: "",
+                    reference: ""
+                ),
+                stability: .providerStable,
+                expiresAt: nil
+            )
+        }
+
+        // Compatibility contract for bundles that return no explicit
+        // descriptor. The raw episode input remains in Keychain; history sees
+        // only the provider-bound digest and can therefore ask this exact
+        // provider to regenerate URL, headers and proxy state after expiry.
+        let replay = NodePlaybackReplay(flag: flag, episodeURL: episodeURL)
+        guard let locator = NodePlaybackReplayReference.locator(
+            configurationIdentity: configurationIdentity,
+            siteIdentity: site.key,
+            replay: replay
+        ), playbackReplayStore.store(replay, for: locator) else {
+            return nil
+        }
+        let reference = PlaybackResourceReference(
+            configurationIdentity: configurationIdentity,
+            siteIdentity: site.key,
+            providerKind: "node-http-spider",
+            providerVersion: 1,
+            stableResourceLocator: locator,
+            sourceIdentity: PlaybackReferenceIdentity.source(
+                explicitIdentity: "node-http-source:\(site.key):\(flag)",
+                episodes: []
+            ),
+            episodeIdentity: PlaybackReferenceIdentity.episode(
+                explicitIdentity: "node-http-replay:\(locator)",
+                name: "",
+                reference: ""
+            ),
+            stability: .providerStable,
+            expiresAt: nil
+        )
+        return PlaybackPersistencePolicy
+            .sanitizedProviderResourceReference(reference)
+    }
+
+    private func playbackReplay(
+        for reference: PlaybackResourceReference
+    ) -> NodePlaybackReplay? {
+        let locator = reference.stableResourceLocator
+        guard NodePlaybackReplayReference.isLocator(locator)
+                || NodeProviderLocatorReference.isLocator(locator) else {
+            return nil
+        }
+        return playbackReplayStore.replay(for: locator)
+    }
+
+    private func playbackMediaSession(
+        result: SitePlaybackResult,
+        reference: PlaybackResourceReference,
+        baseURL: URL
+    ) -> PlaybackMediaSession {
+        var fingerprintData = Data(result.url.utf8)
+        for (name, value) in result.headers.dictionary.sorted(by: {
+            $0.key.localizedCaseInsensitiveCompare($1.key) == .orderedAscending
+        }) {
+            fingerprintData.append(0)
+            fingerprintData.append(contentsOf: name.lowercased().utf8)
+            fingerprintData.append(0)
+            fingerprintData.append(contentsOf: value.utf8)
+        }
+        let fingerprint = SHA256.hash(data: fingerprintData)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return PlaybackMediaSession(
+            sessionID: UUID().uuidString.lowercased(),
+            transport: isOwnedByRuntime(result.url, baseURL: baseURL)
+                ? .providerLoopback
+                : .compatibilityDirect,
+            mediaURL: result.url,
+            headers: result.headers,
+            upstreamResourceFingerprint: fingerprint,
+            refreshPerformed: false,
+            redirectPolicy: .providerDefined,
+            rangePolicy: .providerDefined,
+            resourceReference: reference
+        )
     }
 
     private func refreshQuarkShareToken(
@@ -579,10 +1285,26 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         guard let identity = QuarkEpisodeReference.identity(from: episodeURL) else {
             throw AppError.playback("夸克分集令牌缺少分享或文件标识")
         }
+        let passcode: String
+        if let embeddedPasscode = QuarkEpisodeReference.embeddedPasscode(
+            from: episodeURL
+        ) {
+            passcode = embeddedPasscode
+            if !embeddedPasscode.isEmpty {
+                _ = quarkPasscodeStore.store(
+                    embeddedPasscode,
+                    for: QuarkEpisodeReference.credentialAccount(for: identity)
+                )
+            }
+        } else {
+            passcode = quarkPasscodeStore.passcode(
+                for: QuarkEpisodeReference.credentialAccount(for: identity)
+            ) ?? ""
+        }
         let body = try JSONSerialization.data(
             withJSONObject: [
                 "pwd_id": identity.shareID,
-                "passcode": QuarkEpisodeReference.passcode(from: episodeURL)
+                "passcode": passcode
             ],
             options: [.sortedKeys, .withoutEscapingSlashes]
         )
@@ -940,6 +1662,43 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         components.host = baseURL.host
         components.port = baseURL.port
         return components.url?.absoluteString ?? value
+    }
+
+    /// Contract-B providers publish their quality choices in provider order.
+    /// When those choices are endpoints owned by the current local runtime,
+    /// the first one can be an authenticated streaming relay while a later
+    /// "original" choice is only a redirect. The shared decoder's display-name
+    /// preference must not override that transport contract: cross-origin
+    /// redirects may discard the provider's Cookie/Referer context. This rule
+    /// is deliberately structural and applies only when the provider's first
+    /// choice belongs to this exact runtime origin; all-remote quality lists
+    /// keep the shared FongMi behavior.
+    private func preferredProviderLocalTransportURL(
+        selectedURL: String,
+        qualities: [PlaybackQuality],
+        baseURL: URL
+    ) -> String {
+        guard let providerPreferredURL = qualities.first?.url,
+              providerPreferredURL != selectedURL,
+              isOwnedByRuntime(providerPreferredURL, baseURL: baseURL) else {
+            return selectedURL
+        }
+        return providerPreferredURL
+    }
+
+    private func isOwnedByRuntime(
+        _ rawValue: String,
+        baseURL: URL
+    ) -> Bool {
+        guard let candidate = URL(string: rawValue),
+              let candidateHost = candidate.host,
+              let baseHost = baseURL.host else {
+            return false
+        }
+        return candidate.scheme?.caseInsensitiveCompare(baseURL.scheme ?? "")
+                == .orderedSame
+            && candidateHost.caseInsensitiveCompare(baseHost) == .orderedSame
+            && candidate.port == baseURL.port
     }
 
     private static func serverMessage(from value: JSONValue) -> String? {

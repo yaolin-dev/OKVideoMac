@@ -99,11 +99,16 @@ public struct FavoriteRecord: Codable, Equatable, Identifiable, Sendable {
 }
 
 public struct HistoryPlaybackReference: Codable, Equatable, Sendable {
-    public static let currentVersion = 2
+    public static let currentVersion = 3
 
     public var version: Int
     public var sourceIdentity: String
     public var resourceIdentity: String
+    /// Provider-owned durable identity used to rebuild an expired media
+    /// session. This value is safe to persist and deliberately excludes the
+    /// runtime URL, Cookie, Authorization and loopback media-session token.
+    /// It is optional so version 1/2 history JSON continues to decode.
+    public var providerResourceReference: PlaybackResourceReference?
     /// Only non-sensitive request context may be persisted here. Cookie and
     /// Authorization are intentionally reacquired from the provider.
     public var replayHeaders: [String: String]
@@ -112,12 +117,39 @@ public struct HistoryPlaybackReference: Codable, Equatable, Sendable {
         version: Int = currentVersion,
         sourceIdentity: String,
         resourceIdentity: String,
+        providerResourceReference: PlaybackResourceReference? = nil,
         replayHeaders: [String: String] = [:]
     ) {
         self.version = version
         self.sourceIdentity = sourceIdentity
         self.resourceIdentity = resourceIdentity
+        self.providerResourceReference = providerResourceReference
         self.replayHeaders = replayHeaders
+    }
+}
+
+public extension HistoryPlaybackReference {
+    /// Returns the complete durable subset of a playback reference. Runtime
+    /// media/session material is intentionally not representable here.
+    func sanitizedForPersistence() -> HistoryPlaybackReference? {
+        guard let sourceIdentity = PlaybackPersistencePolicy
+            .sanitizedPlaybackIdentity(sourceIdentity),
+              let resourceIdentity = PlaybackPersistencePolicy
+                .sanitizedPlaybackIdentity(resourceIdentity) else {
+            return nil
+        }
+        return HistoryPlaybackReference(
+            version: Self.currentVersion,
+            sourceIdentity: sourceIdentity,
+            resourceIdentity: resourceIdentity,
+            providerResourceReference: PlaybackPersistencePolicy
+                .sanitizedProviderResourceReference(
+                    providerResourceReference
+                ),
+            replayHeaders: PlaybackPersistencePolicy.sanitizedReplayHeaders(
+                replayHeaders
+            )
+        )
     }
 }
 
@@ -172,6 +204,27 @@ public struct HistoryRecord: Codable, Equatable, Identifiable, Sendable {
         self.position = max(0, position)
         self.duration = max(0, duration)
         self.watchedAt = watchedAt
+    }
+}
+
+public extension HistoryRecord {
+    /// Applies the durable-playback boundary to the entire record. Callers may
+    /// use this before display, but repositories must still enforce it on both
+    /// writes and reads because old or externally modified databases exist.
+    func sanitizedForPersistence() -> HistoryRecord {
+        var record = self
+        record.episodeReference = PlaybackPersistencePolicy
+            .sanitizedOpaqueLocator(episodeReference)
+        record.mediaReference = PlaybackPersistencePolicy
+            .sanitizedMediaReference(mediaReference)
+        record.playbackReference = playbackReference?
+            .sanitizedForPersistence()
+        record.position = position.isFinite ? max(0, position) : 0
+        record.duration = duration.isFinite ? max(0, duration) : 0
+        if !watchedAt.timeIntervalSince1970.isFinite {
+            record.watchedAt = Date(timeIntervalSince1970: 0)
+        }
+        return record
     }
 }
 

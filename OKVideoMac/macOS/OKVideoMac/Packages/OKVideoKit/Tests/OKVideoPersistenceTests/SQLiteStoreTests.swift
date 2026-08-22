@@ -210,10 +210,22 @@ final class SQLiteStoreTests: XCTestCase {
     }
 
     func testHistoryPlaybackReferenceRoundTripsWithoutSensitiveHeaders() async throws {
-        let store = try makeStore()
+        let databaseURL = try makeDatabaseURL()
+        let store = try SQLiteStore(databaseURL: databaseURL)
+        let providerReference = PlaybackResourceReference(
+            configurationIdentity: "configuration-v1",
+            siteIdentity: "site-v1",
+            providerKind: "android-dex-spider",
+            providerVersion: 1,
+            stableResourceLocator: "share-42/item-9",
+            sourceIdentity: "stable-source",
+            episodeIdentity: "stable-resource",
+            stability: .providerStable
+        )
         let reference = HistoryPlaybackReference(
             sourceIdentity: "stable-source",
             resourceIdentity: "stable-resource",
+            providerResourceReference: providerReference,
             replayHeaders: [
                 "User-Agent": "Fixture/1.0",
                 "Referer": "https://example.invalid/watch/17"
@@ -225,6 +237,10 @@ final class SQLiteStoreTests: XCTestCase {
             title: "Fixture",
             sourceName: "Display Only",
             episodeName: "Episode Display Only",
+            episodeReference: "share-42/item-9",
+            mediaReference: URL(
+                fileURLWithPath: "/tmp/OKVideoMac fixture.mkv"
+            ).absoluteString,
             playbackReference: reference
         )
 
@@ -232,9 +248,408 @@ final class SQLiteStoreTests: XCTestCase {
         let history = try await store.history()
         let stored = try XCTUnwrap(history.first)
 
-        XCTAssertEqual(stored.playbackReference, reference)
+        let expectedReference = HistoryPlaybackReference(
+            sourceIdentity: "stable-source",
+            resourceIdentity: "stable-resource",
+            providerResourceReference: providerReference,
+            replayHeaders: ["User-Agent": "Fixture/1.0"]
+        )
+        XCTAssertEqual(stored.episodeReference, "share-42/item-9")
+        XCTAssertEqual(
+            stored.mediaReference,
+            URL(fileURLWithPath: "/tmp/OKVideoMac fixture.mkv")
+                .standardizedFileURL.absoluteString
+        )
+        XCTAssertEqual(stored.playbackReference, expectedReference)
         XCTAssertEqual(stored.playbackReference?.sourceIdentity, "stable-source")
         XCTAssertEqual(stored.playbackReference?.resourceIdentity, "stable-resource")
+        XCTAssertEqual(
+            stored.playbackReference?.providerResourceReference,
+            providerReference
+        )
+        let encoded = try JSONEncoder().encode(stored.playbackReference)
+        let encodedText = try XCTUnwrap(String(data: encoded, encoding: .utf8))
+        XCTAssertFalse(encodedText.localizedCaseInsensitiveContains("cookie"))
+        XCTAssertFalse(
+            encodedText.localizedCaseInsensitiveContains("authorization")
+        )
+        XCTAssertFalse(encodedText.localizedCaseInsensitiveContains("mediaSession"))
+
+        var rawValues: [String] = []
+        let verification = try SQLiteConnection(url: databaseURL)
+        try verification.query(
+            """
+            SELECT episode_reference, media_reference, playback_reference
+            FROM history
+            """
+        ) { statement in
+            rawValues = (0...2).compactMap { verification.text(statement, Int32($0)) }
+        }
+        verification.close()
+        let rawText = rawValues.joined(separator: "\n")
+        XCTAssertFalse(rawText.localizedCaseInsensitiveContains("referer"))
+        XCTAssertFalse(rawText.localizedCaseInsensitiveContains("cookie"))
+        XCTAssertFalse(rawText.localizedCaseInsensitiveContains("authorization"))
+    }
+
+    func testHistoryPersistenceBoundaryRejectsMaliciousValuesOnWriteAndRead()
+        async throws {
+        let databaseURL = try makeDatabaseURL()
+        let store = try SQLiteStore(databaseURL: databaseURL)
+        let sentinel = "SECRET-SENTINEL-9427"
+        let base64EpisodeReference = Data(
+            #"{"fileId":"42","token":"SECRET-SENTINEL-9427"}"#.utf8
+        ).base64EncodedString()
+        let expiringProviderReference = PlaybackResourceReference(
+            configurationIdentity: "configuration-v1",
+            siteIdentity: "site-v1",
+            providerKind: "android-dex-spider",
+            providerVersion: 1,
+            stableResourceLocator: "token-\(sentinel)",
+            sourceIdentity: "stable-source",
+            episodeIdentity: "stable-resource",
+            stability: .providerStable,
+            expiresAt: Date(timeIntervalSince1970: 1_900_000_000)
+        )
+        let inputReference = HistoryPlaybackReference(
+            sourceIdentity: "stable-source",
+            resourceIdentity: "stable-resource",
+            providerResourceReference: expiringProviderReference,
+            replayHeaders: [
+                "Authorization": "Bearer \(sentinel)",
+                "Cookie": "session=\(sentinel)",
+                "Origin": "https://origin.invalid/\(sentinel)",
+                "Referer": "https://referer.invalid/\(sentinel)",
+                "User-Agent": "Fixture/1.0"
+            ]
+        )
+        try await store.saveHistory(
+            HistoryRecord(
+                siteKey: "fixture",
+                videoID: "unsafe",
+                title: "Unsafe",
+                episodeReference: base64EpisodeReference,
+                mediaReference: "https://media.invalid/video?token=\(sentinel)",
+                playbackReference: inputReference
+            ),
+            incognito: false
+        )
+
+        var records = try await store.history()
+        var stored = try XCTUnwrap(records.first)
+        XCTAssertNil(stored.episodeReference)
+        XCTAssertNil(stored.mediaReference)
+        XCTAssertNil(stored.playbackReference?.providerResourceReference)
+        XCTAssertEqual(
+            stored.playbackReference?.replayHeaders,
+            ["User-Agent": "Fixture/1.0"]
+        )
+
+        let direct = try SQLiteConnection(url: databaseURL)
+        var persistedText = ""
+        try direct.query(
+            """
+            SELECT COALESCE(episode_reference, ''),
+                   COALESCE(media_reference, ''),
+                   COALESCE(playback_reference, '')
+            FROM history
+            """
+        ) { statement in
+            persistedText = (0...2)
+                .compactMap { direct.text(statement, Int32($0)) }
+                .joined(separator: "\n")
+        }
+        XCTAssertFalse(persistedText.contains(sentinel))
+        XCTAssertFalse(persistedText.localizedCaseInsensitiveContains("cookie"))
+        XCTAssertFalse(
+            persistedText.localizedCaseInsensitiveContains("authorization")
+        )
+
+        let replayOnlyReference = HistoryPlaybackReference(
+            sourceIdentity: "stable-source",
+            resourceIdentity: "stable-resource",
+            providerResourceReference: PlaybackResourceReference(
+                configurationIdentity: "configuration-v1",
+                siteIdentity: "site-v1",
+                providerKind: "android-dex-spider",
+                providerVersion: 1,
+                stableResourceLocator: "item-\(sentinel)",
+                sourceIdentity: "stable-source",
+                episodeIdentity: "stable-resource",
+                stability: .providerReplay
+            ),
+            replayHeaders: [
+                "Authorization": "Bearer \(sentinel)",
+                "User-Agent": "Fixture/2.0"
+            ]
+        )
+        let rawPlaybackReference = String(
+            decoding: try JSONEncoder().encode(replayOnlyReference),
+            as: UTF8.self
+        )
+        try direct.execute(
+            """
+            UPDATE history
+            SET episode_reference = ?, media_reference = ?,
+                playback_reference = ?
+            """,
+            bindings: [
+                .text("http://127.0.0.1:9978/media?token=\(sentinel)"),
+                .text("http://localhost:9978/media/\(sentinel)"),
+                .text(rawPlaybackReference)
+            ]
+        )
+        direct.close()
+
+        records = try await store.history()
+        stored = try XCTUnwrap(records.first)
+        XCTAssertNil(stored.episodeReference)
+        XCTAssertNil(stored.mediaReference)
+        XCTAssertNil(stored.playbackReference?.providerResourceReference)
+        XCTAssertEqual(
+            stored.playbackReference?.replayHeaders,
+            ["User-Agent": "Fixture/2.0"]
+        )
+        XCTAssertNil(
+            PlaybackPersistencePolicy.sanitizedOpaqueLocator(
+                #"{"fileId":"42"}"#
+            )
+        )
+        XCTAssertNil(
+            PlaybackPersistencePolicy.sanitizedOpaqueLocator(
+                "unsafe\u{0000}locator"
+            )
+        )
+    }
+
+    func testSchemaSixMigrationScrubsLegacyHistorySecretsFromDisk()
+        async throws {
+        let databaseURL = try makeDatabaseURL()
+        let sentinel = "MIGRATION-SECRET-SENTINEL-7319"
+        let legacyReference = HistoryPlaybackReference(
+            version: 3,
+            sourceIdentity: "stable-source",
+            resourceIdentity: "stable-resource",
+            providerResourceReference: PlaybackResourceReference(
+                configurationIdentity: "configuration-v1",
+                siteIdentity: "site-v1",
+                providerKind: "android-dex-spider",
+                providerVersion: 1,
+                stableResourceLocator: "token-\(sentinel)",
+                sourceIdentity: "stable-source",
+                episodeIdentity: "stable-resource",
+                stability: .providerReplay
+            ),
+            replayHeaders: [
+                "Authorization": "Bearer \(sentinel)",
+                "Cookie": "session=\(sentinel)",
+                "User-Agent": "Legacy/1.0"
+            ]
+        )
+        let rawLegacyReference = String(
+            decoding: try JSONEncoder().encode(legacyReference),
+            as: UTF8.self
+        )
+        let legacy = try SQLiteConnection(url: databaseURL)
+        try legacy.execute(
+            """
+            CREATE TABLE history (
+                configuration_id TEXT NOT NULL,
+                site_key TEXT NOT NULL,
+                video_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                poster_url TEXT,
+                source_name TEXT,
+                episode_name TEXT,
+                media_reference TEXT,
+                position REAL NOT NULL DEFAULT 0,
+                duration REAL NOT NULL DEFAULT 0,
+                watched_at REAL NOT NULL,
+                episode_reference TEXT,
+                playback_reference TEXT,
+                PRIMARY KEY (configuration_id, site_key, video_id)
+            )
+            """
+        )
+        try legacy.execute(
+            """
+            INSERT INTO history (
+                configuration_id, site_key, video_id, title, source_name,
+                episode_name, media_reference, position, duration, watched_at,
+                episode_reference, playback_reference
+            ) VALUES ('', 'fixture', 'legacy', 'Legacy', 'UC', 'Episode',
+                      ?, 33, 100, 1000, ?, ?)
+            """,
+            bindings: [
+                .text("https://media.invalid/file?token=\(sentinel)"),
+                .text("https://episode.invalid/item?cookie=\(sentinel)"),
+                .text(rawLegacyReference)
+            ]
+        )
+        try legacy.execute("PRAGMA user_version = 5")
+        legacy.close()
+
+        let store = try SQLiteStore(databaseURL: databaseURL)
+        let migratedRecords = try await store.history()
+        let migrated = try XCTUnwrap(migratedRecords.first)
+        XCTAssertEqual(migrated.title, "Legacy")
+        XCTAssertEqual(migrated.position, 33)
+        XCTAssertEqual(migrated.duration, 100)
+        XCTAssertNil(migrated.episodeReference)
+        XCTAssertNil(migrated.mediaReference)
+        XCTAssertNil(migrated.playbackReference?.providerResourceReference)
+        XCTAssertEqual(
+            migrated.playbackReference?.replayHeaders,
+            ["User-Agent": "Legacy/1.0"]
+        )
+
+        let verification = try SQLiteConnection(url: databaseURL)
+        XCTAssertEqual(
+            try verification.scalarInt("PRAGMA user_version"),
+            SQLiteStore.currentSchemaVersion
+        )
+        var persistedText = ""
+        try verification.query(
+            """
+            SELECT COALESCE(episode_reference, ''),
+                   COALESCE(media_reference, ''),
+                   COALESCE(playback_reference, '')
+            FROM history
+            """
+        ) { statement in
+            persistedText = (0...2)
+                .compactMap { verification.text(statement, Int32($0)) }
+                .joined(separator: "\n")
+        }
+        verification.close()
+        XCTAssertFalse(persistedText.contains(sentinel))
+
+        let sentinelData = Data(sentinel.utf8)
+        for suffix in ["", "-wal", "-shm"] {
+            let candidate = URL(fileURLWithPath: databaseURL.path + suffix)
+            guard FileManager.default.fileExists(atPath: candidate.path) else {
+                continue
+            }
+            let contents = try Data(contentsOf: candidate)
+            XCTAssertNil(
+                contents.range(of: sentinelData),
+                "Migration left the secret sentinel in \(candidate.lastPathComponent)"
+            )
+        }
+    }
+
+    func testSchemaSevenMigrationRemovesRawNodeProviderLocatorFromSQLite()
+        async throws {
+        let databaseURL = try makeDatabaseURL()
+        let sentinel = "eyJhbGciOiJIUzI1NiJ9.NODE-SECRET-7319.signature"
+        let legacyReference = HistoryPlaybackReference(
+            version: 3,
+            sourceIdentity: "node-source",
+            resourceIdentity: "node-episode",
+            providerResourceReference: PlaybackResourceReference(
+                configurationIdentity: "configuration-a",
+                siteIdentity: "node-site",
+                providerKind: "node-http-spider",
+                providerVersion: 1,
+                stableResourceLocator: sentinel,
+                sourceIdentity: "node-source",
+                episodeIdentity: "node-episode",
+                stability: .providerStable
+            ),
+            replayHeaders: ["User-Agent": "Fixture/1.0"]
+        )
+        let rawLegacyReference = String(
+            decoding: try JSONEncoder().encode(legacyReference),
+            as: UTF8.self
+        )
+        let legacy = try SQLiteConnection(url: databaseURL)
+        try legacy.execute(
+            """
+            CREATE TABLE history (
+                configuration_id TEXT NOT NULL,
+                site_key TEXT NOT NULL,
+                video_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                poster_url TEXT,
+                source_name TEXT,
+                episode_name TEXT,
+                media_reference TEXT,
+                position REAL NOT NULL DEFAULT 0,
+                duration REAL NOT NULL DEFAULT 0,
+                watched_at REAL NOT NULL,
+                episode_reference TEXT,
+                playback_reference TEXT,
+                PRIMARY KEY (configuration_id, site_key, video_id)
+            )
+            """
+        )
+        try legacy.execute(
+            """
+            INSERT INTO history (
+                configuration_id, site_key, video_id, title, position,
+                duration, watched_at, playback_reference
+            ) VALUES ('configuration-a', 'node-site', 'video', 'Node',
+                      10, 100, 1000, ?)
+            """,
+            bindings: [.text(rawLegacyReference)]
+        )
+        try legacy.execute("PRAGMA user_version = 6")
+        legacy.close()
+
+        let store = try SQLiteStore(databaseURL: databaseURL)
+        let migratedRecords = try await store.history()
+        let migrated = try XCTUnwrap(migratedRecords.first)
+        XCTAssertEqual(migrated.playbackReference?.sourceIdentity, "node-source")
+        XCTAssertEqual(migrated.playbackReference?.resourceIdentity, "node-episode")
+        XCTAssertNil(migrated.playbackReference?.providerResourceReference)
+        XCTAssertEqual(
+            migrated.playbackReference?.replayHeaders,
+            ["User-Agent": "Fixture/1.0"]
+        )
+
+        let verification = try SQLiteConnection(url: databaseURL)
+        XCTAssertEqual(
+            try verification.scalarInt("PRAGMA user_version"),
+            SQLiteStore.currentSchemaVersion
+        )
+        var persistedReference = ""
+        try verification.query(
+            "SELECT COALESCE(playback_reference, '') FROM history"
+        ) { statement in
+            persistedReference = verification.text(statement, 0) ?? ""
+        }
+        verification.close()
+        XCTAssertFalse(persistedReference.contains(sentinel))
+
+        let sentinelData = Data(sentinel.utf8)
+        for suffix in ["", "-wal", "-shm"] {
+            let candidate = URL(fileURLWithPath: databaseURL.path + suffix)
+            guard FileManager.default.fileExists(atPath: candidate.path) else {
+                continue
+            }
+            let contents = try Data(contentsOf: candidate)
+            XCTAssertNil(
+                contents.range(of: sentinelData),
+                "Migration left the raw Node locator in \(candidate.lastPathComponent)"
+            )
+        }
+    }
+
+    func testLegacyHistoryPlaybackReferenceDecodesWithoutProviderReference()
+        throws {
+        let legacy = Data(
+            #"{"version":2,"sourceIdentity":"source","resourceIdentity":"episode","replayHeaders":{"User-Agent":"Fixture"}}"#.utf8
+        )
+        let decoded = try JSONDecoder().decode(
+            HistoryPlaybackReference.self,
+            from: legacy
+        )
+
+        XCTAssertEqual(decoded.version, 2)
+        XCTAssertEqual(decoded.sourceIdentity, "source")
+        XCTAssertEqual(decoded.resourceIdentity, "episode")
+        XCTAssertNil(decoded.providerResourceReference)
+        XCTAssertEqual(decoded.replayHeaders["User-Agent"], "Fixture")
     }
 
     func testHistoryKeepsSameSiteAndVideoSeparateAcrossConfigurations() async throws {
@@ -395,12 +810,20 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(favorites.count, 50)
     }
 
-    private func makeStore() throws -> SQLiteStore {
+    private func makeDatabaseURL() throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("OKVideoMacTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
         addTeardownBlock {
             try? FileManager.default.removeItem(at: directory)
         }
-        return try SQLiteStore(databaseURL: directory.appendingPathComponent("test.sqlite3"))
+        return directory.appendingPathComponent("test.sqlite3")
+    }
+
+    private func makeStore() throws -> SQLiteStore {
+        try SQLiteStore(databaseURL: makeDatabaseURL())
     }
 }

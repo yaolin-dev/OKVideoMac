@@ -185,15 +185,201 @@ enum CloudInteractionKind: String, Equatable {
     case authorization
 }
 
+/// Host-owned semantics for a configuration interaction. Providers may adopt
+/// these values directly once their protocol exposes an interaction ID. Until
+/// then the legacy adapter starts conservatively as `.legacy` and only
+/// promotes a native surface from structural UI metadata.
+enum ConfigurationInteractionSemantic: String, Equatable, Sendable {
+    case command
+    case toggle
+    case choice
+    case order
+    case qrAuthorization = "qr"
+    case credentialAuthorization = "credential"
+    case web
+    case native
+    case legacy
+
+    var isAuthorization: Bool {
+        // These values are assigned only after the provider has explicitly
+        // declared an authorization interaction. Merely exposing an input or
+        // image must never upgrade an ordinary configuration command.
+        self == .qrAuthorization || self == .credentialAuthorization
+    }
+}
+
+enum ConfigurationInteractionTransport: String, Equatable, Sendable {
+    case web
+    case native
+    case legacy
+}
+
+enum ConfigurationInteractionPhase: String, Equatable, Sendable {
+    case invoking
+    case awaitingInterface
+    case presenting
+    case submitting
+    case processing
+    case completed
+    case failed
+    case cancelled
+
+    var isTerminal: Bool {
+        switch self {
+        case .completed, .failed, .cancelled:
+            return true
+        default:
+            return false
+        }
+    }
+
+    var isBusy: Bool {
+        switch self {
+        case .invoking, .awaitingInterface, .submitting, .processing:
+            return true
+        case .presenting, .completed, .failed, .cancelled:
+            return false
+        }
+    }
+}
+
+enum ConfigurationInteractionCancellationReason: String, Equatable, Sendable {
+    case user
+    case superseded
+    case sourceChanged
+    case providerCancelled
+}
+
+struct ConfigurationInteractionRequest: Equatable, Sendable {
+    let interactionID: UUID
+    let sourceIdentity: HomeContentIdentity
+    let semantic: ConfigurationInteractionSemantic
+    let transport: ConfigurationInteractionTransport
+    let title: String
+}
+
+struct ConfigurationInteractionTransaction: Equatable, Sendable {
+    var request: ConfigurationInteractionRequest
+    var phase: ConfigurationInteractionPhase
+    var status: String?
+    var cancellationReason: ConfigurationInteractionCancellationReason?
+}
+
+/// Single semantic owner for request-scoped configuration UI. Every async
+/// callback must still own `interactionID` before it may publish UI or a
+/// terminal result. A new request supersedes the previous request without
+/// allowing its late callbacks to mutate the replacement.
+struct ConfigurationInteractionCoordinator: Sendable {
+    private(set) var current: ConfigurationInteractionTransaction?
+
+    var hasActiveRequest: Bool {
+        guard let current else { return false }
+        return !current.phase.isTerminal
+    }
+
+    @discardableResult
+    mutating func begin(
+        sourceIdentity: HomeContentIdentity,
+        semantic: ConfigurationInteractionSemantic,
+        transport: ConfigurationInteractionTransport,
+        title: String,
+        interactionID: UUID = UUID()
+    ) -> ConfigurationInteractionRequest {
+        let request = ConfigurationInteractionRequest(
+            interactionID: interactionID,
+            sourceIdentity: sourceIdentity,
+            semantic: semantic,
+            transport: transport,
+            title: title
+        )
+        current = ConfigurationInteractionTransaction(
+            request: request,
+            phase: .invoking,
+            status: nil,
+            cancellationReason: nil
+        )
+        return request
+    }
+
+    func owns(_ interactionID: UUID) -> Bool {
+        current?.request.interactionID == interactionID
+    }
+
+    @discardableResult
+    mutating func transition(
+        _ interactionID: UUID,
+        to phase: ConfigurationInteractionPhase,
+        semantic: ConfigurationInteractionSemantic? = nil,
+        transport: ConfigurationInteractionTransport? = nil,
+        status: String? = nil
+    ) -> Bool {
+        guard var transaction = current,
+              transaction.request.interactionID == interactionID,
+              !transaction.phase.isTerminal else {
+            return false
+        }
+        if let semantic {
+            transaction.request = ConfigurationInteractionRequest(
+                interactionID: transaction.request.interactionID,
+                sourceIdentity: transaction.request.sourceIdentity,
+                semantic: semantic,
+                transport: transport ?? transaction.request.transport,
+                title: transaction.request.title
+            )
+        } else if let transport {
+            transaction.request = ConfigurationInteractionRequest(
+                interactionID: transaction.request.interactionID,
+                sourceIdentity: transaction.request.sourceIdentity,
+                semantic: transaction.request.semantic,
+                transport: transport,
+                title: transaction.request.title
+            )
+        }
+        transaction.phase = phase
+        transaction.status = status
+        current = transaction
+        return true
+    }
+
+    @discardableResult
+    mutating func cancel(
+        _ interactionID: UUID,
+        reason: ConfigurationInteractionCancellationReason
+    ) -> Bool {
+        guard var transaction = current,
+              transaction.request.interactionID == interactionID,
+              !transaction.phase.isTerminal else {
+            return false
+        }
+        transaction.phase = .cancelled
+        transaction.cancellationReason = reason
+        current = transaction
+        return true
+    }
+
+    mutating func clear(_ interactionID: UUID? = nil) {
+        guard interactionID == nil || current?.request.interactionID == interactionID else {
+            return
+        }
+        current = nil
+    }
+}
+
 struct CloudAuthorizationPrompt: Identifiable, Equatable {
     let id: UUID
+    let interactionID: UUID
     var title: String
     var interactionKind: CloudInteractionKind
+    var semantic: ConfigurationInteractionSemantic
+    var transport: ConfigurationInteractionTransport
+    var lifecyclePhase: ConfigurationInteractionPhase
     var status: String?
     var phase: String?
     var provider: String?
     var hasTextInput: Bool
+    var usesSecureInput: Bool
     var credentialPush: Bool
+    var displaysLoginQRCode: Bool
     var allowsRetry: Bool
     var actions: [CloudAuthorizationAction]
     var snapshot: Data?
@@ -387,20 +573,14 @@ enum CloudAuthorizationCompletionPolicy {
         hasObservedQRCode: Bool,
         hiddenPollCount: Int
     ) -> Bool {
-        if authenticated { return true }
-        guard hasObservedPrompt else { return false }
-        switch interactionKind {
-        case .configuration:
-            // Ordinary chooser/confirmation dialogs complete by returning to
-            // the host. They must not be forced through an auth-only status
-            // check that their Spider never publishes.
-            return hiddenPollCount >= 3
-        case .authorization:
-            // For QR flows the original Spider invocation remains alive and
-            // the next playback/home refresh verifies the resulting session.
-            // A short debounce avoids treating dialog replacement as success.
-            return hasObservedQRCode && hiddenPollCount >= 6
-        }
+        // Retained only as a compatibility seam for older tests/callers. UI
+        // visibility, a decoded QR image and a bridge authentication snapshot
+        // are observations, not the terminal result of the request that
+        // created the interaction. Success is published exclusively by the
+        // request-scoped InteractionHandle terminal response (or by the
+        // immediate provider call returning normally before a UI is created).
+        // In particular, a window disappearing must never become success.
+        false
     }
 }
 
@@ -431,6 +611,215 @@ enum CloudAuthorizationPollingPolicy {
             return false
         }
         return elapsed >= max(0, maximumInterval)
+    }
+}
+
+enum ConfigurationInteractionVerificationDecision: Equatable, Sendable {
+    case pending
+    case verifySucceeded(refreshPerformed: Bool?)
+    case verifyFailed(String)
+    case terminalSucceeded
+    case terminalFailed(String?)
+    case terminalCancelled
+}
+
+/// Converts request-scoped bridge state into an explicit host action. Neither
+/// UI visibility nor a generation change is a business result. A login flow
+/// may be verified only after the provider's refreshed status explicitly says
+/// that it is authenticated (or supplies an explicit verification error).
+/// Other configuration commands remain owned by the provider worker's
+/// terminal response.
+enum ConfigurationInteractionVerificationPolicy {
+    static func accepts(
+        _ state: AndroidBridgeUIState,
+        interactionID: UUID,
+        requiresScopedIdentity: Bool
+    ) -> Bool {
+        guard let rawID = state.interactionID?.nonEmpty else {
+            return !requiresScopedIdentity
+        }
+        return UUID(uuidString: rawID) == interactionID
+    }
+
+    static func decision(
+        for state: AndroidBridgeUIState,
+        semantic: ConfigurationInteractionSemantic
+    ) -> ConfigurationInteractionVerificationDecision {
+        let normalizedOutcome = state.outcome?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let normalizedPhase = state.phase?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        if state.terminal == true {
+            switch normalizedOutcome {
+            case "completed", "success", "succeeded":
+                return .terminalSucceeded
+            case "cancelled", "canceled", "superseded":
+                return .terminalCancelled
+            case "failed", "error":
+                return .terminalFailed(state.error?.nonEmpty)
+            default:
+                switch normalizedPhase {
+                case "completed", "success", "succeeded":
+                    return .terminalSucceeded
+                case "cancelled", "canceled", "superseded":
+                    return .terminalCancelled
+                case "failed", "error":
+                    return .terminalFailed(state.error?.nonEmpty)
+                default:
+                    return .pending
+                }
+            }
+        }
+
+        guard state.hostUnavailable != true,
+              state.verificationPerformed != true,
+              (semantic == .qrAuthorization
+                || semantic == .credentialAuthorization) else {
+            return .pending
+        }
+        if state.authenticated == true {
+            return .verifySucceeded(refreshPerformed: state.refreshPerformed)
+        }
+        if state.authenticated == false,
+           let error = state.error?.nonEmpty {
+            return .verifyFailed(error)
+        }
+        return .pending
+    }
+}
+
+enum ConfigurationInteractionClassificationPolicy {
+    /// Only structural metadata is accepted here. Display names, source keys,
+    /// domains and provider-specific action IDs deliberately do not classify an
+    /// operation.
+    static func legacySemantic(tag: String?) -> ConfigurationInteractionSemantic {
+        switch tag?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() {
+        case "command": return .command
+        case "toggle": return .toggle
+        case "choice": return .choice
+        case "order": return .order
+        // Legacy tags are presentation hints, not proof that the provider is
+        // performing authorization. The live provider interaction must first
+        // declare authorization and then expose verified login UI before the
+        // host upgrades the prompt semantics.
+        case "qr", "qr-authorization", "qrauthorization",
+             "credential", "credentials":
+            return .legacy
+        case "web": return .web
+        case "native": return .native
+        default: return .legacy
+        }
+    }
+
+    private static func structuralNativeSemantic(
+        inputCount: Int,
+        controlRoles: [String?]
+    ) -> ConfigurationInteractionSemantic {
+        let roles = controlRoles.compactMap {
+            $0?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        if roles.contains(where: { $0 == "toggle" || $0 == "switch" }) {
+            return .toggle
+        }
+        if roles.contains(where: { $0 == "order" || $0 == "reorder" }) {
+            return .order
+        }
+        if !controlRoles.isEmpty { return .choice }
+        return .native
+    }
+
+    static func nativeSemantic(
+        interaction: ConfigurationInteraction?,
+        hasVerifiedQRCode: Bool,
+        credentialPush: Bool,
+        state: AndroidBridgeUIState
+    ) -> ConfigurationInteractionSemantic {
+        // A bitmap merely being decodable as a QR code is not enough to call
+        // an arbitrary configuration surface "authorization". The provider
+        // must explicitly own an authorization interaction and identify the
+        // image as its login QR code.
+        if hasVerifiedQRCode,
+           interaction?.actionKind == .authorization,
+           interaction?.qrRole == .login {
+            return .qrAuthorization
+        }
+        if interaction?.actionKind == .authorization,
+           credentialPush {
+            return .credentialAuthorization
+        }
+        switch interaction?.actionKind {
+        case .command, .immediate:
+            return .command
+        case .toggle:
+            return .toggle
+        case .ordering:
+            return .order
+        case .webSetting:
+            return .web
+        case .nativeSetting:
+            return .native
+        case .configuration, .authorization, .playback, nil:
+            break
+        }
+        let structuralSemantic = structuralNativeSemantic(
+            inputCount: 0,
+            controlRoles: state.actionableControls.map(\.role)
+        )
+        switch interaction?.phase {
+        case .choice:
+            switch structuralSemantic {
+            case .toggle, .order:
+                return structuralSemantic
+            default:
+                return .choice
+            }
+        case .form:
+            switch structuralSemantic {
+            case .toggle, .order, .choice:
+                return structuralSemantic
+            default:
+                return .native
+            }
+        case .qrCode:
+            // Candidate/helper/credential-push images remain generic native
+            // configuration UI. Only the explicit login case above is auth.
+            return .native
+        case .invoking, .transitioning, .reattaching, .status, .completed, .failed,
+             .cancelled, nil:
+            return structuralSemantic
+        }
+    }
+
+    static func interactionKind(
+        for semantic: ConfigurationInteractionSemantic
+    ) -> CloudInteractionKind {
+        semantic.isAuthorization ? .authorization : .configuration
+    }
+}
+
+enum UserVisibleAsyncErrorPolicy {
+    static func shouldPresent(_ error: Error, ownsSession: Bool) -> Bool {
+        ownsSession && !AsyncCancellationPolicy.isCancellation(error)
+    }
+}
+
+enum AsyncCancellationPolicy {
+    static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError,
+           urlError.code == .cancelled {
+            return true
+        }
+        let nsError = error as NSError
+        return (nsError.domain == NSURLErrorDomain
+                && nsError.code == NSURLErrorCancelled)
+            || (nsError.domain == NSCocoaErrorDomain
+                && nsError.code == NSUserCancelledError)
     }
 }
 
@@ -730,6 +1119,142 @@ enum PlaybackRequestOwnershipPolicy {
     }
 }
 
+enum SiteProviderRoutingPolicy {
+    private struct ArtifactReference {
+        let original: String
+        let artifact: String
+        let checksum: String?
+
+        init?(_ reference: String) {
+            let trimmed = reference.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            guard !trimmed.isEmpty else { return nil }
+
+            let marker = ";md5;"
+            if let range = trimmed.range(
+                of: marker,
+                options: [.caseInsensitive]
+            ) {
+                let artifact = String(trimmed[..<range.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !artifact.isEmpty else { return nil }
+                self.artifact = artifact
+                let checksum = String(trimmed[range.upperBound...])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                self.checksum = checksum
+                original = artifact + marker + checksum
+            } else {
+                self.original = trimmed
+                artifact = trimmed
+                checksum = nil
+            }
+        }
+
+        var hasValidatedContentChecksum: Bool {
+            guard let checksum,
+                  [32, 64].contains(checksum.count) else {
+                return false
+            }
+            return checksum.unicodeScalars.allSatisfy {
+                CharacterSet(charactersIn: "0123456789abcdefABCDEF")
+                    .contains($0)
+            }
+        }
+    }
+
+    private static let localJavaScriptExtensions = Set([
+        "js", "mjs", "cjs"
+    ])
+
+    static func hasExclusiveNodeRuntimeOwnership(
+        _ site: SiteConfiguration
+    ) -> Bool {
+        site.extra["okNodeRuntime"] == .bool(true)
+    }
+
+    /// Android is a compatibility provider only for an actual Java/Dex
+    /// artifact. A `csp_` class name alone is not provenance: Node and local
+    /// JavaScript sites must fail within their own provider boundary instead
+    /// of falling through to Android when their runtime is unavailable.
+    static func javaDexJarReference(
+        site: SiteConfiguration,
+        configurationSpider: String?,
+        baseURL: URL?
+    ) -> String? {
+        guard site.type == 3,
+              site.api.hasPrefix("csp_"),
+              !hasExclusiveNodeRuntimeOwnership(site),
+              localJavaScriptURL(
+                  site: site,
+                  configurationSpider: configurationSpider,
+                  baseURL: baseURL
+              ) == nil,
+              let reference = site.jar ?? configurationSpider,
+              let parsedReference = ArtifactReference(reference) else {
+            return nil
+        }
+        guard let resolved = try? ResourceResolver.resolve(
+            parsedReference.artifact,
+            relativeTo: baseURL
+        ) else {
+            return nil
+        }
+        let extensionName = resolved.pathExtension.lowercased()
+        guard !localJavaScriptExtensions.contains(extensionName) else {
+            return nil
+        }
+        let hasExplicitJavaExtension = ["jar", "dex"].contains(extensionName)
+        // TVBox configurations commonly disguise a Java artifact as `.jpg`
+        // while binding its bytes with `;md5;<digest>`. Treat that
+        // content-addressed form as Java/Dex provenance too. Node-owned and
+        // local JavaScript sites have already been excluded above, so an
+        // arbitrary URL still cannot make a non-Android provider fall through
+        // to the Bridge.
+        let hasContentAddressedArtifact =
+            parsedReference.hasValidatedContentChecksum
+        guard hasExplicitJavaExtension || hasContentAddressedArtifact else {
+            return nil
+        }
+        return parsedReference.original
+    }
+
+    static func localJavaScriptURL(
+        site: SiteConfiguration,
+        configurationSpider: String?,
+        baseURL: URL?
+    ) -> URL? {
+        var references: [String] = []
+        if let script = site.extra["script"]?.stringValue {
+            references.append(script)
+        }
+        if let script = site.ext?.objectValue?["script"]?.stringValue {
+            references.append(script)
+        }
+        references.append(site.api)
+        if let configurationSpider {
+            references.append(configurationSpider)
+        }
+        for reference in references {
+            guard let parsedReference = ArtifactReference(reference) else {
+                continue
+            }
+            if let resolved = try? ResourceResolver.resolve(
+                parsedReference.artifact,
+                relativeTo: baseURL
+            ), localJavaScriptExtensions.contains(
+                resolved.pathExtension.lowercased()
+            ),
+               ["http", "https"].contains(
+                   resolved.scheme?.lowercased() ?? ""
+               ) {
+                return resolved
+            }
+        }
+        return nil
+    }
+}
+
 struct PlayerSubtitleTrackPreference: Equatable {
     let id: Int
     let title: String
@@ -792,11 +1317,13 @@ struct PlayerSubtitleTrackPreference: Equatable {
 }
 
 private struct ActivePlaybackContext {
+    let configurationID: UUID
     var detail: VideoDetail
     var source: PlaySource
     var episode: PlayEpisode
     var media: ResolvedMedia
     var playbackResult: SitePlaybackResult?
+    var providerResourceReference: PlaybackResourceReference?
 }
 
 private struct PlaybackHistoryWrite {
@@ -804,7 +1331,32 @@ private struct PlaybackHistoryWrite {
     let incognito: Bool
 }
 
+enum PlaybackConfigurationOwnershipPolicy {
+    static func capturedConfigurationID(
+        requested: UUID?,
+        history: UUID?,
+        current: UUID?
+    ) -> UUID? {
+        requested ?? history ?? current
+    }
+
+    static func canBeginPlayback(
+        captured: UUID,
+        current: UUID?
+    ) -> Bool {
+        captured == current
+    }
+
+    static func historyOwner(
+        captured: UUID,
+        current _: UUID?
+    ) -> UUID {
+        captured
+    }
+}
+
 private struct PendingCloudPlayback {
+    let configurationID: UUID
     var detail: VideoDetail
     var source: PlaySource
     var episode: PlayEpisode
@@ -822,25 +1374,44 @@ private enum PendingCloudOperation {
         return playback
     }
 
-    var interactionKind: CloudInteractionKind {
+    var initialSemantic: ConfigurationInteractionSemantic {
         switch self {
-        case .playback:
-            return .authorization
-        case .detail, .homeAction, .siteAction:
-            return .configuration
+        case .playback, .siteAction:
+            return .legacy
+        case .detail(let summary):
+            return ConfigurationInteractionClassificationPolicy
+                .legacySemantic(tag: summary.tag)
+        case .homeAction(let item):
+            return ConfigurationInteractionClassificationPolicy
+                .legacySemantic(tag: item.tag)
         }
+    }
+
+    var interactionKind: CloudInteractionKind {
+        ConfigurationInteractionClassificationPolicy.interactionKind(
+            for: initialSemantic
+        )
     }
 }
 
 private struct CloudAuthorizationContext {
     let sourceIdentity: HomeContentIdentity
     let operationID: UUID
+    /// Exact capability binding returned by the Bridge for this interaction.
+    /// The host stores it only for the live prompt and returns it verbatim;
+    /// source/provider labels never select a credential target.
+    var providerOwnerID: String?
+    var actionContract: JSONValue?
+    var providerHandle: InteractionHandle?
+    var providerInteraction: ConfigurationInteraction?
     var operation: PendingCloudOperation
     var submittedAt: Date?
     var submittedGeneration: Int?
     var hasObservedPrompt: Bool
     var hasObservedQRCode: Bool
     var hasObservedPostSubmissionTransition: Bool
+    var lastObservedRevision: Int?
+    var hasRequestedVerification: Bool
 }
 
 enum PlaybackRequestOrigin: Equatable, Sendable {
@@ -854,6 +1425,42 @@ enum PlaybackRequestOrigin: Equatable, Sendable {
 
     var isHistory: Bool {
         historyRecord != nil
+    }
+}
+
+/// Keeps every value used by one resolver/load attempt on the same provider
+/// snapshot. In particular, a same-resource refresh must not combine its new
+/// episode or request headers with the expired values from the first attempt.
+struct PlaybackResolutionAttemptContext: Equatable, Sendable {
+    let detail: VideoDetail
+    let source: PlaySource
+    let episode: PlayEpisode
+    let result: SitePlaybackResult
+
+    func resolutionRequest(
+        configuredParsers: [ParseConfiguration],
+        maximumAttempts: Int
+    ) -> PlaybackResolutionRequest {
+        // A player-authoritative result is already the provider's final,
+        // authenticated media request. Generic parsers cannot renew that
+        // capability and must not consume the retry budget that belongs to the
+        // provider's same-resource refresh.
+        let eligibleParsers = result.validationPolicy == .playerAuthoritative
+            ? []
+            : configuredParsers
+        return PlaybackResolutionRequest(
+            candidates: [
+                PlaybackCandidate(
+                    siteKey: detail.summary.siteKey,
+                    siteName: detail.summary.siteName,
+                    sourceName: source.name,
+                    episodeName: episode.name,
+                    result: result
+                )
+            ],
+            parsers: eligibleParsers,
+            maximumAttempts: maximumAttempts
+        )
     }
 }
 
@@ -1263,6 +1870,15 @@ enum ConfigurationSwitchFeedbackPolicy {
             return false
         }
     }
+
+    static func shouldClear(
+        _ feedback: ConfigurationSwitchFeedback,
+        hasActiveActivationRequest: Bool
+    ) -> Bool {
+        guard !hasActiveActivationRequest else { return false }
+        if case .idle = feedback { return false }
+        return true
+    }
 }
 
 struct ConfigurationActivationRequestTracker: Sendable {
@@ -1294,7 +1910,7 @@ enum ConfigurationActivationErrorPolicy {
         _ error: Error,
         ownsCurrentRequest: Bool
     ) -> Bool {
-        ownsCurrentRequest && !(error is CancellationError)
+        ownsCurrentRequest && !AsyncCancellationPolicy.isCancellation(error)
     }
 }
 
@@ -1446,6 +2062,10 @@ final class AppState: ObservableObject {
     private var playerEventTask: Task<Void, Never>?
     private var cloudAuthorizationPollTask: Task<Void, Never>?
     private var cloudAuthorizationSessionID = UUID()
+    private var configurationInteractionCoordinator =
+        ConfigurationInteractionCoordinator()
+    private var configurationInteractionDismissTask: Task<Void, Never>?
+    private var configurationInteractionTerminalTask: Task<Void, Never>?
     private var activePlayback: ActivePlaybackContext?
     private var pendingPlayback: PendingCloudPlayback?
     private var livePlaybackNavigationContext: LivePlaybackNavigationContext?
@@ -1617,6 +2237,7 @@ final class AppState: ObservableObject {
                 )
             )
         }
+        clearConfigurationSwitchFeedback()
         let operationID = UUID()
         configurationImportOperationID = operationID
         isLoading = true
@@ -1723,6 +2344,7 @@ final class AppState: ObservableObject {
     }
 
     func refreshActiveConfiguration() async {
+        clearConfigurationSwitchFeedback()
         guard activeConfigurationRecord?.sourceKind == .remote else {
             show(
                 AppError.configuration("只有 URL 配置可以直接刷新"),
@@ -1803,10 +2425,14 @@ final class AppState: ObservableObject {
                 self.categoryLoadSessionID = UUID()
                 self.activeConfiguration = loaded.configuration
                 self.rebuildProviders()
+                let previousSiteKey = self.selectedSiteKey
                 if !self.supportedSites.contains(where: {
                     $0.key == self.selectedSiteKey
                 }) {
                     self.selectedSiteKey = self.supportedSites.first?.key
+                }
+                if self.selectedSiteKey != previousSiteKey {
+                    try? await self.reloadHistory()
                 }
                 self.discardHomeContentIfNeeded(
                     for: self.currentHomeContentIdentity
@@ -1842,6 +2468,18 @@ final class AppState: ObservableObject {
         requestedConfigurationID != nil
     }
 
+    private func clearConfigurationSwitchFeedback() {
+        guard ConfigurationSwitchFeedbackPolicy.shouldClear(
+            configurationSwitchFeedback,
+            hasActiveActivationRequest: requestedConfigurationID != nil
+        ) else {
+            return
+        }
+        configurationSwitchFeedbackDismissTask?.cancel()
+        configurationSwitchFeedbackDismissTask = nil
+        configurationSwitchFeedback = .idle
+    }
+
     /// Shared activation entry point used by both Settings and the Home
     /// toolbar. Every request receives a generation; a newer request cancels
     /// the previous waiter and is the only generation allowed to publish or
@@ -1855,9 +2493,7 @@ final class AppState: ObservableObject {
            requestedConfigurationID == nil {
             // Re-selecting the already active source is also an explicit
             // acknowledgement of any earlier failed switch attempt.
-            configurationSwitchFeedbackDismissTask?.cancel()
-            configurationSwitchFeedbackDismissTask = nil
-            configurationSwitchFeedback = .idle
+            clearConfigurationSwitchFeedback()
             return
         }
         if requestedConfigurationID == id {
@@ -2086,6 +2722,7 @@ final class AppState: ObservableObject {
 
     func deleteConfiguration(_ id: UUID) async {
         guard let environment else { return }
+        clearConfigurationSwitchFeedback()
         let deletingActiveConfiguration = activeConfigurationRecord?.id == id
         do {
             try await environment.database.deleteConfiguration(id: id)
@@ -2123,6 +2760,7 @@ final class AppState: ObservableObject {
         isHomeLoading = true
         homeLoadErrorMessage = nil
         selectedSiteKey = key
+        try? await reloadHistory()
         discardHomeContentIfNeeded(for: currentHomeContentIdentity)
         selectedCategoryID = nil
         selectedCategoryFilters = [:]
@@ -2251,6 +2889,16 @@ final class AppState: ObservableObject {
                 )
             )
             return false
+        } catch is CancellationError {
+            guard CategoryLoadResultPolicy.shouldAccept(
+                requestSessionID: sessionID,
+                currentSessionID: categoryLoadSessionID,
+                requestedSiteKey: key,
+                currentSiteKey: selectedSiteKey,
+                requestedIdentity: contentIdentity,
+                currentIdentity: currentHomeContentIdentity
+            ) else { return false }
+            return false
         } catch {
             guard CategoryLoadResultPolicy.shouldAccept(
                 requestSessionID: sessionID,
@@ -2260,6 +2908,14 @@ final class AppState: ObservableObject {
                 requestedIdentity: contentIdentity,
                 currentIdentity: currentHomeContentIdentity
             ) else { return false }
+            if AsyncCancellationPolicy.isCancellation(error) {
+                if loadingNextPage {
+                    categoryPaginationError = nil
+                } else {
+                    homeLoadErrorMessage = nil
+                }
+                return false
+            }
             if loadingNextPage {
                 categoryPaginationError = error.localizedDescription
             } else {
@@ -2365,6 +3021,16 @@ final class AppState: ObservableObject {
                 )
             )
             return false
+        } catch is CancellationError {
+            guard CategoryLoadResultPolicy.shouldAccept(
+                requestSessionID: sessionID,
+                currentSessionID: categoryLoadSessionID,
+                requestedSiteKey: key,
+                currentSiteKey: selectedSiteKey,
+                requestedIdentity: contentIdentity,
+                currentIdentity: currentHomeContentIdentity
+            ) else { return false }
+            return false
         } catch {
             guard CategoryLoadResultPolicy.shouldAccept(
                 requestSessionID: sessionID,
@@ -2374,6 +3040,10 @@ final class AppState: ObservableObject {
                 requestedIdentity: contentIdentity,
                 currentIdentity: currentHomeContentIdentity
             ) else { return false }
+            if AsyncCancellationPolicy.isCancellation(error) {
+                homeLoadErrorMessage = nil
+                return false
+            }
             homeLoadErrorMessage = error.localizedDescription
             if reportErrors {
                 show(error, title: "功能内容加载失败")
@@ -2430,10 +3100,20 @@ final class AppState: ObservableObject {
             )
             guard didApplyPresentation else { return false }
             return true
+        } catch is CancellationError {
+            guard homeLoadSessionID == sessionID else { return false }
+            homeLoadErrorMessage = nil
+            return false
         } catch {
             guard homeLoadSessionID == sessionID else { return false }
-            homeLoadErrorMessage = error.localizedDescription
-            if reportErrors {
+            let shouldPresent = UserVisibleAsyncErrorPolicy.shouldPresent(
+                error,
+                ownsSession: true
+            )
+            homeLoadErrorMessage = shouldPresent
+                ? error.localizedDescription
+                : nil
+            if reportErrors && shouldPresent {
                 show(error, title: "站点加载失败")
             }
             return false
@@ -2441,6 +3121,7 @@ final class AppState: ObservableObject {
     }
 
     func refreshHome() async {
+        clearConfigurationSwitchFeedback()
         _ = await refreshActiveConfigurationIfNeeded(
             force: true,
             reportErrors: true
@@ -2489,12 +3170,8 @@ final class AppState: ObservableObject {
             )
             return
         }
-        if let action = summary.action?.nonEmpty {
-            await performSiteAction(
-                action,
-                title: summary.title,
-                provider: provider
-            )
+        if summary.action?.nonEmpty != nil {
+            await performHomeAction(SiteActionItem(summary: summary))
             return
         }
         let sessionID = UUID()
@@ -2515,30 +3192,16 @@ final class AppState: ObservableObject {
                 presentHomeSearch()
                 search(query, context: .discoveryFallback)
             case .action(let result):
-                if Self.shouldWaitForCloudAuthorization(
-                    capability: provider.capability
-                ), let authorization = await waitForCloudAuthorization() {
-                    await presentCloudAuthorization(
-                        authorization,
-                        operation: .detail(summary),
-                        siteKey: summary.siteKey
-                    )
-                } else {
-                    if provider.capability == .javaDexSpider,
-                       Self.siteActionMessage(result) == nil {
-                        await presentUnconfirmedCloudAuthorization(
-                            title: summary.title,
-                            siteKey: summary.siteKey,
-                            operation: .detail(summary)
-                        )
-                    } else {
-                        presentedError = UserFacingError(
-                            title: summary.title,
-                            message: Self.siteActionMessage(result)
-                                ?? "站点返回了无法识别的操作结果，请重试或切换来源。"
-                        )
-                    }
-                }
+                // Action-backed summaries are routed through
+                // performHomeAction before detail loading. Reaching this
+                // branch means the provider changed an ordinary detail into
+                // an action without the host-owned interaction ID. Never
+                // manufacture a completed configuration operation here.
+                presentedError = UserFacingError(
+                    title: summary.title,
+                    message: Self.siteActionMessage(result)
+                        ?? "站点返回了未关联到当前请求的配置操作，请返回后重试。"
+                )
             }
         } catch let authorization as NodeWebAuthorizationRequired {
             guard detailLoadSessionID == sessionID else { return }
@@ -2564,9 +3227,14 @@ final class AppState: ObservableObject {
             pendingDetailSummary = nil
             await presentCloudAuthorization(
                 authorization.state,
+                interaction: authorization.interaction,
+                handle: authorization.handle,
                 operation: .detail(summary),
                 siteKey: summary.siteKey
             )
+        } catch is CancellationError {
+            guard detailLoadSessionID == sessionID else { return }
+            pendingDetailSummary = nil
         } catch {
             guard detailLoadSessionID == sessionID else { return }
             pendingDetailSummary = nil
@@ -2582,50 +3250,79 @@ final class AppState: ObservableObject {
             )
             return
         }
-        if let action = item.action?.nonEmpty {
-            await performSiteAction(
-                action,
-                title: item.title,
-                provider: provider
-            )
-            return
+        let operation = PendingCloudOperation.homeAction(item)
+        if provider.capability == .javaDexSpider {
+            await supersedeConfigurationInteractionIfNeeded()
         }
-
-        isLoading = true
-        defer { isLoading = false }
+        let interactionID: UUID?
+        if provider.capability == .javaDexSpider {
+            guard let begunInteractionID = beginConfigurationInteraction(
+                title: item.title,
+                siteKey: item.siteKey,
+                operation: operation,
+                semantic: operation.initialSemantic
+            ) else {
+                // A Java/Dex action must never fall through to the legacy
+                // unscoped invocation path. The active configuration may have
+                // changed while the old action card was still visible.
+                return
+            }
+            interactionID = begunInteractionID
+        } else {
+            interactionID = nil
+        }
+        let usesGlobalLoadingIndicator = interactionID == nil
+        if usesGlobalLoadingIndicator { isLoading = true }
+        defer {
+            if usesGlobalLoadingIndicator { isLoading = false }
+        }
         do {
-            switch try await provider.select(action: item) {
-            case .detail:
-                presentedError = UserFacingError(
-                    title: item.title,
-                    message: "该入口是功能操作，未作为影视详情打开。"
+            let selection: SiteSelectionResult
+            if let interactionID,
+               let provider = provider as? AndroidDexSpiderSiteProvider {
+                selection = try await provider.select(
+                    action: item,
+                    interactionID: interactionID
                 )
-            case .action(let result):
-                if Self.shouldWaitForCloudAuthorization(
-                    capability: provider.capability
-                ), let authorization = await waitForCloudAuthorization() {
-                    await presentCloudAuthorization(
-                        authorization,
-                        operation: .homeAction(item),
-                        siteKey: item.siteKey
+            } else {
+                selection = try await provider.select(action: item)
+            }
+            switch selection {
+            case .detail:
+                if let interactionID,
+                   configurationInteractionCoordinator.owns(interactionID) {
+                    failConfigurationInteraction(
+                        interactionID,
+                        message: "站点把配置入口返回成了影视详情，操作未执行。"
                     )
                 } else {
-                    if provider.capability == .javaDexSpider,
-                       Self.siteActionMessage(result) == nil {
-                        await presentUnconfirmedCloudAuthorization(
-                            title: item.title,
-                            siteKey: item.siteKey,
-                            operation: .homeAction(item)
-                        )
-                    } else {
-                        presentedError = UserFacingError(
-                            title: item.title,
-                            message: Self.siteActionMessage(result)
-                                ?? Self.unsupportedSiteActionMessage
-                        )
-                    }
+                    presentedError = UserFacingError(
+                        title: item.title,
+                        message: "该入口是功能操作，未作为影视详情打开。"
+                    )
+                }
+            case .action(let result):
+                if let interactionID,
+                   configurationInteractionCoordinator.owns(interactionID) {
+                    completeConfigurationInteraction(
+                        interactionID,
+                        status: Self.siteActionMessage(result)
+                            ?? "配置操作已完成"
+                    )
+                    scheduleConfigurationInteractionDismiss(interactionID)
+                } else {
+                    presentedError = UserFacingError(
+                        title: item.title,
+                        message: Self.siteActionMessage(result)
+                            ?? Self.unsupportedSiteActionMessage
+                    )
                 }
             case .search(let query):
+                if let interactionID,
+                   configurationInteractionCoordinator.owns(interactionID) {
+                    completeConfigurationInteraction(interactionID)
+                    scheduleConfigurationInteractionDismiss(interactionID)
+                }
                 presentHomeSearch()
                 search(query, context: .discoveryFallback)
             }
@@ -2642,13 +3339,48 @@ final class AppState: ObservableObject {
                 pending: .homeAction(identity: identity, item: item)
             )
         } catch let authorization as AndroidBridgeUIRequired {
+            if let interactionID,
+               !configurationInteractionCoordinator.owns(interactionID) {
+                authorization.handle?.cancel()
+                return
+            }
             await presentCloudAuthorization(
                 authorization.state,
-                operation: .homeAction(item),
+                interaction: authorization.interaction,
+                handle: authorization.handle,
+                operation: operation,
                 siteKey: item.siteKey
             )
+        } catch is CancellationError {
+            if let interactionID,
+               configurationInteractionCoordinator.owns(interactionID) {
+                clearCloudAuthorization(
+                    resetBridgeUI: false,
+                    markPendingPlaybackCancelled: false,
+                    cancellationReason: .providerCancelled
+                )
+            }
         } catch {
-            show(error, title: "\(item.title)失败")
+            if AsyncCancellationPolicy.isCancellation(error) {
+                if let interactionID,
+                   configurationInteractionCoordinator.owns(interactionID) {
+                    clearCloudAuthorization(
+                        resetBridgeUI: false,
+                        markPendingPlaybackCancelled: false,
+                        cancellationReason: .providerCancelled
+                    )
+                }
+                return
+            }
+            if let interactionID,
+               configurationInteractionCoordinator.owns(interactionID) {
+                failConfigurationInteraction(
+                    interactionID,
+                    message: error.localizedDescription
+                )
+            } else {
+                show(error, title: "\(item.title)失败")
+            }
         }
     }
 
@@ -2719,26 +3451,55 @@ final class AppState: ObservableObject {
         title: String,
         provider: SiteProvider
     ) async {
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            let result = try await provider.action(action)
-            if provider.capability == .javaDexSpider,
-               let state = await waitForCloudAuthorization() {
-                await presentCloudAuthorization(
-                    state,
-                    operation: .siteAction(action: action, title: title),
-                    siteKey: provider.site.key
-                )
+        let operation = PendingCloudOperation.siteAction(
+            action: action,
+            title: title
+        )
+        if provider.capability == .javaDexSpider {
+            await supersedeConfigurationInteractionIfNeeded()
+        }
+        let interactionID: UUID?
+        if provider.capability == .javaDexSpider {
+            guard let begunInteractionID = beginConfigurationInteraction(
+                title: title,
+                siteKey: provider.site.key,
+                operation: operation,
+                semantic: operation.initialSemantic
+            ) else {
+                // Do not send a stale Java/Dex command without the host-owned
+                // interaction/session identity.
                 return
             }
-            if provider.capability == .javaDexSpider,
-               Self.siteActionMessage(result) == nil {
-                await presentUnconfirmedCloudAuthorization(
-                    title: title,
-                    siteKey: provider.site.key,
-                    operation: .siteAction(action: action, title: title)
+            interactionID = begunInteractionID
+        } else {
+            interactionID = nil
+        }
+        let usesGlobalLoadingIndicator = interactionID == nil
+        if usesGlobalLoadingIndicator { isLoading = true }
+        defer {
+            if usesGlobalLoadingIndicator { isLoading = false }
+        }
+        do {
+            let result: JSONValue
+            if let interactionID,
+               let provider = provider as? AndroidDexSpiderSiteProvider {
+                result = try await provider.action(
+                    action,
+                    interactionID: interactionID
                 )
+            } else {
+                result = try await provider.action(action)
+            }
+            if let interactionID {
+                guard configurationInteractionCoordinator.owns(interactionID) else {
+                    return
+                }
+                completeConfigurationInteraction(
+                    interactionID,
+                    status: Self.siteActionMessage(result)
+                        ?? "配置操作已完成"
+                )
+                scheduleConfigurationInteractionDismiss(interactionID)
             } else {
                 let message = Self.siteActionMessage(result)
                     ?? Self.unsupportedSiteActionMessage
@@ -2763,52 +3524,496 @@ final class AppState: ObservableObject {
                 )
             )
         } catch let authorization as AndroidBridgeUIRequired {
+            if let interactionID,
+               !configurationInteractionCoordinator.owns(interactionID) {
+                authorization.handle?.cancel()
+                return
+            }
             await presentCloudAuthorization(
                 authorization.state,
-                operation: .siteAction(action: action, title: title),
+                interaction: authorization.interaction,
+                handle: authorization.handle,
+                operation: operation,
                 siteKey: provider.site.key
             )
+        } catch is CancellationError {
+            if let interactionID,
+               configurationInteractionCoordinator.owns(interactionID) {
+                clearCloudAuthorization(
+                    resetBridgeUI: false,
+                    markPendingPlaybackCancelled: false,
+                    cancellationReason: .providerCancelled
+                )
+            }
         } catch {
-            show(error, title: "\(title)失败")
+            if AsyncCancellationPolicy.isCancellation(error) {
+                if let interactionID,
+                   configurationInteractionCoordinator.owns(interactionID) {
+                    clearCloudAuthorization(
+                        resetBridgeUI: false,
+                        markPendingPlaybackCancelled: false,
+                        cancellationReason: .providerCancelled
+                    )
+                }
+                return
+            }
+            if let interactionID,
+               configurationInteractionCoordinator.owns(interactionID) {
+                failConfigurationInteraction(
+                    interactionID,
+                    message: error.localizedDescription
+                )
+            } else {
+                show(error, title: "\(title)失败")
+            }
         }
     }
 
-    private func presentUnconfirmedCloudAuthorization(
+    @discardableResult
+    private func beginConfigurationInteraction(
         title: String,
         siteKey: String,
-        operation: PendingCloudOperation
-    ) async {
+        operation: PendingCloudOperation,
+        semantic: ConfigurationInteractionSemantic? = nil,
+        interactionID: UUID = UUID(),
+        providerHandle: InteractionHandle? = nil,
+        providerInteraction: ConfigurationInteraction? = nil,
+        phase: ConfigurationInteractionPhase = .invoking
+    ) -> UUID? {
         guard let identity = activeSourceIdentity(for: siteKey) else {
             show(
                 AppError.site("该配置操作所属配置已经发生变化"),
                 title: title
             )
-            return
+            return nil
+        }
+        if cloudAuthorizationContext != nil || cloudAuthorizationPrompt != nil {
+            clearCloudAuthorization(
+                resetBridgeUI: true,
+                markPendingPlaybackCancelled: false,
+                cancellationReason: .superseded
+            )
+        }
+        let resolvedSemantic = semantic ?? operation.initialSemantic
+        let request = configurationInteractionCoordinator.begin(
+            sourceIdentity: identity,
+            semantic: resolvedSemantic,
+            transport: .native,
+            title: title,
+            interactionID: interactionID
+        )
+        if phase != .invoking {
+            _ = configurationInteractionCoordinator.transition(
+                request.interactionID,
+                to: phase
+            )
         }
         cloudAuthorizationContext = CloudAuthorizationContext(
             sourceIdentity: identity,
-            operationID: UUID(),
+            operationID: request.interactionID,
+            providerOwnerID: nil,
+            actionContract: nil,
+            providerHandle: providerHandle,
+            providerInteraction: providerInteraction,
             operation: operation,
             submittedAt: nil,
             submittedGeneration: nil,
             hasObservedPrompt: false,
             hasObservedQRCode: false,
-            hasObservedPostSubmissionTransition: false
+            hasObservedPostSubmissionTransition: false,
+            lastObservedRevision: nil,
+            hasRequestedVerification: false
         )
         cloudAuthorizationPrompt = CloudAuthorizationPrompt(
             id: UUID(),
+            interactionID: request.interactionID,
             title: title,
-            interactionKind: operation.interactionKind,
-            status: "命令已经发送，正在等待站点创建下一步操作界面…",
-            phase: "waiting",
+            interactionKind: ConfigurationInteractionClassificationPolicy
+                .interactionKind(for: resolvedSemantic),
+            semantic: resolvedSemantic,
+            transport: .native,
+            lifecyclePhase: phase,
+            status: phase == .invoking
+                ? "正在执行配置操作…"
+                : "正在等待站点创建下一步操作界面…",
+            phase: nil,
             provider: nil,
             hasTextInput: false,
+            usesSecureInput: false,
             credentialPush: false,
+            displaysLoginQRCode: false,
             allowsRetry: false,
             actions: [],
             snapshot: nil
         )
-        startCloudAuthorizationPolling()
+        return request.interactionID
+    }
+
+    /// Retires the previous request before reserving a new native interaction.
+    /// Waiting is bounded so a broken compatibility bridge cannot freeze the
+    /// main actor, while a responsive bridge gets a chance to remove its old UI.
+    private func supersedeConfigurationInteractionIfNeeded() async {
+        guard cloudAuthorizationContext != nil
+                || cloudAuthorizationPrompt != nil else { return }
+        let bridge = environment?.androidDexBridge
+        let providerHandle = cloudAuthorizationContext?.providerHandle
+        let usesLegacyBridge = providerHandle == nil
+        clearCloudAuthorization(
+            resetBridgeUI: false,
+            markPendingPlaybackCancelled: false,
+            cancellationReason: .superseded,
+            cancelProviderHandle: false
+        )
+        await withTaskGroup(of: Void.self) { group in
+            if let providerHandle {
+                group.addTask { await providerHandle.cancelAndWait() }
+            } else if usesLegacyBridge, let bridge {
+                group.addTask { try? await bridge.resetAuthorizationUI() }
+            } else {
+                return
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+            _ = await group.next()
+            group.cancelAll()
+        }
+    }
+
+    private func transitionConfigurationInteraction(
+        _ interactionID: UUID,
+        to phase: ConfigurationInteractionPhase,
+        semantic: ConfigurationInteractionSemantic? = nil,
+        status: String? = nil,
+        allowsRetry: Bool? = nil
+    ) {
+        guard configurationInteractionCoordinator.transition(
+            interactionID,
+            to: phase,
+            semantic: semantic,
+            transport: .native,
+            status: status
+        ), var prompt = cloudAuthorizationPrompt,
+              prompt.interactionID == interactionID else {
+            return
+        }
+        if let semantic {
+            prompt.semantic = semantic
+            prompt.interactionKind = ConfigurationInteractionClassificationPolicy
+                .interactionKind(for: semantic)
+        }
+        prompt.lifecyclePhase = phase
+        if let status { prompt.status = status }
+        if let allowsRetry { prompt.allowsRetry = allowsRetry }
+        if phase == .processing || phase == .completed || phase == .failed {
+            prompt.actions = []
+        }
+        cloudAuthorizationPrompt = prompt
+    }
+
+    private func completeConfigurationInteraction(
+        _ interactionID: UUID,
+        status: String = "配置操作已完成"
+    ) {
+        transitionConfigurationInteraction(
+            interactionID,
+            to: .completed,
+            status: status,
+            allowsRetry: false
+        )
+    }
+
+    private func failConfigurationInteraction(
+        _ interactionID: UUID,
+        message: String
+    ) {
+        transitionConfigurationInteraction(
+            interactionID,
+            to: .failed,
+            status: message,
+            allowsRetry: true
+        )
+    }
+
+    private func scheduleConfigurationInteractionDismiss(
+        _ interactionID: UUID,
+        delayNanoseconds: UInt64 = 900_000_000
+    ) {
+        configurationInteractionDismissTask?.cancel()
+        configurationInteractionDismissTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+            guard !Task.isCancelled, let self,
+                  self.configurationInteractionCoordinator.owns(interactionID),
+                  self.cloudAuthorizationPrompt?.lifecyclePhase == .completed else {
+                return
+            }
+            self.clearCloudAuthorization(
+                resetBridgeUI: false,
+                markPendingPlaybackCancelled: false
+            )
+        }
+    }
+
+    private func observeConfigurationInteractionTerminal(
+        _ handle: InteractionHandle
+    ) {
+        configurationInteractionTerminalTask?.cancel()
+        configurationInteractionTerminalTask = Task { [weak self] in
+            do {
+                let terminal = try await handle.finalResponse()
+                guard let self,
+                      terminal.requestID == handle.id,
+                      self.configurationInteractionCoordinator.owns(handle.id),
+                      self.cloudAuthorizationContext?.operationID == handle.id else {
+                    return
+                }
+                await self.processConfigurationInteractionTerminal(
+                    terminal,
+                    expectedInteractionID: handle.id
+                )
+            } catch is CancellationError {
+                guard let self,
+                      self.configurationInteractionCoordinator.owns(handle.id) else {
+                    return
+                }
+                self.clearCloudAuthorization(
+                    resetBridgeUI: false,
+                    markPendingPlaybackCancelled: false,
+                    cancellationReason: .providerCancelled
+                )
+            } catch {
+                guard let self,
+                      self.configurationInteractionCoordinator.owns(handle.id) else {
+                    return
+                }
+                if AsyncCancellationPolicy.isCancellation(error) {
+                    self.clearCloudAuthorization(
+                        resetBridgeUI: false,
+                        markPendingPlaybackCancelled: false,
+                        cancellationReason: .providerCancelled
+                    )
+                    return
+                }
+                self.failConfigurationInteraction(
+                    handle.id,
+                    message: error.localizedDescription
+                )
+            }
+        }
+    }
+
+    private func processConfigurationInteractionTerminal(
+        _ terminal: ConfigurationInteractionTerminalResponse,
+        expectedInteractionID: UUID
+    ) async {
+        guard terminal.requestID == expectedInteractionID,
+              configurationInteractionCoordinator.owns(expectedInteractionID),
+              cloudAuthorizationContext?.operationID == expectedInteractionID else {
+            return
+        }
+        switch terminal.outcome {
+        case .succeeded:
+            await finishCloudAuthorizationAndRetry(
+                providerResult: terminal.providerResult,
+                refreshPerformed: terminal.refreshPerformed
+            )
+        case .failed:
+            failConfigurationInteraction(
+                expectedInteractionID,
+                message: terminal.error?.nonEmpty
+                    ?? "站点没有完成该配置操作，请重试。"
+            )
+        case .cancelled:
+            clearCloudAuthorization(
+                resetBridgeUI: false,
+                markPendingPlaybackCancelled: false,
+                cancellationReason: .providerCancelled
+            )
+        case .pending:
+            transitionConfigurationInteraction(
+                expectedInteractionID,
+                to: .processing,
+                status: "站点仍在处理该配置操作…"
+            )
+        }
+    }
+
+    private func configurationInteractionState(
+        for context: CloudAuthorizationContext
+    ) async throws -> AndroidBridgeUIState {
+        if let handle = context.providerHandle {
+            return try await handle.currentState()
+        }
+        guard let environment else { throw CancellationError() }
+        return try await environment.androidDexBridge.uiState()
+    }
+
+    @discardableResult
+    private func acceptConfigurationInteractionState(
+        _ state: AndroidBridgeUIState,
+        context: CloudAuthorizationContext
+    ) -> Bool {
+        guard configurationInteractionCoordinator.owns(context.operationID),
+              cloudAuthorizationContext?.operationID == context.operationID,
+              ConfigurationInteractionVerificationPolicy.accepts(
+                state,
+                interactionID: context.operationID,
+                requiresScopedIdentity: context.providerHandle != nil
+              ) else {
+            return false
+        }
+        if let returnedConfigurationID = state.configurationID?.nonEmpty,
+           returnedConfigurationID.lowercased()
+            != context.sourceIdentity.configurationID.uuidString.lowercased() {
+            return false
+        }
+        if let returnedSiteKey = state.siteKey?.nonEmpty,
+           returnedSiteKey != context.sourceIdentity.siteKey {
+            return false
+        }
+        if let currentOwner = context.providerOwnerID?.nonEmpty,
+           let returnedOwner = state.providerOwnerID?.nonEmpty,
+           currentOwner != returnedOwner {
+            return false
+        }
+        if let revision = state.revision,
+           let previousRevision = cloudAuthorizationContext?.lastObservedRevision,
+           revision < previousRevision {
+            return false
+        }
+        if let revision = state.revision,
+           var current = cloudAuthorizationContext,
+           current.operationID == context.operationID {
+            current.lastObservedRevision = max(
+                current.lastObservedRevision ?? revision,
+                revision
+            )
+            cloudAuthorizationContext = current
+        }
+        return true
+    }
+
+    /// Returns true when the state is terminal/being verified and therefore
+    /// must not be interpreted as a missing or hidden window by the poller.
+    private func consumeConfigurationVerificationState(
+        _ state: AndroidBridgeUIState,
+        context: CloudAuthorizationContext
+    ) async -> Bool {
+        let semantic = cloudAuthorizationPrompt?.semantic
+            ?? context.operation.initialSemantic
+        let decision = ConfigurationInteractionVerificationPolicy.decision(
+            for: state,
+            semantic: semantic
+        )
+        switch decision {
+        case .pending:
+            return false
+        case .terminalSucceeded, .terminalFailed, .terminalCancelled:
+            if context.providerHandle != nil {
+                // The scoped worker will publish the full provider terminal
+                // response (including its result/error). Do not close from a
+                // UI/status snapshot, even when that snapshot is terminal.
+                transitionConfigurationInteraction(
+                    context.operationID,
+                    to: .processing,
+                    status: "站点已返回结果，正在完成当前配置操作…"
+                )
+                return true
+            }
+            switch decision {
+            case .terminalSucceeded:
+                await finishCloudAuthorizationAndRetry()
+            case .terminalFailed(let message):
+                failConfigurationInteraction(
+                    context.operationID,
+                    message: message?.nonEmpty
+                        ?? "站点没有完成该配置操作，请重试。"
+                )
+            case .terminalCancelled:
+                clearCloudAuthorization(
+                    resetBridgeUI: false,
+                    markPendingPlaybackCancelled: false,
+                    cancellationReason: .providerCancelled
+                )
+            default:
+                break
+            }
+            return true
+        case .verifySucceeded, .verifyFailed:
+            guard let handle = context.providerHandle else {
+                switch decision {
+                case .verifySucceeded:
+                    await finishCloudAuthorizationAndRetry()
+                case .verifyFailed(let message):
+                    failConfigurationInteraction(
+                        context.operationID,
+                        message: message
+                    )
+                default:
+                    break
+                }
+                return true
+            }
+            if cloudAuthorizationContext?.hasRequestedVerification == true {
+                return true
+            }
+            if var current = cloudAuthorizationContext,
+               current.operationID == context.operationID {
+                current.hasRequestedVerification = true
+                cloudAuthorizationContext = current
+            }
+            transitionConfigurationInteraction(
+                context.operationID,
+                to: .processing,
+                status: "已验证站点状态，正在完成当前配置操作…"
+            )
+            switch decision {
+            case .verifySucceeded(let refreshPerformed):
+                await Self.verifyScopedConfigurationInteraction(
+                    handle,
+                    succeeded: true,
+                    actualRefreshPerformed: refreshPerformed
+                )
+            case .verifyFailed(let message):
+                await Self.verifyScopedConfigurationInteraction(
+                    handle,
+                    succeeded: false,
+                    error: message,
+                    actualRefreshPerformed: state.refreshPerformed
+                )
+            default:
+                return true
+            }
+            return true
+        }
+    }
+
+    /// A scoped verification and its still-running provider invocation share
+    /// one terminal owner inside `InteractionHandle`. The handle publishes the
+    /// provider response (or a bounded verified fallback) to the observer that
+    /// was installed when the native UI was presented. Returning that response
+    /// to this polling call and processing it here as well would create two
+    /// competing AppState continuations and could discard `providerResult`.
+    static func verifyScopedConfigurationInteraction(
+        _ handle: InteractionHandle,
+        succeeded: Bool,
+        error: String? = nil,
+        actualRefreshPerformed: Bool? = nil,
+        providerResultGraceNanoseconds: UInt64 = 3_000_000_000
+    ) async {
+        do {
+            _ = try await handle.verify(
+                succeeded: succeeded,
+                error: error,
+                actualRefreshPerformed: actualRefreshPerformed,
+                providerResultGraceNanoseconds: providerResultGraceNanoseconds
+            )
+        } catch {
+            // `InteractionHandle.verify` already atomically installed this
+            // failure in the request terminal state. Only the observer created
+            // when the interaction was presented may consume that terminal;
+            // handling it again in this polling path would publish twice.
+        }
     }
 
     private func presentNodeConfiguration(
@@ -2834,10 +4039,10 @@ final class AppState: ObservableObject {
 
     func cancelNodeConfiguration() {
         if case .playback = pendingNodeOperation {
-            let message = "已取消网盘授权"
-            playbackResolutionState = .failed
-            playbackFailureSummary = message
-            playerSnapshot.status = .failed(message)
+            // User cancellation is a neutral terminal state. Do not turn it
+            // into a playback failure that can later surface as a stale alert.
+            playbackResolutionState = .idle
+            playbackFailureSummary = nil
         }
         pendingNodeOperation = nil
         nodeWebPresentation = nil
@@ -2858,10 +4063,8 @@ final class AppState: ObservableObject {
             requiresSelectedHomeSource: pending.requiresSelectedHomeSource,
             availableSiteKeys: Set(providers.keys)
         ) else {
-            presentedError = UserFacingError(
-                title: "配置已切换",
-                message: "来源或配置已经发生变化，未重放之前的操作。"
-            )
+            // A source/configuration switch supersedes the pending request.
+            // Its late completion is expected and must not alert the user.
             return
         }
         switch pending {
@@ -2889,7 +4092,8 @@ final class AppState: ObservableObject {
                 detail: playback.detail,
                 source: playback.source,
                 episode: playback.episode,
-                origin: playback.origin
+                origin: playback.origin,
+                configurationID: playback.configurationID
             )
         }
     }
@@ -2926,17 +4130,37 @@ final class AppState: ObservableObject {
         }
         clearCloudAuthorization(
             resetBridgeUI: true,
-            markPendingPlaybackCancelled: false
+            markPendingPlaybackCancelled: false,
+            cancellationReason: .sourceChanged
         )
     }
 
     private func clearCloudAuthorization(
         resetBridgeUI: Bool,
-        markPendingPlaybackCancelled: Bool
+        markPendingPlaybackCancelled: Bool,
+        cancellationReason: ConfigurationInteractionCancellationReason = .user,
+        cancelProviderHandle: Bool = true
     ) {
         let androidDexBridge = environment?.androidDexBridge
+        let providerHandle = cloudAuthorizationContext?.providerHandle
         let hadPendingPlayback = cloudAuthorizationContext?
             .operation.pendingPlayback != nil
+        let interactionID = cloudAuthorizationContext?.operationID
+            ?? cloudAuthorizationPrompt?.interactionID
+        if let interactionID {
+            configurationInteractionCoordinator.cancel(
+                interactionID,
+                reason: cancellationReason
+            )
+            configurationInteractionCoordinator.clear(interactionID)
+        }
+        configurationInteractionDismissTask?.cancel()
+        configurationInteractionDismissTask = nil
+        configurationInteractionTerminalTask?.cancel()
+        configurationInteractionTerminalTask = nil
+        if cancelProviderHandle {
+            providerHandle?.cancel()
+        }
         cloudAuthorizationSessionID = UUID()
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = nil
@@ -2949,7 +4173,10 @@ final class AppState: ObservableObject {
             playbackFailureSummary = message
             playerSnapshot.status = .failed(message)
         }
-        guard resetBridgeUI else { return }
+        // A scoped handle owns its Android interaction and was cancelled
+        // above. Resetting the process-global legacy UI as well could erase a
+        // newer request that has already superseded this one.
+        guard resetBridgeUI, providerHandle == nil else { return }
         Task {
             try? await androidDexBridge?.resetAuthorizationUI()
         }
@@ -2971,51 +4198,59 @@ final class AppState: ObservableObject {
         return kind == .authorization ? "网盘授权" : "配置操作"
     }
 
-    private func waitForCloudAuthorization() async -> AndroidBridgeUIState? {
-        guard let environment else { return nil }
-        // Some configuration spiders create their Android login dialog after
-        // returning the placeholder detail response. Keep observing long
-        // enough to catch that asynchronous hand-off before reporting that no
-        // setup UI appeared.
-        for attempt in 0..<8 {
-            if attempt > 0 {
-                do {
-                    try await Task.sleep(nanoseconds: 250_000_000)
-                } catch {
-                    return nil
-                }
-            }
-            if let state = try? await environment.androidDexBridge.uiState(),
-               state.isAuthorizationPrompt {
-                return state
-            }
-        }
-        return nil
-    }
-
     func submitCloudAuthorization(action: CloudAuthorizationAction) async {
         guard let environment,
               let context = cloudAuthorizationContext,
+              configurationInteractionCoordinator.owns(context.operationID),
+              cloudAuthorizationPrompt?.lifecyclePhase == .presenting,
               isCurrentCloudAuthorizationContext(context) else {
             invalidateCloudAuthorization(nextIdentity: nil)
             return
         }
-        isLoading = true
-        defer { isLoading = false }
+        transitionConfigurationInteraction(
+            context.operationID,
+            to: .submitting,
+            status: "正在提交“\(action.title)”…"
+        )
         do {
             let text = cloudAuthorizationInput.nonEmpty
-            let result = try await environment.androidDexBridge.submitUI(
-                text: text,
-                button: action.title,
-                controlID: action.id.hasPrefix("legacy:")
-                    ? nil
-                    : action.id,
-                generation: action.generation
-            )
+            let controlID = action.id.hasPrefix("legacy:")
+                ? nil
+                : action.id
+            let result: AndroidBridgeUISubmitResult
+            if let handle = context.providerHandle {
+                result = try await handle.submit(
+                    text: text,
+                    button: action.title,
+                    controlID: controlID,
+                    generation: action.generation
+                )
+            } else {
+                result = try await environment.androidDexBridge.submitUI(
+                    text: text,
+                    button: action.title,
+                    controlID: controlID,
+                    generation: action.generation,
+                    interactionID: nil
+                )
+            }
+            guard configurationInteractionCoordinator.owns(context.operationID),
+                  cloudAuthorizationContext?.operationID == context.operationID else {
+                return
+            }
             if result.stale {
-                if let state = try? await environment.androidDexBridge.uiState(),
-                   state.isAuthorizationPrompt {
-                    await updateCloudAuthorizationPrompt(state)
+                if let state = try? await configurationInteractionState(
+                    for: context
+                ), acceptConfigurationInteractionState(state, context: context) {
+                    if await consumeConfigurationVerificationState(
+                        state,
+                        context: context
+                    ) {
+                        return
+                    }
+                    if state.isAuthorizationPrompt {
+                        await updateCloudAuthorizationPrompt(state)
+                    }
                 }
                 throw AppError.spider("操作界面已经更新，请使用刷新后的按钮继续")
             }
@@ -3032,23 +4267,70 @@ final class AppState: ObservableObject {
                 current.hasObservedPostSubmissionTransition = false
                 cloudAuthorizationContext = current
             }
+            transitionConfigurationInteraction(
+                context.operationID,
+                to: .processing,
+                status: "命令已提交，正在等待站点返回结果…"
+            )
             try await Task.sleep(nanoseconds: 250_000_000)
-            if let state = try? await environment.androidDexBridge.uiState(),
-               state.isAuthorizationPrompt {
-                await updateCloudAuthorizationPrompt(state)
-            } else if var prompt = cloudAuthorizationPrompt {
-                prompt.status = "正在打开下一步授权界面…"
+            guard configurationInteractionCoordinator.owns(context.operationID),
+                  cloudAuthorizationContext?.operationID == context.operationID else {
+                return
+            }
+            var consumedState = false
+            var displayedPromptState = false
+            if let state = try? await configurationInteractionState(for: context),
+               acceptConfigurationInteractionState(state, context: context) {
+                consumedState = await consumeConfigurationVerificationState(
+                    state,
+                    context: context
+                )
+                if !consumedState, state.isAuthorizationPrompt {
+                    displayedPromptState = true
+                    await updateCloudAuthorizationPrompt(state)
+                }
+            }
+            if !consumedState, !displayedPromptState,
+               var prompt = cloudAuthorizationPrompt {
+                prompt.status = "正在等待下一步配置界面或最终结果…"
                 prompt.phase = "transitioning"
+                prompt.lifecyclePhase = .processing
                 cloudAuthorizationPrompt = prompt
             }
-            startCloudAuthorizationPolling()
+            if configurationInteractionCoordinator.owns(context.operationID) {
+                startCloudAuthorizationPolling()
+            }
+        } catch is CancellationError {
+            guard configurationInteractionCoordinator.owns(context.operationID) else {
+                return
+            }
+            clearCloudAuthorization(
+                resetBridgeUI: false,
+                markPendingPlaybackCancelled: false,
+                cancellationReason: .providerCancelled
+            )
         } catch {
-            show(error, title: "\(cloudInteractionLabel)失败")
+            if AsyncCancellationPolicy.isCancellation(error) {
+                guard configurationInteractionCoordinator.owns(context.operationID) else {
+                    return
+                }
+                clearCloudAuthorization(
+                    resetBridgeUI: false,
+                    markPendingPlaybackCancelled: false,
+                    cancellationReason: .providerCancelled
+                )
+                return
+            }
+            failConfigurationInteraction(
+                context.operationID,
+                message: error.localizedDescription
+            )
         }
     }
 
     func submitCloudCredential() async {
         guard let context = cloudAuthorizationContext,
+              configurationInteractionCoordinator.owns(context.operationID),
               isCurrentCloudAuthorizationContext(context) else {
             invalidateCloudAuthorization(nextIdentity: nil)
             return
@@ -3056,76 +4338,147 @@ final class AppState: ObservableObject {
         guard let environment,
               let prompt = cloudAuthorizationPrompt,
               prompt.credentialPush,
-              let provider = prompt.provider?.nonEmpty else {
+              let providerOwnerID = context.providerOwnerID?.nonEmpty,
+              let actionContract = context.actionContract else {
             return
         }
         let credential = cloudAuthorizationInput
         guard credential.nonEmpty != nil else {
-            show(AppError.spider("请先粘贴 Cookie 或 Token"), title: "网盘授权失败")
+            failConfigurationInteraction(
+                context.operationID,
+                message: "请先粘贴 Cookie 或 Token"
+            )
             return
         }
 
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = nil
-        isLoading = true
-        defer { isLoading = false }
+        transitionConfigurationInteraction(
+            context.operationID,
+            to: .submitting,
+            status: "正在安全提交凭据…"
+        )
         do {
             try await environment.androidDexBridge.pushCredential(
-                provider: provider,
+                interactionID: context.operationID,
+                configurationID: context.sourceIdentity.configurationID,
+                siteKey: context.sourceIdentity.siteKey,
+                providerOwnerID: providerOwnerID,
+                actionContract: actionContract,
                 credential: credential
             )
-            try await Task.sleep(nanoseconds: 400_000_000)
-            await finishCloudAuthorizationAndRetry()
-        } catch {
-            show(error, title: "网盘授权失败")
+            guard configurationInteractionCoordinator.owns(context.operationID),
+                  cloudAuthorizationContext?.operationID == context.operationID else {
+                return
+            }
+            transitionConfigurationInteraction(
+                context.operationID,
+                to: .processing,
+                status: "凭据已提交，正在等待站点确认…"
+            )
+            // A successful bridge submission only proves that the credential
+            // reached the provider. Completion still belongs to the request's
+            // terminal response. Legacy providers without a handle remain in
+            // processing and eventually surface a bounded, retryable timeout.
             startCloudAuthorizationPolling()
+        } catch is CancellationError {
+            guard configurationInteractionCoordinator.owns(context.operationID) else {
+                return
+            }
+            clearCloudAuthorization(
+                resetBridgeUI: false,
+                markPendingPlaybackCancelled: false,
+                cancellationReason: .providerCancelled
+            )
+        } catch {
+            if AsyncCancellationPolicy.isCancellation(error) {
+                guard configurationInteractionCoordinator.owns(context.operationID) else {
+                    return
+                }
+                clearCloudAuthorization(
+                    resetBridgeUI: false,
+                    markPendingPlaybackCancelled: false,
+                    cancellationReason: .providerCancelled
+                )
+                return
+            }
+            failConfigurationInteraction(
+                context.operationID,
+                message: error.localizedDescription
+            )
         }
     }
 
-    func cancelCloudAuthorization() {
+    func cancelCloudAuthorization() async {
         // The Android dialog is a real native window. Merely hiding the
         // SwiftUI layer leaves it stacked behind the app and causes the next
         // detail/play call to receive the wrong provider prompt.
+        let bridge = environment?.androidDexBridge
+        let providerHandle = cloudAuthorizationContext?.providerHandle
+        let usesLegacyBridge = providerHandle == nil
         clearCloudAuthorization(
-            resetBridgeUI: true,
-            markPendingPlaybackCancelled: true
+            resetBridgeUI: false,
+            markPendingPlaybackCancelled: false,
+            cancelProviderHandle: false
         )
+        if let providerHandle {
+            await providerHandle.cancelAndWait()
+        } else if usesLegacyBridge {
+            try? await bridge?.resetAuthorizationUI()
+        }
     }
 
     func refreshCloudAuthorization() async {
-        guard let environment,
+        guard environment != nil,
               let context = cloudAuthorizationContext,
               isCurrentCloudAuthorizationContext(context) else {
             invalidateCloudAuthorization(nextIdentity: nil)
             return
         }
         do {
-            let state = try await environment.androidDexBridge.uiState()
+            let state = try await configurationInteractionState(for: context)
+            guard configurationInteractionCoordinator.owns(context.operationID),
+                  cloudAuthorizationContext?.operationID == context.operationID,
+                  acceptConfigurationInteractionState(state, context: context) else {
+                return
+            }
+            if await consumeConfigurationVerificationState(
+                state,
+                context: context
+            ) {
+                return
+            }
             guard state.isAuthorizationPrompt else {
                 startCloudAuthorizationPolling()
                 return
             }
             await updateCloudAuthorizationPrompt(state)
             startCloudAuthorizationPolling()
+        } catch is CancellationError {
+            return
         } catch {
-            show(error, title: "无法刷新\(cloudInteractionLabel)")
+            guard configurationInteractionCoordinator.owns(context.operationID) else {
+                return
+            }
+            if AsyncCancellationPolicy.isCancellation(error) {
+                return
+            }
+            failConfigurationInteraction(
+                context.operationID,
+                message: error.localizedDescription
+            )
         }
     }
 
     func retryCloudAuthorizationOperation() async {
-        guard let environment,
-              let context = cloudAuthorizationContext,
+        guard let context = cloudAuthorizationContext,
               isCurrentCloudAuthorizationContext(context),
               cloudAuthorizationPrompt?.allowsRetry == true else {
             return
         }
         let operation = context.operation
         let siteKey = context.sourceIdentity.siteKey
-        clearCloudAuthorization(
-            resetBridgeUI: false,
-            markPendingPlaybackCancelled: false
-        )
-        try? await environment.androidDexBridge.resetAuthorizationUI()
+        await supersedeConfigurationInteractionIfNeeded()
 
         switch operation {
         case .playback(let pending):
@@ -3134,7 +4487,8 @@ final class AppState: ObservableObject {
                 detail: pending.detail,
                 source: pending.source,
                 episode: pending.episode,
-                origin: pending.origin
+                origin: pending.origin,
+                configurationID: pending.configurationID
             )
         case .detail(let summary):
             guard summary.siteKey == siteKey else { return }
@@ -3153,49 +4507,182 @@ final class AppState: ObservableObject {
 
     private func presentCloudAuthorization(
         _ state: AndroidBridgeUIState,
+        interaction: ConfigurationInteraction? = nil,
+        handle: InteractionHandle? = nil,
         operation: PendingCloudOperation,
         siteKey: String
     ) async {
-        guard let identity = activeSourceIdentity(for: siteKey) else {
-            show(
-                AppError.site("该操作所属配置已经发生变化"),
-                title: "\(operation.interactionKind == .authorization ? "网盘授权" : "配置操作")失败"
+        let stateInteractionID = state.interactionID.flatMap(UUID.init(uuidString:))
+        let scopedIdentifiers = [handle?.id, interaction?.id, stateInteractionID]
+            .compactMap { $0 }
+        guard Set(scopedIdentifiers).count <= 1 else {
+            handle?.cancel()
+            if let activeID = cloudAuthorizationContext?.operationID {
+                failConfigurationInteraction(
+                    activeID,
+                    message: "站点返回的配置请求标识不一致，请重试。"
+                )
+            }
+            return
+        }
+        let interactionID = handle?.id
+            ?? interaction?.id
+            ?? stateInteractionID
+            ?? UUID()
+        if var current = cloudAuthorizationContext,
+           current.operationID == interactionID,
+           configurationInteractionCoordinator.owns(interactionID) {
+            guard current.sourceIdentity.siteKey == siteKey else {
+                handle?.cancel()
+                failConfigurationInteraction(
+                    interactionID,
+                    message: "配置界面来源与当前操作不匹配，请重试。"
+                )
+                return
+            }
+            current.providerHandle = handle
+            current.providerInteraction = interaction
+            current.operation = operation
+            cloudAuthorizationContext = current
+            transitionConfigurationInteraction(
+                interactionID,
+                to: .presenting,
+                status: "正在等待站点创建下一步操作界面…"
+            )
+        } else {
+            await supersedeConfigurationInteractionIfNeeded()
+            guard beginConfigurationInteraction(
+                title: state.title.nonEmpty ?? "配置操作",
+                siteKey: siteKey,
+                operation: operation,
+                semantic: operation.initialSemantic,
+                interactionID: interactionID,
+                providerHandle: handle,
+                providerInteraction: interaction,
+                phase: .presenting
+            ) != nil else {
+                handle?.cancel()
+                return
+            }
+        }
+        guard let context = cloudAuthorizationContext,
+              acceptConfigurationInteractionState(state, context: context) else {
+            handle?.cancel()
+            failConfigurationInteraction(
+                interactionID,
+                message: "站点返回的配置界面不属于当前操作，请重试。"
             )
             return
         }
-        cloudAuthorizationContext = CloudAuthorizationContext(
-            sourceIdentity: identity,
-            operationID: UUID(),
-            operation: operation,
-            submittedAt: nil,
-            submittedGeneration: nil,
-            hasObservedPrompt: true,
-            hasObservedQRCode: false,
-            hasObservedPostSubmissionTransition: false
-        )
         await updateCloudAuthorizationPrompt(state)
+        guard configurationInteractionCoordinator.owns(interactionID),
+              cloudAuthorizationContext?.operationID == interactionID else {
+            handle?.cancel()
+            return
+        }
         startCloudAuthorizationPolling()
+        if let handle {
+            observeConfigurationInteractionTerminal(handle)
+        }
     }
 
     private func updateCloudAuthorizationPrompt(
         _ state: AndroidBridgeUIState
     ) async {
+        guard let operationID = cloudAuthorizationContext?.operationID,
+              configurationInteractionCoordinator.owns(operationID) else {
+            return
+        }
         let previous = cloudAuthorizationPrompt
+        let providerHandle = cloudAuthorizationContext?.providerHandle
+        let initialProviderInteraction = cloudAuthorizationContext?
+            .providerInteraction
+        let latestProviderInteraction = await providerHandle?.latestInteraction()
+        guard configurationInteractionCoordinator.owns(operationID),
+              cloudAuthorizationContext?.operationID == operationID else {
+            return
+        }
         let credentialPush = state.isCredentialPush
-        // Some providers rotate an expired QR code without replacing the
-        // Android dialog. Read the small local image on every QR poll and only
-        // publish when its bytes actually change.
-        let rawSnapshot = state.imageCount > 0 && !credentialPush
-            ? try? await environment?.androidDexBridge.uiSnapshot()
-            : nil
+        let fallbackActionKind = providerHandle?.actionKind
+            ?? latestProviderInteraction?.actionKind
+            ?? initialProviderInteraction?.actionKind
+            ?? .configuration
+        // First resolve the provider-declared kind without an image. A normal
+        // configuration image may be a preview, logo or helper code and must
+        // never trigger QR capture or authorization presentation by itself.
+        let declaredInteraction = state.configurationInteraction(
+            requestID: operationID,
+            actionKind: fallbackActionKind,
+            validatedQRCode: nil
+        )
+        // Some authorization providers rotate an expired QR code without
+        // replacing the Android dialog. Read the small local image on every
+        // authorization poll and only publish when its bytes actually change.
+        let rawSnapshot: Data?
+        if declaredInteraction.actionKind == .authorization,
+           state.imageCount > 0,
+           !credentialPush {
+            if let providerHandle {
+                rawSnapshot = try? await providerHandle.snapshot()
+            } else {
+                rawSnapshot = try? await environment?.androidDexBridge.uiSnapshot()
+            }
+        } else {
+            rawSnapshot = nil
+        }
+        guard configurationInteractionCoordinator.owns(operationID),
+              cloudAuthorizationContext?.operationID == operationID else {
+            return
+        }
         let snapshot = AndroidBridgeQRCodePolicy.validatedSnapshot(rawSnapshot)
         let hasVerifiedQRCode = snapshot != nil
-        let interactionKind: CloudInteractionKind = hasVerifiedQRCode
+        // QR images often arrive one or more polling generations after the
+        // interaction first becomes visible. Rebuild the interaction from the
+        // current state and current validated snapshot so an explicit login
+        // operation can reliably move candidate -> login without allowing a
+        // configuration/ordering action to be promoted to authorization.
+        let providerInteraction = state.configurationInteraction(
+            requestID: operationID,
+            actionKind: fallbackActionKind,
+            validatedQRCode: snapshot
+        )
+        await providerHandle?.record(providerInteraction)
+        guard configurationInteractionCoordinator.owns(operationID),
+              var context = cloudAuthorizationContext,
+              context.operationID == operationID else {
+            return
+        }
+        context.providerInteraction = providerInteraction
+        if let owner = state.providerOwnerID?.nonEmpty {
+            context.providerOwnerID = owner
+        }
+        if let contract = state.actionContract {
+            context.actionContract = contract
+        }
+        cloudAuthorizationContext = context
+        let semantic = ConfigurationInteractionClassificationPolicy
+            .nativeSemantic(
+                interaction: providerInteraction,
+                hasVerifiedQRCode: hasVerifiedQRCode,
+                credentialPush: credentialPush,
+                state: state
+            )
+        let interactionKind = ConfigurationInteractionClassificationPolicy
+            .interactionKind(for: semantic)
+        let displaysLoginQRCode = semantic == .qrAuthorization
+            && providerInteraction.actionKind == .authorization
+            && providerInteraction.qrRole == .login
+            && snapshot != nil
+        let usesSecureInput = providerInteraction.actionKind == .authorization
             || credentialPush
-            || cloudAuthorizationContext?.operation.interactionKind
-                == .authorization
-            ? .authorization
-            : .configuration
+        let lifecyclePhase: ConfigurationInteractionPhase = {
+            guard let context = cloudAuthorizationContext,
+                  context.submittedAt != nil,
+                  !context.hasObservedPostSubmissionTransition else {
+                return .presenting
+            }
+            return .processing
+        }()
         let phase = credentialPush
             ? "credentials"
             : hasVerifiedQRCode
@@ -3203,7 +4690,7 @@ final class AppState: ObservableObject {
                 : state.inputCount > 0
                     ? "credentials"
                     : "chooser"
-        if hasVerifiedQRCode,
+        if semantic == .qrAuthorization,
            var context = cloudAuthorizationContext {
             context.hasObservedQRCode = true
             cloudAuthorizationContext = context
@@ -3223,24 +4710,39 @@ final class AppState: ObservableObject {
             : upstreamStatus
         let updated = CloudAuthorizationPrompt(
             id: previous?.id ?? UUID(),
+            interactionID: operationID,
             title: state.title.nonEmpty
                 ?? (interactionKind == .authorization ? "网盘授权" : "配置操作"),
             interactionKind: interactionKind,
+            semantic: semantic,
+            transport: .native,
+            lifecyclePhase: lifecyclePhase,
             status: status,
             phase: phase,
             provider: state.provider,
             hasTextInput: state.inputCount > 0 || credentialPush,
+            usesSecureInput: usesSecureInput,
             credentialPush: credentialPush,
+            displaysLoginQRCode: displaysLoginQRCode,
             allowsRetry: false,
-            actions: state.actionableControls.map {
+            actions: lifecyclePhase == .presenting
+                ? state.actionableControls.map {
                 CloudAuthorizationAction(
                     id: $0.id,
                     title: $0.title,
                     role: $0.role,
-                    generation: state.generation
+                    generation: state.interactionGeneration
                 )
-            },
-            snapshot: snapshot
+                }
+                : [],
+            snapshot: displaysLoginQRCode ? snapshot : nil
+        )
+        _ = configurationInteractionCoordinator.transition(
+            operationID,
+            to: lifecyclePhase,
+            semantic: semantic,
+            transport: .native,
+            status: status
         )
         if updated != previous {
             cloudAuthorizationPrompt = updated
@@ -3253,6 +4755,7 @@ final class AppState: ObservableObject {
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = Task { [weak self] in
             var hiddenPollCount = 0
+            var bridgeFailureCount = 0
             while !Task.isCancelled {
                 do {
                     try await Task.sleep(nanoseconds: 500_000_000)
@@ -3263,14 +4766,39 @@ final class AppState: ObservableObject {
                       self.cloudAuthorizationSessionID == sessionID,
                       self.cloudAuthorizationPrompt != nil,
                       let context = self.cloudAuthorizationContext,
+                      self.configurationInteractionCoordinator.owns(
+                        context.operationID
+                      ),
                       self.isCurrentCloudAuthorizationContext(context),
-                      let environment = self.environment else {
+                      self.environment != nil else {
                     return
                 }
                 do {
-                    let state = try await environment.androidDexBridge.uiState()
-                    guard self.cloudAuthorizationSessionID == sessionID else {
-                        return
+                    let state = try await self.configurationInteractionState(
+                        for: context
+                    )
+                    guard self.cloudAuthorizationSessionID == sessionID,
+                          self.acceptConfigurationInteractionState(
+                            state,
+                            context: context
+                          ) else {
+                        throw AppError.spider(
+                            "配置状态已被另一个操作替换"
+                        )
+                    }
+                    bridgeFailureCount = 0
+                    if await self.consumeConfigurationVerificationState(
+                        state,
+                        context: context
+                    ) {
+                        guard self.cloudAuthorizationSessionID == sessionID,
+                              self.configurationInteractionCoordinator.owns(
+                                context.operationID
+                              ),
+                              self.cloudAuthorizationPrompt != nil else {
+                            return
+                        }
+                        continue
                     }
                     if state.isAuthorizationPrompt {
                         hiddenPollCount = 0
@@ -3278,7 +4806,7 @@ final class AppState: ObservableObject {
                            current.operationID == context.operationID {
                             current.hasObservedPrompt = true
                             if let submittedGeneration = current.submittedGeneration,
-                               state.generation != submittedGeneration {
+                               state.interactionGeneration != submittedGeneration {
                                 current.hasObservedPostSubmissionTransition = true
                             }
                             self.cloudAuthorizationContext = current
@@ -3286,64 +4814,37 @@ final class AppState: ObservableObject {
                         if let current = self.cloudAuthorizationContext,
                            current.operationID == context.operationID,
                            let submittedAt = current.submittedAt,
-                           self.cloudAuthorizationPrompt?.interactionKind
-                            == .authorization,
                            CloudAuthorizationPollingPolicy
                             .shouldFailUnchangedSubmission(
                                 elapsed: Date().timeIntervalSince(submittedAt),
                                 submittedGeneration: current.submittedGeneration,
-                                currentGeneration: state.generation,
+                                currentGeneration: state.interactionGeneration,
                                 hasObservedTransition: current
                                     .hasObservedPostSubmissionTransition,
                                 isVisible: state.visible
-                            ), var prompt = self.cloudAuthorizationPrompt {
-                            prompt.status = "站点收到点击，但授权界面没有进入下一步。请重试；若仍失败，请刷新配置后再试。"
-                            prompt.phase = "failed"
-                            prompt.allowsRetry = true
-                            self.cloudAuthorizationPrompt = prompt
-                            return
-                        }
-                        if CloudAuthorizationCompletionPolicy.shouldComplete(
-                            authenticated: state.authenticated == true,
-                            interactionKind: self.cloudAuthorizationPrompt?
-                                .interactionKind
-                                ?? context.operation.interactionKind,
-                            hasObservedPrompt: self.cloudAuthorizationContext?
-                                .hasObservedPrompt == true,
-                            hasObservedQRCode: self.cloudAuthorizationContext?
-                                .hasObservedQRCode == true,
-                            hiddenPollCount: hiddenPollCount
-                        ) {
-                            await self.finishCloudAuthorizationAndRetry()
+                            ) {
+                            current.providerHandle?.cancel()
+                            self.failConfigurationInteraction(
+                                context.operationID,
+                                message: "站点收到点击，但操作界面没有进入下一步。请重试；若仍失败，请刷新配置后再试。"
+                            )
                             return
                         }
                         await self.updateCloudAuthorizationPrompt(state)
                     } else {
                         hiddenPollCount += 1
-                        if CloudAuthorizationCompletionPolicy.shouldComplete(
-                            authenticated: false,
-                            interactionKind: self.cloudAuthorizationPrompt?
-                                .interactionKind
-                                ?? context.operation.interactionKind,
-                            hasObservedPrompt: self.cloudAuthorizationContext?
-                                .hasObservedPrompt == true,
-                            hasObservedQRCode: self.cloudAuthorizationContext?
-                                .hasObservedQRCode == true,
+                        if CloudAuthorizationPollingPolicy.shouldTimeOut(
                             hiddenPollCount: hiddenPollCount
                         ) {
-                            await self.finishCloudAuthorizationAndRetry()
-                            return
-                        } else if CloudAuthorizationPollingPolicy.shouldTimeOut(
-                            hiddenPollCount: hiddenPollCount
-                        ), var prompt = self.cloudAuthorizationPrompt {
                             let observed = self.cloudAuthorizationContext?
                                 .hasObservedPrompt == true
-                            prompt.status = observed
-                                ? "操作窗口已关闭，但站点没有返回可验证的结果。请重试，或关闭后重新执行该操作。"
-                                : "站点未能创建下一步操作界面，操作没有完成。请检查网络后重试。"
-                            prompt.phase = "failed"
-                            prompt.allowsRetry = true
-                            self.cloudAuthorizationPrompt = prompt
+                            context.providerHandle?.cancel()
+                            self.failConfigurationInteraction(
+                                context.operationID,
+                                message: observed
+                                    ? "操作窗口已关闭，但站点没有返回可验证的结果。请重试，或关闭后重新执行该操作。"
+                                    : "站点未能创建下一步操作界面，操作没有完成。请检查网络后重试。"
+                            )
                             return
                         } else if hiddenPollCount == 10,
                                   var prompt = self.cloudAuthorizationPrompt {
@@ -3351,27 +4852,77 @@ final class AppState: ObservableObject {
                             self.cloudAuthorizationPrompt = prompt
                         }
                     }
+                } catch is CancellationError {
+                    return
                 } catch {
-                    // The emulator can briefly refuse requests while an Android
-                    // dialog is being replaced. Keep the visible prompt and retry.
-                    continue
+                    bridgeFailureCount += 1
+                    if bridgeFailureCount >= 6 {
+                        context.providerHandle?.cancel()
+                        self.failConfigurationInteraction(
+                            context.operationID,
+                            message: "本机配置桥连续无法响应，请重试该操作。"
+                        )
+                        return
+                    }
                 }
             }
         }
     }
 
-    private func finishCloudAuthorizationAndRetry() async {
-        let context = cloudAuthorizationContext
-        cloudAuthorizationSessionID = UUID()
-        cloudAuthorizationPollTask?.cancel()
-        cloudAuthorizationPollTask = nil
-        cloudAuthorizationPrompt = nil
-        cloudAuthorizationInput = ""
-        cloudAuthorizationContext = nil
-        guard let context,
+    private func finishCloudAuthorizationAndRetry(
+        providerResult: JSONValue? = nil,
+        refreshPerformed: Bool? = nil
+    ) async {
+        guard let context = cloudAuthorizationContext,
+              configurationInteractionCoordinator.owns(context.operationID),
               isCurrentCloudAuthorizationContext(context) else {
             return
         }
+        var authoritativePlaybackResult: SitePlaybackResult?
+        if case .playback(let pending) = context.operation,
+           let providerResult,
+           providerResult != .null {
+            guard let provider = providers[context.sourceIdentity.siteKey]
+                as? AndroidDexSpiderSiteProvider else {
+                failConfigurationInteraction(
+                    context.operationID,
+                    message: "播放结果所属 provider 已发生变化，请重试。"
+                )
+                return
+            }
+            do {
+                var mapped = try provider.playbackResult(
+                    from: providerResult,
+                    flag: pending.source.name,
+                    episodeURL: pending.episode.url
+                )
+                if let refreshPerformed,
+                   mapped.mediaSession?.refreshPerformed == nil {
+                    mapped.mediaSession?.refreshPerformed = refreshPerformed
+                }
+                authoritativePlaybackResult = mapped
+            } catch {
+                failConfigurationInteraction(
+                    context.operationID,
+                    message: error.localizedDescription
+                )
+                return
+            }
+        }
+        completeConfigurationInteraction(context.operationID)
+        cloudAuthorizationSessionID = UUID()
+        cloudAuthorizationPollTask?.cancel()
+        cloudAuthorizationPollTask = nil
+        try? await Task.sleep(nanoseconds: 650_000_000)
+        guard configurationInteractionCoordinator.owns(context.operationID),
+              cloudAuthorizationContext?.operationID == context.operationID else {
+            return
+        }
+        cloudAuthorizationPrompt = nil
+        cloudAuthorizationInput = ""
+        cloudAuthorizationContext = nil
+        configurationInteractionCoordinator.clear(context.operationID)
+        configurationInteractionTerminalTask = nil
         switch context.operation {
         case .playback(let pending):
             guard pending.detail.summary.siteKey == context.sourceIdentity.siteKey else {
@@ -3381,7 +4932,9 @@ final class AppState: ObservableObject {
                 detail: pending.detail,
                 source: pending.source,
                 episode: pending.episode,
-                origin: pending.origin
+                origin: pending.origin,
+                authoritativePlaybackResult: authoritativePlaybackResult,
+                configurationID: pending.configurationID
             )
         case .detail(let summary):
             guard summary.siteKey == context.sourceIdentity.siteKey else { return }
@@ -3483,9 +5036,18 @@ final class AppState: ObservableObject {
         }
         let siteName = visibleSites.first { $0.key == item.siteKey }?.name
             ?? item.siteKey
+        guard let owningConfigurationID = item.configurationID
+            ?? activeConfigurationRecord?.id else {
+            show(
+                AppError.site("无法确定这条历史记录所属的点播配置"),
+                title: "历史播放失败"
+            )
+            return
+        }
         let preparationID = presentHistoryPlaybackShell(
             item,
-            siteName: siteName
+            siteName: siteName,
+            configurationID: owningConfigurationID
         )
         guard let provider = providers[item.siteKey] else {
             if await replayCachedHistory(
@@ -3536,7 +5098,15 @@ final class AppState: ObservableObject {
             // instead of surfacing a low-level empty-JSON error.
         }
 
-        if let episodeReference = item.episodeReference?.nonEmpty {
+        let acceptedProviderReference = Self.acceptedHistoryProviderReference(
+            from: item,
+            provider: provider
+        )
+        if let episodeReference = acceptedProviderReference?
+            .stableResourceLocator.nonEmpty
+            ?? item.episodeReference?.nonEmpty.flatMap(
+                Self.persistentHistoryEpisodeReference
+            ) {
             guard isCurrentHistoryPreparation(preparationID) else { return }
             isLoading = false
             let context = Self.historyPlaybackContext(
@@ -3620,11 +5190,6 @@ final class AppState: ObservableObject {
               ) else {
             return false
         }
-        if ["127.0.0.1", "localhost", "::1"].contains(
-            replay.media.url.host?.lowercased() ?? ""
-        ) {
-            _ = try? await environment.androidDexBridge.uiState()
-        }
         let probe = DefaultMediaProbe(
             httpClient: configuredHTTPClient(environment: environment)
         )
@@ -3639,12 +5204,17 @@ final class AppState: ObservableObject {
             return false
         }
         let sessionID = owningSessionID ?? playbackSessionID
+        guard let configurationID = item.configurationID
+                ?? activeConfigurationRecord?.id else {
+            return false
+        }
         do {
             try await loadResolvedPlayback(
                 replay.media,
                 detail: replay.detail,
                 source: replay.source,
                 episode: replay.episode,
+                configurationID: configurationID,
                 sessionID: sessionID
             )
             guard playbackSessionID == sessionID else { return false }
@@ -3658,7 +5228,8 @@ final class AppState: ObservableObject {
 
     private func presentHistoryPlaybackShell(
         _ item: HistoryRecord,
-        siteName: String
+        siteName: String,
+        configurationID: UUID
     ) -> UUID {
         let preparationID = UUID()
         playbackSessionID = preparationID
@@ -3681,6 +5252,7 @@ final class AppState: ObservableObject {
             episodeURL: "history-pending://\(preparationID.uuidString.lowercased())"
         )
         pendingPlayback = PendingCloudPlayback(
+            configurationID: configurationID,
             detail: context.detail,
             source: context.source,
             episode: context.episode,
@@ -4052,11 +5624,30 @@ final class AppState: ObservableObject {
         detail: VideoDetail,
         source: PlaySource,
         episode: PlayEpisode,
-        origin: PlaybackRequestOrigin = .direct
+        origin: PlaybackRequestOrigin = .direct,
+        authoritativePlaybackResult: SitePlaybackResult? = nil,
+        configurationID requestedConfigurationID: UUID? = nil
     ) async {
         guard !isShutdownRequested,
               let environment,
+              let activeConfigurationID = activeConfigurationRecord?.id,
               let provider = providers[detail.summary.siteKey] else { return }
+        guard let playbackConfigurationID = PlaybackConfigurationOwnershipPolicy
+            .capturedConfigurationID(
+                requested: requestedConfigurationID,
+                history: origin.historyRecord?.configurationID,
+                current: activeConfigurationID
+            ) else { return }
+        guard PlaybackConfigurationOwnershipPolicy.canBeginPlayback(
+            captured: playbackConfigurationID,
+            current: activeConfigurationID
+        ) else {
+            show(
+                AppError.playback("播放所属配置已经切换，请切回原配置后重试"),
+                title: "播放已停止"
+            )
+            return
+        }
         cancelAllPlaybackStartupGates()
         presentedPlaybackErrorRequestIDs.removeAll()
         // Detail is presented above SearchView, so opening the player does not
@@ -4084,6 +5675,7 @@ final class AppState: ObservableObject {
         selectedPlaybackQualityID = nil
         isSwitchingPlaybackQuality = false
         pendingPlayback = PendingCloudPlayback(
+            configurationID: playbackConfigurationID,
             detail: detail,
             source: source,
             episode: episode,
@@ -4145,14 +5737,26 @@ final class AppState: ObservableObject {
             var failures: [String] = []
             var completedAttempts = 0
             var resolvedRequests = Set<String>()
+            var initialMediaFingerprint: String?
+            var currentProviderReference = Self.acceptedHistoryProviderReference(
+                from: origin.historyRecord,
+                provider: provider
+            )
             // User line selection is authoritative. Automatic attempts may use
             // configured parsers for that resource, but never silently move to
             // another provider line by array order. One same-resource refresh
             // is allowed for both direct and history playback so short-lived
             // URLs and authorization context can be rebuilt after a 401/403.
-            let targetCount = 2
+            // A history record with a provider-owned durable reference starts
+            // with that provider's cache-bypassing refresh. A terminal Bridge
+            // result is even more authoritative and therefore remains first.
+            let refreshFirst = authoritativePlaybackResult == nil
+                && currentProviderReference != nil
+            let refreshAttempts = refreshFirst
+                ? [true, false]
+                : [false, true]
 
-            for targetIndex in 0..<targetCount {
+            for (targetIndex, isRefreshAttempt) in refreshAttempts.enumerated() {
                 try Task.checkCancellation()
                 guard playbackSessionID == sessionID else {
                     throw CancellationError()
@@ -4162,11 +5766,13 @@ final class AppState: ObservableObject {
                 let candidateSource: PlaySource
                 let candidateEpisode: PlayEpisode
                 let refreshedPlaybackResult: SitePlaybackResult?
-                if targetIndex == 0 {
+                if !isRefreshAttempt {
                     candidateDetail = detail
                     candidateSource = source
                     candidateEpisode = episode
-                    refreshedPlaybackResult = nil
+                    refreshedPlaybackResult = targetIndex == 0
+                        ? authoritativePlaybackResult
+                        : nil
                 } else {
                     // A retry is a true same-resource refresh. Fetch current
                     // detail again so expiring episode references, provider
@@ -4176,22 +5782,28 @@ final class AppState: ObservableObject {
                     do {
                         let historyRecord = origin.historyRecord
                         let reference = historyRecord?.playbackReference
+                        let providerReference = currentProviderReference
                         let refreshed = try await provider.refreshPlayback(
                             PlaybackRefreshRequest(
                                 videoID: historyRecord?.videoID
                                     ?? detail.summary.videoID,
                                 title: historyRecord?.title
                                     ?? detail.summary.title,
-                                sourceIdentity: reference?.sourceIdentity
+                                sourceIdentity: providerReference?.sourceIdentity
+                                    ?? reference?.sourceIdentity
                                     ?? source.stableIdentity,
-                                resourceIdentity: reference?.resourceIdentity
+                                resourceIdentity: providerReference?.episodeIdentity
+                                    ?? reference?.resourceIdentity
                                     ?? episode.stableIdentity,
                                 sourceName: historyRecord?.sourceName
                                     ?? source.name,
                                 episodeName: historyRecord?.episodeName
                                     ?? episode.name,
-                                episodeReference: historyRecord?.episodeReference
-                                    ?? episode.url
+                                episodeReference: providerReference?
+                                    .stableResourceLocator
+                                    ?? historyRecord?.episodeReference
+                                    ?? episode.url,
+                                providerResourceReference: providerReference
                             )
                         )
                         candidateDetail = refreshed.detail
@@ -4207,6 +5819,7 @@ final class AppState: ObservableObject {
                             pending: .playback(
                                 identity: identity,
                                 playback: PendingCloudPlayback(
+                                    configurationID: playbackConfigurationID,
                                     detail: detail,
                                     source: source,
                                     episode: episode,
@@ -4216,10 +5829,17 @@ final class AppState: ObservableObject {
                         )
                         return
                     } catch let authorization as AndroidBridgeUIRequired {
+                        guard playbackSessionID == sessionID else {
+                            authorization.handle?.cancel()
+                            return
+                        }
                         await presentCloudAuthorization(
                             authorization.state,
+                            interaction: authorization.interaction,
+                            handle: authorization.handle,
                             operation: .playback(
                                 PendingCloudPlayback(
+                                    configurationID: playbackConfigurationID,
                                     detail: detail,
                                     source: source,
                                     episode: episode,
@@ -4232,7 +5852,7 @@ final class AppState: ObservableObject {
                     } catch {
                         failures.append("重新获取播放详情失败：\(error.localizedDescription)")
                         playbackFailureSummary = error.localizedDescription
-                        break
+                        continue
                     }
                 }
 
@@ -4263,6 +5883,12 @@ final class AppState: ObservableObject {
                     guard playbackSessionID == sessionID else {
                         throw CancellationError()
                     }
+                    if let acceptedReference = Self.acceptedProviderResourceReference(
+                        result.resourceReference,
+                        provider: provider
+                    ) {
+                        currentProviderReference = acceptedReference
+                    }
                 } catch let authorization as NodeWebAuthorizationRequired {
                     guard playbackSessionID == sessionID else { return }
                     guard let identity = activeSourceIdentity(
@@ -4277,6 +5903,7 @@ final class AppState: ObservableObject {
                         pending: .playback(
                             identity: identity,
                             playback: PendingCloudPlayback(
+                                configurationID: playbackConfigurationID,
                                 detail: candidateDetail,
                                 source: candidateSource,
                                 episode: candidateEpisode,
@@ -4286,11 +5913,17 @@ final class AppState: ObservableObject {
                     )
                     return
                 } catch let authorization as AndroidBridgeUIRequired {
-                    guard playbackSessionID == sessionID else { return }
+                    guard playbackSessionID == sessionID else {
+                        authorization.handle?.cancel()
+                        return
+                    }
                     await presentCloudAuthorization(
                         authorization.state,
+                        interaction: authorization.interaction,
+                        handle: authorization.handle,
                         operation: .playback(
                             PendingCloudPlayback(
+                                configurationID: playbackConfigurationID,
                                 detail: candidateDetail,
                                 source: candidateSource,
                                 episode: candidateEpisode,
@@ -4309,34 +5942,43 @@ final class AppState: ObservableObject {
                     continue
                 }
 
-                // The retry exists only to refresh an expiring URL or request
-                // context for the same stable resource. If the provider
-                // returns the identical address and headers, do not submit the
-                // same known-failing request again.
-                let requestSignature = ([result.url] + result.headers.dictionary
-                    .map { "\($0.key.lowercased()):\($0.value)" }
-                    .sorted())
-                    .joined(separator: "\n")
+                // A provider-owned loopback URL is a short-lived capability;
+                // its random session component does not prove that the
+                // upstream media request changed. Prefer the provider's
+                // non-secret upstream fingerprint together with the stable
+                // resource identity and request policy. Legacy results that
+                // cannot provide a fingerprint retain URL + header-value
+                // comparison for compatibility.
+                let requestSignature = Self.playbackRequestSignature(for: result)
                 if !resolvedRequests.insert(requestSignature).inserted {
                     failures.append("\(candidateSource.name)：重新解析仍返回相同地址和请求上下文")
                     playbackFailureSummary = "重新解析仍返回相同地址和请求上下文"
                     continue
                 }
+                let currentMediaFingerprint = result.mediaSession?
+                    .upstreamResourceFingerprint
+                let refreshWasExplicitlyObserved = isRefreshAttempt
+                    && (result.mediaSession?.refreshPerformed == true
+                        || (initialMediaFingerprint != nil
+                            && currentMediaFingerprint != nil
+                            && currentMediaFingerprint != initialMediaFingerprint))
+                if targetIndex == 0 {
+                    initialMediaFingerprint = currentMediaFingerprint
+                }
 
-                let candidate = PlaybackCandidate(
-                    siteKey: candidateDetail.summary.siteKey,
-                    siteName: candidateDetail.summary.siteName,
-                    sourceName: candidateSource.name,
-                    episodeName: candidateEpisode.name,
+                let attemptContext = PlaybackResolutionAttemptContext(
+                    detail: candidateDetail,
+                    source: candidateSource,
+                    episode: candidateEpisode,
                     result: result
                 )
+                let providerReferenceForAttempt = currentProviderReference
                 let remainingAttempts = max(1, 8 - completedAttempts)
                 var attemptsInCandidate = 0
                 var candidateFailure: String?
                 let stream = resolver.resolve(
-                    PlaybackResolutionRequest(
-                        candidates: [candidate],
-                        parsers: activeConfiguration?.parses ?? [],
+                    attemptContext.resolutionRequest(
+                        configuredParsers: activeConfiguration?.parses ?? [],
                         maximumAttempts: remainingAttempts
                     ),
                     mediaLoader: { [weak self] media, _ in
@@ -4351,10 +5993,12 @@ final class AppState: ObservableObject {
                         await imageQuiesceTask.value
                         try await self.loadResolvedPlayback(
                             media,
-                            detail: candidateDetail,
-                            source: candidateSource,
-                            episode: candidateEpisode,
-                            playbackResult: result,
+                            detail: attemptContext.detail,
+                            source: attemptContext.source,
+                            episode: attemptContext.episode,
+                            playbackResult: attemptContext.result,
+                            configurationID: playbackConfigurationID,
+                            providerResourceReference: providerReferenceForAttempt,
                             sessionID: sessionID
                         )
                     }
@@ -4377,7 +6021,8 @@ final class AppState: ObservableObject {
                         currentPlaybackAttempt = attempt
                         playbackFailureSummary = Self.playbackFailureMessage(
                             message,
-                            validationPolicy: result.validationPolicy
+                            validationPolicy: result.validationPolicy,
+                            refreshPerformed: refreshWasExplicitlyObserved
                         )
                     case .resolved:
                         playbackFailureSummary = nil
@@ -4386,7 +6031,8 @@ final class AppState: ObservableObject {
                     case .failed(let message):
                         candidateFailure = Self.playbackFailureMessage(
                             message,
-                            validationPolicy: result.validationPolicy
+                            validationPolicy: result.validationPolicy,
+                            refreshPerformed: refreshWasExplicitlyObserved
                         )
                     case .cancelled:
                         throw CancellationError()
@@ -4446,18 +6092,67 @@ final class AppState: ObservableObject {
 
     static func playbackFailureMessage(
         _ message: String,
-        validationPolicy: SitePlaybackResult.ValidationPolicy
+        validationPolicy: SitePlaybackResult.ValidationPolicy,
+        refreshPerformed: Bool = false,
+        upstreamHTTPStatusCode: Int? = nil
     ) -> String {
         guard validationPolicy == .playerAuthoritative else { return message }
-        let lower = message.lowercased()
-        if lower.contains("loading failed")
-            || lower.contains("http 状态码 401")
-            || lower.contains("http 状态码 403")
-            || lower.contains("http status 401")
-            || lower.contains("http status 403") {
-            return "媒体请求被拒绝，网盘授权或临时播放地址可能已失效。已完成一次同资源刷新；请重新授权后再试。"
+        // libmpv's generic `loading failed` does not identify an authorization
+        // failure. A provider loopback proxy can already have returned 200/206
+        // and still fail because the body is empty, truncated, non-media, has an
+        // inconsistent range, or cannot be demuxed. Only structured upstream
+        // HTTP evidence may turn a player failure into an authorization prompt;
+        // NodeWebAuthorizationRequired is handled explicitly before this helper.
+        if upstreamHTTPStatusCode == 401 || upstreamHTTPStatusCode == 403 {
+            let refreshStatus = refreshPerformed
+                ? "已完成一次同资源刷新；"
+                : ""
+            return "媒体请求被拒绝，网盘授权或临时播放地址可能已失效。\(refreshStatus)请重新授权后再试。"
         }
         return message
+    }
+
+    static func playbackRequestSignature(
+        for result: SitePlaybackResult
+    ) -> String {
+        guard let mediaSession = result.mediaSession,
+              let fingerprint = mediaSession.upstreamResourceFingerprint?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !fingerprint.isEmpty else {
+            let sensitiveRequest = ([result.url] + result.headers.dictionary
+                .map { "\($0.key.lowercased()):\($0.value)" }
+                .sorted())
+                .joined(separator: "\n")
+            let digest = SHA256.hash(data: Data(sensitiveRequest.utf8)).map {
+                String(format: "%02x", $0)
+            }.joined()
+            return "legacy-v1:\(digest)"
+        }
+
+        let reference = mediaSession.resourceReference
+        let fingerprintDigest = SHA256.hash(
+            data: Data(fingerprint.utf8)
+        ).map {
+            String(format: "%02x", $0)
+        }.joined()
+        let headerNames = Set(
+            result.headers.dictionary.keys.map { $0.lowercased() }
+                + mediaSession.headers.dictionary.keys.map { $0.lowercased() }
+        ).sorted().joined(separator: ",")
+        return [
+            "provider-v1",
+            "fingerprint-sha256:\(fingerprintDigest)",
+            "configuration:\(reference.configurationIdentity)",
+            "site:\(reference.siteIdentity)",
+            "provider:\(reference.providerKind):\(reference.providerVersion)",
+            "source:\(reference.sourceIdentity)",
+            "episode:\(reference.episodeIdentity)",
+            "transport:\(mediaSession.transport.rawValue)",
+            "redirect:\(mediaSession.redirectPolicy.rawValue)",
+            "range:\(mediaSession.rangePolicy.rawValue)",
+            "refresh:\(mediaSession.refreshPerformed.map(String.init) ?? "unknown")",
+            "headers:\(headerNames)"
+        ].joined(separator: "\n")
     }
 
     @discardableResult
@@ -5506,19 +7201,17 @@ final class AppState: ObservableObject {
                 parseExecutor: AppParseExecutor(httpClient: httpClient),
                 mediaProbe: DefaultMediaProbe(httpClient: httpClient)
             )
-            let candidate = PlaybackCandidate(
-                siteKey: playback.detail.summary.siteKey,
-                siteName: playback.detail.summary.siteName,
-                sourceName: playback.source.name,
-                episodeName: playback.episode.name,
+            let attemptContext = PlaybackResolutionAttemptContext(
+                detail: playback.detail,
+                source: playback.source,
+                episode: playback.episode,
                 result: playbackResult
             )
             var resolvedMedia: ResolvedMedia?
             var failureMessage: String?
             for await event in resolver.resolve(
-                PlaybackResolutionRequest(
-                    candidates: [candidate],
-                    parsers: activeConfiguration?.parses ?? [],
+                attemptContext.resolutionRequest(
+                    configuredParsers: activeConfiguration?.parses ?? [],
                     maximumAttempts: 8
                 )
             ) {
@@ -5572,11 +7265,13 @@ final class AppState: ObservableObject {
                 }
             }
             activePlayback = ActivePlaybackContext(
+                configurationID: playback.configurationID,
                 detail: playback.detail,
                 source: playback.source,
                 episode: playback.episode,
                 media: resolvedMedia,
-                playbackResult: playbackResult
+                playbackResult: playbackResult,
+                providerResourceReference: playback.providerResourceReference
             )
             playbackQualities = playbackResult.qualities
             selectedPlaybackQualityID = quality.id
@@ -5830,7 +7525,8 @@ final class AppState: ObservableObject {
         await startPlayback(
             detail: playback.detail,
             source: playback.source,
-            episode: playback.source.episodes[nextIndex]
+            episode: playback.source.episodes[nextIndex],
+            configurationID: playback.configurationID
         )
     }
 
@@ -5842,7 +7538,8 @@ final class AppState: ObservableObject {
         await startPlayback(
             detail: playback.detail,
             source: playback.source,
-            episode: episode
+            episode: episode,
+            configurationID: playback.configurationID
         )
     }
 
@@ -5866,6 +7563,10 @@ final class AppState: ObservableObject {
 
     var currentSite: SiteConfiguration? {
         visibleSites.first { $0.key == selectedSiteKey }
+    }
+
+    var isConfigurationInteractionActive: Bool {
+        configurationInteractionCoordinator.hasActiveRequest
     }
 
     var systemDescription: String {
@@ -6454,13 +8155,51 @@ final class AppState: ObservableObject {
     static func historyPlaybackReference(
         source: PlaySource,
         episode: PlayEpisode,
+        providerResourceReference: PlaybackResourceReference? = nil,
         headers: HTTPHeaders
     ) -> HistoryPlaybackReference {
-        HistoryPlaybackReference(
-            sourceIdentity: source.stableIdentity,
-            resourceIdentity: episode.stableIdentity,
+        let sourceIdentity = PlaybackPersistencePolicy
+            .sanitizedPlaybackIdentity(source.stableIdentity)
+            ?? PlaybackReferenceIdentity.source(
+                explicitIdentity: source.stableIdentity,
+                episodes: []
+            )
+        let resourceIdentity = PlaybackPersistencePolicy
+            .sanitizedPlaybackIdentity(episode.stableIdentity)
+            ?? PlaybackReferenceIdentity.episode(
+                explicitIdentity: episode.stableIdentity,
+                name: "",
+                reference: ""
+            )
+        return HistoryPlaybackReference(
+            sourceIdentity: sourceIdentity,
+            resourceIdentity: resourceIdentity,
+            providerResourceReference: persistentProviderResourceReference(
+                providerResourceReference
+            ),
             replayHeaders: safeHistoryReplayHeaders(headers)
         )
+    }
+
+    static func acceptedHistoryProviderReference(
+        from record: HistoryRecord?,
+        provider: any SiteProvider
+    ) -> PlaybackResourceReference? {
+        acceptedProviderResourceReference(
+            record?.playbackReference?.providerResourceReference,
+            provider: provider
+        )
+    }
+
+    static func acceptedProviderResourceReference(
+        _ reference: PlaybackResourceReference?,
+        provider: any SiteProvider
+    ) -> PlaybackResourceReference? {
+        guard let reference,
+              provider.acceptsPlaybackResourceReference(reference) else {
+            return nil
+        }
+        return reference
     }
 
     static func historyRecord(
@@ -6496,32 +8235,7 @@ final class AppState: ObservableObject {
     private static func safeHistoryReplayHeaders(
         _ headers: HTTPHeaders
     ) -> [String: String] {
-        var output: [String: String] = [:]
-        for name in ["User-Agent", "Origin", "Referer"] {
-            guard let value = headers[name]?.nonEmpty else { continue }
-            if name == "User-Agent" {
-                output[name] = String(value.prefix(512))
-            } else if let sanitized = sanitizedHistoryHeaderURL(value) {
-                output[name] = sanitized
-            }
-        }
-        return output
-    }
-
-    private static func sanitizedHistoryHeaderURL(_ value: String) -> String? {
-        guard var components = URLComponents(string: value),
-              components.scheme?.isEmpty == false else {
-            return nil
-        }
-        let sensitiveFragments = [
-            "auth", "cookie", "credential", "expire", "key", "password",
-            "secret", "sign", "stoken", "timestamp", "token"
-        ]
-        components.queryItems = components.queryItems?.filter { item in
-            let name = item.name.lowercased()
-            return !sensitiveFragments.contains { name.contains($0) }
-        }
-        return components.string
+        PlaybackPersistencePolicy.sanitizedReplayHeaders(headers).dictionary
     }
 
     static func historyPlaybackContext(
@@ -6559,30 +8273,73 @@ final class AppState: ObservableObject {
         episode: PlayEpisode,
         media: ResolvedMedia
     )? {
-        guard let rawReference = record.mediaReference?.nonEmpty,
-              !rawReference.localizedCaseInsensitiveContains("<redacted>"),
-              !rawReference.localizedCaseInsensitiveContains("%3credacted%3e"),
-              let url = URL(string: rawReference),
-              ["http", "https", "file"].contains(
-                url.scheme?.lowercased() ?? ""
-              ) else {
+        guard let rawReference = PlaybackPersistencePolicy
+            .sanitizedMediaReference(record.mediaReference),
+              let url = URL(string: rawReference) else {
             return nil
         }
+        let episodeReference = PlaybackPersistencePolicy
+            .sanitizedOpaqueLocator(record.episodeReference)
         let context = historyPlaybackContext(
             record: record,
             siteName: siteName,
-            episodeURL: record.episodeReference?.nonEmpty ?? rawReference
+            episodeURL: episodeReference ?? rawReference
         )
         let media = ResolvedMedia(
             url: url,
-            headers: HTTPHeaders(
-                record.playbackReference?.replayHeaders ?? [:]
+            headers: PlaybackPersistencePolicy.sanitizedReplayHeaders(
+                HTTPHeaders(record.playbackReference?.replayHeaders ?? [:])
             ),
             siteKey: record.siteKey,
             sourceName: context.source.name,
             episodeName: context.episode.name
         )
         return (context.detail, context.source, context.episode, media)
+    }
+
+    static func persistentHistoryMediaReference(
+        _ mediaURL: URL,
+        playbackResult: SitePlaybackResult?
+    ) -> String? {
+        // Provider media sessions and localhost proxy URLs are runtime
+        // capabilities, not durable media. History retains the provider's
+        // validated resource reference instead and asks that same provider to
+        // refresh it on resume.
+        guard playbackResult?.mediaSession == nil else {
+            return nil
+        }
+        return PlaybackPersistencePolicy.sanitizedMediaReference(
+            mediaURL.absoluteString
+        )
+    }
+
+    /// Keeps only provider locators that are safe to serialize. Runtime
+    /// capabilities and credential-bearing URLs remain in memory and are
+    /// regenerated by the owning provider on the next playback.
+    static func persistentHistoryEpisodeReference(
+        _ rawValue: String
+    ) -> String? {
+        let trimmed = rawValue.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !trimmed.isEmpty else { return nil }
+
+        if QuarkEpisodeReference.identity(from: trimmed) != nil {
+            let durable = QuarkEpisodeReference.durableHistoryReference(
+                trimmed
+            )
+            guard QuarkEpisodeReference.requiresShareTokenRefresh(durable) else {
+                return nil
+            }
+            return PlaybackPersistencePolicy.sanitizedOpaqueLocator(durable)
+        }
+        return PlaybackPersistencePolicy.sanitizedOpaqueLocator(trimmed)
+    }
+
+    static func persistentProviderResourceReference(
+        _ reference: PlaybackResourceReference?
+    ) -> PlaybackResourceReference? {
+        PlaybackPersistencePolicy.sanitizedProviderResourceReference(reference)
     }
 
     static func historySearchMatch(
@@ -7192,62 +8949,90 @@ final class AppState: ObservableObject {
             ?? URL(string: "http://127.0.0.1/")!
         let httpClient = configuredHTTPClient(environment: environment)
         let nodeBundleRuntime = environment.nodeBundleRuntime
+        let activeConfigurationID = activeConfigurationRecord?.id
         providers = Dictionary(
             uniqueKeysWithValues: visibleSites.map { site in
                 let provider: SiteProvider
-                if usesNodeRuntime,
-                   site.extra["okNodeRuntime"] == .bool(true),
-                   let nodeSourceURL,
-                   NodeHTTPSpiderSiteProvider.canHandle(
-                       site: site,
-                       baseURL: nodeFallbackBaseURL
-                   ) {
-                    provider = (try? NodeHTTPSpiderSiteProvider(
-                        site: site,
-                        baseURL: nodeFallbackBaseURL,
-                        httpClient: httpClient,
-                        diagnosticReporter: { [weak runtime = nodeBundleRuntime] event in
-                            Task { await runtime?.recordDiagnosticEvent(event) }
-                        },
-                        ensureRuntimeReady: {
-                            try await nodeBundleRuntime.ensureReady(
-                                from: nodeSourceURL
-                            )
-                        }
-                    )) ?? UnsupportedSiteProvider(site: site)
-                } else if NodeHTTPSpiderSiteProvider.canHandle(
-                    site: site,
+                let nodeOwned = SiteProviderRoutingPolicy
+                    .hasExclusiveNodeRuntimeOwnership(site)
+                let localScriptURL = javaScriptURL(
+                    for: site,
                     baseURL: baseURL
-                ), let baseURL {
-                    provider = (try? NodeHTTPSpiderSiteProvider(
-                        site: site,
-                        baseURL: baseURL,
-                        httpClient: httpClient,
-                        diagnosticReporter: { [weak runtime = nodeBundleRuntime] event in
-                            Task { await runtime?.recordDiagnosticEvent(event) }
-                        }
-                    )) ?? UnsupportedSiteProvider(site: site)
+                )
+                if nodeOwned {
+                    if usesNodeRuntime,
+                       let nodeSourceURL,
+                       NodeHTTPSpiderSiteProvider.canHandle(
+                           site: site,
+                           baseURL: nodeFallbackBaseURL
+                       ) {
+                        provider = (try? NodeHTTPSpiderSiteProvider(
+                            site: site,
+                            baseURL: nodeFallbackBaseURL,
+                            httpClient: httpClient,
+                            diagnosticReporter: {
+                                [weak runtime = nodeBundleRuntime] event in
+                                Task { await runtime?.recordDiagnosticEvent(event) }
+                            },
+                            ensureRuntimeReady: {
+                                try await nodeBundleRuntime.ensureReady(
+                                    from: nodeSourceURL
+                                )
+                            },
+                            configurationIdentity: activeConfigurationID?
+                                .uuidString
+                        )) ?? UnsupportedSiteProvider(site: site)
+                    } else if let baseURL,
+                              NodeHTTPSpiderSiteProvider.canHandle(
+                                  site: site,
+                                  baseURL: baseURL
+                              ) {
+                        provider = (try? NodeHTTPSpiderSiteProvider(
+                            site: site,
+                            baseURL: baseURL,
+                            httpClient: httpClient,
+                            diagnosticReporter: {
+                                [weak runtime = nodeBundleRuntime] event in
+                                Task { await runtime?.recordDiagnosticEvent(event) }
+                            },
+                            configurationIdentity: activeConfigurationID?
+                                .uuidString
+                        )) ?? UnsupportedSiteProvider(site: site)
+                    } else {
+                        // `okNodeRuntime` is exclusive ownership metadata. A
+                        // broken/missing Node runtime must not start Android.
+                        provider = UnsupportedSiteProvider(site: site)
+                    }
                 } else if [0, 1, 4].contains(site.type) {
                     provider = (try? StandardSiteProvider(
                         site: site,
                         httpClient: httpClient,
                         configurationBaseURL: baseURL
                     )) ?? UnsupportedSiteProvider(site: site)
-                } else if site.type == 3,
-                          let factory = environment.spiderRuntimeFactory,
-                          let scriptURL = javaScriptURL(for: site, baseURL: baseURL) {
-                    provider = (try? JavaScriptSpiderSiteProvider(
-                        site: site,
-                        scriptURL: scriptURL,
-                        baseURL: baseURL,
-                        httpClient: httpClient,
-                        runtimeFactory: factory
-                    )) ?? UnsupportedSiteProvider(site: site)
+                } else if site.type == 3, let localScriptURL {
+                    if let factory = environment.spiderRuntimeFactory {
+                        provider = (try? JavaScriptSpiderSiteProvider(
+                            site: site,
+                            scriptURL: localScriptURL,
+                            baseURL: baseURL,
+                            httpClient: httpClient,
+                            runtimeFactory: factory
+                        )) ?? UnsupportedSiteProvider(site: site)
+                    } else {
+                        // Local JavaScript ownership remains local even when
+                        // QuickJS is unavailable; never reinterpret it as JAR.
+                        provider = UnsupportedSiteProvider(site: site)
+                    }
                 } else if site.type == 3,
                           site.api.hasPrefix("csp_"),
-                          let jarReference = javaDexJarReference(for: site) {
+                          let activeConfigurationID,
+                          let jarReference = javaDexJarReference(
+                              for: site,
+                              baseURL: baseURL
+                          ) {
                     provider = (try? AndroidDexSpiderSiteProvider(
                         site: site,
+                        configurationID: activeConfigurationID,
                         jarReference: jarReference,
                         baseURL: baseURL,
                         bridge: environment.androidDexBridge
@@ -7271,34 +9056,22 @@ final class AppState: ObservableObject {
         for site: SiteConfiguration,
         baseURL: URL?
     ) -> URL? {
-        var references: [String] = []
-        if let script = site.extra["script"]?.stringValue {
-            references.append(script)
-        }
-        if let script = site.ext?.objectValue?["script"]?.stringValue {
-            references.append(script)
-        }
-        references.append(site.api)
-        if let spider = activeConfiguration?.spider {
-            references.append(spider)
-        }
-        for reference in references {
-            if let resolved = try? ResourceResolver.resolve(reference, relativeTo: baseURL),
-               resolved.path.lowercased().hasSuffix(".js"),
-               ["http", "https"].contains(resolved.scheme?.lowercased() ?? "") {
-                return resolved
-            }
-        }
-        return nil
+        SiteProviderRoutingPolicy.localJavaScriptURL(
+            site: site,
+            configurationSpider: activeConfiguration?.spider,
+            baseURL: baseURL
+        )
     }
 
-    private func javaDexJarReference(for site: SiteConfiguration) -> String? {
-        let reference = site.jar ?? activeConfiguration?.spider
-        guard let reference,
-              !reference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return nil
-        }
-        return reference
+    private func javaDexJarReference(
+        for site: SiteConfiguration,
+        baseURL: URL?
+    ) -> String? {
+        SiteProviderRoutingPolicy.javaDexJarReference(
+            site: site,
+            configurationSpider: activeConfiguration?.spider,
+            baseURL: baseURL
+        )
     }
 
     private func reloadUserData() async throws {
@@ -7317,17 +9090,26 @@ final class AppState: ObservableObject {
 
     static func historyRecords(
         _ records: [HistoryRecord],
-        for configurationID: UUID?
+        for configurationID: UUID?,
+        siteKey: String?
     ) -> [HistoryRecord] {
-        guard let configurationID else { return [] }
-        return records.filter { $0.configurationID == configurationID }
+        guard let configurationID,
+              let siteKey,
+              !siteKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                  .isEmpty else {
+            return []
+        }
+        return records.filter {
+            $0.configurationID == configurationID && $0.siteKey == siteKey
+        }
     }
 
     private func reloadHistory() async throws {
         guard let environment else { return }
         history = Self.historyRecords(
             try await environment.database.history(),
-            for: activeConfigurationRecord?.id
+            for: activeConfigurationRecord?.id,
+            siteKey: selectedSiteKey
         )
     }
 
@@ -7602,7 +9384,8 @@ final class AppState: ObservableObject {
         await startPlayback(
             detail: playback.detail,
             source: playback.source,
-            episode: nextEpisode
+            episode: nextEpisode,
+            configurationID: playback.configurationID
         )
     }
 
@@ -7786,6 +9569,8 @@ final class AppState: ObservableObject {
         source: PlaySource,
         episode: PlayEpisode,
         playbackResult: SitePlaybackResult? = nil,
+        configurationID: UUID,
+        providerResourceReference: PlaybackResourceReference? = nil,
         sessionID: UUID
     ) async throws {
         guard let environment else {
@@ -7802,11 +9587,13 @@ final class AppState: ObservableObject {
         }
         let startPosition = Self.historyResumePosition(from: existing)
         let playback = ActivePlaybackContext(
+            configurationID: configurationID,
             detail: detail,
             source: source,
             episode: episode,
             media: media,
-            playbackResult: playbackResult
+            playbackResult: playbackResult,
+            providerResourceReference: providerResourceReference
         )
         livePlaybackChannel = nil
         livePlaybackStream = nil
@@ -7880,27 +9667,32 @@ final class AppState: ObservableObject {
         position: TimeInterval,
         duration: TimeInterval
     ) -> PlaybackHistoryWrite? {
-        guard let playback = activePlayback,
-              let configurationID = activeConfigurationRecord?.id else {
-            return nil
-        }
+        guard let playback = activePlayback else { return nil }
         let detail = playback.detail
+        let providerResourceReference = playback.providerResourceReference
         return PlaybackHistoryWrite(
             record: HistoryRecord(
-                configurationID: configurationID,
+                configurationID: PlaybackConfigurationOwnershipPolicy.historyOwner(
+                    captured: playback.configurationID,
+                    current: activeConfigurationRecord?.id
+                ),
                 siteKey: detail.summary.siteKey,
                 videoID: detail.summary.videoID,
                 title: detail.summary.title,
                 posterURL: detail.summary.posterURL,
                 sourceName: playback.source.name,
                 episodeName: playback.episode.name,
-                episodeReference: QuarkEpisodeReference.durableHistoryReference(
+                episodeReference: Self.persistentHistoryEpisodeReference(
                     playback.episode.url
                 ),
-                mediaReference: playback.media.url.absoluteString,
+                mediaReference: Self.persistentHistoryMediaReference(
+                    playback.media.url,
+                    playbackResult: playback.playbackResult
+                ),
                 playbackReference: Self.historyPlaybackReference(
                     source: playback.source,
                     episode: playback.episode,
+                    providerResourceReference: providerResourceReference,
                     headers: playback.media.headers
                 ),
                 position: position,

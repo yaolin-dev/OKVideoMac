@@ -465,6 +465,157 @@ public struct PlaybackQuality: Equatable, Hashable, Identifiable, Sendable {
     }
 }
 
+/// A provider-owned reference that can be persisted without teaching the host
+/// how a cloud drive, Spider, source or episode encodes its identity.
+///
+/// `stableResourceLocator` is opaque to the host: it may only be returned to
+/// the same provider/version for refresh. It must never be used for display,
+/// source-name matching or cross-provider fallback.
+public struct PlaybackResourceReference: Codable, Equatable, Hashable, Sendable {
+    public enum Stability: String, Codable, Equatable, Hashable, Sendable {
+        /// The provider explicitly guarantees that the locator is durable.
+        case providerStable
+        /// Compatibility for a legacy provider episode reference. The host
+        /// may replay it only through the same provider and must not parse it.
+        case providerReplay
+    }
+
+    public var schemaVersion: Int
+    public var configurationIdentity: String
+    public var siteIdentity: String
+    public var providerKind: String
+    public var providerVersion: Int
+    public var stableResourceLocator: String
+    public var sourceIdentity: String
+    public var episodeIdentity: String
+    public var stability: Stability
+    public var expiresAt: Date?
+
+    public init(
+        schemaVersion: Int = 1,
+        configurationIdentity: String,
+        siteIdentity: String,
+        providerKind: String,
+        providerVersion: Int,
+        stableResourceLocator: String,
+        sourceIdentity: String,
+        episodeIdentity: String,
+        stability: Stability,
+        expiresAt: Date? = nil
+    ) {
+        self.schemaVersion = schemaVersion
+        self.configurationIdentity = configurationIdentity
+        self.siteIdentity = siteIdentity
+        self.providerKind = providerKind
+        self.providerVersion = providerVersion
+        self.stableResourceLocator = stableResourceLocator
+        self.sourceIdentity = sourceIdentity
+        self.episodeIdentity = episodeIdentity
+        self.stability = stability
+        self.expiresAt = expiresAt
+    }
+}
+
+/// The narrow, provider-authored part of a durable playback reference.
+///
+/// A Spider may include this object in its player response under
+/// `providerResourceReference`. The host supplies configuration/site binding
+/// itself and never derives this locator from a media or localhost proxy URL.
+/// Only `.providerStable`, URL-free locators are accepted for persistence.
+public struct ProviderPlaybackResourceDescriptor: Equatable, Hashable, Sendable {
+    public var schemaVersion: Int
+    public var providerVersion: Int
+    public var stableResourceLocator: String
+    public var stability: PlaybackResourceReference.Stability
+
+    public init(
+        schemaVersion: Int,
+        providerVersion: Int,
+        stableResourceLocator: String,
+        stability: PlaybackResourceReference.Stability
+    ) {
+        self.schemaVersion = schemaVersion
+        self.providerVersion = providerVersion
+        self.stableResourceLocator = stableResourceLocator
+        self.stability = stability
+    }
+}
+
+/// Complete, short-lived media request contract returned by a provider.
+///
+/// This model is deliberately not Codable: authorization headers and proxy
+/// session context are runtime-only and must not leak into playback history.
+public struct PlaybackMediaSession: Equatable, Sendable {
+    public enum Transport: String, Equatable, Sendable {
+        /// The media URL is a localhost capability owned by the provider VM.
+        case providerLoopback
+        /// An older bridge wrapped the upstream URL in its unscoped localhost
+        /// endpoint. This remains loopback transport, but it is not an opaque
+        /// provider-owned media session and must not be treated as one.
+        case compatibilityLoopback
+        /// A legacy provider could not establish a scoped loopback session.
+        case compatibilityDirect
+    }
+
+    public enum RedirectPolicy: String, Equatable, Sendable {
+        case follow
+        case providerDefined
+    }
+
+    public enum RangePolicy: String, Equatable, Sendable {
+        case forward
+        case providerDefined
+    }
+
+    public var sessionID: String
+    public var transport: Transport
+    public var mediaURL: String
+    public var headers: HTTPHeaders
+    public var authorizationContextReference: String?
+    public var proxyRequestID: String?
+    /// Non-secret fingerprint of the exact upstream media request. Together
+    /// with `resourceReference`, this lets the host prove both that it selected
+    /// the same stable resource and that a refresh did not reuse the cached
+    /// signed URL, without exposing that URL, Cookie or authorization token.
+    public var upstreamResourceFingerprint: String?
+    /// Present only when the provider explicitly reports whether this session
+    /// was produced by a real cache-bypassing refresh. Compatibility bridges
+    /// leave it `nil`; the host must never infer it from a changed session URL.
+    public var refreshPerformed: Bool?
+    public var expiresAt: Date?
+    public var redirectPolicy: RedirectPolicy
+    public var rangePolicy: RangePolicy
+    public var resourceReference: PlaybackResourceReference
+
+    public init(
+        sessionID: String,
+        transport: Transport,
+        mediaURL: String,
+        headers: HTTPHeaders = [:],
+        authorizationContextReference: String? = nil,
+        proxyRequestID: String? = nil,
+        upstreamResourceFingerprint: String? = nil,
+        refreshPerformed: Bool? = nil,
+        expiresAt: Date? = nil,
+        redirectPolicy: RedirectPolicy = .providerDefined,
+        rangePolicy: RangePolicy = .providerDefined,
+        resourceReference: PlaybackResourceReference
+    ) {
+        self.sessionID = sessionID
+        self.transport = transport
+        self.mediaURL = mediaURL
+        self.headers = headers
+        self.authorizationContextReference = authorizationContextReference
+        self.proxyRequestID = proxyRequestID
+        self.upstreamResourceFingerprint = upstreamResourceFingerprint
+        self.refreshPerformed = refreshPerformed
+        self.expiresAt = expiresAt
+        self.redirectPolicy = redirectPolicy
+        self.rangePolicy = rangePolicy
+        self.resourceReference = resourceReference
+    }
+}
+
 public struct SitePlaybackResult: Equatable, Sendable {
     public enum ValidationPolicy: Equatable, Sendable {
         /// Use the generic HEAD/range reachability probe before loading.
@@ -483,6 +634,8 @@ public struct SitePlaybackResult: Equatable, Sendable {
     public var subtitles: [URL]
     public var qualities: [PlaybackQuality]
     public var validationPolicy: ValidationPolicy
+    public var resourceReference: PlaybackResourceReference?
+    public var mediaSession: PlaybackMediaSession?
 
     public init(
         url: String,
@@ -493,7 +646,9 @@ public struct SitePlaybackResult: Equatable, Sendable {
         format: String? = nil,
         subtitles: [URL] = [],
         qualities: [PlaybackQuality] = [],
-        validationPolicy: ValidationPolicy = .preflight
+        validationPolicy: ValidationPolicy = .preflight,
+        resourceReference: PlaybackResourceReference? = nil,
+        mediaSession: PlaybackMediaSession? = nil
     ) {
         self.url = url
         self.needsParsing = needsParsing
@@ -504,6 +659,8 @@ public struct SitePlaybackResult: Equatable, Sendable {
         self.subtitles = subtitles
         self.qualities = qualities
         self.validationPolicy = validationPolicy
+        self.resourceReference = resourceReference
+        self.mediaSession = mediaSession
     }
 }
 
@@ -517,6 +674,11 @@ public struct PlaybackRefreshRequest: Equatable, Sendable {
     /// Provider-owned opaque episode reference captured when playback was
     /// originally resolved. Hosts persist and compare it, but never parse it.
     public var episodeReference: String?
+    /// Complete provider-owned identity captured with the original playback.
+    /// Only the provider that issued this reference may interpret or replay
+    /// its locator. Other providers continue to use the structural fields
+    /// above and never inherit a bridge dependency.
+    public var providerResourceReference: PlaybackResourceReference?
 
     public init(
         videoID: String,
@@ -525,7 +687,8 @@ public struct PlaybackRefreshRequest: Equatable, Sendable {
         resourceIdentity: String,
         sourceName: String? = nil,
         episodeName: String? = nil,
-        episodeReference: String? = nil
+        episodeReference: String? = nil,
+        providerResourceReference: PlaybackResourceReference? = nil
     ) {
         self.videoID = videoID
         self.title = title
@@ -534,6 +697,7 @@ public struct PlaybackRefreshRequest: Equatable, Sendable {
         self.sourceName = sourceName
         self.episodeName = episodeName
         self.episodeReference = episodeReference
+        self.providerResourceReference = providerResourceReference
     }
 }
 
@@ -595,13 +759,33 @@ public protocol SiteProvider {
     func refreshPlayback(
         _ request: PlaybackRefreshRequest
     ) async throws -> RefreshedSitePlayback
+    /// Returns whether this exact provider instance owns and can safely replay
+    /// the opaque resource reference. The host must never infer ownership from
+    /// a provider class, source name, card ID, URL or domain.
+    func acceptsPlaybackResourceReference(
+        _ reference: PlaybackResourceReference
+    ) -> Bool
     func action(_ action: String) async throws -> JSONValue
 }
 
 public extension SiteProvider {
-    func refreshPlayback(
+    func acceptsPlaybackResourceReference(
+        _ reference: PlaybackResourceReference
+    ) -> Bool {
+        false
+    }
+
+    /// Resolves the one source/episode that is structurally the same resource
+    /// as a previous playback. Providers which need a cache-bypassing player
+    /// call can reuse this selection policy without copying its matching and
+    /// duplicate-title safeguards.
+    func resolvePlaybackRefreshSelection(
         _ request: PlaybackRefreshRequest
-    ) async throws -> RefreshedSitePlayback {
+    ) async throws -> (
+        detail: VideoDetail,
+        source: PlaySource,
+        episode: PlayEpisode
+    ) {
         func matchingPlayback(
             in detail: VideoDetail
         ) -> (PlaySource, PlayEpisode)? {
@@ -697,14 +881,25 @@ public extension SiteProvider {
             detail = refreshed.0
             selected = (refreshed.1, refreshed.2)
         }
-        let result = try await player(
-            flag: selected.0.name,
-            episodeURL: selected.1.url
-        )
-        return RefreshedSitePlayback(
+        return (
             detail: detail,
             source: selected.0,
-            episode: selected.1,
+            episode: selected.1
+        )
+    }
+
+    func refreshPlayback(
+        _ request: PlaybackRefreshRequest
+    ) async throws -> RefreshedSitePlayback {
+        let selected = try await resolvePlaybackRefreshSelection(request)
+        let result = try await player(
+            flag: selected.source.name,
+            episodeURL: selected.episode.url
+        )
+        return RefreshedSitePlayback(
+            detail: selected.detail,
+            source: selected.source,
+            episode: selected.episode,
             playbackResult: result
         )
     }

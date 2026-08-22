@@ -447,10 +447,10 @@ struct CloudAuthorizationView: View {
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
                     Label(
-                        prompt.interactionKind == .authorization
+                        isAuthorization
                             ? "网盘授权"
                             : "配置操作",
-                        systemImage: prompt.interactionKind == .authorization
+                        systemImage: isAuthorization
                             ? "externaldrive.badge.person.crop"
                             : "slider.horizontal.3"
                     )
@@ -461,12 +461,39 @@ struct CloudAuthorizationView: View {
                     } label: {
                         Label("刷新", systemImage: "arrow.clockwise")
                     }
+                    .disabled(isBusy || isTerminal)
                 }
 
                 Text(prompt.title)
                     .font(.headline)
 
-                if prompt.credentialPush {
+                if prompt.lifecyclePhase == .completed {
+                    Label(
+                        isAuthorization ? "授权已完成" : "配置操作已完成",
+                        systemImage: "checkmark.circle.fill"
+                    )
+                    .font(.headline)
+                    .foregroundColor(.green)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 18)
+                } else if prompt.lifecyclePhase == .failed {
+                    Label(
+                        isAuthorization ? "授权尚未完成" : "配置操作尚未完成",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.headline)
+                    .foregroundColor(.orange)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 18)
+                } else if isBusy {
+                    HStack(spacing: 10) {
+                        AppActivityIndicator(size: .small)
+                        Text(lifecycleStatus)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 18)
+                } else if prompt.credentialPush {
                     HStack(spacing: 12) {
                         Image(systemName: "lock.shield.fill")
                             .font(.system(size: 30))
@@ -483,7 +510,8 @@ struct CloudAuthorizationView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.accentColor.opacity(0.08))
                     .clipShape(RoundedRectangle(cornerRadius: 10))
-                } else if let data = prompt.snapshot,
+                } else if prompt.displaysLoginQRCode,
+                   let data = prompt.snapshot,
                    let image = NSImage(data: data) {
                     Image(nsImage: image)
                         .resizable()
@@ -510,23 +538,6 @@ struct CloudAuthorizationView: View {
                         .frame(width: 280, height: 220)
                         Spacer()
                     }
-                } else if prompt.phase == "waiting"
-                    || prompt.phase == "transitioning" {
-                    HStack(spacing: 10) {
-                        AppActivityIndicator(size: .small)
-                        Text("正在等待下一步操作界面")
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 18)
-                } else if prompt.phase == "failed" {
-                    Label(
-                        "配置操作尚未完成",
-                        systemImage: "exclamationmark.triangle.fill"
-                    )
-                    .foregroundColor(.orange)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 12)
                 }
 
                 if let status = prompt.status, !status.isEmpty {
@@ -536,12 +547,24 @@ struct CloudAuthorizationView: View {
                 }
 
                 if prompt.hasTextInput {
-                    SecureField(
-                        inputPlaceholder,
-                        text: $state.cloudAuthorizationInput
-                    )
+                    Group {
+                        if prompt.usesSecureInput {
+                            SecureField(
+                                inputPlaceholder,
+                                text: $state.cloudAuthorizationInput
+                            )
+                        } else {
+                            TextField(
+                                inputPlaceholder,
+                                text: $state.cloudAuthorizationInput
+                            )
+                        }
+                    }
                     .textFieldStyle(.roundedBorder)
-                    Text("内容直接提交给本机 Java/Dex 插件，Mac 端不会另行保存。")
+                    .disabled(isBusy || isTerminal)
+                    Text(prompt.usesSecureInput
+                         ? "内容直接提交给本机 Java/Dex 插件，Mac 端不会另行保存。"
+                         : "内容仅用于当前配置操作。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -550,7 +573,10 @@ struct CloudAuthorizationView: View {
                     Button {
                         Task { await state.submitCloudCredential() }
                     } label: {
-                        Label("提交授权并重试播放", systemImage: "arrow.right.circle.fill")
+                        Label(
+                            isAuthorization ? "提交授权" : "提交配置",
+                            systemImage: "arrow.right.circle.fill"
+                        )
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
@@ -558,7 +584,7 @@ struct CloudAuthorizationView: View {
                     .disabled(
                         state.cloudAuthorizationInput
                             .trimmingCharacters(in: .whitespacesAndNewlines)
-                            .isEmpty
+                            .isEmpty || isBusy || isTerminal
                     )
                 } else {
                     LazyVGrid(
@@ -574,13 +600,9 @@ struct CloudAuthorizationView: View {
                                     await state.submitCloudAuthorization(action: action)
                                 }
                             }
-                            .disabled(
-                                prompt.hasTextInput
-                                    && action.title.uppercased() == "OK"
-                                    && state.cloudAuthorizationInput
-                                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                                        .isEmpty
-                            )
+                            .buttonStyle(.bordered)
+                            .controlSize(.regular)
+                            .disabled(isBusy || isTerminal)
                         }
                     }
                 }
@@ -593,10 +615,11 @@ struct CloudAuthorizationView: View {
                             Label("重试", systemImage: "arrow.clockwise")
                         }
                         .buttonStyle(.borderedProminent)
+                        .disabled(isBusy || prompt.lifecyclePhase == .completed)
                     }
                     Spacer()
                     Button("关闭") {
-                        state.cancelCloudAuthorization()
+                        Task { await state.cancelCloudAuthorization() }
                     }
                 }
             }
@@ -610,15 +633,35 @@ struct CloudAuthorizationView: View {
         .zIndex(1_000)
     }
 
+    private var isAuthorization: Bool {
+        prompt.semantic.isAuthorization
+    }
+
+    private var isBusy: Bool {
+        prompt.lifecyclePhase.isBusy
+    }
+
+    private var isTerminal: Bool {
+        prompt.lifecyclePhase.isTerminal
+    }
+
+    private var lifecycleStatus: String {
+        switch prompt.lifecyclePhase {
+        case .invoking:
+            return "正在提交配置命令"
+        case .awaitingInterface:
+            return "正在等待下一步操作界面"
+        case .submitting:
+            return "正在提交当前操作"
+        case .processing:
+            return "正在等待站点确认结果"
+        case .presenting, .completed, .failed, .cancelled:
+            return ""
+        }
+    }
+
     private var inputPlaceholder: String {
-        let title = prompt.title.lowercased()
-        if title.contains("token") || title.contains("阿里") {
-            return "粘贴阿里云盘 Token"
-        }
-        if title.contains("百度") {
-            return "粘贴百度网盘 Cookie"
-        }
-        return "粘贴网盘 Cookie 或 Token"
+        prompt.usesSecureInput ? "粘贴凭据" : "输入配置内容"
     }
 }
 

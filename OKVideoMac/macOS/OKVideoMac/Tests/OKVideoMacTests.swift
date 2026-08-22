@@ -180,6 +180,68 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testConfigurationSwitchFeedbackClearPolicyClearsStaleFeedback() {
+        let token = ConfigurationActivationToken(
+            generation: 1,
+            configurationID: UUID()
+        )
+
+        XCTAssertTrue(
+            ConfigurationSwitchFeedbackPolicy.shouldClear(
+                .success(token, targetName: "Source A"),
+                hasActiveActivationRequest: false
+            )
+        )
+        XCTAssertTrue(
+            ConfigurationSwitchFeedbackPolicy.shouldClear(
+                .failure(
+                    token,
+                    targetName: "Source A",
+                    message: "Unable to load"
+                ),
+                hasActiveActivationRequest: false
+            )
+        )
+        XCTAssertTrue(
+            ConfigurationSwitchFeedbackPolicy.shouldClear(
+                .switching(token, targetName: "Orphaned Source"),
+                hasActiveActivationRequest: false
+            )
+        )
+        XCTAssertFalse(
+            ConfigurationSwitchFeedbackPolicy.shouldClear(
+                .idle,
+                hasActiveActivationRequest: false
+            )
+        )
+    }
+
+    func testConfigurationSwitchFeedbackClearPolicyPreservesActiveRequest() {
+        let token = ConfigurationActivationToken(
+            generation: 2,
+            configurationID: UUID()
+        )
+        for feedback in [
+            ConfigurationSwitchFeedback.switching(
+                token,
+                targetName: "Source B"
+            ),
+            .success(token, targetName: "Source B"),
+            .failure(
+                token,
+                targetName: "Source B",
+                message: "Latest failure"
+            )
+        ] {
+            XCTAssertFalse(
+                ConfigurationSwitchFeedbackPolicy.shouldClear(
+                    feedback,
+                    hasActiveActivationRequest: true
+                )
+            )
+        }
+    }
+
     func testConfigurationActivationRuntimeCleanupIsOwnedByLatestNonNodeTarget() {
         XCTAssertTrue(
             ConfigurationActivationRuntimePolicy.shouldStopNodeRuntime(
@@ -1617,7 +1679,7 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testCloudInteractionCompletionDistinguishesConfigurationAndAuthorization() {
+    func testCloudInteractionCompletionNeverInfersSuccessFromPresentationState() {
         XCTAssertFalse(
             CloudAuthorizationCompletionPolicy.shouldComplete(
                 authenticated: false,
@@ -1636,7 +1698,7 @@ final class OKVideoMacTests: XCTestCase {
                 hiddenPollCount: 2
             )
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             CloudAuthorizationCompletionPolicy.shouldComplete(
                 authenticated: false,
                 interactionKind: .configuration,
@@ -1645,7 +1707,7 @@ final class OKVideoMacTests: XCTestCase {
                 hiddenPollCount: 3
             )
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             CloudAuthorizationCompletionPolicy.shouldComplete(
                 authenticated: true,
                 interactionKind: .authorization,
@@ -1663,13 +1725,305 @@ final class OKVideoMacTests: XCTestCase {
                 hiddenPollCount: 600
             )
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             CloudAuthorizationCompletionPolicy.shouldComplete(
                 authenticated: false,
                 interactionKind: .authorization,
                 hasObservedPrompt: true,
                 hasObservedQRCode: true,
                 hiddenPollCount: 6
+            )
+        )
+    }
+
+    func testConfigurationCoordinatorRejectsSupersededAndCancelledCallbacks() {
+        let identity = HomeContentIdentity(
+            configurationID: UUID(),
+            siteKey: "site"
+        )
+        var coordinator = ConfigurationInteractionCoordinator()
+        let first = coordinator.begin(
+            sourceIdentity: identity,
+            semantic: .command,
+            transport: .native,
+            title: "First"
+        )
+        let second = coordinator.begin(
+            sourceIdentity: identity,
+            semantic: .choice,
+            transport: .native,
+            title: "Second"
+        )
+
+        XCTAssertFalse(coordinator.owns(first.interactionID))
+        XCTAssertFalse(
+            coordinator.transition(first.interactionID, to: .completed)
+        )
+        XCTAssertTrue(coordinator.owns(second.interactionID))
+        XCTAssertTrue(
+            coordinator.transition(second.interactionID, to: .processing)
+        )
+        XCTAssertTrue(
+            coordinator.cancel(second.interactionID, reason: .user)
+        )
+        XCTAssertFalse(
+            coordinator.transition(second.interactionID, to: .completed)
+        )
+        XCTAssertFalse(coordinator.hasActiveRequest)
+    }
+
+    func testOnlyExplicitLoginQRCodeUsesAuthorizationSemantics() {
+        let state = AndroidBridgeUIState(
+            interactionID: nil,
+            revision: nil,
+            kind: nil,
+            method: nil,
+            visible: true,
+            title: "Configure",
+            inputCount: 0,
+            imageCount: 1,
+            buttons: [],
+            controls: [],
+            texts: [],
+            phase: "qr",
+            provider: nil,
+            authenticated: false,
+            credentialPush: false,
+            remoteInput: false,
+            generation: 1,
+            outcome: nil,
+            terminal: nil,
+            hostUnavailable: nil,
+            verificationPerformed: nil,
+            refreshPerformed: nil,
+            error: nil
+        )
+        func interaction(
+            actionKind: ConfigurationInteraction.ActionKind,
+            qrRole: ConfigurationInteraction.QRRole
+        ) -> ConfigurationInteraction {
+            ConfigurationInteraction(
+                id: UUID(),
+                actionKind: actionKind,
+                phase: .qrCode,
+                outcome: .pending,
+                title: "Configure",
+                provider: nil,
+                generation: 1,
+                controls: [],
+                qrRole: qrRole,
+                qrImage: nil
+            )
+        }
+
+        XCTAssertEqual(
+            ConfigurationInteractionClassificationPolicy.nativeSemantic(
+                interaction: interaction(
+                    actionKind: .authorization,
+                    qrRole: .login
+                ),
+                hasVerifiedQRCode: true,
+                credentialPush: false,
+                state: state
+            ),
+            .qrAuthorization
+        )
+        for candidate in [
+            interaction(actionKind: .configuration, qrRole: .login),
+            interaction(actionKind: .authorization, qrRole: .remoteInputHelper),
+            interaction(actionKind: .authorization, qrRole: .candidate)
+        ] {
+            let semantic = ConfigurationInteractionClassificationPolicy
+                .nativeSemantic(
+                    interaction: candidate,
+                    hasVerifiedQRCode: true,
+                    credentialPush: false,
+                    state: state
+                )
+            XCTAssertFalse(semantic.isAuthorization)
+            XCTAssertEqual(
+                ConfigurationInteractionClassificationPolicy.interactionKind(
+                    for: semantic
+                ),
+                .configuration
+            )
+        }
+    }
+
+    func testConfigurationVerificationRequiresOwnedScopedState() {
+        let interactionID = UUID()
+        func state(_ rawID: String?) -> AndroidBridgeUIState {
+            AndroidBridgeUIState(
+                interactionID: rawID,
+                revision: 1,
+                kind: "configuration",
+                method: "choice",
+                visible: true,
+                title: "Configure",
+                inputCount: 0,
+                imageCount: 0,
+                buttons: ["OK"],
+                controls: [],
+                texts: [],
+                phase: "awaitingUser",
+                provider: nil,
+                authenticated: nil,
+                credentialPush: false,
+                remoteInput: false,
+                generation: 1,
+                outcome: "pending",
+                terminal: false,
+                hostUnavailable: false,
+                verificationPerformed: false,
+                refreshPerformed: nil,
+                error: nil
+            )
+        }
+
+        XCTAssertTrue(
+            ConfigurationInteractionVerificationPolicy.accepts(
+                state(interactionID.uuidString),
+                interactionID: interactionID,
+                requiresScopedIdentity: true
+            )
+        )
+        XCTAssertFalse(
+            ConfigurationInteractionVerificationPolicy.accepts(
+                state(UUID().uuidString),
+                interactionID: interactionID,
+                requiresScopedIdentity: true
+            )
+        )
+        XCTAssertFalse(
+            ConfigurationInteractionVerificationPolicy.accepts(
+                state(nil),
+                interactionID: interactionID,
+                requiresScopedIdentity: true
+            )
+        )
+        XCTAssertTrue(
+            ConfigurationInteractionVerificationPolicy.accepts(
+                state(nil),
+                interactionID: interactionID,
+                requiresScopedIdentity: false
+            )
+        )
+    }
+
+    func testConfigurationVerificationUsesExplicitProviderEvidenceOnly() {
+        func state(
+            authenticated: Bool? = nil,
+            terminal: Bool? = false,
+            outcome: String? = "pending",
+            hostUnavailable: Bool? = false,
+            verificationPerformed: Bool? = false,
+            refreshPerformed: Bool? = nil,
+            error: String? = nil
+        ) -> AndroidBridgeUIState {
+            AndroidBridgeUIState(
+                interactionID: UUID().uuidString,
+                revision: 1,
+                kind: "configuration",
+                method: "choice",
+                visible: false,
+                title: "Configure",
+                inputCount: 0,
+                imageCount: 0,
+                buttons: [],
+                controls: [],
+                texts: [],
+                phase: "processing",
+                provider: nil,
+                authenticated: authenticated,
+                credentialPush: false,
+                remoteInput: false,
+                generation: 1,
+                outcome: outcome,
+                terminal: terminal,
+                hostUnavailable: hostUnavailable,
+                verificationPerformed: verificationPerformed,
+                refreshPerformed: refreshPerformed,
+                error: error
+            )
+        }
+
+        XCTAssertEqual(
+            ConfigurationInteractionVerificationPolicy.decision(
+                for: state(authenticated: true),
+                semantic: .command
+            ),
+            .pending
+        )
+        XCTAssertEqual(
+            ConfigurationInteractionVerificationPolicy.decision(
+                for: state(authenticated: true, hostUnavailable: true),
+                semantic: .qrAuthorization
+            ),
+            .pending
+        )
+        XCTAssertEqual(
+            ConfigurationInteractionVerificationPolicy.decision(
+                for: state(authenticated: true, verificationPerformed: true),
+                semantic: .qrAuthorization
+            ),
+            .pending
+        )
+        XCTAssertEqual(
+            ConfigurationInteractionVerificationPolicy.decision(
+                for: state(authenticated: true, refreshPerformed: true),
+                semantic: .qrAuthorization
+            ),
+            .verifySucceeded(refreshPerformed: true)
+        )
+        XCTAssertEqual(
+            ConfigurationInteractionVerificationPolicy.decision(
+                for: state(authenticated: false, error: "invalid token"),
+                semantic: .credentialAuthorization
+            ),
+            .verifyFailed("invalid token")
+        )
+        XCTAssertEqual(
+            ConfigurationInteractionVerificationPolicy.decision(
+                for: state(terminal: true, outcome: "cancelled"),
+                semantic: .command
+            ),
+            .terminalCancelled
+        )
+        XCTAssertEqual(
+            ConfigurationInteractionVerificationPolicy.decision(
+                for: state(terminal: true, outcome: "completed"),
+                semantic: .choice
+            ),
+            .terminalSucceeded
+        )
+    }
+
+    func testCancellationIsNeverPresentedAsAnOperationFailure() {
+        XCTAssertFalse(
+            UserVisibleAsyncErrorPolicy.shouldPresent(
+                CancellationError(),
+                ownsSession: true
+            )
+        )
+        XCTAssertFalse(
+            UserVisibleAsyncErrorPolicy.shouldPresent(
+                URLError(.cancelled),
+                ownsSession: true
+            )
+        )
+        XCTAssertFalse(
+            UserVisibleAsyncErrorPolicy.shouldPresent(
+                NSError(
+                    domain: NSURLErrorDomain,
+                    code: NSURLErrorCancelled
+                ),
+                ownsSession: true
+            )
+        )
+        XCTAssertTrue(
+            UserVisibleAsyncErrorPolicy.shouldPresent(
+                NSError(domain: "test", code: 1),
+                ownsSession: true
             )
         )
     }
@@ -3398,18 +3752,28 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(state.actionableControls.isEmpty)
     }
 
-    func testAndroidBridgeRecognizesCredentialPushQRCodeWithoutNewFlag() throws {
+    func testAndroidBridgeRecognizesOnlyStructuredCredentialPushRole() throws {
         let data = try XCTUnwrap(
             """
             {
               "visible": true,
-              "title": "请使用百度网盘 APP 扫码登录",
+              "title": "Untrusted presentation text",
               "inputCount": 0,
               "imageCount": 1,
               "buttons": [],
-              "texts": ["使用微信扫码推送 Cookie 或 Token"],
+              "texts": ["Untrusted helper text"],
               "phase": "qr",
-              "provider": "baidu",
+              "provider": "opaque-provider",
+              "credentialPush": true,
+              "providerOwnerID": "android-owner-v1:test-owner",
+              "configurationID": "configuration-a",
+              "siteKey": "site-a",
+              "actionContract": {
+                "credentialSubmission": {
+                  "parameters": {},
+                  "credentialField": "credential"
+                }
+              },
               "authenticated": false
             }
             """.data(using: .utf8)
@@ -3421,6 +3785,114 @@ final class OKVideoMacTests: XCTestCase {
 
         XCTAssertTrue(state.isCredentialPush)
         XCTAssertTrue(state.isAuthorizationPrompt)
+    }
+
+    func testAndroidBridgeRejectsCredentialPushWithoutExactActionContract()
+        throws {
+        let data = try XCTUnwrap(
+            """
+            {
+              "visible": true,
+              "title": "Untrusted presentation text",
+              "inputCount": 1,
+              "imageCount": 1,
+              "buttons": ["Continue"],
+              "credentialPush": true,
+              "providerOwnerID": "android-owner-v1:test-owner",
+              "configurationID": "configuration-a",
+              "siteKey": "site-a",
+              "authenticated": false
+            }
+            """.data(using: .utf8)
+        )
+        let state = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: data
+        )
+
+        XCTAssertFalse(state.isCredentialPush)
+    }
+
+    func testAndroidProviderOwnerIdentityIsStableAndFullyScoped() throws {
+        let jarURL = try XCTUnwrap(URL(string: "https://example.test/a.jar"))
+        let first = AndroidDexBridgeClient.providerOwnerID(
+            configurationID: "configuration-a",
+            siteKey: "site-a",
+            jarURL: jarURL,
+            jarMD5: "ABCDEF"
+        )
+
+        XCTAssertEqual(
+            first,
+            AndroidDexBridgeClient.providerOwnerID(
+                configurationID: "configuration-a",
+                siteKey: "site-a",
+                jarURL: jarURL,
+                jarMD5: "abcdef"
+            )
+        )
+        XCTAssertNotEqual(
+            first,
+            AndroidDexBridgeClient.providerOwnerID(
+                configurationID: "configuration-b",
+                siteKey: "site-a",
+                jarURL: jarURL,
+                jarMD5: "abcdef"
+            )
+        )
+        XCTAssertNotEqual(
+            first,
+            AndroidDexBridgeClient.providerOwnerID(
+                configurationID: "configuration-a",
+                siteKey: "site-b",
+                jarURL: jarURL,
+                jarMD5: "abcdef"
+            )
+        )
+    }
+
+    func testAndroidBridgeDoesNotInferCredentialPushFromTextOrInputCount()
+        throws {
+        let data = try XCTUnwrap(
+            """
+            {
+              "visible": true,
+              "title": "Configuration form",
+              "inputCount": 1,
+              "imageCount": 0,
+              "buttons": ["Continue"],
+              "texts": ["Enter a value"],
+              "phase": "form",
+              "provider": "opaque-provider",
+              "authenticated": false
+            }
+            """.data(using: .utf8)
+        )
+        let state = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: data
+        )
+        let interaction = state.configurationInteraction(
+            requestID: UUID(),
+            actionKind: .authorization
+        )
+
+        XCTAssertFalse(state.isCredentialPush)
+        XCTAssertEqual(interaction.actionKind, .authorization)
+        let semantic = ConfigurationInteractionClassificationPolicy
+            .nativeSemantic(
+                interaction: interaction,
+                hasVerifiedQRCode: false,
+                credentialPush: false,
+                state: state
+            )
+        XCTAssertFalse(semantic.isAuthorization)
+        XCTAssertEqual(
+            ConfigurationInteractionClassificationPolicy.interactionKind(
+                for: semantic
+            ),
+            .configuration
+        )
     }
 
     func testAndroidBridgeDoesNotPresentRemoteInputHelperAsLoginQRCode() throws {
@@ -3502,6 +3974,827 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertFalse(state.isAuthorizationPrompt)
     }
 
+    func testConfigurationInteractionUsesStructuralKindAndClickableControls()
+        throws {
+        let data = try XCTUnwrap(
+            """
+            {
+              "visible": true,
+              "title": "扫码登录（只是误导性显示文本）",
+              "inputCount": 0,
+              "imageCount": 0,
+              "buttons": [],
+              "controls": [
+                {"id": "choice:1", "title": "普通配置", "enabled": true, "clickable": true, "role": "button"},
+                {"id": "status:1", "title": "不可点击状态", "enabled": true, "clickable": false, "role": "status"},
+                {"id": "disabled:1", "title": "已停用", "enabled": false, "clickable": true, "role": "button"}
+              ],
+              "texts": [],
+              "phase": "awaitingUser",
+              "provider": "opaque-provider",
+              "generation": 9
+            }
+            """.data(using: .utf8)
+        )
+        let state = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: data
+        )
+        let requestID = UUID()
+        let interaction = state.configurationInteraction(
+            requestID: requestID,
+            actionKind: .configuration
+        )
+
+        XCTAssertEqual(interaction.id, requestID)
+        XCTAssertEqual(interaction.actionKind, .configuration)
+        XCTAssertEqual(interaction.phase, .choice)
+        XCTAssertEqual(interaction.outcome, .pending)
+        XCTAssertEqual(interaction.qrRole, .none)
+        XCTAssertEqual(interaction.controls.map(\.id), ["choice:1"])
+        XCTAssertEqual(interaction.controls.first?.role, .action)
+        XCTAssertEqual(interaction.generation, 9)
+    }
+
+    func testConfigurationInteractionHonorsBridgeOrderingKindWithoutTitleInference()
+        throws {
+        let requestID = UUID()
+        let data = Data(
+            """
+            {
+              "interactionID": "\(requestID.uuidString)",
+              "revision": 12,
+              "kind": "ordering",
+              "method": "action",
+              "visible": true,
+              "title": "登录授权（误导性文本）",
+              "inputCount": 0,
+              "imageCount": 0,
+              "buttons": [],
+              "controls": [
+                {"id":"order:1","title":"第一项","enabled":true,"clickable":true,"role":"action"},
+                {"id":"order:status","title":"状态","enabled":true,"clickable":false,"role":"status"}
+              ],
+              "texts": [],
+              "phase": "awaitingUser",
+              "outcome": "stay",
+              "terminal": false
+            }
+            """.utf8
+        )
+        let state = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: data
+        )
+        let interaction = state.configurationInteraction(
+            requestID: requestID,
+            actionKind: .configuration
+        )
+
+        XCTAssertEqual(interaction.actionKind, .ordering)
+        XCTAssertEqual(interaction.phase, .choice)
+        XCTAssertEqual(interaction.outcome, .pending)
+        XCTAssertEqual(interaction.generation, 12)
+        XCTAssertEqual(interaction.controls.map(\.id), ["order:1"])
+        XCTAssertEqual(interaction.qrRole, .none)
+    }
+
+    func testAndroidActionKindUsesOnlyExplicitProtocolTag() {
+        XCTAssertEqual(
+            AndroidDexSpiderSiteProvider.interactionActionKind(tag: "command"),
+            .command
+        )
+        XCTAssertEqual(
+            AndroidDexSpiderSiteProvider.interactionActionKind(tag: "toggle"),
+            .toggle
+        )
+        XCTAssertEqual(
+            AndroidDexSpiderSiteProvider.interactionActionKind(tag: "order"),
+            .ordering
+        )
+        XCTAssertEqual(
+            AndroidDexSpiderSiteProvider.interactionActionKind(tag: "qr"),
+            .configuration
+        )
+        XCTAssertEqual(
+            AndroidDexSpiderSiteProvider.interactionActionKind(
+                tag: "credential"
+            ),
+            .configuration
+        )
+        XCTAssertEqual(
+            AndroidDexSpiderSiteProvider.interactionActionKind(
+                tag: "authorization"
+            ),
+            .authorization
+        )
+        XCTAssertEqual(
+            AndroidDexSpiderSiteProvider.interactionActionKind(tag: "web"),
+            .webSetting
+        )
+        XCTAssertEqual(
+            AndroidDexSpiderSiteProvider.interactionActionKind(tag: "other"),
+            .configuration
+        )
+        XCTAssertEqual(
+            AndroidDexSpiderSiteProvider.interactionActionKind(tag: nil),
+            .configuration
+        )
+    }
+
+    func testConfigurationInteractionReattachingHostRemainsPending() throws {
+        let requestID = UUID()
+        let data = Data(
+            """
+            {
+              "interactionID": "\(requestID.uuidString)",
+              "revision": 4,
+              "kind": "authorization",
+              "method": "action",
+              "visible": false,
+              "title": "",
+              "inputCount": 0,
+              "imageCount": 0,
+              "buttons": [],
+              "phase": "reattaching",
+              "outcome": "stay",
+              "terminal": false,
+              "hostUnavailable": true
+            }
+            """.utf8
+        )
+        let state = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: data
+        )
+        let interaction = state.configurationInteraction(
+            requestID: requestID,
+            actionKind: .configuration
+        )
+
+        XCTAssertEqual(state.hostUnavailable, true)
+        XCTAssertEqual(interaction.actionKind, .authorization)
+        XCTAssertEqual(interaction.phase, .reattaching)
+        XCTAssertEqual(interaction.outcome, .pending)
+    }
+
+    func testConfigurationInteractionRequiresValidatedQRCodeForAuthorization()
+        throws {
+        let data = try XCTUnwrap(
+            """
+            {
+              "visible": true,
+              "title": "Native content",
+              "inputCount": 0,
+              "imageCount": 1,
+              "buttons": [],
+              "controls": [],
+              "texts": [],
+              "phase": "awaitingUser"
+            }
+            """.data(using: .utf8)
+        )
+        let state = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: data
+        )
+        let requestID = UUID()
+        let imageOnly = state.configurationInteraction(
+            requestID: requestID,
+            actionKind: .configuration
+        )
+        let validated = state.configurationInteraction(
+            requestID: requestID,
+            actionKind: .configuration,
+            validatedQRCode: Data([0x51, 0x52])
+        )
+        let declaredAuthorization = state.configurationInteraction(
+            requestID: requestID,
+            actionKind: .authorization,
+            validatedQRCode: Data([0x51, 0x52])
+        )
+        let declaredAuthorizationWithoutQRCode = state
+            .configurationInteraction(
+                requestID: requestID,
+                actionKind: .authorization
+            )
+
+        XCTAssertEqual(imageOnly.actionKind, .configuration)
+        XCTAssertEqual(imageOnly.qrRole, .none)
+        XCTAssertEqual(imageOnly.phase, .status)
+        XCTAssertEqual(validated.actionKind, .configuration)
+        XCTAssertEqual(validated.qrRole, .candidate)
+        XCTAssertEqual(validated.phase, .qrCode)
+        XCTAssertEqual(declaredAuthorization.actionKind, .authorization)
+        XCTAssertEqual(declaredAuthorization.qrRole, .login)
+        XCTAssertEqual(declaredAuthorization.phase, .qrCode)
+        XCTAssertEqual(
+            declaredAuthorizationWithoutQRCode.actionKind,
+            .authorization
+        )
+        XCTAssertNotEqual(
+            declaredAuthorizationWithoutQRCode.qrRole,
+            .login
+        )
+        XCTAssertFalse(
+            ConfigurationInteractionClassificationPolicy.nativeSemantic(
+                interaction: declaredAuthorizationWithoutQRCode,
+                hasVerifiedQRCode: false,
+                credentialPush: false,
+                state: state
+            ).isAuthorization
+        )
+        XCTAssertEqual(
+            ConfigurationInteractionClassificationPolicy.nativeSemantic(
+                interaction: declaredAuthorization,
+                hasVerifiedQRCode: true,
+                credentialPush: false,
+                state: state
+            ),
+            .qrAuthorization
+        )
+        XCTAssertFalse(
+            ConfigurationInteractionClassificationPolicy
+                .legacySemantic(tag: "qr")
+                .isAuthorization
+        )
+    }
+
+    func testOrderingInteractionCannotBePromotedToAuthorizationByQRCode()
+        throws {
+        let data = try XCTUnwrap(
+            """
+            {
+              "visible": true,
+              "kind": "ordering",
+              "title": "网盘线路前后排序",
+              "inputCount": 0,
+              "imageCount": 1,
+              "buttons": [],
+              "controls": [],
+              "texts": [],
+              "phase": "qr"
+            }
+            """.data(using: .utf8)
+        )
+        let state = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: data
+        )
+        let interaction = state.configurationInteraction(
+            requestID: UUID(),
+            actionKind: .configuration,
+            validatedQRCode: Data([0x51, 0x52])
+        )
+
+        XCTAssertEqual(interaction.actionKind, .ordering)
+        XCTAssertEqual(interaction.qrRole, .candidate)
+        XCTAssertFalse(
+            ConfigurationInteractionClassificationPolicy.nativeSemantic(
+                interaction: interaction,
+                hasVerifiedQRCode: true,
+                credentialPush: false,
+                state: state
+            ).isAuthorization
+        )
+    }
+
+    func testInteractionHandleRetainsTerminalResponseAfterUIPresentation()
+        async throws {
+        let requestID = UUID()
+        let expected = ConfigurationInteractionTerminalResponse(
+            requestID: requestID,
+            outcome: .succeeded,
+            providerResult: .string("provider-final-result"),
+            error: nil,
+            httpStatusCode: 200,
+            refreshPerformed: nil
+        )
+        let handle = InteractionHandle(
+            id: requestID,
+            actionKind: .configuration
+        ) {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            return expected
+        }
+        let presented = ConfigurationInteraction(
+            id: requestID,
+            actionKind: .configuration,
+            phase: .choice,
+            outcome: .pending,
+            title: "Choose",
+            provider: nil,
+            generation: 1,
+            controls: [],
+            qrRole: .none,
+            qrImage: nil
+        )
+
+        await handle.record(presented)
+        let firstRead = try await handle.finalResponse()
+        let secondRead = try await handle.finalResponse()
+        let latest = await handle.latestInteraction()
+
+        XCTAssertEqual(firstRead, expected)
+        XCTAssertEqual(secondRead, expected)
+        XCTAssertEqual(latest, presented)
+    }
+
+    func testInteractionHandleUsesOneRequestIDForEveryScopedOperation()
+        async throws {
+        let requestID = UUID()
+        let expected = ConfigurationInteractionTerminalResponse(
+            requestID: requestID,
+            outcome: .succeeded,
+            providerResult: .string("final"),
+            error: nil,
+            httpStatusCode: 200,
+            refreshPerformed: nil
+        )
+        let handle = InteractionHandle(
+            id: requestID,
+            actionKind: .configuration,
+            stateProvider: { receivedID in
+                guard receivedID == requestID else {
+                    throw AppError.spider("state request id mismatch")
+                }
+                return try JSONDecoder().decode(
+                    AndroidBridgeUIState.self,
+                    from: Data(
+                        """
+                        {"interactionID":"\(requestID.uuidString)","visible":false,"title":"","inputCount":0,"imageCount":0,"buttons":[],"phase":"processing","outcome":"stay","terminal":false}
+                        """.utf8
+                    )
+                )
+            },
+            snapshotProvider: { receivedID in
+                guard receivedID == requestID else {
+                    throw AppError.spider("snapshot request id mismatch")
+                }
+                return Data([0x01, 0x02])
+            },
+            submitProvider: {
+                receivedID, _, _, _, generation in
+                guard receivedID == requestID else {
+                    throw AppError.spider("submit request id mismatch")
+                }
+                return AndroidBridgeUISubmitResult(
+                    clicked: true,
+                    stale: false,
+                    generation: generation
+                )
+            },
+            verifyProvider: {
+                receivedID, succeeded, _, refreshPerformed in
+                guard receivedID == requestID, succeeded else {
+                    throw AppError.spider("verify request id mismatch")
+                }
+                return ConfigurationInteractionTerminalResponse(
+                    requestID: receivedID,
+                    outcome: .succeeded,
+                    providerResult: nil,
+                    error: nil,
+                    httpStatusCode: 200,
+                    refreshPerformed: refreshPerformed
+                )
+            }
+        ) { expected }
+
+        let state = try await handle.currentState()
+        let snapshot = try await handle.snapshot()
+        let submission = try await handle.submit(
+            text: nil,
+            button: "",
+            controlID: "control:1",
+            generation: 7
+        )
+        let verification = try await handle.verify(
+            succeeded: true,
+            actualRefreshPerformed: false
+        )
+
+        XCTAssertEqual(state.interactionID, requestID.uuidString)
+        XCTAssertEqual(snapshot, Data([0x01, 0x02]))
+        XCTAssertEqual(submission.generation, 7)
+        XCTAssertEqual(verification.requestID, requestID)
+        XCTAssertEqual(verification.providerResult, .string("final"))
+        XCTAssertNil(verification.refreshPerformed)
+    }
+
+    func testInteractionHandleWaitsForScopedCancellationAcknowledgement()
+        async throws {
+        let requestID = UUID()
+        let recorder = ConfigurationCancellationTestRecorder()
+        let handle = InteractionHandle(
+            id: requestID,
+            actionKind: .configuration,
+            cancelProvider: { receivedID in
+                await recorder.recordStarted(receivedID)
+                try await Task.sleep(nanoseconds: 20_000_000)
+                await recorder.recordAcknowledged(receivedID)
+            }
+        ) {
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+            return ConfigurationInteractionTerminalResponse(
+                requestID: requestID,
+                outcome: .succeeded,
+                providerResult: .string("late"),
+                error: nil,
+                httpStatusCode: 200,
+                refreshPerformed: nil
+            )
+        }
+
+        await handle.cancelAndWait()
+        let events = await recorder.events
+
+        XCTAssertEqual(events, ["start:\(requestID)", "ack:\(requestID)"])
+    }
+
+    func testAppStateScopedVerificationPreservesDelayedProviderTerminalResult()
+        async throws {
+        let requestID = UUID()
+        let providerTerminal = ConfigurationInteractionTerminalResponse(
+            requestID: requestID,
+            outcome: .succeeded,
+            providerResult: .object([
+                "url": .string("provider-owned-result")
+            ]),
+            error: nil,
+            httpStatusCode: 200,
+            refreshPerformed: true
+        )
+        let handle = InteractionHandle(
+            id: requestID,
+            actionKind: .playback,
+            verifyProvider: {
+                receivedID, succeeded, _, refreshPerformed in
+                XCTAssertEqual(receivedID, requestID)
+                XCTAssertTrue(succeeded)
+                return ConfigurationInteractionTerminalResponse(
+                    requestID: receivedID,
+                    outcome: .succeeded,
+                    providerResult: nil,
+                    error: nil,
+                    httpStatusCode: 200,
+                    refreshPerformed: refreshPerformed
+                )
+            }
+        ) {
+            // Reproduce the real race: the state verification endpoint becomes
+            // terminal just before the original `/v1/invoke` returns its value.
+            try await Task.sleep(nanoseconds: 50_000_000)
+            return providerTerminal
+        }
+        let observer = Task {
+            try await handle.finalResponse()
+        }
+
+        await AppState.verifyScopedConfigurationInteraction(
+            handle,
+            succeeded: true,
+            actualRefreshPerformed: false,
+            providerResultGraceNanoseconds: 1_000_000_000
+        )
+        let observed = try await observer.value
+        let repeatedTerminal = try await handle.finalResponse()
+
+        XCTAssertEqual(observed, providerTerminal)
+        XCTAssertEqual(repeatedTerminal.providerResult, providerTerminal.providerResult)
+    }
+
+    func testAppStateScopedVerificationPublishesBoundedFallbackOnce()
+        async throws {
+        let requestID = UUID()
+        let verifiedFallback = ConfigurationInteractionTerminalResponse(
+            requestID: requestID,
+            outcome: .succeeded,
+            providerResult: nil,
+            error: nil,
+            httpStatusCode: 200,
+            refreshPerformed: false
+        )
+        let handle = InteractionHandle(
+            id: requestID,
+            actionKind: .authorization,
+            verifyProvider: { _, _, _, _ in verifiedFallback }
+        ) {
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+            return ConfigurationInteractionTerminalResponse(
+                requestID: requestID,
+                outcome: .succeeded,
+                providerResult: .string("too-late"),
+                error: nil,
+                httpStatusCode: 200,
+                refreshPerformed: nil
+            )
+        }
+        let observer = Task {
+            try await handle.finalResponse()
+        }
+
+        await AppState.verifyScopedConfigurationInteraction(
+            handle,
+            succeeded: true,
+            actualRefreshPerformed: false,
+            providerResultGraceNanoseconds: 5_000_000
+        )
+        let first = try await observer.value
+        let repeated = try await handle.finalResponse()
+
+        XCTAssertEqual(first, verifiedFallback)
+        XCTAssertEqual(repeated, verifiedFallback)
+    }
+
+    func testScopedVerificationUsesReturnedOutcomeForProviderResultGrace()
+        async throws {
+        let requestID = UUID()
+        let providerTerminal = ConfigurationInteractionTerminalResponse(
+            requestID: requestID,
+            outcome: .succeeded,
+            providerResult: .string("delayed-provider-result"),
+            error: nil,
+            httpStatusCode: 200,
+            refreshPerformed: true
+        )
+        let handle = InteractionHandle(
+            id: requestID,
+            actionKind: .configuration,
+            verifyProvider: { receivedID, succeeded, _, _ in
+                XCTAssertEqual(receivedID, requestID)
+                XCTAssertFalse(succeeded)
+                return ConfigurationInteractionTerminalResponse(
+                    requestID: receivedID,
+                    outcome: .succeeded,
+                    providerResult: nil,
+                    error: nil,
+                    httpStatusCode: 200,
+                    refreshPerformed: false
+                )
+            }
+        ) {
+            try await Task.sleep(nanoseconds: 50_000_000)
+            return providerTerminal
+        }
+        let observer = Task {
+            try await handle.finalResponse()
+        }
+
+        await AppState.verifyScopedConfigurationInteraction(
+            handle,
+            succeeded: false,
+            error: "stale-host-input",
+            actualRefreshPerformed: false,
+            providerResultGraceNanoseconds: 1_000_000_000
+        )
+        let observed = try await observer.value
+        let repeated = try await handle.finalResponse()
+
+        XCTAssertEqual(observed, providerTerminal)
+        XCTAssertEqual(repeated, providerTerminal)
+    }
+
+    func testScopedVerificationThrowWinsOverLateProviderSuccessOnce()
+        async throws {
+        let requestID = UUID()
+        let verificationMessage = "scoped verification failed"
+        let handle = InteractionHandle(
+            id: requestID,
+            actionKind: .authorization,
+            verifyProvider: { _, _, _, _ in
+                throw AppError.spider(verificationMessage)
+            }
+        ) {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            return ConfigurationInteractionTerminalResponse(
+                requestID: requestID,
+                outcome: .succeeded,
+                providerResult: .string("late-success-must-not-win"),
+                error: nil,
+                httpStatusCode: 200,
+                refreshPerformed: nil
+            )
+        }
+        let observer = Task {
+            try await handle.finalResponse()
+        }
+
+        await AppState.verifyScopedConfigurationInteraction(
+            handle,
+            succeeded: true,
+            providerResultGraceNanoseconds: 1_000_000_000
+        )
+
+        do {
+            _ = try await observer.value
+            XCTFail("Verification failure must be the only terminal result")
+        } catch {
+            XCTAssertTrue(
+                error.localizedDescription.contains(verificationMessage)
+            )
+        }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        do {
+            _ = try await handle.finalResponse()
+            XCTFail(
+                "Late provider success must not replace verification failure"
+            )
+        } catch {
+            XCTAssertTrue(
+                error.localizedDescription.contains(verificationMessage)
+            )
+        }
+    }
+
+    func testAndroidBridgeTerminalResponseUsesActualScopedOutcomeAndRefresh()
+        throws {
+        let requestID = UUID()
+        let data = Data(
+            """
+            {
+              "ok": true,
+              "result": "provider-final-result",
+              "interactionID": "\(requestID.uuidString)",
+              "interaction": {
+                "interactionID": "\(requestID.uuidString)",
+                "phase": "completed",
+                "outcome": "completed",
+                "terminal": true,
+                "refreshPerformed": true
+              }
+            }
+            """.utf8
+        )
+        let response = try XCTUnwrap(
+            HTTPURLResponse(
+                url: URL(string: "http://127.0.0.1:19978/v1/invoke")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )
+        )
+
+        let terminal = AndroidDexBridgeClient.decodeTerminalResponse(
+            requestID: requestID,
+            data: data,
+            response: response
+        )
+
+        XCTAssertEqual(terminal.requestID, requestID)
+        XCTAssertEqual(terminal.outcome, .succeeded)
+        XCTAssertEqual(terminal.providerResult, .string("provider-final-result"))
+        XCTAssertEqual(terminal.refreshPerformed, true)
+    }
+
+    func testAndroidBridgeLegacyTerminalResponseDoesNotInventRefreshState()
+        throws {
+        let requestID = UUID()
+        let response = try XCTUnwrap(
+            HTTPURLResponse(
+                url: URL(string: "http://127.0.0.1:19978/v1/invoke")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )
+        )
+        let terminal = AndroidDexBridgeClient.decodeTerminalResponse(
+            requestID: requestID,
+            data: Data(#"{"ok":true,"result":"legacy-result"}"#.utf8),
+            response: response
+        )
+
+        XCTAssertEqual(terminal.outcome, .succeeded)
+        XCTAssertEqual(terminal.providerResult, .string("legacy-result"))
+        XCTAssertNil(terminal.refreshPerformed)
+    }
+
+    func testAndroidBridgeAcceptedWorkerResponseIsPendingUntilScopedTerminalState()
+        throws {
+        let requestID = UUID()
+        let response = try XCTUnwrap(
+            HTTPURLResponse(
+                url: URL(string: "http://127.0.0.1:19978/v1/invoke")!,
+                statusCode: 202,
+                httpVersion: nil,
+                headerFields: nil
+            )
+        )
+        let terminal = AndroidDexBridgeClient.decodeTerminalResponse(
+            requestID: requestID,
+            data: Data(
+                """
+                {"ok":true,"interactionID":"\(requestID.uuidString)"}
+                """.utf8
+            ),
+            response: response
+        )
+
+        XCTAssertEqual(terminal.outcome, .pending)
+        XCTAssertNil(terminal.providerResult)
+    }
+
+    func testAndroidBridgeStrictTerminalResponseRejectsMissingInteractionID()
+        throws {
+        let requestID = UUID()
+        let response = try XCTUnwrap(
+            HTTPURLResponse(
+                url: URL(string: "http://127.0.0.1:19978/v1/invoke")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )
+        )
+        let terminal = AndroidDexBridgeClient.decodeTerminalResponse(
+            requestID: requestID,
+            data: Data(#"{"ok":true,"result":"unscoped"}"#.utf8),
+            response: response,
+            requiresScopedIdentity: true
+        )
+
+        XCTAssertEqual(terminal.outcome, .failed)
+        XCTAssertNil(terminal.providerResult)
+    }
+
+    func testAndroidBridgeStrictEmptyActionAcknowledgementRemainsPending()
+        throws {
+        let requestID = UUID()
+        let response = try XCTUnwrap(
+            HTTPURLResponse(
+                url: URL(string: "http://127.0.0.1:19978/v1/invoke")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )
+        )
+        let terminal = AndroidDexBridgeClient.decodeTerminalResponse(
+            requestID: requestID,
+            data: Data(
+                """
+                {"ok":true,"result":null,"interactionID":"\(requestID.uuidString)"}
+                """.utf8
+            ),
+            response: response,
+            requiresScopedIdentity: true
+        )
+
+        XCTAssertEqual(terminal.outcome, .pending)
+        XCTAssertNil(terminal.providerResult)
+    }
+
+    func testAndroidBridgeExplicitImmediateResultMayCompleteWithoutUI()
+        throws {
+        let requestID = UUID()
+        let response = try XCTUnwrap(
+            HTTPURLResponse(
+                url: URL(string: "http://127.0.0.1:19978/v1/invoke")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )
+        )
+        let terminal = AndroidDexBridgeClient.decodeTerminalResponse(
+            requestID: requestID,
+            data: Data(
+                """
+                {"ok":true,"result":"done","interactionID":"\(requestID.uuidString)"}
+                """.utf8
+            ),
+            response: response,
+            requiresScopedIdentity: true,
+            allowsImmediateAuthoritativeResult: true
+        )
+
+        XCTAssertEqual(terminal.outcome, .succeeded)
+        XCTAssertEqual(terminal.providerResult, .string("done"))
+    }
+
+    func testAndroidBridgeRejectsTerminalResponseFromDifferentInteraction()
+        throws {
+        let requestID = UUID()
+        let otherID = UUID()
+        let response = try XCTUnwrap(
+            HTTPURLResponse(
+                url: URL(string: "http://127.0.0.1:19978/v1/invoke")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )
+        )
+        let terminal = AndroidDexBridgeClient.decodeTerminalResponse(
+            requestID: requestID,
+            data: Data(
+                """
+                {"ok":true,"result":"must-not-leak","interactionID":"\(otherID.uuidString)","interaction":{"interactionID":"\(otherID.uuidString)","phase":"completed","outcome":"completed","terminal":true}}
+                """.utf8
+            ),
+            response: response
+        )
+
+        XCTAssertEqual(terminal.outcome, .failed)
+        XCTAssertNil(terminal.providerResult)
+        XCTAssertTrue(terminal.error?.contains("其他配置操作") == true)
+    }
+
     func testAndroidPlaybackContractMergesHeadersWithPlayerResultPrecedence() {
         let result = AndroidDexSpiderSiteProvider.applyingPlaybackRequestContract(
             to: SitePlaybackResult(
@@ -3531,14 +4824,267 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
     }
 
-    @MainActor
-    func testAuthoritativePlaybackFailureExplainsAuthorizationFailure() {
-        XCTAssertTrue(
-            AppState.playbackFailureMessage(
-                "播放错误：loading failed",
-                validationPolicy: .playerAuthoritative
-            ).contains("重新授权")
+    func testAndroidBridgeSendsSiteHeadersOnlyForPlaybackRequests() {
+        let headers = [
+            "Cookie": "request-scoped-secret",
+            "User-Agent": "Fixture Agent"
+        ]
+
+        XCTAssertEqual(
+            AndroidDexBridgeClient.requestScopedPlaybackHeaders(
+                method: "play",
+                siteHeaders: headers
+            ),
+            headers
         )
+        XCTAssertNil(
+            AndroidDexBridgeClient.requestScopedPlaybackHeaders(
+                method: "detail",
+                siteHeaders: headers
+            )
+        )
+        XCTAssertNil(
+            AndroidDexBridgeClient.requestScopedPlaybackHeaders(
+                method: "play",
+                siteHeaders: [:]
+            )
+        )
+    }
+
+    func testAndroidBridgeMediaSessionUsesScopedLoopbackAndLegacyCapability() {
+        let client = AndroidDexBridgeClient()
+        let scoped = client.hostReachableMediaURL(
+            "http://127.0.0.1:9978/proxy/media/session-123"
+        )
+        let legacy = client.hostReachableMediaURL(
+            "https://media.example.invalid/movie.mp4?signature=fixture"
+        )
+        let legacyComponents = URLComponents(string: legacy)
+
+        XCTAssertEqual(
+            scoped,
+            "http://127.0.0.1:19978/proxy/media/session-123"
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeClient.providerMediaSessionID(from: scoped),
+            "session-123"
+        )
+        XCTAssertTrue(AndroidDexBridgeClient.isLoopbackMediaURL(scoped))
+        XCTAssertEqual(legacyComponents?.host, "127.0.0.1")
+        XCTAssertEqual(legacyComponents?.port, 19_978)
+        XCTAssertEqual(legacyComponents?.path, "/v1/media")
+        XCTAssertEqual(
+            legacyComponents?.queryItems?.first(where: { $0.name == "url" })?
+                .value,
+            "https://media.example.invalid/movie.mp4?signature=fixture"
+        )
+    }
+
+    func testAndroidPlaybackHandoffRequiresMatchingOpaqueSessionMetadata() {
+        let fingerprint = String(repeating: "a", count: 64)
+        let handoff = AndroidDexSpiderSiteProvider.playbackHandoff(
+            from: .object([
+                "url": .string(
+                    "http://127.0.0.1:9978/proxy/media/session-123"
+                ),
+                "mediaSessionID": .string("session-123"),
+                "upstreamFingerprint": .string(fingerprint),
+                "refreshPerformed": .bool(true),
+                // This signed URL-shaped field is deliberately ignored by
+                // playbackHandoff and never copied into the media session.
+                "upstreamURL": .string(
+                    "https://secret.invalid/media?token=must-not-leak"
+                )
+            ])
+        )
+
+        XCTAssertEqual(handoff?.mediaSessionID, "session-123")
+        XCTAssertEqual(handoff?.upstreamFingerprint, fingerprint)
+        XCTAssertEqual(handoff?.refreshPerformed, true)
+        XCTAssertNil(
+            AndroidDexSpiderSiteProvider.validatedUpstreamFingerprint(
+                String(repeating: "A", count: 64)
+            )
+        )
+        XCTAssertEqual(
+            AndroidDexSpiderSiteProvider.playbackSessionTransport(
+                mediaURL:
+                    "http://127.0.0.1:19978/proxy/media/session-123",
+                providerSessionID: handoff?.mediaSessionID
+            ),
+            .providerLoopback
+        )
+        XCTAssertEqual(
+            AndroidDexSpiderSiteProvider.playbackSessionTransport(
+                mediaURL: "http://127.0.0.1:19978/v1/media?url=legacy",
+                providerSessionID: nil
+            ),
+            .compatibilityLoopback
+        )
+    }
+
+    func testAndroidPlaybackReferenceIsStableAndProviderOpaque() {
+        let site = SiteConfiguration(
+            key: "opaque-site-key",
+            name: "Renamed Site",
+            type: 3,
+            api: "csp_Provider"
+        )
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let episodeReference = "provider://opaque/item/42?generation=7"
+        let first = AndroidDexSpiderSiteProvider.playbackResourceReference(
+            site: site,
+            configurationIdentity: configurationIdentity,
+            flag: "opaque-line-a",
+            episodeURL: episodeReference
+        )
+        let repeated = AndroidDexSpiderSiteProvider.playbackResourceReference(
+            site: site,
+            configurationIdentity: configurationIdentity,
+            flag: "opaque-line-a",
+            episodeURL: episodeReference
+        )
+        let otherLine = AndroidDexSpiderSiteProvider.playbackResourceReference(
+            site: site,
+            configurationIdentity: configurationIdentity,
+            flag: "opaque-line-b",
+            episodeURL: episodeReference
+        )
+
+        XCTAssertEqual(first, repeated)
+        XCTAssertNotEqual(first.sourceIdentity, otherLine.sourceIdentity)
+        XCTAssertEqual(first.configurationIdentity, configurationIdentity)
+        XCTAssertEqual(first.siteIdentity, site.key)
+        XCTAssertEqual(first.stableResourceLocator, episodeReference)
+        XCTAssertEqual(first.stability, .providerReplay)
+    }
+
+    func testAndroidPlaybackReferenceIsBoundToCurrentProviderAndConfiguration()
+        throws {
+        let configurationID = UUID()
+        let site = SiteConfiguration(
+            key: "site-a",
+            name: "Site A",
+            type: 3,
+            api: "csp_Provider"
+        )
+        let provider = try AndroidDexSpiderSiteProvider(
+            site: site,
+            configurationID: configurationID,
+            jarReference: "https://configuration.invalid/provider.jar",
+            baseURL: nil,
+            bridge: AndroidDexBridgeClient()
+        )
+        let valid = AndroidDexSpiderSiteProvider.playbackResourceReference(
+            site: site,
+            configurationIdentity: configurationID.uuidString.lowercased(),
+            flag: "line-a",
+            episodeURL: "provider://opaque/item/42"
+        )
+
+        XCTAssertTrue(provider.acceptsPlaybackResourceReference(valid))
+
+        var wrongConfiguration = valid
+        wrongConfiguration.configurationIdentity = UUID()
+            .uuidString.lowercased()
+        XCTAssertFalse(
+            provider.acceptsPlaybackResourceReference(wrongConfiguration)
+        )
+
+        var wrongSite = valid
+        wrongSite.siteIdentity = "site-b"
+        XCTAssertFalse(provider.acceptsPlaybackResourceReference(wrongSite))
+
+        var wrongProvider = valid
+        wrongProvider.providerKind = "node-http"
+        XCTAssertFalse(
+            provider.acceptsPlaybackResourceReference(wrongProvider)
+        )
+
+        var wrongVersion = valid
+        wrongVersion.providerVersion += 1
+        XCTAssertFalse(
+            provider.acceptsPlaybackResourceReference(wrongVersion)
+        )
+
+        var expired = valid
+        expired.expiresAt = Date(timeIntervalSinceNow: -1)
+        XCTAssertFalse(provider.acceptsPlaybackResourceReference(expired))
+    }
+
+    func testAndroidTerminalProviderResultPreservesItsMediaSession()
+        throws {
+        let configurationID = UUID()
+        let site = SiteConfiguration(
+            key: "site-a",
+            name: "Site A",
+            type: 3,
+            api: "csp_Provider"
+        )
+        let provider = try AndroidDexSpiderSiteProvider(
+            site: site,
+            configurationID: configurationID,
+            jarReference: "https://configuration.invalid/provider.jar",
+            baseURL: nil,
+            bridge: AndroidDexBridgeClient()
+        )
+        let fingerprint = String(repeating: "a", count: 64)
+        let terminalResult: JSONValue = .object([
+            "parse": .integer(0),
+            "url": .string(
+                "http://127.0.0.1:9978/proxy/media/session-123"
+            ),
+            "mediaSessionID": .string("session-123"),
+            "upstreamFingerprint": .string(fingerprint),
+            "refreshPerformed": .bool(true)
+        ])
+
+        let result = try provider.playbackResult(
+            from: terminalResult,
+            flag: "line-a",
+            episodeURL: "provider://opaque/item/42"
+        )
+
+        XCTAssertEqual(
+            result.url,
+            "http://127.0.0.1:19978/proxy/media/session-123"
+        )
+        XCTAssertEqual(result.mediaSession?.sessionID, "session-123")
+        XCTAssertEqual(
+            result.mediaSession?.upstreamResourceFingerprint,
+            fingerprint
+        )
+        XCTAssertEqual(result.mediaSession?.refreshPerformed, true)
+        XCTAssertEqual(
+            result.resourceReference?.configurationIdentity,
+            configurationID.uuidString.lowercased()
+        )
+    }
+
+    @MainActor
+    func testAuthoritativePlaybackFailureRequiresStructuredAuthorizationEvidence() {
+        let initialFailure = AppState.playbackFailureMessage(
+            "播放错误：loading failed",
+            validationPolicy: .playerAuthoritative,
+            refreshPerformed: false
+        )
+        XCTAssertEqual(initialFailure, "播放错误：loading failed")
+        XCTAssertEqual(
+            AppState.playbackFailureMessage(
+                "播放错误：http status 403",
+                validationPolicy: .playerAuthoritative,
+                refreshPerformed: true
+            ),
+            "播放错误：http status 403"
+        )
+        let authorizationFailure = AppState.playbackFailureMessage(
+            "播放错误：上游拒绝请求",
+            validationPolicy: .playerAuthoritative,
+            refreshPerformed: true,
+            upstreamHTTPStatusCode: 403
+        )
+        XCTAssertTrue(authorizationFailure.contains("重新授权"))
+        XCTAssertTrue(authorizationFailure.contains("已完成一次同资源刷新"))
         XCTAssertEqual(
             AppState.playbackFailureMessage(
                 "普通地址不可达",
@@ -3546,6 +5092,93 @@ final class OKVideoMacTests: XCTestCase {
             ),
             "普通地址不可达"
         )
+    }
+
+    @MainActor
+    func testPlaybackRequestSignatureUsesStableUpstreamIdentity() {
+        let reference = PlaybackResourceReference(
+            configurationIdentity: "configuration-a",
+            siteIdentity: "site-a",
+            providerKind: "android-dex",
+            providerVersion: 1,
+            stableResourceLocator: "provider://opaque/item/42",
+            sourceIdentity: "source-a",
+            episodeIdentity: "episode-a",
+            stability: .providerStable
+        )
+        func result(
+            sessionID: String,
+            fingerprint: String,
+            refreshPerformed: Bool? = nil
+        ) -> SitePlaybackResult {
+            let url = "http://127.0.0.1:9978/provider-media/\(sessionID)"
+            return SitePlaybackResult(
+                url: url,
+                needsParsing: false,
+                flag: "line",
+                headers: ["X-Provider-Media-Session": sessionID],
+                validationPolicy: .playerAuthoritative,
+                resourceReference: reference,
+                mediaSession: PlaybackMediaSession(
+                    sessionID: sessionID,
+                    transport: .providerLoopback,
+                    mediaURL: url,
+                    headers: ["X-Provider-Media-Session": sessionID],
+                    upstreamResourceFingerprint: fingerprint,
+                    refreshPerformed: refreshPerformed,
+                    resourceReference: reference
+                )
+            )
+        }
+
+        let first = result(sessionID: "random-session-a", fingerprint: "upstream-a")
+        let repeated = result(sessionID: "random-session-b", fingerprint: "upstream-a")
+        let refreshed = result(sessionID: "random-session-c", fingerprint: "upstream-b")
+        let explicitlyRefreshed = result(
+            sessionID: "random-session-d",
+            fingerprint: "upstream-a",
+            refreshPerformed: true
+        )
+
+        XCTAssertEqual(
+            AppState.playbackRequestSignature(for: first),
+            AppState.playbackRequestSignature(for: repeated)
+        )
+        XCTAssertNotEqual(
+            AppState.playbackRequestSignature(for: first),
+            AppState.playbackRequestSignature(for: refreshed)
+        )
+        XCTAssertNotEqual(
+            AppState.playbackRequestSignature(for: first),
+            AppState.playbackRequestSignature(for: explicitlyRefreshed)
+        )
+        XCTAssertFalse(
+            AppState.playbackRequestSignature(for: first)
+                .contains(reference.stableResourceLocator)
+        )
+        XCTAssertFalse(
+            AppState.playbackRequestSignature(for: first)
+                .contains("upstream-a")
+        )
+    }
+
+    @MainActor
+    func testLegacyPlaybackDedupeSignatureDoesNotRetainSecrets() {
+        let result = SitePlaybackResult(
+            url: "https://media.invalid/movie?token=must-not-remain",
+            needsParsing: false,
+            flag: "line",
+            headers: [
+                "Authorization": "Bearer must-not-remain",
+                "Cookie": "session=must-not-remain"
+            ]
+        )
+
+        let signature = AppState.playbackRequestSignature(for: result)
+
+        XCTAssertTrue(signature.hasPrefix("legacy-v1:"))
+        XCTAssertFalse(signature.contains("must-not-remain"))
+        XCTAssertEqual(signature.count, "legacy-v1:".count + 64)
     }
 
     func testPlaybackFallbackPreservesProviderOrderWithoutDisplayNameRules() {
@@ -3688,6 +5321,87 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(presentation.title, "Android 兼容环境启动失败")
         XCTAssertTrue(presentation.message.contains("Emulator"))
         XCTAssertFalse(presentation.message.contains("technical detail"))
+    }
+
+    func testAndroidBridgeTimeoutDoesNotClaimCleanedEmulatorIsRunning()
+        throws {
+        let error = AndroidRuntimeFailureError(
+            record: AndroidRuntimeFailureRecord(
+                occurredAt: Date(),
+                stage: .probingBridge,
+                category: .bridgeHealthTimedOut,
+                message: "bridge probe exhausted"
+            )
+        )
+        let presentation = try XCTUnwrap(
+            AndroidRuntimeUserFacingErrorMapper.presentation(for: error)
+        )
+
+        XCTAssertTrue(presentation.message.contains("本次启动已失败"))
+        XCTAssertFalse(presentation.message.contains("Emulator 已启动"))
+    }
+
+    func testAndroidManagedRuntimeLifecycleClassifiesExitBeforeOwnership() {
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.managedRuntimeFailureCategory(
+                processPresent: false,
+                processOwned: false,
+                deviceRequired: true,
+                deviceReachable: false,
+                deviceOwned: false
+            ),
+            .runtimeExited
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.managedRuntimeFailureCategory(
+                processPresent: true,
+                processOwned: false,
+                deviceRequired: true,
+                deviceReachable: true,
+                deviceOwned: true
+            ),
+            .emulatorOwnershipMismatch
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.managedRuntimeFailureCategory(
+                processPresent: true,
+                processOwned: true,
+                deviceRequired: true,
+                deviceReachable: false,
+                deviceOwned: false
+            ),
+            .adbUnavailable
+        )
+        XCTAssertNil(
+            AndroidDexBridgeRuntime.managedRuntimeFailureCategory(
+                processPresent: true,
+                processOwned: true,
+                deviceRequired: false,
+                deviceReachable: false,
+                deviceOwned: false
+            )
+        )
+    }
+
+    func testAndroidFailedRuntimeRecordClearsOnlyAfterProcessAndDeviceExit() {
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.failedRuntimeRecordCanBeCleared(
+                processPresent: false,
+                deviceReachable: false
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.failedRuntimeRecordCanBeCleared(
+                processPresent: true,
+                deviceReachable: false
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.failedRuntimeRecordCanBeCleared(
+                processPresent: false,
+                deviceReachable: true
+            )
+        )
     }
 
     func testAndroidLastFailureRemainsVisibleAfterOperationStops() throws {
@@ -3906,7 +5620,7 @@ final class OKVideoMacTests: XCTestCase {
     func testAndroidBridgeHealthRequiresCurrentGeneration() {
         let current: [String: Any] = [
             "ok": true,
-            "version": "0.3.17",
+            "version": AndroidDexBridgeRuntime.bridgeVersion,
             "generation": "current-generation"
         ]
         XCTAssertTrue(
@@ -3923,10 +5637,166 @@ final class OKVideoMacTests: XCTestCase {
         )
         XCTAssertFalse(
             AndroidDexBridgeRuntime.healthMatches(
-                ["ok": true, "version": "0.3.17"],
+                [
+                    "ok": true,
+                    "version": AndroidDexBridgeRuntime.bridgeVersion
+                ],
                 generation: "current-generation"
             )
         )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.healthValidation(
+                current,
+                generation: "stale-generation"
+            ),
+            .generationMismatch
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.healthValidation(
+                [
+                    "ok": true,
+                    "version": "0.0.0",
+                    "generation": "current-generation"
+                ],
+                generation: "current-generation"
+            ),
+            .versionMismatch
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.bridgeFailureCategory(
+                for: AndroidBridgeHealthValidation.versionMismatch.rawValue
+            ),
+            .bridgeVersionMismatch
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.terminalBridgeProbeMessage(
+                for: AndroidBridgeHealthValidation.versionMismatch.rawValue
+            ).contains("版本不匹配")
+        )
+    }
+
+    func testAndroidBridgeContractMatchesBundledAPKGradleAndHealth() throws {
+        let apk = try XCTUnwrap(
+            Bundle.main.url(
+                forResource: "AndroidDexBridge-release",
+                withExtension: "apk"
+            ),
+            "测试宿主必须包含实际交付的 Android Bridge APK"
+        )
+        let badging = try androidAAPTBadging(for: apk)
+        let packageLine = try XCTUnwrap(
+            badging.split(whereSeparator: \.isNewline)
+                .map(String.init)
+                .first(where: { $0.hasPrefix("package:") })
+        )
+        let packageName = androidBadgingAttribute("name", in: packageLine)
+        let versionName = androidBadgingAttribute(
+            "versionName",
+            in: packageLine
+        )
+        let versionCode = androidBadgingAttribute(
+            "versionCode",
+            in: packageLine
+        ).flatMap(Int.init)
+
+        XCTAssertEqual(packageName, "com.okvideomac.dexbridge")
+        XCTAssertEqual(versionName, AndroidDexBridgeRuntime.bridgeVersion)
+        XCTAssertEqual(versionCode, AndroidDexBridgeRuntime.bridgeVersionCode)
+
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let gradle = try String(
+            contentsOf: repository.appendingPathComponent(
+                "Helpers/AndroidDexBridge/app/build.gradle"
+            ),
+            encoding: .utf8
+        )
+        XCTAssertTrue(gradle.contains(
+            "versionCode = \(AndroidDexBridgeRuntime.bridgeVersionCode)"
+        ))
+        XCTAssertTrue(gradle.contains(
+            "versionName = \"\(AndroidDexBridgeRuntime.bridgeVersion)\""
+        ))
+
+        let bridgeServer = try String(
+            contentsOf: repository.appendingPathComponent(
+                "Helpers/AndroidDexBridge/app/src/main/java/"
+                    + "com/okvideomac/dexbridge/BridgeServer.java"
+            ),
+            encoding: .utf8
+        )
+        XCTAssertTrue(bridgeServer.contains(
+            ".getPackageInfo(context.getPackageName(), 0)"
+        ))
+        XCTAssertTrue(bridgeServer.contains(".versionName"))
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.healthValidation(
+                [
+                    "ok": true,
+                    "version": try XCTUnwrap(versionName),
+                    "generation": "packaged-generation"
+                ],
+                generation: "packaged-generation"
+            ),
+            .healthy
+        )
+    }
+
+    private func androidAAPTBadging(for apk: URL) throws -> String {
+        let environment = ProcessInfo.processInfo.environment
+        let roots = [
+            environment["ANDROID_SDK_ROOT"],
+            environment["ANDROID_HOME"],
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Android/sdk").path,
+            "/Volumes/XcodeDev/AndroidSDK"
+        ].compactMap { $0 }
+        let aapt = roots.lazy.compactMap { root -> URL? in
+            let buildTools = URL(fileURLWithPath: root)
+                .appendingPathComponent("build-tools")
+            let versions = (try? FileManager.default.contentsOfDirectory(
+                at: buildTools,
+                includingPropertiesForKeys: nil
+            ))?.sorted { $0.lastPathComponent > $1.lastPathComponent } ?? []
+            return versions
+                .map { $0.appendingPathComponent("aapt") }
+                .first(where: {
+                    FileManager.default.isExecutableFile(atPath: $0.path)
+                })
+        }.first
+        let executable = try XCTUnwrap(
+            aapt,
+            "验证实际 APK 版本需要 Android SDK build-tools/aapt"
+        )
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = executable
+        process.arguments = ["dump", "badging", apk.path]
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        process.waitUntilExit()
+        let text = String(
+            decoding: output.fileHandleForReading.readDataToEndOfFile(),
+            as: UTF8.self
+        )
+        XCTAssertEqual(process.terminationStatus, 0, text)
+        return text
+    }
+
+    private func androidBadgingAttribute(
+        _ name: String,
+        in packageLine: String
+    ) -> String? {
+        guard let start = packageLine.range(of: "\(name)='") else {
+            return nil
+        }
+        let suffix = packageLine[start.upperBound...]
+        guard let end = suffix.firstIndex(of: "'") else { return nil }
+        return String(suffix[..<end])
     }
 
     func testAndroidBridgeForwardInspectionIsScopedToVerifiedSerial() {
@@ -4220,6 +6090,40 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(states.isEmpty)
     }
 
+    func testAndroidDexRequestKeepsObservingWhenNativeUIArrivesAfterOneSecond()
+        async throws {
+        let hidden = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: Data(
+                """
+                {"visible":false,"title":"","inputCount":0,"imageCount":0,"buttons":[],"phase":"processing","outcome":"stay","terminal":false}
+                """.utf8
+            )
+        )
+        let authorization = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: Data(
+                """
+                {"visible":true,"title":"Native UI","inputCount":1,"imageCount":0,"buttons":["Continue"],"phase":"awaitingUser","outcome":"stay","terminal":false}
+                """.utf8
+            )
+        )
+        var pollCount = 0
+        let startedAt = Date()
+
+        let resolved = await AndroidDexBridgeClient
+            .waitForAuthorizationStateAfterFailure(
+                attempts: 13,
+                pollIntervalNanoseconds: 100_000_000
+            ) {
+                pollCount += 1
+                return pollCount >= 12 ? authorization : hidden
+            }
+
+        XCTAssertEqual(resolved, authorization)
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(startedAt), 1)
+    }
+
     @MainActor
     func testHistoryConfigurationResolutionSwitchesOnlyToAvailableOwner() {
         let first = UUID()
@@ -4283,7 +6187,7 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     @MainActor
-    func testVisibleHistoryIsScopedToActiveConfiguration() {
+    func testVisibleHistoryIsScopedToActiveConfigurationAndSelectedSite() {
         let first = UUID()
         let second = UUID()
         let firstRecord = HistoryRecord(
@@ -4298,6 +6202,12 @@ final class OKVideoMacTests: XCTestCase {
             videoID: "second",
             title: "Second"
         )
+        let anotherSiteRecord = HistoryRecord(
+            configurationID: first,
+            siteKey: "another-site-key",
+            videoID: "another-site",
+            title: "Another Site"
+        )
         let legacyRecord = HistoryRecord(
             siteKey: "shared-site-key",
             videoID: "legacy",
@@ -4306,15 +6216,29 @@ final class OKVideoMacTests: XCTestCase {
 
         XCTAssertEqual(
             AppState.historyRecords(
-                [secondRecord, legacyRecord, firstRecord],
-                for: first
+                [
+                    secondRecord,
+                    legacyRecord,
+                    anotherSiteRecord,
+                    firstRecord
+                ],
+                for: first,
+                siteKey: "shared-site-key"
             ),
             [firstRecord]
         )
         XCTAssertTrue(
             AppState.historyRecords(
                 [firstRecord, secondRecord],
-                for: nil
+                for: nil,
+                siteKey: "shared-site-key"
+            ).isEmpty
+        )
+        XCTAssertTrue(
+            AppState.historyRecords(
+                [firstRecord, anotherSiteRecord],
+                for: first,
+                siteKey: nil
             ).isEmpty
         )
     }
@@ -4952,10 +6876,221 @@ final class OKVideoMacTests: XCTestCase {
         )
 
         XCTAssertEqual(reference.replayHeaders["User-Agent"], "FixtureAgent/1.0")
-        XCTAssertEqual(reference.replayHeaders["Origin"], "https://example.invalid")
-        XCTAssertEqual(reference.replayHeaders["Referer"], "https://example.invalid/watch?item=17")
+        XCTAssertNil(reference.replayHeaders["Origin"])
+        XCTAssertNil(reference.replayHeaders["Referer"])
         XCTAssertNil(reference.replayHeaders["Cookie"])
         XCTAssertNil(reference.replayHeaders["Authorization"])
+    }
+
+    @MainActor
+    func testHistoryReferencePersistsProviderIdentityAndUsesItForRefresh()
+        throws {
+        let source = PlaySource(
+            name: "Display",
+            episodes: [PlayEpisode(name: "Episode", url: "expired-resource")]
+        )
+        let configurationID = UUID()
+        let providerReference = PlaybackResourceReference(
+            configurationIdentity: configurationID.uuidString.lowercased(),
+            siteIdentity: "site-a",
+            providerKind: "android-dex-spider",
+            providerVersion: 1,
+            stableResourceLocator: "provider-opaque-item-42",
+            sourceIdentity: source.stableIdentity,
+            episodeIdentity: source.episodes[0].stableIdentity,
+            stability: .providerStable
+        )
+        let playbackReference = AppState.historyPlaybackReference(
+            source: source,
+            episode: source.episodes[0],
+            providerResourceReference: providerReference,
+            headers: [
+                "Cookie": "must-not-persist",
+                "Authorization": "Bearer must-not-persist"
+            ]
+        )
+        let record = HistoryRecord(
+            siteKey: "site-a",
+            videoID: "video-a",
+            title: "Title",
+            episodeReference: "expired-resource",
+            playbackReference: playbackReference
+        )
+
+        XCTAssertEqual(
+            playbackReference.providerResourceReference,
+            providerReference
+        )
+        XCTAssertTrue(playbackReference.replayHeaders.isEmpty)
+        let site = SiteConfiguration(
+            key: "site-a",
+            name: "Site A",
+            type: 3,
+            api: "csp_Provider"
+        )
+        let androidProvider = try AndroidDexSpiderSiteProvider(
+            site: site,
+            configurationID: configurationID,
+            jarReference: "https://configuration.invalid/provider.jar",
+            baseURL: nil,
+            bridge: AndroidDexBridgeClient()
+        )
+        XCTAssertEqual(
+            AppState.acceptedHistoryProviderReference(
+                from: record,
+                provider: androidProvider
+            ),
+            providerReference
+        )
+        XCTAssertNil(
+            AppState.acceptedHistoryProviderReference(
+                from: record,
+                provider: UnsupportedSiteProvider(site: site)
+            )
+        )
+
+        var legacyRecord = record
+        legacyRecord.playbackReference?.providerResourceReference = nil
+        XCTAssertNil(
+            AppState.acceptedHistoryProviderReference(
+                from: legacyRecord,
+                provider: androidProvider
+            ),
+            "Legacy records must rebuild through their current local provider"
+        )
+    }
+
+    @MainActor
+    func testHistoryNeverPersistsOrReplaysRuntimeLoopbackCapabilities()
+        throws {
+        let nodeProxy = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:18888/proxy/media/session-secret")
+        )
+        let remote = try XCTUnwrap(
+            URL(string: "https://media.invalid/movie.mp4")
+        )
+        let signedRemote = try XCTUnwrap(
+            URL(
+                string: "https://media.invalid/movie.mp4"
+                    + "?token=must-not-persist&expires=2000000000"
+            )
+        )
+        let providerReference = PlaybackResourceReference(
+            configurationIdentity: UUID().uuidString.lowercased(),
+            siteIdentity: "site-a",
+            providerKind: "android-dex-spider",
+            providerVersion: 1,
+            stableResourceLocator: "provider-opaque-item-42",
+            sourceIdentity: "source-a",
+            episodeIdentity: "episode-a",
+            stability: .providerReplay
+        )
+        let providerResult = SitePlaybackResult(
+            url: remote.absoluteString,
+            needsParsing: false,
+            flag: "line",
+            mediaSession: PlaybackMediaSession(
+                sessionID: "session-secret",
+                transport: .compatibilityDirect,
+                mediaURL: remote.absoluteString,
+                resourceReference: providerReference
+            )
+        )
+
+        XCTAssertNil(
+            AppState.persistentHistoryMediaReference(
+                nodeProxy,
+                playbackResult: nil
+            )
+        )
+        XCTAssertNil(
+            AppState.persistentHistoryMediaReference(
+                remote,
+                playbackResult: providerResult
+            )
+        )
+        XCTAssertNil(
+            AppState.persistentHistoryMediaReference(
+                remote,
+                playbackResult: nil
+            )
+        )
+        XCTAssertNil(
+            AppState.persistentHistoryMediaReference(
+                signedRemote,
+                playbackResult: nil
+            )
+        )
+        XCTAssertNil(
+            AppState.persistentHistoryEpisodeReference(
+                signedRemote.absoluteString
+            )
+        )
+        XCTAssertEqual(
+            AppState.persistentHistoryEpisodeReference(
+                "provider-opaque-item-42-generation-7"
+            ),
+            "provider-opaque-item-42-generation-7"
+        )
+
+        var unsafeProviderReference = providerReference
+        unsafeProviderReference.stableResourceLocator =
+            signedRemote.absoluteString
+        XCTAssertNil(
+            AppState.persistentProviderResourceReference(
+                unsafeProviderReference
+            )
+        )
+        XCTAssertNil(
+            AppState.persistentProviderResourceReference(providerReference),
+            "providerReplay locators are runtime-only capabilities"
+        )
+        var durableProviderReference = providerReference
+        durableProviderReference.stability = .providerStable
+        XCTAssertEqual(
+            AppState.persistentProviderResourceReference(
+                durableProviderReference
+            ),
+            durableProviderReference
+        )
+
+        let unsafeEncodedLocator = try JSONSerialization.data(
+            withJSONObject: [
+                "resourceID": "item-42",
+                "authorizationToken": "must-not-persist"
+            ],
+            options: [.sortedKeys]
+        ).base64EncodedString()
+        XCTAssertNil(
+            AppState.persistentHistoryEpisodeReference(
+                unsafeEncodedLocator
+            )
+        )
+
+        let loopbackRecord = HistoryRecord(
+            siteKey: "node-site",
+            videoID: "video-a",
+            title: "Title",
+            mediaReference: nodeProxy.absoluteString
+        )
+        XCTAssertNil(
+            AppState.replayableHistoryPlayback(
+                record: loopbackRecord,
+                siteName: "Node"
+            )
+        )
+        let signedRecord = HistoryRecord(
+            siteKey: "android-site",
+            videoID: "video-b",
+            title: "Title",
+            mediaReference: signedRemote.absoluteString
+        )
+        XCTAssertNil(
+            AppState.replayableHistoryPlayback(
+                record: signedRecord,
+                siteName: "Android"
+            )
+        )
     }
 
     @MainActor
@@ -5017,8 +7152,8 @@ final class OKVideoMacTests: XCTestCase {
             title: "Fixture",
             sourceName: "线路一",
             episodeName: "第2集",
-            episodeReference: "episode-token",
-            mediaReference: "https://media.example/video.m3u8",
+            episodeReference: "provider-opaque-item-42",
+            mediaReference: "file:///tmp/okvideomac-history-fixture.m3u8",
             position: 42
         )
         let replay = try XCTUnwrap(
@@ -5030,10 +7165,10 @@ final class OKVideoMacTests: XCTestCase {
 
         XCTAssertEqual(replay.detail.summary.videoID, "video-1")
         XCTAssertEqual(replay.source.name, "线路一")
-        XCTAssertEqual(replay.episode.url, "episode-token")
+        XCTAssertEqual(replay.episode.url, "provider-opaque-item-42")
         XCTAssertEqual(
             replay.media.url.absoluteString,
-            "https://media.example/video.m3u8"
+            "file:///tmp/okvideomac-history-fixture.m3u8"
         )
     }
 
@@ -5729,6 +7864,175 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         ))
     }
 
+    func testNodeAndLocalJavaScriptOwnershipNeverFallsThroughToAndroid()
+        throws {
+        let baseURL = try XCTUnwrap(
+            URL(string: "https://configuration.invalid/config.json")
+        )
+        let node = SiteConfiguration(
+            key: "node-csp",
+            name: "Node",
+            type: 3,
+            api: "csp_Node",
+            jar: "https://configuration.invalid/provider.jar",
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let localJavaScript = SiteConfiguration(
+            key: "local-js-csp",
+            name: "Local JS",
+            type: 3,
+            api: "csp_Local",
+            jar: "https://configuration.invalid/provider.jar",
+            extra: [
+                "script": .string(
+                    "https://configuration.invalid/provider.js"
+                )
+            ]
+        )
+
+        XCTAssertTrue(
+            SiteProviderRoutingPolicy.hasExclusiveNodeRuntimeOwnership(node)
+        )
+        XCTAssertNil(
+            SiteProviderRoutingPolicy.javaDexJarReference(
+                site: node,
+                configurationSpider: nil,
+                baseURL: baseURL
+            )
+        )
+        XCTAssertNotNil(
+            SiteProviderRoutingPolicy.localJavaScriptURL(
+                site: localJavaScript,
+                configurationSpider: nil,
+                baseURL: baseURL
+            )
+        )
+        XCTAssertNil(
+            SiteProviderRoutingPolicy.javaDexJarReference(
+                site: localJavaScript,
+                configurationSpider: nil,
+                baseURL: baseURL
+            )
+        )
+    }
+
+    func testContentAddressedLocalJavaScriptNeverRoutesToAndroid() throws {
+        let baseURL = try XCTUnwrap(
+            URL(string: "https://configuration.invalid/config.json")
+        )
+        let digest = "1fb66ff185ea35252d2ae2a07d058ec1"
+
+        for extensionName in ["js", "mjs", "cjs"] {
+            let script = "https://configuration.invalid/provider."
+                + extensionName + ";md5;" + digest
+            let site = SiteConfiguration(
+                key: "local-script-\(extensionName)",
+                name: "Local Script",
+                type: 3,
+                api: "csp_LocalScript"
+            )
+
+            XCTAssertEqual(
+                SiteProviderRoutingPolicy.localJavaScriptURL(
+                    site: site,
+                    configurationSpider: script,
+                    baseURL: baseURL
+                )?.absoluteString,
+                "https://configuration.invalid/provider.\(extensionName)"
+            )
+            XCTAssertNil(
+                SiteProviderRoutingPolicy.javaDexJarReference(
+                    site: site,
+                    configurationSpider: script,
+                    baseURL: baseURL
+                )
+            )
+        }
+    }
+
+    func testCSPWithoutJarOrDexProvenanceCannotUseAndroid() throws {
+        let baseURL = try XCTUnwrap(
+            URL(string: "https://configuration.invalid/config.json")
+        )
+        let site = SiteConfiguration(
+            key: "ambiguous-csp",
+            name: "Ambiguous",
+            type: 3,
+            api: "csp_Ambiguous"
+        )
+
+        XCTAssertNil(
+            SiteProviderRoutingPolicy.javaDexJarReference(
+                site: site,
+                configurationSpider:
+                    "https://configuration.invalid/provider.bin",
+                baseURL: baseURL
+            )
+        )
+        XCTAssertEqual(
+            SiteProviderRoutingPolicy.javaDexJarReference(
+                site: site,
+                configurationSpider:
+                    "https://configuration.invalid/provider.jar;md5;fixture",
+                baseURL: baseURL
+            ),
+            "https://configuration.invalid/provider.jar;md5;fixture"
+        )
+        XCTAssertEqual(
+            SiteProviderRoutingPolicy.javaDexJarReference(
+                site: site,
+                configurationSpider:
+                    "https://configuration.invalid/provider.jpg;md5;"
+                    + "1fb66ff185ea35252d2ae2a07d058ec1",
+                baseURL: baseURL
+            ),
+            "https://configuration.invalid/provider.jpg;md5;"
+                + "1fb66ff185ea35252d2ae2a07d058ec1"
+        )
+        XCTAssertNil(
+            SiteProviderRoutingPolicy.javaDexJarReference(
+                site: site,
+                configurationSpider:
+                    "https://configuration.invalid/provider.jpg;md5;invalid",
+                baseURL: baseURL
+            )
+        )
+    }
+
+    func testContentAddressedMDriveRoutesToAndroidWithoutAuthorizationInference()
+        throws {
+        let baseURL = try XCTUnwrap(
+            URL(string: "https://configuration.invalid/config.json")
+        )
+        let spider = "https://configuration.invalid/provider.jpg;md5;"
+            + "1fb66ff185ea35252d2ae2a07d058ec1"
+        let site = SiteConfiguration(
+            key: "drive-fixture",
+            name: "Drive Fixture",
+            type: 3,
+            api: "csp_MyDriveGuard"
+        )
+
+        XCTAssertEqual(
+            SiteProviderRoutingPolicy.javaDexJarReference(
+                site: site,
+                configurationSpider: spider,
+                baseURL: baseURL
+            ),
+            spider
+        )
+
+        XCTAssertEqual(
+            AndroidDexSpiderSiteProvider.interactionActionKind(tag: nil),
+            .configuration
+        )
+        XCTAssertFalse(
+            ConfigurationInteractionClassificationPolicy
+                .legacySemantic(tag: nil)
+                .isAuthorization
+        )
+    }
+
     func testOfflineLegacyCacheMigratesWithExplicitTOFUTrust() async throws {
         let fixture = try makeLegacyCacheFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -6025,6 +8329,10 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                 "token=secret-\(index) /Users/alice/private \(String(repeating: "x", count: 80))\n".utf8
             ))
         }
+        writer.writeNodeOutput(Data(
+            #"{"req":{"method":"GET","url":"/proxy/quark?pst=signed-url-cookie-token"},"msg":"GET http://127.0.0.1:18988/proxy/quark?pst=another-secret"}"#.utf8
+        ))
+        writer.writeNodeOutput(Data("\n".utf8))
         writer.close()
 
         let files = try FileManager.default.contentsOfDirectory(
@@ -6035,6 +8343,10 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         let combined = try files.map { try String(contentsOf: $0) }.joined()
         XCTAssertFalse(combined.contains("legacy-secret"))
         XCTAssertFalse(combined.contains("secret-"))
+        XCTAssertFalse(combined.contains("signed-url-cookie-token"))
+        XCTAssertFalse(combined.contains("another-secret"))
+        XCTAssertFalse(combined.contains("pst="))
+        XCTAssertTrue(combined.contains("/proxy/quark?<redacted>"))
         XCTAssertFalse(combined.contains("alice"))
         XCTAssertTrue(combined.contains("<HOME>"))
         let attributes = try FileManager.default.attributesOfItem(
@@ -7876,6 +10188,8 @@ final class NodeBundleCompatibilityTests: XCTestCase {
     }
 
     func testNodePlayerRewritesRuntimeProxyToLoopback() async throws {
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let replayStore = NodePlaybackReplayMemoryStore()
         let site = SiteConfiguration(
             key: "nodejs_fixture",
             name: "Fixture",
@@ -7897,7 +10211,9 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         let provider = try NodeHTTPSpiderSiteProvider(
             site: site,
             baseURL: baseURL,
-            httpClient: client
+            httpClient: client,
+            playbackReplayStore: replayStore,
+            configurationIdentity: configurationIdentity
         )
 
         let result = try await provider.player(flag: "直链", episodeURL: "episode")
@@ -7906,9 +10222,101 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             result.url,
             "http://127.0.0.1:18988/spider/fixture/4/proxy/media?id=1"
         )
+        let reference = try XCTUnwrap(result.resourceReference)
+        XCTAssertEqual(reference.configurationIdentity, configurationIdentity)
+        XCTAssertTrue(reference.stableResourceLocator.hasPrefix("nhr1."))
+        XCTAssertEqual(
+            replayStore.replay(for: reference.stableResourceLocator),
+            NodePlaybackReplay(flag: "直链", episodeURL: "episode")
+        )
+    }
+
+    func testNodePlayerRespectsProviderOrderForRuntimeOwnedTransports()
+        async throws {
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let replayStore = NodePlaybackReplayMemoryStore()
+        let site = SiteConfiguration(
+            key: "nodejs_fixture",
+            name: "Fixture",
+            type: 4,
+            api: "/spider/fixture/4",
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let client = NodeProviderStubHTTPClient { request in
+            HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(
+                    #"{"parse":0,"url":["Provider relay","http://192.168.1.9:18988/spider/fixture/4/proxy/stream?id=1","Original","https://media.example.invalid/original?id=1"]}"#.utf8
+                )
+            )
+        }
+        let baseURL = try XCTUnwrap(URL(string: "http://127.0.0.1:18988/"))
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: baseURL,
+            httpClient: client,
+            playbackReplayStore: replayStore,
+            configurationIdentity: configurationIdentity
+        )
+
+        let result = try await provider.player(flag: "direct", episodeURL: "episode")
+
+        XCTAssertEqual(
+            result.url,
+            "http://127.0.0.1:18988/spider/fixture/4/proxy/stream?id=1"
+        )
+        XCTAssertEqual(
+            result.qualities.map(\.url),
+            [
+                "http://127.0.0.1:18988/spider/fixture/4/proxy/stream?id=1",
+                "https://media.example.invalid/original?id=1"
+            ]
+        )
+        let reference = try XCTUnwrap(result.resourceReference)
+        XCTAssertEqual(reference.configurationIdentity, configurationIdentity)
+        XCTAssertEqual(
+            replayStore.replay(for: reference.stableResourceLocator),
+            NodePlaybackReplay(flag: "direct", episodeURL: "episode")
+        )
+    }
+
+    func testNodePlayerKeepsSharedQualitySelectionForRemoteTransports()
+        async throws {
+        let site = SiteConfiguration(
+            key: "nodejs_fixture",
+            name: "Fixture",
+            type: 4,
+            api: "/spider/fixture/4",
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let client = NodeProviderStubHTTPClient { request in
+            HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(
+                    #"{"parse":0,"url":["Provider relay","https://media.example.invalid/relay","Original","https://media.example.invalid/original"]}"#.utf8
+                )
+            )
+        }
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        let result = try await provider.player(flag: "direct", episodeURL: "episode")
+
+        XCTAssertEqual(
+            result.url,
+            "https://media.example.invalid/original"
+        )
     }
 
     func testQuarkEpisodeReferenceKeepsStableHistoryIdentityWithoutStoken() throws {
+        let passcodeStore = QuarkPasscodeMemoryStore()
         let original = try makeQuarkEpisodeReference(
             stoken: "expired-stoken",
             passcode: "2468"
@@ -7917,22 +10325,57 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             QuarkEpisodeReference.identity(from: original)
         )
 
-        let durable = QuarkEpisodeReference.durableHistoryReference(original)
+        let durable = QuarkEpisodeReference.durableHistoryReference(
+            original,
+            passcodeStore: passcodeStore
+        )
+        let durableBytes = Data(durable.utf8)
+        let storedText = try XCTUnwrap(
+            String(data: durableBytes, encoding: .utf8)
+        ).lowercased()
 
         XCTAssertEqual(identity.providerID, "quark")
         XCTAssertEqual(identity.shareID, "share-123")
         XCTAssertEqual(identity.fileID, "file-456")
+        XCTAssertTrue(durable.hasPrefix("qhr1."))
+        XCTAssertEqual(
+            PlaybackPersistencePolicy.sanitizedOpaqueLocator(durable),
+            durable
+        )
         XCTAssertEqual(QuarkEpisodeReference.identity(from: durable), identity)
         XCTAssertTrue(QuarkEpisodeReference.requiresShareTokenRefresh(durable))
-        XCTAssertEqual(try quarkStoken(from: durable), "")
-        XCTAssertEqual(QuarkEpisodeReference.passcode(from: durable), "2468")
+        XCTAssertEqual(QuarkEpisodeReference.passcode(from: durable), "")
+        for forbidden in [
+            "stoken", "passcode", "password", "pwd", "playtoken",
+            "2468", "expired-stoken"
+        ] {
+            XCTAssertFalse(
+                storedText.contains(forbidden),
+                "durable reference leaked \(forbidden)"
+            )
+        }
+        XCTAssertEqual(
+            passcodeStore.passcode(
+                for: QuarkEpisodeReference.credentialAccount(for: identity)
+            ),
+            "2468"
+        )
     }
 
     func testNodeProviderRefreshesDurableQuarkHistoryBeforePlayback() async throws {
+        let passcodeStore = QuarkPasscodeMemoryStore()
         let client = QuarkRefreshHTTPClient(firstPlayFailure: .none)
-        let provider = try makeNodeProvider(httpClient: client)
+        let provider = try makeNodeProvider(
+            httpClient: client,
+            quarkPasscodeStore: passcodeStore
+        )
+        let original = try makeQuarkEpisodeReference(
+            stoken: "expired-stoken",
+            passcode: "2468"
+        )
         let durable = QuarkEpisodeReference.durableHistoryReference(
-            try makeQuarkEpisodeReference(stoken: "expired-stoken")
+            original,
+            passcodeStore: passcodeStore
         )
 
         let result = try await provider.player(
@@ -7949,8 +10392,748 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(tokenRequests.count, 1)
         XCTAssertEqual(playRequests.count, 1)
         XCTAssertEqual(
-            try quarkStoken(from: nodeEpisodeID(from: playRequests[0])),
+            try quarkTokenRequestPasscode(from: tokenRequests[0]),
+            "2468"
+        )
+        let refreshedEpisode = try nodeEpisodeID(from: playRequests[0])
+        XCTAssertEqual(
+            QuarkEpisodeReference.identity(from: refreshedEpisode),
+            QuarkEpisodeReference.identity(from: original)
+        )
+        XCTAssertEqual(
+            try quarkStoken(from: refreshedEpisode),
             "fresh-stoken"
+        )
+        let refreshedData = try XCTUnwrap(
+            Data(
+                base64Encoded: refreshedEpisode,
+                options: .ignoreUnknownCharacters
+            )
+        )
+        let refreshedText = try XCTUnwrap(
+            String(data: refreshedData, encoding: .utf8)
+        ).lowercased()
+        XCTAssertFalse(refreshedText.contains("passcode"))
+        XCTAssertFalse(refreshedText.contains("password"))
+        XCTAssertFalse(refreshedText.contains("2468"))
+    }
+
+    func testNodePlayerReturnsStableOpaqueQuarkResourceReference() async throws {
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let passcodeStore = QuarkPasscodeMemoryStore()
+        let client = QuarkRefreshHTTPClient(firstPlayFailure: .none)
+        let provider = try makeNodeProvider(
+            httpClient: client,
+            quarkPasscodeStore: passcodeStore,
+            configurationIdentity: configurationIdentity
+        )
+        let episode = try makeQuarkEpisodeReference(
+            stoken: "current-stoken",
+            passcode: "2468"
+        )
+
+        let result = try await provider.player(
+            flag: "原画",
+            episodeURL: episode
+        )
+        let reference = try XCTUnwrap(result.resourceReference)
+        let locator = reference.stableResourceLocator.lowercased()
+
+        XCTAssertEqual(reference.schemaVersion, 1)
+        XCTAssertEqual(reference.configurationIdentity, configurationIdentity)
+        XCTAssertEqual(reference.siteIdentity, "nodejs_quark")
+        XCTAssertEqual(reference.providerKind, "node-http-spider")
+        XCTAssertEqual(reference.providerVersion, 1)
+        XCTAssertEqual(reference.stability, .providerStable)
+        XCTAssertTrue(reference.stableResourceLocator.hasPrefix("qhr1."))
+        XCTAssertEqual(
+            QuarkEpisodeReference.identity(from: reference.stableResourceLocator),
+            QuarkEpisodeReference.identity(from: episode)
+        )
+        XCTAssertTrue(provider.acceptsPlaybackResourceReference(reference))
+        for forbidden in [
+            "stoken", "passcode", "password", "pwd", "playtoken",
+            "2468", "current-stoken"
+        ] {
+            XCTAssertFalse(locator.contains(forbidden))
+        }
+    }
+
+    func testPlaybackHistoryOwnerRemainsCapturedConfigurationAfterSwitch() {
+        let configurationA = UUID()
+        let configurationB = UUID()
+
+        XCTAssertEqual(
+            PlaybackConfigurationOwnershipPolicy.historyOwner(
+                captured: configurationA,
+                current: configurationB
+            ),
+            configurationA
+        )
+    }
+
+    func testInFlightPlaybackCannotBeReownedByNewConfiguration() throws {
+        let configurationA = UUID()
+        let configurationB = UUID()
+        let captured = PlaybackConfigurationOwnershipPolicy
+            .capturedConfigurationID(
+                requested: configurationA,
+                history: nil,
+                current: configurationA
+            )
+
+        XCTAssertEqual(captured, configurationA)
+        XCTAssertFalse(
+            PlaybackConfigurationOwnershipPolicy.canBeginPlayback(
+                captured: try XCTUnwrap(captured),
+                current: configurationB
+            )
+        )
+        XCTAssertEqual(
+            PlaybackConfigurationOwnershipPolicy.historyOwner(
+                captured: try XCTUnwrap(captured),
+                current: configurationB
+            ),
+            configurationA
+        )
+    }
+
+    func testNodePlayerWrapsExplicitGenericProviderStableReference()
+        async throws {
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let stableLocator = "node-item-42-file-7"
+        let replayStore = NodePlaybackReplayMemoryStore()
+        let client = NodeStableReferenceHTTPClient(
+            stableLocator: stableLocator
+        )
+        let provider = try makeGenericNodeProvider(
+            httpClient: client,
+            configurationIdentity: configurationIdentity,
+            playbackReplayStore: replayStore
+        )
+
+        let result = try await provider.player(
+            flag: "provider-line",
+            episodeURL: "http://127.0.0.1:18988/temporary/item?nonce=ephemeral"
+        )
+        let reference = try XCTUnwrap(result.resourceReference)
+
+        XCTAssertEqual(reference.configurationIdentity, configurationIdentity)
+        XCTAssertEqual(reference.siteIdentity, "nodejs_stable_fixture")
+        XCTAssertEqual(reference.providerKind, "node-http-spider")
+        XCTAssertEqual(reference.providerVersion, 1)
+        XCTAssertTrue(reference.stableResourceLocator.hasPrefix("npr1."))
+        XCTAssertEqual(reference.stability, .providerStable)
+        XCTAssertNil(reference.expiresAt)
+        XCTAssertTrue(provider.acceptsPlaybackResourceReference(reference))
+        XCTAssertEqual(
+            PlaybackPersistencePolicy.sanitizedProviderResourceReference(
+                reference
+            ),
+            reference
+        )
+        XCTAssertEqual(
+            replayStore.replay(for: reference.stableResourceLocator),
+            NodePlaybackReplay(flag: "provider-line", episodeURL: stableLocator)
+        )
+        let differentlyBoundProvider = try makeGenericNodeProvider(
+            httpClient: client,
+            configurationIdentity: UUID().uuidString.lowercased(),
+            playbackReplayStore: replayStore
+        )
+        XCTAssertFalse(
+            differentlyBoundProvider.acceptsPlaybackResourceReference(reference),
+            "a device-local locator handle must not replay across configurations"
+        )
+        let encoded = try JSONEncoder().encode(reference)
+        XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains(stableLocator))
+    }
+
+    func testNodeGenericStableReferencePersistsAndRefreshesAfterRestart()
+        async throws {
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let stableLocator = "node-library-17-resource-99"
+        let replayStore = NodePlaybackReplayMemoryStore()
+        let initialClient = NodeStableReferenceHTTPClient(
+            stableLocator: stableLocator
+        )
+        let initialProvider = try makeGenericNodeProvider(
+            httpClient: initialClient,
+            configurationIdentity: configurationIdentity,
+            playbackReplayStore: replayStore
+        )
+        let initial = try await initialProvider.player(
+            flag: "provider-line",
+            episodeURL: "http://127.0.0.1:18988/temporary/item?nonce=discarded"
+        )
+        let initialReference = try XCTUnwrap(initial.resourceReference)
+        let durable = try XCTUnwrap(
+            HistoryPlaybackReference(
+                sourceIdentity: initialReference.sourceIdentity,
+                resourceIdentity: initialReference.episodeIdentity,
+                providerResourceReference: initialReference,
+                replayHeaders: [
+                    "Cookie": "must-not-persist",
+                    "Authorization": "Bearer must-not-persist"
+                ]
+            ).sanitizedForPersistence()
+        )
+        let encoded = try JSONEncoder().encode(durable)
+        let decoded = try JSONDecoder().decode(
+            HistoryPlaybackReference.self,
+            from: encoded
+        )
+        let persistedReference = try XCTUnwrap(
+            decoded.providerResourceReference
+        )
+
+        XCTAssertEqual(persistedReference, initialReference)
+        XCTAssertTrue(decoded.replayHeaders.isEmpty)
+        let persistedText = try XCTUnwrap(
+            String(data: encoded, encoding: .utf8)
+        )
+        XCTAssertFalse(persistedText.contains("temporary/item"))
+        XCTAssertFalse(persistedText.contains("must-not-persist"))
+
+        // A new provider instance models an app restart. The replay response
+        // intentionally omits the descriptor; after a successful direct
+        // replay the accepted durable reference must remain attached.
+        let replayClient = NodeStableReferenceHTTPClient(stableLocator: nil)
+        let restartedProvider = try makeGenericNodeProvider(
+            httpClient: replayClient,
+            configurationIdentity: configurationIdentity,
+            playbackReplayStore: replayStore
+        )
+        let refreshed = try await restartedProvider.refreshPlayback(
+            PlaybackRefreshRequest(
+                videoID: "history-video",
+                title: "多个完全同名结果",
+                sourceIdentity: persistedReference.sourceIdentity,
+                resourceIdentity: persistedReference.episodeIdentity,
+                sourceName: "provider-line",
+                episodeName: "历史分集",
+                episodeReference: "obsolete-ephemeral-reference",
+                providerResourceReference: persistedReference
+            )
+        )
+        let requests = await replayClient.capturedRequests()
+
+        XCTAssertEqual(
+            requests.filter { $0.url.path.hasSuffix("/play") }.count,
+            1
+        )
+        XCTAssertFalse(requests.contains {
+            $0.url.path.hasSuffix("/search")
+                || $0.url.path.hasSuffix("/detail")
+        })
+        let replayRequest = try XCTUnwrap(
+            requests.first { $0.url.path.hasSuffix("/play") }
+        )
+        XCTAssertEqual(try nodeEpisodeID(from: replayRequest), stableLocator)
+        XCTAssertEqual(
+            refreshed.episode.url,
+            persistedReference.stableResourceLocator
+        )
+        XCTAssertEqual(
+            refreshed.playbackResult.resourceReference,
+            persistedReference
+        )
+
+        XCTAssertTrue(
+            replayStore.removeReplay(
+                for: persistedReference.stableResourceLocator
+            )
+        )
+        do {
+            _ = try await restartedProvider.refreshPlayback(
+                PlaybackRefreshRequest(
+                    videoID: "history-video",
+                    title: "多个完全同名结果",
+                    sourceIdentity: persistedReference.sourceIdentity,
+                    resourceIdentity: persistedReference.episodeIdentity,
+                    sourceName: "provider-line",
+                    episodeName: "历史分集",
+                    providerResourceReference: persistedReference
+                )
+            )
+            XCTFail("missing device-local locator must fail closed")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("本机安全资源引用"))
+        }
+    }
+
+    func testNodePlayerKeepsCompatibilityReplayCapabilityOutOfHistory()
+        async throws {
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let unsafeLocators: [String?] = [
+            nil,
+            "https://media.example.invalid/signed/item-42",
+            "node-item-42-token-secret"
+        ]
+
+        for locator in unsafeLocators {
+            let replayStore = NodePlaybackReplayMemoryStore()
+            let client = NodeStableReferenceHTTPClient(
+                stableLocator: locator
+            )
+            let provider = try makeGenericNodeProvider(
+                httpClient: client,
+                configurationIdentity: configurationIdentity,
+                playbackReplayStore: replayStore
+            )
+            let result = try await provider.player(
+                flag: "provider-line",
+                episodeURL: "opaque-provider-input?token=runtime-only"
+            )
+            let reference = try XCTUnwrap(result.resourceReference)
+            let encoded = try JSONEncoder().encode(reference)
+            let persistedText = try XCTUnwrap(
+                String(data: encoded, encoding: .utf8)
+            )
+
+            XCTAssertTrue(reference.stableResourceLocator.hasPrefix("nhr1."))
+            XCTAssertEqual(reference.stability, .providerStable)
+            XCTAssertTrue(provider.acceptsPlaybackResourceReference(reference))
+            XCTAssertFalse(persistedText.contains("runtime-only"))
+            XCTAssertFalse(persistedText.contains("signed/item-42"))
+            XCTAssertFalse(persistedText.contains("token-secret"))
+            XCTAssertEqual(
+                replayStore.replay(for: reference.stableResourceLocator),
+                NodePlaybackReplay(
+                    flag: "provider-line",
+                    episodeURL: "opaque-provider-input?token=runtime-only"
+                )
+            )
+        }
+    }
+
+    func testNodeSecureReplayReferenceRefreshesExactResourceAfterRestart()
+        async throws {
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let replayStore = NodePlaybackReplayMemoryStore()
+        let originalEpisode = "opaque-file-42?authorization=runtime-only"
+        let initialClient = NodeStableReferenceHTTPClient(stableLocator: nil)
+        let initialProvider = try makeGenericNodeProvider(
+            httpClient: initialClient,
+            configurationIdentity: configurationIdentity,
+            playbackReplayStore: replayStore
+        )
+
+        let initial = try await initialProvider.player(
+            flag: "cloud-original",
+            episodeURL: originalEpisode
+        )
+        let reference = try XCTUnwrap(initial.resourceReference)
+        let persisted = try JSONEncoder().encode(reference)
+        let persistedText = try XCTUnwrap(
+            String(data: persisted, encoding: .utf8)
+        )
+
+        XCTAssertTrue(reference.stableResourceLocator.hasPrefix("nhr1."))
+        XCTAssertFalse(persistedText.contains(originalEpisode))
+        XCTAssertFalse(persistedText.contains("runtime-only-cookie"))
+        XCTAssertFalse(persistedText.contains("http://"))
+        XCTAssertFalse(persistedText.contains("127.0.0.1"))
+        XCTAssertEqual(initial.mediaSession?.transport, .providerLoopback)
+        XCTAssertEqual(initial.mediaSession?.headers["Cookie"], "runtime-only-cookie")
+        let initialRequests = await initialClient.capturedRequests()
+        XCTAssertTrue(initialRequests.allSatisfy {
+            $0.url.host == "127.0.0.1" && $0.url.port == 18_988
+        })
+        XCTAssertTrue(initialRequests.allSatisfy {
+            $0.url.path.hasSuffix("/init") || $0.url.path.hasSuffix("/play")
+        })
+
+        let refreshClient = NodeStableReferenceHTTPClient(stableLocator: nil)
+        let restartedProvider = try makeGenericNodeProvider(
+            httpClient: refreshClient,
+            configurationIdentity: configurationIdentity,
+            playbackReplayStore: replayStore
+        )
+        let refreshed = try await restartedProvider.refreshPlayback(
+            PlaybackRefreshRequest(
+                videoID: "history-video",
+                title: "重复标题",
+                sourceIdentity: reference.sourceIdentity,
+                resourceIdentity: reference.episodeIdentity,
+                sourceName: nil,
+                episodeName: "历史分集",
+                episodeReference: "expired-display-reference",
+                providerResourceReference: reference
+            )
+        )
+        let requests = await refreshClient.capturedRequests()
+        let playRequest = try XCTUnwrap(
+            requests.first { $0.url.path.hasSuffix("/play") }
+        )
+
+        XCTAssertTrue(requests.allSatisfy {
+            $0.url.host == "127.0.0.1" && $0.url.port == 18_988
+        })
+        XCTAssertEqual(try nodeEpisodeID(from: playRequest), originalEpisode)
+        XCTAssertEqual(
+            requests.filter { $0.url.path.hasSuffix("/play") }.count,
+            1
+        )
+        XCTAssertFalse(requests.contains {
+            $0.url.path.hasSuffix("/search")
+                || $0.url.path.hasSuffix("/detail")
+        })
+        XCTAssertEqual(
+            refreshed.playbackResult.resourceReference,
+            reference
+        )
+        XCTAssertEqual(
+            refreshed.playbackResult.mediaSession?.refreshPerformed,
+            true
+        )
+        XCTAssertEqual(
+            refreshed.playbackResult.mediaSession?.transport,
+            .providerLoopback
+        )
+    }
+
+    func testNodeSecureReplayReferenceDoesNotFallBackWhenKeychainItemMissing()
+        async throws {
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let initialStore = NodePlaybackReplayMemoryStore()
+        let initialProvider = try makeGenericNodeProvider(
+            httpClient: NodeStableReferenceHTTPClient(stableLocator: nil),
+            configurationIdentity: configurationIdentity,
+            playbackReplayStore: initialStore
+        )
+        let initial = try await initialProvider.player(
+            flag: "cloud-original",
+            episodeURL: "opaque-file-42"
+        )
+        let reference = try XCTUnwrap(initial.resourceReference)
+        let refreshClient = NodeStableReferenceHTTPClient(stableLocator: nil)
+        let restartedProvider = try makeGenericNodeProvider(
+            httpClient: refreshClient,
+            configurationIdentity: configurationIdentity,
+            playbackReplayStore: NodePlaybackReplayMemoryStore()
+        )
+
+        do {
+            _ = try await restartedProvider.refreshPlayback(
+                PlaybackRefreshRequest(
+                    videoID: "history-video",
+                    title: "重复标题",
+                    sourceIdentity: reference.sourceIdentity,
+                    resourceIdentity: reference.episodeIdentity,
+                    sourceName: "cloud-original",
+                    episodeName: "历史分集",
+                    episodeReference: "expired-display-reference",
+                    providerResourceReference: reference
+                )
+            )
+            XCTFail("missing secure replay entry must not use title search")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("安全资源引用已失效"))
+        }
+
+        let requests = await refreshClient.capturedRequests()
+        XCTAssertFalse(requests.contains {
+            $0.url.path.hasSuffix("/play")
+                || $0.url.path.hasSuffix("/search")
+                || $0.url.path.hasSuffix("/detail")
+        })
+    }
+
+    func testNodeLoopbackPlayFailsClosedWhenSecureReplayCannotBeStored()
+        async throws {
+        let client = NodeStableReferenceHTTPClient(stableLocator: nil)
+        let provider = try makeGenericNodeProvider(
+            httpClient: client,
+            configurationIdentity: UUID().uuidString.lowercased(),
+            playbackReplayStore: NodePlaybackReplayRejectingStore()
+        )
+
+        do {
+            _ = try await provider.player(
+                flag: "cloud-original",
+                episodeURL: "opaque-file-42"
+            )
+            XCTFail("provider loopback playback must require a durable replay")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("本机安全引用"))
+        }
+
+        let requests = await client.capturedRequests()
+        XCTAssertEqual(
+            requests.filter { $0.url.path.hasSuffix("/play") }.count,
+            1
+        )
+        XCTAssertFalse(requests.contains {
+            $0.url.path.hasSuffix("/search")
+                || $0.url.path.hasSuffix("/detail")
+        })
+    }
+
+    func testNodePlaybackReferenceIsBoundToCurrentProviderAndConfiguration()
+        async throws {
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let provider = try makeNodeProvider(
+            httpClient: QuarkRefreshHTTPClient(firstPlayFailure: .none),
+            configurationIdentity: configurationIdentity
+        )
+        let result = try await provider.player(
+            flag: "原画",
+            episodeURL: try makeQuarkEpisodeReference(
+                stoken: "current-stoken"
+            )
+        )
+        let valid = try XCTUnwrap(result.resourceReference)
+
+        XCTAssertTrue(provider.acceptsPlaybackResourceReference(valid))
+
+        var wrongConfiguration = valid
+        wrongConfiguration.configurationIdentity = UUID()
+            .uuidString.lowercased()
+        XCTAssertFalse(
+            provider.acceptsPlaybackResourceReference(wrongConfiguration)
+        )
+
+        var wrongSite = valid
+        wrongSite.siteIdentity = "another-node-site"
+        XCTAssertFalse(provider.acceptsPlaybackResourceReference(wrongSite))
+
+        var wrongProvider = valid
+        wrongProvider.providerKind = "android-dex-spider"
+        XCTAssertFalse(
+            provider.acceptsPlaybackResourceReference(wrongProvider)
+        )
+
+        var wrongVersion = valid
+        wrongVersion.providerVersion += 1
+        XCTAssertFalse(
+            provider.acceptsPlaybackResourceReference(wrongVersion)
+        )
+
+        var expired = valid
+        expired.expiresAt = Date(timeIntervalSinceNow: -1)
+        XCTAssertFalse(provider.acceptsPlaybackResourceReference(expired))
+    }
+
+    func testNodeRefreshReplaysStableQuarkLocatorWithoutSearchOrDetail()
+        async throws {
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let passcodeStore = QuarkPasscodeMemoryStore()
+        let initialProvider = try makeNodeProvider(
+            httpClient: QuarkRefreshHTTPClient(firstPlayFailure: .none),
+            quarkPasscodeStore: passcodeStore,
+            configurationIdentity: configurationIdentity
+        )
+        let initialResult = try await initialProvider.player(
+            flag: "原画",
+            episodeURL: try makeQuarkEpisodeReference(
+                stoken: "current-stoken",
+                passcode: "2468"
+            )
+        )
+        let reference = try XCTUnwrap(initialResult.resourceReference)
+
+        let refreshClient = QuarkRefreshHTTPClient(firstPlayFailure: .none)
+        let refreshProvider = try makeNodeProvider(
+            httpClient: refreshClient,
+            quarkPasscodeStore: passcodeStore,
+            configurationIdentity: configurationIdentity
+        )
+        let refreshed = try await refreshProvider.refreshPlayback(
+            PlaybackRefreshRequest(
+                videoID: "history-video-id",
+                title: "多个同名的影片",
+                sourceIdentity: reference.sourceIdentity,
+                resourceIdentity: reference.episodeIdentity,
+                sourceName: "原画",
+                episodeName: "第 1 集",
+                episodeReference: "obsolete-ephemeral-reference",
+                providerResourceReference: reference
+            )
+        )
+        let requests = await refreshClient.capturedRequests()
+
+        XCTAssertEqual(
+            requests.filter { $0.url == QuarkEpisodeReference.shareTokenURL }.count,
+            1
+        )
+        XCTAssertEqual(
+            requests.filter { $0.url.path.hasSuffix("/play") }.count,
+            1
+        )
+        XCTAssertFalse(
+            requests.contains {
+                $0.url.path.hasSuffix("/search")
+                    || $0.url.path.hasSuffix("/detail")
+            }
+        )
+        XCTAssertEqual(refreshed.detail.summary.videoID, "history-video-id")
+        XCTAssertEqual(refreshed.source.name, "原画")
+        XCTAssertEqual(refreshed.episode.name, "第 1 集")
+        XCTAssertEqual(
+            refreshed.episode.url,
+            reference.stableResourceLocator
+        )
+        let refreshedReference = try XCTUnwrap(
+            refreshed.playbackResult.resourceReference
+        )
+        XCTAssertTrue(
+            refreshProvider.acceptsPlaybackResourceReference(refreshedReference)
+        )
+        XCTAssertEqual(
+            QuarkEpisodeReference.identity(
+                from: refreshedReference.stableResourceLocator
+            ),
+            QuarkEpisodeReference.identity(
+                from: reference.stableResourceLocator
+            )
+        )
+
+        // Model AppState's first player-load failure followed by the provider
+        // refresh above. The expired authoritative request gets exactly one
+        // direct attempt; it must not spend the remaining budget on unrelated
+        // configured parsers. The second actual media-loader invocation must
+        // then receive every value from the refreshed provider snapshot.
+        let configuredParser = ParseConfiguration(
+            name: "Unrelated parser",
+            type: 1,
+            url: "https://parser.example.invalid/?url="
+        )
+        let obsoleteResult = SitePlaybackResult(
+            url: "https://expired.example.invalid/old-media.m3u8",
+            needsParsing: false,
+            flag: refreshed.source.name,
+            headers: ["X-Playback-Revision": "expired"],
+            validationPolicy: .playerAuthoritative,
+            resourceReference: reference
+        )
+        let obsoleteContext = PlaybackResolutionAttemptContext(
+            detail: refreshed.detail,
+            source: refreshed.source,
+            episode: PlayEpisode(
+                name: "旧分集",
+                url: "obsolete-ephemeral-reference"
+            ),
+            result: obsoleteResult
+        )
+        let refreshedContext = PlaybackResolutionAttemptContext(
+            detail: refreshed.detail,
+            source: refreshed.source,
+            episode: refreshed.episode,
+            result: refreshed.playbackResult
+        )
+        let parseExecutor = PlaybackParseInvocationRecorder()
+        let resolver = PlaybackResolver(
+            parseExecutor: parseExecutor,
+            mediaProbe: RejectingPlaybackMediaProbe()
+        )
+        var obsoleteAttempts = 0
+        for await event in resolver.resolve(
+            obsoleteContext.resolutionRequest(
+                configuredParsers: [configuredParser],
+                maximumAttempts: 8
+            ),
+            mediaLoader: { _, _ in
+                throw AppError.playback("fixture loading failed")
+            }
+        ) {
+            if case .attempting = event {
+                obsoleteAttempts += 1
+            }
+        }
+        XCTAssertEqual(obsoleteAttempts, 1)
+
+        let loadRecorder = PlaybackMediaLoadRecorder()
+        var refreshedAttempts = 0
+        for await event in resolver.resolve(
+            refreshedContext.resolutionRequest(
+                configuredParsers: [configuredParser],
+                maximumAttempts: 7
+            ),
+            mediaLoader: { media, _ in
+                await loadRecorder.record(media)
+            }
+        ) {
+            if case .attempting = event {
+                refreshedAttempts += 1
+            }
+        }
+        let loadedMedia = await loadRecorder.loadedMedia()
+        let parserInvocationCount = await parseExecutor.invocationCount()
+
+        XCTAssertEqual(refreshedAttempts, 1)
+        XCTAssertEqual(parserInvocationCount, 0)
+        XCTAssertEqual(
+            loadedMedia?.url.absoluteString,
+            refreshed.playbackResult.url
+        )
+        XCTAssertNotEqual(
+            loadedMedia?.url.absoluteString,
+            obsoleteResult.url
+        )
+        XCTAssertEqual(
+            loadedMedia?.headers["X-Playback-Revision"],
+            "refreshed"
+        )
+        XCTAssertEqual(loadedMedia?.episodeName, refreshed.episode.name)
+    }
+
+    func testNodeProviderKeepsCurrentQuarkEpisodeUnchangedWhenTokenIsValid() async throws {
+        let passcodeStore = QuarkPasscodeMemoryStore()
+        let client = QuarkRefreshHTTPClient(firstPlayFailure: .none)
+        let provider = try makeNodeProvider(
+            httpClient: client,
+            quarkPasscodeStore: passcodeStore
+        )
+        let episode = try makeQuarkEpisodeReference(
+            stoken: "current-stoken",
+            passcode: "2468"
+        )
+
+        _ = try await provider.player(flag: "夸克", episodeURL: episode)
+        let requests = await client.capturedRequests()
+        let playRequests = requests.filter { $0.url.path.hasSuffix("/play") }
+
+        XCTAssertEqual(
+            requests.filter {
+                $0.url == QuarkEpisodeReference.shareTokenURL
+            }.count,
+            0
+        )
+        XCTAssertEqual(playRequests.count, 1)
+        XCTAssertEqual(try nodeEpisodeID(from: playRequests[0]), episode)
+    }
+
+    func testNodeProviderPrefersCurrentQuarkPasscodeOverStoredValue() async throws {
+        let passcodeStore = QuarkPasscodeMemoryStore()
+        let client = QuarkRefreshHTTPClient(firstPlayFailure: .expiredStoken)
+        let episode = try makeQuarkEpisodeReference(
+            stoken: "expired-stoken",
+            passcode: "2468"
+        )
+        let identity = try XCTUnwrap(
+            QuarkEpisodeReference.identity(from: episode)
+        )
+        passcodeStore.store(
+            "obsolete-passcode",
+            for: QuarkEpisodeReference.credentialAccount(for: identity)
+        )
+        let provider = try makeNodeProvider(
+            httpClient: client,
+            quarkPasscodeStore: passcodeStore
+        )
+
+        _ = try await provider.player(flag: "夸克", episodeURL: episode)
+        let requests = await client.capturedRequests()
+        let tokenRequest = try XCTUnwrap(
+            requests.first {
+                $0.url == QuarkEpisodeReference.shareTokenURL
+            }
+        )
+
+        XCTAssertEqual(
+            try quarkTokenRequestPasscode(from: tokenRequest),
+            "2468"
         )
     }
 
@@ -8024,7 +11207,9 @@ final class NodeBundleCompatibilityTests: XCTestCase {
     }
 
     private func makeNodeProvider(
-        httpClient: HTTPClient
+        httpClient: HTTPClient,
+        quarkPasscodeStore: QuarkPasscodeStoring = QuarkPasscodeMemoryStore(),
+        configurationIdentity: String? = nil
     ) throws -> NodeHTTPSpiderSiteProvider {
         try NodeHTTPSpiderSiteProvider(
             site: SiteConfiguration(
@@ -8035,7 +11220,30 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                 extra: ["okNodeRuntime": .bool(true)]
             ),
             baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
-            httpClient: httpClient
+            httpClient: httpClient,
+            quarkPasscodeStore: quarkPasscodeStore,
+            configurationIdentity: configurationIdentity
+        )
+    }
+
+    private func makeGenericNodeProvider(
+        httpClient: HTTPClient,
+        configurationIdentity: String,
+        playbackReplayStore: NodePlaybackReplayStoring =
+            NodePlaybackKeychainReplayStore()
+    ) throws -> NodeHTTPSpiderSiteProvider {
+        try NodeHTTPSpiderSiteProvider(
+            site: SiteConfiguration(
+                key: "nodejs_stable_fixture",
+                name: "Stable Node Fixture",
+                type: 4,
+                api: "/spider/stable-fixture/4",
+                extra: ["okNodeRuntime": .bool(true)]
+            ),
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: httpClient,
+            playbackReplayStore: playbackReplayStore,
+            configurationIdentity: configurationIdentity
         )
     }
 
@@ -8115,6 +11323,18 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             ),
             171
         )
+    }
+}
+
+private actor ConfigurationCancellationTestRecorder {
+    private(set) var events: [String] = []
+
+    func recordStarted(_ requestID: UUID) {
+        events.append("start:\(requestID)")
+    }
+
+    func recordAcknowledged(_ requestID: UUID) {
+        events.append("ack:\(requestID)")
     }
 }
 
@@ -8237,6 +11457,113 @@ private struct NodeProviderStubHTTPClient: HTTPClient {
     }
 }
 
+private actor NodeStableReferenceHTTPClient: HTTPClient {
+    private let stableLocator: String?
+    private var requests: [HTTPRequest] = []
+
+    init(stableLocator: String?) {
+        self.stableLocator = stableLocator
+    }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        requests.append(request)
+        if request.url.path.hasSuffix("/init") {
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 404,
+                headers: [:],
+                body: Data()
+            )
+        }
+        guard request.url.path.hasSuffix("/play") else {
+            throw HTTPClientError.statusCode(404)
+        }
+
+        var response: [String: Any] = [
+            "parse": 0,
+            "url": "http://127.0.0.1:18988/src/down/runtime-capability",
+            "header": ["Cookie": "runtime-only-cookie"]
+        ]
+        if let stableLocator {
+            response["providerResourceReference"] = [
+                "schemaVersion": 1,
+                "providerVersion": 1,
+                "stableResourceLocator": stableLocator,
+                "stability": "providerStable"
+            ]
+        }
+        return HTTPResponse(
+            url: request.url,
+            statusCode: 200,
+            headers: ["Content-Type": "application/json"],
+            body: try JSONSerialization.data(
+                withJSONObject: response,
+                options: [.sortedKeys, .withoutEscapingSlashes]
+            )
+        )
+    }
+
+    func capturedRequests() -> [HTTPRequest] {
+        requests
+    }
+}
+
+private final class QuarkPasscodeMemoryStore: QuarkPasscodeStoring {
+    private let lock = NSLock()
+    private var values: [String: String] = [:]
+
+    func passcode(for account: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return values[account]
+    }
+
+    @discardableResult
+    func store(_ passcode: String, for account: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        values[account] = passcode
+        return true
+    }
+}
+
+private final class NodePlaybackReplayMemoryStore: NodePlaybackReplayStoring {
+    private let lock = NSLock()
+    private var values: [String: NodePlaybackReplay] = [:]
+
+    func replay(for locator: String) -> NodePlaybackReplay? {
+        lock.lock()
+        defer { lock.unlock() }
+        return values[locator]
+    }
+
+    @discardableResult
+    func store(_ replay: NodePlaybackReplay, for locator: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        values[locator] = replay
+        return true
+    }
+
+    @discardableResult
+    func removeReplay(for locator: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        values.removeValue(forKey: locator)
+        return true
+    }
+}
+
+private struct NodePlaybackReplayRejectingStore: NodePlaybackReplayStoring {
+    func replay(for locator: String) -> NodePlaybackReplay? { nil }
+
+    func store(_ replay: NodePlaybackReplay, for locator: String) -> Bool {
+        false
+    }
+
+    func removeReplay(for locator: String) -> Bool { false }
+}
+
 private actor QuarkRefreshHTTPClient: HTTPClient {
     enum FirstPlayFailure {
         case none
@@ -8303,13 +11630,48 @@ private actor QuarkRefreshHTTPClient: HTTPClient {
             statusCode: 200,
             headers: ["Content-Type": "application/json"],
             body: Data(
-                #"{"parse":0,"url":"https://media.example.invalid/video.m3u8"}"#.utf8
+                #"{"parse":0,"url":"https://media.example.invalid/video.m3u8","header":{"X-Playback-Revision":"refreshed"}}"#.utf8
             )
         )
     }
 
     func capturedRequests() -> [HTTPRequest] {
         requests
+    }
+}
+
+private actor PlaybackParseInvocationRecorder: ParseExecutor {
+    private var count = 0
+
+    func resolve(
+        parser: ParseConfiguration,
+        inputURL: String,
+        headers: HTTPHeaders
+    ) async throws -> ParsedMedia {
+        count += 1
+        throw AppError.parsing("unexpected generic parser invocation")
+    }
+
+    func invocationCount() -> Int {
+        count
+    }
+}
+
+private struct RejectingPlaybackMediaProbe: MediaProbe {
+    func validate(url: URL, headers: HTTPHeaders) async throws -> Bool {
+        false
+    }
+}
+
+private actor PlaybackMediaLoadRecorder {
+    private var media: ResolvedMedia?
+
+    func record(_ media: ResolvedMedia) {
+        self.media = media
+    }
+
+    func loadedMedia() -> ResolvedMedia? {
+        media
     }
 }
 
@@ -8343,6 +11705,16 @@ private func nodeEpisodeID(from request: HTTPRequest) throws -> String {
     let body = try XCTUnwrap(request.body)
     let value = try JSONDecoder().decode(JSONValue.self, from: body)
     return try XCTUnwrap(value.objectValue?["id"]?.stringValue)
+}
+
+private func quarkTokenRequestPasscode(
+    from request: HTTPRequest
+) throws -> String {
+    let body = try XCTUnwrap(request.body)
+    let object = try XCTUnwrap(
+        JSONSerialization.jsonObject(with: body) as? [String: Any]
+    )
+    return try XCTUnwrap(object["passcode"] as? String)
 }
 
 private func quarkStoken(from episodeReference: String) throws -> String {

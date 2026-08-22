@@ -9,7 +9,7 @@ public actor SQLiteStore:
     HistoryRepository,
     SettingsRepository
 {
-    public static let currentSchemaVersion = 5
+    public static let currentSchemaVersion = 7
 
     private let connection: SQLiteConnection
     public let databaseURL: URL
@@ -469,6 +469,7 @@ public actor SQLiteStore:
 
     public func saveHistory(_ history: HistoryRecord, incognito: Bool) throws {
         guard !incognito else { return }
+        let history = history.sanitizedForPersistence()
         let playbackReference = try history.playbackReference.map {
             String(decoding: try JSONEncoder().encode($0), as: UTF8.self)
         }
@@ -500,7 +501,7 @@ public actor SQLiteStore:
                 .optional(history.sourceName),
                 .optional(history.episodeName),
                 .optional(history.episodeReference),
-                .optional(Self.safeMediaReference(history.mediaReference)),
+                .optional(history.mediaReference),
                 .double(history.position),
                 .double(history.duration),
                 .double(history.watchedAt.timeIntervalSince1970),
@@ -520,29 +521,28 @@ public actor SQLiteStore:
             ORDER BY watched_at DESC
             """
         ) { statement in
-            values.append(
-                HistoryRecord(
-                    configurationID: self.connection.text(statement, 0)
-                        .flatMap(UUID.init(uuidString:)),
-                    siteKey: self.connection.text(statement, 1) ?? "",
-                    videoID: self.connection.text(statement, 2) ?? "",
-                    title: self.connection.text(statement, 3) ?? "",
-                    posterURL: self.connection.text(statement, 4).flatMap(URL.init(string:)),
-                    sourceName: self.connection.text(statement, 5),
-                    episodeName: self.connection.text(statement, 6),
-                    episodeReference: self.connection.text(statement, 7),
-                    mediaReference: self.connection.text(statement, 8),
-                    playbackReference: self.connection.text(statement, 12)
-                        .flatMap { $0.data(using: .utf8) }
-                        .flatMap { try? JSONDecoder().decode(
-                            HistoryPlaybackReference.self,
-                            from: $0
-                        ) },
-                    position: sqlite3_column_double(statement, 9),
-                    duration: sqlite3_column_double(statement, 10),
-                    watchedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 11))
-                )
+            let record = HistoryRecord(
+                configurationID: self.connection.text(statement, 0)
+                    .flatMap(UUID.init(uuidString:)),
+                siteKey: self.connection.text(statement, 1) ?? "",
+                videoID: self.connection.text(statement, 2) ?? "",
+                title: self.connection.text(statement, 3) ?? "",
+                posterURL: self.connection.text(statement, 4).flatMap(URL.init(string:)),
+                sourceName: self.connection.text(statement, 5),
+                episodeName: self.connection.text(statement, 6),
+                episodeReference: self.connection.text(statement, 7),
+                mediaReference: self.connection.text(statement, 8),
+                playbackReference: self.connection.text(statement, 12)
+                    .flatMap { $0.data(using: .utf8) }
+                    .flatMap { try? JSONDecoder().decode(
+                        HistoryPlaybackReference.self,
+                        from: $0
+                    ) },
+                position: sqlite3_column_double(statement, 9),
+                duration: sqlite3_column_double(statement, 10),
+                watchedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 11))
             )
+            values.append(record.sanitizedForPersistence())
         }
         return values
     }
@@ -631,6 +631,12 @@ public actor SQLiteStore:
         }
         try connection.execute("PRAGMA foreign_keys = ON")
         try connection.execute("PRAGMA synchronous = NORMAL")
+        let secureDelete = try connection.scalarInt("PRAGMA secure_delete = ON")
+        guard secureDelete == 1 else {
+            throw AppError.database(
+                "无法启用 SQLite 安全删除：\(secureDelete)"
+            )
+        }
         let busyTimeout = try connection.scalarInt("PRAGMA busy_timeout = 5000")
         guard busyTimeout == 5_000 else {
             throw AppError.database(
@@ -796,6 +802,113 @@ public actor SQLiteStore:
                 try connection.execute("PRAGMA user_version = 5")
             }
         }
+        if version < 6 {
+            try connection.transaction {
+                var rows: [(
+                    rowID: Int64,
+                    episodeReference: String?,
+                    mediaReference: String?,
+                    playbackReference: String?
+                )] = []
+                try connection.query(
+                    """
+                    SELECT rowid, episode_reference, media_reference,
+                           playback_reference
+                    FROM history
+                    """
+                ) { statement in
+                    rows.append((
+                        rowID: sqlite3_column_int64(statement, 0),
+                        episodeReference: connection.text(statement, 1),
+                        mediaReference: connection.text(statement, 2),
+                        playbackReference: connection.text(statement, 3)
+                    ))
+                }
+
+                let encoder = JSONEncoder()
+                let decoder = JSONDecoder()
+                for row in rows {
+                    let playbackReference = row.playbackReference
+                        .flatMap { $0.data(using: .utf8) }
+                        .flatMap {
+                            try? decoder.decode(
+                                HistoryPlaybackReference.self,
+                                from: $0
+                            )
+                        }?
+                        .sanitizedForPersistence()
+                    let encodedPlaybackReference = try playbackReference.map {
+                        String(decoding: try encoder.encode($0), as: UTF8.self)
+                    }
+                    try connection.execute(
+                        """
+                        UPDATE history
+                        SET episode_reference = ?, media_reference = ?,
+                            playback_reference = ?
+                        WHERE rowid = ?
+                        """,
+                        bindings: [
+                            .optional(PlaybackPersistencePolicy
+                                .sanitizedOpaqueLocator(
+                                    row.episodeReference
+                                )),
+                            .optional(PlaybackPersistencePolicy
+                                .sanitizedMediaReference(
+                                    row.mediaReference
+                                )),
+                            .optional(encodedPlaybackReference),
+                            .integer(row.rowID)
+                        ]
+                    )
+                }
+                try connection.execute("PRAGMA user_version = 6")
+            }
+
+            // Existing databases may have carried a secret in an old cell or
+            // WAL frame. This one-time rebuild/checkpoint removes stale copies
+            // after the v6 row-level scrub.
+            try connection.query("PRAGMA wal_checkpoint(TRUNCATE)") { _ in }
+            try connection.execute("VACUUM")
+            try connection.query("PRAGMA wal_checkpoint(TRUNCATE)") { _ in }
+        }
+        if version < 7 {
+            try connection.transaction {
+                var rows: [(rowID: Int64, playbackReference: String?)] = []
+                try connection.query(
+                    "SELECT rowid, playback_reference FROM history"
+                ) { statement in
+                    rows.append((
+                        rowID: sqlite3_column_int64(statement, 0),
+                        playbackReference: connection.text(statement, 1)
+                    ))
+                }
+                let encoder = JSONEncoder()
+                let decoder = JSONDecoder()
+                for row in rows {
+                    let scrubbed = row.playbackReference
+                        .flatMap { $0.data(using: .utf8) }
+                        .flatMap {
+                            try? decoder.decode(
+                                HistoryPlaybackReference.self,
+                                from: $0
+                            )
+                        }?
+                        .sanitizedForPersistence()
+                    let encoded = try scrubbed.map {
+                        String(decoding: try encoder.encode($0), as: UTF8.self)
+                    }
+                    try connection.execute(
+                        "UPDATE history SET playback_reference = ? WHERE rowid = ?",
+                        bindings: [.optional(encoded), .integer(row.rowID)]
+                    )
+                }
+                try connection.execute("PRAGMA user_version = 7")
+            }
+            // Remove old raw provider locators from both table pages and WAL.
+            try connection.query("PRAGMA wal_checkpoint(TRUNCATE)") { _ in }
+            try connection.execute("VACUUM")
+            try connection.query("PRAGMA wal_checkpoint(TRUNCATE)") { _ in }
+        }
     }
 
     private static func verify(_ connection: SQLiteConnection) throws {
@@ -866,17 +979,4 @@ public actor SQLiteStore:
         )
     }
 
-    private static func safeMediaReference(_ value: String?) -> String? {
-        guard let value, let url = URL(string: value) else { return value }
-        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
-            return value
-        }
-        let sensitive = ["token", "auth", "authorization", "cookie", "password", "secret", "key"]
-        components.queryItems = components.queryItems?.map { item in
-            sensitive.contains(where: { item.name.lowercased().contains($0) })
-                ? URLQueryItem(name: item.name, value: "<redacted>")
-                : item
-        }
-        return components.string
-    }
 }

@@ -2,6 +2,76 @@ import XCTest
 @testable import OKVideoCore
 
 final class PlaybackResolverTests: XCTestCase {
+    func testPlaybackResourceReferenceRoundTripsWithoutRuntimeSecrets() throws {
+        let reference = PlaybackResourceReference(
+            configurationIdentity: "configuration-v1",
+            siteIdentity: "site-v1",
+            providerKind: "android-dex-spider",
+            providerVersion: 1,
+            stableResourceLocator: "provider://opaque/item/42",
+            sourceIdentity: "source-hash",
+            episodeIdentity: "episode-hash",
+            stability: .providerStable,
+            expiresAt: Date(timeIntervalSince1970: 123_456)
+        )
+
+        let data = try JSONEncoder().encode(reference)
+        let decoded = try JSONDecoder().decode(
+            PlaybackResourceReference.self,
+            from: data
+        )
+
+        XCTAssertEqual(decoded, reference)
+        let text = try XCTUnwrap(String(data: data, encoding: .utf8))
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("authorization"))
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("cookie"))
+    }
+
+    func testPlaybackMediaSessionKeepsRequestContextRuntimeOnly() {
+        let reference = PlaybackResourceReference(
+            configurationIdentity: "configuration-v1",
+            siteIdentity: "site-v1",
+            providerKind: "android-dex-spider",
+            providerVersion: 1,
+            stableResourceLocator: "provider://opaque/item/42",
+            sourceIdentity: "source-hash",
+            episodeIdentity: "episode-hash",
+            stability: .providerReplay
+        )
+        let session = PlaybackMediaSession(
+            sessionID: "session-1",
+            transport: .providerLoopback,
+            mediaURL: "http://127.0.0.1:19978/proxy/media/session-1",
+            headers: ["Authorization": "runtime-only"],
+            authorizationContextReference: "bridge-context-1",
+            proxyRequestID: "request-1",
+            upstreamResourceFingerprint: String(repeating: "a", count: 64),
+            refreshPerformed: true,
+            redirectPolicy: .follow,
+            rangePolicy: .forward,
+            resourceReference: reference
+        )
+        let result = SitePlaybackResult(
+            url: session.mediaURL,
+            needsParsing: false,
+            flag: "opaque",
+            headers: session.headers,
+            validationPolicy: .playerAuthoritative,
+            resourceReference: reference,
+            mediaSession: session
+        )
+
+        XCTAssertEqual(result.resourceReference, reference)
+        XCTAssertEqual(result.mediaSession, session)
+        XCTAssertEqual(result.mediaSession?.transport, .providerLoopback)
+        XCTAssertEqual(result.mediaSession?.rangePolicy, .forward)
+        XCTAssertEqual(
+            result.mediaSession?.upstreamResourceFingerprint,
+            String(repeating: "a", count: 64)
+        )
+        XCTAssertEqual(result.mediaSession?.refreshPerformed, true)
+    }
+
     func testPlayerAuthoritativeDirectMediaBypassesGenericPreflight() async {
         let resolver = PlaybackResolver(
             parseExecutor: FixtureParseExecutor(results: [:]),

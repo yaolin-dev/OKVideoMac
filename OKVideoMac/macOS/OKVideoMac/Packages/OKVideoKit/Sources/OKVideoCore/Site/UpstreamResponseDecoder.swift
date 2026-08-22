@@ -711,6 +711,72 @@ public enum SpiderResponseMapper {
         return player
     }
 
+    /// Reads the explicit, versioned durable-locator contract from a Spider
+    /// player response. This deliberately does not inspect `url`, `playUrl`,
+    /// headers, quality URLs, or localhost proxy paths: none of those prove a
+    /// stable resource identity and they may contain short-lived credentials.
+    public static func providerPlaybackResourceDescriptor(
+        _ value: JSONValue
+    ) -> ProviderPlaybackResourceDescriptor? {
+        guard let object = topLevelObject(value),
+              case .object(let reference) = object[
+                  "providerResourceReference"
+              ],
+              let schemaVersion = strictInteger(reference["schemaVersion"]),
+              let providerVersion = strictInteger(reference["providerVersion"]),
+              case .string(let rawLocator) = reference[
+                  "stableResourceLocator"
+              ],
+              case .string(let rawStability) = reference["stability"],
+              let stability = PlaybackResourceReference.Stability(
+                  rawValue: rawStability
+              ),
+              schemaVersion == 1,
+              providerVersion == 1,
+              stability == .providerStable,
+              reference["expiresAt"] == nil || reference["expiresAt"] == .null,
+              let safeLocator = PlaybackPersistencePolicy
+                  .sanitizedOpaqueLocator(rawLocator),
+              safeLocator == rawLocator else {
+            return nil
+        }
+        return ProviderPlaybackResourceDescriptor(
+            schemaVersion: schemaVersion,
+            providerVersion: providerVersion,
+            stableResourceLocator: safeLocator,
+            stability: stability
+        )
+    }
+
+    private static func topLevelObject(
+        _ value: JSONValue
+    ) -> [String: JSONValue]? {
+        if case .object(let object) = value {
+            return object
+        }
+        guard case .string(let encoded) = value,
+              let data = encoded.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(
+                  JSONValue.self,
+                  from: data
+              ),
+              case .object(let object) = decoded else {
+            return nil
+        }
+        return object
+    }
+
+    private static func strictInteger(_ value: JSONValue?) -> Int? {
+        switch value {
+        case .integer(let value):
+            return Int(exactly: value)
+        case .number(let value) where value.isFinite && value.rounded() == value:
+            return Int(exactly: value)
+        default:
+            return nil
+        }
+    }
+
     private static func decode(
         _ value: JSONValue,
         site: SiteConfiguration,
