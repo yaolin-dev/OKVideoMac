@@ -38,6 +38,30 @@ fi
 if [[ -z "$APKANALYZER" ]]; then
   APKANALYZER="$(command -v apkanalyzer || true)"
 fi
+AAPT=""
+DEXDUMP=""
+if [[ -n "$ANDROID_SDK" ]]; then
+  while IFS= read -r candidate; do
+    if [[ -x "$candidate" ]]; then
+      AAPT="$candidate"
+      break
+    fi
+  done < <(find "$ANDROID_SDK/build-tools" -mindepth 2 -maxdepth 2 \
+    -path '*/aapt' -type f 2>/dev/null | sort -r)
+  while IFS= read -r candidate; do
+    if [[ -x "$candidate" ]]; then
+      DEXDUMP="$candidate"
+      break
+    fi
+  done < <(find "$ANDROID_SDK/build-tools" -mindepth 2 -maxdepth 2 \
+    -path '*/dexdump' -type f 2>/dev/null | sort -r)
+fi
+if [[ -z "$AAPT" ]]; then
+  AAPT="$(command -v aapt || true)"
+fi
+if [[ -z "$DEXDUMP" ]]; then
+  DEXDUMP="$(command -v dexdump || true)"
+fi
 EXPECTED_VERSION="${OKVIDEOMAC_EXPECTED_VERSION:-$(
   awk -F' = ' '/MARKETING_VERSION = / {
     gsub(/[ ;]/, "", $2)
@@ -101,21 +125,38 @@ if [[ -f "$APP/Contents/Resources/AndroidDexBridge-debug.apk" ]]; then
   echo "A Debug Android bridge must not be included in a formal package." >&2
   exit 1
 fi
-if [[ ! -x "$APKANALYZER" ]]; then
-  echo "apkanalyzer is required to verify the Android bridge." >&2
+if [[ -x "$APKANALYZER" ]]; then
+  BRIDGE_DEBUGGABLE="$("$APKANALYZER" manifest debuggable "$BRIDGE_APK")"
+  BRIDGE_TARGET_SDK="$("$APKANALYZER" manifest target-sdk "$BRIDGE_APK")"
+  BRIDGE_VERSION_NAME="$("$APKANALYZER" manifest version-name "$BRIDGE_APK")"
+elif [[ -x "$AAPT" ]]; then
+  BRIDGE_BADGING="$("$AAPT" dump badging "$BRIDGE_APK")"
+  if grep -q '^application-debuggable' <<< "$BRIDGE_BADGING"; then
+    BRIDGE_DEBUGGABLE="true"
+  else
+    BRIDGE_DEBUGGABLE="false"
+  fi
+  BRIDGE_TARGET_SDK="$(
+    sed -n "s/^targetSdkVersion:'\([^']*\)'.*/\1/p" <<< "$BRIDGE_BADGING" | head -n 1
+  )"
+  BRIDGE_VERSION_NAME="$(
+    sed -n "s/^package: .*versionName='\([^']*\)'.*/\1/p" <<< "$BRIDGE_BADGING" | head -n 1
+  )"
+else
+  echo "apkanalyzer or aapt is required to verify the Android bridge." >&2
   echo "Detected Android SDK: ${ANDROID_SDK:-none}" >&2
-  echo "Install Android SDK Command-line Tools, or set ANDROID_HOME or ANDROID_SDK_ROOT." >&2
+  echo "Install Android SDK Command-line Tools or Build Tools, or set ANDROID_HOME or ANDROID_SDK_ROOT." >&2
   exit 1
 fi
-if [[ "$("$APKANALYZER" manifest debuggable "$BRIDGE_APK")" != "false" ]]; then
+if [[ "$BRIDGE_DEBUGGABLE" != "false" ]]; then
   echo "Bundled Android bridge is debuggable." >&2
   exit 1
 fi
-if [[ "$("$APKANALYZER" manifest target-sdk "$BRIDGE_APK")" != "27" ]]; then
+if [[ "$BRIDGE_TARGET_SDK" != "27" ]]; then
   echo "Bundled Android bridge lost legacy Spider Activity compatibility." >&2
   exit 1
 fi
-if [[ "$("$APKANALYZER" manifest version-name "$BRIDGE_APK")" != "0.3.18" ]]; then
+if [[ "$BRIDGE_VERSION_NAME" != "0.3.18" ]]; then
   echo "Bundled Android bridge has an unexpected version." >&2
   exit 1
 fi
@@ -252,8 +293,38 @@ if ! grep -Fq 'AndroidDexBridge-release.apk' \
   echo "The legal payload does not link the APK to its dependency notice." >&2
   exit 1
 fi
-apk_dex_packages="$("$APKANALYZER" dex packages "$BRIDGE_APK")"
-if grep -Fq 'org.xmlpull.mxp1' <<<"$apk_dex_packages"; then
+excluded_xpp3_present="false"
+if [[ -x "$APKANALYZER" ]]; then
+  apk_dex_packages="$("$APKANALYZER" dex packages "$BRIDGE_APK")"
+  if grep -Fq 'org.xmlpull.mxp1' <<<"$apk_dex_packages"; then
+    excluded_xpp3_present="true"
+  fi
+elif [[ -x "$DEXDUMP" ]]; then
+  apk_dex_file="$(mktemp "${TMPDIR:-/tmp}/okvideomac-apk-dex.XXXXXX")"
+  apk_dex_dump="$(mktemp "${TMPDIR:-/tmp}/okvideomac-apk-dump.XXXXXX")"
+  trap 'unlink "$apk_dex_file" 2>/dev/null || true; unlink "$apk_dex_dump" 2>/dev/null || true' EXIT
+  dex_count=0
+  while IFS= read -r dex_entry; do
+    dex_count=$((dex_count + 1))
+    unzip -p "$BRIDGE_APK" "$dex_entry" > "$apk_dex_file"
+    "$DEXDUMP" "$apk_dex_file" > "$apk_dex_dump"
+    if grep -Fq 'Lorg/xmlpull/mxp1' "$apk_dex_dump"; then
+      excluded_xpp3_present="true"
+      break
+    fi
+  done < <(unzip -Z1 "$BRIDGE_APK" | grep -E '^classes([0-9]+)?\.dex$')
+  unlink "$apk_dex_file"
+  unlink "$apk_dex_dump"
+  trap - EXIT
+  if [[ "$dex_count" -eq 0 ]]; then
+    echo "The Android bridge APK contains no DEX payload." >&2
+    exit 1
+  fi
+else
+  echo "apkanalyzer or dexdump is required to audit Android bridge DEX packages." >&2
+  exit 1
+fi
+if [[ "$excluded_xpp3_present" == "true" ]]; then
   echo "The excluded xpp3 implementation is still present in the APK." >&2
   exit 1
 fi
