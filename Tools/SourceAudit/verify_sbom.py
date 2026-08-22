@@ -28,7 +28,9 @@ def locked_coordinates(lock: Path) -> set[str]:
     return {
         line.split("=", 1)[0]
         for line in lock.read_text(encoding="utf-8").splitlines()
-        if line and not line.startswith("#") and line != "empty="
+        # Gradle records dependency-free configurations as ``empty=<configs>``.
+        # This is lock metadata rather than a Maven coordinate.
+        if line and not line.startswith("#") and not line.startswith("empty=")
     }
 
 
