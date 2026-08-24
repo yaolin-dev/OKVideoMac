@@ -1567,7 +1567,16 @@ final class OKVideoMacTests: XCTestCase {
         )
         let home = SiteHome(
             categories: [VideoCategory(id: "peizhi", name: "云盘配置")],
-            recommendations: []
+            recommendations: [],
+            actionItems: [
+                SiteActionItem(
+                    siteKey: "drive",
+                    siteName: "Drive",
+                    itemID: "clear",
+                    title: "Clear",
+                    action: "ucClean"
+                )
+            ]
         )
 
         let normalized = AndroidDexSpiderSiteProvider.applyingHomeContract(
@@ -1583,11 +1592,63 @@ final class OKVideoMacTests: XCTestCase {
             HomePresentationPolicy.selection(for: normalized, preserving: nil),
             .actions
         )
+        XCTAssertEqual(normalized.actionItems.first?.tag, "command")
         XCTAssertFalse(
             AndroidDexSpiderSiteProvider.homeConfirmsAuthorization(
                 normalized,
                 site: site
             )
+        )
+    }
+
+    func testMDriveActionContractClassifiesStableActionIdentifiers() {
+        XCTAssertEqual(
+            MyDriveGuardActionContract.tag(for: "LoginShow"),
+            "authorization"
+        )
+        XCTAssertEqual(
+            MyDriveGuardActionContract.tag(for: "pushCkShow"),
+            "authorization"
+        )
+        for action in ["ucClean", "quarkClean", "BdClean", "aliClean"] {
+            XCTAssertEqual(
+                MyDriveGuardActionContract.tag(for: action),
+                "command"
+            )
+        }
+        for action in ["panSortShow", "panSourceSortShow"] {
+            XCTAssertEqual(
+                MyDriveGuardActionContract.tag(for: action),
+                "order"
+            )
+        }
+        XCTAssertNil(MyDriveGuardActionContract.tag(for: "unknownAction"))
+    }
+
+    func testMDriveActionContractPreservesExplicitUpstreamTag() {
+        let explicit = SiteActionItem(
+            siteKey: "MDrive",
+            siteName: "Drive",
+            itemID: "sort",
+            title: "Sort",
+            tag: "toggle",
+            action: "panSortShow"
+        )
+        let inferred = SiteActionItem(
+            siteKey: "MDrive",
+            siteName: "Drive",
+            itemID: "clear",
+            title: "Clear",
+            action: "quarkClean"
+        )
+
+        XCTAssertEqual(
+            MyDriveGuardActionContract.applying(to: explicit).tag,
+            "toggle"
+        )
+        XCTAssertEqual(
+            MyDriveGuardActionContract.applying(to: inferred).tag,
+            "command"
         )
     }
 
@@ -2196,6 +2257,45 @@ final class OKVideoMacTests: XCTestCase {
                 hasObservedTransition: true,
                 isVisible: true
             )
+        )
+    }
+
+    func testAcceptedMyDriveOrderingClicksAreTerminalMutations() {
+        for action in ["panSortShow", "panSourceSortShow"] {
+            XCTAssertTrue(
+                ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
+                    semantic: .order,
+                    providerAPI: "csp_MyDriveGuard",
+                    actionIdentifier: action
+                )
+            )
+        }
+        XCTAssertFalse(
+            ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
+                semantic: .order,
+                providerAPI: "csp_Other",
+                actionIdentifier: "panSourceSortShow"
+            )
+        )
+        XCTAssertFalse(
+            ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
+                semantic: .choice,
+                providerAPI: "csp_MyDriveGuard",
+                actionIdentifier: "panSourceSortShow"
+            )
+        )
+        XCTAssertFalse(
+            ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
+                semantic: .qrAuthorization,
+                providerAPI: "csp_MyDriveGuard",
+                actionIdentifier: "LoginShow"
+            )
+        )
+        XCTAssertEqual(
+            ConfigurationControlSubmissionPolicy.completionStatus(
+                semantic: .order
+            ),
+            "排序已更新"
         )
     }
 

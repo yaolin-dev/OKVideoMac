@@ -614,6 +614,47 @@ enum CloudAuthorizationPollingPolicy {
     }
 }
 
+/// MyDriveGuard's ordering controls are legacy immediate-mutation surfaces:
+/// the provider performs and persists the change inside the clicked Android
+/// view callback, but does not publish a second terminal response. A
+/// successful, request-scoped `performClick` is therefore their explicit
+/// completion event. Other providers, authorization, and generic
+/// configuration surfaces deliberately remain on the stricter verification
+/// path.
+enum ConfigurationControlSubmissionPolicy {
+    static func acceptedClickCompletes(
+        semantic: ConfigurationInteractionSemantic,
+        providerAPI: String?,
+        actionIdentifier: String?
+    ) -> Bool {
+        guard providerAPI?.trimmingCharacters(in: .whitespacesAndNewlines)
+                == MyDriveGuardActionContract.providerAPI else {
+            return false
+        }
+        switch (semantic, MyDriveGuardActionContract.tag(for: actionIdentifier)) {
+        case (.order, "order"), (.toggle, "toggle"):
+            return true
+        default:
+            return false
+        }
+    }
+
+    static func completionStatus(
+        semantic: ConfigurationInteractionSemantic
+    ) -> String {
+        switch semantic {
+        case .order:
+            return "排序已更新"
+        case .toggle:
+            return "设置已更新"
+        default:
+            return semantic.isAuthorization
+                ? "授权成功，正在刷新网盘内容…"
+                : "配置操作已完成"
+        }
+    }
+}
+
 enum ConfigurationInteractionVerificationDecision: Equatable, Sendable {
     case pending
     case verifySucceeded(refreshPerformed: Bool?)
@@ -1391,6 +1432,19 @@ private enum PendingCloudOperation {
         ConfigurationInteractionClassificationPolicy.interactionKind(
             for: initialSemantic
         )
+    }
+
+    var actionIdentifier: String? {
+        switch self {
+        case .playback:
+            return nil
+        case .detail(let summary):
+            return summary.action
+        case .homeAction(let item):
+            return item.action
+        case .siteAction(let action, _):
+            return action
+        }
     }
 }
 
@@ -4209,6 +4263,8 @@ final class AppState: ObservableObject {
             invalidateCloudAuthorization(nextIdentity: nil)
             return
         }
+        let submissionSemantic = cloudAuthorizationPrompt?.semantic
+            ?? context.operation.initialSemantic
         transitionConfigurationInteraction(
             context.operationID,
             to: .submitting,
@@ -4260,6 +4316,35 @@ final class AppState: ObservableObject {
                 throw AppError.spider(
                     "后台授权窗口中没有找到“\(action.title)”按钮"
                 )
+            }
+            if ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
+                semantic: submissionSemantic,
+                providerAPI: (providers[context.sourceIdentity.siteKey]
+                    as? AndroidDexSpiderSiteProvider)?.site.api,
+                actionIdentifier: context.operation.actionIdentifier
+            ) {
+                if var current = cloudAuthorizationContext,
+                   current.operationID == context.operationID {
+                    current.hasRequestedVerification = true
+                    cloudAuthorizationContext = current
+                }
+                transitionConfigurationInteraction(
+                    context.operationID,
+                    to: .processing,
+                    semantic: submissionSemantic,
+                    status: submissionSemantic == .order
+                        ? "排序操作已提交，正在保存…"
+                        : "设置操作已提交，正在保存…"
+                )
+                if let handle = context.providerHandle {
+                    await Self.verifyScopedConfigurationInteraction(
+                        handle,
+                        succeeded: true
+                    )
+                } else {
+                    await finishCloudAuthorizationAndRetry()
+                }
+                return
             }
             if var current = cloudAuthorizationContext,
                current.operationID == context.operationID {
@@ -4987,11 +5072,31 @@ final class AppState: ObservableObject {
         }
         let completionSemantic = cloudAuthorizationPrompt?.semantic
             ?? context.operation.initialSemantic
+        let loginStatusActionToReopen: SiteActionItem? = {
+            guard completionSemantic.isAuthorization,
+                  let provider = providers[context.sourceIdentity.siteKey]
+                    as? AndroidDexSpiderSiteProvider,
+                  provider.site.api.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                  ) == MyDriveGuardActionContract.providerAPI else {
+                return nil
+            }
+            switch context.operation {
+            case .homeAction(let item)
+                where item.action == MyDriveGuardActionContract.loginAction:
+                return item
+            case .detail(let summary)
+                where summary.action == MyDriveGuardActionContract.loginAction:
+                return SiteActionItem(summary: summary)
+            default:
+                return nil
+            }
+        }()
         completeConfigurationInteraction(
             context.operationID,
-            status: completionSemantic.isAuthorization
-                ? "授权成功，正在刷新网盘内容…"
-                : "配置操作已完成"
+            status: ConfigurationControlSubmissionPolicy.completionStatus(
+                semantic: completionSemantic
+            )
         )
         cloudAuthorizationSessionID = UUID()
         cloudAuthorizationPollTask?.cancel()
@@ -5029,6 +5134,12 @@ final class AppState: ObservableObject {
                selectedSection == .home,
                selectedSiteKey == context.sourceIdentity.siteKey {
                 await loadSelectedSiteHome(refreshConfigurationIfNeeded: false)
+                if let loginStatusActionToReopen {
+                    let refreshedAction = siteHome?.actionItems.first(where: {
+                        $0.action == MyDriveGuardActionContract.loginAction
+                    }) ?? loginStatusActionToReopen
+                    await performHomeAction(refreshedAction)
+                }
             } else {
                 await loadDetail(summary)
             }
@@ -5036,6 +5147,12 @@ final class AppState: ObservableObject {
             if selectedSection == .home,
                selectedSiteKey == context.sourceIdentity.siteKey {
                 await loadSelectedSiteHome(refreshConfigurationIfNeeded: false)
+                if let loginStatusActionToReopen {
+                    let refreshedAction = siteHome?.actionItems.first(where: {
+                        $0.action == MyDriveGuardActionContract.loginAction
+                    }) ?? loginStatusActionToReopen
+                    await performHomeAction(refreshedAction)
+                }
             }
         case .siteAction:
             if selectedSection == .home,

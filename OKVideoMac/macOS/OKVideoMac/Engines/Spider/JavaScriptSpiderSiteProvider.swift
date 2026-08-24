@@ -891,6 +891,51 @@ private actor JavaScriptSpiderSession {
     }
 }
 
+/// Structural compatibility metadata for the legacy MyDriveGuard action
+/// surface. The upstream CatVod response exposes stable action identifiers but
+/// omits `tag`, so every card would otherwise be treated as a generic native
+/// configuration operation. Bind only the documented provider class and its
+/// opaque action IDs; localized titles remain presentation-only.
+enum MyDriveGuardActionContract {
+    static let providerAPI = "csp_MyDriveGuard"
+    static let loginAction = "LoginShow"
+
+    static func tag(for action: String?) -> String? {
+        switch action?.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case loginAction, "pushCkShow":
+            return "authorization"
+        case "ucClean", "quarkClean", "BdClean", "aliClean":
+            return "command"
+        case "panSortShow", "panSourceSortShow":
+            return "order"
+        default:
+            return nil
+        }
+    }
+
+    static func applying(to item: SiteActionItem) -> SiteActionItem {
+        guard item.tag?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty != false,
+              let tag = tag(for: item.action) else {
+            return item
+        }
+        var updated = item
+        updated.tag = tag
+        return updated
+    }
+
+    static func applying(to summary: VideoSummary) -> VideoSummary {
+        guard summary.tag?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty != false,
+              let tag = tag(for: summary.action) else {
+            return summary
+        }
+        var updated = summary
+        updated.tag = tag
+        return updated
+    }
+}
+
 final class AndroidDexSpiderSiteProvider: SiteProvider {
     let site: SiteConfiguration
     let capability: SiteCapability = .javaDexSpider
@@ -1004,7 +1049,7 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         site: SiteConfiguration
     ) -> SiteHome {
         guard site.api.trimmingCharacters(in: .whitespacesAndNewlines)
-            == "csp_MyDriveGuard" else {
+            == MyDriveGuardActionContract.providerAPI else {
             return home
         }
         var updated = home
@@ -1012,6 +1057,9 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         where updated.categories[index].id == "peizhi" {
             updated.categories[index].contentKind = .action
         }
+        updated.actionItems = updated.actionItems.map(
+            MyDriveGuardActionContract.applying(to:)
+        )
         return updated
     }
 
@@ -1024,7 +1072,7 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         site: SiteConfiguration
     ) -> Bool {
         guard site.api.trimmingCharacters(in: .whitespacesAndNewlines)
-            == "csp_MyDriveGuard" else {
+            == MyDriveGuardActionContract.providerAPI else {
             return false
         }
         return applyingHomeContract(to: home, site: site).categories.contains {
@@ -1054,11 +1102,19 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         page: Int,
         filters: [String: String]
     ) async throws -> VideoPage {
-        try SpiderResponseMapper.actionPage(
+        let mapped = try SpiderResponseMapper.actionPage(
             await categoryValue(id: id, page: page, filters: filters),
             site: site,
             baseURL: baseURL,
             page: page
+        )
+        guard site.api.trimmingCharacters(in: .whitespacesAndNewlines)
+            == MyDriveGuardActionContract.providerAPI else {
+            return mapped
+        }
+        return VideoPage(
+            items: mapped.items.map(MyDriveGuardActionContract.applying(to:)),
+            pagination: mapped.pagination
         )
     }
 
