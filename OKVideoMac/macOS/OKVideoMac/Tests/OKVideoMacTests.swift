@@ -2467,6 +2467,183 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testCloudAccountStatusSharesAcrossConfigurationsForSameProvider() {
+        let providerID = CloudAccountProviderIdentity.identifier(
+            capability: .javaDexSpider,
+            api: "csp_MyDriveGuard"
+        )!
+        var store = CloudAccountStatusStore()
+
+        XCTAssertTrue(
+            store.observe(
+                title: "我的夸父 - 已登录",
+                providerID: providerID
+            )
+        )
+        XCTAssertEqual(
+            store.reconciledTitle(
+                "我的夸父 - 未登录",
+                providerID: providerID
+            ),
+            "我的夸父 - 已登录"
+        )
+    }
+
+    func testCloudAccountStatusDoesNotCrossProviderBoundary() {
+        let first = CloudAccountProviderIdentity.identifier(
+            capability: .javaDexSpider,
+            api: "csp_MyDriveGuard"
+        )!
+        let second = CloudAccountProviderIdentity.identifier(
+            capability: .javaDexSpider,
+            api: "csp_OtherDrive"
+        )!
+        var store = CloudAccountStatusStore()
+        _ = store.observe(title: "我的优汐 - 已登录", providerID: first)
+
+        XCTAssertEqual(
+            store.reconciledTitle(
+                "我的优汐 - 未登录",
+                providerID: second
+            ),
+            "我的优汐 - 未登录"
+        )
+    }
+
+    func testCloudAccountStatusRejectsTransientUnauthenticatedSnapshot() {
+        let providerID = CloudAccountProviderIdentity.identifier(
+            capability: .javaDexSpider,
+            api: "csp_MyDriveGuard"
+        )!
+        var store = CloudAccountStatusStore()
+        _ = store.observe(title: "我的阿狸 - 已登录", providerID: providerID)
+
+        XCTAssertFalse(
+            store.observe(
+                title: "我的阿狸 - 未登录",
+                providerID: providerID
+            )
+        )
+        XCTAssertEqual(
+            store.reconciledTitle(
+                "我的阿狸 - 未登录",
+                providerID: providerID
+            ),
+            "我的阿狸 - 已登录"
+        )
+        XCTAssertFalse(
+            store.observe(
+                title: "我的阿狸 - 正在确认",
+                providerID: providerID
+            )
+        )
+        XCTAssertEqual(
+            store.reconciledTitle(
+                "我的阿狸 - 正在确认",
+                providerID: providerID
+            ),
+            "我的阿狸 - 已登录"
+        )
+        XCTAssertTrue(
+            store.observe(
+                title: "我的阿狸 - 未登录",
+                providerID: providerID,
+                explicitlyUnauthenticated: true
+            )
+        )
+        XCTAssertEqual(
+            store.reconciledTitle(
+                "我的阿狸 - 已登录",
+                providerID: providerID
+            ),
+            "我的阿狸 - 未登录"
+        )
+    }
+
+    func testCloudAccountBridgeDefaultFalseIsNotExplicitLogoutEvidence() {
+        XCTAssertFalse(
+            CloudAccountBridgeEvidencePolicy.isExplicitlyUnauthenticated(
+                authenticated: false,
+                verificationPerformed: nil,
+                error: nil
+            )
+        )
+        XCTAssertFalse(
+            CloudAccountBridgeEvidencePolicy.isExplicitlyUnauthenticated(
+                authenticated: false,
+                verificationPerformed: true,
+                error: nil
+            )
+        )
+        XCTAssertTrue(
+            CloudAccountBridgeEvidencePolicy.isExplicitlyUnauthenticated(
+                authenticated: false,
+                verificationPerformed: true,
+                error: "invalid credential"
+            )
+        )
+    }
+
+    func testCloudAccountClearCommandOnlyInvalidatesMatchingAccount() {
+        let providerID = CloudAccountProviderIdentity.identifier(
+            capability: .javaDexSpider,
+            api: "csp_MyDriveGuard"
+        )!
+        var store = CloudAccountStatusStore()
+        _ = store.observe(title: "我的夸父 - 已登录", providerID: providerID)
+        _ = store.observe(title: "我的优汐 - 已登录", providerID: providerID)
+
+        XCTAssertTrue(
+            store.invalidate(providerID: providerID, command: "ucClean")
+        )
+        XCTAssertEqual(
+            store.reconciledTitle(
+                "我的夸父 - 未登录",
+                providerID: providerID
+            ),
+            "我的夸父 - 已登录"
+        )
+        XCTAssertEqual(
+            store.reconciledTitle(
+                "我的优汐 - 已登录",
+                providerID: providerID
+            ),
+            "我的优汐 - 未登录"
+        )
+    }
+
+    func testCloudAccountStatusPersistsWithoutCredentials() throws {
+        let providerID = CloudAccountProviderIdentity.identifier(
+            capability: .javaDexSpider,
+            api: "csp_MyDriveGuard"
+        )!
+        var store = CloudAccountStatusStore()
+        _ = store.observe(title: "我的哪哪 - 已登录", providerID: providerID)
+
+        let restored = try XCTUnwrap(
+            store.setting.flatMap(CloudAccountStatusStore.init(setting:))
+        )
+        XCTAssertEqual(restored, store)
+        XCTAssertFalse(String(describing: restored).contains("Cookie"))
+        XCTAssertFalse(String(describing: restored).contains("Token"))
+    }
+
+    func testReconciledAccountActionPreservesProviderAuthorizationTitle() {
+        let action = CloudAuthorizationAction(
+            id: "account-uc",
+            title: "我的优汐 - 已登录",
+            providerTitle: "我的优汐 - 未登录"
+        )
+
+        XCTAssertNotNil(
+            MyDriveAuthorizationVerificationPolicy.target(
+                controlID: action.id,
+                title: action.providerTitle
+            )
+        )
+        XCTAssertEqual(action.title, "我的优汐 - 已登录")
+    }
+
     func testMyDriveAuthorizationRejectsQRCodeExitAndUnrelatedLogin() throws {
         let target = try XCTUnwrap(
             MyDriveAuthorizationVerificationPolicy.target(

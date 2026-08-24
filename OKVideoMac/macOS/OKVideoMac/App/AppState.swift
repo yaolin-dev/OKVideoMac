@@ -164,19 +164,338 @@ enum NodeUserFacingErrorMapper {
 struct CloudAuthorizationAction: Identifiable, Equatable {
     let id: String
     let title: String
+    /// Provider-owned title before the host reconciles a persisted account
+    /// status for display. Authorization verification must always inspect
+    /// this value so presentation state cannot change provider semantics.
+    let providerTitle: String
     let role: String?
     let generation: Int?
 
     init(
         id: String,
         title: String,
+        providerTitle: String? = nil,
         role: String? = nil,
         generation: Int? = nil
     ) {
         self.id = id
         self.title = title
+        self.providerTitle = providerTitle ?? title
         self.role = role
         self.generation = generation
+    }
+}
+
+enum CloudAccountSnapshotStatus: String, Codable, Equatable, Sendable {
+    case authenticated
+    case unauthenticated
+    case pending
+}
+
+struct CloudAccountStatusKey: Codable, Equatable, Hashable, Sendable {
+    let providerID: String
+    let accountKey: String
+}
+
+struct CloudAccountStatusRecord: Codable, Equatable, Sendable {
+    let key: CloudAccountStatusKey
+    var status: CloudAccountSnapshotStatus
+    var verifiedAt: Date
+}
+
+/// A credential-free, application-wide snapshot of cloud account state.
+/// Android remains the sole owner of Cookie/Token data. This store persists
+/// only provider/account identity, a tri-state result and its verification
+/// time so equivalent providers can retain presentation state across source
+/// configuration switches.
+struct CloudAccountStatusStore: Codable, Equatable, Sendable {
+    static let settingKey = "cloud.accountStatus.v1"
+
+    private(set) var records: [CloudAccountStatusRecord] = []
+
+    init(records: [CloudAccountStatusRecord] = []) {
+        self.records = records
+    }
+
+    init?(setting: JSONValue) {
+        guard case .string(let encoded) = setting,
+              let data = Data(base64Encoded: encoded),
+              let decoded = try? JSONDecoder().decode(Self.self, from: data)
+        else { return nil }
+        self = decoded
+    }
+
+    var setting: JSONValue? {
+        guard let data = try? JSONEncoder().encode(self) else { return nil }
+        return .string(data.base64EncodedString())
+    }
+
+    func status(
+        providerID: String,
+        accountKey: String
+    ) -> CloudAccountSnapshotStatus? {
+        records.first(where: {
+            $0.key == CloudAccountStatusKey(
+                providerID: providerID,
+                accountKey: accountKey
+            )
+        })?.status
+    }
+
+    @discardableResult
+    mutating func observe(
+        title: String,
+        providerID: String,
+        explicitlyUnauthenticated: Bool = false,
+        now: Date = Date()
+    ) -> Bool {
+        guard let parsed = CloudAccountStatusTitlePolicy.parse(title) else {
+            return false
+        }
+        let key = CloudAccountStatusKey(
+            providerID: providerID,
+            accountKey: parsed.accountKey
+        )
+        let incoming: CloudAccountSnapshotStatus
+        switch parsed.status {
+        case .authenticated:
+            incoming = .authenticated
+        case .unauthenticated:
+            // A legacy chooser may publish a temporary "未登录" row while a
+            // newly-created provider instance is restoring Android state.
+            // It cannot revoke a previously confirmed login unless the Bridge
+            // also reports an explicit unauthenticated result.
+            if status(
+                providerID: providerID,
+                accountKey: parsed.accountKey
+            ) == .authenticated, !explicitlyUnauthenticated {
+                return false
+            }
+            incoming = .unauthenticated
+        case .pending:
+            if status(
+                providerID: providerID,
+                accountKey: parsed.accountKey
+            ) == .authenticated {
+                return false
+            }
+            incoming = .pending
+        }
+        return set(incoming, for: key, verifiedAt: now)
+    }
+
+    @discardableResult
+    mutating func confirmAuthenticated(
+        providerID: String,
+        accountKey: String,
+        now: Date = Date()
+    ) -> Bool {
+        set(
+            .authenticated,
+            for: CloudAccountStatusKey(
+                providerID: providerID,
+                accountKey: accountKey
+            ),
+            verifiedAt: now
+        )
+    }
+
+    @discardableResult
+    mutating func invalidate(
+        providerID: String,
+        command: String,
+        now: Date = Date()
+    ) -> Bool {
+        guard let fragments = CloudAccountStatusInvalidationPolicy
+            .accountKeyFragments(for: command) else {
+            return false
+        }
+        var changed = false
+        for index in records.indices
+        where records[index].key.providerID == providerID
+            && fragments.contains(where: {
+                records[index].key.accountKey.contains($0)
+            }) {
+            if records[index].status != .unauthenticated {
+                records[index].status = .unauthenticated
+                records[index].verifiedAt = now
+                changed = true
+            }
+        }
+        return changed
+    }
+
+    func reconciledTitle(_ title: String, providerID: String) -> String {
+        guard let parsed = CloudAccountStatusTitlePolicy.parse(title),
+              let stored = status(
+                providerID: providerID,
+                accountKey: parsed.accountKey
+              ) else {
+            return title
+        }
+        return CloudAccountStatusTitlePolicy.replacingStatus(
+            in: title,
+            with: stored
+        )
+    }
+
+    private mutating func set(
+        _ status: CloudAccountSnapshotStatus,
+        for key: CloudAccountStatusKey,
+        verifiedAt: Date
+    ) -> Bool {
+        if let index = records.firstIndex(where: { $0.key == key }) {
+            guard records[index].status != status else { return false }
+            records[index].status = status
+            records[index].verifiedAt = verifiedAt
+            return true
+        }
+        records.append(
+            CloudAccountStatusRecord(
+                key: key,
+                status: status,
+                verifiedAt: verifiedAt
+            )
+        )
+        return true
+    }
+}
+
+enum CloudAccountStatusTitlePolicy {
+    struct ParsedStatus: Equatable, Sendable {
+        let accountKey: String
+        let status: CloudAccountSnapshotStatus
+    }
+
+    private static let markers: [
+        (text: String, status: CloudAccountSnapshotStatus)
+    ] = [
+        ("未登录", .unauthenticated),
+        ("未登入", .unauthenticated),
+        ("未授权", .unauthenticated),
+        ("已登录", .authenticated),
+        ("已登入", .authenticated),
+        ("已授权", .authenticated),
+        ("正在确认", .pending)
+    ]
+
+    static func parse(_ title: String) -> ParsedStatus? {
+        guard let marker = markers.first(where: { title.contains($0.text) }),
+              let accountKey = accountKey(in: title) else {
+            return nil
+        }
+        return ParsedStatus(accountKey: accountKey, status: marker.status)
+    }
+
+    static func accountKey(in title: String) -> String? {
+        var normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        for marker in markers {
+            normalized = normalized.replacingOccurrences(
+                of: marker.text,
+                with: ""
+            )
+        }
+        let separators = CharacterSet(
+            charactersIn: "-—–_:：|｜·•()（）[]【】"
+        ).union(.whitespacesAndNewlines)
+        normalized = normalized.trimmingCharacters(in: separators).lowercased()
+        return normalized.nonEmpty
+    }
+
+    static func replacingStatus(
+        in title: String,
+        with status: CloudAccountSnapshotStatus
+    ) -> String {
+        guard parse(title) != nil else { return title }
+        var base = title
+        for marker in markers {
+            base = base.replacingOccurrences(of: marker.text, with: "")
+        }
+        let separators = CharacterSet(
+            charactersIn: "-—–_:：|｜·•()（）[]【】"
+        ).union(.whitespacesAndNewlines)
+        base = base.trimmingCharacters(in: separators)
+        let suffix: String
+        switch status {
+        case .authenticated:
+            suffix = "已登录"
+        case .unauthenticated:
+            suffix = "未登录"
+        case .pending:
+            suffix = "正在确认"
+        }
+        return "\(base) - \(suffix)"
+    }
+}
+
+enum CloudAccountStatusInvalidationPolicy {
+    static func accountKeyFragments(for command: String) -> [String]? {
+        switch command.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "quarkClean":
+            return ["quark", "夸克", "夸父"]
+        case "ucClean":
+            return ["uc", "优沛", "优汐"]
+        case "BdClean":
+            return ["baidu", "百度", "哪吒", "哪哪"]
+        case "aliClean":
+            return ["ali", "阿里", "阿狸"]
+        default:
+            return nil
+        }
+    }
+}
+
+enum CloudAccountProviderIdentity {
+    static func identifier(
+        capability: SiteCapability,
+        api: String
+    ) -> String? {
+        let normalizedAPI = api.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).lowercased()
+        guard !normalizedAPI.isEmpty else { return nil }
+        return "\(capability.rawValue.lowercased()):\(normalizedAPI)"
+    }
+}
+
+enum CloudAccountBridgeEvidencePolicy {
+    static func isExplicitlyUnauthenticated(
+        authenticated: Bool?,
+        verificationPerformed: Bool?,
+        error: String?
+    ) -> Bool {
+        authenticated == false
+            && verificationPerformed == true
+            && error?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+}
+
+private extension AndroidBridgeUIElement {
+    func replacingTitle(_ title: String) -> AndroidBridgeUIElement {
+        AndroidBridgeUIElement(
+            id: id,
+            type: type,
+            title: title,
+            role: role,
+            enabled: enabled,
+            clickable: clickable,
+            selected: selected,
+            checked: checked,
+            selectedIndex: selectedIndex,
+            value: value,
+            maximumValue: maximumValue,
+            hint: hint,
+            hasValue: hasValue,
+            parentID: parentID,
+            resourceName: resourceName,
+            className: className,
+            order: order,
+            depth: depth,
+            x: x,
+            y: y,
+            width: width,
+            height: height
+        )
     }
 }
 
@@ -759,15 +1078,7 @@ enum MyDriveAuthorizationVerificationPolicy {
     }
 
     private static func accountKey(in title: String) -> String? {
-        var normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        for marker in unauthenticatedMarkers + authenticatedMarkers {
-            normalized = normalized.replacingOccurrences(of: marker, with: "")
-        }
-        let separators = CharacterSet(
-            charactersIn: "-—–_:：|｜·•()（）[]【】"
-        ).union(.whitespacesAndNewlines)
-        normalized = normalized.trimmingCharacters(in: separators).lowercased()
-        return normalized.nonEmpty
+        CloudAccountStatusTitlePolicy.accountKey(in: title)
     }
 }
 
@@ -2406,6 +2717,7 @@ final class AppState: ObservableObject {
     private var playerEpisodePresentationCache: PlayerEpisodePresentationCache?
     private var playerEpisodePreparationTask: Task<Void, Never>?
     private var cloudAuthorizationContext: CloudAuthorizationContext?
+    private var cloudAccountStatusStore = CloudAccountStatusStore()
     private var pendingNodeOperation: PendingNodeOperation?
     private var playbackSessionID = UUID()
     private var activePlayerRequestID = UUID()
@@ -3011,7 +3323,7 @@ final class AppState: ObservableObject {
     private func commitConfigurationActivation(
         _ prepared: PreparedConfigurationActivation
     ) {
-        invalidateCloudAuthorization(nextIdentity: nil)
+        cancelActiveCloudAuthorizationInteraction(nextIdentity: nil)
         resetSearchForConfigurationChange()
         configurationRefreshSessionID = UUID()
         configurationRefreshTask?.cancel()
@@ -3077,7 +3389,7 @@ final class AppState: ObservableObject {
 
     func selectSite(_ key: String) async {
         invalidatePendingNodeHomeOperation(nextSiteKey: key)
-        invalidateCloudAuthorization(
+        cancelActiveCloudAuthorizationInteraction(
             nextIdentity: activeConfigurationRecord.map {
                 HomeContentIdentity(configurationID: $0.id, siteKey: key)
             }
@@ -3650,6 +3962,12 @@ final class AppState: ObservableObject {
                     )
                 }
             case .action(let result):
+                if let command = item.action {
+                    await invalidatePersistedCloudAccountStatus(
+                        provider: provider,
+                        command: command
+                    )
+                }
                 if let interactionID,
                    configurationInteractionCoordinator.owns(interactionID) {
                     completeConfigurationInteraction(
@@ -3838,6 +4156,10 @@ final class AppState: ObservableObject {
             } else {
                 result = try await provider.action(action)
             }
+            await invalidatePersistedCloudAccountStatus(
+                provider: provider,
+                command: action
+            )
             if let interactionID {
                 guard configurationInteractionCoordinator.owns(interactionID) else {
                     return
@@ -4476,7 +4798,7 @@ final class AppState: ObservableObject {
         nodeWebPresentation = nil
     }
 
-    private func invalidateCloudAuthorization(
+    private func cancelActiveCloudAuthorizationInteraction(
         nextIdentity: HomeContentIdentity?
     ) {
         guard let context = cloudAuthorizationContext,
@@ -4488,6 +4810,99 @@ final class AppState: ObservableObject {
             markPendingPlaybackCancelled: false,
             cancellationReason: .sourceChanged
         )
+    }
+
+    private func cloudAccountProviderID(
+        for context: CloudAuthorizationContext
+    ) -> String? {
+        guard let provider = providers[context.sourceIdentity.siteKey] else {
+            return nil
+        }
+        return CloudAccountProviderIdentity.identifier(
+            capability: provider.capability,
+            api: provider.site.api
+        )
+    }
+
+    /// Reconciles provider UI labels with the credential-free global snapshot.
+    /// Empty/transitional legacy UI does not alter a confirmed account. A
+    /// downgrade is accepted only when the Bridge returns a completed failed
+    /// credential verification with an error, or when a clear/logout command
+    /// succeeds. The current UI capture's default `authenticated: false` is
+    /// transitional metadata and must never revoke a confirmed login.
+    private func observeCloudAccountStatuses(
+        in state: AndroidBridgeUIState,
+        context: CloudAuthorizationContext
+    ) async -> String? {
+        guard configurationInteractionCoordinator.owns(context.operationID),
+              cloudAuthorizationContext?.operationID == context.operationID,
+              let providerID = cloudAccountProviderID(for: context) else {
+            return nil
+        }
+        let titles = state.actionableControls.map(\.title)
+            + (state.texts ?? [])
+            + (state.elements ?? []).map(\.title)
+        var changed = false
+        let explicitlyUnauthenticated = CloudAccountBridgeEvidencePolicy
+            .isExplicitlyUnauthenticated(
+                authenticated: state.authenticated,
+                verificationPerformed: state.verificationPerformed,
+                error: state.error
+            )
+        for title in Set(titles) {
+            changed = cloudAccountStatusStore.observe(
+                title: title,
+                providerID: providerID,
+                explicitlyUnauthenticated: explicitlyUnauthenticated
+            ) || changed
+        }
+        if state.authenticated == true,
+           let target = context.myDriveAuthorizationTarget {
+            changed = cloudAccountStatusStore.confirmAuthenticated(
+                providerID: providerID,
+                accountKey: target.accountKey
+            ) || changed
+        }
+        if changed {
+            await persistCloudAccountStatusStore()
+        }
+        guard configurationInteractionCoordinator.owns(context.operationID),
+              cloudAuthorizationContext?.operationID == context.operationID else {
+            return nil
+        }
+        return providerID
+    }
+
+    private func confirmCloudAccountStatus(
+        for context: CloudAuthorizationContext
+    ) async {
+        guard configurationInteractionCoordinator.owns(context.operationID),
+              cloudAuthorizationContext?.operationID == context.operationID,
+              let target = context.myDriveAuthorizationTarget,
+              let providerID = cloudAccountProviderID(for: context),
+              cloudAccountStatusStore.confirmAuthenticated(
+                providerID: providerID,
+                accountKey: target.accountKey
+              ) else {
+            return
+        }
+        await persistCloudAccountStatusStore()
+    }
+
+    private func invalidatePersistedCloudAccountStatus(
+        provider: SiteProvider,
+        command: String
+    ) async {
+        guard let providerID = CloudAccountProviderIdentity.identifier(
+            capability: provider.capability,
+            api: provider.site.api
+        ), cloudAccountStatusStore.invalidate(
+            providerID: providerID,
+            command: command
+        ) else {
+            return
+        }
+        await persistCloudAccountStatusStore()
     }
 
     private func clearCloudAuthorization(
@@ -4559,7 +4974,7 @@ final class AppState: ObservableObject {
               configurationInteractionCoordinator.owns(context.operationID),
               cloudAuthorizationPrompt?.lifecyclePhase == .presenting,
               isCurrentCloudAuthorizationContext(context) else {
-            invalidateCloudAuthorization(nextIdentity: nil)
+            cancelActiveCloudAuthorizationInteraction(nextIdentity: nil)
             return
         }
         let submissionSemantic = cloudAuthorizationPrompt?.semantic
@@ -4570,7 +4985,7 @@ final class AppState: ObservableObject {
         if myDriveLoginStatusAction(for: context) != nil,
            let target = MyDriveAuthorizationVerificationPolicy.target(
                 controlID: controlID,
-                title: action.title
+                title: action.providerTitle
            ) {
             // The legacy provider's submit call can remain suspended until
             // after the phone has scanned the QR and credentials are already
@@ -4760,7 +5175,7 @@ final class AppState: ObservableObject {
         guard let context = cloudAuthorizationContext,
               configurationInteractionCoordinator.owns(context.operationID),
               isCurrentCloudAuthorizationContext(context) else {
-            invalidateCloudAuthorization(nextIdentity: nil)
+            cancelActiveCloudAuthorizationInteraction(nextIdentity: nil)
             return
         }
         guard let environment,
@@ -4860,7 +5275,7 @@ final class AppState: ObservableObject {
         guard environment != nil,
               let context = cloudAuthorizationContext,
               isCurrentCloudAuthorizationContext(context) else {
-            invalidateCloudAuthorization(nextIdentity: nil)
+            cancelActiveCloudAuthorizationInteraction(nextIdentity: nil)
             return
         }
         do {
@@ -5104,6 +5519,21 @@ final class AppState: ObservableObject {
             context.actionContract = contract
         }
         cloudAuthorizationContext = context
+        let accountProviderID = await observeCloudAccountStatuses(
+            in: state,
+            context: context
+        )
+        guard configurationInteractionCoordinator.owns(operationID),
+              cloudAuthorizationContext?.operationID == operationID else {
+            return
+        }
+        let reconciledAccountTitle: (String) -> String = { [self] title in
+            guard let accountProviderID else { return title }
+            return cloudAccountStatusStore.reconciledTitle(
+                title,
+                providerID: accountProviderID
+            )
+        }
         let semantic = ConfigurationInteractionClassificationPolicy
             .nativeSemantic(
                 interaction: providerInteraction,
@@ -5222,7 +5652,8 @@ final class AppState: ObservableObject {
                 ? state.actionableControls.map {
                 CloudAuthorizationAction(
                     id: $0.id,
-                    title: $0.title,
+                    title: reconciledAccountTitle($0.title),
+                    providerTitle: $0.title,
                     role: $0.role,
                     generation: state.interactionGeneration
                 )
@@ -5230,8 +5661,14 @@ final class AppState: ObservableObject {
                 : [],
             snapshot: displaysLoginQRCode ? snapshot : nil,
             uiSchemaVersion: state.uiSchemaVersion,
-            elements: displaysLoginQRCode ? [] : state.elements ?? [],
-            supportingTexts: displaysLoginQRCode ? [] : state.texts ?? []
+            elements: displaysLoginQRCode
+                ? []
+                : (state.elements ?? []).map {
+                    $0.replacingTitle(reconciledAccountTitle($0.title))
+                },
+            supportingTexts: displaysLoginQRCode
+                ? []
+                : (state.texts ?? []).map(reconciledAccountTitle)
         )
         _ = configurationInteractionCoordinator.transition(
             operationID,
@@ -5640,6 +6077,11 @@ final class AppState: ObservableObject {
                 cloudAuthorizationPrompt = prompt
             }
             return true
+        }
+        await confirmCloudAccountStatus(for: context)
+        guard configurationInteractionCoordinator.owns(context.operationID),
+              cloudAuthorizationContext?.operationID == context.operationID else {
+            return false
         }
         if verifiedHome == nil {
             verifiedHome = try? await provider.home()
@@ -10116,7 +10558,21 @@ final class AppState: ObservableObject {
         ), case .array(let identifiers) = value {
             deletedLiveChannelIDs = Set(identifiers.compactMap(\.stringValue))
         }
+        if let value = try await environment.database.setting(
+            forKey: CloudAccountStatusStore.settingKey
+        ), let stored = CloudAccountStatusStore(setting: value) {
+            cloudAccountStatusStore = stored
+        }
         await loadSearchSiteScope()
+    }
+
+    private func persistCloudAccountStatusStore() async {
+        guard let environment,
+              let setting = cloudAccountStatusStore.setting else { return }
+        try? await environment.database.setSetting(
+            setting,
+            forKey: CloudAccountStatusStore.settingKey
+        )
     }
 
     private func persistFavoriteLiveChannels() async throws {
