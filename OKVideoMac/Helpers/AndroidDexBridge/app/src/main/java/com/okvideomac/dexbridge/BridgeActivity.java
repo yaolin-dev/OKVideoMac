@@ -8,16 +8,21 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.os.Bundle;
 import android.text.InputType;
 import android.text.method.PasswordTransformationMethod;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewParent;
 import android.view.Window;
 import android.widget.Button;
+import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.ImageView;
+import android.widget.SeekBar;
+import android.widget.Spinner;
 import android.widget.TextView;
 
 import org.json.JSONArray;
@@ -38,11 +43,13 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class BridgeActivity extends Activity {
+    private static final int UI_SCHEMA_VERSION = 2;
     private static volatile WeakReference<BridgeActivity> current =
             new WeakReference<>(null);
     private static volatile Context applicationContext;
@@ -313,6 +320,8 @@ public final class BridgeActivity extends Activity {
         unavailable.put("buttons", new JSONArray());
         unavailable.put("controls", new JSONArray());
         unavailable.put("texts", new JSONArray());
+        unavailable.put("uiSchemaVersion", UI_SCHEMA_VERSION);
+        unavailable.put("elements", new JSONArray());
         unavailable.put("generation", uiGeneration);
         unavailable.put("hostUnavailable", true);
         unavailable.put("phase", "reattaching");
@@ -326,6 +335,7 @@ public final class BridgeActivity extends Activity {
             JSONArray buttons = new JSONArray();
             JSONArray controls = new JSONArray();
             JSONArray texts = new JSONArray();
+            JSONArray elements = new JSONArray();
             String title = "";
             int inputCount = 0;
             int imageCount = 0;
@@ -338,18 +348,106 @@ public final class BridgeActivity extends Activity {
             String windowOwnerInteractionID =
                     BridgeActionActivity.interactionIDFor(windowOwner);
             if (root != null) {
+                int elementOrder = 0;
                 for (View view : flattened(root)) {
                     if (!view.isShown()) continue;
                     if (view instanceof EditText) {
                         inputCount++;
-                        if (isCredentialInput((EditText) view)) {
+                        boolean credential = isCredentialInput((EditText) view);
+                        if (credential) {
                             credentialInputCount++;
                         }
+                        elements.put(uiElement(
+                                view,
+                                root,
+                                credential ? "secureField" : "textField",
+                                inputLabel((EditText) view),
+                                "input",
+                                elementOrder++
+                        ));
                     } else if (view instanceof ImageView) {
                         imageCount++;
-                        if (isQRCodeImage((ImageView) view)) qrImageCount++;
+                        boolean qrCode = isQRCodeImage((ImageView) view);
+                        if (qrCode) qrImageCount++;
+                        String label = actionableLabelOf(view);
+                        boolean imageAction = view.isClickable()
+                                && view.isEnabled()
+                                && !label.isEmpty();
+                        elements.put(uiElement(
+                                view,
+                                root,
+                                qrCode
+                                        ? "qrCode"
+                                        : imageAction ? "imageButton" : "image",
+                                label,
+                                imageAction ? "action" : "image",
+                                elementOrder++
+                        ));
+                        if (imageAction) {
+                            appendControl(
+                                    buttons,
+                                    controls,
+                                    view,
+                                    label,
+                                    "imageButton"
+                            );
+                        }
+                    } else if (view instanceof CompoundButton) {
+                        String label = textOf((TextView) view);
+                        JSONObject element = uiElement(
+                                view,
+                                root,
+                                "toggle",
+                                label,
+                                view.isClickable() ? "action" : "status",
+                                elementOrder++
+                        );
+                        element.put(
+                                "checked",
+                                ((CompoundButton) view).isChecked()
+                        );
+                        elements.put(element);
+                        appendControl(buttons, controls, view, label, "toggle");
+                    } else if (view instanceof Spinner) {
+                        String label = selectedSpinnerLabel((Spinner) view);
+                        JSONObject element = uiElement(
+                                view,
+                                root,
+                                "picker",
+                                label,
+                                view.isClickable() ? "action" : "status",
+                                elementOrder++
+                        );
+                        element.put(
+                                "selectedIndex",
+                                ((Spinner) view).getSelectedItemPosition()
+                        );
+                        elements.put(element);
+                        appendControl(buttons, controls, view, label, "picker");
+                    } else if (view instanceof SeekBar) {
+                        JSONObject element = uiElement(
+                                view,
+                                root,
+                                "slider",
+                                contentDescriptionOf(view),
+                                view.isEnabled() ? "action" : "status",
+                                elementOrder++
+                        );
+                        element.put("value", ((SeekBar) view).getProgress());
+                        element.put("maximumValue", ((SeekBar) view).getMax());
+                        elements.put(element);
                     } else if (view instanceof Button) {
                         String label = textOf((TextView) view);
+                        elements.put(uiElement(
+                                view,
+                                root,
+                                "button",
+                                label,
+                                view.isClickable() && view.isEnabled()
+                                        ? "action"
+                                        : "status",
+                                elementOrder++
+                        ));
                         if (!label.isEmpty()
                                 && view.isEnabled()
                                 && view.isClickable()) {
@@ -369,7 +467,15 @@ public final class BridgeActivity extends Activity {
                             texts.put(label);
                         }
                     } else if (view.isClickable() && view.isEnabled()) {
-                        String label = labelOf(view);
+                        String label = actionableLabelOf(view);
+                        elements.put(uiElement(
+                                view,
+                                root,
+                                "actionRow",
+                                label,
+                                "action",
+                                elementOrder++
+                        ));
                         if (!label.isEmpty()) {
                             String id = stableControlID(view);
                             JSONObject control = new JSONObject();
@@ -383,6 +489,14 @@ public final class BridgeActivity extends Activity {
                     } else if (view instanceof TextView) {
                         String label = textOf((TextView) view);
                         if (label.isEmpty()) continue;
+                        elements.put(uiElement(
+                                view,
+                                root,
+                                "label",
+                                label,
+                                "label",
+                                elementOrder++
+                        ));
                         texts.put(label);
                         if (isAlertTitle(view)) title = label;
                     }
@@ -417,6 +531,7 @@ public final class BridgeActivity extends Activity {
                     root,
                     controls,
                     texts,
+                    elements,
                     inputCount,
                     imageCount,
                     credentialInputCount,
@@ -438,6 +553,8 @@ public final class BridgeActivity extends Activity {
             state.put("buttons", buttons);
             state.put("controls", controls);
             state.put("texts", texts);
+            state.put("uiSchemaVersion", UI_SCHEMA_VERSION);
+            state.put("elements", elements);
             state.put("phase", phase);
             state.put("provider", provider);
             state.put("credentialPush", credentialPush);
@@ -498,6 +615,8 @@ public final class BridgeActivity extends Activity {
         state.put("buttons", new JSONArray());
         state.put("controls", new JSONArray());
         state.put("texts", new JSONArray());
+        state.put("uiSchemaVersion", UI_SCHEMA_VERSION);
+        state.put("elements", new JSONArray());
         state.put("generation", generation);
         state.put("foreignUI", foreignVisible);
         state.put("phase", "hidden");
@@ -577,7 +696,7 @@ public final class BridgeActivity extends Activity {
                 boolean isButton = view instanceof Button;
                 String label = isButton
                         ? textOf((Button) view)
-                        : labelOf(view);
+                        : actionableLabelOf(view);
                 if (label.isEmpty()) continue;
                 String candidateControlID = stableControlID(view);
                 if ((controlId != null && controlId.equals(candidateControlID))
@@ -927,13 +1046,152 @@ public final class BridgeActivity extends Activity {
     }
 
     private static String stableControlID(View view) {
-        return "view:" + Integer.toUnsignedString(System.identityHashCode(view));
+        String resource = resourceName(view);
+        String path = hierarchyPath(view);
+        if (resource.isEmpty() && path.isEmpty()) {
+            return "view:" + Integer.toUnsignedString(
+                    System.identityHashCode(view)
+            );
+        }
+        return "view-v2:" + resource + ":" + path;
+    }
+
+    private static JSONObject uiElement(
+            View view,
+            View root,
+            String type,
+            String title,
+            String role,
+            int order
+    ) throws Exception {
+        JSONObject element = new JSONObject();
+        element.put("id", stableControlID(view));
+        element.put("type", type);
+        element.put("title", title == null ? "" : title);
+        element.put("role", role);
+        element.put("enabled", view.isEnabled());
+        element.put("clickable", view.isClickable());
+        element.put("selected", view.isSelected());
+        element.put("order", order);
+        element.put("depth", viewDepth(view));
+        element.put("resourceName", resourceName(view));
+        element.put("className", view.getClass().getName());
+        element.put("parentID", parentElementID(view));
+
+        Rect frame = new Rect();
+        Rect rootFrame = new Rect();
+        if (view.getGlobalVisibleRect(frame)) {
+            root.getGlobalVisibleRect(rootFrame);
+            element.put("x", frame.left - rootFrame.left);
+            element.put("y", frame.top - rootFrame.top);
+            element.put("width", frame.width());
+            element.put("height", frame.height());
+        }
+        if (view instanceof EditText) {
+            EditText input = (EditText) view;
+            CharSequence hint = input.getHint();
+            element.put("hint", hint == null ? "" : hint.toString().trim());
+            CharSequence value = input.getText();
+            // Input content may be a Cookie, token or password. The host only
+            // needs to know whether the field is populated; the value remains
+            // inside the Android provider process.
+            element.put("hasValue", value != null && value.length() > 0);
+        }
+        return element;
+    }
+
+    private static void appendControl(
+            JSONArray buttons,
+            JSONArray controls,
+            View view,
+            String rawLabel,
+            String role
+    ) throws Exception {
+        String label = rawLabel == null || rawLabel.trim().isEmpty()
+                ? contentDescriptionOf(view)
+                : rawLabel.trim();
+        if (label.isEmpty()) return;
+        if (view.isEnabled() && view.isClickable()) {
+            JSONObject control = new JSONObject();
+            control.put("id", stableControlID(view));
+            control.put("title", label);
+            control.put("enabled", true);
+            control.put("clickable", true);
+            control.put("role", role);
+            controls.put(control);
+            buttons.put(label);
+        }
+    }
+
+    private static String inputLabel(EditText input) {
+        CharSequence hint = input.getHint();
+        if (hint != null && !hint.toString().trim().isEmpty()) {
+            return hint.toString().trim();
+        }
+        return contentDescriptionOf(input);
+    }
+
+    private static String selectedSpinnerLabel(Spinner spinner) {
+        Object selected = spinner.getSelectedItem();
+        if (selected != null && !selected.toString().trim().isEmpty()) {
+            return selected.toString().trim();
+        }
+        return contentDescriptionOf(spinner);
+    }
+
+    private static String contentDescriptionOf(View view) {
+        CharSequence value = view.getContentDescription();
+        return value == null ? "" : value.toString().trim();
+    }
+
+    private static String parentElementID(View view) {
+        ViewParent parent = view.getParent();
+        return parent instanceof View ? stableControlID((View) parent) : "";
+    }
+
+    private static int viewDepth(View view) {
+        int depth = 0;
+        ViewParent parent = view.getParent();
+        while (parent instanceof View) {
+            depth++;
+            parent = parent.getParent();
+        }
+        return depth;
+    }
+
+    private static String hierarchyPath(View view) {
+        ArrayList<Integer> indices = new ArrayList<>();
+        View current = view;
+        ViewParent parent = current.getParent();
+        while (parent instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) parent;
+            indices.add(group.indexOfChild(current));
+            current = group;
+            parent = current.getParent();
+        }
+        Collections.reverse(indices);
+        StringBuilder path = new StringBuilder();
+        for (Integer index : indices) {
+            if (path.length() > 0) path.append('.');
+            path.append(index == null ? -1 : index.intValue());
+        }
+        return path.toString();
+    }
+
+    private static String resourceName(View view) {
+        if (view == null || view.getId() == View.NO_ID) return "";
+        try {
+            return view.getResources().getResourceName(view.getId());
+        } catch (Throwable ignored) {
+            return "";
+        }
     }
 
     private static String uiSignature(
             View root,
             JSONArray controls,
             JSONArray texts,
+            JSONArray elements,
             int inputCount,
             int imageCount,
             int credentialInputCount,
@@ -944,6 +1202,7 @@ public final class BridgeActivity extends Activity {
                 System.identityHashCode(root)))
                 + "|" + controls.toString()
                 + "|" + texts.toString()
+                + "|" + elements.toString()
                 + "|" + inputCount
                 + "|" + imageCount
                 + "|" + credentialInputCount
@@ -1078,6 +1337,37 @@ public final class BridgeActivity extends Activity {
             if (!label.isEmpty()) return label;
         }
         return "";
+    }
+
+    /**
+     * Produces a submit-safe label for icon-only provider controls. Android
+     * spiders frequently use ImageButtons for ordering; losing these controls
+     * makes the corresponding Mac setting appear incomplete.
+     */
+    private static String actionableLabelOf(View view) {
+        String label = labelOf(view);
+        if (!label.isEmpty()) return label;
+        label = contentDescriptionOf(view);
+        if (!label.isEmpty()) return label;
+        if (view == null || view.getId() == View.NO_ID) return "";
+        try {
+            String entry = view.getResources()
+                    .getResourceEntryName(view.getId());
+            String normalized = entry.toLowerCase(Locale.ROOT);
+            if (normalized.contains("move_up")
+                    || normalized.endsWith("_up")
+                    || normalized.equals("up")) {
+                return "上移";
+            }
+            if (normalized.contains("move_down")
+                    || normalized.endsWith("_down")
+                    || normalized.equals("down")) {
+                return "下移";
+            }
+            return entry.replace('_', ' ').trim();
+        } catch (Throwable ignored) {
+            return "";
+        }
     }
 
 

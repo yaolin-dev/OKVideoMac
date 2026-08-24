@@ -383,6 +383,13 @@ struct CloudAuthorizationPrompt: Identifiable, Equatable {
     var allowsRetry: Bool
     var actions: [CloudAuthorizationAction]
     var snapshot: Data?
+    var uiSchemaVersion: Int? = nil
+    var elements: [AndroidBridgeUIElement] = []
+    var supportingTexts: [String] = []
+
+    var structuredRows: [AndroidConfigurationSurfaceRow] {
+        AndroidConfigurationSurfaceLayout.rows(elements: elements)
+    }
 }
 
 struct NodeWebPresentation: Identifiable, Equatable {
@@ -624,20 +631,65 @@ enum CloudAuthorizationPollingPolicy {
     }
 }
 
-/// Legacy CatVod command, toggle and ordering controls perform and persist
-/// their change inside the clicked Android view callback, but often publish no
-/// second terminal response. A successful request-scoped `performClick` is
-/// therefore their explicit completion event. Choices and authorization stay
-/// on the stricter transition/verification path because they may open another
-/// provider-owned surface.
+/// Legacy CatVod commands and one-shot toggles persist inside their clicked
+/// Android callback and often publish no second terminal response. Ordering
+/// controls are different: arrow clicks mutate a draft dialog and only its
+/// own save/cancel control is terminal. Treating every arrow as completion
+/// closes the Mac surface after one move and loses the provider's draft.
 enum ConfigurationControlSubmissionPolicy {
     static func acceptedClickCompletes(
-        semantic: ConfigurationInteractionSemantic
+        semantic: ConfigurationInteractionSemantic,
+        controlTitle: String? = nil,
+        controlRole: String? = nil
     ) -> Bool {
         switch semantic {
-        case .command, .toggle, .order: return true
+        case .command, .toggle: return true
+        case .order:
+            return isOrderingCommit(
+                title: controlTitle,
+                role: controlRole
+            )
         default: return false
         }
+    }
+
+    static func acceptedClickCancels(
+        controlTitle: String,
+        controlRole: String?
+    ) -> Bool {
+        let value = normalizedControlText(
+            title: controlTitle,
+            role: controlRole
+        )
+        return ["取消", "关闭", "返回", "cancel", "close", "dismiss"]
+            .contains(value)
+    }
+
+    private static func isOrderingCommit(
+        title: String?,
+        role: String?
+    ) -> Bool {
+        let value = normalizedControlText(title: title, role: role)
+        return [
+            "保存", "确定", "应用", "完成", "提交",
+            "save", "confirm", "apply", "done", "submit"
+        ].contains(value)
+    }
+
+    private static func normalizedControlText(
+        title: String?,
+        role: String?
+    ) -> String {
+        let normalizedRole = role?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        if ["cancel", "dismiss", "close", "save", "confirm", "apply"]
+            .contains(normalizedRole) {
+            return normalizedRole
+        }
+        return title?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
     }
 
     static func completionStatus(
@@ -4318,8 +4370,22 @@ final class AppState: ObservableObject {
                     "后台授权窗口中没有找到“\(action.title)”按钮"
                 )
             }
+            if ConfigurationControlSubmissionPolicy.acceptedClickCancels(
+                controlTitle: action.title,
+                controlRole: action.role
+            ) {
+                clearCloudAuthorization(
+                    resetBridgeUI: false,
+                    markPendingPlaybackCancelled: false,
+                    cancellationReason: .user,
+                    cancelProviderHandle: false
+                )
+                return
+            }
             if ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
-                semantic: submissionSemantic
+                semantic: submissionSemantic,
+                controlTitle: action.title,
+                controlRole: action.role
             ) {
                 if var current = cloudAuthorizationContext,
                    current.operationID == context.operationID {
@@ -4820,7 +4886,10 @@ final class AppState: ObservableObject {
                 )
                 }
                 : [],
-            snapshot: displaysLoginQRCode ? snapshot : nil
+            snapshot: displaysLoginQRCode ? snapshot : nil,
+            uiSchemaVersion: state.uiSchemaVersion,
+            elements: state.elements ?? [],
+            supportingTexts: state.texts ?? []
         )
         _ = configurationInteractionCoordinator.transition(
             operationID,

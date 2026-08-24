@@ -26,6 +26,206 @@ struct AndroidBridgeUIControl: Decodable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// Lossless-enough description of one visible Android configuration view.
+/// Sensitive input values are deliberately excluded by the Bridge; `hasValue`
+/// only lets macOS show whether a provider field is already populated.
+struct AndroidBridgeUIElement: Decodable, Equatable, Identifiable, Sendable {
+    let id: String
+    let type: String
+    let title: String
+    let role: String?
+    let enabled: Bool?
+    let clickable: Bool?
+    let selected: Bool?
+    let checked: Bool?
+    let selectedIndex: Int?
+    let value: Int?
+    let maximumValue: Int?
+    let hint: String?
+    let hasValue: Bool?
+    let parentID: String?
+    let resourceName: String?
+    let className: String?
+    let order: Int?
+    let depth: Int?
+    let x: Int?
+    let y: Int?
+    let width: Int?
+    let height: Int?
+
+    init(
+        id: String,
+        type: String,
+        title: String = "",
+        role: String? = nil,
+        enabled: Bool? = true,
+        clickable: Bool? = false,
+        selected: Bool? = nil,
+        checked: Bool? = nil,
+        selectedIndex: Int? = nil,
+        value: Int? = nil,
+        maximumValue: Int? = nil,
+        hint: String? = nil,
+        hasValue: Bool? = nil,
+        parentID: String? = nil,
+        resourceName: String? = nil,
+        className: String? = nil,
+        order: Int? = nil,
+        depth: Int? = nil,
+        x: Int? = nil,
+        y: Int? = nil,
+        width: Int? = nil,
+        height: Int? = nil
+    ) {
+        self.id = id
+        self.type = type
+        self.title = title
+        self.role = role
+        self.enabled = enabled
+        self.clickable = clickable
+        self.selected = selected
+        self.checked = checked
+        self.selectedIndex = selectedIndex
+        self.value = value
+        self.maximumValue = maximumValue
+        self.hint = hint
+        self.hasValue = hasValue
+        self.parentID = parentID
+        self.resourceName = resourceName
+        self.className = className
+        self.order = order
+        self.depth = depth
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+    }
+
+    var normalizedType: String {
+        type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    var isActionable: Bool {
+        enabled != false && clickable == true
+    }
+
+    var verticalCenter: Double? {
+        guard let y else { return nil }
+        return Double(y) + Double(height ?? 0) / 2
+    }
+}
+
+struct AndroidConfigurationSurfaceRow: Equatable, Identifiable, Sendable {
+    let id: String
+    let elements: [AndroidBridgeUIElement]
+
+    var labels: [AndroidBridgeUIElement] {
+        elements.filter { !$0.isActionable && $0.normalizedType != "image"
+            && $0.normalizedType != "qrcode" }
+    }
+
+    var actions: [AndroidBridgeUIElement] {
+        elements.filter(\.isActionable)
+    }
+}
+
+enum AndroidConfigurationSurfaceLayout {
+    /// Reconstructs visual rows from the Android view bounds. Nested TextViews
+    /// which merely repeat a clickable parent's label are removed, while real
+    /// adjacent labels remain available to identify arrow/toggle controls.
+    static func rows(
+        elements rawElements: [AndroidBridgeUIElement]
+    ) -> [AndroidConfigurationSurfaceRow] {
+        let actionableIDs = Set(rawElements.filter(\.isActionable).map(\.id))
+        var elements = rawElements.filter { element in
+            guard !element.title.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ).isEmpty || element.isActionable else {
+                return false
+            }
+            if element.normalizedType == "label",
+               let parentID = element.parentID,
+               actionableIDs.contains(parentID) {
+                return false
+            }
+            return true
+        }
+        elements.sort {
+            let leftY = $0.verticalCenter ?? Double.greatestFiniteMagnitude
+            let rightY = $1.verticalCenter ?? Double.greatestFiniteMagnitude
+            if abs(leftY - rightY) > 4 { return leftY < rightY }
+            if ($0.x ?? Int.max) != ($1.x ?? Int.max) {
+                return ($0.x ?? Int.max) < ($1.x ?? Int.max)
+            }
+            return ($0.order ?? Int.max) < ($1.order ?? Int.max)
+        }
+
+        var grouped: [[AndroidBridgeUIElement]] = []
+        var centers: [Double?] = []
+        for element in elements {
+            guard let center = element.verticalCenter else {
+                grouped.append([element])
+                centers.append(nil)
+                continue
+            }
+            if let index = centers.indices.last,
+               let existingCenter = centers[index],
+               abs(existingCenter - center) <= rowTolerance(
+                   grouped[index],
+                   adding: element
+               ) {
+                grouped[index].append(element)
+                let count = Double(grouped[index].count)
+                centers[index] = existingCenter + (center - existingCenter) / count
+            } else {
+                grouped.append([element])
+                centers.append(center)
+            }
+        }
+
+        return grouped.enumerated().compactMap { index, values in
+            var deduplicated: [AndroidBridgeUIElement] = []
+            for value in values {
+                let duplicateActionTitle = !value.isActionable
+                    && values.contains {
+                        $0.isActionable
+                            && $0.title == value.title
+                    }
+                guard !duplicateActionTitle else { continue }
+                if !deduplicated.contains(where: {
+                    $0.id == value.id || (!$0.isActionable
+                        && !value.isActionable
+                        && $0.title == value.title)
+                }) {
+                    deduplicated.append(value)
+                }
+            }
+            guard !deduplicated.isEmpty else { return nil }
+            deduplicated.sort {
+                if ($0.x ?? Int.max) != ($1.x ?? Int.max) {
+                    return ($0.x ?? Int.max) < ($1.x ?? Int.max)
+                }
+                return ($0.order ?? Int.max) < ($1.order ?? Int.max)
+            }
+            return AndroidConfigurationSurfaceRow(
+                id: "row:\(index):\(deduplicated.map(\.id).joined(separator: "|"))",
+                elements: deduplicated
+            )
+        }
+    }
+
+    private static func rowTolerance(
+        _ current: [AndroidBridgeUIElement],
+        adding element: AndroidBridgeUIElement
+    ) -> Double {
+        let heights = (current + [element]).compactMap(\.height)
+        let typicalHeight = heights.isEmpty
+            ? 28
+            : heights.reduce(0, +) / heights.count
+        return Double(max(10, min(24, typicalHeight / 2)))
+    }
+}
+
 /// A request-owned description of one native Android configuration surface.
 ///
 /// This is intentionally provider-neutral. A chooser, ordering form, cookie
@@ -394,6 +594,8 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
     let verificationPerformed: Bool?
     let refreshPerformed: Bool?
     let error: String?
+    var uiSchemaVersion: Int? = nil
+    var elements: [AndroidBridgeUIElement]? = nil
     /// Opaque request owner minted by the macOS host and bound by the Bridge
     /// to one configuration/site/JAR tuple. These fields are optional so an
     /// older Bridge can still render read-only state, but credential

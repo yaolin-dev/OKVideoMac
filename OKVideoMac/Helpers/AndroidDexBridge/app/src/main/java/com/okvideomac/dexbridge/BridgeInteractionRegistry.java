@@ -327,6 +327,8 @@ final class BridgeInteractionRegistry {
             value.put("buttons", new JSONArray());
             value.put("controls", new JSONArray());
             value.put("texts", new JSONArray());
+            value.put("uiSchemaVersion", 2);
+            value.put("elements", new JSONArray());
             value.put("generation", 0L);
             value.put("hostUnavailable", false);
         } catch (Throwable ignored) {
@@ -370,6 +372,16 @@ final class BridgeInteractionRegistry {
                     ui.optJSONArray("texts") == null
                             ? new JSONArray()
                             : ui.optJSONArray("texts")
+            );
+            destination.put(
+                    "uiSchemaVersion",
+                    ui.optInt("uiSchemaVersion", 1)
+            );
+            destination.put(
+                    "elements",
+                    ui.optJSONArray("elements") == null
+                            ? new JSONArray()
+                            : ui.optJSONArray("elements")
             );
             destination.put("generation", ui.optLong("generation", 0L));
             destination.put(

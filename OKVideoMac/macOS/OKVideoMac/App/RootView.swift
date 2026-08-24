@@ -540,7 +540,10 @@ struct CloudAuthorizationView: View {
                     }
                 }
 
-                if let status = prompt.status, !status.isEmpty {
+                if let status = prompt.status,
+                   !status.isEmpty,
+                   !prompt.structuredRows.flatMap(\.labels)
+                    .contains(where: { $0.title == status }) {
                     Text(status)
                         .font(.callout)
                         .foregroundColor(.secondary)
@@ -586,6 +589,17 @@ struct CloudAuthorizationView: View {
                             .trimmingCharacters(in: .whitespacesAndNewlines)
                             .isEmpty || isBusy || isTerminal
                     )
+                } else if prompt.uiSchemaVersion ?? 0 >= 2,
+                          !prompt.structuredRows.isEmpty {
+                    AndroidConfigurationSurfaceView(
+                        rows: prompt.structuredRows,
+                        actions: prompt.actions,
+                        disabled: isBusy || isTerminal
+                    ) { action in
+                        Task {
+                            await state.submitCloudAuthorization(action: action)
+                        }
+                    }
                 } else {
                     LazyVGrid(
                         columns: [
@@ -624,7 +638,7 @@ struct CloudAuthorizationView: View {
                 }
             }
             .padding(22)
-            .frame(width: 520)
+            .frame(minWidth: 560, idealWidth: 700, maxWidth: 780)
             .background(.regularMaterial)
             .clipShape(RoundedRectangle(cornerRadius: 14))
             .shadow(radius: 24)
@@ -662,6 +676,198 @@ struct CloudAuthorizationView: View {
 
     private var inputPlaceholder: String {
         prompt.usesSecureInput ? "粘贴凭据" : "输入配置内容"
+    }
+}
+
+/// A native macOS projection of the Android provider's configuration view.
+/// The bridge supplies geometry and hierarchy instead of a flattened button
+/// list, allowing labels, state and ordering controls to stay associated.
+private struct AndroidConfigurationSurfaceView: View {
+    let rows: [AndroidConfigurationSurfaceRow]
+    let actions: [CloudAuthorizationAction]
+    let disabled: Bool
+    let submit: (CloudAuthorizationAction) -> Void
+
+    private var actionsByID: [String: CloudAuthorizationAction] {
+        Dictionary(uniqueKeysWithValues: actions.map { ($0.id, $0) })
+    }
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(rows) { row in
+                    AndroidConfigurationSurfaceRowView(
+                        row: row,
+                        actionsByID: actionsByID,
+                        disabled: disabled,
+                        submit: submit
+                    )
+                    if row.id != rows.last?.id {
+                        Divider()
+                            .padding(.leading, 14)
+                    }
+                }
+            }
+            .background(
+                Color(nsColor: .controlBackgroundColor),
+                in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+            }
+        }
+        .frame(minHeight: 80, maxHeight: 440)
+    }
+}
+
+private struct AndroidConfigurationSurfaceRowView: View {
+    let row: AndroidConfigurationSurfaceRow
+    let actionsByID: [String: CloudAuthorizationAction]
+    let disabled: Bool
+    let submit: (CloudAuthorizationAction) -> Void
+
+    private var labels: [AndroidBridgeUIElement] {
+        row.labels.filter {
+            !["textfield", "securefield"].contains($0.normalizedType)
+        }
+    }
+
+    private var inputElements: [AndroidBridgeUIElement] {
+        row.elements.filter {
+            ["textfield", "securefield"].contains($0.normalizedType)
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 3) {
+                if labels.isEmpty, let namedAction = namedStandaloneAction {
+                    Text(namedAction.title)
+                        .font(.body.weight(.medium))
+                } else {
+                    ForEach(Array(labels.enumerated()), id: \.element.id) { index, label in
+                        Text(label.title)
+                            .font(index == 0 ? .body.weight(.medium) : .caption)
+                            .foregroundColor(index == 0 ? .primary : .secondary)
+                            .lineLimit(index == 0 ? 2 : 3)
+                    }
+                }
+
+                ForEach(inputElements) { input in
+                    HStack(spacing: 6) {
+                        Image(systemName: input.normalizedType == "securefield"
+                            ? "lock.fill" : "text.cursor")
+                        Text(input.hint.flatMap {
+                            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                                .isEmpty ? nil : $0
+                        } ?? input.title)
+                        if input.hasValue == true {
+                            Text("已填写")
+                                .foregroundColor(.green)
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 8) {
+                ForEach(row.actions) { element in
+                    if let action = actionsByID[element.id] {
+                        actionButton(element: element, action: action)
+                    }
+                }
+            }
+            .fixedSize(horizontal: true, vertical: false)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(minHeight: 48)
+    }
+
+    private var namedStandaloneAction: AndroidBridgeUIElement? {
+        guard row.actions.count == 1,
+              let action = row.actions.first,
+              !isArrowTitle(action.title) else { return nil }
+        return action
+    }
+
+    @ViewBuilder
+    private func actionButton(
+        element: AndroidBridgeUIElement,
+        action: CloudAuthorizationAction
+    ) -> some View {
+        if element.normalizedType == "toggle" {
+            Button {
+                submit(action)
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: element.checked == true
+                        ? "checkmark.circle.fill" : "circle")
+                    Text(element.checked == true ? "已开启" : "已关闭")
+                }
+            }
+            .buttonStyle(.bordered)
+            .tint(element.checked == true ? .accentColor : .secondary)
+            .disabled(disabled || element.enabled == false)
+            .accessibilityLabel(action.title)
+        } else if let symbol = arrowSymbol(for: action.title) {
+            Button {
+                submit(action)
+            } label: {
+                Image(systemName: symbol)
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.bordered)
+            .disabled(disabled || element.enabled == false)
+            .help(arrowHelp(for: action.title))
+            .accessibilityLabel(arrowHelp(for: action.title))
+        } else {
+            if isPrimary(action) {
+                Button(action.title) {
+                    submit(action)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(disabled || element.enabled == false)
+            } else {
+                Button(action.title) {
+                    submit(action)
+                }
+                .buttonStyle(.bordered)
+                .disabled(disabled || element.enabled == false)
+            }
+        }
+    }
+
+    private func isPrimary(_ action: CloudAuthorizationAction) -> Bool {
+        let value = [action.title, action.role ?? ""]
+            .joined(separator: " ")
+            .lowercased()
+        return value.contains("保存") || value.contains("确定")
+            || value.contains("登录") || value.contains("save")
+            || value.contains("confirm")
+    }
+
+    private func isArrowTitle(_ title: String) -> Bool {
+        arrowSymbol(for: title) != nil
+    }
+
+    private func arrowSymbol(for title: String) -> String? {
+        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if ["▲", "↑", "上移", "向上", "up"].contains(normalized) {
+            return "chevron.up"
+        }
+        if ["▼", "↓", "下移", "向下", "down"].contains(normalized) {
+            return "chevron.down"
+        }
+        return nil
+    }
+
+    private func arrowHelp(for title: String) -> String {
+        arrowSymbol(for: title) == "chevron.up" ? "上移" : "下移"
     }
 }
 

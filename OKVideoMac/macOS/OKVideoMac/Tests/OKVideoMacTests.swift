@@ -2284,11 +2284,10 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testAcceptedStructuredControlClicksAreTerminalMutations() {
+    func testAcceptedStructuredControlClicksKeepOrderingDraftOpen() {
         for semantic in [
             ConfigurationInteractionSemantic.command,
-            .toggle,
-            .order
+            .toggle
         ] {
             XCTAssertTrue(
                 ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
@@ -2296,6 +2295,29 @@ final class OKVideoMacTests: XCTestCase {
                 )
             )
         }
+        XCTAssertFalse(
+            ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
+                semantic: .order
+            )
+        )
+        XCTAssertFalse(
+            ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
+                semantic: .order,
+                controlTitle: "▲"
+            )
+        )
+        XCTAssertTrue(
+            ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
+                semantic: .order,
+                controlTitle: "保存"
+            )
+        )
+        XCTAssertTrue(
+            ConfigurationControlSubmissionPolicy.acceptedClickCancels(
+                controlTitle: "取消",
+                controlRole: nil
+            )
+        )
         XCTAssertFalse(
             ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
                 semantic: .choice
@@ -2312,6 +2334,125 @@ final class OKVideoMacTests: XCTestCase {
             ),
             "排序已更新"
         )
+    }
+
+    func testAndroidConfigurationSurfaceAssociatesLabelsWithArrowControls() {
+        let elements = [
+            AndroidBridgeUIElement(
+                id: "label-quark",
+                type: "label",
+                title: "夸克网盘",
+                order: 0,
+                x: 20,
+                y: 100,
+                width: 120,
+                height: 24
+            ),
+            AndroidBridgeUIElement(
+                id: "up-quark",
+                type: "button",
+                title: "▲",
+                role: "ordering",
+                clickable: true,
+                order: 1,
+                x: 320,
+                y: 98,
+                width: 30,
+                height: 28
+            ),
+            AndroidBridgeUIElement(
+                id: "down-quark",
+                type: "button",
+                title: "▼",
+                role: "ordering",
+                clickable: true,
+                order: 2,
+                x: 360,
+                y: 98,
+                width: 30,
+                height: 28
+            ),
+            AndroidBridgeUIElement(
+                id: "label-uc",
+                type: "label",
+                title: "UC 网盘",
+                order: 3,
+                x: 20,
+                y: 144,
+                width: 120,
+                height: 24
+            )
+        ]
+
+        let rows = AndroidConfigurationSurfaceLayout.rows(elements: elements)
+
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0].labels.map(\.title), ["夸克网盘"])
+        XCTAssertEqual(rows[0].actions.map(\.id), ["up-quark", "down-quark"])
+        XCTAssertEqual(rows[1].labels.map(\.title), ["UC 网盘"])
+    }
+
+    func testAndroidConfigurationSurfaceDropsNestedDuplicateButtonLabel() {
+        let elements = [
+            AndroidBridgeUIElement(
+                id: "save",
+                type: "button",
+                title: "保存",
+                clickable: true,
+                x: 300,
+                y: 200,
+                width: 80,
+                height: 32
+            ),
+            AndroidBridgeUIElement(
+                id: "save-label",
+                type: "label",
+                title: "保存",
+                parentID: "save",
+                x: 315,
+                y: 204,
+                width: 50,
+                height: 22
+            )
+        ]
+
+        let rows = AndroidConfigurationSurfaceLayout.rows(elements: elements)
+
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].elements.map(\.id), ["save"])
+    }
+
+    func testAndroidBridgeDecodesStructuredUISchema() throws {
+        let json = """
+        {
+          "visible": true,
+          "title": "播放源排序",
+          "inputCount": 0,
+          "imageCount": 0,
+          "buttons": ["▲"],
+          "uiSchemaVersion": 2,
+          "elements": [{
+            "id": "up",
+            "type": "button",
+            "title": "▲",
+            "enabled": true,
+            "clickable": true,
+            "x": 300,
+            "y": 80,
+            "width": 30,
+            "height": 28
+          }]
+        }
+        """
+
+        let state = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: Data(json.utf8)
+        )
+
+        XCTAssertEqual(state.uiSchemaVersion, 2)
+        XCTAssertEqual(state.elements?.first?.id, "up")
+        XCTAssertEqual(state.elements?.first?.normalizedType, "button")
     }
 
     @MainActor

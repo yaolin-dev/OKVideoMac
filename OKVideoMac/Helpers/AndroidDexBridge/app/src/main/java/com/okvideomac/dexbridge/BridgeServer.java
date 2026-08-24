@@ -3,6 +3,7 @@ package com.okvideomac.dexbridge;
 import android.content.Context;
 import android.util.Log;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
@@ -263,6 +264,17 @@ final class BridgeServer {
                                     .versionName
                     );
                     health.put("generation", runtimeGeneration);
+                    health.put("uiSchemaVersion", 2);
+                    health.put(
+                            "uiCapabilities",
+                            new JSONArray()
+                                    .put("hierarchy")
+                                    .put("geometry")
+                                    .put("toggleState")
+                                    .put("pickerState")
+                                    .put("sliderState")
+                                    .put("secureInputRedaction")
+                    );
                     writeJSON(output, 200, health);
                     return;
                 }
