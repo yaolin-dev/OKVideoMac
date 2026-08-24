@@ -637,6 +637,12 @@ enum CloudAuthorizationPollingPolicy {
             && exitInterval >= minimumQRCodeExitInterval
             && hasGenerationTransition
     }
+
+    static func isWaitingForProviderWorker(
+        workerReturned: Bool?
+    ) -> Bool {
+        workerReturned != true
+    }
 }
 
 /// Legacy CatVod commands and one-shot toggles persist inside their clicked
@@ -5032,6 +5038,12 @@ final class AppState: ObservableObject {
                             state: state,
                             context: context
                         ) {
+                            if CloudAuthorizationPollingPolicy
+                                .isWaitingForProviderWorker(
+                                    workerReturned: state.workerReturned
+                                ) {
+                                hiddenPollCount = 0
+                            }
                             continue
                         }
                         if CloudAuthorizationPollingPolicy.shouldTimeOut(
@@ -5128,8 +5140,70 @@ final class AppState: ObservableObject {
         guard context.hasObservedQRCode,
               !state.isQRCode,
               context.providerInteraction?.actionKind == .authorization,
-              cloudAuthorizationContext?.hasRequestedVerification != true,
-              let provider = providers[context.sourceIdentity.siteKey]
+              cloudAuthorizationContext?.hasRequestedVerification != true else {
+            return false
+        }
+        // A QR dialog commonly closes as soon as the phone confirms the scan,
+        // before the provider worker has finished exchanging the token and
+        // persisting its Cookie. Calling home() in that interval executes the
+        // same legacy Spider concurrently and corrupts provider-owned locks or
+        // state. Keep the validated QR visible and wait for the original
+        // request-scoped worker instead.
+        if CloudAuthorizationPollingPolicy.isWaitingForProviderWorker(
+            workerReturned: state.workerReturned
+        ) {
+            if var prompt = cloudAuthorizationPrompt,
+               prompt.interactionID == context.operationID,
+               prompt.lifecyclePhase == .presenting {
+                prompt.status = "已扫码，正在等待站点写入登录凭据…"
+                cloudAuthorizationPrompt = prompt
+            }
+            // The Bridge owns the worker timeout and publishes an explicit
+            // failure if it never returns. Do not consume the short generic
+            // hidden-window timeout while useful provider work is active.
+            return true
+        }
+
+        // MyDriveGuard's LoginShow result is its refreshed account chooser,
+        // not the provider home page. Once the original worker returns, close
+        // only that scoped interaction and reopen LoginShow after refreshing
+        // home. The account rows then provide authoritative 已登录/未登录
+        // feedback for Quark, UC and every sibling drive handled by this
+        // provider class.
+        if myDriveLoginStatusAction(for: context) != nil {
+            guard configurationInteractionCoordinator.owns(
+                    context.operationID
+                  ),
+                  cloudAuthorizationContext?.operationID
+                    == context.operationID else {
+                return false
+            }
+            if var verifiedContext = cloudAuthorizationContext,
+               verifiedContext.operationID == context.operationID {
+                verifiedContext.hasRequestedVerification = true
+                cloudAuthorizationContext = verifiedContext
+            }
+            transitionConfigurationInteraction(
+                context.operationID,
+                to: .processing,
+                semantic: .qrAuthorization,
+                status: "二维码流程已结束，正在刷新账号状态…"
+            )
+            if let handle = context.providerHandle {
+                await Self.verifyScopedConfigurationInteraction(
+                    handle,
+                    succeeded: true,
+                    actualRefreshPerformed: false
+                )
+            } else {
+                await finishCloudAuthorizationAndRetry(
+                    refreshPerformed: false
+                )
+            }
+            return true
+        }
+
+        guard let provider = providers[context.sourceIdentity.siteKey]
                 as? AndroidDexSpiderSiteProvider else {
             return false
         }
@@ -5242,37 +5316,24 @@ final class AppState: ObservableObject {
         }
         let completionSemantic = cloudAuthorizationPrompt?.semantic
             ?? context.operation.initialSemantic
-        let loginStatusActionToReopen: SiteActionItem? = {
-            guard completionSemantic.isAuthorization,
-                  let provider = providers[context.sourceIdentity.siteKey]
-                    as? AndroidDexSpiderSiteProvider,
-                  provider.site.api.trimmingCharacters(
-                    in: .whitespacesAndNewlines
-                  ) == MyDriveGuardActionContract.providerAPI else {
-                return nil
-            }
-            switch context.operation {
-            case .homeAction(let item)
-                where item.action == MyDriveGuardActionContract.loginAction:
-                return item
-            case .detail(let summary)
-                where summary.action == MyDriveGuardActionContract.loginAction:
-                return SiteActionItem(summary: summary)
-            default:
-                return nil
-            }
-        }()
+        let loginStatusActionToReopen = completionSemantic.isAuthorization
+            ? myDriveLoginStatusAction(for: context)
+            : nil
         completeConfigurationInteraction(
             context.operationID,
-            status: ConfigurationControlSubmissionPolicy.completionStatus(
-                semantic: completionSemantic
-            )
+            status: loginStatusActionToReopen == nil
+                ? ConfigurationControlSubmissionPolicy.completionStatus(
+                    semantic: completionSemantic
+                )
+                : "二维码流程已结束，正在刷新账号状态…"
         )
         cloudAuthorizationSessionID = UUID()
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = nil
         try? await Task.sleep(
-            nanoseconds: completionSemantic.isAuthorization
+            nanoseconds: loginStatusActionToReopen != nil
+                ? 350_000_000
+                : completionSemantic.isAuthorization
                 ? 1_400_000_000
                 : 650_000_000
         )
@@ -5329,6 +5390,28 @@ final class AppState: ObservableObject {
                selectedSiteKey == context.sourceIdentity.siteKey {
                 await loadSelectedSiteHome(refreshConfigurationIfNeeded: false)
             }
+        }
+    }
+
+    private func myDriveLoginStatusAction(
+        for context: CloudAuthorizationContext
+    ) -> SiteActionItem? {
+        guard let provider = providers[context.sourceIdentity.siteKey]
+                as? AndroidDexSpiderSiteProvider,
+              provider.site.api.trimmingCharacters(
+                in: .whitespacesAndNewlines
+              ) == MyDriveGuardActionContract.providerAPI else {
+            return nil
+        }
+        switch context.operation {
+        case .homeAction(let item)
+            where item.action == MyDriveGuardActionContract.loginAction:
+            return item
+        case .detail(let summary)
+            where summary.action == MyDriveGuardActionContract.loginAction:
+            return SiteActionItem(summary: summary)
+        default:
+            return nil
         }
     }
 

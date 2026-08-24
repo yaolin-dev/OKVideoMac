@@ -156,7 +156,7 @@ if [[ "$BRIDGE_TARGET_SDK" != "27" ]]; then
   echo "Bundled Android bridge lost legacy Spider Activity compatibility." >&2
   exit 1
 fi
-if [[ "$BRIDGE_VERSION_NAME" != "0.3.24" ]]; then
+if [[ "$BRIDGE_VERSION_NAME" != "0.3.25" ]]; then
   echo "Bundled Android bridge has an unexpected version." >&2
   exit 1
 fi

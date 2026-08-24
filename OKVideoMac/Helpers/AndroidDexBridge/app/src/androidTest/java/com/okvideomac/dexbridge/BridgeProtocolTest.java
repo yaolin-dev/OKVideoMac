@@ -729,6 +729,38 @@ public final class BridgeProtocolTest extends TestCase {
         assertFalse(BridgeServer.hasTrackedInteractionWorker(id));
     }
 
+    public void testProviderFinishHandsDialogsBackToPersistentHost()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        String id = "interaction-provider-finish-" + UUID.randomUUID();
+        BridgeServer.beginAndActivateInteraction(
+                context,
+                id,
+                "authorization",
+                "action"
+        );
+        BridgeActivity.prepareDialogHandoff(context, id);
+        AlertDialog dialog = showOwnedDialog(id, "即将切换到二维码", null);
+        Activity disposableOwner = (Activity) com.github.catvod.Init.context();
+
+        // Spider actions run on the Bridge worker, so exercise the real
+        // off-main handoff rather than only Activity button callbacks.
+        Thread finishThread = new Thread(
+                disposableOwner::finish,
+                "provider-finish-test"
+        );
+        finishThread.start();
+        finishThread.join(2_000L);
+        assertFalse(finishThread.isAlive());
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+
+        assertFalse(isShowing(dialog));
+        assertTrue(BridgeActionActivity.awaitReleased(id, 2_000L));
+        assertFalse(com.github.catvod.Init.context() == disposableOwner);
+        BridgeInteractionRegistry.cancel(id);
+    }
+
     public void testLegacyUntaggedLoginQRCodePromotesAndVerifies()
             throws Exception {
         ensureBridgeServer();

@@ -15,8 +15,8 @@ android {
         // dialogs with a null Context. Keep compiling with the current SDK,
         // but declare the compatibility level expected by those packages.
         targetSdk = 27
-        versionCode = 36
-        versionName = "0.3.24"
+        versionCode = 37
+        versionName = "0.3.25"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

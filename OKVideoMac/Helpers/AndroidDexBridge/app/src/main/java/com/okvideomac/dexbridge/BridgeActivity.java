@@ -11,6 +11,7 @@ import android.graphics.Color;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.os.Bundle;
+import android.os.Looper;
 import android.text.InputType;
 import android.text.method.PasswordTransformationMethod;
 import android.view.View;
@@ -862,6 +863,52 @@ public final class BridgeActivity extends Activity {
         releaseUIOwner(id);
         BridgeActionActivity.restoreInitContext(context);
         return dismissedDialog || dismissedActionHost || releaseScope;
+    }
+
+    /**
+     * Removes Dialog windows owned by a disposable provider Activity before
+     * it is finished. Provider handoffs intentionally close the parent
+     * chooser before opening a child QR dialog on BridgeActivity; leaving the
+     * parent Dialog attached produces WindowLeaked and can suppress the child.
+     */
+    static void dismissVisibleDialogsOwnedBy(Activity activity) {
+        if (activity == null) return;
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            CountDownLatch latch = new CountDownLatch(1);
+            activity.runOnUiThread(() -> {
+                try {
+                    dismissVisibleDialogsOwnedByOnUIThread(activity);
+                } finally {
+                    latch.countDown();
+                }
+            });
+            try {
+                latch.await(1L, TimeUnit.SECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            return;
+        }
+        dismissVisibleDialogsOwnedByOnUIThread(activity);
+    }
+
+    private static void dismissVisibleDialogsOwnedByOnUIThread(
+            Activity activity
+    ) {
+        try {
+            for (View root : rootViews()) {
+                if (root == null || activityFrom(root.getContext()) != activity) {
+                    continue;
+                }
+                Dialog dialog = dialogFrom(root);
+                if (dialog != null && dialog.isShowing()) {
+                    dialog.dismiss();
+                }
+            }
+        } catch (Throwable ignored) {
+            // Activity.finish() must remain available even on Android builds
+            // where WindowManagerGlobal reflection is restricted.
+        }
     }
 
     static void requestHost(Context context) {

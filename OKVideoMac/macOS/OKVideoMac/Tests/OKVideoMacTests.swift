@@ -2341,6 +2341,44 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testQRCodeExitWaitsForOriginalProviderWorker() {
+        XCTAssertTrue(
+            CloudAuthorizationPollingPolicy.isWaitingForProviderWorker(
+                workerReturned: nil
+            )
+        )
+        XCTAssertTrue(
+            CloudAuthorizationPollingPolicy.isWaitingForProviderWorker(
+                workerReturned: false
+            )
+        )
+        XCTAssertFalse(
+            CloudAuthorizationPollingPolicy.isWaitingForProviderWorker(
+                workerReturned: true
+            )
+        )
+    }
+
+    func testAndroidBridgeUIStateDecodesProviderWorkerLifecycle() throws {
+        let data = Data(#"""
+        {
+          "visible": false,
+          "title": "",
+          "inputCount": 0,
+          "imageCount": 0,
+          "buttons": [],
+          "workerReturned": true,
+          "expectsProviderUI": true
+        }
+        """#.utf8)
+        let state = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: data
+        )
+        XCTAssertEqual(state.workerReturned, true)
+        XCTAssertEqual(state.expectsProviderUI, true)
+    }
+
     func testAcceptedStructuredControlClicksKeepOrderingDraftOpen() {
         for semantic in [
             ConfigurationInteractionSemantic.command,
@@ -6416,6 +6454,45 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertNil(
             AndroidDexBridgeRuntime.installedVersionCode(
                 from: "package not installed"
+            )
+        )
+    }
+
+    func testAndroidBridgeDismissesOnlyItsExactCompatibilityWarning() {
+        let windows = """
+        Window #0 Window{1 u0 DeprecatedTargetSdkVersionDialog}:
+        Window #1 Window{2 u0 com.okvideomac.dexbridge/com.okvideomac.dexbridge.BridgeActivity}:
+        """
+        XCTAssertTrue(
+            AndroidDeprecatedTargetSDKWarningPolicy.shouldInspect(
+                windowDump: windows
+            )
+        )
+        XCTAssertFalse(
+            AndroidDeprecatedTargetSDKWarningPolicy.shouldInspect(
+                windowDump: windows.replacingOccurrences(
+                    of: "com.okvideomac.dexbridge",
+                    with: "com.example.other"
+                )
+            )
+        )
+
+        let hierarchy = """
+        <hierarchy><node text="OKVideo Dex Bridge" bounds="[0,0][10,10]" />
+        <node text="OK" resource-id="android:id/button1" class="android.widget.Button" bounds="[228,381][292,429]" /></hierarchy>
+        """
+        XCTAssertEqual(
+            AndroidDeprecatedTargetSDKWarningPolicy.dismissalPoint(
+                uiHierarchy: hierarchy
+            ),
+            .init(x: 260, y: 405)
+        )
+        XCTAssertNil(
+            AndroidDeprecatedTargetSDKWarningPolicy.dismissalPoint(
+                uiHierarchy: hierarchy.replacingOccurrences(
+                    of: "OKVideo Dex Bridge",
+                    with: "Another App"
+                )
             )
         )
     }

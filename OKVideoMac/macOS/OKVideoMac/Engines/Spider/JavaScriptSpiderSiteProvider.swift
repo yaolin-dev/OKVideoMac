@@ -594,6 +594,11 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
     let verificationPerformed: Bool?
     let refreshPerformed: Bool?
     let error: String?
+    /// The request-scoped Android worker is the only authoritative signal
+    /// that a legacy Spider has finished persisting credentials. UI changes
+    /// can happen earlier while that worker is still active.
+    var workerReturned: Bool? = nil
+    var expectsProviderUI: Bool? = nil
     var uiSchemaVersion: Int? = nil
     var elements: [AndroidBridgeUIElement]? = nil
     /// Opaque request owner minted by the macOS host and bound by the Bridge
@@ -3526,6 +3531,54 @@ struct AndroidToolchain: Equatable, Sendable {
     let avdManager: URL?
 }
 
+struct AndroidDeprecatedTargetSDKWarningPolicy {
+    struct TapPoint: Equatable, Sendable {
+        let x: Int
+        let y: Int
+    }
+
+    static func shouldInspect(windowDump: String) -> Bool {
+        windowDump.contains("Window #0")
+            && windowDump.contains("DeprecatedTargetSdkVersionDialog")
+            && windowDump.contains(
+                "com.okvideomac.dexbridge/com.okvideomac.dexbridge.BridgeActivity"
+            )
+    }
+
+    static func dismissalPoint(uiHierarchy: String) -> TapPoint? {
+        // The system window is already identified by dumpsys. Still require
+        // the exact Bridge title so a generic Android OK button can never be
+        // clicked on behalf of an unrelated dialog.
+        guard uiHierarchy.contains("text=\"OKVideo Dex Bridge\"") else {
+            return nil
+        }
+        let pattern = #"<node(?=[^>]*resource-id="android:id/button1")(?=[^>]*text="OK")[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"[^>]*/>"#
+        guard let expression = try? NSRegularExpression(pattern: pattern),
+              let match = expression.firstMatch(
+                in: uiHierarchy,
+                range: NSRange(uiHierarchy.startIndex..., in: uiHierarchy)
+              ),
+              match.numberOfRanges == 5 else {
+            return nil
+        }
+        func integer(at index: Int) -> Int? {
+            guard let range = Range(match.range(at: index), in: uiHierarchy) else {
+                return nil
+            }
+            return Int(uiHierarchy[range])
+        }
+        guard let left = integer(at: 1),
+              let top = integer(at: 2),
+              let right = integer(at: 3),
+              let bottom = integer(at: 4),
+              right > left,
+              bottom > top else {
+            return nil
+        }
+        return TapPoint(x: (left + right) / 2, y: (top + bottom) / 2)
+    }
+}
+
 struct AndroidSystemImage: Equatable, Sendable {
     let packageID: String
     let apiLevel: Int
@@ -3742,8 +3795,8 @@ enum AndroidBridgeDeploymentAction: Equatable, Sendable {
 }
 
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.24"
-    static let bridgeVersionCode = 36
+    static let bridgeVersion = "0.3.25"
+    static let bridgeVersionCode = 37
     private static let networkCheckInterval: TimeInterval = 30
     private static let manifestSchema = 1
     private static let avdName = "OKVideoMac_Runtime"
@@ -4734,6 +4787,10 @@ actor AndroidDexBridgeRuntime {
                     toolchain: toolchain,
                     acceptVersionMismatch: hasNewerBridge
                ) {
+                dismissDeprecatedTargetSDKWarningIfNeeded(
+                    identity,
+                    toolchain: toolchain
+                )
                 ready = true
                 acceptsNewerBridge = hasNewerBridge
                 lastNetworkCheck = Date()
@@ -5648,6 +5705,49 @@ actor AndroidDexBridgeRuntime {
                 "--es", "okvideomac_runtime_generation", identity.generation
             ],
             category: "adb.bridge.start"
+        )
+        dismissDeprecatedTargetSDKWarningIfNeeded(
+            identity,
+            toolchain: toolchain
+        )
+    }
+
+    private func dismissDeprecatedTargetSDKWarningIfNeeded(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) {
+        guard let windows = try? runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            ["shell", "dumpsys", "window", "windows"],
+            category: "adb.bridge.compatibility_warning.window",
+            timeout: 8
+        ), AndroidDeprecatedTargetSDKWarningPolicy.shouldInspect(
+            windowDump: windows
+        ), let hierarchy = try? runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            ["exec-out", "uiautomator", "dump", "/dev/tty"],
+            category: "adb.bridge.compatibility_warning.ui",
+            timeout: 8
+        ), let point = AndroidDeprecatedTargetSDKWarningPolicy.dismissalPoint(
+            uiHierarchy: hierarchy
+        ) else {
+            return
+        }
+        guard (try? runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            ["shell", "input", "tap", "\(point.x)", "\(point.y)"],
+            category: "adb.bridge.compatibility_warning.dismiss",
+            timeout: 8
+        )) != nil else {
+            return
+        }
+        appendEvent(
+            stage: .launchingBridge,
+            event: "compatibility_warning_dismissed",
+            detail: "dismissed the Bridge target-SDK warning on the owned emulator"
         )
     }
 

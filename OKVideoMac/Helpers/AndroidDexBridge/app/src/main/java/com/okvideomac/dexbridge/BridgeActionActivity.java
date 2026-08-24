@@ -81,6 +81,20 @@ public final class BridgeActionActivity extends Activity {
     }
 
     @Override
+    public void finish() {
+        // Several cloud-drive Spiders use the FongMi handoff pattern:
+        // Init.context().finish(); then post/show the next Dialog through
+        // Init.context(). If Init still points at this disposable Activity,
+        // that second Dialog is attached to a window which is already being
+        // destroyed (WindowLeaked) and UC/Quark can appear to produce no QR.
+        // Dismiss the outgoing owned Dialog and synchronously hand Init back
+        // to the persistent host before Activity.finish() changes lifecycle.
+        BridgeActivity.dismissVisibleDialogsOwnedBy(this);
+        handoffInitContextBeforeFinish();
+        super.finish();
+    }
+
+    @Override
     protected void onDestroy() {
         BridgeActionActivity replacement;
         synchronized (lifecycleLock) {
@@ -105,6 +119,22 @@ public final class BridgeActionActivity extends Activity {
         );
         if (host == null) BridgeActivity.requestHost(getApplicationContext());
         super.onDestroy();
+    }
+
+    private void handoffInitContextBeforeFinish() {
+        BridgeActionActivity replacement;
+        synchronized (lifecycleLock) {
+            replacement = current.get();
+        }
+        if (replacement != this && usable(replacement)
+                && isCurrentRequest(replacement.interactionID)) {
+            com.github.catvod.Init.set(replacement);
+            return;
+        }
+        Context host = BridgeActivity.hostContext();
+        Context fallback = getApplicationContext();
+        com.github.catvod.Init.set(host == null ? fallback : host);
+        if (host == null) BridgeActivity.requestHost(fallback);
     }
 
     static boolean isReady() {

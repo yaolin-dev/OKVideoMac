@@ -1,6 +1,6 @@
 # Compatibility
 
-- 对照版本：0.3.47（Build 72）
+- 对照版本：0.3.48（Build 73）
 - 最近更新：2026-08-24
 - 当前交付目标：Apple Silicon / arm64 / macOS 12.0+
 
