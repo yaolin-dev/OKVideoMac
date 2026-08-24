@@ -645,6 +645,132 @@ enum CloudAuthorizationPollingPolicy {
     }
 }
 
+enum MyDriveAuthorizationAccountStatus: Equatable, Sendable {
+    case authenticated
+    case unauthenticated
+    case unknown
+}
+
+struct MyDriveAuthorizationTarget: Equatable, Sendable {
+    let controlID: String?
+    let accountKey: String
+    let initialStatus: MyDriveAuthorizationAccountStatus
+}
+
+enum MyDriveAuthorizationVerificationDecision: Equatable, Sendable {
+    case authenticated
+    case unauthenticated
+    case pending
+}
+
+/// MyDriveGuard exposes the account being authorized as a chooser row whose
+/// stable identity remains the same when its suffix changes from 未登录 to
+/// 已登录. A QR disappearing, an Android generation change, or the provider
+/// worker returning is never account evidence on its own.
+enum MyDriveAuthorizationVerificationPolicy {
+    private static let authenticatedMarkers = ["已登录", "已登入", "已授权"]
+    private static let unauthenticatedMarkers = ["未登录", "未登入", "未授权"]
+
+    static func target(
+        controlID: String?,
+        title: String
+    ) -> MyDriveAuthorizationTarget? {
+        let initialStatus = status(in: title)
+        guard initialStatus == .unauthenticated,
+              let accountKey = accountKey(in: title) else {
+            return nil
+        }
+        return MyDriveAuthorizationTarget(
+            controlID: controlID?.nonEmpty,
+            accountKey: accountKey,
+            initialStatus: initialStatus
+        )
+    }
+
+    static func decision(
+        target: MyDriveAuthorizationTarget?,
+        state: AndroidBridgeUIState
+    ) -> MyDriveAuthorizationVerificationDecision {
+        guard let target,
+              target.initialStatus == .unauthenticated else {
+            return .pending
+        }
+        let candidates = state.actionableControls.map {
+            (id: Optional($0.id), title: $0.title)
+        } + (state.texts ?? []).map {
+            (id: Optional<String>.none, title: $0)
+        } + (state.elements ?? []).map {
+            (id: Optional($0.id), title: $0.title)
+        }
+        var observedUnauthenticated = false
+        for candidate in candidates {
+            let candidateStatus = status(in: candidate.title)
+            guard candidateStatus != .unknown else { continue }
+            let candidateAccountKey = accountKey(in: candidate.title)
+            let sameAccount = candidateAccountKey == target.accountKey
+            // Android view identifiers can be positional and may be reused
+            // when the provider reconstructs its chooser. Prefer the account
+            // identity whenever the title contains one; use the control only
+            // for a generic status-only row.
+            let sameStatusOnlyControl = candidateAccountKey == nil
+                && target.controlID != nil
+                && candidate.id == target.controlID
+            guard sameAccount || sameStatusOnlyControl else { continue }
+            if candidateStatus == .authenticated {
+                return .authenticated
+            }
+            observedUnauthenticated = true
+        }
+        return observedUnauthenticated ? .unauthenticated : .pending
+    }
+
+    static func status(in title: String) -> MyDriveAuthorizationAccountStatus {
+        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if unauthenticatedMarkers.contains(where: normalized.contains) {
+            return .unauthenticated
+        }
+        if authenticatedMarkers.contains(where: normalized.contains) {
+            return .authenticated
+        }
+        return .unknown
+    }
+
+    /// MyDriveGuard exposes every usable cloud account as a media category on
+    /// its home response. Comparing stable category identifiers before and
+    /// after an authorization attempt gives us a second authoritative signal
+    /// when the legacy Android dialog destroys both the QR child and its
+    /// chooser parent before the Mac can capture the changed account row.
+    static func authorizedCategoryIDs(in home: SiteHome?) -> Set<String>? {
+        guard let home else { return nil }
+        return Set(
+            home.categories
+                .filter { $0.resolvedContentKind == .media }
+                .map(\.id)
+        )
+    }
+
+    static func confirmsNewAuthorizedCategory(
+        baseline: Set<String>?,
+        home: SiteHome
+    ) -> Bool {
+        guard let baseline else { return false }
+        let current = authorizedCategoryIDs(in: home) ?? []
+        return !current.subtracting(baseline).isEmpty
+    }
+
+    private static func accountKey(in title: String) -> String? {
+        var normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        for marker in unauthenticatedMarkers + authenticatedMarkers {
+            normalized = normalized.replacingOccurrences(of: marker, with: "")
+        }
+        let separators = CharacterSet(
+            charactersIn: "-—–_:：|｜·•()（）[]【】"
+        ).union(.whitespacesAndNewlines)
+        normalized = normalized.trimmingCharacters(in: separators).lowercased()
+        return normalized.nonEmpty
+    }
+}
+
 /// Legacy CatVod commands and one-shot toggles persist inside their clicked
 /// Android callback and often publish no second terminal response. Ordering
 /// controls are different: arrow clicks mutate a draft dialog and only its
@@ -1535,6 +1661,14 @@ private struct CloudAuthorizationContext {
     var lastObservedRevision: Int?
     var hasRequestedVerification: Bool
     var lastAuthorizationProbeAt: Date?
+    /// Exact chooser row selected before MyDriveGuard displayed a login QR.
+    /// A later QR/window transition is successful only when this same account
+    /// is observed as authenticated.
+    var myDriveAuthorizationTarget: MyDriveAuthorizationTarget?
+    /// Stable media-category identifiers visible before the selected account
+    /// opened its QR. A newly available category after the worker returns is
+    /// accepted as authorization evidence when the legacy chooser disappears.
+    var myDriveAuthorizedCategoryIDsAtStart: Set<String>?
 }
 
 enum PlaybackRequestOrigin: Equatable, Sendable {
@@ -3747,7 +3881,9 @@ final class AppState: ObservableObject {
             hasObservedPostSubmissionTransition: false,
             lastObservedRevision: nil,
             hasRequestedVerification: false,
-            lastAuthorizationProbeAt: nil
+            lastAuthorizationProbeAt: nil,
+            myDriveAuthorizationTarget: nil,
+            myDriveAuthorizedCategoryIDsAtStart: nil
         )
         cloudAuthorizationPrompt = CloudAuthorizationPrompt(
             id: UUID(),
@@ -4385,6 +4521,25 @@ final class AppState: ObservableObject {
                 throw AppError.spider(
                     "后台授权窗口中没有找到“\(action.title)”按钮"
                 )
+            }
+            if myDriveLoginStatusAction(for: context) != nil,
+               let target = MyDriveAuthorizationVerificationPolicy.target(
+                    controlID: controlID,
+                    title: action.title
+               ),
+               var current = cloudAuthorizationContext,
+               current.operationID == context.operationID {
+                // Capture the exact account row before the provider replaces
+                // the chooser with its QR child dialog. This is the baseline
+                // used to distinguish a real login from UC/Quark window
+                // redraws and automatic QR dismissal.
+                current.myDriveAuthorizationTarget = target
+                current.myDriveAuthorizedCategoryIDsAtStart =
+                    currentHomeContentIdentity == context.sourceIdentity
+                        ? MyDriveAuthorizationVerificationPolicy
+                            .authorizedCategoryIDs(in: siteHome)
+                        : nil
+                cloudAuthorizationContext = current
             }
             if ConfigurationControlSubmissionPolicy.acceptedClickCancels(
                 controlTitle: action.title,
@@ -5038,12 +5193,11 @@ final class AppState: ObservableObject {
                             state: state,
                             context: context
                         ) {
-                            if CloudAuthorizationPollingPolicy
-                                .isWaitingForProviderWorker(
-                                    workerReturned: state.workerReturned
-                                ) {
-                                hiddenPollCount = 0
-                            }
+                            // The verifier also owns the explicitly pending
+                            // MyDrive state. Do not age that state into the
+                            // generic hidden-window timeout while the QR is
+                            // still awaiting an authenticated account delta.
+                            hiddenPollCount = 0
                             continue
                         }
                         if CloudAuthorizationPollingPolicy.shouldTimeOut(
@@ -5127,12 +5281,9 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Legacy CatVod providers commonly close only the child QR dialog after
-    /// the phone accepts a login while leaving their parent chooser visible.
-    /// Treat the QR -> non-QR transition as a request to refresh provider
-    /// state, not as success by itself. MyDrive has an explicit post-login
-    /// home contract; multi-category configuration spiders are verified by a
-    /// structural change in the currently displayed category response.
+    /// Legacy CatVod providers can close or rebuild their child QR dialog both
+    /// before and after a phone scan. Treat the QR -> non-QR transition only as
+    /// a request to inspect provider state, never as evidence of a scan.
     private func verifyAuthorizationResultAfterQRCodeExit(
         state: AndroidBridgeUIState,
         context: CloudAuthorizationContext
@@ -5143,19 +5294,17 @@ final class AppState: ObservableObject {
               cloudAuthorizationContext?.hasRequestedVerification != true else {
             return false
         }
-        // A QR dialog commonly closes as soon as the phone confirms the scan,
-        // before the provider worker has finished exchanging the token and
-        // persisting its Cookie. Calling home() in that interval executes the
-        // same legacy Spider concurrently and corrupts provider-owned locks or
-        // state. Keep the validated QR visible and wait for the original
-        // request-scoped worker instead.
+        // Calling the same legacy Spider while its authorization worker is
+        // active can corrupt provider-owned locks or state. QR disappearance
+        // still does not prove that the phone scanned it, so keep the last
+        // validated image visible and wait without claiming success.
         if CloudAuthorizationPollingPolicy.isWaitingForProviderWorker(
             workerReturned: state.workerReturned
         ) {
             if var prompt = cloudAuthorizationPrompt,
                prompt.interactionID == context.operationID,
                prompt.lifecyclePhase == .presenting {
-                prompt.status = "已扫码，正在等待站点写入登录凭据…"
+                prompt.status = "二维码界面发生变化，正在等待站点返回账号状态…"
                 cloudAuthorizationPrompt = prompt
             }
             // The Bridge owns the worker timeout and publishes an explicit
@@ -5164,19 +5313,88 @@ final class AppState: ObservableObject {
             return true
         }
 
-        // MyDriveGuard's LoginShow result is its refreshed account chooser,
-        // not the provider home page. Once the original worker returns, close
-        // only that scoped interaction and reopen LoginShow after refreshing
-        // home. The account rows then provide authoritative 已登录/未登录
-        // feedback for Quark, UC and every sibling drive handled by this
-        // provider class.
+        // The old implementation marked MyDriveGuard successful merely because
+        // the worker returned, then reopened the chooser. UC routinely returns
+        // or rebuilds its child window before any scan, so that branch closed a
+        // valid QR after a few seconds. Accept only either (a) the exact row
+        // selected before QR presentation changing from 未登录 to 已登录, or (b)
+        // a new media category appearing relative to the pre-click home. The
+        // latter covers legacy dialogs that destroy their chooser parent after
+        // a real scan, while still rejecting a bare QR/window transition.
         if myDriveLoginStatusAction(for: context) != nil {
             guard configurationInteractionCoordinator.owns(
                     context.operationID
                   ),
                   cloudAuthorizationContext?.operationID
-                    == context.operationID else {
+                    == context.operationID,
+                  let provider = providers[context.sourceIdentity.siteKey]
+                    as? AndroidDexSpiderSiteProvider else {
                 return false
+            }
+            let decision = MyDriveAuthorizationVerificationPolicy.decision(
+                target: context.myDriveAuthorizationTarget,
+                state: state
+            )
+            var verifiedHome: SiteHome?
+            var categoryDeltaConfirmed = false
+            let now = Date()
+            let mayProbeHome: Bool
+            if let lastProbe = cloudAuthorizationContext?
+                .lastAuthorizationProbeAt {
+                mayProbeHome = now.timeIntervalSince(lastProbe) >= 1
+            } else {
+                mayProbeHome = true
+            }
+            if decision != .authenticated, mayProbeHome,
+               var current = cloudAuthorizationContext,
+               current.operationID == context.operationID {
+                current.lastAuthorizationProbeAt = now
+                cloudAuthorizationContext = current
+                verifiedHome = try? await provider.home()
+                if let verifiedHome {
+                    categoryDeltaConfirmed =
+                        MyDriveAuthorizationVerificationPolicy
+                            .confirmsNewAuthorizedCategory(
+                                baseline: current
+                                    .myDriveAuthorizedCategoryIDsAtStart,
+                                home: verifiedHome
+                            )
+                }
+            }
+            guard decision == .authenticated || categoryDeltaConfirmed else {
+                if var prompt = cloudAuthorizationPrompt,
+                   prompt.interactionID == context.operationID,
+                   prompt.lifecyclePhase == .presenting {
+                    prompt.status = decision == .unauthenticated || mayProbeHome
+                        ? "尚未检测到登录成功；请完成扫码。二维码失效时可点“重试”重新生成。"
+                        : "正在等待所选网盘账号返回明确的登录状态…"
+                    prompt.allowsRetry = true
+                    cloudAuthorizationPrompt = prompt
+                }
+                // This is an explicitly pending authorization state, not a
+                // hidden-window failure. Keep polling until the selected row
+                // authenticates, the user retries/closes, or the provider
+                // publishes an explicit terminal failure.
+                return true
+            }
+            if verifiedHome == nil {
+                verifiedHome = try? await provider.home()
+            }
+            if let verifiedHome,
+               currentHomeContentIdentity == context.sourceIdentity {
+                publishHomeContent(
+                    verifiedHome,
+                    identity: context.sourceIdentity
+                )
+                await cacheSiteHome(
+                    verifiedHome,
+                    identity: context.sourceIdentity
+                )
+                _ = await applyHomePresentation(
+                    verifiedHome,
+                    identity: context.sourceIdentity,
+                    loadsCategoryContent: false
+                )
             }
             if var verifiedContext = cloudAuthorizationContext,
                verifiedContext.operationID == context.operationID {
@@ -5187,17 +5405,17 @@ final class AppState: ObservableObject {
                 context.operationID,
                 to: .processing,
                 semantic: .qrAuthorization,
-                status: "二维码流程已结束，正在刷新账号状态…"
+                status: "已确认所选网盘账号登录成功，正在刷新账号状态…"
             )
             if let handle = context.providerHandle {
                 await Self.verifyScopedConfigurationInteraction(
                     handle,
                     succeeded: true,
-                    actualRefreshPerformed: false
+                    actualRefreshPerformed: verifiedHome != nil
                 )
             } else {
                 await finishCloudAuthorizationAndRetry(
-                    refreshPerformed: false
+                    refreshPerformed: verifiedHome != nil
                 )
             }
             return true

@@ -2359,6 +2359,197 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testMyDriveAuthorizationRequiresSelectedAccountStatusChange() throws {
+        let target = try XCTUnwrap(
+            MyDriveAuthorizationVerificationPolicy.target(
+                controlID: "account-uc",
+                title: "我的优沫-未登录"
+            )
+        )
+        XCTAssertEqual(target.accountKey, "我的优沫")
+        XCTAssertEqual(target.initialStatus, .unauthenticated)
+
+        let authenticated = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: Data(#"""
+            {
+              "visible": true,
+              "title": "配置操作",
+              "inputCount": 0,
+              "imageCount": 0,
+              "buttons": ["我的优沫-已登录"],
+              "controls": [{
+                "id": "account-uc",
+                "title": "我的优沫-已登录",
+                "enabled": true,
+                "clickable": true,
+                "role": "clickable"
+              }],
+              "workerReturned": true
+            }
+            """#.utf8)
+        )
+        XCTAssertEqual(
+            MyDriveAuthorizationVerificationPolicy.decision(
+                target: target,
+                state: authenticated
+            ),
+            .authenticated
+        )
+
+        let unauthenticated = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: Data(#"""
+            {
+              "visible": true,
+              "title": "配置操作",
+              "inputCount": 0,
+              "imageCount": 0,
+              "buttons": ["我的优沫-未登录"],
+              "controls": [{
+                "id": "rebuilt-account-uc",
+                "title": "我的优沫-未登录",
+                "enabled": true,
+                "clickable": true,
+                "role": "clickable"
+              }],
+              "workerReturned": true
+            }
+            """#.utf8)
+        )
+        XCTAssertEqual(
+            MyDriveAuthorizationVerificationPolicy.decision(
+                target: target,
+                state: unauthenticated
+            ),
+            .unauthenticated
+        )
+    }
+
+    func testMyDriveAuthorizationRejectsQRCodeExitAndUnrelatedLogin() throws {
+        let target = try XCTUnwrap(
+            MyDriveAuthorizationVerificationPolicy.target(
+                controlID: "account-uc",
+                title: "我的优沫-未登录"
+            )
+        )
+        let hiddenAfterQRCodeExit = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: Data(#"""
+            {
+              "visible": false,
+              "title": "",
+              "inputCount": 0,
+              "imageCount": 0,
+              "buttons": [],
+              "phase": "processing",
+              "workerReturned": true,
+              "generation": 21
+            }
+            """#.utf8)
+        )
+        XCTAssertEqual(
+            MyDriveAuthorizationVerificationPolicy.decision(
+                target: target,
+                state: hiddenAfterQRCodeExit
+            ),
+            .pending
+        )
+
+        let anotherAccount = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: Data(#"""
+            {
+              "visible": true,
+              "title": "配置操作",
+              "inputCount": 0,
+              "imageCount": 0,
+              "buttons": ["我的夸父-已登录"],
+              "controls": [{
+                "id": "account-uc",
+                "title": "我的夸父-已登录",
+                "enabled": true,
+                "clickable": true,
+                "role": "clickable"
+              }],
+              "workerReturned": true
+            }
+            """#.utf8)
+        )
+        XCTAssertEqual(
+            MyDriveAuthorizationVerificationPolicy.decision(
+                target: target,
+                state: anotherAccount
+            ),
+            .pending
+        )
+    }
+
+    func testMyDriveAuthorizationRequiresNewMediaCategoryForHomeFallback() {
+        let baselineHome = SiteHome(
+            categories: [
+                VideoCategory(id: "quark", name: "夸克网盘"),
+                VideoCategory(
+                    id: "settings",
+                    name: "设置",
+                    contentKind: .action
+                )
+            ],
+            recommendations: []
+        )
+        let baseline = MyDriveAuthorizationVerificationPolicy
+            .authorizedCategoryIDs(in: baselineHome)
+        XCTAssertEqual(baseline, Set(["quark"]))
+
+        let unchangedHome = SiteHome(
+            categories: [
+                VideoCategory(id: "quark", name: "夸克网盘"),
+                VideoCategory(
+                    id: "login",
+                    name: "登录",
+                    contentKind: .action
+                )
+            ],
+            recommendations: []
+        )
+        XCTAssertFalse(
+            MyDriveAuthorizationVerificationPolicy
+                .confirmsNewAuthorizedCategory(
+                    baseline: baseline,
+                    home: unchangedHome
+                )
+        )
+
+        let ucAuthorizedHome = SiteHome(
+            categories: [
+                VideoCategory(id: "quark", name: "夸克网盘"),
+                VideoCategory(id: "uc", name: "UC 网盘")
+            ],
+            recommendations: []
+        )
+        XCTAssertTrue(
+            MyDriveAuthorizationVerificationPolicy
+                .confirmsNewAuthorizedCategory(
+                    baseline: baseline,
+                    home: ucAuthorizedHome
+                )
+        )
+    }
+
+    func testMyDriveAuthorizationDoesNotInferHomeDeltaWithoutBaseline() {
+        let home = SiteHome(
+            categories: [VideoCategory(id: "uc", name: "UC 网盘")],
+            recommendations: []
+        )
+        XCTAssertFalse(
+            MyDriveAuthorizationVerificationPolicy
+                .confirmsNewAuthorizedCategory(
+                    baseline: nil,
+                    home: home
+                )
+        )
+    }
+
     func testAndroidBridgeUIStateDecodesProviderWorkerLifecycle() throws {
         let data = Data(#"""
         {
