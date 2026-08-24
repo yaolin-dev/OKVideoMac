@@ -1634,20 +1634,20 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
             siteHeaders: HTTPHeaders(site.header)
         )
         let needsParsing = result.needsParsing
-        let rewriteMediaURL: (String) -> String = { rawURL in
+        let rewriteMediaURL: (String) throws -> String = { rawURL in
             needsParsing
                 ? self.bridge.hostReachableProxyURL(rawURL)
-                : self.bridge.hostReachableMediaURL(rawURL)
+                : try self.bridge.hostReachableMediaURL(rawURL)
         }
-        result.url = rewriteMediaURL(result.url)
-        result.qualities = result.qualities.map { quality in
+        result.url = try rewriteMediaURL(result.url)
+        result.qualities = try result.qualities.map { quality in
             PlaybackQuality(
                 name: quality.name,
-                url: rewriteMediaURL(quality.url)
+                url: try rewriteMediaURL(quality.url)
             )
         }
         if let playURL = result.playURL {
-            result.playURL = rewriteMediaURL(playURL)
+            result.playURL = try rewriteMediaURL(playURL)
         }
         result.subtitles = result.subtitles.map {
             URL(string: bridge.hostReachableProxyURL($0.absoluteString)) ?? $0
@@ -2439,7 +2439,7 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     /// legacy builds are wrapped by the maintained `/v1/media` endpoint.
     /// Parsing URLs are intentionally handled by `hostReachableProxyURL`
     /// instead because they are not yet media resources.
-    func hostReachableMediaURL(_ rawURL: String) -> String {
+    func hostReachableMediaURL(_ rawURL: String) throws -> String {
         let rewritten = hostReachableProxyURL(rawURL)
         guard let components = URLComponents(string: rewritten),
               ["http", "https"].contains(
@@ -2448,6 +2448,11 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
             return rewritten
         }
         if Self.isLoopbackHost(components.host) {
+            guard Self.isHostReachablePlaybackLoopback(components) else {
+                throw AppError.playback(
+                    "Android 内部媒体代理未正确转发"
+                )
+            }
             return rewritten
         }
         return Self.bridgeMediaProxyURL(for: rewritten) ?? rewritten
@@ -2485,6 +2490,29 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         ["127.0.0.1", "localhost", "::1"].contains(
             host?.lowercased() ?? ""
         )
+    }
+
+    /// Only loopback endpoints explicitly forwarded by the Android runtime
+    /// may be handed to the Mac player. Provider-owned dynamic ports must have
+    /// been converted to a scoped `/proxy/media/{session}` capability first.
+    private static func isHostReachablePlaybackLoopback(
+        _ components: URLComponents
+    ) -> Bool {
+        let path = components.path
+        switch components.port {
+        case BridgeServerPort.host:
+            return path.hasPrefix("/proxy/media/")
+                || path.hasPrefix("/v1/media-sessions/")
+                || path == "/v1/media"
+                || path == "/proxy"
+                || path.hasPrefix("/proxy/")
+        case BridgeServerPort.kaiserHost:
+            return path.hasPrefix("/kaiser")
+        case BridgeServerPort.cloudFileHost:
+            return path.hasPrefix("/proxy/play/")
+        default:
+            return false
+        }
     }
 
     private static func bridgeMediaProxyURL(
@@ -3706,8 +3734,8 @@ enum AndroidBridgeDeploymentAction: Equatable, Sendable {
 }
 
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.23"
-    static let bridgeVersionCode = 35
+    static let bridgeVersion = "0.3.24"
+    static let bridgeVersionCode = 36
     private static let networkCheckInterval: TimeInterval = 30
     private static let manifestSchema = 1
     private static let avdName = "OKVideoMac_Runtime"

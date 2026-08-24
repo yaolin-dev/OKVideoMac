@@ -6356,8 +6356,7 @@ final class AppState: ObservableObject {
                 }
             }
 
-            let message = failures.suffix(4).joined(separator: "；")
-                .nonEmpty ?? "所有线路都无法返回可播放媒体"
+            let message = Self.consolidatedPlaybackFailureMessage(failures)
             playbackResolutionState = .exhausted
             playbackFailureSummary = message
             playerSnapshot.status = .failed(message)
@@ -6418,6 +6417,23 @@ final class AppState: ObservableObject {
             return "媒体请求被拒绝，网盘授权或临时播放地址可能已失效。\(refreshStatus)请重新授权后再试。"
         }
         return message
+    }
+
+    static func consolidatedPlaybackFailureMessage(
+        _ failures: [String]
+    ) -> String {
+        let proxyFailure = "Android 内部媒体代理未正确转发"
+        let normalized = failures.compactMap { failure -> String? in
+            let value = failure.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? nil : value
+        }
+        if normalized.contains(where: { $0.contains(proxyFailure) }) {
+            return proxyFailure
+        }
+        var seen = Set<String>()
+        let unique = normalized.filter { seen.insert($0).inserted }
+        return unique.suffix(4).joined(separator: "；")
+            .nonEmpty ?? "所有线路都无法返回可播放媒体"
     }
 
     static func playbackRequestSignature(

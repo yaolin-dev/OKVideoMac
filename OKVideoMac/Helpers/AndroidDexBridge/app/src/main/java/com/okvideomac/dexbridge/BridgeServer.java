@@ -1181,6 +1181,7 @@ final class BridgeServer {
                     || "::1".equals(host);
             String path = value.getPath() == null ? "" : value.getPath();
             return loopback
+                    && value.getPort() == BridgeServer.PORT
                     && ("/proxy".equals(path) || path.startsWith("/proxy/"))
                     && !path.startsWith("/proxy/media/")
                     ? value

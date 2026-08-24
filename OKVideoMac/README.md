@@ -2,7 +2,7 @@
 
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于
 配置格式、站点类型和运行时，而不是简单以 TVBox、FongMi、MiraPlay 或 CatPawOpen
-等生态名称判断。当前版本为 **0.3.45（Build 70）**，支持 **arm64**，最低系统为
+等生态名称判断。当前版本为 **0.3.46（Build 71）**，支持 **arm64**，最低系统为
 **macOS 12.0**。
 
 项目不内置内容源、账号、Cookie、DRM key 或私人服务配置。请只导入你有权使用
@@ -10,7 +10,7 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源�
 
 ## 当前版本
 
-- 当前版本：0.3.45（Build 70）
+- 当前版本：0.3.46（Build 71）
 - 最低系统：macOS 12.0
 - 支持架构：Apple Silicon / arm64
 - 发行验证：355 项 Xcode 集成测试通过（另有 1 项按设计跳过），124 项 OKVideoKit

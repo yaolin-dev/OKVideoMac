@@ -1410,7 +1410,8 @@ public final class BridgeProtocolTest extends TestCase {
         );
     }
 
-    public void testParseRequiredAndLoopbackURLsRemainUnchanged() throws Exception {
+    public void testParseRequiredStaysUnchangedAndLoopbackMediaIsScoped()
+            throws Exception {
         JSONObject parsed = new JSONObject()
                 .put("parse", 1)
                 .put("url", "https://parser.example/?url=target");
@@ -1420,14 +1421,71 @@ public final class BridgeProtocolTest extends TestCase {
                 parsed.getString("url")
         );
 
-        JSONObject loopback = new JSONObject()
-                .put("parse", 0)
-                .put("url", "http://127.0.0.1:6677/proxy/play");
-        BridgeMediaSessionRegistry.securePlaybackResult(loopback);
-        assertEquals(
-                "http://127.0.0.1:6677/proxy/play",
-                loopback.getString("url")
-        );
+        for (String localURL : new String[] {
+                "http://127.0.0.1:5266/fishplay/go/quark_vip/movie.mkv",
+                "http://127.0.0.1:43127/provider-dynamic/movie.m3u8",
+                "http://127.0.0.1:6677/proxy/play/movie.mkv"
+        }) {
+            JSONObject loopback = new JSONObject()
+                    .put("parse", 0)
+                    .put("url", localURL);
+            BridgeMediaSessionRegistry.securePlaybackResult(loopback);
+            assertTrue(loopback.getString("url").startsWith(
+                    "http://127.0.0.1:9978/proxy/media/"
+            ));
+            String sessionID = loopback.getString("mediaSessionID");
+            BridgeMediaSessionRegistry.Session session =
+                    BridgeMediaSessionRegistry.get(sessionID);
+            assertNotNull(session);
+            assertEquals(localURL, session.upstreamURL);
+        }
+    }
+
+    public void testDynamicLoopbackMediaWithoutHeadersStreamsThroughBridge()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        BridgeServer.start(context);
+        Thread.sleep(250L);
+        InetAddress loopback = InetAddress.getByName("127.0.0.1");
+        try (ServerSocket providerServer = new ServerSocket(0, 1, loopback)) {
+            providerServer.setSoTimeout(5_000);
+            FutureTask<Map<String, String>> providerRequest =
+                    new FutureTask<>(() -> serveOnce(
+                            providerServer,
+                            "HTTP/1.1 200 OK\r\n"
+                                    + "Content-Type: video/mp4\r\n"
+                                    + "Content-Length: 2\r\n"
+                                    + "Connection: close\r\n\r\nOK"
+                    ));
+            new Thread(providerRequest, "dynamic-media-test").start();
+
+            String providerURL = "http://127.0.0.1:"
+                    + providerServer.getLocalPort()
+                    + "/fishplay/go/quark_vip/movie.mkv";
+            JSONObject result = new JSONObject()
+                    .put("parse", 0)
+                    .put("url", providerURL);
+            JSONObject secured = (JSONObject)
+                    BridgeMediaSessionRegistry.securePlaybackResult(result);
+            HttpURLConnection connection = (HttpURLConnection) new URL(
+                    secured.getString("url")
+            ).openConnection();
+            connection.setConnectTimeout(2_000);
+            connection.setReadTimeout(5_000);
+            assertEquals(200, connection.getResponseCode());
+            try (InputStream input = connection.getInputStream()) {
+                assertEquals('O', input.read());
+                assertEquals('K', input.read());
+                assertEquals(-1, input.read());
+            } finally {
+                connection.disconnect();
+            }
+            assertEquals(
+                    "GET /fishplay/go/quark_vip/movie.mkv HTTP/1.1",
+                    providerRequest.get(5, TimeUnit.SECONDS).get(":request")
+            );
+        }
     }
 
     public void testNestedSignedURLStaysInsideProviderLoopbackSession()
@@ -1957,7 +2015,7 @@ public final class BridgeProtocolTest extends TestCase {
              OutputStream output = socket.getOutputStream()) {
             socket.setSoTimeout(5_000);
             Map<String, String> headers = new LinkedHashMap<>();
-            reader.readLine();
+            headers.put(":request", reader.readLine());
             String line;
             while ((line = reader.readLine()) != null && !line.isEmpty()) {
                 int separator = line.indexOf(':');

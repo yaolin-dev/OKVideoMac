@@ -4,7 +4,6 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.net.URI;
-import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Iterator;
@@ -188,11 +187,11 @@ final class BridgeMediaSessionRegistry {
                     true
             );
         }
-        boolean hasProviderContext = headers != null && !headers.isEmpty();
-        if (!isHTTPURL(raw)
-                || (!hasProviderContext
-                && !isRemote(raw)
-                && !isLoopbackProxyWithNestedRemote(raw))) {
+        // Every parse=0 HTTP(S) result belongs to the Android provider VM.
+        // This includes loopback servers started dynamically by a Spider
+        // (fishplay, cloud-drive helpers, and future provider-specific ports).
+        // Never let the Mac interpret Android's 127.0.0.1 as its own host.
+        if (!isHTTPURL(raw)) {
             return new SecuredURL(raw, "", "", false);
         }
         prune();
@@ -261,43 +260,6 @@ final class BridgeMediaSessionRegistry {
         }
     }
 
-    /**
-     * Some Android providers return a local proxy URL whose {@code url=}
-     * parameter contains the expiring signed media address. Keep the complete
-     * provider proxy URL inside Android so proxy-specific behavior and any
-     * unescaped trailing query parameters remain byte-for-byte intact.
-     */
-    private static boolean isLoopbackProxyWithNestedRemote(String raw) {
-        if (raw == null || raw.trim().isEmpty()) return false;
-        try {
-            URI uri = URI.create(raw.trim());
-            if (!isHTTP(uri) || !isLoopbackHost(uri.getHost())) return false;
-            String query = uri.getRawQuery();
-            if (query == null || query.isEmpty()) return false;
-            for (String field : query.split("&")) {
-                int separator = field.indexOf('=');
-                if (separator <= 0) continue;
-                String key = decodeQueryPart(field.substring(0, separator));
-                if (!"url".equalsIgnoreCase(key)) continue;
-                String nested = decodeQueryPart(field.substring(separator + 1));
-                return isRemote(nested);
-            }
-            return false;
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    private static boolean isRemote(String raw) {
-        if (raw == null || raw.trim().isEmpty()) return false;
-        try {
-            URI uri = URI.create(raw.trim());
-            return isHTTP(uri) && !isLoopbackHost(uri.getHost());
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
     private static boolean isHTTP(URI uri) {
         String scheme = uri.getScheme();
         return uri.getHost() != null
@@ -312,14 +274,6 @@ final class BridgeMediaSessionRegistry {
         return "localhost".equals(normalized)
                 || "127.0.0.1".equals(normalized)
                 || "::1".equals(normalized);
-    }
-
-    private static String decodeQueryPart(String value) {
-        try {
-            return URLDecoder.decode(value, "UTF-8");
-        } catch (Throwable ignored) {
-            return value;
-        }
     }
 
     private static void collectHeaders(

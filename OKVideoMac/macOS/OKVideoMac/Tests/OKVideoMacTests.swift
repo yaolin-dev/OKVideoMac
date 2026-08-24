@@ -5205,12 +5205,13 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testAndroidBridgeMediaSessionUsesScopedLoopbackAndLegacyCapability() {
+    func testAndroidBridgeMediaSessionUsesScopedLoopbackAndLegacyCapability()
+        throws {
         let client = AndroidDexBridgeClient()
-        let scoped = client.hostReachableMediaURL(
+        let scoped = try client.hostReachableMediaURL(
             "http://127.0.0.1:9978/proxy/media/session-123"
         )
-        let legacy = client.hostReachableMediaURL(
+        let legacy = try client.hostReachableMediaURL(
             "https://media.example.invalid/movie.mp4?signature=fixture"
         )
         let legacyComponents = URLComponents(string: legacy)
@@ -5232,6 +5233,22 @@ final class OKVideoMacTests: XCTestCase {
                 .value,
             "https://media.example.invalid/movie.mp4?signature=fixture"
         )
+    }
+
+    func testAndroidBridgeRejectsUnscopedAndroidLoopbackMediaPorts() {
+        let client = AndroidDexBridgeClient()
+        for raw in [
+            "http://127.0.0.1:5266/fishplay/go/quark_vip/movie.mkv",
+            "http://localhost:43127/provider-dynamic/movie.m3u8"
+        ] {
+            XCTAssertThrowsError(try client.hostReachableMediaURL(raw)) { error in
+                XCTAssertTrue(
+                    error.localizedDescription.contains(
+                        "Android 内部媒体代理未正确转发"
+                    )
+                )
+            }
+        }
     }
 
     func testAndroidPlaybackHandoffRequiresMatchingOpaqueSessionMetadata() {
@@ -5445,6 +5462,24 @@ final class OKVideoMacTests: XCTestCase {
                 validationPolicy: .preflight
             ),
             "普通地址不可达"
+        )
+    }
+
+    @MainActor
+    func testPlaybackFailureSummaryDeduplicatesRetriesAndClassifiesProxyFailure() {
+        XCTAssertEqual(
+            AppState.consolidatedPlaybackFailureMessage([
+                "夸克原画：播放错误：loading failed",
+                "夸克原画：播放错误：loading failed"
+            ]),
+            "夸克原画：播放错误：loading failed"
+        )
+        XCTAssertEqual(
+            AppState.consolidatedPlaybackFailureMessage([
+                "Libvio：Android 内部媒体代理未正确转发",
+                "Libvio：Android 内部媒体代理未正确转发"
+            ]),
+            "Android 内部媒体代理未正确转发"
         )
     }
 
