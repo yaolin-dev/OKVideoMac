@@ -399,6 +399,12 @@ final class BridgeInteractionRegistry {
                             : ui.optJSONArray("elements")
             );
             destination.put("generation", ui.optLong("generation", 0L));
+            if (ui.has("authorizationStorageFingerprint")) {
+                destination.put(
+                        "authorizationStorageFingerprint",
+                        ui.optString("authorizationStorageFingerprint", "")
+                );
+            }
             destination.put(
                     "hostUnavailable",
                     ui.optBoolean("hostUnavailable", false)

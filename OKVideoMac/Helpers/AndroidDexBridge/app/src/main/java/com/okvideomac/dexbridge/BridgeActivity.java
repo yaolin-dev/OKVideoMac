@@ -331,6 +331,10 @@ public final class BridgeActivity extends Activity {
     }
 
     private static JSONObject captureUIState(BridgeActivity host) throws Exception {
+        // Read provider storage off the Android UI thread. Only an opaque
+        // digest is returned, never preference names or credential values.
+        String authorizationStorageFingerprint =
+                BridgeAuthorizationStorageFingerprint.capture(host);
         return onUIThread(host, () -> {
             JSONObject state = new JSONObject();
             JSONArray buttons = new JSONArray();
@@ -562,6 +566,10 @@ public final class BridgeActivity extends Activity {
             state.put("remoteInput", remoteInput);
             state.put("generation", uiGeneration);
             state.put("windowOwnerInteractionID", windowOwnerInteractionID);
+            state.put(
+                    "authorizationStorageFingerprint",
+                    authorizationStorageFingerprint
+            );
             state.put(
                     "authenticated",
                     false

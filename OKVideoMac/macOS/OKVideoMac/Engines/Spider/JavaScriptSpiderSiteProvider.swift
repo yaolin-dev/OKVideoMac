@@ -609,6 +609,10 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
     var configurationID: String? = nil
     var siteKey: String? = nil
     var actionContract: JSONValue? = nil
+    /// Opaque digest computed inside Android from provider-owned preferences.
+    /// No key or credential value leaves the Bridge. MyDrive authorization
+    /// uses a stable post-QR change only as request-scoped success evidence.
+    var authorizationStorageFingerprint: String? = nil
 
     var interactionGeneration: Int? {
         generation ?? revision
@@ -872,12 +876,44 @@ enum AndroidBridgeQRCodePolicy {
         return data
     }
 
+    static func payload(_ data: Data?) -> String? {
+        guard let data,
+              let image = CIImage(data: data),
+              let detector = CIDetector(
+                ofType: CIDetectorTypeQRCode,
+                context: nil,
+                options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]
+              ) else {
+            return nil
+        }
+        return detector.features(in: image).compactMap { feature in
+            guard let value = (feature as? CIQRCodeFeature)?.messageString,
+                  !value.isEmpty else {
+                return nil
+            }
+            return value
+        }.first
+    }
+
     static func retainedSnapshot(
         fresh: Data?,
         previous: Data?,
-        currentStateIsQRCode: Bool
+        currentStateIsQRCode: Bool,
+        retainsPendingAuthorization: Bool = false
     ) -> Data? {
-        fresh ?? (currentStateIsQRCode ? previous : nil)
+        if let fresh, let previous,
+           let freshPayload = payload(fresh),
+           let previousPayload = payload(previous),
+           freshPayload == previousPayload {
+            // Android redraws the same ImageView while polling. Preserve the
+            // original bytes so SwiftUI does not rebuild the QR image every
+            // half second merely because PNG encoding changed.
+            return previous
+        }
+        if let fresh { return fresh }
+        return currentStateIsQRCode || retainsPendingAuthorization
+            ? previous
+            : nil
     }
 }
 

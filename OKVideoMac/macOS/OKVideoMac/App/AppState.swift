@@ -771,6 +771,28 @@ enum MyDriveAuthorizationVerificationPolicy {
     }
 }
 
+/// MyDrive's legacy QR dialogs can remain visible after the provider has
+/// already persisted the account credential. The Android Bridge exposes only
+/// an opaque preference digest. Require the changed digest to remain stable
+/// across multiple polls so a transient/partial preference write cannot
+/// complete the authorization by itself.
+enum MyDriveAuthorizationStorageEvidencePolicy {
+    static let requiredStablePollCount = 2
+
+    static func confirmsStableChange(
+        baseline: String?,
+        candidate: String?,
+        stablePollCount: Int
+    ) -> Bool {
+        guard let baseline = baseline?.nonEmpty,
+              let candidate = candidate?.nonEmpty,
+              candidate != baseline else {
+            return false
+        }
+        return stablePollCount >= requiredStablePollCount
+    }
+}
+
 /// Legacy CatVod commands and one-shot toggles persist inside their clicked
 /// Android callback and often publish no second terminal response. Ordering
 /// controls are different: arrow clicks mutate a draft dialog and only its
@@ -1669,6 +1691,12 @@ private struct CloudAuthorizationContext {
     /// opened its QR. A newly available category after the worker returns is
     /// accepted as authorization evidence when the legacy chooser disappears.
     var myDriveAuthorizedCategoryIDsAtStart: Set<String>?
+    /// Opaque Android preference digest captured once the selected account's
+    /// QR is visible. A later stable change proves provider auth storage was
+    /// updated even when the legacy QR dialog never closes.
+    var myDriveAuthorizationStorageFingerprintAtQRCode: String?
+    var myDriveAuthorizationStorageCandidateFingerprint: String?
+    var myDriveAuthorizationStorageStablePollCount: Int
 }
 
 enum PlaybackRequestOrigin: Equatable, Sendable {
@@ -3883,7 +3911,10 @@ final class AppState: ObservableObject {
             hasRequestedVerification: false,
             lastAuthorizationProbeAt: nil,
             myDriveAuthorizationTarget: nil,
-            myDriveAuthorizedCategoryIDsAtStart: nil
+            myDriveAuthorizedCategoryIDsAtStart: nil,
+            myDriveAuthorizationStorageFingerprintAtQRCode: nil,
+            myDriveAuthorizationStorageCandidateFingerprint: nil,
+            myDriveAuthorizationStorageStablePollCount: 0
         )
         cloudAuthorizationPrompt = CloudAuthorizationPrompt(
             id: UUID(),
@@ -4539,6 +4570,9 @@ final class AppState: ObservableObject {
                         ? MyDriveAuthorizationVerificationPolicy
                             .authorizedCategoryIDs(in: siteHome)
                         : nil
+                current.myDriveAuthorizationStorageFingerprintAtQRCode = nil
+                current.myDriveAuthorizationStorageCandidateFingerprint = nil
+                current.myDriveAuthorizationStorageStablePollCount = 0
                 cloudAuthorizationContext = current
             }
             if ConfigurationControlSubmissionPolicy.acceptedClickCancels(
@@ -4963,10 +4997,15 @@ final class AppState: ObservableObject {
         // classification and can miss one frame while the ImageView redraws.
         // Within the same request, retain the last decoded login QR until the
         // bridge reports a stable exit; the poller owns that exit decision.
+        let retainsPendingAuthorization = previous?.interactionID == operationID
+            && previous?.displaysLoginQRCode == true
+            && cloudAuthorizationContext?.hasObservedQRCode == true
+            && cloudAuthorizationContext?.hasRequestedVerification != true
         let snapshot = AndroidBridgeQRCodePolicy.retainedSnapshot(
             fresh: freshSnapshot,
             previous: previous?.snapshot,
-            currentStateIsQRCode: state.isQRCode
+            currentStateIsQRCode: state.isQRCode,
+            retainsPendingAuthorization: retainsPendingAuthorization
         )
         let hasVerifiedQRCode = snapshot != nil
         // QR images often arrive one or more polling generations after the
@@ -5027,6 +5066,30 @@ final class AppState: ObservableObject {
            var context = cloudAuthorizationContext {
             context.hasObservedQRCode = true
             context.lastObservedQRCodeGeneration = state.interactionGeneration
+            if context.myDriveAuthorizationTarget != nil,
+               let fingerprint = state.authorizationStorageFingerprint?.nonEmpty {
+                if context.myDriveAuthorizationStorageFingerprintAtQRCode == nil {
+                    // Capture after the QR is rendered so provider writes used
+                    // only to construct the QR cannot become login evidence.
+                    context.myDriveAuthorizationStorageFingerprintAtQRCode =
+                        fingerprint
+                    context.myDriveAuthorizationStorageCandidateFingerprint = nil
+                    context.myDriveAuthorizationStorageStablePollCount = 0
+                } else if fingerprint
+                            != context.myDriveAuthorizationStorageFingerprintAtQRCode {
+                    if context.myDriveAuthorizationStorageCandidateFingerprint
+                        == fingerprint {
+                        context.myDriveAuthorizationStorageStablePollCount += 1
+                    } else {
+                        context.myDriveAuthorizationStorageCandidateFingerprint =
+                            fingerprint
+                        context.myDriveAuthorizationStorageStablePollCount = 1
+                    }
+                } else {
+                    context.myDriveAuthorizationStorageCandidateFingerprint = nil
+                    context.myDriveAuthorizationStorageStablePollCount = 0
+                }
+            }
             cloudAuthorizationContext = context
         }
         let upstreamStatus = state.texts?
@@ -5037,11 +5100,20 @@ final class AppState: ObservableObject {
                         "/proxy?do=input"
                     )
             })
-        let status = state.isRemoteInputQRCode
+        let freshStatus = state.isRemoteInputQRCode
             ? "当前辅助输入码不适用于 Mac。请直接粘贴 Cookie，或点击“扫描二维码”生成网盘 App 登录码。"
             : credentialPush
             ? "该上游页面不是网盘 APP 登录码。请在下方粘贴 Cookie 或 Token，内容只发送到本机 Android 桥。"
             : upstreamStatus
+        // A transient Android chooser/QR rebuild must not erase the useful
+        // verification message and then restore it on the next half-second
+        // poll. Preserve the current request's QR status until new upstream
+        // text or a terminal state replaces it.
+        let status = freshStatus
+            ?? (previous?.interactionID == operationID
+                && previous?.displaysLoginQRCode == true
+                ? previous?.status
+                : nil)
         let updated = CloudAuthorizationPrompt(
             id: previous?.id ?? UUID(),
             interactionID: operationID,
@@ -5058,8 +5130,12 @@ final class AppState: ObservableObject {
             usesSecureInput: usesSecureInput,
             credentialPush: credentialPush,
             displaysLoginQRCode: displaysLoginQRCode,
-            allowsRetry: false,
+            allowsRetry: previous?.interactionID == operationID
+                && previous?.displaysLoginQRCode == true
+                ? previous?.allowsRetry == true
+                : false,
             actions: lifecyclePhase == .presenting
+                && !displaysLoginQRCode
                 ? state.actionableControls.map {
                 CloudAuthorizationAction(
                     id: $0.id,
@@ -5071,8 +5147,8 @@ final class AppState: ObservableObject {
                 : [],
             snapshot: displaysLoginQRCode ? snapshot : nil,
             uiSchemaVersion: state.uiSchemaVersion,
-            elements: state.elements ?? [],
-            supportingTexts: state.texts ?? []
+            elements: displaysLoginQRCode ? [] : state.elements ?? [],
+            supportingTexts: displaysLoginQRCode ? [] : state.texts ?? []
         )
         _ = configurationInteractionCoordinator.transition(
             operationID,
@@ -5243,6 +5319,25 @@ final class AppState: ObservableObject {
                             return
                         }
                         await self.updateCloudAuthorizationPrompt(state)
+                        if state.isQRCode,
+                           let latestContext = self.cloudAuthorizationContext,
+                           latestContext.operationID == context.operationID,
+                           MyDriveAuthorizationStorageEvidencePolicy
+                            .confirmsStableChange(
+                                baseline: latestContext
+                                    .myDriveAuthorizationStorageFingerprintAtQRCode,
+                                candidate: latestContext
+                                    .myDriveAuthorizationStorageCandidateFingerprint,
+                                stablePollCount: latestContext
+                                    .myDriveAuthorizationStorageStablePollCount
+                            ),
+                           await self.verifyMyDriveAuthorizationResult(
+                                state: state,
+                                context: latestContext,
+                                storageEvidenceConfirmed: true
+                           ) {
+                            continue
+                        }
                     } else {
                         hiddenPollCount += 1
                         if CloudAuthorizationPollingPolicy.shouldTimeOut(
@@ -5322,103 +5417,11 @@ final class AppState: ObservableObject {
         // latter covers legacy dialogs that destroy their chooser parent after
         // a real scan, while still rejecting a bare QR/window transition.
         if myDriveLoginStatusAction(for: context) != nil {
-            guard configurationInteractionCoordinator.owns(
-                    context.operationID
-                  ),
-                  cloudAuthorizationContext?.operationID
-                    == context.operationID,
-                  let provider = providers[context.sourceIdentity.siteKey]
-                    as? AndroidDexSpiderSiteProvider else {
-                return false
-            }
-            let decision = MyDriveAuthorizationVerificationPolicy.decision(
-                target: context.myDriveAuthorizationTarget,
-                state: state
+            return await verifyMyDriveAuthorizationResult(
+                state: state,
+                context: context,
+                storageEvidenceConfirmed: false
             )
-            var verifiedHome: SiteHome?
-            var categoryDeltaConfirmed = false
-            let now = Date()
-            let mayProbeHome: Bool
-            if let lastProbe = cloudAuthorizationContext?
-                .lastAuthorizationProbeAt {
-                mayProbeHome = now.timeIntervalSince(lastProbe) >= 1
-            } else {
-                mayProbeHome = true
-            }
-            if decision != .authenticated, mayProbeHome,
-               var current = cloudAuthorizationContext,
-               current.operationID == context.operationID {
-                current.lastAuthorizationProbeAt = now
-                cloudAuthorizationContext = current
-                verifiedHome = try? await provider.home()
-                if let verifiedHome {
-                    categoryDeltaConfirmed =
-                        MyDriveAuthorizationVerificationPolicy
-                            .confirmsNewAuthorizedCategory(
-                                baseline: current
-                                    .myDriveAuthorizedCategoryIDsAtStart,
-                                home: verifiedHome
-                            )
-                }
-            }
-            guard decision == .authenticated || categoryDeltaConfirmed else {
-                if var prompt = cloudAuthorizationPrompt,
-                   prompt.interactionID == context.operationID,
-                   prompt.lifecyclePhase == .presenting {
-                    prompt.status = decision == .unauthenticated || mayProbeHome
-                        ? "尚未检测到登录成功；请完成扫码。二维码失效时可点“重试”重新生成。"
-                        : "正在等待所选网盘账号返回明确的登录状态…"
-                    prompt.allowsRetry = true
-                    cloudAuthorizationPrompt = prompt
-                }
-                // This is an explicitly pending authorization state, not a
-                // hidden-window failure. Keep polling until the selected row
-                // authenticates, the user retries/closes, or the provider
-                // publishes an explicit terminal failure.
-                return true
-            }
-            if verifiedHome == nil {
-                verifiedHome = try? await provider.home()
-            }
-            if let verifiedHome,
-               currentHomeContentIdentity == context.sourceIdentity {
-                publishHomeContent(
-                    verifiedHome,
-                    identity: context.sourceIdentity
-                )
-                await cacheSiteHome(
-                    verifiedHome,
-                    identity: context.sourceIdentity
-                )
-                _ = await applyHomePresentation(
-                    verifiedHome,
-                    identity: context.sourceIdentity,
-                    loadsCategoryContent: false
-                )
-            }
-            if var verifiedContext = cloudAuthorizationContext,
-               verifiedContext.operationID == context.operationID {
-                verifiedContext.hasRequestedVerification = true
-                cloudAuthorizationContext = verifiedContext
-            }
-            transitionConfigurationInteraction(
-                context.operationID,
-                to: .processing,
-                semantic: .qrAuthorization,
-                status: "已确认所选网盘账号登录成功，正在刷新账号状态…"
-            )
-            if let handle = context.providerHandle {
-                await Self.verifyScopedConfigurationInteraction(
-                    handle,
-                    succeeded: true,
-                    actualRefreshPerformed: verifiedHome != nil
-                )
-            } else {
-                await finishCloudAuthorizationAndRetry(
-                    refreshPerformed: verifiedHome != nil
-                )
-            }
-            return true
         }
 
         guard let provider = providers[context.sourceIdentity.siteKey]
@@ -5488,6 +5491,112 @@ final class AppState: ObservableObject {
             )
         } else {
             await finishCloudAuthorizationAndRetry(refreshPerformed: true)
+        }
+        return true
+    }
+
+    /// Confirms MyDrive authorization from one of three request-scoped facts:
+    /// the exact chooser row changed to logged in, a new usable media category
+    /// appeared, or Android persisted a stable post-QR preference change.
+    /// The last signal is necessary for providers that keep their QR dialog
+    /// visible after success and leave the newly logged account disabled.
+    private func verifyMyDriveAuthorizationResult(
+        state: AndroidBridgeUIState,
+        context: CloudAuthorizationContext,
+        storageEvidenceConfirmed: Bool
+    ) async -> Bool {
+        guard myDriveLoginStatusAction(for: context) != nil,
+              configurationInteractionCoordinator.owns(context.operationID),
+              cloudAuthorizationContext?.operationID == context.operationID,
+              CloudAuthorizationPollingPolicy.isWaitingForProviderWorker(
+                workerReturned: state.workerReturned
+              ) == false,
+              let provider = providers[context.sourceIdentity.siteKey]
+                as? AndroidDexSpiderSiteProvider else {
+            return false
+        }
+        let decision = MyDriveAuthorizationVerificationPolicy.decision(
+            target: context.myDriveAuthorizationTarget,
+            state: state
+        )
+        var verifiedHome: SiteHome?
+        var categoryDeltaConfirmed = false
+        let now = Date()
+        let mayProbeHome: Bool
+        if let lastProbe = cloudAuthorizationContext?.lastAuthorizationProbeAt {
+            mayProbeHome = now.timeIntervalSince(lastProbe) >= 1
+        } else {
+            mayProbeHome = true
+        }
+        if decision != .authenticated, mayProbeHome,
+           var current = cloudAuthorizationContext,
+           current.operationID == context.operationID {
+            current.lastAuthorizationProbeAt = now
+            cloudAuthorizationContext = current
+            verifiedHome = try? await provider.home()
+            if let verifiedHome {
+                categoryDeltaConfirmed =
+                    MyDriveAuthorizationVerificationPolicy
+                        .confirmsNewAuthorizedCategory(
+                            baseline: current
+                                .myDriveAuthorizedCategoryIDsAtStart,
+                            home: verifiedHome
+                        )
+            }
+        }
+        guard decision == .authenticated
+                || categoryDeltaConfirmed
+                || storageEvidenceConfirmed else {
+            if var prompt = cloudAuthorizationPrompt,
+               prompt.interactionID == context.operationID,
+               prompt.lifecyclePhase == .presenting {
+                prompt.status = decision == .unauthenticated || mayProbeHome
+                    ? "尚未检测到登录成功；请完成扫码。二维码失效时可点“重试”重新生成。"
+                    : "正在等待所选网盘账号返回明确的登录状态…"
+                prompt.allowsRetry = true
+                cloudAuthorizationPrompt = prompt
+            }
+            return true
+        }
+        if verifiedHome == nil {
+            verifiedHome = try? await provider.home()
+        }
+        if let verifiedHome,
+           currentHomeContentIdentity == context.sourceIdentity {
+            publishHomeContent(verifiedHome, identity: context.sourceIdentity)
+            await cacheSiteHome(
+                verifiedHome,
+                identity: context.sourceIdentity
+            )
+            _ = await applyHomePresentation(
+                verifiedHome,
+                identity: context.sourceIdentity,
+                loadsCategoryContent: false
+            )
+        }
+        if var verifiedContext = cloudAuthorizationContext,
+           verifiedContext.operationID == context.operationID {
+            verifiedContext.hasRequestedVerification = true
+            cloudAuthorizationContext = verifiedContext
+        }
+        transitionConfigurationInteraction(
+            context.operationID,
+            to: .processing,
+            semantic: .qrAuthorization,
+            status: storageEvidenceConfirmed
+                ? "检测到所选网盘账号授权数据已更新，正在刷新账号状态…"
+                : "已确认所选网盘账号登录成功，正在刷新账号状态…"
+        )
+        if let handle = context.providerHandle {
+            await Self.verifyScopedConfigurationInteraction(
+                handle,
+                succeeded: true,
+                actualRefreshPerformed: verifiedHome != nil
+            )
+        } else {
+            await finishCloudAuthorizationAndRetry(
+                refreshPerformed: verifiedHome != nil
+            )
         }
         return true
     }

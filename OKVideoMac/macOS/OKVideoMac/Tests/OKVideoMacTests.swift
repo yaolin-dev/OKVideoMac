@@ -2222,6 +2222,15 @@ final class OKVideoMacTests: XCTestCase {
             ),
             replacement
         )
+        XCTAssertEqual(
+            AndroidBridgeQRCodePolicy.retainedSnapshot(
+                fresh: nil,
+                previous: previous,
+                currentStateIsQRCode: false,
+                retainsPendingAuthorization: true
+            ),
+            previous
+        )
     }
 
     func testPosterlessHomeItemsUseCompactPresentation() {
@@ -2547,6 +2556,60 @@ final class OKVideoMacTests: XCTestCase {
                     baseline: nil,
                     home: home
                 )
+        )
+    }
+
+    func testMyDriveAuthorizationRequiresStablePostQRCodeStorageChange() {
+        XCTAssertFalse(
+            MyDriveAuthorizationStorageEvidencePolicy.confirmsStableChange(
+                baseline: "before",
+                candidate: "after",
+                stablePollCount: 1
+            )
+        )
+        XCTAssertTrue(
+            MyDriveAuthorizationStorageEvidencePolicy.confirmsStableChange(
+                baseline: "before",
+                candidate: "after",
+                stablePollCount: 2
+            )
+        )
+        XCTAssertFalse(
+            MyDriveAuthorizationStorageEvidencePolicy.confirmsStableChange(
+                baseline: "same",
+                candidate: "same",
+                stablePollCount: 10
+            )
+        )
+        XCTAssertFalse(
+            MyDriveAuthorizationStorageEvidencePolicy.confirmsStableChange(
+                baseline: nil,
+                candidate: "after",
+                stablePollCount: 10
+            )
+        )
+    }
+
+    func testAndroidBridgeUIStateDecodesOpaqueAuthorizationStorageFingerprint()
+        throws {
+        let state = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: Data(#"""
+            {
+              "visible": true,
+              "title": "网盘授权",
+              "inputCount": 0,
+              "imageCount": 1,
+              "buttons": [],
+              "phase": "qr",
+              "workerReturned": true,
+              "authorizationStorageFingerprint": "opaque-digest"
+            }
+            """#.utf8)
+        )
+        XCTAssertEqual(
+            state.authorizationStorageFingerprint,
+            "opaque-digest"
         )
     }
 
