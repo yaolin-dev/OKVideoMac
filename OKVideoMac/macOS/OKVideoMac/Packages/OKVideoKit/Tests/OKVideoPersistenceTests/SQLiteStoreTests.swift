@@ -692,6 +692,33 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(remaining.map(\.configurationID), [second])
     }
 
+    func testHistoryKeepsSameVideoSeparateAcrossSitesWithinConfiguration() async throws {
+        let store = try makeStore()
+        let configurationID = UUID()
+        try await store.saveHistory(
+            HistoryRecord(
+                configurationID: configurationID,
+                siteKey: "site-a",
+                videoID: "shared-video",
+                title: "Site A"
+            ),
+            incognito: false
+        )
+        try await store.saveHistory(
+            HistoryRecord(
+                configurationID: configurationID,
+                siteKey: "site-b",
+                videoID: "shared-video",
+                title: "Site B"
+            ),
+            incognito: false
+        )
+
+        let records = try await store.history()
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(Set(records.map(\.siteKey)), Set(["site-a", "site-b"]))
+    }
+
     func testHistoryDeletionTargetsOnlySelectedRecord() async throws {
         let store = try makeStore()
         let configurationID = UUID()

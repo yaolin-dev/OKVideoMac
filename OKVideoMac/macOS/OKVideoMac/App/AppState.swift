@@ -3089,7 +3089,6 @@ final class AppState: ObservableObject {
         isHomeLoading = true
         homeLoadErrorMessage = nil
         selectedSiteKey = key
-        try? await reloadHistory()
         discardHomeContentIfNeeded(for: currentHomeContentIdentity)
         selectedCategoryID = nil
         selectedCategoryFilters = [:]
@@ -8909,6 +8908,19 @@ final class AppState: ObservableObject {
             ?? "原配置已删除"
     }
 
+    func historySiteName(for record: HistoryRecord) -> String {
+        guard record.configurationID == activeConfigurationRecord?.id else {
+            return record.siteKey
+        }
+        let configuredName = activeConfiguration?.sites.first(where: {
+            $0.key == record.siteKey
+        })?.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let configuredName, !configuredName.isEmpty else {
+            return record.siteKey
+        }
+        return configuredName
+    }
+
     static func historyPlaybackSelection(
         in detail: VideoDetail,
         record: HistoryRecord
@@ -9997,26 +10009,21 @@ final class AppState: ObservableObject {
 
     static func historyRecords(
         _ records: [HistoryRecord],
-        for configurationID: UUID?,
-        siteKey: String?
+        for configurationID: UUID?
     ) -> [HistoryRecord] {
-        guard let configurationID,
-              let siteKey,
-              !siteKey.trimmingCharacters(in: .whitespacesAndNewlines)
-                  .isEmpty else {
-            return []
-        }
-        return records.filter {
-            $0.configurationID == configurationID && $0.siteKey == siteKey
-        }
+        guard let configurationID else { return [] }
+        // A point-on-demand configuration is the user's history source.
+        // Site keys remain part of each record's durable identity and replay
+        // target, but switching the selected homepage site must never hide
+        // history produced by sibling sites in the same configuration.
+        return records.filter { $0.configurationID == configurationID }
     }
 
     private func reloadHistory() async throws {
         guard let environment else { return }
         history = Self.historyRecords(
             try await environment.database.history(),
-            for: activeConfigurationRecord?.id,
-            siteKey: selectedSiteKey
+            for: activeConfigurationRecord?.id
         )
     }
 

@@ -7137,7 +7137,7 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     @MainActor
-    func testVisibleHistoryIsScopedToActiveConfigurationAndSelectedSite() {
+    func testVisibleHistoryIsScopedToActiveConfigurationAcrossSites() {
         let first = UUID()
         let second = UUID()
         let firstRecord = HistoryRecord(
@@ -7172,23 +7172,14 @@ final class OKVideoMacTests: XCTestCase {
                     anotherSiteRecord,
                     firstRecord
                 ],
-                for: first,
-                siteKey: "shared-site-key"
+                for: first
             ),
-            [firstRecord]
+            [anotherSiteRecord, firstRecord]
         )
         XCTAssertTrue(
             AppState.historyRecords(
                 [firstRecord, secondRecord],
-                for: nil,
-                siteKey: "shared-site-key"
-            ).isEmpty
-        )
-        XCTAssertTrue(
-            AppState.historyRecords(
-                [firstRecord, anotherSiteRecord],
-                for: first,
-                siteKey: nil
+                for: nil
             ).isEmpty
         )
     }

@@ -27,7 +27,7 @@ struct HistoryView: View {
                 }
             }
         }
-        .navigationTitle("历史")
+        .navigationTitle(navigationTitle)
         .toolbar {
             ToolbarItemGroup {
                 if !state.history.isEmpty {
@@ -139,7 +139,7 @@ struct HistoryView: View {
                     .lineLimit(1)
                 Text(
                     [
-                        state.historyConfigurationName(for: item),
+                        state.historySiteName(for: item),
                         item.sourceName,
                         item.episodeName
                     ]
@@ -210,6 +210,15 @@ struct HistoryView: View {
 
     private var allItemsSelected: Bool {
         !state.history.isEmpty && selectedIDs.count == state.history.count
+    }
+
+    private var navigationTitle: String {
+        let sourceName = state.activeConfigurationRecord?.name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let sourceName, !sourceName.isEmpty else {
+            return "历史"
+        }
+        return "历史 · \(sourceName)"
     }
 
     private var deletionAlertIsPresented: Binding<Bool> {
