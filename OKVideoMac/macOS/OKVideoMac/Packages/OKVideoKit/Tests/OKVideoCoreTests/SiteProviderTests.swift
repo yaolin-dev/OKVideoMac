@@ -803,6 +803,62 @@ final class SiteProviderTests: XCTestCase {
         })
     }
 
+    func testJavaDexCategoryPreservesExplicitActionsWithoutChangingNodePage()
+        throws {
+        let site = SiteConfiguration(
+            key: "multi-config-source",
+            name: "Multi Config Source",
+            type: 3,
+            api: "csp_FishConfig"
+        )
+        let payload: JSONValue = .object([
+            "list": .array([
+                .object([
+                    "vod_id": .string("config-health"),
+                    "vod_name": .string("配置检查"),
+                    "action": .string("config_health")
+                ]),
+                .object([
+                    "vod_id": .string("ordinary-movie"),
+                    "vod_name": .string("普通影片")
+                ]),
+                .object([
+                    "vod_id": .string("unsupported-entry"),
+                    "vod_name": .string("不支持"),
+                    "vod_tag": .string("unsupported")
+                ])
+            ]),
+            "page": .integer(1),
+            "pagecount": .integer(1)
+        ])
+
+        let javaDex = try SpiderResponseMapper.javaDexCategoryPage(
+            payload,
+            site: site,
+            baseURL: nil,
+            page: 1
+        )
+        XCTAssertEqual(
+            javaDex.items.map(\.videoID),
+            ["config-health", "ordinary-movie"]
+        )
+        XCTAssertEqual(
+            javaDex.items.map(\.resolvedContentKind),
+            [.action, .media]
+        )
+
+        // NodeHTTPSpiderSiteProvider deliberately continues through `page`.
+        // Its host-message configuration transport must remain isolated from
+        // the Android/Dex action-card contract.
+        let node = try SpiderResponseMapper.page(
+            payload,
+            site: site,
+            baseURL: nil,
+            page: 1
+        )
+        XCTAssertEqual(node.items.map(\.videoID), ["ordinary-movie"])
+    }
+
     func testPlayerAcceptsPluralHeadersAndCanonicalHeaderWins() throws {
         let site = SiteConfiguration(
             key: "header-source",

@@ -2260,35 +2260,50 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testAcceptedMyDriveOrderingClicksAreTerminalMutations() {
-        for action in ["panSortShow", "panSourceSortShow"] {
+    func testQRCodeExitRequestsVerificationEvenWhenParentUIRemainsVisible() {
+        XCTAssertTrue(
+            CloudAuthorizationPollingPolicy.shouldVerifyAfterQRCodeExit(
+                hasObservedQRCode: true,
+                currentStateIsQRCode: false,
+                actionKind: .authorization
+            )
+        )
+        XCTAssertFalse(
+            CloudAuthorizationPollingPolicy.shouldVerifyAfterQRCodeExit(
+                hasObservedQRCode: true,
+                currentStateIsQRCode: true,
+                actionKind: .authorization
+            )
+        )
+        XCTAssertFalse(
+            CloudAuthorizationPollingPolicy.shouldVerifyAfterQRCodeExit(
+                hasObservedQRCode: true,
+                currentStateIsQRCode: false,
+                actionKind: .ordering
+            )
+        )
+    }
+
+    func testAcceptedStructuredControlClicksAreTerminalMutations() {
+        for semantic in [
+            ConfigurationInteractionSemantic.command,
+            .toggle,
+            .order
+        ] {
             XCTAssertTrue(
                 ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
-                    semantic: .order,
-                    providerAPI: "csp_MyDriveGuard",
-                    actionIdentifier: action
+                    semantic: semantic
                 )
             )
         }
         XCTAssertFalse(
             ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
-                semantic: .order,
-                providerAPI: "csp_Other",
-                actionIdentifier: "panSourceSortShow"
+                semantic: .choice
             )
         )
         XCTAssertFalse(
             ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
-                semantic: .choice,
-                providerAPI: "csp_MyDriveGuard",
-                actionIdentifier: "panSourceSortShow"
-            )
-        )
-        XCTAssertFalse(
-            ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
-                semantic: .qrAuthorization,
-                providerAPI: "csp_MyDriveGuard",
-                actionIdentifier: "LoginShow"
+                semantic: .qrAuthorization
             )
         )
         XCTAssertEqual(

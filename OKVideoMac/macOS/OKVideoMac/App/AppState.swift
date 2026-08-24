@@ -612,30 +612,31 @@ enum CloudAuthorizationPollingPolicy {
         }
         return elapsed >= max(0, maximumInterval)
     }
+
+    static func shouldVerifyAfterQRCodeExit(
+        hasObservedQRCode: Bool,
+        currentStateIsQRCode: Bool,
+        actionKind: ConfigurationInteraction.ActionKind?
+    ) -> Bool {
+        hasObservedQRCode
+            && !currentStateIsQRCode
+            && actionKind == .authorization
+    }
 }
 
-/// MyDriveGuard's ordering controls are legacy immediate-mutation surfaces:
-/// the provider performs and persists the change inside the clicked Android
-/// view callback, but does not publish a second terminal response. A
-/// successful, request-scoped `performClick` is therefore their explicit
-/// completion event. Other providers, authorization, and generic
-/// configuration surfaces deliberately remain on the stricter verification
-/// path.
+/// Legacy CatVod command, toggle and ordering controls perform and persist
+/// their change inside the clicked Android view callback, but often publish no
+/// second terminal response. A successful request-scoped `performClick` is
+/// therefore their explicit completion event. Choices and authorization stay
+/// on the stricter transition/verification path because they may open another
+/// provider-owned surface.
 enum ConfigurationControlSubmissionPolicy {
     static func acceptedClickCompletes(
-        semantic: ConfigurationInteractionSemantic,
-        providerAPI: String?,
-        actionIdentifier: String?
+        semantic: ConfigurationInteractionSemantic
     ) -> Bool {
-        guard providerAPI?.trimmingCharacters(in: .whitespacesAndNewlines)
-                == MyDriveGuardActionContract.providerAPI else {
-            return false
-        }
-        switch (semantic, MyDriveGuardActionContract.tag(for: actionIdentifier)) {
-        case (.order, "order"), (.toggle, "toggle"):
-            return true
-        default:
-            return false
+        switch semantic {
+        case .command, .toggle, .order: return true
+        default: return false
         }
     }
 
@@ -4318,10 +4319,7 @@ final class AppState: ObservableObject {
                 )
             }
             if ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
-                semantic: submissionSemantic,
-                providerAPI: (providers[context.sourceIdentity.siteKey]
-                    as? AndroidDexSpiderSiteProvider)?.site.api,
-                actionIdentifier: context.operation.actionIdentifier
+                semantic: submissionSemantic
             ) {
                 if var current = cloudAuthorizationContext,
                    current.operationID == context.operationID {
@@ -4887,6 +4885,31 @@ final class AppState: ObservableObject {
                         }
                         continue
                     }
+                    if CloudAuthorizationPollingPolicy
+                        .shouldVerifyAfterQRCodeExit(
+                            hasObservedQRCode: context.hasObservedQRCode,
+                            currentStateIsQRCode: state.isQRCode,
+                            actionKind: context.providerInteraction?.actionKind
+                        ) {
+                        hiddenPollCount += 1
+                        if await self.verifyAuthorizationResultAfterQRCodeExit(
+                            state: state,
+                            context: context
+                        ) {
+                            continue
+                        }
+                        if CloudAuthorizationPollingPolicy.shouldTimeOut(
+                            hiddenPollCount: hiddenPollCount
+                        ) {
+                            context.providerHandle?.cancel()
+                            self.failConfigurationInteraction(
+                                context.operationID,
+                                message: "二维码已确认，但站点状态长时间没有更新。请刷新后重试。"
+                            )
+                            return
+                        }
+                        continue
+                    }
                     if state.isAuthorizationPrompt {
                         hiddenPollCount = 0
                         if var current = self.cloudAuthorizationContext,
@@ -4919,12 +4942,6 @@ final class AppState: ObservableObject {
                         }
                         await self.updateCloudAuthorizationPrompt(state)
                     } else {
-                        if await self.verifyHiddenAuthorizationResult(
-                            state: state,
-                            context: context
-                        ) {
-                            continue
-                        }
                         hiddenPollCount += 1
                         if CloudAuthorizationPollingPolicy.shouldTimeOut(
                             hiddenPollCount: hiddenPollCount
@@ -4962,19 +4979,19 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// MyDriveGuard closes its QR surface after the phone accepts the login,
-    /// but its legacy action result does not carry an authenticated flag.  A
-    /// hidden window is not success on its own, so confirm the provider's
-    /// documented post-login home contract before completing the request.
-    /// This turns the newly exposed media provider into explicit verification
-    /// instead of making the user infer success from a much later refresh.
-    private func verifyHiddenAuthorizationResult(
+    /// Legacy CatVod providers commonly close only the child QR dialog after
+    /// the phone accepts a login while leaving their parent chooser visible.
+    /// Treat the QR -> non-QR transition as a request to refresh provider
+    /// state, not as success by itself. MyDrive has an explicit post-login
+    /// home contract; multi-category configuration spiders are verified by a
+    /// structural change in the currently displayed category response.
+    private func verifyAuthorizationResultAfterQRCodeExit(
         state: AndroidBridgeUIState,
         context: CloudAuthorizationContext
     ) async -> Bool {
-        guard !state.visible,
-              context.hasObservedQRCode,
-              cloudAuthorizationPrompt?.semantic == .qrAuthorization,
+        guard context.hasObservedQRCode,
+              !state.isQRCode,
+              context.providerInteraction?.actionKind == .authorization,
               cloudAuthorizationContext?.hasRequestedVerification != true,
               let provider = providers[context.sourceIdentity.siteKey]
                 as? AndroidDexSpiderSiteProvider else {
@@ -4998,13 +5015,31 @@ final class AppState: ObservableObject {
             status: "二维码窗口已关闭，正在确认授权结果…"
         )
 
-        guard let verifiedHome = try? await provider.home(),
-              provider.homeConfirmsAuthorization(verifiedHome),
+        let verifiedHome = try? await provider.home()
+        let homeConfirmed = verifiedHome.map {
+            provider.homeConfirmsAuthorization($0)
+        } == true
+        var categoryConfirmed = false
+        if !homeConfirmed,
+           currentHomeContentIdentity == context.sourceIdentity,
+           let categoryID = selectedCategoryID,
+           let previousPage = categoryPage,
+           let refreshedPage = try? await provider.category(
+                id: categoryID,
+                page: 1,
+                filters: selectedCategoryFilters
+           ), refreshedPage != previousPage {
+            categoryPage = refreshedPage
+            categoryConfirmed = true
+        }
+        guard homeConfirmed || categoryConfirmed,
               configurationInteractionCoordinator.owns(context.operationID),
               cloudAuthorizationContext?.operationID == context.operationID else {
             return false
         }
-        if currentHomeContentIdentity == context.sourceIdentity {
+        if homeConfirmed,
+           let verifiedHome,
+           currentHomeContentIdentity == context.sourceIdentity {
             publishHomeContent(verifiedHome, identity: context.sourceIdentity)
             await cacheSiteHome(verifiedHome, identity: context.sourceIdentity)
             _ = await applyHomePresentation(

@@ -127,13 +127,21 @@ final class BridgeInteractionRegistry {
                 interaction.uiVisible = false;
                 if (now >= interaction.delayedUIDeadline) {
                     if (interaction.sawUI) {
-                        // Dismissing provider UI is presentation state, not a
-                        // successful provider outcome. In particular, closing
-                        // a QR window does not prove that the credential was
-                        // accepted. Only verified(true) or another explicit
-                        // provider terminal result may complete the request.
-                        interaction.failure = "providerOutcomeUnverified";
-                        interaction.transition("failed", "failed");
+                        if (interaction.submitted
+                                && !"authorization".equals(interaction.kind)) {
+                            // submitUI performs a final request-ownership check
+                            // and invokes the provider's click listener on the
+                            // Android UI thread. When that accepted callback
+                            // closes its configuration surface and no successor
+                            // appears during the handoff grace, the click is the
+                            // strongest terminal event legacy CatVod providers
+                            // expose. Authorization is deliberately excluded:
+                            // closing a QR window never proves login success.
+                            interaction.transition("completed", "completed");
+                        } else {
+                            interaction.failure = "providerOutcomeUnverified";
+                            interaction.transition("failed", "failed");
+                        }
                     } else {
                         // Merely returning from a worker that explicitly
                         // requested UI is not success. Treating an absent UI as

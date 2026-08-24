@@ -547,6 +547,34 @@ public enum SpiderResponseMapper {
         )
     }
 
+    /// Preserves the mixed media/action list used by CatVod Java/Dex
+    /// `categoryContent`. FongMi dispatches every item with an explicit
+    /// `action` through `Spider.action` while ordinary items continue to
+    /// detail. Keep this mapper scoped to AndroidDex callers: Node/HTTP
+    /// bundles own a separate host-message configuration contract and retain
+    /// the media-only behavior of `page`.
+    public static func javaDexCategoryPage(
+        _ value: JSONValue,
+        site: SiteConfiguration,
+        baseURL: URL?,
+        page: Int
+    ) throws -> VideoPage {
+        let response = try decode(
+            value,
+            site: site,
+            baseURL: baseURL,
+            allowEmpty: true
+        )
+        return VideoPage(
+            items: UpstreamResponseDecoder.summaries(
+                from: response.videos,
+                site: site,
+                baseURL: baseURL
+            ).filter { $0.resolvedContentKind != .unsupported },
+            pagination: Pagination(page: page, pageCount: response.pageCount)
+        )
+    }
+
     /// Maps a category that the provider has already classified as an action
     /// surface. A regular page intentionally keeps media only; using it here
     /// erases configuration cards before the host can present them.

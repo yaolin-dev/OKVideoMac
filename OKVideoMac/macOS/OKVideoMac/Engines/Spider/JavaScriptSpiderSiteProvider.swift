@@ -1089,7 +1089,7 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         page: Int,
         filters: [String: String]
     ) async throws -> VideoPage {
-        try SpiderResponseMapper.page(
+        try SpiderResponseMapper.javaDexCategoryPage(
             await categoryValue(id: id, page: page, filters: filters),
             site: site,
             baseURL: baseURL,

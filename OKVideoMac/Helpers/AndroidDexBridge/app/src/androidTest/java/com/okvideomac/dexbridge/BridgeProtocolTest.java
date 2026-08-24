@@ -514,6 +514,45 @@ public final class BridgeProtocolTest extends TestCase {
         assertFalse(failed.optBoolean("verificationPerformed", false));
     }
 
+    public void testAcceptedConfigurationClickCompletesAfterUIHandoffGrace()
+            throws Exception {
+        String id = BridgeInteractionRegistry.begin(
+                "interaction-clicked-configuration-" + UUID.randomUUID(),
+                "configuration",
+                "action"
+        );
+        BridgeInteractionRegistry.expectProviderUI(id);
+        BridgeInteractionRegistry.observeUI(
+                id,
+                new JSONObject()
+                        .put("visible", true)
+                        .put("generation", 12L)
+        );
+        BridgeInteractionRegistry.submitted(id);
+        BridgeInteractionRegistry.invocationReturned(id);
+
+        JSONObject pending = BridgeInteractionRegistry.observeUI(
+                id,
+                new JSONObject()
+                        .put("visible", false)
+                        .put("generation", 13L)
+        );
+        assertEquals("awaitingVerification", pending.getString("phase"));
+        assertFalse(pending.getBoolean("terminal"));
+
+        Thread.sleep(8_150L);
+        JSONObject completed = BridgeInteractionRegistry.observeUI(
+                id,
+                new JSONObject()
+                        .put("visible", false)
+                        .put("generation", 13L)
+        );
+        assertEquals("completed", completed.getString("phase"));
+        assertEquals("completed", completed.getString("outcome"));
+        assertTrue(completed.getBoolean("terminal"));
+        assertFalse(completed.optBoolean("verificationPerformed", false));
+    }
+
     public void testCancelledInteractionIgnoresLateWorkerReturn() throws Exception {
         String id = BridgeInteractionRegistry.begin(
                 "interaction-cancel-late",
