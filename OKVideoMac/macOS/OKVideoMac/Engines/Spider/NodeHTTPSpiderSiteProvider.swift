@@ -801,6 +801,9 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 "page": .string(String(page)),
                 "pg": .string(String(page))
             ],
+            // Aggregate search may retry one genuinely transient transport
+            // failure, but empty results and provider/business errors are
+            // authoritative and must not create duplicate Node work.
             maximumAttempts: 2
         )
         return try SpiderResponseMapper.page(
@@ -1093,11 +1096,13 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 )
             )
         }
-        result.url = preferredProviderLocalTransportURL(
+        let transportSelection = await preferredPlaybackTransport(
             selectedURL: result.url,
             qualities: result.qualities,
+            headers: result.headers,
             baseURL: invocation.baseURL
         )
+        result.url = transportSelection.url
         result.subtitles = result.subtitles.map { subtitle in
             URL(string: normalizePlaybackURL(
                 subtitle.absoluteString,
@@ -1122,7 +1127,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             result.mediaSession = playbackMediaSession(
                 result: result,
                 reference: reference,
-                baseURL: invocation.baseURL
+                baseURL: invocation.baseURL,
+                rangePolicy: transportSelection.rangePolicy
             )
         }
         return result
@@ -1250,7 +1256,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     private func playbackMediaSession(
         result: SitePlaybackResult,
         reference: PlaybackResourceReference,
-        baseURL: URL
+        baseURL: URL,
+        rangePolicy: PlaybackMediaSession.RangePolicy
     ) -> PlaybackMediaSession {
         var fingerprintData = Data(result.url.utf8)
         for (name, value) in result.headers.dictionary.sorted(by: {
@@ -1274,7 +1281,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             upstreamResourceFingerprint: fingerprint,
             refreshPerformed: false,
             redirectPolicy: .providerDefined,
-            rangePolicy: .providerDefined,
+            rangePolicy: rangePolicy,
             resourceReference: reference
         )
     }
@@ -1470,7 +1477,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                     )
                 }
                 if attempt + 1 < attempts,
-                   (500...599).contains(response.statusCode) {
+                   Self.isTransientHTTPStatus(response.statusCode) {
                     try await retryDelay(after: attempt)
                     continue
                 }
@@ -1480,7 +1487,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             } catch let authorization as NodeWebAuthorizationRequired {
                 throw authorization
             } catch {
-                if attempt + 1 < attempts {
+                if attempt + 1 < attempts,
+                   Self.isTransientTransportError(error) {
                     try await retryDelay(after: attempt)
                     continue
                 }
@@ -1503,6 +1511,24 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             }
         }
         throw AppError.spider("Node 站点 \(site.name) 的 \(method) 请求失败")
+    }
+
+    private static func isTransientHTTPStatus(_ statusCode: Int) -> Bool {
+        statusCode == 502 || statusCode == 503
+    }
+
+    private static func isTransientTransportError(_ error: Error) -> Bool {
+        guard !Task.isCancelled else { return false }
+        guard let error = error as? HTTPClientError else { return false }
+        switch error {
+        case .timeout, .transport:
+            return true
+        case .statusCode(let code):
+            return isTransientHTTPStatus(code)
+        case .invalidScheme, .responseTooLarge, .tooManyRedirects,
+             .invalidResponse, .cancelled:
+            return false
+        }
     }
 
     private func awaitHostMessage(
@@ -1664,26 +1690,115 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         return components.url?.absoluteString ?? value
     }
 
-    /// Contract-B providers publish their quality choices in provider order.
-    /// When those choices are endpoints owned by the current local runtime,
-    /// the first one can be an authenticated streaming relay while a later
-    /// "original" choice is only a redirect. The shared decoder's display-name
-    /// preference must not override that transport contract: cross-origin
-    /// redirects may discard the provider's Cookie/Referer context. This rule
-    /// is deliberately structural and applies only when the provider's first
-    /// choice belongs to this exact runtime origin; all-remote quality lists
-    /// keep the shared FongMi behavior.
-    private func preferredProviderLocalTransportURL(
+    private struct PlaybackTransportSelection {
+        let url: String
+        let rangePolicy: PlaybackMediaSession.RangePolicy
+    }
+
+    /// Prefer the decoder-selected original/direct transport. A Node relay is
+    /// a fallback only when the direct file does not implement byte ranges.
+    /// HLS manifests always stay direct so mpv owns manifest/segment seeking.
+    private func preferredPlaybackTransport(
         selectedURL: String,
         qualities: [PlaybackQuality],
+        headers: HTTPHeaders,
         baseURL: URL
-    ) -> String {
-        guard let providerPreferredURL = qualities.first?.url,
-              providerPreferredURL != selectedURL,
-              isOwnedByRuntime(providerPreferredURL, baseURL: baseURL) else {
-            return selectedURL
+    ) async -> PlaybackTransportSelection {
+        if Self.isHLSURL(selectedURL) {
+            return PlaybackTransportSelection(
+                url: selectedURL,
+                rangePolicy: .providerDefined
+            )
         }
-        return providerPreferredURL
+
+        let selectedIsRuntimeOwned = isOwnedByRuntime(
+            selectedURL,
+            baseURL: baseURL
+        )
+        if !selectedIsRuntimeOwned,
+           await supportsByteRanges(url: selectedURL, headers: headers) {
+            return PlaybackTransportSelection(
+                url: selectedURL,
+                rangePolicy: .forward
+            )
+        }
+
+        if !selectedIsRuntimeOwned,
+           let hls = qualities.first(where: {
+               !isOwnedByRuntime($0.url, baseURL: baseURL)
+                   && Self.isHLSURL($0.url)
+           }) {
+            return PlaybackTransportSelection(
+                url: hls.url,
+                rangePolicy: .providerDefined
+            )
+        }
+
+        if let relay = qualities.first(where: {
+            isOwnedByRuntime($0.url, baseURL: baseURL)
+        }) {
+            let supportsRange = await supportsByteRanges(
+                url: relay.url,
+                headers: headers
+            )
+            return PlaybackTransportSelection(
+                url: relay.url,
+                rangePolicy: supportsRange ? .forward : .unsupported
+            )
+        }
+
+        let supportsRange = selectedIsRuntimeOwned
+            ? await supportsByteRanges(url: selectedURL, headers: headers)
+            : false
+        return PlaybackTransportSelection(
+            url: selectedURL,
+            rangePolicy: supportsRange ? .forward : .unsupported
+        )
+    }
+
+    private func supportsByteRanges(
+        url rawValue: String,
+        headers: HTTPHeaders
+    ) async -> Bool {
+        guard let url = URL(string: rawValue),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+            return false
+        }
+        var probeHeaders = headers
+        probeHeaders["Range"] = "bytes=0-0"
+        do {
+            let response = try await httpClient.send(
+                HTTPRequest(
+                    url: url,
+                    headers: probeHeaders,
+                    timeout: 3,
+                    maximumResponseBytes: 64 * 1_024,
+                    maximumRedirects: 4,
+                    retryPolicy: .none,
+                    allowsNonSuccessfulStatus: true
+                )
+            )
+            guard response.statusCode == 206,
+                  let contentRange = response.headers["Content-Range"]?
+                    .lowercased() else { return false }
+            return contentRange.hasPrefix("bytes 0-0/")
+                || contentRange.hasPrefix("bytes 0-")
+        } catch is CancellationError {
+            return false
+        } catch {
+            return false
+        }
+    }
+
+    private static func isHLSURL(_ rawValue: String) -> Bool {
+        let lowered = rawValue.lowercased()
+        if lowered.contains(".m3u8") { return true }
+        guard let components = URLComponents(string: rawValue) else {
+            return false
+        }
+        return components.queryItems?.contains {
+            $0.value?.lowercased().contains("m3u8") == true
+        } == true
     }
 
     private func isOwnedByRuntime(

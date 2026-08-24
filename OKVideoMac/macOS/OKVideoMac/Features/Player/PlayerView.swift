@@ -721,6 +721,7 @@ struct PlayerView: View {
                 }
             }
         )
+        .disabled(!state.canSeekPlayback)
         .frame(height: 12)
         .shadow(
             color: playerAccentColor.opacity(isProgressHovering ? 0.42 : 0),
@@ -877,7 +878,8 @@ struct PlayerView: View {
 
             playerIconButton(
                 systemImage: "gobackward.10",
-                help: "快退 10 秒"
+                help: state.canSeekPlayback ? "快退 10 秒" : "当前线路不支持跳转",
+                disabled: !state.canSeekPlayback
             ) {
                 Task { await state.seek(by: -10) }
             }
@@ -900,7 +902,8 @@ struct PlayerView: View {
 
             playerIconButton(
                 systemImage: "goforward.10",
-                help: "快进 10 秒"
+                help: state.canSeekPlayback ? "快进 10 秒" : "当前线路不支持跳转",
+                disabled: !state.canSeekPlayback
             ) {
                 Task { await state.seek(by: 10) }
             }

@@ -1035,6 +1035,38 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testHomeIndexCardRoutesDirectlyToSearchWithoutNameHeuristics() {
+        let summary = VideoSummary(
+            siteKey: "opaque-index",
+            siteName: "Renamed Provider",
+            videoID: "provider-owned-id",
+            title: "索引影片"
+        )
+        let indexSite = SiteConfiguration(
+            key: "opaque-index",
+            name: "Completely Renamed",
+            type: 4,
+            api: "/spider/index/4",
+            indexs: 1
+        )
+        let detailSite = SiteConfiguration(
+            key: "opaque-index",
+            name: "Completely Renamed",
+            type: 4,
+            api: "/spider/index/4",
+            indexs: 0
+        )
+
+        XCTAssertEqual(
+            HomeItemRoutePolicy.route(summary: summary, site: indexSite),
+            .search
+        )
+        XCTAssertEqual(
+            HomeItemRoutePolicy.route(summary: summary, site: detailSite),
+            .detail
+        )
+    }
+
     func testOnlyMediaHomeCanBecomePersistedLandingSite() {
         let actionHome = SiteHome(
             categories: [
@@ -10788,8 +10820,49 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             XCTAssertTrue(error.localizedDescription.contains("init 失败"))
         }
         let paths = await client.requestPaths()
-        XCTAssertEqual(paths.filter { $0.hasSuffix("/init") }.count, 2)
+        XCTAssertEqual(
+            paths.filter { $0.hasSuffix("/init") }.count,
+            1,
+            "provider/business init failures must not be retried blindly"
+        )
         XCTAssertFalse(paths.contains { $0.hasSuffix("/home") })
+    }
+
+    func testNodeSearchDoesNotRetryProviderBusinessFailure() async throws {
+        let client = NodeSearchRetryHTTPClient(mode: .businessFailure)
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: nodeLifecycleFixtureSite,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        do {
+            _ = try await provider.search(keyword: "fixture", page: 1, quick: false)
+            XCTFail("provider business failure must be surfaced")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("业务拒绝"))
+        }
+        let searchCount = await client.searchCount
+        XCTAssertEqual(searchCount, 1)
+    }
+
+    func testNodeSearchRetriesOneTransient503() async throws {
+        let client = NodeSearchRetryHTTPClient(mode: .transient503)
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: nodeLifecycleFixtureSite,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        let page = try await provider.search(
+            keyword: "fixture",
+            page: 1,
+            quick: false
+        )
+
+        XCTAssertTrue(page.items.isEmpty)
+        let searchCount = await client.searchCount
+        XCTAssertEqual(searchCount, 2)
     }
 
     func testNodeProviderSurfacesCloudLoginAsNativeWebAuthorization() async throws {
@@ -11198,6 +11271,88 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             replayStore.replay(for: reference.stableResourceLocator),
             NodePlaybackReplay(flag: "direct", episodeURL: "episode")
         )
+        XCTAssertEqual(result.mediaSession?.rangePolicy, .unsupported)
+    }
+
+    func testNodePlayerKeepsDirectOriginalWhenRangeProbeSucceeds()
+        async throws {
+        let directURL = "https://media.example.invalid/original?id=1"
+        let site = SiteConfiguration(
+            key: "nodejs_fixture",
+            name: "Fixture",
+            type: 4,
+            api: "/spider/fixture/4",
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.absoluteString == directURL {
+                XCTAssertEqual(request.headers["Range"], "bytes=0-0")
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 206,
+                    headers: [
+                        "Content-Type": "video/mp4",
+                        "Content-Range": "bytes 0-0/4096"
+                    ],
+                    body: Data([0])
+                )
+            }
+            return HTTPResponse(
+                url: request.url,
+                statusCode: request.url.path.hasSuffix("/init") ? 404 : 200,
+                headers: ["Content-Type": "application/json"],
+                body: request.url.path.hasSuffix("/init")
+                    ? Data()
+                    : Data(
+                        #"{"parse":0,"url":["Provider relay","http://127.0.0.1:18988/spider/fixture/4/proxy/stream?id=1","Original","https://media.example.invalid/original?id=1"]}"#.utf8
+                    )
+            )
+        }
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client,
+            configurationIdentity: UUID().uuidString.lowercased()
+        )
+
+        let result = try await provider.player(flag: "direct", episodeURL: "episode")
+
+        XCTAssertEqual(result.url, directURL)
+        XCTAssertEqual(result.mediaSession?.transport, .compatibilityDirect)
+        XCTAssertEqual(result.mediaSession?.rangePolicy, .forward)
+    }
+
+    func testNodePlayerLeavesHLSDirectWithoutFileRangeProbe() async throws {
+        let hlsURL = "https://media.example.invalid/master.m3u8?token=fixture"
+        let site = SiteConfiguration(
+            key: "nodejs_fixture",
+            name: "Fixture",
+            type: 4,
+            api: "/spider/fixture/4",
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let client = NodeProviderStubHTTPClient { request in
+            XCTAssertNotEqual(request.url.absoluteString, hlsURL)
+            return HTTPResponse(
+                url: request.url,
+                statusCode: request.url.path.hasSuffix("/init") ? 404 : 200,
+                headers: ["Content-Type": "application/json"],
+                body: request.url.path.hasSuffix("/init")
+                    ? Data()
+                    : Data(#"{"parse":0,"url":"https://media.example.invalid/master.m3u8?token=fixture"}"#.utf8)
+            )
+        }
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client,
+            configurationIdentity: UUID().uuidString.lowercased()
+        )
+
+        let result = try await provider.player(flag: "hls", episodeURL: "episode")
+
+        XCTAssertEqual(result.url, hlsURL)
+        XCTAssertEqual(result.mediaSession?.rangePolicy, .providerDefined)
     }
 
     func testNodePlayerKeepsSharedQualitySelectionForRemoteTransports()
@@ -11659,7 +11814,9 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             $0.url.host == "127.0.0.1" && $0.url.port == 18_988
         })
         XCTAssertTrue(initialRequests.allSatisfy {
-            $0.url.path.hasSuffix("/init") || $0.url.path.hasSuffix("/play")
+            $0.url.path.hasSuffix("/init")
+                || $0.url.path.hasSuffix("/play")
+                || $0.url.path.hasPrefix("/src/down/")
         })
 
         let refreshClient = NodeStableReferenceHTTPClient(stableLocator: nil)
@@ -12421,6 +12578,58 @@ private actor NodeLifecycleRecordingHTTPClient: HTTPClient {
         requests
             .filter { $0.path.hasSuffix("/init") }
             .compactMap(\.port)
+    }
+}
+
+private actor NodeSearchRetryHTTPClient: HTTPClient {
+    enum Mode {
+        case businessFailure
+        case transient503
+    }
+
+    let mode: Mode
+    private(set) var searchCount = 0
+
+    init(mode: Mode) {
+        self.mode = mode
+    }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        if request.url.path.hasSuffix("/init") {
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 404,
+                headers: [:],
+                body: Data()
+            )
+        }
+        guard request.url.path.hasSuffix("/search") else {
+            throw HTTPClientError.statusCode(404)
+        }
+        searchCount += 1
+        switch mode {
+        case .businessFailure:
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 400,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"message":"业务拒绝"}"#.utf8)
+            )
+        case .transient503 where searchCount == 1:
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 503,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"message":"temporarily unavailable"}"#.utf8)
+            )
+        case .transient503:
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"list":[],"page":1,"pagecount":1}"#.utf8)
+            )
+        }
     }
 }
 

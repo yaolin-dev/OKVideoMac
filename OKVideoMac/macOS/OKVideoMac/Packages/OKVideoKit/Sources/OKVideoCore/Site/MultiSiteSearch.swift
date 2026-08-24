@@ -50,6 +50,25 @@ public enum MultiSiteSearchEvent: Equatable, Sendable {
     case finished(MultiSiteSearchTermination)
 }
 
+/// Per-provider aggregate-search limits. Providers that share one runtime can
+/// use a common group to avoid flooding that runtime without slowing unrelated
+/// native/Jar/Dex providers.
+public struct MultiSiteSearchProviderPolicy: Equatable, Sendable {
+    public var concurrencyGroup: String?
+    public var maximumGroupConcurrency: Int?
+    public var maximumPagesPerSite: Int?
+
+    public init(
+        concurrencyGroup: String? = nil,
+        maximumGroupConcurrency: Int? = nil,
+        maximumPagesPerSite: Int? = nil
+    ) {
+        self.concurrencyGroup = concurrencyGroup
+        self.maximumGroupConcurrency = maximumGroupConcurrency.map { max(1, $0) }
+        self.maximumPagesPerSite = maximumPagesPerSite.map { max(1, $0) }
+    }
+}
+
 private enum PageSearchOutcome: Sendable {
     case page(VideoPage)
     case failure(String)
@@ -371,7 +390,8 @@ public struct MultiSiteSearch {
     public func search(
         providers: [SiteProvider],
         keyword: String,
-        quick: Bool = false
+        quick: Bool = false,
+        providerPolicies: [String: MultiSiteSearchProviderPolicy] = [:]
     ) -> AsyncStream<MultiSiteSearchEvent> {
         AsyncStream { continuation in
             let task = Task {
@@ -387,24 +407,71 @@ public struct MultiSiteSearch {
                 var providerFailureCount = 0
                 var reachedDeadline = false
 
-                // Every eligible provider is invoked for page one immediately.
-                // Deep pagination stays bounded separately.
+                // Page one is progressive, but bounded. Providers sharing a
+                // constrained runtime (for example CatPawOpen's Node process)
+                // can declare a tighter group limit while unrelated providers
+                // retain the normal desktop concurrency budget.
                 await withTaskGroup(of: InitialPageResult.self) { group in
-                    for index in enabled.indices {
-                        group.addTask {
-                            InitialPageResult(
-                                providerIndex: index,
-                                outcome: await initialPageOutcome(
-                                    provider: enabled[index],
-                                    keyword: keyword,
-                                    quick: quick,
-                                    deadline: deadline
-                                )
-                            )
+                    var pendingIndexes = Array(enabled.indices)
+                    var activeCount = 0
+                    var activeGroupCounts: [String: Int] = [:]
+
+                    func canStart(_ index: Int) -> Bool {
+                        guard activeCount < maximumConcurrency else { return false }
+                        guard let policy = providerPolicies[enabled[index].site.key],
+                              let groupKey = policy.concurrencyGroup,
+                              let groupLimit = policy.maximumGroupConcurrency else {
+                            return true
+                        }
+                        return activeGroupCounts[groupKey, default: 0] < groupLimit
+                    }
+
+                    func recordStarted(_ index: Int) {
+                        activeCount += 1
+                        guard let groupKey = providerPolicies[
+                            enabled[index].site.key
+                        ]?.concurrencyGroup else { return }
+                        activeGroupCounts[groupKey, default: 0] += 1
+                    }
+
+                    func recordFinished(_ index: Int) {
+                        activeCount = max(0, activeCount - 1)
+                        guard let groupKey = providerPolicies[
+                            enabled[index].site.key
+                        ]?.concurrencyGroup else { return }
+                        let remaining = activeGroupCounts[groupKey, default: 0] - 1
+                        if remaining > 0 {
+                            activeGroupCounts[groupKey] = remaining
+                        } else {
+                            activeGroupCounts.removeValue(forKey: groupKey)
                         }
                     }
 
+                    func scheduleAvailable() {
+                        while activeCount < maximumConcurrency,
+                              let pendingPosition = pendingIndexes.firstIndex(
+                                where: canStart
+                              ) {
+                            let index = pendingIndexes.remove(at: pendingPosition)
+                            recordStarted(index)
+                            group.addTask {
+                                InitialPageResult(
+                                    providerIndex: index,
+                                    outcome: await initialPageOutcome(
+                                        provider: enabled[index],
+                                        keyword: keyword,
+                                        quick: quick,
+                                        deadline: deadline
+                                    )
+                                )
+                            }
+                        }
+                    }
+
+                    scheduleAvailable()
+
                     while let result = await group.next() {
+                        recordFinished(result.providerIndex)
                         guard !Task.isCancelled else {
                             group.cancelAll()
                             break
@@ -420,9 +487,12 @@ public struct MultiSiteSearch {
                                 $0 > 0 ? $0 : nil
                             }
                             let hasDeclaredNextPage = pageCount.map { $0 > 1 } ?? true
+                            let providerMaximumPages = providerPolicies[
+                                provider.site.key
+                            ]?.maximumPagesPerSite ?? maximumPagesPerSite
                             if !items.isEmpty,
                                hasDeclaredNextPage,
-                               maximumPagesPerSite > 1,
+                               providerMaximumPages > 1,
                                pool.retainedCount(for: provider.site.key)
                                     < maximumResultsPerSite {
                                 backgroundStates.append(
@@ -476,6 +546,7 @@ public struct MultiSiteSearch {
                                 .siteFirstPageCompleted(siteKey: provider.site.key)
                             )
                         }
+                        scheduleAvailable()
                     }
                 }
 
@@ -520,7 +591,8 @@ public struct MultiSiteSearch {
                                     providers: enabled,
                                     keyword: keyword,
                                     quick: quick,
-                                    deadline: deadline
+                                    deadline: deadline,
+                                    providerPolicies: providerPolicies
                                 )
                             }
                         }
@@ -616,13 +688,17 @@ public struct MultiSiteSearch {
         providers: [SiteProvider],
         keyword: String,
         quick: Bool,
-        deadline: Date
+        deadline: Date,
+        providerPolicies: [String: MultiSiteSearchProviderPolicy]
     ) async -> BackgroundSearchResult {
         var state = initialState
         let provider = providers[state.providerIndex]
         var collected: [VideoSummary] = []
 
-        searchLoop: while state.nextPage <= maximumPagesPerSite,
+        let providerMaximumPages = providerPolicies[
+            provider.site.key
+        ]?.maximumPagesPerSite ?? maximumPagesPerSite
+        searchLoop: while state.nextPage <= providerMaximumPages,
                           state.candidateCount < maximumResultsPerSite,
                           !Task.isCancelled {
             if let pageCount = state.explicitPageCount,

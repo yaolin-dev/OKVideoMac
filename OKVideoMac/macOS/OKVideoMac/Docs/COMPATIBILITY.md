@@ -1,7 +1,7 @@
 # Compatibility
 
-- 对照版本：0.3.50（Build 75）
-- 最近更新：2026-08-24
+- 对照版本：0.3.51（Build 76）
+- 最近更新：2026-08-25
 - 当前交付目标：Apple Silicon / arm64 / macOS 12.0+
 
 ## 概述
@@ -79,6 +79,11 @@ type 3 站点在解析到 HTTP(S) `.js` 脚本时进入 QuickJS。当前 Provide
 视频站点通过 `/spider/<key>/<method>` 形状调用 `home`、`category`、`detail`、
 `search` 和 `play`。根级 `sites` 和 `video.sites` 均可归一化；冷启动和并发调用
 共享 runtime readiness。
+
+`indexs == 1` 的首页卡片按协议直接进入搜索，不先请求详情。Node 聚合搜索共享
+4 个 runtime 执行槽且每站只请求第一页；Jar/Dex Provider 保持独立策略。播放优先
+保留 HLS 或通过 `206 + Content-Range` 验证的原画直连，只有直连不可用时才回退
+Node relay；relay 不支持 Range 时播放器会明确禁用进度跳转。
 
 这是受支持 CatVod/CatPaw 风格 Node 视频接口的一个兼容子集，不表示支持任意 Node
 Spider、完整 CatPawOpen 应用协议或其他内容模块。远程 bundle 具有 Node 完整能力，
@@ -213,7 +218,7 @@ OKVideoMac 实现了 CatVod/CatPaw 风格 Node 视频接口的兼容子集，包
 - CMS XML 核心 class/list 映射；
 - FongMi 包装配置和 type 4 参数编码；
 - QuickJS 方法与参数映射；
-- Node `video.sites` 归一化和视频 home route；
+- Node `video.sites` 归一化、`indexs` 首页路由、聚合搜索限流和播放 Range 选择；
 - Android Bridge 方法/代理映射；
 - M3U/TXT/JSON 直播解析；
 - XMLTV/gzip/缓存；

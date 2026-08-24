@@ -354,11 +354,46 @@ final class MultiSiteSearchTests: XCTestCase {
         for await _ in MultiSiteSearch(
             maximumConcurrency: 1,
             siteTimeout: 1,
-            overallDeadline: 1
+            overallDeadline: 2
         ).search(providers: providers, keyword: "fixture") {}
 
         let invokedKeys = await recorder.keys
         XCTAssertEqual(invokedKeys, Set((0..<20).map { "site-\($0)" }))
+    }
+
+    func testSharedRuntimePolicyLimitsFirstPageConcurrencyAndDisablesDeepPages()
+        async {
+        let recorder = AggregateRuntimeSearchRecorder()
+        let providers: [SiteProvider] = (0..<9).map {
+            AggregateRuntimeSearchProvider(index: $0, recorder: recorder)
+        }
+        let policies = Dictionary(
+            uniqueKeysWithValues: providers.map {
+                (
+                    $0.site.key,
+                    MultiSiteSearchProviderPolicy(
+                        concurrencyGroup: "node-runtime",
+                        maximumGroupConcurrency: 4,
+                        maximumPagesPerSite: 1
+                    )
+                )
+            }
+        )
+
+        for await _ in MultiSiteSearch(
+            maximumConcurrency: 12,
+            overallDeadline: 2,
+            maximumPagesPerSite: 3
+        ).search(
+            providers: providers,
+            keyword: "fixture",
+            providerPolicies: policies
+        ) {}
+
+        let peakActiveCount = await recorder.peakActiveCount
+        let requestedPages = await recorder.requestedPages
+        XCTAssertLessThanOrEqual(peakActiveCount, 4)
+        XCTAssertEqual(requestedPages, [1])
     }
 
     func testFirstPageRetainsAtMostFortyResultsFromOneSite() async {
@@ -592,6 +627,80 @@ private actor FirstPageInvocationRecorder {
 
     func record(_ key: String) {
         keys.insert(key)
+    }
+}
+
+private actor AggregateRuntimeSearchRecorder {
+    private(set) var activeCount = 0
+    private(set) var peakActiveCount = 0
+    private(set) var requestedPages: Set<Int> = []
+
+    func begin(page: Int) {
+        activeCount += 1
+        peakActiveCount = max(peakActiveCount, activeCount)
+        requestedPages.insert(page)
+    }
+
+    func finish() {
+        activeCount = max(0, activeCount - 1)
+    }
+}
+
+private struct AggregateRuntimeSearchProvider: SiteProvider {
+    let site: SiteConfiguration
+    let recorder: AggregateRuntimeSearchRecorder
+    let capability: SiteCapability = .javaScriptSpider
+
+    init(index: Int, recorder: AggregateRuntimeSearchRecorder) {
+        site = SiteConfiguration(
+            key: "runtime-\(index)",
+            name: "Runtime \(index)",
+            type: 4,
+            api: "http://127.0.0.1/spider/\(index)"
+        )
+        self.recorder = recorder
+    }
+
+    func home() async throws -> SiteHome {
+        SiteHome(categories: [], recommendations: [])
+    }
+
+    func category(
+        id: String,
+        page: Int,
+        filters: [String: String]
+    ) async throws -> VideoPage {
+        VideoPage(items: [], pagination: Pagination(page: page, pageCount: 0))
+    }
+
+    func detail(id: String) async throws -> VideoDetail {
+        throw AppError.site("unused")
+    }
+
+    func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
+        await recorder.begin(page: page)
+        do {
+            try await Task.sleep(nanoseconds: 30_000_000)
+        } catch {
+            await recorder.finish()
+            throw error
+        }
+        await recorder.finish()
+        return VideoPage(
+            items: [
+                VideoSummary(
+                    siteKey: site.key,
+                    siteName: site.name,
+                    videoID: "page-\(page)",
+                    title: keyword
+                )
+            ],
+            pagination: Pagination(page: page, pageCount: 3)
+        )
+    }
+
+    func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
+        throw AppError.site("unused")
     }
 }
 

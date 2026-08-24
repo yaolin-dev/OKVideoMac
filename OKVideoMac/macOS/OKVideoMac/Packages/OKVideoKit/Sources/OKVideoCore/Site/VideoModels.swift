@@ -565,6 +565,9 @@ public struct PlaybackMediaSession: Equatable, Sendable {
     public enum RangePolicy: String, Equatable, Sendable {
         case forward
         case providerDefined
+        /// The selected provider transport did not honor a byte-range probe.
+        /// The player may play linearly, but the UI must not offer seeking.
+        case unsupported
     }
 
     public var sessionID: String

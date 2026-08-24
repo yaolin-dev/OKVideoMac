@@ -256,13 +256,13 @@ struct HomeView: View {
                 ) {
                     ForEach(mediaItems) { summary in
                         HomeCompactItemCard(summary: summary) {
-                            Task { await state.loadDetail(summary) }
+                            Task { await state.openHomeItem(summary) }
                         }
                     }
                 }
             } else {
                 VideoGrid(items: mediaItems) { summary in
-                    Task { await state.loadDetail(summary) }
+                    Task { await state.openHomeItem(summary) }
                 }
             }
         }

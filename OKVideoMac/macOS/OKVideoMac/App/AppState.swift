@@ -1259,6 +1259,32 @@ enum HomeLandingSitePolicy {
     }
 }
 
+enum HomeItemRoute: Equatable, Sendable {
+    case action
+    case folder
+    case search
+    case detail
+}
+
+enum HomeItemRoutePolicy {
+    static func route(
+        summary: VideoSummary,
+        site: SiteConfiguration?
+    ) -> HomeItemRoute {
+        if summary.resolvedContentKind == .action
+            || summary.action?.nonEmpty != nil {
+            return .action
+        }
+        if summary.isFolder { return .folder }
+        // FongMi's `indexs` contract describes discovery/index providers.
+        // Their cards are search seeds, not provider-owned detail records.
+        if site?.indexs == 1 || summary.videoID.hasPrefix("msearch:") {
+            return .search
+        }
+        return .detail
+    }
+}
+
 enum HomeEntryReason: Equatable, Sendable {
     case applicationRestore
     case configurationSwitch
@@ -3542,6 +3568,26 @@ final class AppState: ObservableObject {
             guard detailLoadSessionID == sessionID else { return }
             pendingDetailSummary = nil
             show(error, title: "详情加载失败")
+        }
+    }
+
+    func openHomeItem(_ summary: VideoSummary) async {
+        let site = supportedSites.first { $0.key == summary.siteKey }
+        switch HomeItemRoutePolicy.route(summary: summary, site: site) {
+        case .action:
+            await performHomeAction(SiteActionItem(summary: summary))
+        case .folder:
+            openSearchFolder(summary, replacingPath: true)
+        case .search:
+            detailLoadSessionID = UUID()
+            selectedDetail = nil
+            pendingDetailSummary = nil
+            presentHomeSearch()
+            // An index card is a user-initiated search and therefore observes
+            // the user's configured search scope.
+            search(summary.title, context: .manual)
+        case .detail:
+            await loadDetail(summary)
         }
     }
 
@@ -6162,9 +6208,24 @@ final class AppState: ObservableObject {
         activeSearchSiteKeys = Set(searchableProviders.map { $0.site.key })
         searchTotalSiteCount = searchableProviders.count
         isSearching = !searchableProviders.isEmpty
+        let aggregatePolicies: [String: MultiSiteSearchProviderPolicy] = Dictionary(
+            uniqueKeysWithValues: searchableProviders.compactMap {
+                provider -> (String, MultiSiteSearchProviderPolicy)? in
+                guard provider is NodeHTTPSpiderSiteProvider else { return nil }
+                return (
+                    provider.site.key,
+                    MultiSiteSearchProviderPolicy(
+                        concurrencyGroup: "node-http-runtime",
+                        maximumGroupConcurrency: 4,
+                        maximumPagesPerSite: 1
+                    )
+                )
+            }
+        )
         let stream = MultiSiteSearch().search(
             providers: searchableProviders,
-            keyword: trimmed
+            keyword: trimmed,
+            providerPolicies: aggregatePolicies
         )
         searchTask = Task { [weak self] in
             var firstPageCompletedSiteKeys = Set<String>()
@@ -7921,6 +7982,7 @@ final class AppState: ObservableObject {
     }
 
     func seek(by offset: TimeInterval) async {
+        guard canSeekPlayback else { return }
         let target = min(
             max(0, playerSnapshot.position + offset),
             playerSnapshot.duration > 0
@@ -7931,6 +7993,7 @@ final class AppState: ObservableObject {
     }
 
     func seek(to position: TimeInterval) async {
+        guard canSeekPlayback else { return }
         guard let player = environment?.player else { return }
         guard let target = PlayerSeekPolicy.target(
             requested: position,
@@ -8574,6 +8637,10 @@ final class AppState: ObservableObject {
 
     var isLivePlayback: Bool {
         livePlaybackChannel != nil
+    }
+
+    var canSeekPlayback: Bool {
+        activePlayback?.playbackResult?.mediaSession?.rangePolicy != .unsupported
     }
 
     var canSwitchLiveChannel: Bool {
