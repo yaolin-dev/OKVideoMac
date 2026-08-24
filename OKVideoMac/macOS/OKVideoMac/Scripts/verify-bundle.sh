@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_FILE="$SCRIPT_DIR/../OKVideoMac.xcodeproj/project.pbxproj"
 REPOSITORY_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 GRADLE_LOCK="$REPOSITORY_ROOT/OKVideoMac/Helpers/AndroidDexBridge/app/gradle.lockfile"
+BRIDGE_GRADLE="$REPOSITORY_ROOT/OKVideoMac/Helpers/AndroidDexBridge/app/build.gradle"
 
 if [[ "$#" -ne 1 ]]; then
   echo "Usage: $0 /path/to/OKVideoMac.app" >&2
@@ -76,6 +77,25 @@ EXPECTED_BUILD="${OKVIDEOMAC_EXPECTED_BUILD:-$(
     exit
   }' "$PROJECT_FILE"
 )}"
+EXPECTED_BRIDGE_VERSION_CODE="$(
+  awk -F' = ' '/^[[:space:]]*versionCode = / {
+    gsub(/[[:space:]]/, "", $2)
+    print $2
+    exit
+  }' "$BRIDGE_GRADLE"
+)"
+EXPECTED_BRIDGE_VERSION_NAME="$(
+  awk -F' = ' '/^[[:space:]]*versionName = / {
+    gsub(/[[:space:]\"]/, "", $2)
+    print $2
+    exit
+  }' "$BRIDGE_GRADLE"
+)"
+if [[ -z "$EXPECTED_BRIDGE_VERSION_CODE" ]] ||
+   [[ -z "$EXPECTED_BRIDGE_VERSION_NAME" ]]; then
+  echo "Unable to read the expected Android bridge version from Gradle." >&2
+  exit 1
+fi
 
 if [[ ! -x "$EXECUTABLE" ]]; then
   echo "Main executable missing: $EXECUTABLE" >&2
@@ -129,6 +149,7 @@ if [[ -x "$APKANALYZER" ]]; then
   BRIDGE_DEBUGGABLE="$("$APKANALYZER" manifest debuggable "$BRIDGE_APK")"
   BRIDGE_TARGET_SDK="$("$APKANALYZER" manifest target-sdk "$BRIDGE_APK")"
   BRIDGE_VERSION_NAME="$("$APKANALYZER" manifest version-name "$BRIDGE_APK")"
+  BRIDGE_VERSION_CODE="$("$APKANALYZER" manifest version-code "$BRIDGE_APK")"
 elif [[ -x "$AAPT" ]]; then
   BRIDGE_BADGING="$("$AAPT" dump badging "$BRIDGE_APK")"
   if grep -q '^application-debuggable' <<< "$BRIDGE_BADGING"; then
@@ -141,6 +162,9 @@ elif [[ -x "$AAPT" ]]; then
   )"
   BRIDGE_VERSION_NAME="$(
     sed -n "s/^package: .*versionName='\([^']*\)'.*/\1/p" <<< "$BRIDGE_BADGING" | head -n 1
+  )"
+  BRIDGE_VERSION_CODE="$(
+    sed -n "s/^package: .*versionCode='\([^']*\)'.*/\1/p" <<< "$BRIDGE_BADGING" | head -n 1
   )"
 else
   echo "apkanalyzer or aapt is required to verify the Android bridge." >&2
@@ -156,8 +180,11 @@ if [[ "$BRIDGE_TARGET_SDK" != "27" ]]; then
   echo "Bundled Android bridge lost legacy Spider Activity compatibility." >&2
   exit 1
 fi
-if [[ "$BRIDGE_VERSION_NAME" != "0.3.25" ]]; then
-  echo "Bundled Android bridge has an unexpected version." >&2
+if [[ "$BRIDGE_VERSION_NAME" != "$EXPECTED_BRIDGE_VERSION_NAME" ]] ||
+   [[ "$BRIDGE_VERSION_CODE" != "$EXPECTED_BRIDGE_VERSION_CODE" ]]; then
+  echo "Bundled Android bridge has unexpected version metadata:" >&2
+  echo "  expected $EXPECTED_BRIDGE_VERSION_NAME ($EXPECTED_BRIDGE_VERSION_CODE)" >&2
+  echo "  actual   $BRIDGE_VERSION_NAME ($BRIDGE_VERSION_CODE)" >&2
   exit 1
 fi
 if [[ ! -f "$APP/Contents/Resources/LICENSE" ]] ||
