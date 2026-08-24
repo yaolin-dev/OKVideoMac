@@ -2196,6 +2196,34 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertNil(AndroidBridgeQRCodePolicy.validatedSnapshot(nil))
     }
 
+    func testQRCodeSnapshotSurvivesOneTransientCaptureFailure() {
+        let previous = Data([0x51, 0x52])
+        XCTAssertEqual(
+            AndroidBridgeQRCodePolicy.retainedSnapshot(
+                fresh: nil,
+                previous: previous,
+                currentStateIsQRCode: true
+            ),
+            previous
+        )
+        XCTAssertNil(
+            AndroidBridgeQRCodePolicy.retainedSnapshot(
+                fresh: nil,
+                previous: previous,
+                currentStateIsQRCode: false
+            )
+        )
+        let replacement = Data([0x52, 0x53])
+        XCTAssertEqual(
+            AndroidBridgeQRCodePolicy.retainedSnapshot(
+                fresh: replacement,
+                previous: previous,
+                currentStateIsQRCode: true
+            ),
+            replacement
+        )
+    }
+
     func testPosterlessHomeItemsUseCompactPresentation() {
         let posterless = VideoSummary(
             siteKey: "site",
@@ -2260,26 +2288,55 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testQRCodeExitRequestsVerificationEvenWhenParentUIRemainsVisible() {
+    func testQRCodeExitRequiresStableGenerationTransitionBeforeVerification() {
         XCTAssertTrue(
             CloudAuthorizationPollingPolicy.shouldVerifyAfterQRCodeExit(
                 hasObservedQRCode: true,
                 currentStateIsQRCode: false,
-                actionKind: .authorization
+                actionKind: .authorization,
+                consecutiveExitPollCount: 3,
+                exitInterval: 1,
+                hasGenerationTransition: true
             )
         )
         XCTAssertFalse(
             CloudAuthorizationPollingPolicy.shouldVerifyAfterQRCodeExit(
                 hasObservedQRCode: true,
                 currentStateIsQRCode: true,
-                actionKind: .authorization
+                actionKind: .authorization,
+                consecutiveExitPollCount: 3,
+                exitInterval: 1,
+                hasGenerationTransition: true
             )
         )
         XCTAssertFalse(
             CloudAuthorizationPollingPolicy.shouldVerifyAfterQRCodeExit(
                 hasObservedQRCode: true,
                 currentStateIsQRCode: false,
-                actionKind: .ordering
+                actionKind: .ordering,
+                consecutiveExitPollCount: 3,
+                exitInterval: 1,
+                hasGenerationTransition: true
+            )
+        )
+        XCTAssertFalse(
+            CloudAuthorizationPollingPolicy.shouldVerifyAfterQRCodeExit(
+                hasObservedQRCode: true,
+                currentStateIsQRCode: false,
+                actionKind: .authorization,
+                consecutiveExitPollCount: 1,
+                exitInterval: 0,
+                hasGenerationTransition: true
+            )
+        )
+        XCTAssertFalse(
+            CloudAuthorizationPollingPolicy.shouldVerifyAfterQRCodeExit(
+                hasObservedQRCode: true,
+                currentStateIsQRCode: false,
+                actionKind: .authorization,
+                consecutiveExitPollCount: 3,
+                exitInterval: 1,
+                hasGenerationTransition: false
             )
         )
     }

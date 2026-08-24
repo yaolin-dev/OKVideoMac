@@ -21,6 +21,7 @@ final class BridgeInteractionRegistry {
     private static final int MAX_INTERACTIONS = 64;
     private static final long RETENTION_MS = 10 * 60_000L;
     private static final long DELAYED_UI_GRACE_MS = 8_000L;
+    private static final long TRANSIENT_QR_CAPTURE_GRACE_MS = 900L;
     private static final Map<String, Interaction> INTERACTIONS =
             new LinkedHashMap<>();
     private static String latestID = "";
@@ -89,6 +90,21 @@ final class BridgeInteractionRegistry {
             interaction.authorizationPromoted = true;
             interaction.revision++;
         }
+        long now = System.currentTimeMillis();
+        if (isQRCodeUI(ui)) {
+            interaction.lastStableQRCodeUI = copyUI(ui);
+            interaction.stableQRCodeDeadline =
+                    now + TRANSIENT_QR_CAPTURE_GRACE_MS;
+        } else if (!interaction.terminal()
+                && interaction.lastStableQRCodeUI != null
+                && now < interaction.stableQRCodeDeadline) {
+            // Android can expose the underlying chooser for one capture while
+            // an ImageView redraws or its Dialog/Activity is reattached. Keep
+            // the request-owned QR classification stable across that one
+            // transient sample. A real close is still observable after this
+            // short grace and must be verified by the Mac host.
+            ui = copyUI(interaction.lastStableQRCodeUI);
+        }
         boolean visible = ui != null && ui.optBoolean("visible", false);
         String signature = ui == null ? "" : ui.toString();
         if (!signature.equals(interaction.uiSignature)) {
@@ -113,7 +129,6 @@ final class BridgeInteractionRegistry {
                 interaction.outcome = "stay";
             } else if (interaction.invocationReturned
                     && interaction.expectsProviderUI) {
-                long now = System.currentTimeMillis();
                 // UI can briefly disappear while BridgeActionActivity hands
                 // the request back to the persistent host. Start a fresh
                 // grace period for every visible -> hidden transition rather
@@ -414,6 +429,22 @@ final class BridgeInteractionRegistry {
         return value == null ? "" : value.trim();
     }
 
+    private static boolean isQRCodeUI(JSONObject ui) {
+        return ui != null
+                && ui.optBoolean("visible", false)
+                && "qrCode".equals(ui.optString("uiRole", ""))
+                && ui.optInt("qrImageCount", 0) > 0;
+    }
+
+    private static JSONObject copyUI(JSONObject ui) {
+        if (ui == null) return emptyUI();
+        try {
+            return new JSONObject(ui.toString());
+        } catch (Throwable ignored) {
+            return ui;
+        }
+    }
+
     /**
      * Legacy Spider packages often predate the structured action-kind field.
      * Promote only a generic configuration action whose request-owned UI has
@@ -454,6 +485,7 @@ final class BridgeInteractionRegistry {
         String failure = "";
         String uiSignature = "";
         JSONObject lastUI = emptyUI();
+        JSONObject lastStableQRCodeUI;
         boolean sawUI;
         boolean uiVisible;
         boolean submitted;
@@ -464,6 +496,7 @@ final class BridgeInteractionRegistry {
         Boolean refreshPerformed;
         long invocationReturnedAt;
         long delayedUIDeadline;
+        long stableQRCodeDeadline;
 
         Interaction(String id, String kind, String method) {
             this.id = id;

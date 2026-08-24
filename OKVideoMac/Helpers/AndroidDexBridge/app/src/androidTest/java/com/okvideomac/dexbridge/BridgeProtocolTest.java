@@ -514,6 +514,54 @@ public final class BridgeProtocolTest extends TestCase {
         assertFalse(failed.optBoolean("verificationPerformed", false));
     }
 
+    public void testTransientQRCodeCaptureGapKeepsStableRequestUI()
+            throws Exception {
+        String id = BridgeInteractionRegistry.begin(
+                "interaction-qr-capture-gap-" + UUID.randomUUID(),
+                "authorization",
+                "action"
+        );
+        BridgeInteractionRegistry.expectProviderUI(id);
+        JSONObject qr = new JSONObject()
+                .put("visible", true)
+                .put("imageCount", 1)
+                .put("qrImageCount", 1)
+                .put("uiRole", "qrCode")
+                .put("generation", 21L);
+        JSONObject visible = BridgeInteractionRegistry.observeUI(id, qr);
+        assertTrue(visible.getBoolean("visible"));
+        assertEquals("qrCode", visible.getString("uiRole"));
+        BridgeInteractionRegistry.invocationReturned(id);
+
+        JSONObject transientGap = BridgeInteractionRegistry.observeUI(
+                id,
+                new JSONObject()
+                        .put("visible", false)
+                        .put("imageCount", 0)
+                        .put("qrImageCount", 0)
+                        .put("uiRole", "configuration")
+                        .put("generation", 22L)
+        );
+        assertTrue(transientGap.getBoolean("visible"));
+        assertEquals("qrCode", transientGap.getString("uiRole"));
+        assertEquals(21L, transientGap.getLong("generation"));
+
+        Thread.sleep(950L);
+        JSONObject stableExit = BridgeInteractionRegistry.observeUI(
+                id,
+                new JSONObject()
+                        .put("visible", false)
+                        .put("imageCount", 0)
+                        .put("qrImageCount", 0)
+                        .put("uiRole", "configuration")
+                        .put("generation", 22L)
+        );
+        assertFalse(stableExit.getBoolean("visible"));
+        assertEquals("awaitingVerification", stableExit.getString("phase"));
+        assertFalse(stableExit.getBoolean("terminal"));
+        BridgeInteractionRegistry.cancel(id);
+    }
+
     public void testAcceptedConfigurationClickCompletesAfterUIHandoffGrace()
             throws Exception {
         String id = BridgeInteractionRegistry.begin(

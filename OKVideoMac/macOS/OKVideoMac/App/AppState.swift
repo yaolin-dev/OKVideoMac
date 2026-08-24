@@ -594,6 +594,8 @@ enum CloudAuthorizationCompletionPolicy {
 enum CloudAuthorizationPollingPolicy {
     static let maximumHiddenPollCount = 40
     static let maximumUnchangedSubmissionInterval: TimeInterval = 8
+    static let minimumQRCodeExitPollCount = 3
+    static let minimumQRCodeExitInterval: TimeInterval = 1
 
     static func shouldTimeOut(
         hiddenPollCount: Int,
@@ -623,11 +625,17 @@ enum CloudAuthorizationPollingPolicy {
     static func shouldVerifyAfterQRCodeExit(
         hasObservedQRCode: Bool,
         currentStateIsQRCode: Bool,
-        actionKind: ConfigurationInteraction.ActionKind?
+        actionKind: ConfigurationInteraction.ActionKind?,
+        consecutiveExitPollCount: Int,
+        exitInterval: TimeInterval,
+        hasGenerationTransition: Bool
     ) -> Bool {
         hasObservedQRCode
             && !currentStateIsQRCode
             && actionKind == .authorization
+            && consecutiveExitPollCount >= minimumQRCodeExitPollCount
+            && exitInterval >= minimumQRCodeExitInterval
+            && hasGenerationTransition
     }
 }
 
@@ -1516,6 +1524,7 @@ private struct CloudAuthorizationContext {
     var submittedGeneration: Int?
     var hasObservedPrompt: Bool
     var hasObservedQRCode: Bool
+    var lastObservedQRCodeGeneration: Int?
     var hasObservedPostSubmissionTransition: Bool
     var lastObservedRevision: Int?
     var hasRequestedVerification: Bool
@@ -3728,6 +3737,7 @@ final class AppState: ObservableObject {
             submittedGeneration: nil,
             hasObservedPrompt: false,
             hasObservedQRCode: false,
+            lastObservedQRCodeGeneration: nil,
             hasObservedPostSubmissionTransition: false,
             lastObservedRevision: nil,
             hasRequestedVerification: false,
@@ -4785,7 +4795,18 @@ final class AppState: ObservableObject {
               cloudAuthorizationContext?.operationID == operationID else {
             return
         }
-        let snapshot = AndroidBridgeQRCodePolicy.validatedSnapshot(rawSnapshot)
+        let freshSnapshot = AndroidBridgeQRCodePolicy.validatedSnapshot(
+            rawSnapshot
+        )
+        // Snapshot capture is intentionally stricter than Android view-tree
+        // classification and can miss one frame while the ImageView redraws.
+        // Within the same request, retain the last decoded login QR until the
+        // bridge reports a stable exit; the poller owns that exit decision.
+        let snapshot = AndroidBridgeQRCodePolicy.retainedSnapshot(
+            fresh: freshSnapshot,
+            previous: previous?.snapshot,
+            currentStateIsQRCode: state.isQRCode
+        )
         let hasVerifiedQRCode = snapshot != nil
         // QR images often arrive one or more polling generations after the
         // interaction first becomes visible. Rebuild the interaction from the
@@ -4844,6 +4865,7 @@ final class AppState: ObservableObject {
         if semantic == .qrAuthorization,
            var context = cloudAuthorizationContext {
             context.hasObservedQRCode = true
+            context.lastObservedQRCodeGeneration = state.interactionGeneration
             cloudAuthorizationContext = context
         }
         let upstreamStatus = state.texts?
@@ -4910,6 +4932,8 @@ final class AppState: ObservableObject {
         cloudAuthorizationPollTask = Task { [weak self] in
             var hiddenPollCount = 0
             var bridgeFailureCount = 0
+            var qrExitPollCount = 0
+            var qrExitStartedAt: Date?
             while !Task.isCancelled {
                 do {
                     try await Task.sleep(nanoseconds: 500_000_000)
@@ -4954,11 +4978,54 @@ final class AppState: ObservableObject {
                         }
                         continue
                     }
+                    if state.isQRCode {
+                        qrExitPollCount = 0
+                        qrExitStartedAt = nil
+                    }
+                    if context.hasObservedQRCode,
+                       !state.isQRCode,
+                       context.providerInteraction?.actionKind == .authorization {
+                        let now = Date()
+                        if qrExitPollCount == 0 {
+                            qrExitStartedAt = now
+                        }
+                        qrExitPollCount += 1
+                        let exitInterval = now.timeIntervalSince(
+                            qrExitStartedAt ?? now
+                        )
+                        let hasGenerationTransition = context
+                            .lastObservedQRCodeGeneration.map {
+                                state.interactionGeneration != $0
+                            } ?? false
+                        guard CloudAuthorizationPollingPolicy
+                            .shouldVerifyAfterQRCodeExit(
+                                hasObservedQRCode: true,
+                                currentStateIsQRCode: false,
+                                actionKind: .authorization,
+                                consecutiveExitPollCount: qrExitPollCount,
+                                exitInterval: exitInterval,
+                                hasGenerationTransition: hasGenerationTransition
+                            ) else {
+                            // A single Android snapshot can lose its QR role
+                            // while the ImageView redraws or the dialog host is
+                            // reattached. Keep the last validated QR visible;
+                            // absence is presentation state, not scan proof.
+                            continue
+                        }
+                    }
                     if CloudAuthorizationPollingPolicy
                         .shouldVerifyAfterQRCodeExit(
                             hasObservedQRCode: context.hasObservedQRCode,
                             currentStateIsQRCode: state.isQRCode,
-                            actionKind: context.providerInteraction?.actionKind
+                            actionKind: context.providerInteraction?.actionKind,
+                            consecutiveExitPollCount: qrExitPollCount,
+                            exitInterval: Date().timeIntervalSince(
+                                qrExitStartedAt ?? Date()
+                            ),
+                            hasGenerationTransition: context
+                                .lastObservedQRCodeGeneration.map {
+                                    state.interactionGeneration != $0
+                                } ?? false
                         ) {
                         hiddenPollCount += 1
                         if await self.verifyAuthorizationResultAfterQRCodeExit(
@@ -5077,35 +5144,34 @@ final class AppState: ObservableObject {
         }
         current.lastAuthorizationProbeAt = now
         cloudAuthorizationContext = current
-        transitionConfigurationInteraction(
-            context.operationID,
-            to: .processing,
-            semantic: .qrAuthorization,
-            status: "二维码窗口已关闭，正在确认授权结果…"
-        )
+        // Keep the last validated QR visible while probing. Switching the
+        // whole prompt to `.processing` on an unverified UI transition made
+        // the QR disappear and reappear whenever Android missed one capture.
+        if var prompt = cloudAuthorizationPrompt,
+           prompt.interactionID == context.operationID,
+           prompt.lifecyclePhase == .presenting {
+            prompt.status = "检测到二维码界面变化，正在确认授权结果…"
+            cloudAuthorizationPrompt = prompt
+        }
 
         let verifiedHome = try? await provider.home()
         let homeConfirmed = verifiedHome.map {
             provider.homeConfirmsAuthorization($0)
         } == true
-        var categoryConfirmed = false
-        if !homeConfirmed,
-           currentHomeContentIdentity == context.sourceIdentity,
-           let categoryID = selectedCategoryID,
-           let previousPage = categoryPage,
-           let refreshedPage = try? await provider.category(
-                id: categoryID,
-                page: 1,
-                filters: selectedCategoryFilters
-           ), refreshedPage != previousPage {
-            categoryPage = refreshedPage
-            categoryConfirmed = true
-        }
-        guard homeConfirmed || categoryConfirmed,
+        // A category response may differ because of pagination, ordering,
+        // posters or network timing. It is not an authentication contract and
+        // must never close a QR prompt before the user has scanned it.
+        guard homeConfirmed,
               configurationInteractionCoordinator.owns(context.operationID),
               cloudAuthorizationContext?.operationID == context.operationID else {
             return false
         }
+        transitionConfigurationInteraction(
+            context.operationID,
+            to: .processing,
+            semantic: .qrAuthorization,
+            status: "授权已确认，正在刷新网盘内容…"
+        )
         if homeConfirmed,
            let verifiedHome,
            currentHomeContentIdentity == context.sourceIdentity {

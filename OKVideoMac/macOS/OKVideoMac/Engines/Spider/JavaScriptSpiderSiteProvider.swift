@@ -866,6 +866,14 @@ enum AndroidBridgeQRCodePolicy {
         }
         return data
     }
+
+    static func retainedSnapshot(
+        fresh: Data?,
+        previous: Data?,
+        currentStateIsQRCode: Bool
+    ) -> Data? {
+        fresh ?? (currentStateIsQRCode ? previous : nil)
+    }
 }
 
 struct AndroidBridgeUIRequired: Error {
