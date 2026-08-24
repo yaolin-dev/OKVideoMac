@@ -11748,6 +11748,63 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             171
         )
     }
+
+    func testPlayerTimelineFractionsClampPlaybackAndBufferValues() {
+        XCTAssertEqual(
+            PlayerTimelinePolicy.fraction(value: 30, total: 120),
+            0.25
+        )
+        XCTAssertEqual(
+            PlayerTimelinePolicy.fraction(value: 180, total: 120),
+            1
+        )
+        XCTAssertEqual(
+            PlayerTimelinePolicy.fraction(value: -10, total: 120),
+            0
+        )
+        XCTAssertEqual(PlayerTimelinePolicy.bufferedFraction(percent: 42), 0.42)
+        XCTAssertEqual(PlayerTimelinePolicy.bufferedFraction(percent: 160), 1)
+        XCTAssertEqual(PlayerTimelinePolicy.bufferedFraction(percent: -20), 0)
+        XCTAssertEqual(
+            PlayerTimelinePolicy.bufferedFraction(percent: .nan),
+            0
+        )
+    }
+
+    func testPlayerTimelineDragUsesSingleInsetTrackGeometry() {
+        XCTAssertEqual(
+            PlayerTimelinePolicy.fraction(
+                x: 6,
+                width: 212,
+                horizontalInset: 6
+            ),
+            0
+        )
+        XCTAssertEqual(
+            PlayerTimelinePolicy.fraction(
+                x: 106,
+                width: 212,
+                horizontalInset: 6
+            ),
+            0.5
+        )
+        XCTAssertEqual(
+            PlayerTimelinePolicy.fraction(
+                x: 206,
+                width: 212,
+                horizontalInset: 6
+            ),
+            1
+        )
+        XCTAssertEqual(
+            PlayerTimelinePolicy.value(fraction: 0.5, total: 4_048),
+            2_024
+        )
+        XCTAssertEqual(
+            PlayerTimelinePolicy.value(fraction: 2, total: 100),
+            100
+        )
+    }
 }
 
 private actor ConfigurationCancellationTestRecorder {

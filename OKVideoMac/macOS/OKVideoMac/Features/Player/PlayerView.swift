@@ -665,16 +665,6 @@ struct PlayerView: View {
             progressControls
                 .padding(.horizontal, 3)
 
-            if case .buffering = state.playerSnapshot.status {
-                ProgressView(
-                    value: state.playerSnapshot.bufferedPercent,
-                    total: 100
-                )
-                .tint(playerAccentColor)
-                .controlSize(.mini)
-                .frame(height: 2)
-            }
-
             ZStack {
                 HStack(spacing: 12) {
                     HStack(spacing: 10) {
@@ -713,12 +703,15 @@ struct PlayerView: View {
     }
 
     private var progressControls: some View {
-        Slider(
+        PlayerTimelineControl(
             value: Binding(
                 get: { displayedPosition },
                 set: { scrubPosition = $0 }
             ),
-            in: 0...max(state.playerSnapshot.duration, 1),
+            total: max(state.playerSnapshot.duration, 1),
+            bufferedPercent: state.playerSnapshot.bufferedPercent,
+            accentColor: playerAccentColor,
+            isEmphasized: isProgressHovering,
             onEditingChanged: { editing in
                 if editing {
                     keepControlsVisible()
@@ -728,10 +721,7 @@ struct PlayerView: View {
                 }
             }
         )
-        .tint(playerAccentColor)
-        .controlSize(.mini)
         .frame(height: 12)
-        .scaleEffect(x: 1, y: isProgressHovering ? 1.55 : 1)
         .shadow(
             color: playerAccentColor.opacity(isProgressHovering ? 0.42 : 0),
             radius: isProgressHovering ? 5 : 0
@@ -3193,6 +3183,153 @@ enum PlayerProgressHoverPolicy {
         let half = min(max(tooltipWidth / 2, 0), width / 2)
         let raw = CGFloat(min(1, max(0, fraction))) * width
         return min(max(raw, half), width - half)
+    }
+}
+
+enum PlayerTimelinePolicy {
+    static func fraction(value: Double, total: Double) -> Double {
+        guard value.isFinite,
+              total.isFinite,
+              total > 0 else { return 0 }
+        return min(1, max(0, value / total))
+    }
+
+    static func bufferedFraction(percent: Double) -> Double {
+        guard percent.isFinite else { return 0 }
+        return min(1, max(0, percent / 100))
+    }
+
+    static func value(fraction: Double, total: Double) -> Double {
+        guard fraction.isFinite,
+              total.isFinite,
+              total > 0 else { return 0 }
+        return min(1, max(0, fraction)) * total
+    }
+
+    static func fraction(
+        x: CGFloat,
+        width: CGFloat,
+        horizontalInset: CGFloat
+    ) -> Double {
+        guard x.isFinite,
+              width.isFinite,
+              horizontalInset.isFinite else { return 0 }
+        let inset = min(max(horizontalInset, 0), max(width / 2, 0))
+        let trackWidth = width - (inset * 2)
+        guard trackWidth > 0 else { return 0 }
+        return min(1, max(0, Double((x - inset) / trackWidth)))
+    }
+}
+
+private struct PlayerTimelineControl: View {
+    @Binding var value: Double
+    let total: Double
+    let bufferedPercent: Double
+    let accentColor: Color
+    let isEmphasized: Bool
+    let onEditingChanged: (Bool) -> Void
+
+    @State private var isEditing = false
+
+    private let thumbDiameter: CGFloat = 12
+
+    var body: some View {
+        GeometryReader { geometry in
+            let playedFraction = PlayerTimelinePolicy.fraction(
+                value: value,
+                total: total
+            )
+            let bufferedFraction = PlayerTimelinePolicy.bufferedFraction(
+                percent: bufferedPercent
+            )
+            let horizontalInset = thumbDiameter / 2
+            let trackWidth = max(geometry.size.width - thumbDiameter, 0)
+            let trackHeight: CGFloat = isEmphasized ? 6 : 4
+            let playedWidth = trackWidth * CGFloat(playedFraction)
+            let bufferedWidth = trackWidth * CGFloat(bufferedFraction)
+            let thumbX = horizontalInset + playedWidth
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.18))
+                    .frame(width: trackWidth, height: trackHeight)
+                    .offset(x: horizontalInset)
+
+                Capsule()
+                    .fill(Color.white.opacity(0.40))
+                    .frame(width: bufferedWidth, height: trackHeight)
+                    .offset(x: horizontalInset)
+
+                Capsule()
+                    .fill(accentColor)
+                    .frame(width: playedWidth, height: trackHeight)
+                    .offset(x: horizontalInset)
+
+                Circle()
+                    .fill(Color.white)
+                    .overlay {
+                        Circle()
+                            .stroke(accentColor.opacity(0.82), lineWidth: 1.5)
+                    }
+                    .frame(width: thumbDiameter, height: thumbDiameter)
+                    .shadow(color: .black.opacity(0.48), radius: 2, y: 1)
+                    .position(x: thumbX, y: geometry.size.height / 2)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { gesture in
+                        if !isEditing {
+                            isEditing = true
+                            onEditingChanged(true)
+                        }
+                        let fraction = PlayerTimelinePolicy.fraction(
+                            x: gesture.location.x,
+                            width: geometry.size.width,
+                            horizontalInset: horizontalInset
+                        )
+                        value = PlayerTimelinePolicy.value(
+                            fraction: fraction,
+                            total: total
+                        )
+                    }
+                    .onEnded { _ in
+                        finishEditing()
+                    }
+            )
+        }
+        .accessibilityElement()
+        .accessibilityLabel("播放进度")
+        .accessibilityValue(
+            "\(Int((PlayerTimelinePolicy.fraction(value: value, total: total) * 100).rounded()))%"
+        )
+        .accessibilityAdjustableAction { direction in
+            let step = min(max(total * 0.01, 5), 30)
+            switch direction {
+            case .increment:
+                adjustValue(by: step)
+            case .decrement:
+                adjustValue(by: -step)
+            @unknown default:
+                break
+            }
+        }
+        .onDisappear {
+            finishEditing()
+        }
+    }
+
+    private func adjustValue(by offset: Double) {
+        onEditingChanged(true)
+        value = min(max(value + offset, 0), max(total, 0))
+        onEditingChanged(false)
+    }
+
+    private func finishEditing() {
+        guard isEditing else { return }
+        isEditing = false
+        onEditingChanged(false)
     }
 }
 
