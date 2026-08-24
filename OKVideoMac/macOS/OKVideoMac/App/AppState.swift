@@ -1412,6 +1412,7 @@ private struct CloudAuthorizationContext {
     var hasObservedPostSubmissionTransition: Bool
     var lastObservedRevision: Int?
     var hasRequestedVerification: Bool
+    var lastAuthorizationProbeAt: Date?
 }
 
 enum PlaybackRequestOrigin: Equatable, Sendable {
@@ -3622,7 +3623,8 @@ final class AppState: ObservableObject {
             hasObservedQRCode: false,
             hasObservedPostSubmissionTransition: false,
             lastObservedRevision: nil,
-            hasRequestedVerification: false
+            hasRequestedVerification: false,
+            lastAuthorizationProbeAt: nil
         )
         cloudAuthorizationPrompt = CloudAuthorizationPrompt(
             id: UUID(),
@@ -4832,6 +4834,12 @@ final class AppState: ObservableObject {
                         }
                         await self.updateCloudAuthorizationPrompt(state)
                     } else {
+                        if await self.verifyHiddenAuthorizationResult(
+                            state: state,
+                            context: context
+                        ) {
+                            continue
+                        }
                         hiddenPollCount += 1
                         if CloudAuthorizationPollingPolicy.shouldTimeOut(
                             hiddenPollCount: hiddenPollCount
@@ -4867,6 +4875,74 @@ final class AppState: ObservableObject {
                 }
             }
         }
+    }
+
+    /// MyDriveGuard closes its QR surface after the phone accepts the login,
+    /// but its legacy action result does not carry an authenticated flag.  A
+    /// hidden window is not success on its own, so confirm the provider's
+    /// documented post-login home contract before completing the request.
+    /// This turns the newly exposed media provider into explicit verification
+    /// instead of making the user infer success from a much later refresh.
+    private func verifyHiddenAuthorizationResult(
+        state: AndroidBridgeUIState,
+        context: CloudAuthorizationContext
+    ) async -> Bool {
+        guard !state.visible,
+              context.hasObservedQRCode,
+              cloudAuthorizationPrompt?.semantic == .qrAuthorization,
+              cloudAuthorizationContext?.hasRequestedVerification != true,
+              let provider = providers[context.sourceIdentity.siteKey]
+                as? AndroidDexSpiderSiteProvider else {
+            return false
+        }
+        let now = Date()
+        if let lastProbe = cloudAuthorizationContext?.lastAuthorizationProbeAt,
+           now.timeIntervalSince(lastProbe) < 1 {
+            return false
+        }
+        guard var current = cloudAuthorizationContext,
+              current.operationID == context.operationID else {
+            return false
+        }
+        current.lastAuthorizationProbeAt = now
+        cloudAuthorizationContext = current
+        transitionConfigurationInteraction(
+            context.operationID,
+            to: .processing,
+            semantic: .qrAuthorization,
+            status: "二维码窗口已关闭，正在确认授权结果…"
+        )
+
+        guard let verifiedHome = try? await provider.home(),
+              provider.homeConfirmsAuthorization(verifiedHome),
+              configurationInteractionCoordinator.owns(context.operationID),
+              cloudAuthorizationContext?.operationID == context.operationID else {
+            return false
+        }
+        if currentHomeContentIdentity == context.sourceIdentity {
+            publishHomeContent(verifiedHome, identity: context.sourceIdentity)
+            await cacheSiteHome(verifiedHome, identity: context.sourceIdentity)
+            _ = await applyHomePresentation(
+                verifiedHome,
+                identity: context.sourceIdentity,
+                loadsCategoryContent: false
+            )
+        }
+        if var verifiedContext = cloudAuthorizationContext,
+           verifiedContext.operationID == context.operationID {
+            verifiedContext.hasRequestedVerification = true
+            cloudAuthorizationContext = verifiedContext
+        }
+        if let handle = context.providerHandle {
+            await Self.verifyScopedConfigurationInteraction(
+                handle,
+                succeeded: true,
+                actualRefreshPerformed: true
+            )
+        } else {
+            await finishCloudAuthorizationAndRetry(refreshPerformed: true)
+        }
+        return true
     }
 
     private func finishCloudAuthorizationAndRetry(
@@ -4909,11 +4985,22 @@ final class AppState: ObservableObject {
                 return
             }
         }
-        completeConfigurationInteraction(context.operationID)
+        let completionSemantic = cloudAuthorizationPrompt?.semantic
+            ?? context.operation.initialSemantic
+        completeConfigurationInteraction(
+            context.operationID,
+            status: completionSemantic.isAuthorization
+                ? "授权成功，正在刷新网盘内容…"
+                : "配置操作已完成"
+        )
         cloudAuthorizationSessionID = UUID()
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = nil
-        try? await Task.sleep(nanoseconds: 650_000_000)
+        try? await Task.sleep(
+            nanoseconds: completionSemantic.isAuthorization
+                ? 1_400_000_000
+                : 650_000_000
+        )
         guard configurationInteractionCoordinator.owns(context.operationID),
               cloudAuthorizationContext?.operationID == context.operationID else {
             return
@@ -8774,9 +8861,11 @@ final class AppState: ObservableObject {
               currentHomeContentIdentity == contentIdentity else {
             return
         }
-        publishHomeContent(cached, identity: contentIdentity)
+        let restored = (providers[siteKey] as? AndroidDexSpiderSiteProvider)?
+            .restoringHomeContract(in: cached) ?? cached
+        publishHomeContent(restored, identity: contentIdentity)
         _ = await applyHomePresentation(
-            cached,
+            restored,
             identity: contentIdentity,
             loadsCategoryContent: loadsCategoryContent
         )

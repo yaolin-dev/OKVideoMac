@@ -971,11 +971,14 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         homeValue: JSONValue,
         homeVideoValue: JSONValue?
     ) throws -> SiteHome {
-        let result = try SpiderResponseMapper.home(
-            homeValue,
-            homeVideoValue: homeVideoValue,
-            site: site,
-            baseURL: baseURL
+        let result = Self.applyingHomeContract(
+            to: try SpiderResponseMapper.home(
+                homeValue,
+                homeVideoValue: homeVideoValue,
+                site: site,
+                baseURL: baseURL
+            ),
+            site: site
         )
         guard site.categories.isEmpty else {
             let allowed = Set(site.categories)
@@ -986,6 +989,51 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
             )
         }
         return result
+    }
+
+    /// Restores semantics which are part of a known Java/Dex provider's home
+    /// contract but are not encoded in CatVod's generic `class` objects.
+    ///
+    /// MyDriveGuard always exposes `peizhi` as a host configuration entry.
+    /// After authorization it appends media providers (for example Quark), so
+    /// the old singleton-empty-category fallback can no longer identify that
+    /// entry.  Bind the meaning to the provider class and its stable contract
+    /// identifier; never infer it from a localized display title.
+    static func applyingHomeContract(
+        to home: SiteHome,
+        site: SiteConfiguration
+    ) -> SiteHome {
+        guard site.api.trimmingCharacters(in: .whitespacesAndNewlines)
+            == "csp_MyDriveGuard" else {
+            return home
+        }
+        var updated = home
+        for index in updated.categories.indices
+        where updated.categories[index].id == "peizhi" {
+            updated.categories[index].contentKind = .action
+        }
+        return updated
+    }
+
+    func restoringHomeContract(in home: SiteHome) -> SiteHome {
+        Self.applyingHomeContract(to: home, site: site)
+    }
+
+    static func homeConfirmsAuthorization(
+        _ home: SiteHome,
+        site: SiteConfiguration
+    ) -> Bool {
+        guard site.api.trimmingCharacters(in: .whitespacesAndNewlines)
+            == "csp_MyDriveGuard" else {
+            return false
+        }
+        return applyingHomeContract(to: home, site: site).categories.contains {
+            $0.resolvedContentKind == .media
+        }
+    }
+
+    func homeConfirmsAuthorization(_ home: SiteHome) -> Bool {
+        Self.homeConfirmsAuthorization(home, site: site)
     }
 
     func category(

@@ -1522,6 +1522,104 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testMDriveHomeContractSeparatesConfigurationFromAuthorizedMedia() {
+        let site = SiteConfiguration(
+            key: "renamed-drive",
+            name: "Renamed Drive",
+            type: 3,
+            api: "csp_MyDriveGuard"
+        )
+        let home = SiteHome(
+            categories: [
+                VideoCategory(id: "peizhi", name: "Arbitrary host action"),
+                VideoCategory(id: "夸父", name: "Arbitrary media provider")
+            ],
+            recommendations: []
+        )
+
+        let normalized = AndroidDexSpiderSiteProvider.applyingHomeContract(
+            to: home,
+            site: site
+        )
+
+        XCTAssertEqual(
+            normalized.categories.map(\.resolvedContentKind),
+            [.action, .media]
+        )
+        XCTAssertEqual(
+            HomePresentationPolicy.selection(for: normalized, preserving: nil),
+            .category("夸父")
+        )
+        XCTAssertTrue(
+            AndroidDexSpiderSiteProvider.homeConfirmsAuthorization(
+                normalized,
+                site: site
+            )
+        )
+    }
+
+    func testMDriveHomeContractKeepsPreAuthorizationConfigurationAction() {
+        let site = SiteConfiguration(
+            key: "drive",
+            name: "Drive",
+            type: 3,
+            api: "csp_MyDriveGuard"
+        )
+        let home = SiteHome(
+            categories: [VideoCategory(id: "peizhi", name: "云盘配置")],
+            recommendations: []
+        )
+
+        let normalized = AndroidDexSpiderSiteProvider.applyingHomeContract(
+            to: home,
+            site: site
+        )
+
+        XCTAssertEqual(
+            normalized.categories.first?.resolvedContentKind,
+            .action
+        )
+        XCTAssertEqual(
+            HomePresentationPolicy.selection(for: normalized, preserving: nil),
+            .actions
+        )
+        XCTAssertFalse(
+            AndroidDexSpiderSiteProvider.homeConfirmsAuthorization(
+                normalized,
+                site: site
+            )
+        )
+    }
+
+    func testGenericDexHomeDoesNotInferActionFromMDriveCategoryIdentifier() {
+        let site = SiteConfiguration(
+            key: "generic",
+            name: "Generic",
+            type: 3,
+            api: "csp_UnrelatedProvider"
+        )
+        let home = SiteHome(
+            categories: [VideoCategory(id: "peizhi", name: "云盘配置")],
+            recommendations: []
+        )
+
+        let normalized = AndroidDexSpiderSiteProvider.applyingHomeContract(
+            to: home,
+            site: site
+        )
+
+        XCTAssertEqual(
+            normalized.categories.first?.resolvedContentKind,
+            .media
+        )
+        XCTAssertFalse(
+            AndroidDexSpiderSiteProvider.homeConfirmsAuthorization(
+                normalized,
+                site: site
+            )
+        )
+    }
+
     func testHomePresentationIsEmptyWhenEveryCategoryIsUnsupported() {
         let home = SiteHome(
             categories: [
