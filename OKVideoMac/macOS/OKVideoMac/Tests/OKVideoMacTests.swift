@@ -2590,6 +2590,45 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testMyDriveAuthorizationRefreshesBaselineDuringFirstQRCodeFrame() {
+        XCTAssertEqual(
+            MyDriveAuthorizationStorageEvidencePolicy
+                .baselineAfterObservingQRCode(
+                    existing: "before-click",
+                    observed: "qr-generated",
+                    hadObservedQRCode: false,
+                    workerReturned: false
+                ),
+            "qr-generated"
+        )
+    }
+
+    func testMyDriveAuthorizationPreservesPreClickBaselineWhenWorkerReturned() {
+        XCTAssertEqual(
+            MyDriveAuthorizationStorageEvidencePolicy
+                .baselineAfterObservingQRCode(
+                    existing: "before-click",
+                    observed: "authorized",
+                    hadObservedQRCode: false,
+                    workerReturned: true
+                ),
+            "before-click"
+        )
+    }
+
+    func testMyDriveAuthorizationKeepsFirstQRCodeBaselineOnLaterPolls() {
+        XCTAssertEqual(
+            MyDriveAuthorizationStorageEvidencePolicy
+                .baselineAfterObservingQRCode(
+                    existing: "qr-generated",
+                    observed: "authorized",
+                    hadObservedQRCode: true,
+                    workerReturned: true
+                ),
+            "qr-generated"
+        )
+    }
+
     func testAndroidBridgeUIStateDecodesOpaqueAuthorizationStorageFingerprint()
         throws {
         let state = try JSONDecoder().decode(

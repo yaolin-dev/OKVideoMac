@@ -779,6 +779,24 @@ enum MyDriveAuthorizationVerificationPolicy {
 enum MyDriveAuthorizationStorageEvidencePolicy {
     static let requiredStablePollCount = 2
 
+    /// Provider callbacks may not return until after the phone has completed
+    /// authorization. Seed the digest before clicking the account row, then
+    /// allow the first visible QR frame to replace it only while the provider
+    /// worker is still active. This filters QR-generation writes without
+    /// allowing a post-login digest to become the baseline.
+    static func baselineAfterObservingQRCode(
+        existing: String?,
+        observed: String?,
+        hadObservedQRCode: Bool,
+        workerReturned: Bool?
+    ) -> String? {
+        guard let observed = observed?.nonEmpty else { return existing }
+        if !hadObservedQRCode, workerReturned != true {
+            return observed
+        }
+        return existing?.nonEmpty ?? observed
+    }
+
     static func confirmsStableChange(
         baseline: String?,
         candidate: String?,
@@ -4501,6 +4519,40 @@ final class AppState: ObservableObject {
         }
         let submissionSemantic = cloudAuthorizationPrompt?.semantic
             ?? context.operation.initialSemantic
+        let controlID = action.id.hasPrefix("legacy:")
+            ? nil
+            : action.id
+        if myDriveLoginStatusAction(for: context) != nil,
+           let target = MyDriveAuthorizationVerificationPolicy.target(
+                controlID: controlID,
+                title: action.title
+           ) {
+            // The legacy provider's submit call can remain suspended until
+            // after the phone has scanned the QR and credentials are already
+            // persisted. Stage the exact row and pre-click storage digest
+            // before entering that call; doing this after `submit` returns
+            // records the successful credential as the baseline and makes the
+            // UI wait forever despite a completed login.
+            let baselineState = try? await configurationInteractionState(
+                for: context
+            )
+            guard configurationInteractionCoordinator.owns(context.operationID),
+                  var current = cloudAuthorizationContext,
+                  current.operationID == context.operationID else {
+                return
+            }
+            current.myDriveAuthorizationTarget = target
+            current.myDriveAuthorizedCategoryIDsAtStart =
+                currentHomeContentIdentity == context.sourceIdentity
+                    ? MyDriveAuthorizationVerificationPolicy
+                        .authorizedCategoryIDs(in: siteHome)
+                    : nil
+            current.myDriveAuthorizationStorageFingerprintAtQRCode =
+                baselineState?.authorizationStorageFingerprint?.nonEmpty
+            current.myDriveAuthorizationStorageCandidateFingerprint = nil
+            current.myDriveAuthorizationStorageStablePollCount = 0
+            cloudAuthorizationContext = current
+        }
         transitionConfigurationInteraction(
             context.operationID,
             to: .submitting,
@@ -4508,9 +4560,6 @@ final class AppState: ObservableObject {
         )
         do {
             let text = cloudAuthorizationInput.nonEmpty
-            let controlID = action.id.hasPrefix("legacy:")
-                ? nil
-                : action.id
             let result: AndroidBridgeUISubmitResult
             if let handle = context.providerHandle {
                 result = try await handle.submit(
@@ -4552,28 +4601,6 @@ final class AppState: ObservableObject {
                 throw AppError.spider(
                     "后台授权窗口中没有找到“\(action.title)”按钮"
                 )
-            }
-            if myDriveLoginStatusAction(for: context) != nil,
-               let target = MyDriveAuthorizationVerificationPolicy.target(
-                    controlID: controlID,
-                    title: action.title
-               ),
-               var current = cloudAuthorizationContext,
-               current.operationID == context.operationID {
-                // Capture the exact account row before the provider replaces
-                // the chooser with its QR child dialog. This is the baseline
-                // used to distinguish a real login from UC/Quark window
-                // redraws and automatic QR dismissal.
-                current.myDriveAuthorizationTarget = target
-                current.myDriveAuthorizedCategoryIDsAtStart =
-                    currentHomeContentIdentity == context.sourceIdentity
-                        ? MyDriveAuthorizationVerificationPolicy
-                            .authorizedCategoryIDs(in: siteHome)
-                        : nil
-                current.myDriveAuthorizationStorageFingerprintAtQRCode = nil
-                current.myDriveAuthorizationStorageCandidateFingerprint = nil
-                current.myDriveAuthorizationStorageStablePollCount = 0
-                cloudAuthorizationContext = current
             }
             if ConfigurationControlSubmissionPolicy.acceptedClickCancels(
                 controlTitle: action.title,
@@ -5064,19 +5091,30 @@ final class AppState: ObservableObject {
                     : "chooser"
         if semantic == .qrAuthorization,
            var context = cloudAuthorizationContext {
+            let hadObservedQRCode = context.hasObservedQRCode
             context.hasObservedQRCode = true
             context.lastObservedQRCodeGeneration = state.interactionGeneration
             if context.myDriveAuthorizationTarget != nil,
                let fingerprint = state.authorizationStorageFingerprint?.nonEmpty {
-                if context.myDriveAuthorizationStorageFingerprintAtQRCode == nil {
-                    // Capture after the QR is rendered so provider writes used
-                    // only to construct the QR cannot become login evidence.
+                let baseline = MyDriveAuthorizationStorageEvidencePolicy
+                    .baselineAfterObservingQRCode(
+                        existing: context
+                            .myDriveAuthorizationStorageFingerprintAtQRCode,
+                        observed: fingerprint,
+                        hadObservedQRCode: hadObservedQRCode,
+                        workerReturned: state.workerReturned
+                    )
+                if baseline
+                    != context.myDriveAuthorizationStorageFingerprintAtQRCode {
+                    // The first QR frame is the authoritative baseline while
+                    // the worker is active because some providers persist a
+                    // QR nonce during dialog construction.
                     context.myDriveAuthorizationStorageFingerprintAtQRCode =
-                        fingerprint
+                        baseline
                     context.myDriveAuthorizationStorageCandidateFingerprint = nil
                     context.myDriveAuthorizationStorageStablePollCount = 0
-                } else if fingerprint
-                            != context.myDriveAuthorizationStorageFingerprintAtQRCode {
+                } else if let baseline,
+                          fingerprint != baseline {
                     if context.myDriveAuthorizationStorageCandidateFingerprint
                         == fingerprint {
                         context.myDriveAuthorizationStorageStablePollCount += 1
