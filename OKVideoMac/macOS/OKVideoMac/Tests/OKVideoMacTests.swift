@@ -6448,6 +6448,73 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testAndroidBridgeEqualVersionRequiresExactBundledAPKIdentity() {
+        let bundled = String(repeating: "a", count: 64)
+        let installed = String(repeating: "b", count: 64)
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.bridgeInstallRequired(
+                installedVersionCode: AndroidDexBridgeRuntime.bridgeVersionCode,
+                installedSHA256: bundled.uppercased(),
+                bundledSHA256: bundled
+            )
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.bridgeInstallRequired(
+                installedVersionCode: AndroidDexBridgeRuntime.bridgeVersionCode,
+                installedSHA256: installed,
+                bundledSHA256: bundled
+            )
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.bridgeInstallRequired(
+                installedVersionCode: AndroidDexBridgeRuntime.bridgeVersionCode,
+                installedSHA256: nil,
+                bundledSHA256: bundled
+            )
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.bridgeInstallRequired(
+                installedVersionCode: AndroidDexBridgeRuntime.bridgeVersionCode
+                    - 1,
+                installedSHA256: bundled,
+                bundledSHA256: bundled
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.bridgeInstallRequired(
+                installedVersionCode: AndroidDexBridgeRuntime.bridgeVersionCode
+                    + 1,
+                installedSHA256: installed,
+                bundledSHA256: bundled
+            )
+        )
+    }
+
+    func testAndroidBridgeParsesOwnedBaseAPKAndSHA256Output() {
+        let path = "/data/app/~~abc_123==/com.okvideomac.dexbridge-xyz==/base.apk"
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.installedAPKPath(
+                from: "package:\(path)\r\n"
+            ),
+            path
+        )
+        XCTAssertNil(
+            AndroidDexBridgeRuntime.installedAPKPath(
+                from: "package:/system/priv-app/Other/base.apk\n"
+            )
+        )
+        let digest = String(repeating: "c", count: 64)
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.sha256FromCommandOutput(
+                "\(digest)  \(path)\n"
+            ),
+            digest
+        )
+        XCTAssertNil(
+            AndroidDexBridgeRuntime.sha256FromCommandOutput("not-a-digest")
+        )
+    }
+
     func testAndroidBridgeContractMatchesBundledAPKGradleAndHealth() throws {
         let apk = try XCTUnwrap(
             Bundle.main.url(

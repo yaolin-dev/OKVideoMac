@@ -3831,8 +3831,8 @@ enum AndroidBridgeDeploymentAction: Equatable, Sendable {
 }
 
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.25"
-    static let bridgeVersionCode = 37
+    static let bridgeVersion = "0.3.26"
+    static let bridgeVersionCode = 38
     private static let networkCheckInterval: TimeInterval = 30
     private static let manifestSchema = 1
     private static let avdName = "OKVideoMac_Runtime"
@@ -4766,6 +4766,22 @@ actor AndroidDexBridgeRuntime {
             } else {
                 hasNewerBridge = false
             }
+            let requiresBundledInstall: Bool
+            if hasNewerBridge {
+                requiresBundledInstall = false
+            } else if installedVersionCode == Self.bridgeVersionCode {
+                let bundledAPK = try bridgeAPK()
+                requiresBundledInstall = Self.bridgeInstallRequired(
+                    installedVersionCode: installedVersionCode,
+                    installedSHA256: installedBridgeAPKSHA256(
+                        identity,
+                        toolchain: toolchain
+                    ),
+                    bundledSHA256: Self.sha256Hex(bundledAPK)
+                )
+            } else {
+                requiresBundledInstall = true
+            }
             try configurePortForwards(identity, toolchain: toolchain)
 
             transition(to: .checkingEmulatorNetwork)
@@ -4818,6 +4834,7 @@ actor AndroidDexBridgeRuntime {
                 )
             }
             if !forceInstall, !networkWasRepaired,
+               !requiresBundledInstall,
                try await isHealthy(
                     identity,
                     toolchain: toolchain,
@@ -4845,6 +4862,16 @@ actor AndroidDexBridgeRuntime {
                 category: "adb.bridge.install",
                 timeout: 120
             )
+            if let bundledSHA256 = Self.sha256Hex(apk),
+               let installedSHA256 = installedBridgeAPKSHA256(
+                    identity,
+                    toolchain: toolchain
+               ),
+               bundledSHA256 != installedSHA256 {
+                throw AppError.spider(
+                    "Android Bridge 安装后内容校验失败；已拒绝启动旧 Bridge"
+                )
+            }
             transition(to: .launchingBridge)
             try startBridge(identity, toolchain: toolchain)
             transition(to: .probingBridge)
@@ -5254,6 +5281,93 @@ actor AndroidDexBridgeRuntime {
             return .installBundled
         }
         return .activateInstalledNewer(versionCode: installedVersionCode)
+    }
+
+    /// Version equality alone is not enough: local Release builds can embed a
+    /// rebuilt APK before its Gradle version is bumped. In that case Android
+    /// reports a healthy, same-version package while macOS is still speaking
+    /// to the old Bridge protocol. Compare the installed base APK with the
+    /// bundled APK and reinstall in place when their content differs. A newer
+    /// installed build remains protected from downgrade so cloud credentials
+    /// stored in the managed emulator are never erased.
+    static func bridgeInstallRequired(
+        installedVersionCode: Int?,
+        installedSHA256: String?,
+        bundledSHA256: String?
+    ) -> Bool {
+        guard let installedVersionCode else { return true }
+        if installedVersionCode > bridgeVersionCode { return false }
+        if installedVersionCode < bridgeVersionCode { return true }
+        guard let installedSHA256 = normalizedSHA256(installedSHA256),
+              let bundledSHA256 = normalizedSHA256(bundledSHA256) else {
+            // For an equal-version package, inability to prove byte identity
+            // must not silently retain an unknown Bridge implementation.
+            return true
+        }
+        return installedSHA256 != bundledSHA256
+    }
+
+    static func installedAPKPath(from packageManagerOutput: String) -> String? {
+        let paths = packageManagerOutput.split(whereSeparator: \.isNewline)
+            .compactMap { rawLine -> String? in
+                let line = String(rawLine).trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+                guard line.hasPrefix("package:") else { return nil }
+                let path = String(line.dropFirst("package:".count))
+                let allowed = CharacterSet.alphanumerics.union(
+                    CharacterSet(charactersIn: "/._~=-")
+                )
+                guard path.hasPrefix("/data/app/"),
+                      path.hasSuffix("/base.apk"),
+                      path.unicodeScalars.allSatisfy(allowed.contains) else {
+                    return nil
+                }
+                return path
+            }
+        return paths.count == 1 ? paths[0] : nil
+    }
+
+    static func sha256FromCommandOutput(_ output: String) -> String? {
+        let candidate = output.split(whereSeparator: \.isWhitespace)
+            .first.map(String.init)
+        return normalizedSHA256(candidate)
+    }
+
+    private static func normalizedSHA256(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let normalized = value.lowercased()
+        let hexadecimal = CharacterSet(
+            charactersIn: "0123456789abcdef"
+        )
+        guard normalized.count == 64,
+              normalized.unicodeScalars.allSatisfy(hexadecimal.contains)
+        else {
+            return nil
+        }
+        return normalized
+    }
+
+    private func installedBridgeAPKSHA256(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) -> String? {
+        guard let packageOutput = try? runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            ["shell", "pm", "path", "com.okvideomac.dexbridge"],
+            category: "adb.bridge.apk.path"
+        ),
+        let path = Self.installedAPKPath(from: packageOutput),
+        let digestOutput = try? runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            ["shell", "sha256sum", path],
+            category: "adb.bridge.apk.sha256"
+        ) else {
+            return nil
+        }
+        return Self.sha256FromCommandOutput(digestOutput)
     }
 
     private func isHealthy(
