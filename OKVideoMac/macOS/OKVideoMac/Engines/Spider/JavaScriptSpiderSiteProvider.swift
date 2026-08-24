@@ -3498,9 +3498,14 @@ enum AndroidBridgeHealthValidation: String, Equatable, Sendable {
     case versionMismatch = "bridge_version_mismatch"
 }
 
+enum AndroidBridgeDeploymentAction: Equatable, Sendable {
+    case installBundled
+    case activateInstalledNewer(versionCode: Int)
+}
+
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.18"
-    static let bridgeVersionCode = 30
+    static let bridgeVersion = "0.3.22"
+    static let bridgeVersionCode = 34
     private static let networkCheckInterval: TimeInterval = 30
     private static let manifestSchema = 1
     private static let avdName = "OKVideoMac_Runtime"
@@ -4425,9 +4430,15 @@ actor AndroidDexBridgeRuntime {
                 identity,
                 toolchain: toolchain
             )
-            let hasNewerBridge = installedVersionCode.map {
-                $0 > Self.bridgeVersionCode
-            } ?? false
+            let deploymentAction = Self.bridgeDeploymentAction(
+                installedVersionCode: installedVersionCode
+            )
+            let hasNewerBridge: Bool
+            if case .activateInstalledNewer = deploymentAction {
+                hasNewerBridge = true
+            } else {
+                hasNewerBridge = false
+            }
             try configurePortForwards(identity, toolchain: toolchain)
 
             transition(to: .checkingEmulatorNetwork)
@@ -4441,6 +4452,42 @@ actor AndroidDexBridgeRuntime {
                     identity,
                     toolchain: toolchain,
                     allowRecoveryCommand: retryKnownFailedNetworkCommand
+                )
+            }
+            if case let .activateInstalledNewer(versionCode) = deploymentAction {
+                // A newer signed Bridge can remain in the managed emulator
+                // after the user tests a later OKVideoMac build. Android will
+                // reject an install -r downgrade, and uninstalling here would
+                // erase the user's cloud-drive login data. Start and validate
+                // the newer compatible Bridge instead.
+                transition(to: .launchingBridge)
+                try startBridge(identity, toolchain: toolchain)
+                transition(to: .probingBridge)
+                for attempt in 0..<AndroidRuntimeRecoveryPolicy
+                    .initialBridgeProbeAttempts {
+                    try Task.checkCancellation()
+                    probeRetryCount = attempt + 1
+                    if try await isHealthy(
+                        identity,
+                        toolchain: toolchain,
+                        acceptVersionMismatch: true
+                    ) {
+                        ready = true
+                        acceptsNewerBridge = true
+                        lastNetworkCheck = Date()
+                        lastFailure = nil
+                        lastSuccessfulStartAt = Date()
+                        transition(to: .ready, event: "newer_bridge_ready")
+                        return
+                    }
+                    try await Task.sleep(
+                        nanoseconds: AndroidRuntimeRecoveryPolicy
+                            .bridgeProbePollNanoseconds
+                    )
+                }
+                throw AppError.spider(
+                    "检测到较新的 Android Bridge（构建 \(versionCode)），"
+                        + "但启动验证失败；为保留网盘登录数据，未执行降级或卸载"
                 )
             }
             if !forceInstall, !networkWasRepaired,
@@ -4866,6 +4913,16 @@ actor AndroidDexBridgeRuntime {
         let suffix = packageDump[marker.upperBound...]
         let digits = suffix.prefix(while: \.isNumber)
         return Int(digits)
+    }
+
+    static func bridgeDeploymentAction(
+        installedVersionCode: Int?
+    ) -> AndroidBridgeDeploymentAction {
+        guard let installedVersionCode,
+              installedVersionCode > bridgeVersionCode else {
+            return .installBundled
+        }
+        return .activateInstalledNewer(versionCode: installedVersionCode)
     }
 
     private func isHealthy(

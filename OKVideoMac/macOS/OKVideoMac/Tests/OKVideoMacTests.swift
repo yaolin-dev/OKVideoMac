@@ -5886,6 +5886,41 @@ final class OKVideoMacTests: XCTestCase {
                 for: AndroidBridgeHealthValidation.versionMismatch.rawValue
             ).contains("版本不匹配")
         )
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.healthMatches(
+                [
+                    "ok": true,
+                    "version": "99.0.0",
+                    "generation": "current-generation"
+                ],
+                generation: "current-generation",
+                acceptVersionMismatch: true
+            )
+        )
+    }
+
+    func testAndroidBridgeDeploymentNeverDowngradesNewerInstalledBuild() {
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.bridgeDeploymentAction(
+                installedVersionCode: AndroidDexBridgeRuntime.bridgeVersionCode
+                    + 1
+            ),
+            .activateInstalledNewer(
+                versionCode: AndroidDexBridgeRuntime.bridgeVersionCode + 1
+            )
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.bridgeDeploymentAction(
+                installedVersionCode: AndroidDexBridgeRuntime.bridgeVersionCode
+            ),
+            .installBundled
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.bridgeDeploymentAction(
+                installedVersionCode: nil
+            ),
+            .installBundled
+        )
     }
 
     func testAndroidBridgeContractMatchesBundledAPKGradleAndHealth() throws {
