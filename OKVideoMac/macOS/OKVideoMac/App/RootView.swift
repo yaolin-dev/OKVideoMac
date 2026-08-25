@@ -967,6 +967,7 @@ private struct SectionContentView: View {
 /// the poster grid. The navigation store is intentionally observed only here,
 /// so changing sections does not invalidate either content subtree.
 private struct HomeLiveSectionContainer: View {
+    @EnvironmentObject private var state: AppState
     @EnvironmentObject private var navigation: AppNavigationState
     @ObservedObject var liveSession: LiveBrowserSession
 
@@ -974,32 +975,64 @@ private struct HomeLiveSectionContainer: View {
         navigation.selectedSection == .home
     }
 
-    var body: some View {
-        ZStack {
-            HomeView()
-                .opacity(showsHome ? 1 : 0)
-                .allowsHitTesting(showsHome)
-                .accessibilityHidden(!showsHome)
-                .zIndex(showsHome ? 1 : 0)
+    private var showsHomeToolbar: Bool {
+        showsHome
+            && !state.isHomeSearchPresented
+            && state.activeConfiguration != nil
+    }
 
-            LiveView(session: liveSession)
-                .opacity(showsHome ? 0 : 1)
-                .allowsHitTesting(!showsHome)
-                .accessibilityHidden(showsHome)
-                .zIndex(showsHome ? 0 : 1)
-        }
-        .navigationTitle(navigation.selectedSection.rawValue)
-        .toolbar {
-            ToolbarItem {
-                if showsHome {
-                    HomeToolbarView()
-                } else {
-                    LiveToolbarView(session: liveSession)
+    var body: some View {
+        GeometryReader { proxy in
+            let toolbarLayout = HomeToolbarLayoutPolicy.layout(
+                contentWidth: proxy.size.width
+            )
+            ZStack {
+                HomeView()
+                    .opacity(showsHome ? 1 : 0)
+                    .allowsHitTesting(showsHome)
+                    .accessibilityHidden(!showsHome)
+                    .zIndex(showsHome ? 1 : 0)
+
+                LiveView(session: liveSession)
+                    .opacity(showsHome ? 0 : 1)
+                    .allowsHitTesting(!showsHome)
+                    .accessibilityHidden(showsHome)
+                    .zIndex(showsHome ? 0 : 1)
+            }
+            .navigationTitle(navigation.selectedSection.rawValue)
+            .toolbar {
+                // Separate ToolbarItems are intentional: a narrow window can
+                // overflow low-priority actions without hiding the essential
+                // site and search entries as one indivisible group.
+                ToolbarItem {
+                    if showsHomeToolbar {
+                        HomeSiteToolbarItem(layout: toolbarLayout)
+                    }
+                }
+                ToolbarItem {
+                    if showsHomeToolbar {
+                        HomeSearchToolbarItem(layout: toolbarLayout)
+                    }
+                }
+                ToolbarItem {
+                    if showsHomeToolbar {
+                        HomeConfigurationToolbarItem()
+                    }
+                }
+                ToolbarItem {
+                    if showsHomeToolbar {
+                        HomeRefreshToolbarItem(layout: toolbarLayout)
+                    }
+                }
+                ToolbarItem {
+                    if !showsHome {
+                        LiveToolbarView(session: liveSession)
+                    }
                 }
             }
-        }
-        .transaction { transaction in
-            transaction.disablesAnimations = true
+            .transaction { transaction in
+                transaction.disablesAnimations = true
+            }
         }
     }
 }

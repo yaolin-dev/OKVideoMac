@@ -8444,6 +8444,38 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testHomeToolbarLayoutUsesContentWidthBreakpoints() {
+        XCTAssertEqual(
+            HomeToolbarLayoutPolicy.layout(contentWidth: 1_200),
+            .expanded
+        )
+        XCTAssertEqual(
+            HomeToolbarLayoutPolicy.layout(contentWidth: 900),
+            .expanded
+        )
+        XCTAssertEqual(
+            HomeToolbarLayoutPolicy.layout(contentWidth: 899),
+            .compact
+        )
+        XCTAssertEqual(
+            HomeToolbarLayoutPolicy.layout(contentWidth: 650),
+            .compact
+        )
+        XCTAssertEqual(
+            HomeToolbarLayoutPolicy.layout(contentWidth: 649),
+            .minimal
+        )
+    }
+
+    func testHomeToolbarCompactControlsRemainBounded() {
+        XCTAssertEqual(HomeToolbarLayout.expanded.sitePickerWidth, 210)
+        XCTAssertEqual(HomeToolbarLayout.compact.sitePickerWidth, 150)
+        XCTAssertEqual(HomeToolbarLayout.minimal.sitePickerWidth, 0)
+        XCTAssertEqual(HomeToolbarLayout.expanded.searchFieldWidth, 280)
+        XCTAssertEqual(HomeToolbarLayout.compact.searchFieldWidth, 190)
+        XCTAssertEqual(HomeToolbarLayout.minimal.searchFieldWidth, 0)
+    }
+
     func testSearchResultPresentationCanMergeAndSeparateDuplicateTitles() {
         let values = [
             VideoSummary(

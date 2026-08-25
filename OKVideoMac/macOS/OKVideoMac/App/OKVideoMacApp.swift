@@ -540,7 +540,7 @@ struct AppCommands: Commands {
     var body: some Commands {
         CommandMenu("导航") {
             Button("搜索") {
-                state.presentHomeSearch()
+                state.focusHomeToolbarSearch()
             }
             .keyboardShortcut("f", modifiers: .command)
 

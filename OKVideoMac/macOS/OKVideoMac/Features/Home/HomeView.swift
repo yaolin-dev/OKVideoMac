@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import OKVideoCore
 
@@ -302,102 +303,152 @@ struct HomeView: View {
     }
 }
 
-struct HomeToolbarView: View {
+enum HomeToolbarLayout: Equatable, Sendable {
+    case expanded
+    case compact
+    case minimal
+
+    var sitePickerWidth: CGFloat {
+        switch self {
+        case .expanded: return 210
+        case .compact: return 150
+        case .minimal: return 0
+        }
+    }
+
+    var searchFieldWidth: CGFloat {
+        switch self {
+        case .expanded: return 280
+        case .compact: return 190
+        case .minimal: return 0
+        }
+    }
+}
+
+enum HomeToolbarLayoutPolicy {
+    static func layout(contentWidth: CGFloat) -> HomeToolbarLayout {
+        if contentWidth >= 900 { return .expanded }
+        if contentWidth >= 650 { return .compact }
+        return .minimal
+    }
+}
+
+struct HomeSiteToolbarItem: View {
     @EnvironmentObject private var state: AppState
-    @FocusState private var isSearchFieldFocused: Bool
+    let layout: HomeToolbarLayout
 
     var body: some View {
-        if !state.isHomeSearchPresented,
-           state.activeConfiguration != nil {
-            HStack(spacing: 10) {
-                HStack(spacing: 6) {
-                    if !state.configurations.isEmpty {
-                        Menu {
-                            ForEach(state.configurations) { record in
-                                Button {
-                                    Task {
-                                        await state.activateConfiguration(record.id)
-                                    }
-                                } label: {
-                                    if state.configurationMenuSelectionID == record.id {
-                                        Label(record.name, systemImage: "checkmark")
-                                    } else {
-                                        Text(record.name)
-                                    }
-                                }
-                                .disabled(
-                                    state.activeConfigurationRecord?.id == record.id
-                                        && !state.isSwitchingConfiguration
-                                )
-                            }
+        if !state.visibleSites.isEmpty {
+            switch layout {
+            case .expanded, .compact:
+                Picker("站点", selection: selection) {
+                    ForEach(state.visibleSites) { site in
+                        Text(displayName(for: site))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .tag(site.key)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: layout.sitePickerWidth)
+                .help(siteHelp)
+                .accessibilityLabel("选择内容站点")
+
+            case .minimal:
+                Menu {
+                    ForEach(state.visibleSites) { site in
+                        Button {
+                            Task { await state.selectSite(site.key) }
                         } label: {
-                            Image(systemName: "play.rectangle.on.rectangle")
-                                .foregroundColor(.secondary)
-                        }
-                        .menuStyle(.borderlessButton)
-                        .fixedSize()
-                        .help("切换点播源")
-                        .accessibilityLabel("切换点播源")
-                    }
-
-                    SourceSwitchFeedbackView(
-                        feedback: state.configurationSwitchFeedback,
-                        compact: true
-                    )
-
-                    if !state.visibleSites.isEmpty {
-                        Picker(
-                            "站点",
-                            selection: Binding(
-                                get: { state.selectedSiteKey ?? "" },
-                                set: { key in
-                                    Task { await state.selectSite(key) }
-                                }
-                            )
-                        ) {
-                            ForEach(state.visibleSites) { site in
-                                Text(
-                                    HomeSitePresentation.displayName(
-                                        siteName: site.name,
-                                        capability: state.siteCapability(for: site.key)
-                                    )
-                                )
-                                .tag(site.key)
+                            if state.selectedSiteKey == site.key {
+                                Label(displayName(for: site), systemImage: "checkmark")
+                            } else {
+                                Text(displayName(for: site))
                             }
                         }
-                        .labelsHidden()
-                        .frame(width: 210)
-                        .help("选择内容站点，共 \(state.visibleSites.count) 个")
                     }
-                }
-
-                TextField("搜索全部站点", text: $state.searchKeyword)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($isSearchFieldFocused)
-                    .onSubmit(performSearch)
-                    .frame(minWidth: 190, idealWidth: 280, maxWidth: 360)
-
-                Button(action: performSearch) {
-                    Label("搜索", systemImage: "magnifyingglass")
-                }
-                .disabled(
-                    state.visibleSites.isEmpty
-                        ||
-                    state.searchKeyword
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                        .isEmpty
-                )
-
-                if state.isLoading || state.isHomeLoading {
-                    AppActivityIndicator(size: .small)
-                }
-
-                Button {
-                    Task { await state.refreshHome() }
                 } label: {
-                    Label("刷新", systemImage: "arrow.clockwise")
+                    Image(systemName: "rectangle.stack.fill")
+                        .foregroundColor(.secondary)
                 }
-                .disabled(state.currentSite == nil)
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help(siteHelp)
+                .accessibilityLabel("选择内容站点")
+            }
+        }
+    }
+
+    private var selection: Binding<String> {
+        Binding(
+            get: { state.selectedSiteKey ?? "" },
+            set: { key in Task { await state.selectSite(key) } }
+        )
+    }
+
+    private var siteHelp: String {
+        let currentName = state.currentSite.map(displayName(for:)) ?? "未选择"
+        return "当前站点：\(currentName)，共 \(state.visibleSites.count) 个"
+    }
+
+    private func displayName(for site: SiteConfiguration) -> String {
+        HomeSitePresentation.displayName(
+            siteName: site.name,
+            capability: state.siteCapability(for: site.key)
+        )
+    }
+}
+
+struct HomeSearchToolbarItem: View {
+    @EnvironmentObject private var state: AppState
+    let layout: HomeToolbarLayout
+
+    @State private var showingCompactSearch = false
+    @State private var compactFocusRequest: UInt64 = 0
+
+    var body: some View {
+        Group {
+            if layout == .minimal {
+                Button {
+                    compactFocusRequest &+= 1
+                    showingCompactSearch = true
+                } label: {
+                    Label("搜索", systemImage: "magnifyingglass")
+                        .labelStyle(.iconOnly)
+                }
+                .help("搜索全部站点（⌘F）")
+                .accessibilityLabel("搜索全部站点")
+                .disabled(state.visibleSites.isEmpty)
+                .popover(isPresented: $showingCompactSearch, arrowEdge: .top) {
+                    HomeToolbarSearchField(
+                        text: $state.searchKeyword,
+                        focusRequest: state.homeToolbarSearchFocusRequest
+                            &+ compactFocusRequest,
+                        onSubmit: performSearch
+                    )
+                    .frame(width: 280, height: 28)
+                    .padding(14)
+                }
+            } else {
+                HomeToolbarSearchField(
+                    text: $state.searchKeyword,
+                    focusRequest: state.homeToolbarSearchFocusRequest,
+                    onSubmit: performSearch
+                )
+                .frame(width: layout.searchFieldWidth, height: 28)
+                .disabled(state.visibleSites.isEmpty)
+                .help("搜索全部站点，按 Return 开始（⌘F 聚焦）")
+            }
+        }
+        .onChange(of: state.homeToolbarSearchFocusRequest) { _ in
+            if layout == .minimal {
+                compactFocusRequest &+= 1
+                showingCompactSearch = true
+            }
+        }
+        .onChange(of: layout) { newLayout in
+            if newLayout != .minimal {
+                showingCompactSearch = false
             }
         }
     }
@@ -405,11 +456,152 @@ struct HomeToolbarView: View {
     private func performSearch() {
         let keyword = state.searchKeyword
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !keyword.isEmpty else {
-            isSearchFieldFocused = true
+        guard !keyword.isEmpty else { return }
+        showingCompactSearch = false
+        state.searchFromHome(keyword)
+    }
+}
+
+private struct HomeToolbarSearchField: NSViewRepresentable {
+    @Binding var text: String
+    let focusRequest: UInt64
+    let onSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NSSearchField {
+        let field = NSSearchField()
+        field.placeholderString = "搜索全部站点"
+        field.sendsSearchStringImmediately = false
+        field.sendsWholeSearchString = true
+        field.delegate = context.coordinator
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.submit(_:))
+        field.setAccessibilityLabel("搜索全部站点")
+        return field
+    }
+
+    func updateNSView(_ field: NSSearchField, context: Context) {
+        context.coordinator.parent = self
+        if field.stringValue != text {
+            field.stringValue = text
+        }
+        guard focusRequest > 0,
+              context.coordinator.lastFocusRequest != focusRequest else {
             return
         }
-        state.searchFromHome(keyword)
+        context.coordinator.lastFocusRequest = focusRequest
+        DispatchQueue.main.async {
+            guard let window = field.window else { return }
+            window.makeFirstResponder(field)
+            field.selectText(nil)
+        }
+    }
+
+    final class Coordinator: NSObject, NSSearchFieldDelegate {
+        var parent: HomeToolbarSearchField
+        var lastFocusRequest: UInt64 = 0
+
+        init(_ parent: HomeToolbarSearchField) {
+            self.parent = parent
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSSearchField else { return }
+            parent.text = field.stringValue
+        }
+
+        @objc func submit(_ sender: NSSearchField) {
+            parent.text = sender.stringValue
+            parent.onSubmit()
+        }
+    }
+}
+
+struct HomeConfigurationToolbarItem: View {
+    @EnvironmentObject private var state: AppState
+
+    var body: some View {
+        if !state.configurations.isEmpty {
+            Menu {
+                ForEach(state.configurations) { record in
+                    Button {
+                        Task { await state.activateConfiguration(record.id) }
+                    } label: {
+                        if state.configurationMenuSelectionID == record.id {
+                            Label(record.name, systemImage: "checkmark")
+                        } else {
+                            Text(record.name)
+                        }
+                    }
+                    .disabled(
+                        state.activeConfigurationRecord?.id == record.id
+                            && !state.isSwitchingConfiguration
+                    )
+                }
+            } label: {
+                configurationStatusIcon
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help(configurationStatusHelp)
+            .accessibilityLabel(configurationStatusHelp)
+        }
+    }
+
+    @ViewBuilder
+    private var configurationStatusIcon: some View {
+        switch state.configurationSwitchFeedback {
+        case .switching:
+            ProgressView()
+                .controlSize(.small)
+        case .success:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundColor(.green)
+        case .failure:
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundColor(.red)
+        case .idle:
+            Image(systemName: "play.rectangle.on.rectangle")
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var configurationStatusHelp: String {
+        switch state.configurationSwitchFeedback {
+        case .switching(_, let name):
+            return "正在切换到 \(name)"
+        case .success(_, let name):
+            return "已切换到 \(name)"
+        case .failure(_, let name, let message):
+            return "切换到 \(name) 失败：\(message)"
+        case .idle:
+            return "切换点播配置"
+        }
+    }
+}
+
+struct HomeRefreshToolbarItem: View {
+    @EnvironmentObject private var state: AppState
+    let layout: HomeToolbarLayout
+
+    var body: some View {
+        Button {
+            Task { await state.refreshHome() }
+        } label: {
+            if state.isLoading || state.isHomeLoading {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Label("刷新", systemImage: "arrow.clockwise")
+                    .labelStyle(.iconOnly)
+            }
+        }
+        .disabled(state.currentSite == nil || state.isHomeLoading)
+        .help(layout == .minimal ? "刷新当前站点（⌘R，可能收入更多菜单）" : "刷新当前站点（⌘R）")
+        .accessibilityLabel(state.isHomeLoading ? "正在刷新当前站点" : "刷新当前站点")
     }
 }
 

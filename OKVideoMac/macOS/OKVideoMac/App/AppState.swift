@@ -2612,6 +2612,7 @@ final class AppState: ObservableObject {
     @Published private(set) var homePresentationSelection:
         HomePresentationSelection = .empty
     @Published var searchKeyword = ""
+    @Published private(set) var homeToolbarSearchFocusRequest: UInt64 = 0
     @Published private(set) var searchResults: [VideoSummary] = []
     @Published private(set) var searchClusters: [SearchResultCluster] = []
     @Published private(set) var searchFailures: [SearchFailure] = []
@@ -6743,6 +6744,15 @@ final class AppState: ObservableObject {
     func presentHomeSearch() {
         selectedSection = .home
         isHomeSearchPresented = true
+    }
+
+    func focusHomeToolbarSearch() {
+        if isHomeSearchPresented {
+            returnFromSearchToHome()
+        } else {
+            selectedSection = .home
+        }
+        homeToolbarSearchFocusRequest &+= 1
     }
 
     func searchFromHome(_ keyword: String) {
