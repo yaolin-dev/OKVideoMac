@@ -73,7 +73,7 @@ struct HistoryView: View {
                 if isSelecting {
                     toggleSelection(item.id)
                 } else {
-                    Task { await state.openHistory(item) }
+                    state.requestHistoryPlayback(item)
                 }
             } label: {
                 HStack(spacing: 14) {
@@ -99,7 +99,6 @@ struct HistoryView: View {
                 .padding(.vertical, 14)
             }
             .buttonStyle(.plain)
-            .disabled(state.historyPlaybackLoadingID == item.id)
             .appInteractiveHover(
                 cornerRadius: 10,
                 selected: selectedIDs.contains(item.id) || focusedID == item.id
@@ -173,26 +172,14 @@ struct HistoryView: View {
                 }
             }
             Spacer()
-            if state.historyPlaybackLoadingID == item.id {
-                HStack(spacing: 7) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("正在恢复…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("正在恢复历史记录")
-            } else {
-                Text(
-                    item.watchedAt.formatted(
-                        date: .abbreviated,
-                        time: .shortened
-                    )
+            Text(
+                item.watchedAt.formatted(
+                    date: .abbreviated,
+                    time: .shortened
                 )
-                .font(.caption)
-                .foregroundColor(.secondary)
-            }
+            )
+            .font(.caption)
+            .foregroundColor(.secondary)
         }
     }
 
@@ -323,7 +310,7 @@ struct HistoryView: View {
             if isSelecting {
                 toggleSelection(focusedID)
             } else {
-                Task { await state.openHistory(item) }
+                state.requestHistoryPlayback(item)
             }
         case 51, 117:
             guard let focusedID else { return false }

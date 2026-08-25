@@ -647,6 +647,22 @@ struct PlayerView: View {
                         .lineLimit(5)
                         .frame(maxWidth: 560)
                 }
+
+                if isFailed, state.canRetryHistoryPlayback {
+                    HStack(spacing: 10) {
+                        Button("重试") {
+                            state.retryHistoryPlayback()
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button("返回历史") {
+                            state.returnToHistoryAfterPlaybackFailure()
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .controlSize(.regular)
+                    .padding(.top, 2)
+                }
             }
             .foregroundColor(.white)
             .padding(.horizontal, 22)

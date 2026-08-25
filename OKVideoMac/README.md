@@ -2,7 +2,7 @@
 
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于
 配置格式、站点类型和运行时，而不是简单以 TVBox、FongMi、MiraPlay 或 CatPawOpen
-等生态名称判断。当前版本为 **0.3.60（Build 85）**，支持 **arm64**，最低系统为
+等生态名称判断。当前版本为 **0.3.61（Build 86）**，支持 **arm64**，最低系统为
 **macOS 12.0**。
 
 项目不内置内容源、账号、Cookie、DRM key 或私人服务配置。请只导入你有权使用
@@ -10,7 +10,7 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源�
 
 ## 当前版本
 
-- 当前版本：0.3.60（Build 85）
+- 当前版本：0.3.61（Build 86）
 - 最低系统：macOS 12.0
 - 支持架构：Apple Silicon / arm64
 - 播放历史按点播配置源分组；切换同一配置内的站点不会隐藏历史，历史项仍保留
@@ -19,7 +19,7 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源�
   不会清除已经确认的登录状态，也不会存储 Cookie 或 Token
 - Android Bridge 运行时固定 AVD 身份与正式签名；发现旧版 AVD 时可在完整备份和
  复制核验后安全迁移，失败会恢复原运行环境，旧 AVD 始终保持只读
-- 发行验证：411 项 Xcode 测试通过（另有 1 项按设计跳过），129 项 OKVideoKit
+- 发行验证：412 项 Xcode 测试通过（另有 1 项按设计跳过），129 项 OKVideoKit
   测试与 59 项 Android Bridge 测试通过，arm64 Release 与 Android Release Bridge
   构建通过；正式 Release packaging 已验证 28 个
   Mach-O 的架构、部署目标、依赖闭包、签名和 Hardened Runtime

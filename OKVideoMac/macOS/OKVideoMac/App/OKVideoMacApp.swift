@@ -107,6 +107,12 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak playerWindowController] command in
                 playerWindowController?.execute(command)
             }
+        // Build the hidden AppKit/SwiftUI shell after the browser has mounted.
+        // PlayerSurfaceMountPolicy keeps MPV/OpenGL detached until a concrete
+        // playback request has prepared the engine.
+        DispatchQueue.main.async { [weak playerWindowController] in
+            playerWindowController?.prewarm()
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -183,6 +189,11 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
 
     init(appState: AppState) {
         self.appState = appState
+    }
+
+    func prewarm() {
+        guard window == nil else { return }
+        _ = ensureWindow()
     }
 
     func execute(_ command: PlayerWindowCommand) {

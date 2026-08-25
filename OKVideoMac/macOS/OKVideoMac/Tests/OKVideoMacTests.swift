@@ -125,6 +125,54 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testHistoryPlaybackRequestShowsPlayerSynchronouslyAndDeduplicates()
+        async throws {
+        let state = AppState.bootstrap()
+        let configurationID = UUID()
+        let first = HistoryRecord(
+            configurationID: configurationID,
+            siteKey: "fixture",
+            videoID: "video-1",
+            title: "Fixture One",
+            sourceKey: "line-1",
+            episodeName: "Episode 1"
+        )
+        let second = HistoryRecord(
+            configurationID: configurationID,
+            siteKey: "fixture",
+            videoID: "video-2",
+            title: "Fixture Two",
+            sourceKey: "line-1",
+            episodeName: "Episode 1"
+        )
+
+        state.requestHistoryPlayback(first)
+        let initial = try XCTUnwrap(state.playerWindowCommand)
+        XCTAssertTrue(state.isPlayerPresented)
+        XCTAssertEqual(state.historyPlaybackLoadingID, first.id)
+        XCTAssertEqual(state.playbackResolutionState, .restoringHistory)
+        XCTAssertEqual(initial.kind, .showAndActivate)
+
+        state.requestHistoryPlayback(first)
+        let duplicate = try XCTUnwrap(state.playerWindowCommand)
+        XCTAssertEqual(duplicate.kind, .focus)
+        XCTAssertEqual(duplicate.requestID, initial.requestID)
+        XCTAssertNotEqual(duplicate.id, initial.id)
+
+        state.requestHistoryPlayback(second)
+        let replacement = try XCTUnwrap(state.playerWindowCommand)
+        XCTAssertEqual(replacement.kind, .focus)
+        XCTAssertNotEqual(replacement.requestID, initial.requestID)
+        XCTAssertEqual(state.historyPlaybackLoadingID, second.id)
+
+        await Task.yield()
+        XCTAssertTrue(state.canRetryHistoryPlayback)
+        XCTAssertNil(state.playerPresentedError)
+
+        await state.closePlayer()
+    }
+
     func testPlaybackErrorsRouteToPlayerOnlyWhileItExists() {
         XCTAssertTrue(
             PlayerErrorPresentationPolicy.targetsPlayer(
