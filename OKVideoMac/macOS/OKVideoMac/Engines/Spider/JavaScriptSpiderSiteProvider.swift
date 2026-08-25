@@ -579,6 +579,7 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
     let title: String
     let inputCount: Int
     let imageCount: Int
+    var qrImageCount: Int? = nil
     let buttons: [String]
     let controls: [AndroidBridgeUIControl]?
     let texts: [String]?
@@ -601,6 +602,9 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
     var expectsProviderUI: Bool? = nil
     var uiSchemaVersion: Int? = nil
     var elements: [AndroidBridgeUIElement]? = nil
+    /// Request-scoped QR capture lifecycle published by Bridge schema v3.
+    /// This never contains QR payload data.
+    var qrStatus: String? = nil
     /// Opaque request owner minted by the macOS host and bound by the Bridge
     /// to one configuration/site/JAR tuple. These fields are optional so an
     /// older Bridge can still render read-only state, but credential
@@ -644,7 +648,7 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         return !isRemoteInputQRCode
-            && imageCount > 0
+            && (qrImageCount ?? imageCount) > 0
             && ["qr", "qrcode", "qr_code", "awaitinguser", "awaiting_user"]
                 .contains(normalizedPhase)
     }
@@ -3846,8 +3850,8 @@ enum AndroidBridgeDeploymentAction: Equatable, Sendable {
 }
 
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.35"
-    static let bridgeVersionCode = 47
+    static let bridgeVersion = "0.3.36"
+    static let bridgeVersionCode = 48
     private static let networkCheckInterval: TimeInterval = 30
     private static let manifestSchema = 1
     private static let avdName = "OKVideoMac_Runtime"

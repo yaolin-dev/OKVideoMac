@@ -350,12 +350,13 @@ final class BridgeInteractionRegistry {
             value.put("imageCount", 0);
             value.put("credentialInputCount", 0);
             value.put("qrImageCount", 0);
+            value.put("qrStatus", "idle");
             value.put("uiRole", "configuration");
             value.put("authorizationCandidate", false);
             value.put("buttons", new JSONArray());
             value.put("controls", new JSONArray());
             value.put("texts", new JSONArray());
-            value.put("uiSchemaVersion", 2);
+            value.put("uiSchemaVersion", 3);
             value.put("elements", new JSONArray());
             value.put("generation", 0L);
             value.put("hostUnavailable", false);
@@ -375,6 +376,10 @@ final class BridgeInteractionRegistry {
                     ui.optInt("credentialInputCount", 0)
             );
             destination.put("qrImageCount", ui.optInt("qrImageCount", 0));
+            destination.put(
+                    "qrStatus",
+                    ui.optString("qrStatus", "idle")
+            );
             destination.put(
                     "uiRole",
                     ui.optString("uiRole", "configuration")
@@ -588,7 +593,21 @@ final class BridgeInteractionRegistry {
                         }
                     }
                 }
-                putUIFields(value, lastUI == null ? emptyUI() : lastUI);
+                JSONObject ui = lastUI == null ? emptyUI() : lastUI;
+                putUIFields(value, ui);
+                if (isQRCodeUI(ui)) {
+                    value.put("qrStatus", "ready");
+                } else if ("authorization".equals(kind)
+                        && submitted
+                        && ui.optBoolean("visible", false)
+                        && ui.optInt("inputCount", 0) == 0
+                        && ui.optJSONArray("controls") != null
+                        && ui.optJSONArray("controls").length() == 0) {
+                    boolean expired = lastStableQRCodeUI != null
+                            && System.currentTimeMillis()
+                            >= stableQRCodeDeadline;
+                    value.put("qrStatus", expired ? "expired" : "generating");
+                }
                 value.put("phase", phase);
                 value.put("outcome", outcome);
                 value.put("revision", revision);

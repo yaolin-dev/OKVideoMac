@@ -830,6 +830,39 @@ public final class BridgeProtocolTest extends TestCase {
         assertTrue(BridgeActionActivity.awaitReleased(id, 2_000L));
     }
 
+    public void testQRCodeCaptureSearchesAllRequestOwnedWindows()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        String id = "interaction-multi-window-qr-" + UUID.randomUUID();
+        BridgeServer.beginAndActivateInteraction(
+                context,
+                id,
+                "authorization",
+                "action"
+        );
+        BridgeActivity.prepareDialogHandoff(context, id);
+        AlertDialog qrDialog = showOwnedImageDialog(id, true);
+        AlertDialog textDialog = showOwnedDialog(
+                id,
+                "请使用网盘 APP 扫码",
+                null
+        );
+
+        JSONObject visible = awaitCapturedUI(context, id, 2_000L);
+        assertTrue(visible.getBoolean("visible"));
+        assertEquals(3, visible.getInt("uiSchemaVersion"));
+        assertEquals("ready", visible.getString("qrStatus"));
+        assertEquals(1, visible.getInt("qrImageCount"));
+        assertTrue(visible.getInt("imageCount") >= 1);
+        byte[] snapshot = BridgeActivity.snapshotUI(context, id);
+        assertTrue(snapshot.length > 100);
+
+        BridgeActivity.dismissUI(context, id);
+        assertFalse(isShowing(qrDialog));
+        assertFalse(isShowing(textDialog));
+    }
+
     public void testOrdinaryImageDoesNotPromoteConfigurationToAuthorization()
             throws Exception {
         Context context = InstrumentationRegistry.getInstrumentation()

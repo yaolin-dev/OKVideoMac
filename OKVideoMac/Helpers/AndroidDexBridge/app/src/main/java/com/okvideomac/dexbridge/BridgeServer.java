@@ -267,7 +267,7 @@ final class BridgeServer {
                                     .versionName
                     );
                     health.put("generation", runtimeGeneration);
-                    health.put("uiSchemaVersion", 2);
+                    health.put("uiSchemaVersion", 3);
                     health.put(
                             "uiCapabilities",
                             new JSONArray()

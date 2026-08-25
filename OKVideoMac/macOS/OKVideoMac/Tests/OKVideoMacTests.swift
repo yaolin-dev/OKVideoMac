@@ -3224,7 +3224,8 @@ final class OKVideoMacTests: XCTestCase {
           "inputCount": 0,
           "imageCount": 0,
           "buttons": ["▲"],
-          "uiSchemaVersion": 2,
+          "uiSchemaVersion": 3,
+          "qrStatus": "generating",
           "elements": [{
             "id": "up",
             "type": "button",
@@ -3244,9 +3245,39 @@ final class OKVideoMacTests: XCTestCase {
             from: Data(json.utf8)
         )
 
-        XCTAssertEqual(state.uiSchemaVersion, 2)
+        XCTAssertEqual(state.uiSchemaVersion, 3)
+        XCTAssertEqual(state.qrStatus, "generating")
         XCTAssertEqual(state.elements?.first?.id, "up")
         XCTAssertEqual(state.elements?.first?.normalizedType, "button")
+    }
+
+    func testCloudAuthorizationPlaybackOwnershipRejectsStaleRequests() {
+        let current = UUID()
+
+        XCTAssertTrue(
+            CloudAuthorizationPlaybackOwnershipPolicy.isCurrent(
+                requestID: current,
+                activeRequestID: current,
+                playbackSessionID: current,
+                isPlayerPresented: true
+            )
+        )
+        XCTAssertFalse(
+            CloudAuthorizationPlaybackOwnershipPolicy.isCurrent(
+                requestID: UUID(),
+                activeRequestID: current,
+                playbackSessionID: current,
+                isPlayerPresented: true
+            )
+        )
+        XCTAssertFalse(
+            CloudAuthorizationPlaybackOwnershipPolicy.isCurrent(
+                requestID: current,
+                activeRequestID: current,
+                playbackSessionID: current,
+                isPlayerPresented: false
+            )
+        )
     }
 
     @MainActor

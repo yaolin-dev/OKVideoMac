@@ -330,6 +330,13 @@ private struct PlayerPlaybackWindowRoot: View {
 
             PlayerView(onWindowChromeRestored: {})
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if let prompt = appState.playerCloudAuthorizationPrompt {
+                CloudAuthorizationView(prompt: prompt)
+                    .environmentObject(appState)
+                    .environment(\.colorScheme, .dark)
+                    .zIndex(1_000)
+            }
         }
         .frame(minWidth: 800, minHeight: 450)
         .background(Color.black)

@@ -92,7 +92,7 @@ struct DetailView: View {
             .padding(14)
         }
         .overlay {
-            if let prompt = state.cloudAuthorizationPrompt {
+            if let prompt = state.detailCloudAuthorizationPrompt {
                 CloudAuthorizationView(prompt: prompt)
                     .environmentObject(state)
             }

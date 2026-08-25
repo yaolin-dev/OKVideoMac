@@ -843,6 +843,33 @@ struct ConfigurationInteractionCoordinator: Sendable {
     }
 }
 
+enum CloudAuthorizationPresentationTarget: Equatable {
+    case mainWindow
+    case detail
+    case player(requestID: UUID)
+}
+
+enum CloudAuthorizationQRCodeState: String, Equatable {
+    case idle
+    case generating
+    case ready
+    case expired
+    case notFound
+}
+
+enum CloudAuthorizationPlaybackOwnershipPolicy {
+    static func isCurrent(
+        requestID: UUID,
+        activeRequestID: UUID,
+        playbackSessionID: UUID,
+        isPlayerPresented: Bool
+    ) -> Bool {
+        isPlayerPresented
+            && requestID == activeRequestID
+            && requestID == playbackSessionID
+    }
+}
+
 struct CloudAuthorizationPrompt: Identifiable, Equatable {
     let id: UUID
     let interactionID: UUID
@@ -851,6 +878,8 @@ struct CloudAuthorizationPrompt: Identifiable, Equatable {
     var semantic: ConfigurationInteractionSemantic
     var transport: ConfigurationInteractionTransport
     var lifecyclePhase: ConfigurationInteractionPhase
+    var presentationTarget: CloudAuthorizationPresentationTarget
+    var qrState: CloudAuthorizationQRCodeState
     var status: String?
     var phase: String?
     var provider: String?
@@ -2226,6 +2255,7 @@ enum PlaybackConfigurationOwnershipPolicy {
 }
 
 private struct PendingCloudPlayback {
+    let requestID: UUID
     let configurationID: UUID
     var detail: VideoDetail
     var source: PlaySource
@@ -2242,6 +2272,10 @@ private enum PendingCloudOperation {
     var pendingPlayback: PendingCloudPlayback? {
         guard case .playback(let playback) = self else { return nil }
         return playback
+    }
+
+    var playbackRequestID: UUID? {
+        pendingPlayback?.requestID
     }
 
     var initialSemantic: ConfigurationInteractionSemantic {
@@ -2953,6 +2987,36 @@ final class AppState: ObservableObject {
     @Published private(set) var nodeWebPresentation: NodeWebPresentation?
     @Published private(set) var androidRuntimeStatus: AndroidRuntimeStatus = .checking
     @Published private(set) var isAndroidRuntimeBusy = false
+
+    var mainWindowCloudAuthorizationPrompt: CloudAuthorizationPrompt? {
+        guard let prompt = cloudAuthorizationPrompt,
+              prompt.presentationTarget == .mainWindow else {
+            return nil
+        }
+        return prompt
+    }
+
+    var detailCloudAuthorizationPrompt: CloudAuthorizationPrompt? {
+        guard let prompt = cloudAuthorizationPrompt,
+              prompt.presentationTarget == .detail else {
+            return nil
+        }
+        return prompt
+    }
+
+    var playerCloudAuthorizationPrompt: CloudAuthorizationPrompt? {
+        guard let prompt = cloudAuthorizationPrompt,
+              case .player(let requestID) = prompt.presentationTarget,
+              CloudAuthorizationPlaybackOwnershipPolicy.isCurrent(
+                requestID: requestID,
+                activeRequestID: activePlayerRequestID,
+                playbackSessionID: playbackSessionID,
+                isPlayerPresented: isPlayerPresented
+              ) else {
+            return nil
+        }
+        return prompt
+    }
 
     private let environment: AppEnvironment?
     private let playerRenderSurfaceGate = PlayerRenderSurfaceReadinessGate()
@@ -4522,6 +4586,21 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func cloudAuthorizationPresentationTarget(
+        for operation: PendingCloudOperation
+    ) -> CloudAuthorizationPresentationTarget {
+        switch operation {
+        case .playback(let pending):
+            return .player(requestID: pending.requestID)
+        case .detail:
+            return selectedDetail != nil || pendingDetailSummary != nil
+                ? .detail
+                : .mainWindow
+        case .homeAction, .siteAction:
+            return .mainWindow
+        }
+    }
+
     @discardableResult
     private func beginConfigurationInteraction(
         title: String,
@@ -4593,6 +4672,10 @@ final class AppState: ObservableObject {
             semantic: resolvedSemantic,
             transport: .native,
             lifecyclePhase: phase,
+            presentationTarget: cloudAuthorizationPresentationTarget(
+                for: operation
+            ),
+            qrState: .idle,
             status: phase == .invoking
                 ? "正在执行配置操作…"
                 : "正在等待站点创建下一步操作界面…",
@@ -5267,10 +5350,21 @@ final class AppState: ObservableObject {
     private func isCurrentCloudAuthorizationContext(
         _ context: CloudAuthorizationContext
     ) -> Bool {
-        CloudAuthorizationRetryPolicy.isCurrent(
+        guard CloudAuthorizationRetryPolicy.isCurrent(
             sourceIdentity: context.sourceIdentity,
             activeConfigurationID: activeConfigurationRecord?.id,
             availableSiteKeys: Set(providers.keys)
+        ) else {
+            return false
+        }
+        guard let requestID = context.operation.playbackRequestID else {
+            return true
+        }
+        return CloudAuthorizationPlaybackOwnershipPolicy.isCurrent(
+            requestID: requestID,
+            activeRequestID: activePlayerRequestID,
+            playbackSessionID: playbackSessionID,
+            isPlayerPresented: isPlayerPresented
         )
     }
 
@@ -5570,6 +5664,8 @@ final class AppState: ObservableObject {
         // detail/play call to receive the wrong provider prompt.
         let bridge = environment?.androidDexBridge
         let providerHandle = cloudAuthorizationContext?.providerHandle
+        let cancelsPlayback = cloudAuthorizationContext?
+            .operation.pendingPlayback != nil
         let usesLegacyBridge = providerHandle == nil
         clearCloudAuthorization(
             resetBridgeUI: false,
@@ -5580,6 +5676,9 @@ final class AppState: ObservableObject {
             await providerHandle.cancelAndWait()
         } else if usesLegacyBridge {
             try? await bridge?.resetAuthorizationUI()
+        }
+        if cancelsPlayback {
+            await closePlayer()
         }
     }
 
@@ -5699,6 +5798,13 @@ final class AppState: ObservableObject {
             current.providerInteraction = interaction
             current.operation = operation
             cloudAuthorizationContext = current
+            if var prompt = cloudAuthorizationPrompt,
+               prompt.interactionID == interactionID {
+                prompt.presentationTarget = cloudAuthorizationPresentationTarget(
+                    for: operation
+                )
+                cloudAuthorizationPrompt = prompt
+            }
             transitionConfigurationInteraction(
                 interactionID,
                 to: .presenting,
@@ -5859,9 +5965,33 @@ final class AppState: ObservableObject {
             && providerInteraction.actionKind == .authorization
             && providerInteraction.qrRole == .login
             && snapshot != nil
+        let expectsLoginQRCode = !credentialPush
+            && snapshot == nil
+            && cloudAuthorizationContext?.submittedAt != nil
+            && state.inputCount == 0
+            && state.actionableControls.isEmpty
+            && (providerInteraction.actionKind == .authorization
+                || cloudAuthorizationContext?.myDriveAuthorizationTarget != nil
+                || previous?.qrState != .idle)
+        let qrState: CloudAuthorizationQRCodeState = {
+            if displaysLoginQRCode { return .ready }
+            switch state.qrStatus?.lowercased() {
+            case "expired": return .expired
+            case "notfound", "not_found": return .notFound
+            case "generating": return .generating
+            default: break
+            }
+            guard expectsLoginQRCode else { return .idle }
+            if let submittedAt = cloudAuthorizationContext?.submittedAt,
+               Date().timeIntervalSince(submittedAt) >= 12 {
+                return .notFound
+            }
+            return .generating
+        }()
         let usesSecureInput = providerInteraction.actionKind == .authorization
             || credentialPush
         let lifecyclePhase: ConfigurationInteractionPhase = {
+            if qrState != .idle { return .presenting }
             guard let context = cloudAuthorizationContext,
                   context.submittedAt != nil,
                   !context.hasObservedPostSubmissionTransition else {
@@ -5871,7 +6001,7 @@ final class AppState: ObservableObject {
         }()
         let phase = credentialPush
             ? "credentials"
-            : hasVerifiedQRCode
+            : qrState != .idle
                 ? "qr"
                 : state.inputCount > 0
                     ? "credentials"
@@ -5949,6 +6079,11 @@ final class AppState: ObservableObject {
             semantic: semantic,
             transport: .native,
             lifecyclePhase: lifecyclePhase,
+            presentationTarget: previous?.presentationTarget
+                ?? cloudAuthorizationPresentationTarget(
+                    for: context.operation
+                ),
+            qrState: qrState,
             status: status,
             phase: phase,
             provider: state.provider,
@@ -5956,12 +6091,12 @@ final class AppState: ObservableObject {
             usesSecureInput: usesSecureInput,
             credentialPush: credentialPush,
             displaysLoginQRCode: displaysLoginQRCode,
-            allowsRetry: previous?.interactionID == operationID
-                && previous?.displaysLoginQRCode == true
-                ? previous?.allowsRetry == true
-                : false,
+            allowsRetry: qrState == .expired || qrState == .notFound
+                || (qrState == .idle
+                    && previous?.interactionID == operationID
+                    && previous?.allowsRetry == true),
             actions: lifecyclePhase == .presenting
-                && !displaysLoginQRCode
+                && qrState == .idle
                 ? state.actionableControls.map {
                 CloudAuthorizationAction(
                     id: $0.id,
@@ -5972,14 +6107,14 @@ final class AppState: ObservableObject {
                 )
                 }
                 : [],
-            snapshot: displaysLoginQRCode ? snapshot : nil,
+            snapshot: qrState == .ready ? snapshot : nil,
             uiSchemaVersion: state.uiSchemaVersion,
-            elements: displaysLoginQRCode
+            elements: qrState != .idle
                 ? []
                 : (state.elements ?? []).map {
                     $0.replacingTitle(reconciledAccountTitle($0.title))
                 },
-            supportingTexts: displaysLoginQRCode
+            supportingTexts: qrState != .idle
                 ? []
                 : (state.texts ?? []).map(reconciledAccountTitle)
         )
@@ -6525,29 +6660,45 @@ final class AppState: ObservableObject {
         }
         let completionSemantic = cloudAuthorizationPrompt?.semantic
             ?? context.operation.initialSemantic
+        let isPlaybackOperation: Bool = {
+            if case .playback = context.operation {
+                return true
+            }
+            return false
+        }()
         let loginStatusActionToReopen = completionSemantic.isAuthorization
             ? myDriveLoginStatusAction(for: context)
             : nil
+        let completionStatus: String
+        if loginStatusActionToReopen != nil {
+            completionStatus = "二维码流程已结束，正在刷新账号状态…"
+        } else if isPlaybackOperation && completionSemantic.isAuthorization {
+            completionStatus = "授权成功，正在继续播放…"
+        } else {
+            completionStatus = ConfigurationControlSubmissionPolicy.completionStatus(
+                semantic: completionSemantic
+            )
+        }
         completeConfigurationInteraction(
             context.operationID,
-            status: loginStatusActionToReopen == nil
-                ? ConfigurationControlSubmissionPolicy.completionStatus(
-                    semantic: completionSemantic
-                )
-                : "二维码流程已结束，正在刷新账号状态…"
+            status: completionStatus
         )
         cloudAuthorizationSessionID = UUID()
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = nil
-        try? await Task.sleep(
-            nanoseconds: loginStatusActionToReopen != nil
-                ? 350_000_000
-                : completionSemantic.isAuthorization
-                ? 1_400_000_000
-                : 650_000_000
-        )
+        let completionDelay: UInt64
+        if loginStatusActionToReopen != nil
+            || (isPlaybackOperation && completionSemantic.isAuthorization) {
+            completionDelay = 350_000_000
+        } else if completionSemantic.isAuthorization {
+            completionDelay = 1_400_000_000
+        } else {
+            completionDelay = 650_000_000
+        }
+        try? await Task.sleep(nanoseconds: completionDelay)
         guard configurationInteractionCoordinator.owns(context.operationID),
-              cloudAuthorizationContext?.operationID == context.operationID else {
+              cloudAuthorizationContext?.operationID == context.operationID,
+              isCurrentCloudAuthorizationContext(context) else {
             return
         }
         cloudAuthorizationPrompt = nil
@@ -6992,6 +7143,7 @@ final class AppState: ObservableObject {
             episodeURL: "history-pending://\(preparationID.uuidString.lowercased())"
         )
         pendingPlayback = PendingCloudPlayback(
+            requestID: preparationID,
             configurationID: configurationID,
             detail: context.detail,
             source: context.source,
@@ -7556,6 +7708,7 @@ final class AppState: ObservableObject {
         selectedPlaybackQualityID = nil
         isSwitchingPlaybackQuality = false
         pendingPlayback = PendingCloudPlayback(
+            requestID: sessionID,
             configurationID: playbackConfigurationID,
             detail: detail,
             source: source,
@@ -7700,6 +7853,7 @@ final class AppState: ObservableObject {
                             pending: .playback(
                                 identity: identity,
                                 playback: PendingCloudPlayback(
+                                    requestID: sessionID,
                                     configurationID: playbackConfigurationID,
                                     detail: detail,
                                     source: source,
@@ -7720,6 +7874,7 @@ final class AppState: ObservableObject {
                             handle: authorization.handle,
                             operation: .playback(
                                 PendingCloudPlayback(
+                                    requestID: sessionID,
                                     configurationID: playbackConfigurationID,
                                     detail: detail,
                                     source: source,
@@ -7784,6 +7939,7 @@ final class AppState: ObservableObject {
                         pending: .playback(
                             identity: identity,
                             playback: PendingCloudPlayback(
+                                requestID: sessionID,
                                 configurationID: playbackConfigurationID,
                                 detail: candidateDetail,
                                 source: candidateSource,
@@ -7804,6 +7960,7 @@ final class AppState: ObservableObject {
                         handle: authorization.handle,
                         operation: .playback(
                             PendingCloudPlayback(
+                                requestID: sessionID,
                                 configurationID: playbackConfigurationID,
                                 detail: candidateDetail,
                                 source: candidateSource,
@@ -8913,6 +9070,14 @@ final class AppState: ObservableObject {
                 || pendingPlayback != nil
                 || livePlaybackChannel != nil else {
             return
+        }
+        if let context = cloudAuthorizationContext,
+           context.operation.playbackRequestID == activePlayerRequestID {
+            clearCloudAuthorization(
+                resetBridgeUI: true,
+                markPendingPlaybackCancelled: false,
+                cancellationReason: .user
+            )
         }
         isClosingPlayer = true
         defer { isClosingPlayer = false }

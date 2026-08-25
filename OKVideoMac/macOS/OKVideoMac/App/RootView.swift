@@ -184,8 +184,7 @@ struct RootView: View {
             }
         }
         .overlay {
-            if let prompt = state.cloudAuthorizationPrompt,
-               state.selectedDetail == nil {
+            if let prompt = state.mainWindowCloudAuthorizationPrompt {
                 CloudAuthorizationView(prompt: prompt)
                     .environmentObject(state)
             }
@@ -926,7 +925,8 @@ struct CloudAuthorizationView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.accentColor.opacity(0.08))
                     .clipShape(RoundedRectangle(cornerRadius: 10))
-                } else if prompt.displaysLoginQRCode,
+                } else if prompt.qrState == .ready,
+                          prompt.displaysLoginQRCode,
                    let data = prompt.snapshot,
                    let image = NSImage(data: data) {
                     Image(nsImage: image)
@@ -942,7 +942,7 @@ struct CloudAuthorizationView: View {
                                 .stroke(Color.secondary.opacity(0.18))
                         }
                         .frame(maxWidth: .infinity)
-                } else if prompt.phase == "qr" {
+                } else if prompt.qrState == .generating {
                     HStack {
                         Spacer()
                         VStack(spacing: 10) {
@@ -954,6 +954,22 @@ struct CloudAuthorizationView: View {
                         .frame(width: 280, height: 220)
                         Spacer()
                     }
+                } else if prompt.qrState == .expired
+                            || prompt.qrState == .notFound {
+                    VStack(spacing: 10) {
+                        Image(systemName: "qrcode.viewfinder")
+                            .font(.system(size: 42))
+                            .foregroundColor(.orange)
+                        Text(prompt.qrState == .expired
+                             ? "二维码已过期"
+                             : "暂时没有捕获到登录二维码")
+                            .font(.headline)
+                        Text("请刷新或重试，当前播放请求会保持不变。")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 24)
                 }
 
                 if let status = prompt.status,
@@ -1048,7 +1064,7 @@ struct CloudAuthorizationView: View {
                         .disabled(isBusy || prompt.lifecyclePhase == .completed)
                     }
                     Spacer()
-                    Button("关闭") {
+                    Button(isPlayerAuthorization ? "取消播放" : "关闭") {
                         Task { await state.cancelCloudAuthorization() }
                     }
                 }
@@ -1064,7 +1080,12 @@ struct CloudAuthorizationView: View {
     }
 
     private var isAuthorization: Bool {
-        prompt.semantic.isAuthorization
+        prompt.semantic.isAuthorization || prompt.qrState != .idle
+    }
+
+    private var isPlayerAuthorization: Bool {
+        if case .player = prompt.presentationTarget { return true }
+        return false
     }
 
     private var isBusy: Bool {

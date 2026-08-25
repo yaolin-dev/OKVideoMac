@@ -50,7 +50,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class BridgeActivity extends Activity {
-    private static final int UI_SCHEMA_VERSION = 2;
+    private static final int UI_SCHEMA_VERSION = 3;
     private static volatile WeakReference<BridgeActivity> current =
             new WeakReference<>(null);
     private static volatile Context applicationContext;
@@ -271,7 +271,7 @@ public final class BridgeActivity extends Activity {
             return observeAndFinalize(
                     context,
                     id,
-                    scopedUIState(id, captureUIState(host))
+                    scopedUIState(id, captureUIState(host, id))
             );
         } catch (Throwable firstFailure) {
             // Keep the state endpoint structured across the short Activity
@@ -283,7 +283,7 @@ public final class BridgeActivity extends Activity {
                     return observeAndFinalize(
                             context,
                             id,
-                            scopedUIState(id, captureUIState(recovered))
+                            scopedUIState(id, captureUIState(recovered, id))
                     );
                 } catch (Throwable ignored) {
                     // Return the request-owned availability state below.
@@ -316,6 +316,7 @@ public final class BridgeActivity extends Activity {
         unavailable.put("imageCount", 0);
         unavailable.put("credentialInputCount", 0);
         unavailable.put("qrImageCount", 0);
+        unavailable.put("qrStatus", "idle");
         unavailable.put("uiRole", "configuration");
         unavailable.put("authorizationCandidate", false);
         unavailable.put("buttons", new JSONArray());
@@ -330,7 +331,10 @@ public final class BridgeActivity extends Activity {
         return unavailable;
     }
 
-    private static JSONObject captureUIState(BridgeActivity host) throws Exception {
+    private static JSONObject captureUIState(
+            BridgeActivity host,
+            String interactionID
+    ) throws Exception {
         // Read provider storage off the Android UI thread. Only an opaque
         // digest is returned, never preference names or credential values.
         String authorizationStorageFingerprint =
@@ -345,8 +349,20 @@ public final class BridgeActivity extends Activity {
             int inputCount = 0;
             int imageCount = 0;
             int credentialInputCount = 0;
-            int qrImageCount = 0;
-            View root = activeRoot(rootViews());
+            List<View> roots = eligibleRoots(rootViews(), interactionID);
+            View qrCandidate = largestQRCodeCandidate(roots);
+            int qrImageCount = qrCandidate == null ? 0 : 1;
+            for (View candidateRoot : roots) {
+                for (View view : flattened(candidateRoot)) {
+                    if (view.isShown() && view instanceof ImageView) {
+                        imageCount++;
+                    }
+                }
+            }
+            if (qrCandidate != null && !(qrCandidate instanceof ImageView)) {
+                imageCount++;
+            }
+            View root = activeRoot(roots);
             Activity windowOwner = root == null
                     ? null
                     : activityFrom(root.getContext());
@@ -371,9 +387,7 @@ public final class BridgeActivity extends Activity {
                                 elementOrder++
                         ));
                     } else if (view instanceof ImageView) {
-                        imageCount++;
-                        boolean qrCode = isQRCodeImage((ImageView) view);
-                        if (qrCode) qrImageCount++;
+                        boolean qrCode = view == qrCandidate;
                         String label = actionableLabelOf(view);
                         boolean imageAction = view.isClickable()
                                 && view.isEnabled()
@@ -553,6 +567,7 @@ public final class BridgeActivity extends Activity {
             state.put("imageCount", imageCount);
             state.put("credentialInputCount", credentialInputCount);
             state.put("qrImageCount", qrImageCount);
+            state.put("qrStatus", qrImageCount > 0 ? "ready" : "idle");
             state.put("uiRole", uiRole);
             state.put("authorizationCandidate", authorizationCandidate);
             state.put("buttons", buttons);
@@ -619,6 +634,7 @@ public final class BridgeActivity extends Activity {
         state.put("imageCount", 0);
         state.put("credentialInputCount", 0);
         state.put("qrImageCount", 0);
+        state.put("qrStatus", "idle");
         state.put("uiRole", "configuration");
         state.put("authorizationCandidate", false);
         state.put("buttons", new JSONArray());
@@ -760,19 +776,8 @@ public final class BridgeActivity extends Activity {
                         "Interaction is no longer current"
                 );
             }
-            View root = activeRoot(rootViews());
-            if (root == null) throw new IllegalStateException("No visible dialog");
-            View selected = null;
-            int selectedArea = 0;
-            for (View view : flattened(root)) {
-                if (!view.isShown() || !(view instanceof ImageView)) continue;
-                if (!isQRCodeImage((ImageView) view)) continue;
-                int area = view.getWidth() * view.getHeight();
-                if (area > selectedArea) {
-                    selected = view;
-                    selectedArea = area;
-                }
-            }
+            List<View> roots = eligibleRoots(rootViews(), id);
+            View selected = largestQRCodeCandidate(roots);
             if (selected == null) {
                 throw new IllegalStateException("No visible QR code");
             }
@@ -784,15 +789,14 @@ public final class BridgeActivity extends Activity {
                         "Interaction is no longer current"
                 );
             }
-            int width = selected.getWidth();
-            int height = selected.getHeight();
-            if (width <= 0 || height <= 0) {
+            Bitmap rendered = selected instanceof ImageView
+                    ? renderedImage((ImageView) selected)
+                    : renderedView(selected);
+            if (rendered == null) {
                 throw new IllegalStateException("Dialog has no drawable bounds");
             }
-            Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-            Canvas canvas = new Canvas(bitmap);
-            canvas.drawColor(Color.WHITE);
-            selected.draw(canvas);
+            Bitmap bitmap = bitmapWithQuietZone(rendered);
+            rendered.recycle();
             if (!ownsCurrentCapturedUI(id)) {
                 bitmap.recycle();
                 throw new IllegalStateException(
@@ -1088,6 +1092,79 @@ public final class BridgeActivity extends Activity {
         return fallback;
     }
 
+    /**
+     * Returns every visible root owned by the requested interaction. Legacy
+     * provider dialogs can be hosted by the persistent BridgeActivity and do
+     * not expose an owner ID, so untagged roots remain eligible; roots tagged
+     * to a different request are always excluded.
+     */
+    private static List<View> eligibleRoots(
+            List<View> roots,
+            String interactionID
+    ) {
+        String id = cleanInteractionID(interactionID);
+        ArrayList<View> eligible = new ArrayList<>();
+        for (View root : roots) {
+            if (root.getWindowVisibility() != View.VISIBLE
+                    || !root.isShown()
+                    || root.getWidth() <= 0
+                    || root.getHeight() <= 0) {
+                continue;
+            }
+            Activity owner = activityFrom(root.getContext());
+            String ownerID = BridgeActionActivity.interactionIDFor(owner);
+            if (!ownerID.isEmpty() && !ownerID.equals(id)) continue;
+            eligible.add(root);
+        }
+        return eligible;
+    }
+
+    /**
+     * Finds a decodable QR across every request-owned Window/Dialog. ImageView
+     * is preferred, with a bounded fallback for WebView/custom-view providers
+     * that draw their QR directly into a square view.
+     */
+    private static View largestQRCodeCandidate(List<View> roots) {
+        View selected = null;
+        int selectedArea = 0;
+        for (View root : roots) {
+            for (View view : flattened(root)) {
+                if (!view.isShown() || !(view instanceof ImageView)) continue;
+                if (!isQRCodeImage((ImageView) view)) continue;
+                int area = view.getWidth() * view.getHeight();
+                if (area > selectedArea) {
+                    selected = view;
+                    selectedArea = area;
+                }
+            }
+        }
+        if (selected != null) return selected;
+
+        int inspected = 0;
+        for (int rootIndex = roots.size() - 1; rootIndex >= 0; rootIndex--) {
+            List<View> views = flattened(roots.get(rootIndex));
+            for (int index = views.size() - 1; index >= 0; index--) {
+                View view = views.get(index);
+                if (!isCustomQRCodeCandidate(view)) continue;
+                inspected++;
+                if (isQRCodeView(view)) return view;
+                if (inspected >= 24) return null;
+            }
+        }
+        return null;
+    }
+
+    private static boolean isCustomQRCodeCandidate(View view) {
+        if (view == null || !view.isShown() || view instanceof ImageView) {
+            return false;
+        }
+        int width = view.getWidth();
+        int height = view.getHeight();
+        if (width < 120 || height < 120) return false;
+        double ratio = width / (double) height;
+        return ratio >= 0.65 && ratio <= 1.55;
+    }
+
     private static boolean hasMeaningfulContent(View root) {
         for (View view : flattened(root)) {
             if (!view.isShown()) continue;
@@ -1289,7 +1366,29 @@ public final class BridgeActivity extends Activity {
         Bitmap bitmap = null;
         try {
             bitmap = renderedImage(image);
-            if (bitmap == null) return false;
+            return isQRCodeBitmap(bitmap);
+        } catch (Throwable ignored) {
+            return false;
+        } finally {
+            if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
+        }
+    }
+
+    private static boolean isQRCodeView(View view) {
+        Bitmap bitmap = null;
+        try {
+            bitmap = renderedView(view);
+            return isQRCodeBitmap(bitmap);
+        } catch (Throwable ignored) {
+            return false;
+        } finally {
+            if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
+        }
+    }
+
+    private static boolean isQRCodeBitmap(Bitmap bitmap) {
+        if (bitmap == null) return false;
+        try {
             int width = bitmap.getWidth();
             int height = bitmap.getHeight();
             if (width < 21 || height < 21) return false;
@@ -1315,8 +1414,6 @@ public final class BridgeActivity extends Activity {
             return true;
         } catch (Throwable ignored) {
             return false;
-        } finally {
-            if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
         }
     }
 
@@ -1348,6 +1445,55 @@ public final class BridgeActivity extends Activity {
         }
         canvas.restoreToCount(saveCount);
         return bitmap;
+    }
+
+    private static Bitmap renderedView(View view) {
+        if (view == null) return null;
+        int sourceWidth = view.getWidth();
+        int sourceHeight = view.getHeight();
+        if (sourceWidth <= 0 || sourceHeight <= 0) return null;
+        double scale = Math.min(
+                1.0,
+                1024.0 / Math.max(sourceWidth, sourceHeight)
+        );
+        int width = Math.max(1, (int) Math.round(sourceWidth * scale));
+        int height = Math.max(1, (int) Math.round(sourceHeight * scale));
+        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        canvas.drawColor(Color.WHITE);
+        int saveCount = canvas.save();
+        canvas.scale(width / (float) sourceWidth, height / (float) sourceHeight);
+        view.draw(canvas);
+        canvas.restoreToCount(saveCount);
+        return bitmap;
+    }
+
+    /** Adds a white quiet zone and nearest-neighbour enlargement for CoreImage. */
+    private static Bitmap bitmapWithQuietZone(Bitmap source) {
+        int longest = Math.max(source.getWidth(), source.getHeight());
+        int scale = Math.max(1, Math.min(4, (int) Math.ceil(512.0 / longest)));
+        Bitmap scaled = scale == 1
+                ? source
+                : Bitmap.createScaledBitmap(
+                        source,
+                        source.getWidth() * scale,
+                        source.getHeight() * scale,
+                        false
+                );
+        int quietZone = Math.max(16, Math.max(
+                scaled.getWidth(),
+                scaled.getHeight()
+        ) / 20);
+        Bitmap output = Bitmap.createBitmap(
+                scaled.getWidth() + quietZone * 2,
+                scaled.getHeight() + quietZone * 2,
+                Bitmap.Config.ARGB_8888
+        );
+        Canvas canvas = new Canvas(output);
+        canvas.drawColor(Color.WHITE);
+        canvas.drawBitmap(scaled, quietZone, quietZone, null);
+        if (scaled != source) scaled.recycle();
+        return output;
     }
 
     private static List<View> flattened(View root) {
