@@ -8,6 +8,72 @@ import OKVideoPersistence
 @testable import OKVideoMac
 
 final class OKVideoMacTests: XCTestCase {
+    func testShortcutRoutePolicyGivesPlayerWindowPriority() {
+        XCTAssertEqual(
+            ShortcutRoutePolicy.context(
+                browserWindowIsKey: true,
+                playerWindowIsKey: true
+            ),
+            .player
+        )
+        XCTAssertFalse(
+            ShortcutRoutePolicy.allowsBrowserCommands(
+                browserWindowIsKey: true,
+                playerWindowIsKey: true
+            )
+        )
+        XCTAssertTrue(
+            ShortcutRoutePolicy.allowsPlayerCommands(
+                browserWindowIsKey: true,
+                playerWindowIsKey: true
+            )
+        )
+    }
+
+    func testShortcutRoutePolicyRoutesBrowserOnlyWhenBrowserIsKey() {
+        XCTAssertEqual(
+            ShortcutRoutePolicy.context(
+                browserWindowIsKey: true,
+                playerWindowIsKey: false
+            ),
+            .browser
+        )
+        XCTAssertTrue(
+            ShortcutRoutePolicy.allowsBrowserCommands(
+                browserWindowIsKey: true,
+                playerWindowIsKey: false
+            )
+        )
+        XCTAssertFalse(
+            ShortcutRoutePolicy.allowsPlayerCommands(
+                browserWindowIsKey: true,
+                playerWindowIsKey: false
+            )
+        )
+    }
+
+    func testShortcutRoutePolicyRejectsUnrelatedWindows() {
+        XCTAssertEqual(
+            ShortcutRoutePolicy.context(
+                browserWindowIsKey: false,
+                playerWindowIsKey: false
+            ),
+            .other
+        )
+        XCTAssertFalse(
+            ShortcutRoutePolicy.allowsBrowserCommands(
+                browserWindowIsKey: false,
+                playerWindowIsKey: false
+            )
+        )
+        XCTAssertFalse(
+            ShortcutRoutePolicy.allowsPlayerCommands(
+                browserWindowIsKey: false,
+                playerWindowIsKey: false
+            )
+        )
+    }
+
     func testConfigurationActivationTrackerLatestRequestWinsABC() {
         var tracker = ConfigurationActivationRequestTracker()
         let configurationA = UUID()

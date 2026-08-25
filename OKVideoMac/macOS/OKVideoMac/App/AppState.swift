@@ -24,6 +24,48 @@ enum AppSection: String, CaseIterable, Identifiable {
     }
 }
 
+enum ShortcutWindowContext: Equatable {
+    case browser
+    case player
+    case other
+}
+
+enum ShortcutRoutePolicy {
+    static func context(
+        browserWindowIsKey: Bool,
+        playerWindowIsKey: Bool
+    ) -> ShortcutWindowContext {
+        if playerWindowIsKey { return .player }
+        if browserWindowIsKey { return .browser }
+        return .other
+    }
+
+    static func allowsBrowserCommands(
+        browserWindowIsKey: Bool,
+        playerWindowIsKey: Bool
+    ) -> Bool {
+        context(
+            browserWindowIsKey: browserWindowIsKey,
+            playerWindowIsKey: playerWindowIsKey
+        ) == .browser
+    }
+
+    static func allowsPlayerCommands(
+        browserWindowIsKey: Bool,
+        playerWindowIsKey: Bool
+    ) -> Bool {
+        context(
+            browserWindowIsKey: browserWindowIsKey,
+            playerWindowIsKey: playerWindowIsKey
+        ) == .player
+    }
+}
+
+struct ShortcutLiveSourceSelection: Equatable {
+    let requestID: UUID
+    let sourceID: UUID
+}
+
 /// Keeps high-frequency page navigation separate from the much larger app
 /// content model. Publishing section changes through `AppState` used to
 /// invalidate every view holding that environment object, including all live
@@ -2594,6 +2636,14 @@ final class AppState: ObservableObject {
         set { navigation.selectedSection = newValue }
     }
     @Published private(set) var isHomeSearchPresented = false
+    @Published private(set) var isBrowserWindowKey = false
+    @Published private(set) var isPlayerWindowKey = false
+    @Published private(set) var isQuickSwitcherPresented = false
+    @Published private(set) var isShortcutHelpPresented = false
+    @Published private(set) var shortcutLiveRefreshRequest: UInt64 = 0
+    @Published private(set) var shortcutPlayerEscapeRequest: UInt64 = 0
+    @Published private(set) var shortcutLiveSourceSelection:
+        ShortcutLiveSourceSelection?
     @Published var selectedSettingsPane: SettingsPane = .general
     @Published private(set) var configurations: [StoredConfiguration] = []
     @Published private(set) var activeConfigurationRecord: StoredConfiguration?
@@ -6777,6 +6827,124 @@ final class AppState: ObservableObject {
         selectedSection = section
     }
 
+    var shortcutWindowContext: ShortcutWindowContext {
+        ShortcutRoutePolicy.context(
+            browserWindowIsKey: isBrowserWindowKey,
+            playerWindowIsKey: isPlayerWindowKey
+        )
+    }
+
+    var allowsBrowserShortcuts: Bool {
+        ShortcutRoutePolicy.allowsBrowserCommands(
+            browserWindowIsKey: isBrowserWindowKey,
+            playerWindowIsKey: isPlayerWindowKey
+        )
+    }
+
+    var allowsPlayerShortcuts: Bool {
+        isPlayerPresented
+            && ShortcutRoutePolicy.allowsPlayerCommands(
+                browserWindowIsKey: isBrowserWindowKey,
+                playerWindowIsKey: isPlayerWindowKey
+            )
+    }
+
+    func setBrowserWindowKey(_ isKey: Bool) {
+        isBrowserWindowKey = isKey
+    }
+
+    func setPlayerWindowKey(_ isKey: Bool) {
+        isPlayerWindowKey = isKey
+    }
+
+    func presentQuickSwitcher() {
+        guard allowsBrowserShortcuts,
+              cloudAuthorizationPrompt == nil,
+              nodeWebPresentation == nil,
+              selectedDetail == nil,
+              pendingDetailSummary == nil else { return }
+        isShortcutHelpPresented = false
+        isQuickSwitcherPresented = true
+    }
+
+    func dismissQuickSwitcher() {
+        isQuickSwitcherPresented = false
+    }
+
+    func presentShortcutHelp() {
+        guard allowsBrowserShortcuts,
+              cloudAuthorizationPrompt == nil,
+              nodeWebPresentation == nil,
+              selectedDetail == nil,
+              pendingDetailSummary == nil else { return }
+        isQuickSwitcherPresented = false
+        isShortcutHelpPresented = true
+    }
+
+    func dismissShortcutHelp() {
+        isShortcutHelpPresented = false
+    }
+
+    func requestLiveSourceSelection(_ sourceID: UUID) {
+        shortcutLiveSourceSelection = ShortcutLiveSourceSelection(
+            requestID: UUID(),
+            sourceID: sourceID
+        )
+        selectSection(.live)
+    }
+
+    func requestPlayerEscapeHandling() {
+        guard allowsPlayerShortcuts else { return }
+        shortcutPlayerEscapeRequest &+= 1
+    }
+
+    func performContextRefresh() async {
+        guard allowsBrowserShortcuts else { return }
+        switch selectedSection {
+        case .home:
+            if isHomeSearchPresented {
+                search(searchKeyword)
+            } else {
+                await refreshHome()
+            }
+        case .live:
+            shortcutLiveRefreshRequest &+= 1
+        case .favorites, .history, .settings:
+            // These screens are backed by local observable state and update
+            // as soon as their stores change. There is no remote page request
+            // to repeat, so Command-R intentionally remains a no-op.
+            break
+        }
+    }
+
+    func performBackShortcut() async {
+        guard allowsBrowserShortcuts else { return }
+        if cloudAuthorizationPrompt != nil {
+            await cancelCloudAuthorization()
+        } else if nodeWebPresentation != nil {
+            cancelNodeConfiguration()
+        } else if selectedDetail != nil || pendingDetailSummary != nil {
+            dismissDetail()
+        } else if !searchFolderPath.isEmpty {
+            if searchFolderPath.count > 1 {
+                navigateBackSearchFolder()
+            } else {
+                closeSearchFolder()
+            }
+        } else if isHomeSearchPresented {
+            returnFromSearchToHome()
+        } else if selectedSection != .home {
+            selectSection(.home)
+        }
+    }
+
+    func stopCurrentShortcutOperation() {
+        guard allowsBrowserShortcuts else { return }
+        if isSearching {
+            cancelSearch()
+        }
+    }
+
     func cancelSearch() {
         if isSearching {
             searchTermination = .cancelled
@@ -8211,7 +8379,8 @@ final class AppState: ObservableObject {
                 _ = try await environment.database.deleteHistory(
                     configurationID: record.configurationID,
                     siteKey: record.siteKey,
-                    videoID: record.videoID
+                    videoID: record.videoID,
+                    sourceKey: record.sourceKey
                 )
             }
             try await reloadHistory()
@@ -8490,6 +8659,10 @@ final class AppState: ObservableObject {
         }
     }
 
+    func adjustPlayerVolume(by delta: Double) async {
+        await setPlayerVolume(playerSnapshot.volume + delta)
+    }
+
     func togglePlayerMute() async {
         let previousMuted = playerSnapshot.isMuted
         let targetMuted = !previousMuted
@@ -8515,6 +8688,27 @@ final class AppState: ObservableObject {
             }
             show(error, title: "倍速设置失败")
         }
+    }
+
+    func adjustPlayerSpeed(by delta: Double) async {
+        let target = min(max(playerSnapshot.speed + delta, 0.5), 2)
+        await setPlayerSpeed((target * 4).rounded() / 4)
+    }
+
+    var hasPlayerAudioTracks: Bool {
+        playerSnapshot.tracks.contains { $0.type == .audio }
+    }
+
+    var hasPlayerSubtitleTracks: Bool {
+        playerSnapshot.tracks.contains { $0.type == .subtitle }
+    }
+
+    func cyclePlayerAudioTrack() async {
+        let tracks = playerSnapshot.tracks.filter { $0.type == .audio }
+        guard !tracks.isEmpty else { return }
+        let selectedIndex = tracks.firstIndex(where: \.isSelected)
+        let nextIndex = selectedIndex.map { ($0 + 1) % tracks.count } ?? 0
+        await selectPlayerTrack(tracks[nextIndex])
     }
 
     var selectedPlaybackQualityName: String? {
@@ -9099,7 +9293,11 @@ final class AppState: ObservableObject {
     }
 
     var canSeekPlayback: Bool {
-        activePlayback?.playbackResult?.mediaSession?.rangePolicy != .unsupported
+        guard !isLivePlayback, activePlayback != nil else {
+            return false
+        }
+        return activePlayback?.playbackResult?.mediaSession?.rangePolicy
+            != .unsupported
     }
 
     var canSwitchLiveChannel: Bool {
@@ -11068,6 +11266,7 @@ final class AppState: ObservableObject {
                 videoID: detail.summary.videoID,
                 title: detail.summary.title,
                 posterURL: detail.summary.posterURL,
+                sourceKey: playback.source.id,
                 sourceName: playback.source.name,
                 episodeName: playback.episode.name,
                 episodeReference: Self.persistentHistoryEpisodeReference(

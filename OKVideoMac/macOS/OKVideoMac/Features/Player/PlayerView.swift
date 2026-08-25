@@ -165,6 +165,9 @@ struct PlayerView: View {
                 alignPlayerEpisodePageWithCurrentEpisode()
             }
         }
+        .onChange(of: state.shortcutPlayerEscapeRequest) { _ in
+            handleEscapeShortcut()
+        }
         .animation(
             .easeInOut(duration: 0.22),
             value: controlsVisible
@@ -339,7 +342,6 @@ struct PlayerView: View {
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .keyboardShortcut(.space, modifiers: [])
             .help(isPaused ? "播放" : "暂停")
             .modifier(PlayerControlHoverEffect())
 
@@ -897,7 +899,6 @@ struct PlayerView: View {
             }
             .buttonStyle(.plain)
             .foregroundColor(Color.black.opacity(0.86))
-            .keyboardShortcut(.space, modifiers: [])
             .help(isPaused ? "播放" : "暂停")
 
             playerIconButton(
@@ -1730,6 +1731,17 @@ struct PlayerView: View {
             activeUtilityPanel = nil
         }
         toggleFullScreen()
+    }
+
+    private func handleEscapeShortcut() {
+        if activeUtilityPanel != nil {
+            inspectedPlayerEpisode = nil
+            activeUtilityPanel = nil
+            return
+        }
+        if isWindowFullScreen {
+            toggleFullScreen()
+        }
     }
 
     private func trackMenu(

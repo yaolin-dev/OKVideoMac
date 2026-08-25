@@ -55,6 +55,19 @@ struct LiveView: View {
             }
             Task { await loadSelectedIfNeeded() }
         }
+        .onChange(of: state.shortcutLiveRefreshRequest) { _ in
+            guard session.isActive,
+                  let source = selectedSource,
+                  source.sourceKind == .remote else { return }
+            Task { await state.refreshLiveSource(source.id) }
+        }
+        .onChange(of: state.shortcutLiveSourceSelection) { request in
+            guard let request,
+                  state.liveSources.contains(where: {
+                      $0.id == request.sourceID
+                  }) else { return }
+            session.selectedSourceID = request.sourceID
+        }
     }
 
     private var emptyLibrary: some View {

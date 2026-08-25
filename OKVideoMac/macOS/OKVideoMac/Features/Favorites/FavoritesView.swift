@@ -1,3 +1,4 @@
+import AppKit
 import OKVideoPersistence
 import SwiftUI
 
@@ -6,6 +7,7 @@ struct FavoritesView: View {
     @State private var isSelecting = false
     @State private var selectedIDs: Set<FavoriteRecord.ID> = []
     @State private var pendingDeletion: FavoriteDeletion?
+    @State private var focusedID: FavoriteRecord.ID?
 
     var body: some View {
         Group {
@@ -43,9 +45,19 @@ struct FavoritesView: View {
         }
         .onChange(of: state.favorites.map(\.id)) { availableIDs in
             selectedIDs.formIntersection(availableIDs)
+            if focusedID.map({ availableIDs.contains($0) }) != true {
+                focusedID = availableIDs.first
+            }
             if state.favorites.isEmpty {
                 isSelecting = false
             }
+        }
+        .onAppear {
+            focusedID = focusedID ?? state.favorites.first?.id
+        }
+        .background {
+            AppKeyCommandMonitor(handler: handleKeyCommand)
+                .frame(width: 0, height: 0)
         }
     }
 
@@ -101,7 +113,11 @@ struct FavoritesView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .appInteractiveHover(cornerRadius: 10, selected: selectedIDs.contains(favorite.id))
+            .appInteractiveHover(
+                cornerRadius: 10,
+                selected: selectedIDs.contains(favorite.id)
+                    || focusedID == favorite.id
+            )
             .contextMenu {
                 Button(role: .destructive) {
                     pendingDeletion = .items([favorite.id])
@@ -217,6 +233,55 @@ struct FavoritesView: View {
             selectedIDs.removeAll()
             isSelecting = false
         }
+    }
+
+    private func handleKeyCommand(_ event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(
+            [.command, .option, .control, .shift]
+        )
+        if modifiers == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "a" {
+            isSelecting = true
+            selectedIDs = Set(state.favorites.map(\.id))
+            return true
+        }
+        guard modifiers.isEmpty else { return false }
+        switch event.keyCode {
+        case 125:
+            moveFocus(by: 1)
+        case 126:
+            moveFocus(by: -1)
+        case 36, 76:
+            guard let focusedID,
+                  let item = state.favorites.first(where: {
+                      $0.id == focusedID
+                  }) else { return false }
+            if isSelecting {
+                toggleSelection(focusedID)
+            } else {
+                Task { await state.openFavorite(item) }
+            }
+        case 51, 117:
+            guard let focusedID else { return false }
+            pendingDeletion = .items(
+                isSelecting && !selectedIDs.isEmpty
+                    ? selectedIDs : [focusedID]
+            )
+        case 53:
+            guard isSelecting else { return false }
+            isSelecting = false
+            selectedIDs.removeAll()
+        default:
+            return false
+        }
+        return true
+    }
+
+    private func moveFocus(by offset: Int) {
+        let ids = state.favorites.map(\.id)
+        guard !ids.isEmpty else { return }
+        let currentIndex = focusedID.flatMap { ids.firstIndex(of: $0) } ?? 0
+        focusedID = ids[min(max(currentIndex + offset, 0), ids.count - 1)]
     }
 }
 

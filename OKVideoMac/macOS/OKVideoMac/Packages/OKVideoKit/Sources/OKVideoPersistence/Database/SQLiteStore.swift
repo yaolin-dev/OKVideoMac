@@ -9,7 +9,7 @@ public actor SQLiteStore:
     HistoryRepository,
     SettingsRepository
 {
-    public static let currentSchemaVersion = 7
+    public static let currentSchemaVersion = 8
 
     private let connection: SQLiteConnection
     public let databaseURL: URL
@@ -476,11 +476,12 @@ public actor SQLiteStore:
         try connection.execute(
             """
             INSERT INTO history (
-                configuration_id, site_key, video_id, title, poster_url, source_name,
+                configuration_id, site_key, video_id, source_key,
+                title, poster_url, source_name,
                 episode_name, episode_reference, media_reference,
                 position, duration, watched_at, playback_reference
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(configuration_id, site_key, video_id) DO UPDATE SET
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(configuration_id, site_key, video_id, source_key) DO UPDATE SET
                 title = excluded.title,
                 poster_url = excluded.poster_url,
                 source_name = excluded.source_name,
@@ -496,6 +497,7 @@ public actor SQLiteStore:
                 .text(history.configurationID?.uuidString.lowercased() ?? ""),
                 .text(history.siteKey),
                 .text(history.videoID),
+                .text(history.sourceKey),
                 .text(history.title),
                 .optional(history.posterURL?.absoluteString),
                 .optional(history.sourceName),
@@ -514,7 +516,8 @@ public actor SQLiteStore:
         var values: [HistoryRecord] = []
         try connection.query(
             """
-            SELECT configuration_id, site_key, video_id, title, poster_url, source_name,
+            SELECT configuration_id, site_key, video_id, source_key,
+                   title, poster_url, source_name,
                    episode_name, episode_reference, media_reference,
                    position, duration, watched_at, playback_reference
             FROM history
@@ -526,21 +529,22 @@ public actor SQLiteStore:
                     .flatMap(UUID.init(uuidString:)),
                 siteKey: self.connection.text(statement, 1) ?? "",
                 videoID: self.connection.text(statement, 2) ?? "",
-                title: self.connection.text(statement, 3) ?? "",
-                posterURL: self.connection.text(statement, 4).flatMap(URL.init(string:)),
-                sourceName: self.connection.text(statement, 5),
-                episodeName: self.connection.text(statement, 6),
-                episodeReference: self.connection.text(statement, 7),
-                mediaReference: self.connection.text(statement, 8),
-                playbackReference: self.connection.text(statement, 12)
+                title: self.connection.text(statement, 4) ?? "",
+                posterURL: self.connection.text(statement, 5).flatMap(URL.init(string:)),
+                sourceKey: self.connection.text(statement, 3),
+                sourceName: self.connection.text(statement, 6),
+                episodeName: self.connection.text(statement, 7),
+                episodeReference: self.connection.text(statement, 8),
+                mediaReference: self.connection.text(statement, 9),
+                playbackReference: self.connection.text(statement, 13)
                     .flatMap { $0.data(using: .utf8) }
                     .flatMap { try? JSONDecoder().decode(
                         HistoryPlaybackReference.self,
                         from: $0
                     ) },
-                position: sqlite3_column_double(statement, 9),
-                duration: sqlite3_column_double(statement, 10),
-                watchedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 11))
+                position: sqlite3_column_double(statement, 10),
+                duration: sqlite3_column_double(statement, 11),
+                watchedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 12))
             )
             values.append(record.sanitizedForPersistence())
         }
@@ -551,17 +555,20 @@ public actor SQLiteStore:
     public func deleteHistory(
         configurationID: UUID?,
         siteKey: String,
-        videoID: String
+        videoID: String,
+        sourceKey: String
     ) throws -> Int {
         try connection.execute(
             """
             DELETE FROM history
             WHERE configuration_id = ? AND site_key = ? AND video_id = ?
+                AND source_key = ?
             """,
             bindings: [
                 .text(configurationID?.uuidString.lowercased() ?? ""),
                 .text(siteKey),
-                .text(videoID)
+                .text(videoID),
+                .text(HistoryRecord.normalizedSourceKey(sourceKey))
             ]
         )
         return connection.lastChangedRowCount()
@@ -909,6 +916,94 @@ public actor SQLiteStore:
             try connection.execute("VACUUM")
             try connection.query("PRAGMA wal_checkpoint(TRUNCATE)") { _ in }
         }
+        if version < 8 {
+            try connection.transaction {
+                if try !columnExists(
+                    "playback_reference",
+                    in: "history",
+                    connection: connection
+                ) {
+                    try connection.execute(
+                        "ALTER TABLE history ADD COLUMN playback_reference TEXT"
+                    )
+                }
+
+                if try !columnExists(
+                    "source_key",
+                    in: "history",
+                    connection: connection
+                ) {
+                    try connection.execute(
+                        """
+                        CREATE TABLE history_v8 (
+                            configuration_id TEXT NOT NULL,
+                            site_key TEXT NOT NULL,
+                            video_id TEXT NOT NULL,
+                            source_key TEXT NOT NULL,
+                            title TEXT NOT NULL,
+                            poster_url TEXT,
+                            source_name TEXT,
+                            episode_name TEXT,
+                            media_reference TEXT,
+                            position REAL NOT NULL DEFAULT 0,
+                            duration REAL NOT NULL DEFAULT 0,
+                            watched_at REAL NOT NULL,
+                            episode_reference TEXT,
+                            playback_reference TEXT,
+                            PRIMARY KEY (
+                                configuration_id, site_key, video_id, source_key
+                            )
+                        )
+                        """
+                    )
+                    try connection.execute(
+                        """
+                        INSERT INTO history_v8 (
+                            configuration_id, site_key, video_id, source_key,
+                            title, poster_url, source_name, episode_name,
+                            media_reference, position, duration, watched_at,
+                            episode_reference, playback_reference
+                        )
+                        SELECT configuration_id, site_key, video_id,
+                               CASE
+                                   WHEN trim(COALESCE(source_name, '')) = ''
+                                       THEN '__legacy__'
+                                   ELSE trim(source_name)
+                               END,
+                               title, poster_url, source_name, episode_name,
+                               media_reference, position, duration, watched_at,
+                               episode_reference, playback_reference
+                        FROM history
+                        """
+                    )
+                    try connection.execute("DROP TABLE history")
+                    try connection.execute(
+                        "ALTER TABLE history_v8 RENAME TO history"
+                    )
+                    try connection.execute(
+                        "CREATE INDEX history_watched_at ON history(watched_at)"
+                    )
+                    try connection.execute(
+                        "CREATE INDEX history_configuration_watched_at ON history(configuration_id, watched_at DESC)"
+                    )
+                }
+                try connection.execute("PRAGMA user_version = 8")
+            }
+        }
+    }
+
+    private static func columnExists(
+        _ column: String,
+        in table: String,
+        connection: SQLiteConnection
+    ) throws -> Bool {
+        var exists = false
+        try connection.query("PRAGMA table_info(\(table))") { statement in
+            if connection.text(statement, 1) == column {
+                exists = true
+            }
+        }
+        return exists
     }
 
     private static func verify(_ connection: SQLiteConnection) throws {

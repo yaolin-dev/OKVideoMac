@@ -1,4 +1,6 @@
 import AppKit
+import OKVideoCore
+import OKVideoPersistence
 import SwiftUI
 import WebKit
 
@@ -194,10 +196,39 @@ struct RootView: View {
                     .environmentObject(state)
             }
         }
-        .background {
-            WindowCloseObserver {
-                Task { await state.closePlayer() }
+        .overlay {
+            if state.isQuickSwitcherPresented {
+                QuickSwitcherView()
+                    .environmentObject(state)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    .zIndex(200)
             }
+        }
+        .overlay {
+            if state.isShortcutHelpPresented {
+                ShortcutHelpView()
+                    .environmentObject(state)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    .zIndex(210)
+            }
+        }
+        .animation(
+            .easeOut(duration: 0.14),
+            value: state.isQuickSwitcherPresented
+        )
+        .animation(
+            .easeOut(duration: 0.14),
+            value: state.isShortcutHelpPresented
+        )
+        .background {
+            WindowCloseObserver(
+                onClose: {
+                    Task { await state.closePlayer() }
+                },
+                onKeyChange: { isKey in
+                    state.setBrowserWindowKey(isKey)
+                }
+            )
         }
     }
 
@@ -215,6 +246,308 @@ struct RootView: View {
                 SectionContentView()
             }
             .navigationViewStyle(.columns)
+        }
+    }
+}
+
+private struct QuickSwitcherView: View {
+    @EnvironmentObject private var state: AppState
+    @State private var query = ""
+    @FocusState private var searchIsFocused: Bool
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.28)
+                .ignoresSafeArea()
+                .onTapGesture { state.dismissQuickSwitcher() }
+
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    Image(systemName: "command")
+                        .foregroundStyle(.secondary)
+                    TextField("切换配置、站点或直播源", text: $query)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 17))
+                        .focused($searchIsFocused)
+                        .onSubmit { activateFirstMatch() }
+                    Button {
+                        state.dismissQuickSwitcher()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .keyboardShortcut(.cancelAction)
+                    .help("关闭")
+                }
+                .padding(.horizontal, 16)
+                .frame(height: 52)
+
+                Divider()
+
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        if !matchingConfigurations.isEmpty {
+                            switcherHeader("点播配置")
+                            ForEach(matchingConfigurations) { configuration in
+                                switcherRow(
+                                    title: configuration.name,
+                                    subtitle: configuration.isActive
+                                        ? "当前配置" : nil,
+                                    systemImage: "square.stack.3d.up"
+                                ) {
+                                    state.dismissQuickSwitcher()
+                                    Task {
+                                        await state.activateConfiguration(
+                                            configuration.id
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        if !matchingSites.isEmpty {
+                            switcherHeader("点播站点")
+                            ForEach(matchingSites, id: \.key) { site in
+                                switcherRow(
+                                    title: site.name,
+                                    subtitle: site.key == state.selectedSiteKey
+                                        ? "当前站点" : nil,
+                                    systemImage: "play.rectangle"
+                                ) {
+                                    state.dismissQuickSwitcher()
+                                    state.selectSection(.home)
+                                    Task { await state.selectSite(site.key) }
+                                }
+                            }
+                        }
+
+                        if !matchingLiveSources.isEmpty {
+                            switcherHeader("直播源")
+                            ForEach(matchingLiveSources) { source in
+                                switcherRow(
+                                    title: source.name,
+                                    subtitle: "进入直播",
+                                    systemImage: "dot.radiowaves.left.and.right"
+                                ) {
+                                    state.dismissQuickSwitcher()
+                                    state.requestLiveSourceSelection(source.id)
+                                }
+                            }
+                        }
+
+                        if matchingConfigurations.isEmpty,
+                           matchingSites.isEmpty,
+                           matchingLiveSources.isEmpty {
+                            EmptyStateView(
+                                systemImage: "magnifyingglass",
+                                title: "没有匹配项目",
+                                message: "请尝试输入其他名称。"
+                            )
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 28)
+                        }
+                    }
+                    .padding(10)
+                }
+                .frame(maxHeight: 480)
+
+                Divider()
+                HStack {
+                    Text("输入名称筛选  ·  Return 打开首项  ·  Esc 关闭")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("⌘K")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 16)
+                .frame(height: 36)
+            }
+            .frame(width: 560)
+            .background(
+                Color(nsColor: .windowBackgroundColor),
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.24), radius: 28, y: 12)
+        }
+        .onAppear { searchIsFocused = true }
+    }
+
+    private var normalizedQuery: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var matchingConfigurations: [StoredConfiguration] {
+        state.configurations.filter { matches($0.name) }
+    }
+
+    private var matchingSites: [SiteConfiguration] {
+        state.supportedSites.filter { matches($0.name) || matches($0.key) }
+    }
+
+    private var matchingLiveSources: [StoredLiveSource] {
+        state.liveSources.filter { matches($0.name) }
+    }
+
+    private func matches(_ value: String) -> Bool {
+        normalizedQuery.isEmpty
+            || value.localizedCaseInsensitiveContains(normalizedQuery)
+    }
+
+    private func activateFirstMatch() {
+        if let configuration = matchingConfigurations.first {
+            state.dismissQuickSwitcher()
+            Task { await state.activateConfiguration(configuration.id) }
+        } else if let site = matchingSites.first {
+            state.dismissQuickSwitcher()
+            state.selectSection(.home)
+            Task { await state.selectSite(site.key) }
+        } else if let source = matchingLiveSources.first {
+            state.dismissQuickSwitcher()
+            state.requestLiveSourceSelection(source.id)
+        }
+    }
+
+    private func switcherHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 9)
+            .padding(.top, 8)
+            .padding(.bottom, 3)
+    }
+
+    private func switcherRow(
+        title: String,
+        subtitle: String?,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 11) {
+                Image(systemName: systemImage)
+                    .frame(width: 24)
+                    .foregroundStyle(Color.accentColor)
+                Text(title)
+                    .lineLimit(1)
+                Spacer(minLength: 12)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 42)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .appInteractiveHover(cornerRadius: 8)
+    }
+}
+
+private struct ShortcutHelpView: View {
+    @EnvironmentObject private var state: AppState
+
+    private let sections: [(String, [(String, String)])] = [
+        ("导航", [
+            ("⌘1…⌘5", "首页、直播、收藏、历史、设置"),
+            ("⌘F", "搜索"),
+            ("⌘K", "快速切换配置、站点或直播源"),
+            ("⌘L", "打开点播配置"),
+            ("⌘R", "刷新当前页面"),
+            ("⌘[", "返回"),
+            ("⌘.", "停止当前搜索")
+        ]),
+        ("播放器", [
+            ("Space", "播放或暂停"),
+            ("← / →", "快退或快进 10 秒"),
+            ("⇧← / ⇧→", "快退或快进 30 秒"),
+            ("⌥← / ⌥→", "上一集或下一集"),
+            ("↑ / ↓", "上一个或下一个直播频道"),
+            ("M", "静音"),
+            ("− / =", "音量减小或增大"),
+            ("C / A", "字幕开关 / 下一音轨"),
+            ("F", "进入或退出全屏"),
+            ("⇧, / ⇧.", "降低或提高播放速度"),
+            ("⌘W", "关闭播放器窗口")
+        ]),
+        ("系统", [
+            ("⌘,", "打开设置"),
+            ("⌘/", "显示本快捷键列表")
+        ])
+    ]
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.28)
+                .ignoresSafeArea()
+                .onTapGesture { state.dismissShortcutHelp() }
+
+            VStack(spacing: 0) {
+                HStack {
+                    Label("键盘快捷键", systemImage: "keyboard")
+                        .font(.title3.weight(.semibold))
+                    Spacer()
+                    Button {
+                        state.dismissShortcutHelp()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .keyboardShortcut(.cancelAction)
+                }
+                .padding(18)
+
+                Divider()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        ForEach(Array(sections.enumerated()), id: \.offset) {
+                            _, section in
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(section.0)
+                                    .font(.headline)
+                                ForEach(
+                                    Array(section.1.enumerated()),
+                                    id: \.offset
+                                ) { _, shortcut in
+                                    HStack(alignment: .firstTextBaseline) {
+                                        Text(shortcut.0)
+                                            .font(.body.monospaced())
+                                            .frame(width: 110, alignment: .trailing)
+                                        Text(shortcut.1)
+                                            .foregroundStyle(.secondary)
+                                        Spacer()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(20)
+                }
+                .frame(maxHeight: 610)
+            }
+            .frame(width: 620)
+            .background(
+                Color(nsColor: .windowBackgroundColor),
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.24), radius: 28, y: 12)
         }
     }
 }
@@ -393,10 +726,12 @@ private struct NodeConfigurationWebView: NSViewRepresentable {
 
 private struct WindowCloseObserver: NSViewRepresentable {
     let onClose: () -> Void
+    let onKeyChange: (Bool) -> Void
 
     func makeNSView(context: Context) -> WindowCloseObserverView {
         let view = WindowCloseObserverView()
         view.onClose = onClose
+        view.onKeyChange = onKeyChange
         return view
     }
 
@@ -405,33 +740,114 @@ private struct WindowCloseObserver: NSViewRepresentable {
         context: Context
     ) {
         nsView.onClose = onClose
+        nsView.onKeyChange = onKeyChange
     }
 }
 
 private final class WindowCloseObserverView: NSView {
     var onClose: (() -> Void)?
-    private var observer: NSObjectProtocol?
+    var onKeyChange: ((Bool) -> Void)?
+    private var observers: [NSObjectProtocol] = []
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if let observer {
-            NotificationCenter.default.removeObserver(observer)
-            self.observer = nil
-        }
+        removeObservers()
         guard let window else { return }
-        observer = NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification,
-            object: window,
-            queue: .main
-        ) { [weak self] _ in
-            self?.onClose?()
+        onKeyChange?(window.isKeyWindow)
+        observers = [
+            NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                self?.onKeyChange?(false)
+                self?.onClose?()
+            },
+            NotificationCenter.default.addObserver(
+                forName: NSWindow.didBecomeKeyNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                self?.onKeyChange?(true)
+            },
+            NotificationCenter.default.addObserver(
+                forName: NSWindow.didResignKeyNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                self?.onKeyChange?(false)
+            }
+        ]
+    }
+
+    deinit {
+        removeObservers()
+    }
+
+    private func removeObservers() {
+        for observer in observers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        observers.removeAll()
+    }
+}
+
+struct AppKeyCommandMonitor: NSViewRepresentable {
+    let handler: (NSEvent) -> Bool
+
+    func makeNSView(context: Context) -> AppKeyCommandMonitorView {
+        let view = AppKeyCommandMonitorView()
+        view.handler = handler
+        return view
+    }
+
+    func updateNSView(
+        _ nsView: AppKeyCommandMonitorView,
+        context: Context
+    ) {
+        nsView.handler = handler
+    }
+}
+
+final class AppKeyCommandMonitorView: NSView {
+    var handler: ((NSEvent) -> Bool)?
+    private var monitor: Any?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        removeMonitor()
+        guard window != nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
+            [weak self] event in
+            guard let self,
+                  let window = self.window,
+                  window.isKeyWindow,
+                  event.window === window,
+                  !Self.isEditingText(in: window),
+                  self.handler?(event) == true else {
+                return event
+            }
+            return nil
         }
     }
 
     deinit {
-        if let observer {
-            NotificationCenter.default.removeObserver(observer)
+        removeMonitor()
+    }
+
+    private func removeMonitor() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
         }
+    }
+
+    private static func isEditingText(in window: NSWindow) -> Bool {
+        if window.firstResponder is NSTextField { return true }
+        guard let textView = window.firstResponder as? NSTextView else {
+            return false
+        }
+        return textView.isEditable || textView.isFieldEditor
     }
 }
 

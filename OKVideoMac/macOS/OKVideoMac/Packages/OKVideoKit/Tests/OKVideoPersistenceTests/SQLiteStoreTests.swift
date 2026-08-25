@@ -719,6 +719,152 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(Set(records.map(\.siteKey)), Set(["site-a", "site-b"]))
     }
 
+    func testHistoryKeepsPlaybackSourcesSeparateAndUpdatesOnlyMatchingSource()
+        async throws {
+        let store = try makeStore()
+        let configurationID = UUID()
+        try await store.saveHistory(
+            HistoryRecord(
+                configurationID: configurationID,
+                siteKey: "fixture",
+                videoID: "shared-video",
+                title: "Fixture",
+                sourceKey: "line-1",
+                sourceName: "线路一",
+                episodeName: "第1集",
+                position: 10,
+                watchedAt: Date(timeIntervalSince1970: 10)
+            ),
+            incognito: false
+        )
+        try await store.saveHistory(
+            HistoryRecord(
+                configurationID: configurationID,
+                siteKey: "fixture",
+                videoID: "shared-video",
+                title: "Fixture",
+                sourceKey: "line-2",
+                sourceName: "线路二",
+                episodeName: "第2集",
+                position: 20,
+                watchedAt: Date(timeIntervalSince1970: 20)
+            ),
+            incognito: false
+        )
+        try await store.saveHistory(
+            HistoryRecord(
+                configurationID: configurationID,
+                siteKey: "fixture",
+                videoID: "shared-video",
+                title: "Fixture",
+                sourceKey: "line-1",
+                sourceName: "线路一（重命名）",
+                episodeName: "第3集",
+                position: 30,
+                watchedAt: Date(timeIntervalSince1970: 30)
+            ),
+            incognito: false
+        )
+
+        var records = try await store.history()
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(Set(records.map(\.sourceKey)), Set(["line-1", "line-2"]))
+        XCTAssertEqual(
+            records.first { $0.sourceKey == "line-1" }?.episodeName,
+            "第3集"
+        )
+        XCTAssertEqual(
+            records.first { $0.sourceKey == "line-2" }?.position,
+            20
+        )
+
+        let deleted = try await store.deleteHistory(
+            configurationID: configurationID,
+            siteKey: "fixture",
+            videoID: "shared-video",
+            sourceKey: "line-1"
+        )
+        records = try await store.history()
+        XCTAssertEqual(deleted, 1)
+        XCTAssertEqual(records.map(\.sourceKey), ["line-2"])
+    }
+
+    func testHistoryVersionSevenMigrationPreservesPlaybackReferenceAndRows()
+        async throws {
+        let databaseURL = try makeDatabaseURL()
+        let configurationID = UUID()
+        let persistedReference =
+            #"{"version":3,"sourceIdentity":"line-2","resourceIdentity":"episode-8","replayHeaders":{}}"#
+        do {
+            let connection = try SQLiteConnection(url: databaseURL)
+            try connection.execute(
+                """
+                CREATE TABLE history (
+                    configuration_id TEXT NOT NULL,
+                    site_key TEXT NOT NULL,
+                    video_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    poster_url TEXT,
+                    source_name TEXT,
+                    episode_name TEXT,
+                    media_reference TEXT,
+                    position REAL NOT NULL DEFAULT 0,
+                    duration REAL NOT NULL DEFAULT 0,
+                    watched_at REAL NOT NULL,
+                    episode_reference TEXT,
+                    playback_reference TEXT,
+                    PRIMARY KEY (configuration_id, site_key, video_id)
+                )
+                """
+            )
+            try connection.execute(
+                """
+                INSERT INTO history (
+                    configuration_id, site_key, video_id, title,
+                    source_name, episode_name, position, duration,
+                    watched_at, episode_reference, playback_reference
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                bindings: [
+                    .text(configurationID.uuidString.lowercased()),
+                    .text("fixture"),
+                    .text("video"),
+                    .text("Fixture"),
+                    .text(" 线路二 "),
+                    .text("第8集"),
+                    .double(88),
+                    .double(100),
+                    .double(1_000),
+                    .text("episode-8"),
+                    .text(persistedReference)
+                ]
+            )
+            try connection.execute("PRAGMA user_version = 7")
+        }
+
+        let store = try SQLiteStore(databaseURL: databaseURL)
+        let migratedHistory = try await store.history()
+        let record = try XCTUnwrap(migratedHistory.first)
+        XCTAssertEqual(record.sourceKey, "线路二")
+        XCTAssertEqual(record.sourceName, " 线路二 ")
+        XCTAssertEqual(record.episodeName, "第8集")
+        XCTAssertEqual(record.position, 88)
+        XCTAssertEqual(record.playbackReference?.sourceIdentity, "line-2")
+        XCTAssertEqual(SQLiteStore.currentSchemaVersion, 8)
+
+        let verification = try SQLiteConnection(url: databaseURL)
+        var storedPlaybackReference: String?
+        var storedSourceKey: String?
+        try verification.query(
+            "SELECT playback_reference, source_key FROM history"
+        ) { statement in
+            storedPlaybackReference = verification.text(statement, 0)
+            storedSourceKey = verification.text(statement, 1)
+        }
+        XCTAssertEqual(storedPlaybackReference, persistedReference)
+        XCTAssertEqual(storedSourceKey, "线路二")
+    }
+
     func testHistoryDeletionTargetsOnlySelectedRecord() async throws {
         let store = try makeStore()
         let configurationID = UUID()
@@ -744,7 +890,8 @@ final class SQLiteStoreTests: XCTestCase {
         let deleted = try await store.deleteHistory(
             configurationID: configurationID,
             siteKey: "fixture",
-            videoID: "first"
+            videoID: "first",
+            sourceKey: HistoryRecord.normalizedSourceKey(nil)
         )
         let remaining = try await store.history()
         XCTAssertEqual(deleted, 1)

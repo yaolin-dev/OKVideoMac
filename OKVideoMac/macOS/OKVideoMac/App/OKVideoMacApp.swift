@@ -256,7 +256,20 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         }
     }
 
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard let keyWindow = notification.object as? NSWindow,
+              keyWindow === window else { return }
+        appState?.setPlayerWindowKey(true)
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        guard let resignedWindow = notification.object as? NSWindow,
+              resignedWindow === window else { return }
+        appState?.setPlayerWindowKey(false)
+    }
+
     private func clearWindowReferences() {
+        appState?.setPlayerWindowKey(false)
         window?.delegate = nil
         window = nil
         hostingController = nil
@@ -539,23 +552,66 @@ struct AppCommands: Commands {
 
     var body: some Commands {
         CommandMenu("导航") {
+            ForEach(Array(AppSection.allCases.enumerated()), id: \.element.id) {
+                index, section in
+                Button(section.rawValue) {
+                    state.selectSection(section)
+                }
+                .keyboardShortcut(
+                    KeyEquivalent(Character(String(index + 1))),
+                    modifiers: .command
+                )
+                .disabled(!state.allowsBrowserShortcuts)
+            }
+
+            Divider()
+
             Button("搜索") {
                 state.focusHomeToolbarSearch()
             }
             .keyboardShortcut("f", modifiers: .command)
+            .disabled(!state.allowsBrowserShortcuts)
+
+            Button("快速切换…") {
+                state.presentQuickSwitcher()
+            }
+            .keyboardShortcut("k", modifiers: .command)
+            .disabled(!state.allowsBrowserShortcuts)
 
             Button("打开点播配置") {
                 state.selectedSettingsPane = .configurations
-                state.selectedSection = .settings
+                state.selectSection(.settings)
             }
             .keyboardShortcut("l", modifiers: .command)
+            .disabled(!state.allowsBrowserShortcuts)
 
             Divider()
 
-            Button("刷新当前站点") {
-                Task { await state.refreshHome() }
+            Button("刷新当前页面") {
+                Task { await state.performContextRefresh() }
             }
             .keyboardShortcut("r", modifiers: .command)
+            .disabled(!state.allowsBrowserShortcuts)
+
+            Button("返回") {
+                Task { await state.performBackShortcut() }
+            }
+            .keyboardShortcut("[", modifiers: .command)
+            .disabled(!state.allowsBrowserShortcuts)
+
+            Button("停止当前操作") {
+                state.stopCurrentShortcutOperation()
+            }
+            .keyboardShortcut(".", modifiers: .command)
+            .disabled(!state.allowsBrowserShortcuts || !state.isSearching)
+
+            Divider()
+
+            Button("键盘快捷键") {
+                state.presentShortcutHelp()
+            }
+            .keyboardShortcut("/", modifiers: .command)
+            .disabled(!state.allowsBrowserShortcuts)
         }
 
         CommandMenu("播放") {
@@ -563,34 +619,135 @@ struct AppCommands: Commands {
                 Task { await state.togglePlayPause() }
             }
                 .keyboardShortcut(.space, modifiers: [])
-                .disabled(!state.isPlayerPresented)
+                .disabled(!state.allowsPlayerShortcuts)
             Button("快退 10 秒") {
                 Task { await state.seek(by: -10) }
             }
                 .keyboardShortcut(.leftArrow, modifiers: [])
-                .disabled(!state.isPlayerPresented)
+                .disabled(
+                    !state.allowsPlayerShortcuts || !state.canSeekPlayback
+                )
             Button("快进 10 秒") {
                 Task { await state.seek(by: 10) }
             }
                 .keyboardShortcut(.rightArrow, modifiers: [])
-                .disabled(!state.isPlayerPresented)
+                .disabled(
+                    !state.allowsPlayerShortcuts || !state.canSeekPlayback
+                )
+            Button("快退 30 秒") {
+                Task { await state.seek(by: -30) }
+            }
+                .keyboardShortcut(.leftArrow, modifiers: .shift)
+                .disabled(
+                    !state.allowsPlayerShortcuts || !state.canSeekPlayback
+                )
+            Button("快进 30 秒") {
+                Task { await state.seek(by: 30) }
+            }
+                .keyboardShortcut(.rightArrow, modifiers: .shift)
+                .disabled(
+                    !state.allowsPlayerShortcuts || !state.canSeekPlayback
+                )
+
             Divider()
+
+            Button("上一集") {
+                Task { await state.playAdjacentEpisode(offset: -1) }
+            }
+                .keyboardShortcut(.leftArrow, modifiers: .option)
+                .disabled(
+                    !state.allowsPlayerShortcuts || !state.hasPreviousEpisode
+                )
+            Button("下一集") {
+                Task { await state.playAdjacentEpisode(offset: 1) }
+            }
+                .keyboardShortcut(.rightArrow, modifiers: .option)
+                .disabled(
+                    !state.allowsPlayerShortcuts || !state.hasNextEpisode
+                )
+
+            Divider()
+
             Button("上一个直播频道") {
                 Task { await state.switchLiveChannel(by: -1) }
             }
                 .keyboardShortcut(.upArrow, modifiers: [])
-                .disabled(!state.canSwitchLiveChannel)
+                .disabled(
+                    !state.allowsPlayerShortcuts || !state.canSwitchLiveChannel
+                )
             Button("下一个直播频道") {
                 Task { await state.switchLiveChannel(by: 1) }
             }
                 .keyboardShortcut(.downArrow, modifiers: [])
-                .disabled(!state.canSwitchLiveChannel)
+                .disabled(
+                    !state.allowsPlayerShortcuts || !state.canSwitchLiveChannel
+                )
+
             Divider()
+
+            Button("静音/取消静音") {
+                Task { await state.togglePlayerMute() }
+            }
+                .keyboardShortcut("m", modifiers: [])
+                .disabled(!state.allowsPlayerShortcuts)
+            Button("降低音量") {
+                Task { await state.adjustPlayerVolume(by: -5) }
+            }
+                .keyboardShortcut("-", modifiers: [])
+                .disabled(!state.allowsPlayerShortcuts)
+            Button("提高音量") {
+                Task { await state.adjustPlayerVolume(by: 5) }
+            }
+                .keyboardShortcut("=", modifiers: [])
+                .disabled(!state.allowsPlayerShortcuts)
+
+            Divider()
+
+            Button("字幕开关") {
+                Task { await state.togglePlayerSubtitles() }
+            }
+                .keyboardShortcut("c", modifiers: [])
+                .disabled(
+                    !state.allowsPlayerShortcuts
+                        || !state.hasPlayerSubtitleTracks
+                )
+            Button("下一个音轨") {
+                Task { await state.cyclePlayerAudioTrack() }
+            }
+                .keyboardShortcut("a", modifiers: [])
+                .disabled(
+                    !state.allowsPlayerShortcuts || !state.hasPlayerAudioTracks
+                )
+
+            Button("降低播放速度") {
+                Task { await state.adjustPlayerSpeed(by: -0.25) }
+            }
+                .keyboardShortcut(",", modifiers: .shift)
+                .disabled(!state.allowsPlayerShortcuts || state.isLivePlayback)
+            Button("提高播放速度") {
+                Task { await state.adjustPlayerSpeed(by: 0.25) }
+            }
+                .keyboardShortcut(".", modifiers: .shift)
+                .disabled(!state.allowsPlayerShortcuts || state.isLivePlayback)
+
+            Divider()
+
+            Button("进入/退出全屏 (F)") {
+                NSApp.keyWindow?.toggleFullScreen(nil)
+            }
+                .keyboardShortcut("f", modifiers: [])
+                .disabled(!state.allowsPlayerShortcuts)
             Button("进入/退出全屏") {
-                (NSApp.keyWindow ?? NSApp.mainWindow)?.toggleFullScreen(nil)
+                NSApp.keyWindow?.toggleFullScreen(nil)
             }
                 .keyboardShortcut("f", modifiers: [.command, .control])
-                .disabled(!state.isPlayerPresented)
+                .disabled(!state.allowsPlayerShortcuts)
+
+            Button("关闭面板或退出全屏") {
+                state.requestPlayerEscapeHandling()
+            }
+                .keyboardShortcut(.cancelAction)
+                .disabled(!state.allowsPlayerShortcuts)
         }
     }
 }
