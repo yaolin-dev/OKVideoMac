@@ -6,6 +6,7 @@ PROJECT_FILE="$SCRIPT_DIR/../OKVideoMac.xcodeproj/project.pbxproj"
 REPOSITORY_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 GRADLE_LOCK="$REPOSITORY_ROOT/OKVideoMac/Helpers/AndroidDexBridge/app/gradle.lockfile"
 BRIDGE_GRADLE="$REPOSITORY_ROOT/OKVideoMac/Helpers/AndroidDexBridge/app/build.gradle"
+BRIDGE_CERTIFICATE_FILE="$SCRIPT_DIR/android-bridge-signing.sha256"
 
 if [[ "$#" -ne 1 ]]; then
   echo "Usage: $0 /path/to/OKVideoMac.app" >&2
@@ -41,6 +42,7 @@ if [[ -z "$APKANALYZER" ]]; then
 fi
 AAPT=""
 DEXDUMP=""
+APKSIGNER=""
 if [[ -n "$ANDROID_SDK" ]]; then
   while IFS= read -r candidate; do
     if [[ -x "$candidate" ]]; then
@@ -56,12 +58,22 @@ if [[ -n "$ANDROID_SDK" ]]; then
     fi
   done < <(find "$ANDROID_SDK/build-tools" -mindepth 2 -maxdepth 2 \
     -path '*/dexdump' -type f 2>/dev/null | sort -r)
+  while IFS= read -r candidate; do
+    if [[ -x "$candidate" ]]; then
+      APKSIGNER="$candidate"
+      break
+    fi
+  done < <(find "$ANDROID_SDK/build-tools" -mindepth 2 -maxdepth 2 \
+    -path '*/apksigner' -type f 2>/dev/null | sort -r)
 fi
 if [[ -z "$AAPT" ]]; then
   AAPT="$(command -v aapt || true)"
 fi
 if [[ -z "$DEXDUMP" ]]; then
   DEXDUMP="$(command -v dexdump || true)"
+fi
+if [[ -z "$APKSIGNER" ]]; then
+  APKSIGNER="$(command -v apksigner || true)"
 fi
 EXPECTED_VERSION="${OKVIDEOMAC_EXPECTED_VERSION:-$(
   awk -F' = ' '/MARKETING_VERSION = / {
@@ -123,6 +135,22 @@ if [[ ! -x "$NODE_RUNTIME" ]]; then
 fi
 if [[ ! -f "$BRIDGE_APK" ]]; then
   echo "Bundled Android Release bridge is missing." >&2
+  exit 1
+fi
+if [[ ! -f "$BRIDGE_CERTIFICATE_FILE" ]] || [[ ! -x "$APKSIGNER" ]]; then
+  echo "Pinned Bridge certificate and apksigner are required for bundle verification." >&2
+  exit 1
+fi
+EXPECTED_BRIDGE_CERTIFICATE="$(tr -d '[:space:]' < "$BRIDGE_CERTIFICATE_FILE")"
+ACTUAL_BRIDGE_CERTIFICATE="$($APKSIGNER verify --print-certs "$BRIDGE_APK" |
+  awk -F': ' '/Signer #1 certificate SHA-256 digest:/ {
+    value=$2
+    gsub(/[^0-9A-Fa-f]/, "", value)
+    print tolower(value)
+    exit
+  }')"
+if [[ "$ACTUAL_BRIDGE_CERTIFICATE" != "$EXPECTED_BRIDGE_CERTIFICATE" ]]; then
+  echo "Bundled Android Bridge signing identity mismatch." >&2
   exit 1
 fi
 ACTUAL_VERSION="$(

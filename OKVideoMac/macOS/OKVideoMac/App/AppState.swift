@@ -3047,6 +3047,8 @@ final class AppState: ObservableObject {
     @Published var cloudAuthorizationInput = ""
     @Published private(set) var nodeWebPresentation: NodeWebPresentation?
     @Published private(set) var androidRuntimeStatus: AndroidRuntimeStatus = .checking
+    @Published private(set) var androidRuntimeContinuityStatus:
+        AndroidRuntimeContinuityStatus = .checking
     @Published private(set) var isAndroidRuntimeBusy = false
 
     var mainWindowCloudAuthorizationPrompt: CloudAuthorizationPrompt? {
@@ -9831,6 +9833,8 @@ final class AppState: ObservableObject {
             return
         }
         androidRuntimeStatus = await environment.androidDexBridge.runtimeStatus()
+        androidRuntimeContinuityStatus = await environment.androidDexBridge
+            .runtimeContinuityStatus()
     }
 
     func chooseAndroidSDK() async {
@@ -9903,6 +9907,31 @@ final class AppState: ObservableObject {
             androidRuntimeStatus = await environment.androidDexBridge
                 .runtimeStatus()
             show(error, title: "Android 兼容模块修复失败")
+        }
+    }
+
+    func migrateLegacyAndroidRuntime() async {
+        guard let environment, !isAndroidRuntimeBusy else { return }
+        isAndroidRuntimeBusy = true
+        androidRuntimeContinuityStatus = .migrating
+        defer { isAndroidRuntimeBusy = false }
+        do {
+            androidRuntimeStatus = .starting(
+                "正在复制并验证旧版授权环境",
+                progress: 0
+            )
+            androidRuntimeContinuityStatus = try await environment
+                .androidDexBridge.migrateLegacyRuntime()
+            androidRuntimeStatus = await environment.androidDexBridge
+                .runtimeStatus()
+            androidRuntimeContinuityStatus = await environment.androidDexBridge
+                .runtimeContinuityStatus()
+        } catch {
+            androidRuntimeStatus = await environment.androidDexBridge
+                .runtimeStatus()
+            androidRuntimeContinuityStatus = await environment.androidDexBridge
+                .runtimeContinuityStatus()
+            show(error, title: "旧版授权环境迁移失败")
         }
     }
 

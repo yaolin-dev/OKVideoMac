@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @EnvironmentObject private var state: AppState
     @State private var posterCacheSize = "正在计算…"
+    @State private var confirmsLegacyAndroidMigration = false
 
     var body: some View {
         ZStack {
@@ -31,6 +32,21 @@ struct SettingsView: View {
         .navigationTitle("设置")
         .task {
             await refreshCacheSize()
+        }
+        .alert(
+            "迁移旧版网盘授权？",
+            isPresented: $confirmsLegacyAndroidMigration
+        ) {
+            Button("创建副本并迁移") {
+                Task { await state.migrateLegacyAndroidRuntime() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(
+                "应用会先停止专用 Android 环境，完整复制旧 AVD 并校验，"
+                    + "再把当前环境移入时间戳备份。旧 AVD 不会被覆盖；"
+                    + "验证失败会自动恢复当前环境。"
+            )
         }
     }
 
@@ -444,6 +460,28 @@ struct SettingsView: View {
 
                 SettingsDivider()
 
+                SettingsControlRow(
+                    icon: androidContinuityIcon,
+                    color: androidContinuityColor,
+                    title: state.androidRuntimeContinuityStatus.title,
+                    subtitle: state.androidRuntimeContinuityStatus.detail
+                ) {
+                    if state.androidRuntimeContinuityStatus.canMigrate {
+                        Button("安全迁移…") {
+                            confirmsLegacyAndroidMigration = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(state.isAndroidRuntimeBusy)
+                    } else if let backup = state
+                        .androidRuntimeContinuityStatus.backupLabel {
+                        Text("备份：\(backup)")
+                            .font(.caption.monospaced())
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                SettingsDivider()
+
                 VStack(alignment: .leading, spacing: 6) {
                     Label(
                         "该模块仅用于需要 Android Java/Dex 运行环境的点播站点；普通 API 站点和 JavaScript 站点不需要启动。",
@@ -495,6 +533,24 @@ struct SettingsView: View {
         case .starting, .checking, .stopping: return .orange
         case .failed, .unavailable: return .red
         case .stopped: return .secondary
+        }
+    }
+
+    private var androidContinuityIcon: String {
+        switch state.androidRuntimeContinuityStatus.phase {
+        case .continuous, .migrated: return "checkmark.shield.fill"
+        case .legacyAvailable: return "externaldrive.badge.plus"
+        case .checking, .migrating: return "arrow.triangle.2.circlepath"
+        case .blocked: return "exclamationmark.shield.fill"
+        }
+    }
+
+    private var androidContinuityColor: Color {
+        switch state.androidRuntimeContinuityStatus.phase {
+        case .continuous, .migrated: return .green
+        case .legacyAvailable: return .orange
+        case .checking, .migrating: return .blue
+        case .blocked: return .red
         }
     }
 

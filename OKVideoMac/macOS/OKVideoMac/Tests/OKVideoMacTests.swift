@@ -7096,35 +7096,14 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(versionName, AndroidDexBridgeRuntime.bridgeVersion)
         XCTAssertEqual(versionCode, AndroidDexBridgeRuntime.bridgeVersionCode)
 
-        let repository = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let gradle = try String(
-            contentsOf: repository.appendingPathComponent(
-                "Helpers/AndroidDexBridge/app/build.gradle"
-            ),
-            encoding: .utf8
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.bridgeApplicationID,
+            packageName
         )
-        XCTAssertTrue(gradle.contains(
-            "versionCode = \(AndroidDexBridgeRuntime.bridgeVersionCode)"
-        ))
-        XCTAssertTrue(gradle.contains(
-            "versionName = \"\(AndroidDexBridgeRuntime.bridgeVersion)\""
-        ))
-
-        let bridgeServer = try String(
-            contentsOf: repository.appendingPathComponent(
-                "Helpers/AndroidDexBridge/app/src/main/java/"
-                    + "com/okvideomac/dexbridge/BridgeServer.java"
-            ),
-            encoding: .utf8
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.bridgeCertificateSHA256.count,
+            64
         )
-        XCTAssertTrue(bridgeServer.contains(
-            ".getPackageInfo(context.getPackageName(), 0)"
-        ))
-        XCTAssertTrue(bridgeServer.contains(".versionName"))
         XCTAssertEqual(
             AndroidDexBridgeRuntime.healthValidation(
                 [
@@ -7135,6 +7114,48 @@ final class OKVideoMacTests: XCTestCase {
                 generation: "packaged-generation"
             ),
             .healthy
+        )
+    }
+
+    func testAndroidAVDPersistentFingerprintDetectsDataChanges() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString,
+            isDirectory: true
+        )
+        let first = root.appendingPathComponent("first.avd", isDirectory: true)
+        let second = root.appendingPathComponent("second.avd", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: first,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: second,
+            withIntermediateDirectories: true
+        )
+        let config = Data("target=android-35\n".utf8)
+        let userdata = Data(repeating: 0x5a, count: 140_000)
+        for directory in [first, second] {
+            try config.write(to: directory.appendingPathComponent("config.ini"))
+            try userdata.write(
+                to: directory.appendingPathComponent("userdata-qemu.img.qcow2")
+            )
+        }
+        let firstFingerprint = try AndroidDexBridgeRuntime
+            .avdPersistentFingerprint(at: first)
+        XCTAssertEqual(
+            firstFingerprint,
+            try AndroidDexBridgeRuntime.avdPersistentFingerprint(at: second)
+        )
+
+        var changed = userdata
+        changed[changed.count - 1] = 0x6b
+        try changed.write(
+            to: second.appendingPathComponent("userdata-qemu.img.qcow2")
+        )
+        XCTAssertNotEqual(
+            firstFingerprint,
+            try AndroidDexBridgeRuntime.avdPersistentFingerprint(at: second)
         )
     }
 
@@ -7328,6 +7349,43 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertNil(
             AndroidDexBridgeRuntime.installedVersionCode(
                 from: "package not installed"
+            )
+        )
+    }
+
+    func testAndroidBridgeInstallMustPreservePackageIdentity() throws {
+        let before = try XCTUnwrap(
+            AndroidDexBridgeRuntime.installedPackageContinuity(
+                from: """
+                  userId=10123
+                  dataDir=/data/user/0/com.okvideomac.dexbridge
+                  firstInstallTime=2026-08-20 10:11:12
+                """
+            )
+        )
+        let after = try XCTUnwrap(
+            AndroidDexBridgeRuntime.installedPackageContinuity(
+                from: """
+                  userId=10123
+                  dataDir=/data/user/0/com.okvideomac.dexbridge
+                  firstInstallTime=2026-08-20 10:11:12
+                """
+            )
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.installPreservesPackageContinuity(
+                before: before,
+                after: after
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.installPreservesPackageContinuity(
+                before: before,
+                after: AndroidInstalledPackageContinuity(
+                    firstInstallTime: after.firstInstallTime,
+                    userID: after.userID + 1,
+                    dataDirectory: after.dataDirectory
+                )
             )
         )
     }

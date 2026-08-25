@@ -1,6 +1,7 @@
 package com.okvideomac.dexbridge;
 
 import android.content.Context;
+import android.content.pm.PackageInfo;
 import android.util.Log;
 
 import org.json.JSONArray;
@@ -19,6 +20,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Locale;
@@ -279,6 +281,29 @@ final class BridgeServer {
                                     .put("secureInputRedaction")
                     );
                     writeJSON(output, 200, health);
+                    return;
+                }
+                if ("GET".equals(method)
+                        && "/v1/runtime/continuity".equals(path)) {
+                    PackageInfo packageInfo = context.getPackageManager()
+                            .getPackageInfo(context.getPackageName(), 0);
+                    JSONObject continuity = new JSONObject();
+                    continuity.put("ok", true);
+                    continuity.put("runtimeSchemaVersion", 1);
+                    continuity.put("applicationId", context.getPackageName());
+                    continuity.put("versionCode", packageInfo.versionCode);
+                    continuity.put("firstInstallTime", packageInfo.firstInstallTime);
+                    continuity.put("lastUpdateTime", packageInfo.lastUpdateTime);
+                    continuity.put("uid", context.getApplicationInfo().uid);
+                    continuity.put(
+                            "dataDirectoryFingerprint",
+                            sha256(context.getApplicationInfo().dataDir)
+                    );
+                    continuity.put(
+                            "authorizationStorageFingerprint",
+                            BridgeAuthorizationStorageFingerprint.capture(context)
+                    );
+                    writeJSON(output, 200, continuity);
                     return;
                 }
                 if (path.startsWith("/proxy/media/")
@@ -730,6 +755,22 @@ final class BridgeServer {
             }
         } catch (Throwable error) {
             Log.e(TAG, "RPC connection failed", error);
+        }
+    }
+
+    private static String sha256(String value) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] bytes = digest.digest(
+                    (value == null ? "" : value).getBytes(StandardCharsets.UTF_8)
+            );
+            StringBuilder output = new StringBuilder(64);
+            for (byte item : bytes) {
+                output.append(String.format("%02x", item & 0xff));
+            }
+            return output.toString();
+        } catch (Throwable ignored) {
+            return "";
         }
     }
 
