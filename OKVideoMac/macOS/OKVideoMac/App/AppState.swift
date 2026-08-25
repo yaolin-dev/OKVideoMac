@@ -2632,6 +2632,7 @@ final class AppState: ObservableObject {
     @Published private(set) var searchFolderPath: [SearchFolderPage] = []
     @Published private(set) var favorites: [FavoriteRecord] = []
     @Published private(set) var history: [HistoryRecord] = []
+    @Published private(set) var historyPlaybackLoadingID: HistoryRecord.ID?
     @Published private(set) var liveSources: [StoredLiveSource] = []
     @Published private(set) var loadedLivePlaylists: [UUID: LivePlaylist] = [:]
     @Published private(set) var loadedEPGGuides: [UUID: XMLTVGuide] = [:]
@@ -2727,6 +2728,7 @@ final class AppState: ObservableObject {
     private var playbackRequestsResolving = Set<UUID>()
     private var playbackQualitySwitchSessionID = UUID()
     private var lastHistorySaveAt = Date.distantPast
+    private var historyPlaybackPreparationID = UUID()
     private var pendingHistoryWrite: PlaybackHistoryWrite?
     private var historyPersistenceTask: Task<Void, Never>?
     private var shutdownTask: Task<Void, Never>?
@@ -6314,6 +6316,14 @@ final class AppState: ObservableObject {
     }
 
     func openHistory(_ item: HistoryRecord) async {
+        let preparationID = UUID()
+        historyPlaybackPreparationID = preparationID
+        historyPlaybackLoadingID = item.id
+        defer {
+            if historyPlaybackPreparationID == preparationID {
+                historyPlaybackLoadingID = nil
+            }
+        }
         switch Self.historyConfigurationResolution(
             record: item,
             activeConfigurationID: activeConfigurationRecord?.id,
@@ -6353,23 +6363,16 @@ final class AppState: ObservableObject {
             )
             return
         }
-        let preparationID = presentHistoryPlaybackShell(
-            item,
-            siteName: siteName,
-            configurationID: owningConfigurationID
-        )
         guard let provider = providers[item.siteKey] else {
             if await replayCachedHistory(
                 item,
                 siteName: siteName,
-                owningSessionID: preparationID
+                owningConfigurationID: owningConfigurationID,
+                owningPreparationID: preparationID
             ) {
                 return
             }
             guard isCurrentHistoryPreparation(preparationID) else { return }
-            playerSnapshot.status = .failed("来源暂时不可用")
-            playbackResolutionState = .failed
-            playbackFailureSummary = "来源 \(siteName) 在当前配置中不可用，无法恢复播放"
             show(
                 AppError.site("来源 \(siteName) 在当前配置中不可用，无法恢复播放"),
                 title: "历史播放失败"
@@ -6377,12 +6380,9 @@ final class AppState: ObservableObject {
             return
         }
 
-        isLoading = true
-        defer { isLoading = false }
         do {
             let detail = try await provider.detail(id: item.videoID)
             guard isCurrentHistoryPreparation(preparationID) else { return }
-            isLoading = false
 
             if let selection = Self.historyPlaybackSelection(
                 in: detail,
@@ -6417,7 +6417,6 @@ final class AppState: ObservableObject {
                 Self.persistentHistoryEpisodeReference
             ) {
             guard isCurrentHistoryPreparation(preparationID) else { return }
-            isLoading = false
             let context = Self.historyPlaybackContext(
                 record: item,
                 siteName: siteName,
@@ -6435,9 +6434,9 @@ final class AppState: ObservableObject {
         if await replayCachedHistory(
             item,
             siteName: siteName,
-            owningSessionID: preparationID
+            owningConfigurationID: owningConfigurationID,
+            owningPreparationID: preparationID
         ) {
-            isLoading = false
             return
         }
         guard isCurrentHistoryPreparation(preparationID) else { return }
@@ -6458,7 +6457,6 @@ final class AppState: ObservableObject {
                     in: detail,
                     record: item
                 ) {
-                    isLoading = false
                     await startPlayback(
                         detail: detail,
                         source: selection.source,
@@ -6474,14 +6472,9 @@ final class AppState: ObservableObject {
         }
 
         guard isCurrentHistoryPreparation(preparationID) else { return }
-        isLoading = false
-        playerSnapshot.status = .failed("历史记录恢复失败")
-        playbackResolutionState = .failed
-        playbackFailureSummary = "该来源暂时无法重新获取详情"
         show(
             AppError.playback(
-                "该来源暂时无法重新获取详情，旧记录中的临时播放地址也已失效。"
-                    + "请从搜索结果重新打开一次；新产生的历史记录会保存可刷新的分集信息。"
+                "原资源已变化，或当前来源无法重新定位原分集，请重新选择。"
             ),
             title: "历史播放失败"
         )
@@ -6490,7 +6483,8 @@ final class AppState: ObservableObject {
     private func replayCachedHistory(
         _ item: HistoryRecord,
         siteName: String,
-        owningSessionID: UUID? = nil
+        owningConfigurationID: UUID,
+        owningPreparationID: UUID
     ) async -> Bool {
         guard let environment,
               let replay = Self.replayableHistoryPlayback(
@@ -6508,34 +6502,49 @@ final class AppState: ObservableObject {
         )) == true else {
             return false
         }
-        if let owningSessionID,
-           !isCurrentHistoryPreparation(owningSessionID) {
+        guard isCurrentHistoryPreparation(owningPreparationID) else {
             return false
         }
-        let sessionID = owningSessionID ?? playbackSessionID
-        guard let configurationID = item.configurationID
-                ?? activeConfigurationRecord?.id else {
-            return false
-        }
+        // Only reveal the player after the cached media has been validated.
+        // Detail/provider recovery paths call startPlayback(), which follows
+        // the same prepare-then-present ordering.
+        let sessionID = prepareHistoryPlaybackShell(
+            item,
+            siteName: siteName,
+            configurationID: owningConfigurationID
+        )
         do {
+            try await environment.player.prepareForPlayback(
+                requestID: sessionID
+            )
+            guard isCurrentHistoryPreparation(owningPreparationID),
+                  playbackSessionID == sessionID else { return false }
+            presentPlayer()
+            await environment.player.stop()
+            guard isCurrentHistoryPreparation(owningPreparationID),
+                  playbackSessionID == sessionID else { return false }
             try await loadResolvedPlayback(
                 replay.media,
                 detail: replay.detail,
                 source: replay.source,
                 episode: replay.episode,
-                configurationID: configurationID,
+                configurationID: owningConfigurationID,
                 sessionID: sessionID
             )
-            guard playbackSessionID == sessionID else { return false }
+            guard isCurrentHistoryPreparation(owningPreparationID),
+                  playbackSessionID == sessionID else { return false }
             playbackResolutionState = .playing
             playbackFailureSummary = nil
             return true
         } catch {
+            if playbackSessionID == sessionID, isPlayerPresented {
+                await dismissPlayerSurfaceAndRestoreWindow()
+            }
             return false
         }
     }
 
-    private func presentHistoryPlaybackShell(
+    private func prepareHistoryPlaybackShell(
         _ item: HistoryRecord,
         siteName: String,
         configurationID: UUID
@@ -6576,12 +6585,11 @@ final class AppState: ObservableObject {
             isMuted: playerSnapshot.isMuted,
             speed: playerSnapshot.speed
         )
-        presentPlayer()
         return preparationID
     }
 
     private func isCurrentHistoryPreparation(_ preparationID: UUID) -> Bool {
-        isPlayerPresented && playbackSessionID == preparationID
+        historyPlaybackPreparationID == preparationID
     }
 
     func dismissDetail() {

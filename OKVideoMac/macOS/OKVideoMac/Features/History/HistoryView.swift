@@ -87,6 +87,7 @@ struct HistoryView: View {
                 .padding(.vertical, 14)
             }
             .buttonStyle(.plain)
+            .disabled(state.historyPlaybackLoadingID == item.id)
             .appInteractiveHover(cornerRadius: 10, selected: selectedIDs.contains(item.id))
             .contextMenu {
                 Button(role: .destructive) {
@@ -157,14 +158,26 @@ struct HistoryView: View {
                 }
             }
             Spacer()
-            Text(
-                item.watchedAt.formatted(
-                    date: .abbreviated,
-                    time: .shortened
+            if state.historyPlaybackLoadingID == item.id {
+                HStack(spacing: 7) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("正在恢复…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("正在恢复历史记录")
+            } else {
+                Text(
+                    item.watchedAt.formatted(
+                        date: .abbreviated,
+                        time: .shortened
+                    )
                 )
-            )
-            .font(.caption)
-            .foregroundColor(.secondary)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
         }
     }
 

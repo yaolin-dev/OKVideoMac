@@ -100,7 +100,7 @@ struct QuarkKeychainPasscodeStore: QuarkPasscodeStoring {
     private static let service = "com.okvideomac.quark-history-passcode.v1"
 
     func passcode(for account: String) -> String? {
-        var query = baseQuery(account: account)
+        var query = nonInteractiveQuery(account: account)
         query[kSecMatchLimit] = kSecMatchLimitOne
         query[kSecReturnData] = true
         var result: CFTypeRef?
@@ -114,7 +114,7 @@ struct QuarkKeychainPasscodeStore: QuarkPasscodeStoring {
     @discardableResult
     func store(_ passcode: String, for account: String) -> Bool {
         let valueData = Data(passcode.utf8)
-        let query = baseQuery(account: account)
+        let query = nonInteractiveQuery(account: account)
         let updateStatus = SecItemUpdate(
             query as CFDictionary,
             [kSecValueData: valueData] as CFDictionary
@@ -126,7 +126,7 @@ struct QuarkKeychainPasscodeStore: QuarkPasscodeStoring {
             return false
         }
 
-        var item = query
+        var item = baseQuery(account: account)
         item[kSecValueData] = valueData
         item[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
@@ -139,6 +139,15 @@ struct QuarkKeychainPasscodeStore: QuarkPasscodeStoring {
             kSecAttrAccount: account,
             kSecAttrSynchronizable: false
         ]
+    }
+
+    private func nonInteractiveQuery(account: String) -> [CFString: Any] {
+        var query = baseQuery(account: account)
+        // History restoration and background migration must never summon the
+        // system password dialog. An inaccessible item is treated exactly like
+        // a cache miss and the provider reacquires current authorization state.
+        query[kSecUseAuthenticationUI] = kSecUseAuthenticationUIFail
+        return query
     }
 }
 
@@ -166,7 +175,7 @@ struct NodePlaybackKeychainReplayStore: NodePlaybackReplayStoring {
     private static let service = "com.okvideomac.node-playback-replay.v1"
 
     func replay(for locator: String) -> NodePlaybackReplay? {
-        var query = baseQuery(account: locator)
+        var query = nonInteractiveQuery(account: locator)
         query[kSecMatchLimit] = kSecMatchLimitOne
         query[kSecReturnData] = true
         var result: CFTypeRef?
@@ -182,7 +191,7 @@ struct NodePlaybackKeychainReplayStore: NodePlaybackReplayStoring {
         guard let valueData = try? JSONEncoder().encode(replay) else {
             return false
         }
-        let query = baseQuery(account: locator)
+        let query = nonInteractiveQuery(account: locator)
         let updateStatus = SecItemUpdate(
             query as CFDictionary,
             [kSecValueData: valueData] as CFDictionary
@@ -194,7 +203,7 @@ struct NodePlaybackKeychainReplayStore: NodePlaybackReplayStoring {
             return false
         }
 
-        var item = query
+        var item = baseQuery(account: locator)
         item[kSecValueData] = valueData
         item[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
@@ -202,7 +211,9 @@ struct NodePlaybackKeychainReplayStore: NodePlaybackReplayStoring {
 
     @discardableResult
     func removeReplay(for locator: String) -> Bool {
-        let status = SecItemDelete(baseQuery(account: locator) as CFDictionary)
+        let status = SecItemDelete(
+            nonInteractiveQuery(account: locator) as CFDictionary
+        )
         return status == errSecSuccess || status == errSecItemNotFound
     }
 
@@ -213,6 +224,86 @@ struct NodePlaybackKeychainReplayStore: NodePlaybackReplayStoring {
             kSecAttrAccount: account,
             kSecAttrSynchronizable: false
         ]
+    }
+
+    private func nonInteractiveQuery(account: String) -> [CFString: Any] {
+        var query = baseQuery(account: account)
+        query[kSecUseAuthenticationUI] = kSecUseAuthenticationUIFail
+        return query
+    }
+}
+
+/// Fast process-local replay cache. The locator is already bound to the
+/// configuration and site, so sharing this cache across provider rebuilds is
+/// safe and lets a source switch retain recently resolved Node playback input.
+private final class NodePlaybackSessionReplayStore: NodePlaybackReplayStoring {
+    static let shared = NodePlaybackSessionReplayStore()
+
+    private let lock = NSLock()
+    private var values: [String: NodePlaybackReplay] = [:]
+
+    func replay(for locator: String) -> NodePlaybackReplay? {
+        lock.lock()
+        defer { lock.unlock() }
+        return values[locator]
+    }
+
+    @discardableResult
+    func store(_ replay: NodePlaybackReplay, for locator: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        values[locator] = replay
+        return true
+    }
+
+    @discardableResult
+    func removeReplay(for locator: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        values.removeValue(forKey: locator)
+        return true
+    }
+}
+
+/// Keychain is a best-effort migration/fast-replay layer, never a requirement
+/// for playback. A rebuilt ad-hoc app may be unable to read an older item's ACL;
+/// in that case the in-memory layer continues for this run and history recovery
+/// falls back to current provider detail after restart.
+private struct NodePlaybackTieredReplayStore: NodePlaybackReplayStoring {
+    private let memory: NodePlaybackReplayStoring
+    private let keychain: NodePlaybackReplayStoring
+
+    init(
+        memory: NodePlaybackReplayStoring = NodePlaybackSessionReplayStore.shared,
+        keychain: NodePlaybackReplayStoring = NodePlaybackKeychainReplayStore()
+    ) {
+        self.memory = memory
+        self.keychain = keychain
+    }
+
+    func replay(for locator: String) -> NodePlaybackReplay? {
+        if let replay = memory.replay(for: locator) {
+            return replay
+        }
+        guard let replay = keychain.replay(for: locator) else {
+            return nil
+        }
+        _ = memory.store(replay, for: locator)
+        return replay
+    }
+
+    @discardableResult
+    func store(_ replay: NodePlaybackReplay, for locator: String) -> Bool {
+        let storedInMemory = memory.store(replay, for: locator)
+        _ = keychain.store(replay, for: locator)
+        return storedInMemory
+    }
+
+    @discardableResult
+    func removeReplay(for locator: String) -> Bool {
+        let removedFromMemory = memory.removeReplay(for: locator)
+        _ = keychain.removeReplay(for: locator)
+        return removedFromMemory
     }
 }
 
@@ -613,7 +704,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         ensureRuntimeReady: (@Sendable () async throws -> URL)? = nil,
         quarkPasscodeStore: QuarkPasscodeStoring = QuarkKeychainPasscodeStore(),
         playbackReplayStore: NodePlaybackReplayStoring =
-            NodePlaybackKeychainReplayStore(),
+            NodePlaybackTieredReplayStore(),
         configurationIdentity: String? = nil
     ) throws {
         guard Self.canHandle(site: site, baseURL: baseURL) else {
@@ -875,26 +966,6 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     ) async throws -> RefreshedSitePlayback {
         let requestedSourceName = request.sourceName?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if let reference = request.providerResourceReference,
-           (NodePlaybackReplayReference.isLocator(
-               reference.stableResourceLocator
-           ) || NodeProviderLocatorReference.isLocator(
-               reference.stableResourceLocator
-           )),
-           reference.configurationIdentity == configurationIdentity,
-           reference.siteIdentity == site.key,
-           reference.providerKind == "node-http-spider",
-           playbackReplayStore.replay(
-               for: reference.stableResourceLocator
-           ) == nil {
-            // A replay locator is only a device-local Keychain handle. It is
-            // intentionally impossible to turn the digest back into a raw
-            // episode capability. Do not feed it to the runtime or fall back
-            // to an ambiguous title search when that Keychain item is gone.
-            throw AppError.playback(
-                "该历史记录的本机安全资源引用已失效，请从搜索结果重新打开一次以修复"
-            )
-        }
         if let reference = request.providerResourceReference,
            acceptsPlaybackResourceReference(reference) {
             let replay = playbackReplay(for: reference)

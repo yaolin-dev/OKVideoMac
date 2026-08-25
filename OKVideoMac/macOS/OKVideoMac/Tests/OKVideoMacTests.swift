@@ -6866,11 +6866,11 @@ final class OKVideoMacTests: XCTestCase {
         process.standardOutput = output
         process.standardError = output
         try process.run()
+        // aapt badging can exceed the pipe buffer. Drain while the child is
+        // running; waiting first can deadlock the complete Xcode test suite.
+        let data = output.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        let text = String(
-            decoding: output.fileHandleForReading.readDataToEndOfFile(),
-            as: UTF8.self
-        )
+        let text = String(decoding: data, as: UTF8.self)
         XCTAssertEqual(process.terminationStatus, 0, text)
         return text
     }
@@ -11885,22 +11885,35 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                 for: persistedReference.stableResourceLocator
             )
         )
-        do {
-            _ = try await restartedProvider.refreshPlayback(
-                PlaybackRefreshRequest(
-                    videoID: "history-video",
-                    title: "多个完全同名结果",
-                    sourceIdentity: persistedReference.sourceIdentity,
-                    resourceIdentity: persistedReference.episodeIdentity,
-                    sourceName: "provider-line",
-                    episodeName: "历史分集",
-                    providerResourceReference: persistedReference
-                )
+        let fallbackClient = NodeStableReferenceHTTPClient(
+            stableLocator: nil,
+            detailEpisode: "fresh-provider-episode",
+            detailSourceName: "provider-line"
+        )
+        let fallbackProvider = try makeGenericNodeProvider(
+            httpClient: fallbackClient,
+            configurationIdentity: configurationIdentity,
+            playbackReplayStore: replayStore
+        )
+        let fallback = try await fallbackProvider.refreshPlayback(
+            PlaybackRefreshRequest(
+                videoID: "history-video",
+                title: "多个完全同名结果",
+                sourceIdentity: persistedReference.sourceIdentity,
+                resourceIdentity: persistedReference.episodeIdentity,
+                sourceName: "provider-line",
+                episodeName: "历史分集",
+                providerResourceReference: persistedReference
             )
-            XCTFail("missing device-local locator must fail closed")
-        } catch {
-            XCTAssertTrue(error.localizedDescription.contains("本机安全资源引用"))
-        }
+        )
+        XCTAssertEqual(fallback.episode.url, "fresh-provider-episode")
+        let fallbackRequests = await fallbackClient.capturedRequests()
+        XCTAssertTrue(fallbackRequests.contains {
+            $0.url.path.hasSuffix("/detail")
+        })
+        XCTAssertTrue(fallbackRequests.contains {
+            $0.url.path.hasSuffix("/play")
+        })
     }
 
     func testNodePlayerKeepsCompatibilityReplayCapabilityOutOfHistory()
@@ -12036,7 +12049,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
     }
 
-    func testNodeSecureReplayReferenceDoesNotFallBackWhenKeychainItemMissing()
+    func testNodeSecureReplayReferenceFallsBackToCurrentDetailWhenStoreMissing()
         async throws {
         let configurationIdentity = UUID().uuidString.lowercased()
         let initialStore = NodePlaybackReplayMemoryStore()
@@ -12050,37 +12063,36 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             episodeURL: "opaque-file-42"
         )
         let reference = try XCTUnwrap(initial.resourceReference)
-        let refreshClient = NodeStableReferenceHTTPClient(stableLocator: nil)
+        let refreshClient = NodeStableReferenceHTTPClient(
+            stableLocator: nil,
+            detailEpisode: "fresh-episode-42"
+        )
         let restartedProvider = try makeGenericNodeProvider(
             httpClient: refreshClient,
             configurationIdentity: configurationIdentity,
             playbackReplayStore: NodePlaybackReplayMemoryStore()
         )
 
-        do {
-            _ = try await restartedProvider.refreshPlayback(
-                PlaybackRefreshRequest(
-                    videoID: "history-video",
-                    title: "重复标题",
-                    sourceIdentity: reference.sourceIdentity,
-                    resourceIdentity: reference.episodeIdentity,
-                    sourceName: "cloud-original",
-                    episodeName: "历史分集",
-                    episodeReference: "expired-display-reference",
-                    providerResourceReference: reference
-                )
+        let refreshed = try await restartedProvider.refreshPlayback(
+            PlaybackRefreshRequest(
+                videoID: "history-video",
+                title: "重复标题",
+                sourceIdentity: reference.sourceIdentity,
+                resourceIdentity: reference.episodeIdentity,
+                sourceName: "cloud-original",
+                episodeName: "历史分集",
+                episodeReference: "expired-display-reference",
+                providerResourceReference: reference
             )
-            XCTFail("missing secure replay entry must not use title search")
-        } catch {
-            XCTAssertTrue(error.localizedDescription.contains("安全资源引用已失效"))
-        }
+        )
+        XCTAssertEqual(refreshed.episode.url, "fresh-episode-42")
 
         let requests = await refreshClient.capturedRequests()
-        XCTAssertFalse(requests.contains {
-            $0.url.path.hasSuffix("/play")
-                || $0.url.path.hasSuffix("/search")
-                || $0.url.path.hasSuffix("/detail")
+        XCTAssertTrue(requests.contains {
+            $0.url.path.hasSuffix("/detail")
         })
+        XCTAssertTrue(requests.contains { $0.url.path.hasSuffix("/play") })
+        XCTAssertFalse(requests.contains { $0.url.path.hasSuffix("/search") })
     }
 
     func testNodeLoopbackPlayFailsClosedWhenSecureReplayCannotBeStored()
@@ -12811,10 +12823,18 @@ private struct NodeProviderStubHTTPClient: HTTPClient {
 
 private actor NodeStableReferenceHTTPClient: HTTPClient {
     private let stableLocator: String?
+    private let detailEpisode: String?
+    private let detailSourceName: String
     private var requests: [HTTPRequest] = []
 
-    init(stableLocator: String?) {
+    init(
+        stableLocator: String?,
+        detailEpisode: String? = nil,
+        detailSourceName: String = "cloud-original"
+    ) {
         self.stableLocator = stableLocator
+        self.detailEpisode = detailEpisode
+        self.detailSourceName = detailSourceName
     }
 
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
@@ -12825,6 +12845,26 @@ private actor NodeStableReferenceHTTPClient: HTTPClient {
                 statusCode: 404,
                 headers: [:],
                 body: Data()
+            )
+        }
+        if request.url.path.hasSuffix("/detail"),
+           let detailEpisode {
+            let response: [String: Any] = [
+                "list": [[
+                    "vod_id": "history-video",
+                    "vod_name": "重复标题",
+                    "vod_play_from": detailSourceName,
+                    "vod_play_url": "历史分集$\(detailEpisode)"
+                ]]
+            ]
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: try JSONSerialization.data(
+                    withJSONObject: response,
+                    options: [.sortedKeys, .withoutEscapingSlashes]
+                )
             )
         }
         guard request.url.path.hasSuffix("/play") else {
