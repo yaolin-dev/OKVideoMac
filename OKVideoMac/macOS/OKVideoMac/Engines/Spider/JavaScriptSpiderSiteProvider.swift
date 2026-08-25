@@ -1149,7 +1149,20 @@ private actor JavaScriptSpiderSession {
 /// opaque action IDs; localized titles remain presentation-only.
 enum MyDriveGuardActionContract {
     static let providerAPI = "csp_MyDriveGuard"
+    static let configurationCenterAPI = "csp_FishConfig"
     static let loginAction = "LoginShow"
+
+    /// Both providers expose the same stable cloud-account action contract.
+    /// `csp_FishConfig` is the configuration-center facade used by current
+    /// sources, while `csp_MyDriveGuard` is the underlying legacy provider.
+    /// Bind the behavior to these provider classes and opaque action IDs, not
+    /// to localized card titles such as “扫码登录”.
+    static func supportsAccountAuthorization(api: String) -> Bool {
+        let normalized = api.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        return normalized == providerAPI || normalized == configurationCenterAPI
+    }
 
     static func tag(for action: String?) -> String? {
         switch action?.trimmingCharacters(in: .whitespacesAndNewlines) {
@@ -1299,8 +1312,9 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         to home: SiteHome,
         site: SiteConfiguration
     ) -> SiteHome {
-        guard site.api.trimmingCharacters(in: .whitespacesAndNewlines)
-            == MyDriveGuardActionContract.providerAPI else {
+        guard MyDriveGuardActionContract.supportsAccountAuthorization(
+            api: site.api
+        ) else {
             return home
         }
         var updated = home
@@ -1322,8 +1336,9 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         _ home: SiteHome,
         site: SiteConfiguration
     ) -> Bool {
-        guard site.api.trimmingCharacters(in: .whitespacesAndNewlines)
-            == MyDriveGuardActionContract.providerAPI else {
+        guard MyDriveGuardActionContract.supportsAccountAuthorization(
+            api: site.api
+        ) else {
             return false
         }
         return applyingHomeContract(to: home, site: site).categories.contains {
@@ -1359,8 +1374,9 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
             baseURL: baseURL,
             page: page
         )
-        guard site.api.trimmingCharacters(in: .whitespacesAndNewlines)
-            == MyDriveGuardActionContract.providerAPI else {
+        guard MyDriveGuardActionContract.supportsAccountAuthorization(
+            api: site.api
+        ) else {
             return mapped
         }
         return VideoPage(

@@ -284,6 +284,22 @@ struct CloudAccountStatusStore: Codable, Equatable, Sendable {
         })?.status
     }
 
+    func status(
+        providerID: String,
+        matchingAccountLabel accountLabel: String
+    ) -> CloudAccountSnapshotStatus? {
+        records
+            .filter {
+                $0.key.providerID == providerID
+                    && CloudAccountIdentityPolicy.matches(
+                        $0.key.accountKey,
+                        accountLabel
+                    )
+            }
+            .max(by: { $0.verifiedAt < $1.verifiedAt })?
+            .status
+    }
+
     @discardableResult
     mutating func observe(
         title: String,
@@ -467,6 +483,107 @@ enum CloudAccountStatusTitlePolicy {
             suffix = "正在确认"
         }
         return "\(base) - \(suffix)"
+    }
+
+    static func replacingStatusOnly(
+        in value: String,
+        with status: CloudAccountSnapshotStatus
+    ) -> String {
+        guard isStatusOnly(value) else { return value }
+        switch status {
+        case .authenticated:
+            return "已登录"
+        case .unauthenticated:
+            return "未登录"
+        case .pending:
+            return "正在确认"
+        }
+    }
+
+    static func isStatusOnly(_ value: String) -> Bool {
+        var remainder = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        for marker in markers {
+            remainder = remainder.replacingOccurrences(of: marker.text, with: "")
+        }
+        let separators = CharacterSet(
+            charactersIn: "-—–_:：|｜·•()（）[]【】"
+        ).union(.whitespacesAndNewlines)
+        return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && remainder.trimmingCharacters(in: separators).isEmpty
+            && markers.contains(where: { value.contains($0.text) })
+    }
+}
+
+enum CloudAccountIdentityPolicy {
+    private static let accountFamilies: [[String]] = [
+        ["quark", "夸克", "夸父"],
+        ["uc", "优沛", "优汐", "优沫"],
+        ["baidu", "百度", "哪吒", "哪哪"],
+        ["ali", "阿里", "阿狸"],
+        ["tianyi", "天翼"],
+        ["mobile", "移动", "和彩云"],
+        ["xunlei", "迅雷"],
+        ["123", "123盘", "123网盘"],
+        ["115", "115盘", "115网盘"],
+        ["guangya", "光鸭"]
+    ]
+
+    static func matches(_ lhs: String, _ rhs: String) -> Bool {
+        let left = normalized(lhs)
+        let right = normalized(rhs)
+        guard !left.isEmpty, !right.isEmpty else { return false }
+        if left == right || left.contains(right) || right.contains(left) {
+            return true
+        }
+        return accountFamilies.contains { family in
+            family.contains(where: left.contains)
+                && family.contains(where: right.contains)
+        }
+    }
+
+    private static func normalized(_ value: String) -> String {
+        var normalized = value.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).lowercased()
+        for fragment in [
+            "我的", "网盘", "云盘", "账号", "帐号", "账户", "account", "drive"
+        ] {
+            normalized = normalized.replacingOccurrences(of: fragment, with: "")
+        }
+        let separators = CharacterSet(
+            charactersIn: "-—–_:：|｜·•()（）[]【】"
+        ).union(.whitespacesAndNewlines)
+        return normalized.trimmingCharacters(in: separators)
+    }
+}
+
+enum CloudAccountStatusPresentationPolicy {
+    static func applying(
+        to items: [SiteActionItem],
+        accountLabel: String,
+        providerID: String,
+        store: CloudAccountStatusStore
+    ) -> [SiteActionItem] {
+        guard let status = store.status(
+            providerID: providerID,
+            matchingAccountLabel: accountLabel
+        ) else { return items }
+        return items.map { item in
+            var updated = item
+            updated.title = store.reconciledTitle(
+                item.title,
+                providerID: providerID
+            )
+            if let remarks = item.remarks {
+                let reconciled = store.reconciledTitle(
+                    remarks,
+                    providerID: providerID
+                )
+                updated.remarks = CloudAccountStatusTitlePolicy
+                    .replacingStatusOnly(in: reconciled, with: status)
+            }
+            return updated
+        }
     }
 }
 
@@ -1990,7 +2107,7 @@ struct PlayerSubtitleTrackPreference: Equatable {
     }
 }
 
-private struct ActivePlaybackContext {
+struct ActivePlaybackContext {
     let configurationID: UUID
     var detail: VideoDetail
     var source: PlaySource
@@ -1998,6 +2115,85 @@ private struct ActivePlaybackContext {
     var media: ResolvedMedia
     var playbackResult: SitePlaybackResult?
     var providerResourceReference: PlaybackResourceReference?
+}
+
+/// Keeps recently resolved provider media capabilities in memory only. Cloud
+/// URLs, Cookies and bridge session IDs never cross the persistence boundary,
+/// but closing the player must not throw away a still-valid two-hour bridge
+/// session and force History to invoke the provider (or show a login QR) again.
+struct HistoryPlaybackSessionCache {
+    static let defaultLifetime: TimeInterval = 2 * 60 * 60
+    static let defaultCapacity = 24
+
+    private struct Entry {
+        var playback: ActivePlaybackContext
+        var lastUsedAt: Date
+    }
+
+    private var entries: [HistoryRecord.ID: Entry] = [:]
+    let lifetime: TimeInterval
+    let capacity: Int
+
+    init(
+        lifetime: TimeInterval = defaultLifetime,
+        capacity: Int = defaultCapacity
+    ) {
+        self.lifetime = max(0, lifetime)
+        self.capacity = max(1, capacity)
+    }
+
+    var count: Int { entries.count }
+
+    mutating func store(
+        _ playback: ActivePlaybackContext,
+        for recordIDs: Set<HistoryRecord.ID>,
+        now: Date = Date()
+    ) {
+        prune(now: now)
+        for recordID in recordIDs {
+            entries[recordID] = Entry(
+                playback: playback,
+                lastUsedAt: now
+            )
+        }
+        while entries.count > capacity,
+              let oldest = entries.min(by: {
+                  $0.value.lastUsedAt < $1.value.lastUsedAt
+              })?.key {
+            entries.removeValue(forKey: oldest)
+        }
+    }
+
+    mutating func playback(
+        for recordID: HistoryRecord.ID,
+        now: Date = Date()
+    ) -> ActivePlaybackContext? {
+        prune(now: now)
+        guard var entry = entries[recordID] else { return nil }
+        entry.lastUsedAt = now
+        entries[recordID] = entry
+        return entry.playback
+    }
+
+    mutating func remove(_ recordID: HistoryRecord.ID) {
+        entries.removeValue(forKey: recordID)
+    }
+
+    mutating func remove(_ recordIDs: Set<HistoryRecord.ID>) {
+        for recordID in recordIDs {
+            entries.removeValue(forKey: recordID)
+        }
+    }
+
+    mutating func removeAll() {
+        entries.removeAll()
+    }
+
+    private mutating func prune(now: Date) {
+        entries = entries.filter {
+            now.timeIntervalSince($0.value.lastUsedAt) <= lifetime
+        }
+    }
 }
 
 private struct PlaybackHistoryWrite {
@@ -2801,6 +2997,7 @@ final class AppState: ObservableObject {
     private var playbackQualitySwitchSessionID = UUID()
     private var lastHistorySaveAt = Date.distantPast
     private var historyPlaybackPreparationID = UUID()
+    private var historyPlaybackSessionCache = HistoryPlaybackSessionCache()
     private var pendingHistoryWrite: PlaybackHistoryWrite?
     private var historyPersistenceTask: Task<Void, Never>?
     private var shutdownTask: Task<Void, Never>?
@@ -3710,6 +3907,18 @@ final class AppState: ObservableObject {
                     remarks: "打开配置功能"
                 )
             )
+            if let providerID = CloudAccountProviderIdentity.identifier(
+                capability: provider.capability,
+                api: provider.site.api
+            ) {
+                updatedHome.actionItems = CloudAccountStatusPresentationPolicy
+                    .applying(
+                        to: updatedHome.actionItems,
+                        accountLabel: actionCategory.name,
+                        providerID: providerID,
+                        store: cloudAccountStatusStore
+                    )
+            }
             publishHomeContent(updatedHome, identity: contentIdentity)
             await cacheSiteHome(updatedHome, identity: contentIdentity)
             homeLoadErrorMessage = nil
@@ -4953,14 +5162,43 @@ final class AppState: ObservableObject {
         guard configurationInteractionCoordinator.owns(context.operationID),
               cloudAuthorizationContext?.operationID == context.operationID,
               let target = context.myDriveAuthorizationTarget,
-              let providerID = cloudAccountProviderID(for: context),
-              cloudAccountStatusStore.confirmAuthenticated(
-                providerID: providerID,
-                accountKey: target.accountKey
-              ) else {
+              let providerID = cloudAccountProviderID(for: context) else {
             return
         }
-        await persistCloudAccountStatusStore()
+        let changed = cloudAccountStatusStore.confirmAuthenticated(
+            providerID: providerID,
+            accountKey: target.accountKey
+        )
+        if changed {
+            await persistCloudAccountStatusStore()
+        }
+        await reconcileVisibleCloudAccountStatus(
+            accountLabel: target.accountKey,
+            providerID: providerID,
+            context: context
+        )
+    }
+
+    private func reconcileVisibleCloudAccountStatus(
+        accountLabel: String,
+        providerID: String,
+        context: CloudAuthorizationContext
+    ) async {
+        guard configurationInteractionCoordinator.owns(context.operationID),
+              cloudAuthorizationContext?.operationID == context.operationID,
+              currentHomeContentIdentity == context.sourceIdentity,
+              homeContentIdentity == context.sourceIdentity,
+              var updatedHome = siteHome else {
+            return
+        }
+        updatedHome.actionItems = CloudAccountStatusPresentationPolicy.applying(
+            to: updatedHome.actionItems,
+            accountLabel: accountLabel,
+            providerID: providerID,
+            store: cloudAccountStatusStore
+        )
+        publishHomeContent(updatedHome, identity: context.sourceIdentity)
+        await cacheSiteHome(updatedHome, identity: context.sourceIdentity)
     }
 
     private func invalidatePersistedCloudAccountStatus(
@@ -6369,9 +6607,9 @@ final class AppState: ObservableObject {
     ) -> SiteActionItem? {
         guard let provider = providers[context.sourceIdentity.siteKey]
                 as? AndroidDexSpiderSiteProvider,
-              provider.site.api.trimmingCharacters(
-                in: .whitespacesAndNewlines
-              ) == MyDriveGuardActionContract.providerAPI else {
+              MyDriveGuardActionContract.supportsAccountAuthorization(
+                api: provider.site.api
+              ) else {
             return nil
         }
         switch context.operation {
@@ -6480,6 +6718,14 @@ final class AppState: ObservableObject {
             )
             return
         }
+        if await replayRecentHistorySession(
+            item,
+            owningConfigurationID: owningConfigurationID,
+            owningPreparationID: preparationID
+        ) {
+            return
+        }
+        guard isCurrentHistoryPreparation(preparationID) else { return }
         guard let provider = providers[item.siteKey] else {
             if await replayCachedHistory(
                 item,
@@ -6595,6 +6841,65 @@ final class AppState: ObservableObject {
             ),
             title: "历史播放失败"
         )
+    }
+
+    private func replayRecentHistorySession(
+        _ item: HistoryRecord,
+        owningConfigurationID: UUID,
+        owningPreparationID: UUID
+    ) async -> Bool {
+        guard let environment,
+              let replay = historyPlaybackSessionCache.playback(
+                for: item.id
+              ),
+              replay.configurationID == owningConfigurationID,
+              replay.detail.summary.siteKey == item.siteKey else {
+            return false
+        }
+        guard isCurrentHistoryPreparation(owningPreparationID) else {
+            return false
+        }
+        let sessionID = prepareHistoryPlaybackShell(
+            item,
+            siteName: replay.detail.summary.siteName,
+            configurationID: owningConfigurationID
+        )
+        do {
+            try await environment.player.prepareForPlayback(
+                requestID: sessionID
+            )
+            guard isCurrentHistoryPreparation(owningPreparationID),
+                  playbackSessionID == sessionID else { return false }
+            presentPlayer()
+            await environment.player.stop()
+            guard isCurrentHistoryPreparation(owningPreparationID),
+                  playbackSessionID == sessionID else { return false }
+            // A provider-owned media session is already the authoritative
+            // request contract. Loading it directly avoids a redundant
+            // detail/player invocation whose only observable result may be a
+            // stale authorization dialog.
+            try await loadResolvedPlayback(
+                replay.media,
+                detail: replay.detail,
+                source: replay.source,
+                episode: replay.episode,
+                playbackResult: replay.playbackResult,
+                configurationID: owningConfigurationID,
+                providerResourceReference: replay.providerResourceReference,
+                sessionID: sessionID
+            )
+            guard isCurrentHistoryPreparation(owningPreparationID),
+                  playbackSessionID == sessionID else { return false }
+            playbackResolutionState = .playing
+            playbackFailureSummary = nil
+            return true
+        } catch {
+            historyPlaybackSessionCache.remove(item.id)
+            if playbackSessionID == sessionID, isPlayerPresented {
+                await dismissPlayerSurfaceAndRestoreWindow()
+            }
+            return false
+        }
     }
 
     private func replayCachedHistory(
@@ -8429,9 +8734,11 @@ final class AppState: ObservableObject {
             return
         }
         do {
+            let recordIDs = Set(history.map(\.id))
             _ = try await environment.database.deleteHistory(
                 configurationID: configurationID
             )
+            historyPlaybackSessionCache.remove(recordIDs)
             try await reloadHistory()
         } catch {
             show(error, title: "清理历史失败")
@@ -8449,6 +8756,7 @@ final class AppState: ObservableObject {
                     sourceKey: record.sourceKey
                 )
             }
+            historyPlaybackSessionCache.remove(ids)
             try await reloadHistory()
         } catch {
             show(error, title: "删除历史失败")
@@ -11287,6 +11595,12 @@ final class AppState: ObservableObject {
             throw error
         }
         activePlayback = playback
+        if let authoritativeHistoryRecord {
+            historyPlaybackSessionCache.store(
+                playback,
+                for: [authoritativeHistoryRecord.id]
+            )
+        }
         pendingPlayback = nil
         playbackQualities = playbackResult?.qualities ?? []
         selectedPlaybackQualityID = playbackResult.flatMap { result in
@@ -11308,6 +11622,12 @@ final class AppState: ObservableObject {
             position: position,
             duration: duration
         ) else { return }
+        if !write.incognito, let activePlayback {
+            historyPlaybackSessionCache.store(
+                activePlayback,
+                for: [write.record.id]
+            )
+        }
         try await persistPlaybackHistoryWrite(
             write,
             reloadHistoryAfterSaving: reloadHistoryAfterSaving

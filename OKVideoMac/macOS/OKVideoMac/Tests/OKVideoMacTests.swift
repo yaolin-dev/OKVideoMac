@@ -2555,6 +2555,99 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testFishConfigurationCenterUsesCloudAccountAuthorizationContract() {
+        XCTAssertTrue(
+            MyDriveGuardActionContract.supportsAccountAuthorization(
+                api: "csp_FishConfig"
+            )
+        )
+        XCTAssertTrue(
+            MyDriveGuardActionContract.supportsAccountAuthorization(
+                api: " csp_MyDriveGuard "
+            )
+        )
+        XCTAssertFalse(
+            MyDriveGuardActionContract.supportsAccountAuthorization(
+                api: "csp_Unrelated"
+            )
+        )
+
+        let site = SiteConfiguration(
+            key: "settings-center",
+            name: "设置中心",
+            type: 3,
+            api: "csp_FishConfig"
+        )
+        let home = SiteHome(
+            categories: [VideoCategory(id: "peizhi", name: "网盘设置")],
+            recommendations: [],
+            actionItems: [
+                SiteActionItem(
+                    siteKey: site.key,
+                    siteName: site.name,
+                    itemID: "login",
+                    title: "扫码登录",
+                    action: "LoginShow"
+                )
+            ]
+        )
+        let normalized = AndroidDexSpiderSiteProvider.applyingHomeContract(
+            to: home,
+            site: site
+        )
+        XCTAssertEqual(
+            normalized.categories.first?.resolvedContentKind,
+            .action
+        )
+        XCTAssertEqual(normalized.actionItems.first?.tag, "authorization")
+    }
+
+    func testCloudAccountStatusReconcilesStatusOnlyConfigurationCard() {
+        let providerID = CloudAccountProviderIdentity.identifier(
+            capability: .javaDexSpider,
+            api: "csp_FishConfig"
+        )!
+        var store = CloudAccountStatusStore()
+        _ = store.observe(
+            title: "我的哪哪 - 已登录",
+            providerID: providerID
+        )
+        let items = [
+            SiteActionItem(
+                siteKey: "settings",
+                siteName: "设置中心",
+                itemID: "status",
+                title: "当前状态",
+                remarks: "未登录"
+            ),
+            SiteActionItem(
+                siteKey: "settings",
+                siteName: "设置中心",
+                itemID: "login",
+                title: "扫码登录",
+                remarks: "扫码或输入 Cookie",
+                action: "LoginShow"
+            )
+        ]
+
+        let reconciled = CloudAccountStatusPresentationPolicy.applying(
+            to: items,
+            accountLabel: "百度网盘",
+            providerID: providerID,
+            store: store
+        )
+        XCTAssertEqual(reconciled[0].remarks, "已登录")
+        XCTAssertEqual(reconciled[1].remarks, "扫码或输入 Cookie")
+
+        let unrelated = CloudAccountStatusPresentationPolicy.applying(
+            to: items,
+            accountLabel: "夸克网盘",
+            providerID: providerID,
+            store: store
+        )
+        XCTAssertEqual(unrelated[0].remarks, "未登录")
+    }
+
     func testCloudAccountStatusDoesNotCrossProviderBoundary() {
         let first = CloudAccountProviderIdentity.identifier(
             capability: .javaDexSpider,
@@ -8175,6 +8268,67 @@ final class OKVideoMacTests: XCTestCase {
             ),
             "Legacy records must rebuild through their current local provider"
         )
+    }
+
+    @MainActor
+    func testHistoryPlaybackSessionCacheReusesOnlyLiveMemorySession() throws {
+        let configurationID = UUID()
+        let episode = PlayEpisode(name: "第 2 集", url: "provider-runtime-ref")
+        let source = PlaySource(name: "网盘线路", episodes: [episode])
+        let detail = VideoDetail(
+            summary: VideoSummary(
+                siteKey: "site-a",
+                siteName: "Site A",
+                videoID: "video-a",
+                title: "Title"
+            ),
+            playSources: [source]
+        )
+        let mediaURL = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:19978/proxy/media/session-a")
+        )
+        let playback = ActivePlaybackContext(
+            configurationID: configurationID,
+            detail: detail,
+            source: source,
+            episode: episode,
+            media: ResolvedMedia(
+                url: mediaURL,
+                headers: [:],
+                siteKey: "site-a",
+                sourceName: source.name,
+                episodeName: episode.name
+            ),
+            playbackResult: nil,
+            providerResourceReference: nil
+        )
+        let record = HistoryRecord(
+            configurationID: configurationID,
+            siteKey: "site-a",
+            videoID: "video-a",
+            title: "Title",
+            sourceKey: source.id,
+            sourceName: source.name,
+            episodeName: episode.name
+        )
+        let startedAt = Date(timeIntervalSince1970: 100)
+        var cache = HistoryPlaybackSessionCache(lifetime: 10, capacity: 2)
+        cache.store(playback, for: [record.id], now: startedAt)
+
+        XCTAssertEqual(
+            cache.playback(
+                for: record.id,
+                now: Date(timeIntervalSince1970: 109)
+            )?.media.url,
+            mediaURL
+        )
+        XCTAssertNil(
+            cache.playback(
+                for: record.id,
+                now: Date(timeIntervalSince1970: 120)
+            )
+        )
+        XCTAssertEqual(cache.count, 0)
     }
 
     @MainActor
