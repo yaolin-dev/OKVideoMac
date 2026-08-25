@@ -1162,6 +1162,27 @@ enum MyDriveAuthorizationStorageEvidencePolicy {
         }
         return stablePollCount >= requiredStablePollCount
     }
+
+    /// Accumulates the same opaque post-QR digest across visible and hidden
+    /// provider states. Some providers close their QR window immediately
+    /// after persisting credentials, so limiting this observation to visible
+    /// QR frames loses the only authoritative storage transition.
+    static func updatedCandidate(
+        baseline: String?,
+        candidate: String?,
+        stablePollCount: Int,
+        observed: String?
+    ) -> (fingerprint: String?, stablePollCount: Int) {
+        guard let baseline = baseline?.nonEmpty,
+              let observed = observed?.nonEmpty,
+              observed != baseline else {
+            return (nil, 0)
+        }
+        if candidate?.nonEmpty == observed {
+            return (observed, max(0, stablePollCount) + 1)
+        }
+        return (observed, 1)
+    }
 }
 
 /// Legacy CatVod commands and one-shot toggles persist inside their clicked
@@ -5641,19 +5662,20 @@ final class AppState: ObservableObject {
                         baseline
                     context.myDriveAuthorizationStorageCandidateFingerprint = nil
                     context.myDriveAuthorizationStorageStablePollCount = 0
-                } else if let baseline,
-                          fingerprint != baseline {
-                    if context.myDriveAuthorizationStorageCandidateFingerprint
-                        == fingerprint {
-                        context.myDriveAuthorizationStorageStablePollCount += 1
-                    } else {
-                        context.myDriveAuthorizationStorageCandidateFingerprint =
-                            fingerprint
-                        context.myDriveAuthorizationStorageStablePollCount = 1
-                    }
                 } else {
-                    context.myDriveAuthorizationStorageCandidateFingerprint = nil
-                    context.myDriveAuthorizationStorageStablePollCount = 0
+                    let candidate = MyDriveAuthorizationStorageEvidencePolicy
+                        .updatedCandidate(
+                            baseline: baseline,
+                            candidate: context
+                                .myDriveAuthorizationStorageCandidateFingerprint,
+                            stablePollCount: context
+                                .myDriveAuthorizationStorageStablePollCount,
+                            observed: fingerprint
+                        )
+                    context.myDriveAuthorizationStorageCandidateFingerprint =
+                        candidate.fingerprint
+                    context.myDriveAuthorizationStorageStablePollCount =
+                        candidate.stablePollCount
                 }
             }
             cloudAuthorizationContext = context
@@ -5775,6 +5797,11 @@ final class AppState: ObservableObject {
                         )
                     }
                     bridgeFailureCount = 0
+                    let hiddenStorageEvidenceConfirmed = !state.isQRCode
+                        && self.recordHiddenMyDriveAuthorizationStorageEvidence(
+                            state,
+                            operationID: context.operationID
+                        )
                     if await self.consumeConfigurationVerificationState(
                         state,
                         context: context
@@ -5840,7 +5867,9 @@ final class AppState: ObservableObject {
                         hiddenPollCount += 1
                         if await self.verifyAuthorizationResultAfterQRCodeExit(
                             state: state,
-                            context: context
+                            context: context,
+                            storageEvidenceConfirmed:
+                                hiddenStorageEvidenceConfirmed
                         ) {
                             // The verifier also owns the explicitly pending
                             // MyDrive state. Do not age that state into the
@@ -5954,7 +5983,8 @@ final class AppState: ObservableObject {
     /// a request to inspect provider state, never as evidence of a scan.
     private func verifyAuthorizationResultAfterQRCodeExit(
         state: AndroidBridgeUIState,
-        context: CloudAuthorizationContext
+        context: CloudAuthorizationContext,
+        storageEvidenceConfirmed: Bool
     ) async -> Bool {
         guard context.hasObservedQRCode,
               !state.isQRCode,
@@ -5993,7 +6023,7 @@ final class AppState: ObservableObject {
             return await verifyMyDriveAuthorizationResult(
                 state: state,
                 context: context,
-                storageEvidenceConfirmed: false
+                storageEvidenceConfirmed: storageEvidenceConfirmed
             )
         }
 
@@ -6066,6 +6096,42 @@ final class AppState: ObservableObject {
             await finishCloudAuthorizationAndRetry(refreshPerformed: true)
         }
         return true
+    }
+
+    /// Records an opaque credential-storage transition after the provider has
+    /// hidden its QR UI. This must run before terminal-state consumption: old
+    /// or slow bridges may report a lifecycle transition in the same snapshot
+    /// that first exposes the persisted authorization digest.
+    private func recordHiddenMyDriveAuthorizationStorageEvidence(
+        _ state: AndroidBridgeUIState,
+        operationID: UUID
+    ) -> Bool {
+        guard var context = cloudAuthorizationContext,
+              context.operationID == operationID,
+              context.hasObservedQRCode,
+              context.myDriveAuthorizationTarget != nil else {
+            return false
+        }
+        let candidate = MyDriveAuthorizationStorageEvidencePolicy
+            .updatedCandidate(
+                baseline: context
+                    .myDriveAuthorizationStorageFingerprintAtQRCode,
+                candidate: context
+                    .myDriveAuthorizationStorageCandidateFingerprint,
+                stablePollCount: context
+                    .myDriveAuthorizationStorageStablePollCount,
+                observed: state.authorizationStorageFingerprint
+            )
+        context.myDriveAuthorizationStorageCandidateFingerprint =
+            candidate.fingerprint
+        context.myDriveAuthorizationStorageStablePollCount =
+            candidate.stablePollCount
+        cloudAuthorizationContext = context
+        return MyDriveAuthorizationStorageEvidencePolicy.confirmsStableChange(
+            baseline: context.myDriveAuthorizationStorageFingerprintAtQRCode,
+            candidate: candidate.fingerprint,
+            stablePollCount: candidate.stablePollCount
+        )
     }
 
     /// Confirms MyDrive authorization from one of three request-scoped facts:

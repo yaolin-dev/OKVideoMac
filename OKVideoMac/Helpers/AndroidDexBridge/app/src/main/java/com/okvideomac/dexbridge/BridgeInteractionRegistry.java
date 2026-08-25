@@ -142,7 +142,20 @@ final class BridgeInteractionRegistry {
                 interaction.uiVisible = false;
                 if (now >= interaction.delayedUIDeadline) {
                     if (interaction.sawUI) {
-                        if (interaction.submitted
+                        if ("authorization".equals(interaction.kind)) {
+                            // A QR/login surface disappearing only starts
+                            // host-side verification. Refreshing a provider's
+                            // account/home state can legitimately take longer
+                            // than the delayed-dialog grace, so the Bridge must
+                            // not race that verification and publish a false
+                            // providerOutcomeUnverified failure. The scoped
+                            // host will explicitly verify or cancel this
+                            // interaction; a newer request also supersedes it.
+                            interaction.transition(
+                                    "awaitingVerification",
+                                    "stay"
+                            );
+                        } else if (interaction.submitted
                                 && !"authorization".equals(interaction.kind)) {
                             // submitUI performs a final request-ownership check
                             // and invokes the provider's click listener on the

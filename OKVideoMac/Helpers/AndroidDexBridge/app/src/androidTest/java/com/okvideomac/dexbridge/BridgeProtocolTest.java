@@ -473,7 +473,7 @@ public final class BridgeProtocolTest extends TestCase {
         assertFalse(BridgeServer.hasTrackedInteractionWorker(id));
     }
 
-    public void testDismissedProviderUIRequiresExplicitVerification()
+    public void testDismissedAuthorizationWaitsForExplicitVerification()
             throws Exception {
         String id = BridgeInteractionRegistry.begin(
                 "interaction-dismissed-unverified-" + UUID.randomUUID(),
@@ -499,22 +499,43 @@ public final class BridgeProtocolTest extends TestCase {
         assertEquals("stay", pending.getString("outcome"));
         assertFalse(pending.getBoolean("terminal"));
 
-        // Closing a provider dialog or QR window is not proof that the
-        // provider accepted the operation. Without verified(true), expiry of
-        // the handoff grace must be an explicit unverified failure.
+        // Closing a QR window is not proof that the provider accepted the
+        // operation, but refreshing the provider account can take longer than
+        // the delayed-dialog handoff. The Bridge must keep the request pending
+        // until the scoped Mac host explicitly verifies or cancels it.
         Thread.sleep(8_150L);
-        JSONObject failed = BridgeInteractionRegistry.observeUI(
+        JSONObject awaitingVerification = BridgeInteractionRegistry.observeUI(
                 id,
                 new JSONObject()
                         .put("visible", false)
                         .put("generation", 9L)
         );
+        assertEquals(
+                "awaitingVerification",
+                awaitingVerification.getString("phase")
+        );
+        assertEquals("stay", awaitingVerification.getString("outcome"));
+        assertFalse(awaitingVerification.getBoolean("terminal"));
+        assertTrue(awaitingVerification.getBoolean("uiObserved"));
+        assertFalse(
+                awaitingVerification.optBoolean(
+                        "verificationPerformed",
+                        false
+                )
+        );
+
+        JSONObject failed = BridgeInteractionRegistry.verified(
+                id,
+                false,
+                "accountStateUnchanged",
+                Boolean.TRUE
+        );
         assertEquals("failed", failed.getString("phase"));
         assertEquals("failed", failed.getString("outcome"));
-        assertEquals("providerOutcomeUnverified", failed.getString("error"));
+        assertEquals("accountStateUnchanged", failed.getString("error"));
         assertTrue(failed.getBoolean("terminal"));
         assertTrue(failed.getBoolean("uiObserved"));
-        assertFalse(failed.optBoolean("verificationPerformed", false));
+        assertTrue(failed.getBoolean("verificationPerformed"));
     }
 
     public void testTransientQRCodeCaptureGapKeepsStableRequestUI()

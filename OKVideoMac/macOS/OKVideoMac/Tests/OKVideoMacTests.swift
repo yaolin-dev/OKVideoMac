@@ -2865,6 +2865,44 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testMyDriveAuthorizationAccumulatesStorageChangeAfterQRCodeHides() {
+        let first = MyDriveAuthorizationStorageEvidencePolicy.updatedCandidate(
+            baseline: "qr-visible",
+            candidate: nil,
+            stablePollCount: 0,
+            observed: "authorized"
+        )
+        XCTAssertEqual(first.fingerprint, "authorized")
+        XCTAssertEqual(first.stablePollCount, 1)
+
+        let second = MyDriveAuthorizationStorageEvidencePolicy.updatedCandidate(
+            baseline: "qr-visible",
+            candidate: first.fingerprint,
+            stablePollCount: first.stablePollCount,
+            observed: "authorized"
+        )
+        XCTAssertEqual(second.fingerprint, "authorized")
+        XCTAssertEqual(second.stablePollCount, 2)
+        XCTAssertTrue(
+            MyDriveAuthorizationStorageEvidencePolicy.confirmsStableChange(
+                baseline: "qr-visible",
+                candidate: second.fingerprint,
+                stablePollCount: second.stablePollCount
+            )
+        )
+    }
+
+    func testMyDriveAuthorizationResetsUnstableHiddenStorageCandidate() {
+        let reset = MyDriveAuthorizationStorageEvidencePolicy.updatedCandidate(
+            baseline: "qr-visible",
+            candidate: "partial-write",
+            stablePollCount: 1,
+            observed: "qr-visible"
+        )
+        XCTAssertNil(reset.fingerprint)
+        XCTAssertEqual(reset.stablePollCount, 0)
+    }
+
     func testMyDriveAuthorizationRefreshesBaselineDuringFirstQRCodeFrame() {
         XCTAssertEqual(
             MyDriveAuthorizationStorageEvidencePolicy
