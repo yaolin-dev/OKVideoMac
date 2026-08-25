@@ -95,10 +95,7 @@ final class BridgeServer {
                     .writeTimeout(15, TimeUnit.SECONDS)
                     .build();
     private static final int MAX_MEDIA_REDIRECTS = 10;
-    private static final int MAX_MEDIA_CONTINUATIONS = 512;
     private static final int MEDIA_COPY_BUFFER_BYTES = 128 * 1024;
-    private static final long MIN_CONTINUATION_PROGRESS_BYTES = 64 * 1024L;
-    private static final int MAX_TINY_PROGRESS_CONTINUATIONS = 3;
     private static final String[] FORWARDED_MEDIA_REQUEST_HEADERS = {
             "range",
             "if-range",
@@ -1186,13 +1183,11 @@ final class BridgeServer {
                                     mediaResponse.headers
                             )
             );
-            writeSessionMediaResponse(
-                    output,
-                    mediaResponse,
-                    headersOnly,
-                    requestID,
-                    session.id
-            );
+            // Preserve the upstream response boundary. If a cloud CDN closes
+            // a range early, libmpv must observe that EOF and issue its own
+            // next Range request. Reassembling ranges inside the bridge can
+            // deadlock playback when a signed CDN rejects a continuation.
+            writeMediaResponse(output, response, headersOnly);
         }
     }
 
@@ -1334,66 +1329,6 @@ final class BridgeServer {
         }
     }
 
-    private static void writeSessionMediaResponse(
-            BufferedOutputStream output,
-            SessionMediaResponse mediaResponse,
-            boolean headersOnly,
-            String requestID,
-            String sessionID
-    ) throws IOException {
-        Response response = mediaResponse.response;
-        ResponseBody responseBody = response.body();
-        String contentType = response.header(
-                "Content-Type",
-                "application/octet-stream"
-        );
-        Map<String, String> responseHeaders = mediaResponseHeaders(response);
-        InputStream body = responseBody == null
-                ? new ByteArrayInputStream(new byte[0])
-                : responseBody.byteStream();
-        MediaByteRange range = MediaByteRange.parse(
-                response.header("Content-Range")
-        );
-        if (!headersOnly
-                && response.code() == 206
-                && responseBody != null
-                && range != null) {
-            body = new RangeContinuityInputStream(
-                    mediaResponse,
-                    range,
-                    requestID,
-                    sessionID
-            );
-        }
-        long contentLength = mediaResponseContentLength(
-                response,
-                responseBody,
-                range
-        );
-        if (contentLength >= 0) {
-            writeFixedLengthProxy(
-                    output,
-                    response.code(),
-                    contentType,
-                    body,
-                    responseHeaders,
-                    contentLength,
-                    headersOnly
-            );
-        } else {
-            writeProxy(
-                    output,
-                    new Object[] {
-                            response.code(),
-                            contentType,
-                            body,
-                            responseHeaders
-                    },
-                    headersOnly
-            );
-        }
-    }
-
     private static Map<String, String> mediaResponseHeaders(Response response) {
         Map<String, String> responseHeaders = new LinkedHashMap<>();
         for (String name : FORWARDED_MEDIA_RESPONSE_HEADERS) {
@@ -1403,280 +1338,6 @@ final class BridgeServer {
             }
         }
         return responseHeaders;
-    }
-
-    private static long mediaResponseContentLength(
-            Response response,
-            ResponseBody responseBody,
-            MediaByteRange range
-    ) {
-        if (range != null) return range.end - range.start + 1;
-        String declared = response.header("Content-Length", "").trim();
-        if (!declared.isEmpty()) {
-            try {
-                long value = Long.parseLong(declared);
-                if (value >= 0) return value;
-            } catch (NumberFormatException ignored) {
-            }
-        }
-        if (responseBody == null) return 0L;
-        return responseBody.contentLength();
-    }
-
-    /**
-     * Keeps a progressing cloud-CDN range inside one downstream response.
-     * The player remains responsible for initial requests and user seeks;
-     * this stream only repairs an already-progressing response that the CDN
-     * closed before the advertised Content-Range was complete.
-     */
-    private static final class RangeContinuityInputStream extends InputStream {
-        private final long initialStart;
-        private final long terminalEnd;
-        private final long totalLength;
-        private final Map<String, String> baseHeaders;
-        private final String strongETag;
-        private final String lastModified;
-        private final String requestID;
-        private final String sessionID;
-        private URI upstream;
-        private Response response;
-        private InputStream stream;
-        private long delivered;
-        private long continuationStartDelivered;
-        private int continuationCount;
-        private int tinyProgressContinuations;
-        private boolean closed;
-
-        RangeContinuityInputStream(
-                SessionMediaResponse initial,
-                MediaByteRange range,
-                String requestID,
-                String sessionID
-        ) throws IOException {
-            ResponseBody body = initial.response.body();
-            if (body == null) {
-                throw new IOException("Upstream media response has no body");
-            }
-            this.initialStart = range.start;
-            this.terminalEnd = range.end;
-            this.totalLength = range.total;
-            this.baseHeaders = new LinkedHashMap<>(initial.headers);
-            this.strongETag = strongETag(initial.response.header("ETag"));
-            this.lastModified = initial.response.header("Last-Modified", "");
-            this.requestID = requestID;
-            this.sessionID = sessionID;
-            this.upstream = initial.upstream;
-            this.response = initial.response;
-            this.stream = body.byteStream();
-        }
-
-        @Override
-        public int read() throws IOException {
-            byte[] one = new byte[1];
-            int count = read(one, 0, 1);
-            return count < 0 ? -1 : one[0] & 0xff;
-        }
-
-        @Override
-        public int read(byte[] buffer, int offset, int length)
-                throws IOException {
-            if (closed) throw new IOException("Media stream is closed");
-            if (buffer == null) throw new NullPointerException("buffer");
-            if (offset < 0 || length < 0 || length > buffer.length - offset) {
-                throw new IndexOutOfBoundsException();
-            }
-            if (length == 0) return 0;
-            while (delivered < expectedLength()) {
-                int allowed = (int) Math.min(
-                        (long) length,
-                        expectedLength() - delivered
-                );
-                IOException failure;
-                try {
-                    int count = stream.read(buffer, offset, allowed);
-                    if (count > 0) {
-                        delivered += count;
-                        return count;
-                    }
-                    if (count == 0) continue;
-                    failure = new EOFException(
-                            "Upstream media response ended before its byte range"
-                    );
-                } catch (IOException error) {
-                    if (delivered >= expectedLength()) return -1;
-                    failure = error;
-                }
-                continueRange(failure);
-            }
-            return -1;
-        }
-
-        @Override
-        public void close() {
-            if (closed) return;
-            closed = true;
-            response.close();
-        }
-
-        private long expectedLength() {
-            return terminalEnd - initialStart + 1;
-        }
-
-        private void continueRange(IOException original) throws IOException {
-            long progress = delivered - continuationStartDelivered;
-            if (progress <= 0) {
-                logContinuationFailure("zero_progress", original);
-                throw new IOException(
-                        "Upstream media continuation made no progress",
-                        original
-                );
-            }
-            if (progress < MIN_CONTINUATION_PROGRESS_BYTES) {
-                tinyProgressContinuations++;
-                if (tinyProgressContinuations >= MAX_TINY_PROGRESS_CONTINUATIONS) {
-                    logContinuationFailure("repeated_tiny_progress", original);
-                    throw new IOException(
-                            "Upstream media continuations made insufficient progress",
-                            original
-                    );
-                }
-            } else {
-                tinyProgressContinuations = 0;
-            }
-            if (continuationCount >= MAX_MEDIA_CONTINUATIONS) {
-                logContinuationFailure("limit_reached", original);
-                throw new IOException(
-                        "Upstream media exceeded its continuation limit",
-                        original
-                );
-            }
-            long nextStart = initialStart + delivered;
-            if (nextStart > terminalEnd) return;
-            response.close();
-
-            LinkedHashMap<String, String> headers = new LinkedHashMap<>(
-                    baseHeaders
-            );
-            putHeaderIgnoreCase(
-                    headers,
-                    "Range",
-                    "bytes=" + nextStart + "-" + terminalEnd
-            );
-            if (!strongETag.isEmpty()) {
-                putHeaderIgnoreCase(headers, "If-Range", strongETag);
-            } else if (!lastModified.isEmpty()) {
-                putHeaderIgnoreCase(headers, "If-Range", lastModified);
-            }
-
-            final SessionMediaResponse continued;
-            try {
-                continued = executeSessionMedia(upstream, headers, false);
-            } catch (IOException error) {
-                logContinuationFailure("request_failed", error);
-                throw new IOException(
-                        "Unable to continue truncated upstream media response",
-                        error
-                );
-            }
-            Response nextResponse = continued.response;
-            MediaByteRange nextRange = MediaByteRange.parse(
-                    nextResponse.header("Content-Range")
-            );
-            String nextETag = strongETag(nextResponse.header("ETag"));
-            boolean sameEntity = strongETag.isEmpty()
-                    || nextETag.isEmpty()
-                    || strongETag.equals(nextETag);
-            boolean validRange = nextResponse.code() == 206
-                    && nextRange != null
-                    && nextRange.start == nextStart
-                    && nextRange.end <= terminalEnd
-                    && nextRange.end >= nextRange.start
-                    && (totalLength < 0
-                    || nextRange.total < 0
-                    || totalLength == nextRange.total);
-            ResponseBody nextBody = nextResponse.body();
-            if (!validRange || !sameEntity || nextBody == null) {
-                nextResponse.close();
-                logContinuationFailure("range_mismatch", original);
-                throw new IOException(
-                        "Upstream media continuation did not match the original byte range",
-                        original
-                );
-            }
-
-            continuationStartDelivered = delivered;
-            response = nextResponse;
-            stream = nextBody.byteStream();
-            upstream = continued.upstream;
-            continuationCount++;
-            Log.i(
-                    TAG,
-                    "Media session request=" + requestID
-                            + " session=" + shortHash(sessionID)
-                            + " continuation=" + continuationCount
-                            + " offset=" + delivered
-            );
-        }
-
-        private void logContinuationFailure(
-                String reason,
-                IOException error
-        ) {
-            Log.w(
-                    TAG,
-                    "Media session request=" + requestID
-                            + " session=" + shortHash(sessionID)
-                            + " continuation_failed=" + reason
-                            + " delivered=" + delivered
-                            + " expected=" + expectedLength()
-                            + " error=" + error.getClass().getSimpleName()
-            );
-        }
-    }
-
-    private static String strongETag(String rawValue) {
-        String value = rawValue == null ? "" : rawValue.trim();
-        return value.regionMatches(true, 0, "W/", 0, 2) ? "" : value;
-    }
-
-    private static final class MediaByteRange {
-        final long start;
-        final long end;
-        final long total;
-
-        MediaByteRange(long start, long end, long total) {
-            this.start = start;
-            this.end = end;
-            this.total = total;
-        }
-
-        static MediaByteRange parse(String rawValue) {
-            if (rawValue == null) return null;
-            String value = rawValue.trim();
-            if (!value.regionMatches(true, 0, "bytes ", 0, 6)) return null;
-            int dash = value.indexOf('-', 6);
-            int slash = value.indexOf('/', dash + 1);
-            if (dash <= 6 || slash <= dash + 1) return null;
-            try {
-                long start = Long.parseLong(value.substring(6, dash).trim());
-                long end = Long.parseLong(
-                        value.substring(dash + 1, slash).trim()
-                );
-                String totalValue = value.substring(slash + 1).trim();
-                long total = "*".equals(totalValue)
-                        ? -1
-                        : Long.parseLong(totalValue);
-                if (start < 0
-                        || end < start
-                        || end == Long.MAX_VALUE
-                        || (total >= 0 && end >= total)) {
-                    return null;
-                }
-                return new MediaByteRange(start, end, total);
-            } catch (NumberFormatException ignored) {
-                return null;
-            }
-        }
     }
 
     private static void writeDirectMedia(
@@ -1749,40 +1410,18 @@ final class BridgeServer {
                 "Content-Type",
                 "application/octet-stream"
         );
-        Map<String, String> responseHeaders = mediaResponseHeaders(response);
-        InputStream body = responseBody == null
-                ? new ByteArrayInputStream(new byte[0])
-                : responseBody.byteStream();
-        MediaByteRange range = MediaByteRange.parse(
-                response.header("Content-Range")
+        writeProxy(
+                output,
+                new Object[] {
+                        response.code(),
+                        contentType,
+                        responseBody == null
+                                ? new ByteArrayInputStream(new byte[0])
+                                : responseBody.byteStream(),
+                        mediaResponseHeaders(response)
+                },
+                headersOnly
         );
-        long contentLength = mediaResponseContentLength(
-                response,
-                responseBody,
-                range
-        );
-        if (contentLength >= 0) {
-            writeFixedLengthProxy(
-                    output,
-                    response.code(),
-                    contentType,
-                    body,
-                    responseHeaders,
-                    contentLength,
-                    headersOnly
-            );
-        } else {
-            writeProxy(
-                    output,
-                    new Object[] {
-                            response.code(),
-                            contentType,
-                            body,
-                            responseHeaders
-                    },
-                    headersOnly
-            );
-        }
     }
 
     private static boolean hasHeaderIgnoreCase(
@@ -1880,59 +1519,6 @@ final class BridgeServer {
 
     private static int defaultPort(URI uri) {
         return "https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80;
-    }
-
-    private static void writeFixedLengthProxy(
-            BufferedOutputStream output,
-            int rawStatus,
-            String mime,
-            InputStream body,
-            Map<String, String> responseHeaders,
-            long contentLength,
-            boolean headersOnly
-    ) throws IOException {
-        int status = rawStatus < 100 || rawStatus > 599 ? 502 : rawStatus;
-        StringBuilder rawHeaders = new StringBuilder()
-                .append("HTTP/1.1 ").append(status)
-                .append(" Proxy Response\r\n")
-                .append("Content-Type: ")
-                .append(mime == null || mime.trim().isEmpty()
-                        ? "application/octet-stream" : mime)
-                .append("\r\n")
-                .append("Content-Length: ").append(contentLength)
-                .append("\r\n")
-                .append("Connection: close\r\n");
-        appendForwardedProxyHeaders(rawHeaders, responseHeaders);
-        rawHeaders.append("\r\n");
-        try {
-            output.write(
-                    rawHeaders.toString().getBytes(StandardCharsets.US_ASCII)
-            );
-            try (InputStream stream = body) {
-                if (!headersOnly) {
-                    byte[] buffer = new byte[MEDIA_COPY_BUFFER_BYTES];
-                    long delivered = 0;
-                    while (delivered < contentLength) {
-                        int allowed = (int) Math.min(
-                                (long) buffer.length,
-                                contentLength - delivered
-                        );
-                        int count = stream.read(buffer, 0, allowed);
-                        if (count < 0) {
-                            throw new EOFException(
-                                    "Upstream media response ended before Content-Length"
-                            );
-                        }
-                        if (count == 0) continue;
-                        output.write(buffer, 0, count);
-                        delivered += count;
-                    }
-                }
-                output.flush();
-            }
-        } catch (IOException error) {
-            throw new MediaResponseCommittedException(error);
-        }
     }
 
     private static void appendForwardedProxyHeaders(

@@ -1347,11 +1347,11 @@ public final class BridgeProtocolTest extends TestCase {
         );
     }
 
-    public void testMediaSessionContinuesProgressingTruncatedRangesInOneResponse()
+    public void testMediaSessionLeavesTruncatedRangeRecoveryToPlayer()
             throws Exception {
         ensureBridgeServer();
         InetAddress loopback = InetAddress.getByName("127.0.0.1");
-        try (ServerSocket providerServer = new ServerSocket(0, 3, loopback)) {
+        try (ServerSocket providerServer = new ServerSocket(0, 2, loopback)) {
             providerServer.setSoTimeout(5_000);
             FutureTask<List<Map<String, String>>> providerRequests =
                     new FutureTask<>(() -> {
@@ -1374,21 +1374,11 @@ public final class BridgeProtocolTest extends TestCase {
                                         + "Content-Length: 5\r\n"
                                         + "ETag: \"stream-v1\"\r\n"
                                         + "Connection: close\r\n\r\n"
-                                        + "567"
-                        ));
-                        requests.add(serveOnce(
-                                providerServer,
-                                "HTTP/1.1 206 Partial Content\r\n"
-                                        + "Content-Type: video/mp4\r\n"
-                                        + "Content-Range: bytes 8-9/10\r\n"
-                                        + "Content-Length: 2\r\n"
-                                        + "ETag: \"stream-v1\"\r\n"
-                                        + "Connection: close\r\n\r\n"
-                                        + "89"
+                                        + "56789"
                         ));
                         return requests;
                     });
-            new Thread(providerRequests, "media-range-continuity-test").start();
+            new Thread(providerRequests, "media-player-range-retry-test").start();
 
             JSONObject secured = (JSONObject)
                     BridgeMediaSessionRegistry.securePlaybackResult(
@@ -1401,45 +1391,47 @@ public final class BridgeProtocolTest extends TestCase {
                                                     + "/movie.mp4"
                                     )
                     );
-            HttpURLConnection mediaConnection = (HttpURLConnection) new URL(
+            ByteArrayOutputStream firstBytes = new ByteArrayOutputStream();
+            HttpURLConnection first = (HttpURLConnection) new URL(
                     secured.getString("url")
             ).openConnection();
-            mediaConnection.setConnectTimeout(2_000);
-            mediaConnection.setReadTimeout(5_000);
-            mediaConnection.setRequestProperty("Range", "bytes=0-9");
-            mediaConnection.setRequestProperty("If-Range", "\"stream-v1\"");
-            assertEquals(206, mediaConnection.getResponseCode());
-            assertEquals(10, mediaConnection.getContentLengthLong());
-            ByteArrayOutputStream received = new ByteArrayOutputStream();
-            try (InputStream input = mediaConnection.getInputStream()) {
+            first.setConnectTimeout(2_000);
+            first.setReadTimeout(5_000);
+            first.setRequestProperty("Range", "bytes=0-9");
+            assertEquals(206, first.getResponseCode());
+            try (InputStream input = first.getInputStream()) {
                 byte[] buffer = new byte[16];
                 int count;
                 while ((count = input.read(buffer)) != -1) {
-                    received.write(buffer, 0, count);
+                    firstBytes.write(buffer, 0, count);
                 }
+                fail("A truncated range must remain visible to the player");
+            } catch (java.io.IOException expected) {
+                // The player owns the next request after this premature EOF.
             } finally {
-                mediaConnection.disconnect();
+                first.disconnect();
             }
-
             assertEquals(
-                    "0123456789",
-                    received.toString(StandardCharsets.US_ASCII.name())
+                    "01234",
+                    firstBytes.toString(StandardCharsets.US_ASCII.name())
             );
+
+            HttpURLConnection retry = (HttpURLConnection) new URL(
+                    secured.getString("url")
+            ).openConnection();
+            retry.setConnectTimeout(2_000);
+            retry.setReadTimeout(5_000);
+            retry.setRequestProperty("Range", "bytes=5-9");
+            assertEquals(206, retry.getResponseCode());
+            assertEquals("56789", readText(retry.getInputStream()));
+            retry.disconnect();
+
             List<Map<String, String>> requests = providerRequests.get(
                     5,
                     TimeUnit.SECONDS
             );
             assertEquals("bytes=0-9", header(requests.get(0), "range"));
             assertEquals("bytes=5-9", header(requests.get(1), "range"));
-            assertEquals("bytes=8-9", header(requests.get(2), "range"));
-            assertEquals(
-                    "\"stream-v1\"",
-                    header(requests.get(1), "if-range")
-            );
-            assertEquals(
-                    "\"stream-v1\"",
-                    header(requests.get(2), "if-range")
-            );
         }
     }
 
@@ -2310,6 +2302,18 @@ public final class BridgeProtocolTest extends TestCase {
             }
         }
         return null;
+    }
+
+    private static String readText(InputStream input) throws Exception {
+        try (InputStream stream = input;
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4_096];
+            int count;
+            while ((count = stream.read(buffer)) != -1) {
+                output.write(buffer, 0, count);
+            }
+            return output.toString(StandardCharsets.US_ASCII.name());
+        }
     }
 
     private static JSONObject request(

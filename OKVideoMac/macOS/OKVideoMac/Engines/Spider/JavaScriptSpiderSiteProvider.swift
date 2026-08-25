@@ -3830,8 +3830,8 @@ enum AndroidBridgeDeploymentAction: Equatable, Sendable {
 }
 
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.32"
-    static let bridgeVersionCode = 44
+    static let bridgeVersion = "0.3.33"
+    static let bridgeVersionCode = 45
     private static let networkCheckInterval: TimeInterval = 30
     private static let manifestSchema = 1
     private static let avdName = "OKVideoMac_Runtime"
