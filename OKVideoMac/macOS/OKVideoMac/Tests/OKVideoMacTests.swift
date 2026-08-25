@@ -5868,16 +5868,15 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testAndroidBridgeMediaSessionUsesScopedLoopbackAndLegacyCapability()
+    func testAndroidBridgeMediaSessionUsesScopedLoopbackAndRemoteDirectURL()
         throws {
         let client = AndroidDexBridgeClient()
         let scoped = try client.hostReachableMediaURL(
             "http://127.0.0.1:9978/proxy/media/session-123"
         )
-        let legacy = try client.hostReachableMediaURL(
+        let remote = try client.hostReachableMediaURL(
             "https://media.example.invalid/movie.mp4?signature=fixture"
         )
-        let legacyComponents = URLComponents(string: legacy)
 
         XCTAssertEqual(
             scoped,
@@ -5888,12 +5887,8 @@ final class OKVideoMacTests: XCTestCase {
             "session-123"
         )
         XCTAssertTrue(AndroidDexBridgeClient.isLoopbackMediaURL(scoped))
-        XCTAssertEqual(legacyComponents?.host, "127.0.0.1")
-        XCTAssertEqual(legacyComponents?.port, 19_978)
-        XCTAssertEqual(legacyComponents?.path, "/v1/media")
         XCTAssertEqual(
-            legacyComponents?.queryItems?.first(where: { $0.name == "url" })?
-                .value,
+            remote,
             "https://media.example.invalid/movie.mp4?signature=fixture"
         )
     }

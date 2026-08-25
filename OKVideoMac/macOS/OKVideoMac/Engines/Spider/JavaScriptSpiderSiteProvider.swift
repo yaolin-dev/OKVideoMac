@@ -2483,9 +2483,8 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         return components.url?.absoluteString ?? rawURL
     }
 
-    /// Converts a direct provider media URL into a Mac-reachable loopback
-    /// capability. New bridge builds already return `/proxy/media/{session}`;
-    /// legacy builds are wrapped by the maintained `/v1/media` endpoint.
+    /// Rewrites Android loopback media capabilities to the host port while
+    /// leaving ordinary remote URLs direct for mpv startup and seeking.
     /// Parsing URLs are intentionally handled by `hostReachableProxyURL`
     /// instead because they are not yet media resources.
     func hostReachableMediaURL(_ rawURL: String) throws -> String {
@@ -2504,7 +2503,7 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
             }
             return rewritten
         }
-        return Self.bridgeMediaProxyURL(for: rewritten) ?? rewritten
+        return rewritten
     }
 
     static func providerMediaSessionID(from rawURL: String) -> String? {
@@ -3831,8 +3830,8 @@ enum AndroidBridgeDeploymentAction: Equatable, Sendable {
 }
 
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.26"
-    static let bridgeVersionCode = 38
+    static let bridgeVersion = "0.3.32"
+    static let bridgeVersionCode = 44
     private static let networkCheckInterval: TimeInterval = 30
     private static let manifestSchema = 1
     private static let avdName = "OKVideoMac_Runtime"

@@ -187,12 +187,17 @@ final class BridgeMediaSessionRegistry {
                     true
             );
         }
-        // Every parse=0 HTTP(S) result belongs to the Android provider VM.
-        // This includes loopback servers started dynamically by a Spider
-        // (fishplay, cloud-drive helpers, and future provider-specific ports).
-        // Never let the Mac interpret Android's 127.0.0.1 as its own host.
-        if (!isHTTPURL(raw)) {
+        URI upstream = httpURI(raw);
+        if (upstream == null) {
             return new SecuredURL(raw, "", "", false);
+        }
+        // Ordinary remote media is fastest and most seekable when mpv talks
+        // to the CDN directly. Keep the Android bridge only when it is
+        // required to translate Android loopback or to retain sensitive/
+        // provider-specific request headers inside the provider VM.
+        if (!isLoopbackHost(upstream.getHost())
+                && !requiresProviderProtection(headers)) {
+            return new SecuredURL(raw.trim(), "", "", false);
         }
         prune();
         String id = UUID.randomUUID().toString();
@@ -251,13 +256,32 @@ final class BridgeMediaSessionRegistry {
         }
     }
 
-    private static boolean isHTTPURL(String raw) {
-        if (raw == null || raw.trim().isEmpty()) return false;
+    private static URI httpURI(String raw) {
+        if (raw == null || raw.trim().isEmpty()) return null;
         try {
-            return isHTTP(URI.create(raw.trim()));
+            URI uri = URI.create(raw.trim());
+            return isHTTP(uri) ? uri : null;
         } catch (Throwable ignored) {
-            return false;
+            return null;
         }
+    }
+
+    private static boolean requiresProviderProtection(
+            Map<String, String> headers
+    ) {
+        if (headers == null || headers.isEmpty()) return false;
+        for (String name : headers.keySet()) {
+            if (name == null) continue;
+            String lower = name.trim().toLowerCase(Locale.ROOT);
+            if (!"user-agent".equals(lower)
+                    && !"referer".equals(lower)
+                    && !"origin".equals(lower)
+                    && !"accept".equals(lower)
+                    && !"accept-language".equals(lower)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean isHTTP(URI uri) {

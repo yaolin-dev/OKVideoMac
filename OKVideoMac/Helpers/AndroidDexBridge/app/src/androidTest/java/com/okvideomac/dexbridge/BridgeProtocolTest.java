@@ -34,9 +34,12 @@ import java.net.InetAddress;
 import java.net.HttpURLConnection;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
@@ -1316,6 +1319,189 @@ public final class BridgeProtocolTest extends TestCase {
                 "[0-9a-f]{64}"
         ));
         assertFalse(secured.getBoolean("refreshPerformed"));
+    }
+
+    public void testPlainRemotePlaybackKeepsDirectPlayerFastPath()
+            throws Exception {
+        String mediaURL = "https://media.example/video.mp4?signature=fixture";
+        JSONObject result = new JSONObject()
+                .put("parse", 0)
+                .put("url", mediaURL)
+                .put("header", new JSONObject()
+                        .put("User-Agent", "Fixture Agent")
+                        .put("Referer", "https://site.example/"));
+
+        JSONObject secured = (JSONObject)
+                BridgeMediaSessionRegistry.securePlaybackResult(result);
+
+        assertEquals(mediaURL, secured.getString("url"));
+        assertFalse(secured.has("mediaSessionID"));
+        assertFalse(secured.has("upstreamFingerprint"));
+        assertEquals(
+                "Fixture Agent",
+                secured.getJSONObject("header").getString("User-Agent")
+        );
+        assertEquals(
+                "https://site.example/",
+                secured.getJSONObject("header").getString("Referer")
+        );
+    }
+
+    public void testMediaSessionContinuesProgressingTruncatedRangesInOneResponse()
+            throws Exception {
+        ensureBridgeServer();
+        InetAddress loopback = InetAddress.getByName("127.0.0.1");
+        try (ServerSocket providerServer = new ServerSocket(0, 3, loopback)) {
+            providerServer.setSoTimeout(5_000);
+            FutureTask<List<Map<String, String>>> providerRequests =
+                    new FutureTask<>(() -> {
+                        List<Map<String, String>> requests = new ArrayList<>();
+                        requests.add(serveOnce(
+                                providerServer,
+                                "HTTP/1.1 206 Partial Content\r\n"
+                                        + "Content-Type: video/mp4\r\n"
+                                        + "Content-Range: bytes 0-9/10\r\n"
+                                        + "Content-Length: 10\r\n"
+                                        + "ETag: \"stream-v1\"\r\n"
+                                        + "Connection: close\r\n\r\n"
+                                        + "01234"
+                        ));
+                        requests.add(serveOnce(
+                                providerServer,
+                                "HTTP/1.1 206 Partial Content\r\n"
+                                        + "Content-Type: video/mp4\r\n"
+                                        + "Content-Range: bytes 5-9/10\r\n"
+                                        + "Content-Length: 5\r\n"
+                                        + "ETag: \"stream-v1\"\r\n"
+                                        + "Connection: close\r\n\r\n"
+                                        + "567"
+                        ));
+                        requests.add(serveOnce(
+                                providerServer,
+                                "HTTP/1.1 206 Partial Content\r\n"
+                                        + "Content-Type: video/mp4\r\n"
+                                        + "Content-Range: bytes 8-9/10\r\n"
+                                        + "Content-Length: 2\r\n"
+                                        + "ETag: \"stream-v1\"\r\n"
+                                        + "Connection: close\r\n\r\n"
+                                        + "89"
+                        ));
+                        return requests;
+                    });
+            new Thread(providerRequests, "media-range-continuity-test").start();
+
+            JSONObject secured = (JSONObject)
+                    BridgeMediaSessionRegistry.securePlaybackResult(
+                            new JSONObject()
+                                    .put("parse", 0)
+                                    .put(
+                                            "url",
+                                            "http://127.0.0.1:"
+                                                    + providerServer.getLocalPort()
+                                                    + "/movie.mp4"
+                                    )
+                    );
+            HttpURLConnection mediaConnection = (HttpURLConnection) new URL(
+                    secured.getString("url")
+            ).openConnection();
+            mediaConnection.setConnectTimeout(2_000);
+            mediaConnection.setReadTimeout(5_000);
+            mediaConnection.setRequestProperty("Range", "bytes=0-9");
+            mediaConnection.setRequestProperty("If-Range", "\"stream-v1\"");
+            assertEquals(206, mediaConnection.getResponseCode());
+            assertEquals(10, mediaConnection.getContentLengthLong());
+            ByteArrayOutputStream received = new ByteArrayOutputStream();
+            try (InputStream input = mediaConnection.getInputStream()) {
+                byte[] buffer = new byte[16];
+                int count;
+                while ((count = input.read(buffer)) != -1) {
+                    received.write(buffer, 0, count);
+                }
+            } finally {
+                mediaConnection.disconnect();
+            }
+
+            assertEquals(
+                    "0123456789",
+                    received.toString(StandardCharsets.US_ASCII.name())
+            );
+            List<Map<String, String>> requests = providerRequests.get(
+                    5,
+                    TimeUnit.SECONDS
+            );
+            assertEquals("bytes=0-9", header(requests.get(0), "range"));
+            assertEquals("bytes=5-9", header(requests.get(1), "range"));
+            assertEquals("bytes=8-9", header(requests.get(2), "range"));
+            assertEquals(
+                    "\"stream-v1\"",
+                    header(requests.get(1), "if-range")
+            );
+            assertEquals(
+                    "\"stream-v1\"",
+                    header(requests.get(2), "if-range")
+            );
+        }
+    }
+
+    public void testMediaSessionDoesNotRetryZeroProgressRange()
+            throws Exception {
+        ensureBridgeServer();
+        InetAddress loopback = InetAddress.getByName("127.0.0.1");
+        try (ServerSocket providerServer = new ServerSocket(0, 2, loopback)) {
+            providerServer.setSoTimeout(5_000);
+            FutureTask<Map<String, String>> providerRequest =
+                    new FutureTask<>(() -> serveOnce(
+                            providerServer,
+                            "HTTP/1.1 206 Partial Content\r\n"
+                                    + "Content-Type: video/mp4\r\n"
+                                    + "Content-Range: bytes 0-9/10\r\n"
+                                    + "Content-Length: 10\r\n"
+                                    + "Connection: close\r\n\r\n"
+                    ));
+            new Thread(providerRequest, "media-zero-progress-test").start();
+
+            JSONObject secured = (JSONObject)
+                    BridgeMediaSessionRegistry.securePlaybackResult(
+                            new JSONObject()
+                                    .put("parse", 0)
+                                    .put(
+                                            "url",
+                                            "http://127.0.0.1:"
+                                                    + providerServer.getLocalPort()
+                                                    + "/movie.mp4"
+                                    )
+                    );
+            HttpURLConnection mediaConnection = (HttpURLConnection) new URL(
+                    secured.getString("url")
+            ).openConnection();
+            mediaConnection.setConnectTimeout(2_000);
+            mediaConnection.setReadTimeout(5_000);
+            mediaConnection.setRequestProperty("Range", "bytes=0-9");
+            assertEquals(206, mediaConnection.getResponseCode());
+            boolean interrupted = false;
+            try (InputStream input = mediaConnection.getInputStream()) {
+                while (input.read() != -1) {
+                    fail("Zero-progress upstream must not produce media bytes");
+                }
+            } catch (java.io.IOException expected) {
+                interrupted = true;
+            } finally {
+                mediaConnection.disconnect();
+            }
+
+            assertTrue(interrupted);
+            Map<String, String> request = providerRequest.get(
+                    5,
+                    TimeUnit.SECONDS
+            );
+            assertEquals("bytes=0-9", header(request, "range"));
+            providerServer.setSoTimeout(500);
+            try (Socket unexpected = providerServer.accept()) {
+                fail("Zero progress must not trigger an internal Range retry");
+            } catch (SocketTimeoutException expected) {
+                // The bridge closes this response and waits for the player.
+            }
+        }
     }
 
     public void testRequestScopedSiteHeadersEnterMediaSessionWithResultPrecedence()
