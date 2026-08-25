@@ -1,7 +1,7 @@
 # Performance
 
 - 文档类型：当前性能基线与待验证项
-- 对照版本：0.3.56（Build 81）
+- 对照版本：0.3.57（Build 82）
 - 最近更新：2026-08-25
 
 ## 已设置的资源边界
@@ -13,6 +13,8 @@
 - XMLTV 解压后 64 MiB；
 - 多站搜索全局并发 12；共享同一 Node runtime 的站点并发 4，聚合搜索每站只取第一页；
 - 播放解析最多 8 次去重尝试；
+- Android/Dex 远程媒体由 libmpv 直连 CDN 并直接处理 Range；Bridge 仅保留给
+  Android loopback 媒体，避免模拟器二次转发造成起播、拖动和长连接回退；
 - QuickJS 64 MiB / 10 秒，C smoke test 已验证无限循环中断。
 
 ## 播放器生命周期基线

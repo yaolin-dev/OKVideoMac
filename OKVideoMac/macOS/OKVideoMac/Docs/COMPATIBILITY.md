@@ -1,6 +1,6 @@
 # Compatibility
 
-- 对照版本：0.3.56（Build 81）
+- 对照版本：0.3.57（Build 82）
 - 最近更新：2026-08-25
 - 当前交付目标：Apple Silicon / arm64 / macOS 12.0+
 
@@ -142,6 +142,10 @@ EPG URL 执行链。
 | parser type 3 | Unsupported | 配置可读取，但 PlaybackResolver 不执行 |
 | parser type 4 | Unsupported | 配置可读取，但 PlaybackResolver 不执行 |
 | `parse:<name>` / `json:<url>` | Supported | 显式选择已支持的解析路径 |
+
+Android/Dex Provider 返回的远程 HTTP(S) 媒体及其播放 Header 直接交给 libmpv，
+由播放器负责 CDN Range、重试与跳转；只有 Provider 位于 Android 内部的 loopback
+媒体服务才通过具备作用域的 Bridge 会话转发。
 
 最终播放依赖 libmpv、系统可用 codec、媒体服务器、Headers/Cookies 和源本身行为。
 OKVideoMac 不提供 DRM 绕过。

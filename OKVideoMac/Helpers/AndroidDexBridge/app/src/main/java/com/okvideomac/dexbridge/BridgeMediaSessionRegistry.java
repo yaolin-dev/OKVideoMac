@@ -16,7 +16,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-/** Keeps signed media URLs and authorization headers inside the provider VM. */
+/** Keeps Android loopback media and its request context inside the provider VM. */
 final class BridgeMediaSessionRegistry {
     private static final long SESSION_TTL_MS = 2 * 60 * 60_000L;
     private static final int MAX_SESSIONS = 512;
@@ -191,12 +191,13 @@ final class BridgeMediaSessionRegistry {
         if (upstream == null) {
             return new SecuredURL(raw, "", "", false);
         }
-        // Ordinary remote media is fastest and most seekable when mpv talks
-        // to the CDN directly. Keep the Android bridge only when it is
-        // required to translate Android loopback or to retain sensitive/
-        // provider-specific request headers inside the provider VM.
-        if (!isLoopbackHost(upstream.getHost())
-                && !requiresProviderProtection(headers)) {
+        // Remote media must stay player-owned. libmpv can send the provider's
+        // playback headers itself and is substantially better at CDN Range
+        // recovery, demux probing and seeking than a second HTTP hop through
+        // the Android emulator. This restores the pre-session playback path.
+        // Only Android loopback media needs a scoped bridge capability because
+        // the Mac cannot reach a provider-owned 127.0.0.1 port directly.
+        if (!isLoopbackHost(upstream.getHost())) {
             return new SecuredURL(raw.trim(), "", "", false);
         }
         prune();
@@ -264,24 +265,6 @@ final class BridgeMediaSessionRegistry {
         } catch (Throwable ignored) {
             return null;
         }
-    }
-
-    private static boolean requiresProviderProtection(
-            Map<String, String> headers
-    ) {
-        if (headers == null || headers.isEmpty()) return false;
-        for (String name : headers.keySet()) {
-            if (name == null) continue;
-            String lower = name.trim().toLowerCase(Locale.ROOT);
-            if (!"user-agent".equals(lower)
-                    && !"referer".equals(lower)
-                    && !"origin".equals(lower)
-                    && !"accept".equals(lower)
-                    && !"accept-language".equals(lower)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private static boolean isHTTP(URI uri) {

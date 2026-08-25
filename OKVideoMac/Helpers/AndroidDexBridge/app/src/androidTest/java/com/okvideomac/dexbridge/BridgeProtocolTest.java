@@ -1286,10 +1286,12 @@ public final class BridgeProtocolTest extends TestCase {
         assertTrue(completed.getBoolean("refreshPerformed"));
     }
 
-    public void testPlaybackURLBecomesProviderOwnedSession() throws Exception {
+    public void testRemotePlaybackWithProviderHeadersStaysPlayerOwned()
+            throws Exception {
         JSONObject result = new JSONObject();
         result.put("parse", 0);
-        result.put("url", "https://media.example/video.mp4?signature=secret");
+        String mediaURL = "https://media.example/video.mp4?signature=secret";
+        result.put("url", mediaURL);
         result.put(
                 "header",
                 new JSONObject()
@@ -1298,26 +1300,17 @@ public final class BridgeProtocolTest extends TestCase {
         );
         JSONObject secured = (JSONObject)
                 BridgeMediaSessionRegistry.securePlaybackResult(result);
-        String localURL = secured.getString("url");
-        assertTrue(localURL.startsWith(
-                "http://127.0.0.1:9978/proxy/media/"
-        ));
-        String id = localURL.substring(localURL.lastIndexOf('/') + 1);
-        BridgeMediaSessionRegistry.Session session =
-                BridgeMediaSessionRegistry.get(id);
-        assertNotNull(session);
+        assertEquals(mediaURL, secured.getString("url"));
+        assertFalse(secured.has("mediaSessionID"));
+        assertFalse(secured.has("upstreamFingerprint"));
         assertEquals(
-                "https://media.example/video.mp4?signature=secret",
-                session.upstreamURL
+                "BDUSS=secret",
+                secured.getJSONObject("header").getString("Cookie")
         );
-        assertEquals("BDUSS=secret", session.headers.get("Cookie"));
-        assertEquals("https://pan.example/", session.headers.get("Referer"));
-        assertFalse(secured.has("header"));
-        assertFalse(secured.has("headers"));
-        assertEquals(id, secured.getString("mediaSessionID"));
-        assertTrue(secured.getString("upstreamFingerprint").matches(
-                "[0-9a-f]{64}"
-        ));
+        assertEquals(
+                "https://pan.example/",
+                secured.getJSONObject("header").getString("Referer")
+        );
         assertFalse(secured.getBoolean("refreshPerformed"));
     }
 
@@ -1504,7 +1497,7 @@ public final class BridgeProtocolTest extends TestCase {
                 .put("Origin", "https://site.example/");
         JSONObject result = new JSONObject()
                 .put("parse", 0)
-                .put("url", "https://media.example/context.mkv")
+                .put("url", "http://127.0.0.1:6677/context.mkv")
                 .put("headers", new JSONObject()
                         .put("cookie", "player-secret")
                         .put("Referer", "https://player.example/"));
@@ -1539,7 +1532,7 @@ public final class BridgeProtocolTest extends TestCase {
 
     public void testMediaSessionFingerprintIncludesRequestContext()
             throws Exception {
-        String mediaURL = "https://media.example/fingerprint.mkv";
+        String mediaURL = "http://127.0.0.1:6677/fingerprint.mkv";
         JSONObject first = (JSONObject)
                 BridgeMediaSessionRegistry.securePlaybackResult(
                         new JSONObject().put("parse", 0).put("url", mediaURL),
@@ -1635,7 +1628,7 @@ public final class BridgeProtocolTest extends TestCase {
                         .put("parse", 0)
                         .put(
                                 "url",
-                                "https://media.example/" + suffix + ".mkv"
+                                "http://127.0.0.1:6677/" + suffix + ".mkv"
                         )
                         .put("headers", new JSONObject()
                                 .put("cookie", "player-cookie"))
@@ -1809,7 +1802,7 @@ public final class BridgeProtocolTest extends TestCase {
             throws Exception {
         JSONObject first = new JSONObject()
                 .put("parse", 0)
-                .put("url", "https://media.example/refresh.mkv?token=one")
+                .put("url", "http://127.0.0.1:6677/refresh.mkv?token=one")
                 .put("headers", new JSONObject().put("Cookie", "first"));
         JSONObject secured = (JSONObject)
                 BridgeMediaSessionRegistry.securePlaybackResult(first, true);
@@ -2004,7 +1997,7 @@ public final class BridgeProtocolTest extends TestCase {
             throws Exception {
         JSONObject result = new JSONObject()
                 .put("parse", 0)
-                .put("url", "https://media.example/header-case")
+                .put("url", "http://127.0.0.1:6677/header-case")
                 .put("header", new JSONObject().put("Cookie", "old-secret"))
                 .put("headers", new JSONObject().put("cookie", "new-secret"));
         JSONObject secured = (JSONObject)
