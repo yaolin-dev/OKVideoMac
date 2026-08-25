@@ -121,7 +121,10 @@ struct PlayerView: View {
                 isLivePlayback: state.isLivePlayback,
                 controlsVisible: controlsVisible,
                 title: playbackDisplayTitle,
-                videoAspectRatio: playerWindowAspectRatio,
+                // Media changes are rendered inside the existing viewport.
+                // Do not resize or move the user's window when late metadata,
+                // a new episode, or a different route reports another ratio.
+                videoAspectRatio: nil,
                 onRestore: onWindowChromeRestored,
                 onFullScreenChange: { isWindowFullScreen = $0 }
             )
@@ -547,15 +550,6 @@ struct PlayerView: View {
         ]
         .compactMap { $0 }
         .joined(separator: " · ")
-    }
-
-    private var playerWindowAspectRatio: Double? {
-        PlayerWindowAspectPolicy.aspectRatio(
-            isLivePlayback: state.isLivePlayback,
-            override: state.playerAspectRatio,
-            videoWidth: state.playerSnapshot.videoWidth,
-            videoHeight: state.playerSnapshot.videoHeight
-        )
     }
 
     private func episodePanelDisplayName(
@@ -1722,7 +1716,7 @@ struct PlayerView: View {
     }
 
     private func toggleFullScreen() {
-        (NSApp.keyWindow ?? NSApp.mainWindow)?.toggleFullScreen(nil)
+        state.togglePlayerFullScreen()
     }
 
     private func handleSurfaceDoubleClick() {
@@ -2869,53 +2863,14 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                   aspectRatio > 0,
                   !window.styleMask.contains(.fullScreen),
                   !window.inLiveResize else { return }
-
+            // An episode or route can publish dimensions after playback has
+            // already started. Only update the constraint used for future
+            // manual resizes; never move or resize the current outer frame.
+            // mpv letterboxes the media inside the unchanged viewport.
             window.contentAspectRatio = NSSize(
                 width: aspectRatio,
                 height: 1
             )
-
-            let contentRect = window.contentRect(forFrameRect: window.frame)
-            let visibleFrame = window.screen?.visibleFrame
-            let chromeWidth = max(0, window.frame.width - contentRect.width)
-            let chromeHeight = max(0, window.frame.height - contentRect.height)
-            let maximumContentSize = NSSize(
-                width: max(
-                    1,
-                    (visibleFrame?.width ?? .greatestFiniteMagnitude)
-                        - chromeWidth
-                ),
-                height: max(
-                    1,
-                    (visibleFrame?.height ?? .greatestFiniteMagnitude)
-                        - chromeHeight
-                )
-            )
-            guard let targetContentSize = PlayerWindowAspectPolicy.contentSize(
-                current: contentRect.size,
-                aspectRatio: aspectRatio,
-                minimum: window.contentMinSize,
-                maximum: maximumContentSize
-            ) else { return }
-
-            var targetFrame = window.frameRect(
-                forContentRect: NSRect(origin: .zero, size: targetContentSize)
-            )
-            targetFrame.origin = NSPoint(
-                x: window.frame.midX - targetFrame.width / 2,
-                y: window.frame.midY - targetFrame.height / 2
-            )
-            if let visibleFrame {
-                targetFrame.origin.x = min(
-                    max(targetFrame.origin.x, visibleFrame.minX),
-                    visibleFrame.maxX - targetFrame.width
-                )
-                targetFrame.origin.y = min(
-                    max(targetFrame.origin.y, visibleFrame.minY),
-                    visibleFrame.maxY - targetFrame.height
-                )
-            }
-            window.setFrame(targetFrame, display: false)
         }
 
         private static func restoreWhenWindowIsStable(

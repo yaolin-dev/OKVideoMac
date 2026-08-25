@@ -74,6 +74,78 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testPlayerWindowCommandsRemainDistinctForTheSamePlaybackRequest() {
+        let requestID = UUID()
+        let first = PlayerWindowCommand(
+            requestID: requestID,
+            kind: .showAndActivate
+        )
+        let second = PlayerWindowCommand(
+            requestID: requestID,
+            kind: .focus
+        )
+
+        XCTAssertNotEqual(first.id, second.id)
+        XCTAssertNotEqual(first, second)
+        XCTAssertEqual(first.requestID, second.requestID)
+    }
+
+    func testPlayerFocusCompensationStopsAfterFocusOrApplicationSwitch() {
+        XCTAssertTrue(
+            PlayerWindowFocusCompensationPolicy.shouldRetry(
+                isApplicationActive: true,
+                isWindowKey: false,
+                ownsRequest: true,
+                isCommandPending: true
+            )
+        )
+        XCTAssertFalse(
+            PlayerWindowFocusCompensationPolicy.shouldRetry(
+                isApplicationActive: false,
+                isWindowKey: false,
+                ownsRequest: true,
+                isCommandPending: true
+            )
+        )
+        XCTAssertFalse(
+            PlayerWindowFocusCompensationPolicy.shouldRetry(
+                isApplicationActive: true,
+                isWindowKey: true,
+                ownsRequest: true,
+                isCommandPending: true
+            )
+        )
+        XCTAssertFalse(
+            PlayerWindowFocusCompensationPolicy.shouldRetry(
+                isApplicationActive: true,
+                isWindowKey: false,
+                ownsRequest: false,
+                isCommandPending: true
+            )
+        )
+    }
+
+    func testPlaybackErrorsRouteToPlayerOnlyWhileItExists() {
+        XCTAssertTrue(
+            PlayerErrorPresentationPolicy.targetsPlayer(
+                title: "清晰度切换失败",
+                isPlayerPresented: true
+            )
+        )
+        XCTAssertFalse(
+            PlayerErrorPresentationPolicy.targetsPlayer(
+                title: "清晰度切换失败",
+                isPlayerPresented: false
+            )
+        )
+        XCTAssertFalse(
+            PlayerErrorPresentationPolicy.targetsPlayer(
+                title: "配置刷新失败",
+                isPlayerPresented: true
+            )
+        )
+    }
+
     func testConfigurationActivationTrackerLatestRequestWinsABC() {
         var tracker = ConfigurationActivationRequestTracker()
         let configurationA = UUID()
@@ -390,18 +462,28 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertFalse(
             PlayerSurfaceMountPolicy.shouldMount(
                 isPlayerPresented: false,
+                isMountEnabled: true,
                 hasRenderPlayer: true
             )
         )
         XCTAssertFalse(
             PlayerSurfaceMountPolicy.shouldMount(
                 isPlayerPresented: true,
+                isMountEnabled: true,
                 hasRenderPlayer: false
+            )
+        )
+        XCTAssertFalse(
+            PlayerSurfaceMountPolicy.shouldMount(
+                isPlayerPresented: true,
+                isMountEnabled: false,
+                hasRenderPlayer: true
             )
         )
         XCTAssertTrue(
             PlayerSurfaceMountPolicy.shouldMount(
                 isPlayerPresented: true,
+                isMountEnabled: true,
                 hasRenderPlayer: true
             )
         )
@@ -7781,6 +7863,34 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertLessThanOrEqual(size.height, visibleFrame.height * 0.86)
     }
 
+    func testPlayerWindowFrameReturnsFromDisconnectedDisplay() {
+        let visibleFrame = NSRect(x: 0, y: 0, width: 1_440, height: 900)
+        let disconnectedFrame = NSRect(
+            x: 2_800,
+            y: 300,
+            width: 1_000,
+            height: 600
+        )
+        let adjusted = PlayerWindowFrameVisibilityPolicy.adjustedFrame(
+            disconnectedFrame,
+            visibleFrames: [visibleFrame],
+            fallbackVisibleFrame: visibleFrame
+        )
+
+        XCTAssertTrue(visibleFrame.contains(adjusted))
+        XCTAssertEqual(adjusted.size, disconnectedFrame.size)
+
+        let alreadyVisible = NSRect(x: 120, y: 90, width: 1_000, height: 600)
+        XCTAssertEqual(
+            PlayerWindowFrameVisibilityPolicy.adjustedFrame(
+                alreadyVisible,
+                visibleFrames: [visibleFrame],
+                fallbackVisibleFrame: visibleFrame
+            ),
+            alreadyVisible
+        )
+    }
+
     func testLiveImmersiveControlsScaleWithPlayerViewport() {
         let compact = LivePlayerOverlayMetrics(
             viewportSize: CGSize(width: 800, height: 450)
@@ -7858,7 +7968,7 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     @MainActor
-    func testPlayerWindowChromeLocksAspectWithoutResizingOnLiveChannelChange() async {
+    func testPlayerWindowChromeUpdatesAspectConstraintWithoutResizing() async {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
             styleMask: [.titled, .closable, .resizable],
@@ -7901,12 +8011,7 @@ final class OKVideoMacTests: XCTestCase {
             2.0,
             accuracy: 0.0001
         )
-        XCTAssertEqual(
-            window.contentRect(forFrameRect: window.frame).width
-                / window.contentRect(forFrameRect: window.frame).height,
-            2.0,
-            accuracy: 0.005
-        )
+        XCTAssertEqual(window.frame, originalWindowFrame)
 
         coordinator.configure(
             isLivePlayback: true,
@@ -7927,6 +8032,7 @@ final class OKVideoMacTests: XCTestCase {
             accuracy: 0.0001
         )
         let liveFrame = window.frame
+        XCTAssertEqual(liveFrame, originalWindowFrame)
 
         coordinator.configure(
             isLivePlayback: true,

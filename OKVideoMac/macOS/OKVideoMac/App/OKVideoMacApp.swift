@@ -81,13 +81,15 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
     private weak var appState: AppState?
     private var playerWindowController: PlayerPlaybackWindowController?
     private var playerPresentationCancellable: AnyCancellable?
+    private var playerWindowCommandCancellable: AnyCancellable?
     private var terminationState = TerminationState.idle
     private var terminationTask: Task<Void, Never>?
     private var terminationTimeoutTask: Task<Void, Never>?
 
     func install(appState: AppState) {
         guard self.appState !== appState
-                || playerPresentationCancellable == nil else { return }
+                || playerPresentationCancellable == nil
+                || playerWindowCommandCancellable == nil else { return }
         self.appState = appState
         let playerWindowController = PlayerPlaybackWindowController(
             appState: appState
@@ -95,19 +97,15 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
         self.playerWindowController = playerWindowController
         playerPresentationCancellable = appState.$isPlayerPresented
             .removeDuplicates()
-            .sink { [weak playerWindowController, weak appState] isPresented in
-                if isPresented {
-                    // Do not build the AppKit/OpenGL hierarchy inline with
-                    // the click transaction. The window mounts on the next
-                    // main-loop turn; playback remains gated until the
-                    // attached OpenGL view reports a usable render surface.
-                    DispatchQueue.main.async {
-                        guard appState?.isPlayerPresented == true else { return }
-                        playerWindowController?.present()
-                    }
-                } else {
+            .sink { [weak playerWindowController] isPresented in
+                if !isPresented {
                     playerWindowController?.dismiss()
                 }
+            }
+        playerWindowCommandCancellable = appState.$playerWindowCommand
+            .compactMap { $0 }
+            .sink { [weak playerWindowController] command in
+                playerWindowController?.execute(command)
             }
     }
 
@@ -122,7 +120,7 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(
         _ sender: NSApplication
     ) -> Bool {
-        true
+        false
     }
 
     func applicationShouldTerminate(
@@ -181,17 +179,58 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private var hostingController: NSHostingController<AnyView>?
     private var isDismissingFromState = false
+    private var pendingFocusCommandID: UUID?
 
     init(appState: AppState) {
         self.appState = appState
     }
 
-    func present() {
-        guard let appState else { return }
-        if let window {
-            window.makeKeyAndOrderFront(nil)
-            return
+    func execute(_ command: PlayerWindowCommand) {
+        switch command.kind {
+        case .showAndActivate, .focus:
+            guard owns(command) else { return }
+            showAndActivate(command: command)
+        case .showWithoutStealingFocus:
+            guard owns(command) else { return }
+            showWithoutStealingFocus()
+        case .toggleFullScreen:
+            guard owns(command), let window else { return }
+            window.toggleFullScreen(nil)
+        case .close:
+            dismiss()
         }
+    }
+
+    private func owns(_ command: PlayerWindowCommand) -> Bool {
+        guard let requestID = command.requestID else { return true }
+        return appState?.ownsPlayerWindowRequest(requestID) == true
+    }
+
+    private func showAndActivate(command: PlayerWindowCommand) {
+        guard let window = ensureWindow() else { return }
+        pendingFocusCommandID = command.id
+        NSApp.activate(ignoringOtherApps: true)
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        restoreVisibleFrameIfNeeded(window)
+        window.makeKeyAndOrderFront(nil)
+        if window.isKeyWindow {
+            pendingFocusCommandID = nil
+        }
+        scheduleFocusConfirmation(for: command, window: window)
+    }
+
+    private func showWithoutStealingFocus() {
+        guard let window = ensureWindow() else { return }
+        restoreVisibleFrameIfNeeded(window)
+        guard !window.isMiniaturized, !window.isVisible else { return }
+        window.orderFront(nil)
+    }
+
+    private func ensureWindow() -> NSWindow? {
+        if let window { return window }
+        guard let appState else { return nil }
 
         let contentSize = initialContentSize()
         let window = NSWindow(
@@ -209,7 +248,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         window.delegate = self
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
-        window.collectionBehavior = [.fullScreenPrimary]
+        window.collectionBehavior = [.fullScreenPrimary, .moveToActiveSpace]
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.backgroundColor = .black
@@ -232,11 +271,61 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
             window.center()
         }
         window.setFrameAutosaveName(Self.frameAutosaveName)
+        restoreVisibleFrameIfNeeded(window)
+        return window
+    }
+
+    private func scheduleFocusConfirmation(
+        for command: PlayerWindowCommand,
+        window: NSWindow
+    ) {
+        DispatchQueue.main.async { [weak self, weak window] in
+            self?.confirmFocus(for: command, window: window)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+            [weak self, weak window] in
+            self?.confirmFocus(for: command, window: window)
+        }
+    }
+
+    private func confirmFocus(
+        for command: PlayerWindowCommand,
+        window: NSWindow?
+    ) {
+        guard let window else { return }
+        let ownsRequest = command.requestID.map {
+            appState?.ownsPlayerWindowRequest($0) == true
+        } ?? true
+        guard PlayerWindowFocusCompensationPolicy.shouldRetry(
+            isApplicationActive: NSApp.isActive,
+            isWindowKey: window.isKeyWindow,
+            ownsRequest: ownsRequest,
+            isCommandPending: pendingFocusCommandID == command.id
+        ) else { return }
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
         window.makeKeyAndOrderFront(nil)
+    }
+
+    private func restoreVisibleFrameIfNeeded(_ window: NSWindow) {
+        let visibleFrames = NSScreen.screens.map(\.visibleFrame)
+        let fallback = window.screen?.visibleFrame
+            ?? NSScreen.main?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1_440, height: 900)
+        let adjustedFrame = PlayerWindowFrameVisibilityPolicy.adjustedFrame(
+            window.frame,
+            visibleFrames: visibleFrames,
+            fallbackVisibleFrame: fallback
+        )
+        if adjustedFrame != window.frame {
+            window.setFrame(adjustedFrame, display: false)
+        }
     }
 
     func dismiss() {
         guard let window else { return }
+        pendingFocusCommandID = nil
         isDismissingFromState = true
         window.close()
         clearWindowReferences()
@@ -259,6 +348,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     func windowDidBecomeKey(_ notification: Notification) {
         guard let keyWindow = notification.object as? NSWindow,
               keyWindow === window else { return }
+        pendingFocusCommandID = nil
         appState?.setPlayerWindowKey(true)
     }
 
@@ -269,6 +359,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     }
 
     private func clearWindowReferences() {
+        pendingFocusCommandID = nil
         appState?.setPlayerWindowKey(false)
         window?.delegate = nil
         window = nil
@@ -295,6 +386,32 @@ enum PlayerWindowSizingPolicy {
     }
 }
 
+enum PlayerWindowFrameVisibilityPolicy {
+    private static let minimumVisibleLength: CGFloat = 80
+
+    static func adjustedFrame(
+        _ frame: NSRect,
+        visibleFrames: [NSRect],
+        fallbackVisibleFrame: NSRect
+    ) -> NSRect {
+        let isSufficientlyVisible = visibleFrames.contains { visibleFrame in
+            let intersection = visibleFrame.intersection(frame)
+            return intersection.width >= minimumVisibleLength
+                && intersection.height >= minimumVisibleLength
+        }
+        guard !isSufficientlyVisible else { return frame }
+
+        var adjusted = frame
+        adjusted.size.width = min(adjusted.width, fallbackVisibleFrame.width)
+        adjusted.size.height = min(adjusted.height, fallbackVisibleFrame.height)
+        adjusted.origin = NSPoint(
+            x: fallbackVisibleFrame.midX - adjusted.width / 2,
+            y: fallbackVisibleFrame.midY - adjusted.height / 2
+        )
+        return adjusted
+    }
+}
+
 private struct PlayerPlaybackWindowRoot: View {
     @ObservedObject var appState: AppState
 
@@ -305,6 +422,7 @@ private struct PlayerPlaybackWindowRoot: View {
 
             if PlayerSurfaceMountPolicy.shouldMount(
                 isPlayerPresented: appState.isPlayerPresented,
+                isMountEnabled: appState.isPlayerRenderSurfaceMountEnabled,
                 hasRenderPlayer: appState.embeddedPlayer != nil
             ), let player = appState.embeddedPlayer {
                 MPVRenderView(
@@ -340,6 +458,13 @@ private struct PlayerPlaybackWindowRoot: View {
         }
         .frame(minWidth: 800, minHeight: 450)
         .background(Color.black)
+        .alert(item: $appState.playerPresentedError) { error in
+            Alert(
+                title: Text(error.title),
+                message: Text(error.message),
+                dismissButton: .default(Text("好"))
+            )
+        }
     }
 }
 
@@ -740,12 +865,12 @@ struct AppCommands: Commands {
             Divider()
 
             Button("进入/退出全屏 (F)") {
-                NSApp.keyWindow?.toggleFullScreen(nil)
+                state.togglePlayerFullScreen()
             }
                 .keyboardShortcut("f", modifiers: [])
                 .disabled(!state.allowsPlayerShortcuts)
             Button("进入/退出全屏") {
-                NSApp.keyWindow?.toggleFullScreen(nil)
+                state.togglePlayerFullScreen()
             }
                 .keyboardShortcut("f", modifiers: [.command, .control])
                 .disabled(!state.allowsPlayerShortcuts)

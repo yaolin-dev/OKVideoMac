@@ -105,6 +105,64 @@ struct UserFacingError: Identifiable, Equatable {
     }
 }
 
+enum PlayerWindowActivationPolicy: Equatable {
+    case userInitiated
+    case preserveFocus
+}
+
+enum PlayerWindowCommandKind: Equatable {
+    case showAndActivate
+    case focus
+    case showWithoutStealingFocus
+    case toggleFullScreen
+    case close
+}
+
+struct PlayerWindowCommand: Identifiable, Equatable {
+    let id: UUID
+    let requestID: UUID?
+    let kind: PlayerWindowCommandKind
+
+    init(
+        id: UUID = UUID(),
+        requestID: UUID?,
+        kind: PlayerWindowCommandKind
+    ) {
+        self.id = id
+        self.requestID = requestID
+        self.kind = kind
+    }
+}
+
+enum PlayerWindowFocusCompensationPolicy {
+    static func shouldRetry(
+        isApplicationActive: Bool,
+        isWindowKey: Bool,
+        ownsRequest: Bool,
+        isCommandPending: Bool
+    ) -> Bool {
+        isApplicationActive
+            && !isWindowKey
+            && ownsRequest
+            && isCommandPending
+    }
+}
+
+enum PlayerErrorPresentationPolicy {
+    private static let playerTitleFragments = [
+        "播放", "播放器", "跳转", "音量", "静音", "倍速", "清晰度",
+        "轨道", "字幕", "音频", "画面", "截图", "硬件解码", "视频渲染"
+    ]
+
+    static func targetsPlayer(
+        title: String,
+        isPlayerPresented: Bool
+    ) -> Bool {
+        isPlayerPresented
+            && playerTitleFragments.contains(where: title.contains)
+    }
+}
+
 enum ImportOperationResult {
     case success
     case cancelled
@@ -2978,10 +3036,13 @@ final class AppState: ObservableObject {
     @Published private(set) var selectedPlaybackQualityID: String?
     @Published private(set) var isSwitchingPlaybackQuality = false
     @Published var isPlayerPresented = false
+    @Published private(set) var isPlayerRenderSurfaceMountEnabled = false
+    @Published private(set) var playerWindowCommand: PlayerWindowCommand?
     @Published private(set) var isLoading = false
     @Published private(set) var isLoadingNextCategoryPage = false
     @Published private(set) var categoryPaginationError: String?
     @Published var presentedError: UserFacingError?
+    @Published var playerPresentedError: UserFacingError?
     @Published var cloudAuthorizationPrompt: CloudAuthorizationPrompt?
     @Published var cloudAuthorizationInput = ""
     @Published private(set) var nodeWebPresentation: NodeWebPresentation?
@@ -5136,7 +5197,8 @@ final class AppState: ObservableObject {
                 source: playback.source,
                 episode: playback.episode,
                 origin: playback.origin,
-                configurationID: playback.configurationID
+                configurationID: playback.configurationID,
+                windowActivation: .preserveFocus
             )
         }
     }
@@ -5742,7 +5804,8 @@ final class AppState: ObservableObject {
                 source: pending.source,
                 episode: pending.episode,
                 origin: pending.origin,
-                configurationID: pending.configurationID
+                configurationID: pending.configurationID,
+                windowActivation: .preserveFocus
             )
         case .detail(let summary):
             guard summary.siteKey == siteKey else { return }
@@ -6717,7 +6780,8 @@ final class AppState: ObservableObject {
                 episode: pending.episode,
                 origin: pending.origin,
                 authoritativePlaybackResult: authoritativePlaybackResult,
-                configurationID: pending.configurationID
+                configurationID: pending.configurationID,
+                windowActivation: .preserveFocus
             )
         case .detail(let summary):
             guard summary.siteKey == context.sourceIdentity.siteKey else { return }
@@ -6825,6 +6889,24 @@ final class AppState: ObservableObject {
         let preparationID = UUID()
         historyPlaybackPreparationID = preparationID
         historyPlaybackLoadingID = item.id
+        cancelAllPlaybackStartupGates()
+        playbackSessionID = preparationID
+        activePlayerRequestID = preparationID
+        playbackResolutionState = .restoringHistory
+        currentPlaybackAttempt = nil
+        playbackFailureSummary = nil
+        playerPresentedError = nil
+        isPlayerRenderSurfaceMountEnabled = false
+        playerSnapshot = PlayerSnapshot(
+            status: .loading,
+            volume: playerSnapshot.volume,
+            isMuted: playerSnapshot.isMuted,
+            speed: playerSnapshot.speed
+        )
+        presentPlayer(
+            requestID: preparationID,
+            activation: .userInitiated
+        )
         defer {
             if historyPlaybackPreparationID == preparationID {
                 historyPlaybackLoadingID = nil
@@ -6906,7 +6988,8 @@ final class AppState: ObservableObject {
                     detail: detail,
                     source: selection.source,
                     episode: selection.episode,
-                    origin: .history(item)
+                    origin: .history(item),
+                    windowActivation: .preserveFocus
                 )
                 return
             }
@@ -6940,7 +7023,8 @@ final class AppState: ObservableObject {
                 detail: context.detail,
                 source: context.source,
                 episode: context.episode,
-                origin: .history(item)
+                origin: .history(item),
+                windowActivation: .preserveFocus
             )
             return
         }
@@ -6975,7 +7059,8 @@ final class AppState: ObservableObject {
                         detail: detail,
                         source: selection.source,
                         episode: selection.episode,
-                        origin: .history(item)
+                        origin: .history(item),
+                        windowActivation: .preserveFocus
                     )
                     return
                 }
@@ -7013,7 +7098,8 @@ final class AppState: ObservableObject {
         let sessionID = prepareHistoryPlaybackShell(
             item,
             siteName: replay.detail.summary.siteName,
-            configurationID: owningConfigurationID
+            configurationID: owningConfigurationID,
+            requestID: owningPreparationID
         )
         do {
             try await environment.player.prepareForPlayback(
@@ -7021,7 +7107,7 @@ final class AppState: ObservableObject {
             )
             guard isCurrentHistoryPreparation(owningPreparationID),
                   playbackSessionID == sessionID else { return false }
-            presentPlayer()
+            isPlayerRenderSurfaceMountEnabled = true
             await environment.player.stop()
             guard isCurrentHistoryPreparation(owningPreparationID),
                   playbackSessionID == sessionID else { return false }
@@ -7046,8 +7132,8 @@ final class AppState: ObservableObject {
             return true
         } catch {
             historyPlaybackSessionCache.remove(item.id)
-            if playbackSessionID == sessionID, isPlayerPresented {
-                await dismissPlayerSurfaceAndRestoreWindow()
+            if playbackSessionID == sessionID {
+                isPlayerRenderSurfaceMountEnabled = false
             }
             return false
         }
@@ -7078,13 +7164,14 @@ final class AppState: ObservableObject {
         guard isCurrentHistoryPreparation(owningPreparationID) else {
             return false
         }
-        // Only reveal the player after the cached media has been validated.
-        // Detail/provider recovery paths call startPlayback(), which follows
-        // the same prepare-then-present ordering.
+        // The player shell is already visible while the cached media is
+        // validated. Mount the render surface only after the player engine is
+        // ready, matching the detail/provider recovery path.
         let sessionID = prepareHistoryPlaybackShell(
             item,
             siteName: siteName,
-            configurationID: owningConfigurationID
+            configurationID: owningConfigurationID,
+            requestID: owningPreparationID
         )
         do {
             try await environment.player.prepareForPlayback(
@@ -7092,7 +7179,7 @@ final class AppState: ObservableObject {
             )
             guard isCurrentHistoryPreparation(owningPreparationID),
                   playbackSessionID == sessionID else { return false }
-            presentPlayer()
+            isPlayerRenderSurfaceMountEnabled = true
             await environment.player.stop()
             guard isCurrentHistoryPreparation(owningPreparationID),
                   playbackSessionID == sessionID else { return false }
@@ -7110,8 +7197,8 @@ final class AppState: ObservableObject {
             playbackFailureSummary = nil
             return true
         } catch {
-            if playbackSessionID == sessionID, isPlayerPresented {
-                await dismissPlayerSurfaceAndRestoreWindow()
+            if playbackSessionID == sessionID {
+                isPlayerRenderSurfaceMountEnabled = false
             }
             return false
         }
@@ -7120,9 +7207,10 @@ final class AppState: ObservableObject {
     private func prepareHistoryPlaybackShell(
         _ item: HistoryRecord,
         siteName: String,
-        configurationID: UUID
+        configurationID: UUID,
+        requestID: UUID
     ) -> UUID {
-        let preparationID = UUID()
+        let preparationID = requestID
         playbackSessionID = preparationID
         activePlayerRequestID = preparationID
         playbackQualitySwitchSessionID = UUID()
@@ -7153,6 +7241,7 @@ final class AppState: ObservableObject {
         playbackResolutionState = .restoringHistory
         currentPlaybackAttempt = nil
         playbackFailureSummary = nil
+        isPlayerRenderSurfaceMountEnabled = false
         playerSnapshot = PlayerSnapshot(
             status: .loading,
             volume: playerSnapshot.volume,
@@ -7421,6 +7510,18 @@ final class AppState: ObservableObject {
         shortcutPlayerEscapeRequest &+= 1
     }
 
+    func togglePlayerFullScreen() {
+        guard isPlayerPresented else { return }
+        issuePlayerWindowCommand(
+            .toggleFullScreen,
+            requestID: activePlayerRequestID
+        )
+    }
+
+    func ownsPlayerWindowRequest(_ requestID: UUID) -> Bool {
+        isPlayerPresented && activePlayerRequestID == requestID
+    }
+
     func performContextRefresh() async {
         guard allowsBrowserShortcuts else { return }
         switch selectedSection {
@@ -7659,7 +7760,8 @@ final class AppState: ObservableObject {
         episode: PlayEpisode,
         origin: PlaybackRequestOrigin = .direct,
         authoritativePlaybackResult: SitePlaybackResult? = nil,
-        configurationID requestedConfigurationID: UUID? = nil
+        configurationID requestedConfigurationID: UUID? = nil,
+        windowActivation: PlayerWindowActivationPolicy = .userInitiated
     ) async {
         guard !isShutdownRequested,
               let environment,
@@ -7678,6 +7780,21 @@ final class AppState: ObservableObject {
             show(
                 AppError.playback("播放所属配置已经切换，请切回原配置后重试"),
                 title: "播放已停止"
+            )
+            return
+        }
+        if let pendingPlayback,
+           pendingPlayback.configurationID == playbackConfigurationID,
+           pendingPlayback.detail.summary.siteKey == detail.summary.siteKey,
+           pendingPlayback.detail.summary.videoID == detail.summary.videoID,
+           pendingPlayback.source.id == source.id,
+           pendingPlayback.episode.id == episode.id,
+           activePlayback == nil,
+           playbackResolutionState != .failed,
+           playbackRequestsResolving.contains(pendingPlayback.requestID) {
+            presentPlayer(
+                requestID: pendingPlayback.requestID,
+                activation: .userInitiated
             )
             return
         }
@@ -7729,6 +7846,7 @@ final class AppState: ObservableObject {
         selectedDetail = nil
         pendingDetailSummary = nil
         playbackResolutionState = .resolving
+        playerPresentedError = nil
         currentPlaybackAttempt = PlaybackAttempt(
             siteName: detail.summary.siteName,
             sourceName: source.name,
@@ -7738,11 +7856,21 @@ final class AppState: ObservableObject {
             number: 1
         )
         playbackFailureSummary = nil
+        isPlayerRenderSurfaceMountEnabled = false
         playerSnapshot = PlayerSnapshot(
             status: .loading,
             volume: playerSnapshot.volume,
             isMuted: playerSnapshot.isMuted,
             speed: playerSnapshot.speed
+        )
+        // The native window shell is a user-interface response to the click,
+        // not a side effect of mpv initialization. Mounting the render surface
+        // remains disabled until prepareForPlayback has completed, so the
+        // AppKit window can appear immediately without reusing a stale OpenGL
+        // context from the previous request.
+        presentPlayer(
+            requestID: sessionID,
+            activation: windowActivation
         )
         do {
             try await environment.player.prepareForPlayback(
@@ -7755,7 +7883,7 @@ final class AppState: ObservableObject {
             return
         }
         guard playbackSessionID == sessionID else { return }
-        presentPlayer()
+        isPlayerRenderSurfaceMountEnabled = true
         await environment.player.stop()
         guard playbackSessionID == sessionID else { return }
 
@@ -8515,7 +8643,8 @@ final class AppState: ObservableObject {
         channel: LiveChannel,
         stream: LiveStream,
         sourceID: UUID,
-        navigationChannels: [LiveChannel]? = nil
+        navigationChannels: [LiveChannel]? = nil,
+        windowActivation: PlayerWindowActivationPolicy = .userInitiated
     ) async {
         guard !isShutdownRequested, let environment else { return }
         let clickRequestID = UUID()
@@ -8557,10 +8686,13 @@ final class AppState: ObservableObject {
         playbackQualities = []
         selectedPlaybackQualityID = nil
         isSwitchingPlaybackQuality = false
-        presentPlayer()
-
         playbackSessionID = clickRequestID
         activePlayerRequestID = clickRequestID
+        isPlayerRenderSurfaceMountEnabled = true
+        presentPlayer(
+            requestID: clickRequestID,
+            activation: windowActivation
+        )
         await attemptLivePlaybackCandidates(
             startingChannel: channel,
             startingStream: stream,
@@ -8589,7 +8721,8 @@ final class AppState: ObservableObject {
             channel: targetChannel,
             stream: targetStream,
             sourceID: sourceID,
-            navigationChannels: context.channels
+            navigationChannels: context.channels,
+            windowActivation: .preserveFocus
         )
     }
 
@@ -8987,6 +9120,8 @@ final class AppState: ObservableObject {
         playerRenderSurfaceGate.reset()
         cancelAllPlaybackStartupGates()
         playbackRequestsResolving.removeAll()
+        historyPlaybackPreparationID = UUID()
+        historyPlaybackLoadingID = nil
         playbackSessionID = UUID()
         activePlayerRequestID = UUID()
         playbackQualitySwitchSessionID = UUID()
@@ -9116,6 +9251,7 @@ final class AppState: ObservableObject {
         playbackResolutionState = .idle
         currentPlaybackAttempt = nil
         playbackFailureSummary = nil
+        playerPresentedError = nil
     }
 
     func togglePlayPause() async {
@@ -9619,7 +9755,8 @@ final class AppState: ObservableObject {
             detail: playback.detail,
             source: playback.source,
             episode: playback.source.episodes[nextIndex],
-            configurationID: playback.configurationID
+            configurationID: playback.configurationID,
+            windowActivation: .preserveFocus
         )
     }
 
@@ -9632,7 +9769,8 @@ final class AppState: ObservableObject {
             detail: playback.detail,
             source: playback.source,
             episode: episode,
-            configurationID: playback.configurationID
+            configurationID: playback.configurationID,
+            windowActivation: .preserveFocus
         )
     }
 
@@ -11510,7 +11648,8 @@ final class AppState: ObservableObject {
             detail: playback.detail,
             source: playback.source,
             episode: nextEpisode,
-            configurationID: playback.configurationID
+            configurationID: playback.configurationID,
+            windowActivation: .preserveFocus
         )
     }
 
@@ -11725,8 +11864,11 @@ final class AppState: ObservableObject {
         livePlaybackSourceID = nil
         livePlaybackNavigationContext = nil
         selectedDetail = nil
-        presentPlayer()
         activePlayerRequestID = sessionID
+        presentPlayer(
+            requestID: sessionID,
+            activation: .preserveFocus
+        )
         let startupGate = beginPlaybackStartupGate(requestID: sessionID)
         defer {
             cancelPlaybackStartupGate(
@@ -11916,11 +12058,31 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func presentPlayer() {
+    private func presentPlayer(
+        requestID: UUID? = nil,
+        activation: PlayerWindowActivationPolicy = .userInitiated
+    ) {
+        let wasPresented = isPlayerPresented
         isPlayerPresented = true
+        let owningRequestID = requestID ?? activePlayerRequestID
+        switch activation {
+        case .userInitiated:
+            issuePlayerWindowCommand(
+                wasPresented ? .focus : .showAndActivate,
+                requestID: owningRequestID
+            )
+        case .preserveFocus:
+            issuePlayerWindowCommand(
+                .showWithoutStealingFocus,
+                requestID: owningRequestID
+            )
+        }
     }
 
     private func dismissPlayerSurfaceAndRestoreWindow() async {
+        isPlayerRenderSurfaceMountEnabled = false
+        playerPresentedError = nil
+        issuePlayerWindowCommand(.close, requestID: nil)
         isPlayerPresented = false
         // The player owns a separate window. Yield once so AppKit can close
         // that window after the native render context has detached; the
@@ -11928,8 +12090,26 @@ final class AppState: ObservableObject {
         await Task.yield()
     }
 
+    private func issuePlayerWindowCommand(
+        _ kind: PlayerWindowCommandKind,
+        requestID: UUID?
+    ) {
+        playerWindowCommand = PlayerWindowCommand(
+            requestID: requestID,
+            kind: kind
+        )
+    }
+
     private func show(_ error: Error, title: String) {
-        presentedError = userFacingError(for: error, title: title)
+        let presentation = userFacingError(for: error, title: title)
+        if PlayerErrorPresentationPolicy.targetsPlayer(
+            title: title,
+            isPlayerPresented: isPlayerPresented
+        ) {
+            playerPresentedError = presentation
+        } else {
+            presentedError = presentation
+        }
     }
 
     private func userFacingError(

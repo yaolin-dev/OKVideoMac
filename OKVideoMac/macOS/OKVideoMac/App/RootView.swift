@@ -221,9 +221,7 @@ struct RootView: View {
         )
         .background {
             WindowCloseObserver(
-                onClose: {
-                    Task { await state.closePlayer() }
-                },
+                onClose: {},
                 onKeyChange: { isKey in
                     state.setBrowserWindowKey(isKey)
                 }
@@ -554,9 +552,10 @@ private struct ShortcutHelpView: View {
 enum PlayerSurfaceMountPolicy {
     static func shouldMount(
         isPlayerPresented: Bool,
+        isMountEnabled: Bool,
         hasRenderPlayer: Bool
     ) -> Bool {
-        isPlayerPresented && hasRenderPlayer
+        isPlayerPresented && isMountEnabled && hasRenderPlayer
     }
 }
 
