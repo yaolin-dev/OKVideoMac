@@ -693,7 +693,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 hostMessage: hostMessage
             )
         }
-        return try SpiderResponseMapper.selection(
+        let selection = try SpiderResponseMapper.selection(
             invocation.value,
             site: site,
             baseURL: invocation.baseURL,
@@ -701,6 +701,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             allowsPlaceholderAction:
                 fallbackSummary?.resolvedContentKind == .action
         )
+        return attachDurableEpisodeReferences(to: selection)
     }
 
     func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
@@ -733,14 +734,40 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     }
 
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
+        var resolvedEpisodeURL = episodeURL
+        var refreshedShareToken = false
+        if QuarkEpisodeReference.requiresShareTokenRefresh(resolvedEpisodeURL) {
+            resolvedEpisodeURL = try await refreshQuarkShareToken(
+                in: resolvedEpisodeURL
+            )
+            refreshedShareToken = true
+        }
         do {
             return try await resolvePlayer(
                 flag: flag,
-                episodeURL: episodeURL
+                episodeURL: resolvedEpisodeURL
             )
         } catch let authorization as NodeWebAuthorizationRequired {
             throw authorization
         } catch {
+            if !refreshedShareToken,
+               Self.shouldRefreshQuarkShareToken(after: error),
+               QuarkEpisodeReference.identity(from: resolvedEpisodeURL) != nil {
+                let refreshedURL = try await refreshQuarkShareToken(
+                    in: resolvedEpisodeURL
+                )
+                do {
+                    return try await resolvePlayer(
+                        flag: flag,
+                        episodeURL: refreshedURL
+                    )
+                } catch {
+                    throw AppError.spider(
+                        "\(site.name) play 失败：已刷新夸克分享令牌，但转存仍失败："
+                            + error.localizedDescription
+                    )
+                }
+            }
             // Some Node spiders put an already playable URL directly in the
             // episode field even though their optional play resolver is down.
             // Preserve that valid fallback instead of turning a resolver 500
@@ -765,8 +792,65 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     func refreshPlayback(
         _ request: PlaybackRefreshRequest
     ) async throws -> RefreshedSitePlayback {
-        // Always reacquire the current episode token from Spider detail.
-        // Historical nhr1/npr1 handles are deliberately never dereferenced.
+        let requestedSourceName = request.sourceName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let reference = request.providerResourceReference,
+           acceptsPlaybackResourceReference(reference),
+           let sourceName = requestedSourceName,
+           !sourceName.isEmpty {
+            let directResult: SitePlaybackResult
+            do {
+                directResult = try await player(
+                    flag: sourceName,
+                    episodeURL: reference.stableResourceLocator
+                )
+            } catch let authorization as NodeWebAuthorizationRequired {
+                throw authorization
+            } catch {
+                // Password-protected shares intentionally do not persist the
+                // extraction code. Let current Spider detail reacquire its
+                // own share context before declaring the durable identity
+                // unusable.
+                return try await refreshPlaybackBySelection(request)
+            }
+            var result = directResult
+            result.resourceReference = reference
+            result.mediaSession?.resourceReference = reference
+            result.mediaSession?.refreshPerformed = true
+            let requestedEpisodeName = request.episodeName?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let episodeName: String
+            if let requestedEpisodeName, !requestedEpisodeName.isEmpty {
+                episodeName = requestedEpisodeName
+            } else {
+                episodeName = "历史分集"
+            }
+            let episode = PlayEpisode(
+                name: episodeName,
+                url: reference.stableResourceLocator,
+                referenceIdentity: reference.episodeIdentity,
+                providerResourceReference: reference
+            )
+            let source = PlaySource(
+                name: sourceName,
+                episodes: [episode],
+                referenceIdentity: reference.sourceIdentity
+            )
+            return RefreshedSitePlayback(
+                detail: VideoDetail(
+                    summary: VideoSummary(
+                        siteKey: site.key,
+                        siteName: site.name,
+                        videoID: request.videoID,
+                        title: request.title
+                    ),
+                    playSources: [source]
+                ),
+                source: source,
+                episode: episode,
+                playbackResult: result
+            )
+        }
         return try await refreshPlaybackBySelection(request)
     }
 
@@ -954,6 +1038,106 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         }
 
         return nil
+    }
+
+    private func attachDurableEpisodeReferences(
+        to selection: SiteSelectionResult
+    ) -> SiteSelectionResult {
+        guard case .detail(var detail) = selection else { return selection }
+        detail.playSources = detail.playSources.map { source in
+            var source = source
+            source.episodes = source.episodes.map { episode in
+                guard let reference = playbackResourceReference(
+                    flag: source.name,
+                    episodeURL: episode.url,
+                    providerDescriptor: nil
+                ) else {
+                    return episode
+                }
+                var episode = episode
+                episode.referenceIdentity = reference.episodeIdentity
+                episode.providerResourceReference = reference
+                return episode
+            }
+            if let sourceIdentity = source.episodes.compactMap({
+                $0.providerResourceReference?.sourceIdentity
+            }).first {
+                source.referenceIdentity = sourceIdentity
+            }
+            return source
+        }
+        return .detail(detail)
+    }
+
+    private func refreshQuarkShareToken(
+        in episodeURL: String
+    ) async throws -> String {
+        guard let identity = QuarkEpisodeReference.identity(from: episodeURL) else {
+            throw AppError.playback("夸克分集令牌缺少分享或文件标识")
+        }
+        let body = try JSONSerialization.data(
+            withJSONObject: [
+                "pwd_id": identity.shareID,
+                "passcode": QuarkEpisodeReference.passcode(from: episodeURL)
+            ],
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+        let response = try await httpClient.send(
+            HTTPRequest(
+                url: QuarkEpisodeReference.shareTokenURL,
+                method: .post,
+                headers: [
+                    "Content-Type": "application/json; charset=utf-8",
+                    "Referer": "https://pan.quark.cn/",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                ],
+                body: body,
+                timeout: 20,
+                maximumResponseBytes: 1_024 * 1_024,
+                maximumRedirects: 2,
+                retryPolicy: .none,
+                allowsNonSuccessfulStatus: true
+            )
+        )
+        let value = try? JSONDecoder().decode(JSONValue.self, from: response.body)
+        let message = value.flatMap(Self.serverMessage)
+        guard (200...299).contains(response.statusCode) else {
+            let code = value.flatMap(Self.serverCode)
+            let detail = [code.map { "错误码 \($0)" }, message]
+                .compactMap { $0 }
+                .joined(separator: "：")
+            throw AppError.playback(
+                "夸克分享令牌刷新失败："
+                    + (detail.isEmpty
+                        ? "HTTP 状态码 \(response.statusCode)"
+                        : detail)
+            )
+        }
+        guard let stoken = value?.objectValue?["data"]?
+            .objectValue?["stoken"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !stoken.isEmpty else {
+            throw AppError.playback(
+                "夸克分享令牌刷新失败："
+                    + (message ?? "接口未返回新 stoken，分享可能已失效")
+            )
+        }
+        return try QuarkEpisodeReference.replacingStoken(
+            in: episodeURL,
+            with: stoken
+        )
+    }
+
+    private static func shouldRefreshQuarkShareToken(after error: Error) -> Bool {
+        let message = error.localizedDescription.lowercased()
+        let missingTask = (message.contains("task_id")
+            || message.contains("task id"))
+            && (message.contains("没有返回")
+                || message.contains("未返回")
+                || message.contains("missing")
+                || message.contains("empty")
+                || message.contains("null"))
+        return missingTask || isExpiredQuarkShareTokenMessage(message)
     }
 
     private func playbackMediaSession(

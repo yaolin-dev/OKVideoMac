@@ -527,6 +527,23 @@ public actor SQLiteStore:
         _ = try writeHistory(history, onlyWhenNewer: false)
     }
 
+    public func replaceHistory(
+        _ original: HistoryRecord,
+        with replacement: HistoryRecord,
+        incognito: Bool
+    ) throws {
+        guard !incognito else { return }
+        try connection.transaction {
+            _ = try deleteHistory(
+                configurationID: original.configurationID,
+                siteKey: original.siteKey,
+                videoID: original.videoID,
+                sourceKey: original.sourceKey
+            )
+            _ = try writeHistory(replacement, onlyWhenNewer: false)
+        }
+    }
+
     @discardableResult
     private func writeHistory(
         _ originalHistory: HistoryRecord,

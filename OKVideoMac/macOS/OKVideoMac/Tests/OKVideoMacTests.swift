@@ -9010,6 +9010,29 @@ final class OKVideoMacTests: XCTestCase {
             AppState.historySearchQuery(for: "  Target Film  "),
             "Target Film"
         )
+        XCTAssertEqual(
+            AppState.historySearchQuery(for: "楚门的世界（臻彩） 4K HDR"),
+            "楚门的世界"
+        )
+        let decoratedRecord = HistoryRecord(
+            siteKey: "renamed-site",
+            videoID: "expired-cloud-id",
+            title: "楚门的世界（臻彩）"
+        )
+        XCTAssertEqual(
+            AppState.historySearchMatch(
+                in: [
+                    VideoSummary(
+                        siteKey: "renamed-site",
+                        siteName: "Renamed Site",
+                        videoID: "current-cloud-id",
+                        title: "楚门的世界 4K"
+                    )
+                ],
+                record: decoratedRecord
+            )?.videoID,
+            "current-cloud-id"
+        )
     }
 
     func testVideoPageMergerStopsAfterEmptyNextPage() {
@@ -12520,7 +12543,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
     }
 
-    func testNodePlayerNeverDereferencesDurableQuarkHistoryInHost() async throws {
+    func testNodePlayerRefreshesDurableQuarkHistoryBeforeSpiderPlay() async throws {
         let client = QuarkRefreshHTTPClient(firstPlayFailure: .none)
         let provider = try makeNodeProvider(httpClient: client)
         let durable = QuarkEpisodeReference.durableHistoryReference(
@@ -12529,13 +12552,16 @@ final class NodeBundleCompatibilityTests: XCTestCase {
 
         _ = try await provider.player(flag: "夸克", episodeURL: durable)
         let requests = await client.capturedRequests()
-        XCTAssertFalse(requests.contains {
+        XCTAssertEqual(requests.filter {
             $0.url == QuarkEpisodeReference.shareTokenURL
-        })
+        }.count, 1)
         let playRequest = try XCTUnwrap(
             requests.first { $0.url.path.hasSuffix("/play") }
         )
-        XCTAssertEqual(try nodeEpisodeID(from: playRequest), durable)
+        XCTAssertEqual(
+            try quarkStoken(from: nodeEpisodeID(from: playRequest)),
+            "fresh-stoken"
+        )
     }
 
     func testNodePlayerReturnsStableOpaqueQuarkResourceReference() async throws {
@@ -13049,7 +13075,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertFalse(provider.acceptsPlaybackResourceReference(expired))
     }
 
-    func obsolete_testNodeRefreshReplaysStableQuarkLocatorWithoutSearchOrDetail()
+    func testNodeRefreshReplaysStableQuarkLocatorWithoutSearchOrDetail()
         async throws {
         let configurationIdentity = UUID().uuidString.lowercased()
         let passcodeStore = QuarkPasscodeMemoryStore()
@@ -13371,27 +13397,95 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
     }
 
-    func testNodeExpiredCloudTokenDoesNotTriggerHostTokenRefreshOrRetry()
+    func testNodeExpiredCloudTokenRefreshesShareTokenAndRetriesOnce()
         async throws {
         let client = QuarkRefreshHTTPClient(firstPlayFailure: .expiredStoken)
         let provider = try makeNodeProvider(httpClient: client)
         let episode = try makeQuarkEpisodeReference(stoken: "expired-stoken")
 
-        do {
-            _ = try await provider.player(flag: "夸克", episodeURL: episode)
-            XCTFail("Spider business failure must be returned to the caller")
-        } catch {
-            XCTAssertTrue(error.localizedDescription.contains("stoken 过期"))
-        }
+        _ = try await provider.player(flag: "夸克", episodeURL: episode)
 
         let requests = await client.capturedRequests()
         XCTAssertEqual(
             requests.filter { $0.url.path.hasSuffix("/play") }.count,
-            1
+            2
         )
-        XCTAssertFalse(requests.contains {
+        XCTAssertEqual(requests.filter {
             $0.url == QuarkEpisodeReference.shareTokenURL
+        }.count, 1)
+    }
+
+    func testNodeDetailCapturesSecretFreeQuarkReferenceBeforePlayback()
+        async throws {
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let episode = try makeQuarkEpisodeReference(
+            stoken: "detail-only-stoken",
+            passcode: "2468"
+        )
+        let client = QuarkRefreshHTTPClient(
+            firstPlayFailure: .none,
+            detailEpisode: episode
+        )
+        let provider = try makeNodeProvider(
+            httpClient: client,
+            configurationIdentity: configurationIdentity
+        )
+
+        let detail = try await provider.detail(id: "session-scoped-video")
+        let captured = try XCTUnwrap(
+            detail.playSources.first?.episodes.first?
+                .providerResourceReference
+        )
+        let encoded = String(
+            decoding: try JSONEncoder().encode(captured),
+            as: UTF8.self
+        ).lowercased()
+
+        XCTAssertTrue(provider.acceptsPlaybackResourceReference(captured))
+        XCTAssertTrue(captured.stableResourceLocator.hasPrefix("qhr1."))
+        XCTAssertEqual(
+            QuarkEpisodeReference.identity(from: captured.stableResourceLocator),
+            QuarkEpisodeReference.identity(from: episode)
+        )
+        for forbidden in ["detail-only-stoken", "2468", "playtoken", "cookie"] {
+            XCTAssertFalse(encoded.contains(forbidden))
+        }
+
+        // Recreate the provider to model a complete app restart. The old
+        // session-scoped video ID is deliberately unusable; the persisted
+        // provider/share/file identity must go straight to token refresh and
+        // Spider play without detail or title search.
+        let persisted = try JSONDecoder().decode(
+            PlaybackResourceReference.self,
+            from: JSONEncoder().encode(captured)
+        )
+        let restartedClient = QuarkRefreshHTTPClient(firstPlayFailure: .none)
+        let restartedProvider = try makeNodeProvider(
+            httpClient: restartedClient,
+            configurationIdentity: configurationIdentity
+        )
+        let refreshed = try await restartedProvider.refreshPlayback(
+            PlaybackRefreshRequest(
+                videoID: "expired-session-scoped-video",
+                title: "Fixture（臻彩）",
+                sourceIdentity: persisted.sourceIdentity,
+                resourceIdentity: persisted.episodeIdentity,
+                sourceName: "夸克",
+                episodeName: "原画",
+                providerResourceReference: persisted
+            )
+        )
+        let restartedRequests = await restartedClient.capturedRequests()
+        XCTAssertEqual(refreshed.playbackResult.resourceReference, persisted)
+        XCTAssertFalse(restartedRequests.contains {
+            $0.url.path.hasSuffix("/detail") || $0.url.path.hasSuffix("/search")
         })
+        XCTAssertEqual(restartedRequests.filter {
+            $0.url == QuarkEpisodeReference.shareTokenURL
+        }.count, 1)
+        XCTAssertEqual(restartedRequests.filter {
+            $0.url.path.hasSuffix("/play")
+        }.count, 1)
     }
 
     func testNodeHistoryRefreshLoadsCurrentDetailBeforePlayer() async throws {
@@ -13959,11 +14053,13 @@ private actor QuarkRefreshHTTPClient: HTTPClient {
     }
 
     private let firstPlayFailure: FirstPlayFailure
+    private let detailEpisode: String?
     private var playRequestCount = 0
     private var requests: [HTTPRequest] = []
 
-    init(firstPlayFailure: FirstPlayFailure) {
+    init(firstPlayFailure: FirstPlayFailure, detailEpisode: String? = nil) {
         self.firstPlayFailure = firstPlayFailure
+        self.detailEpisode = detailEpisode
     }
 
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
@@ -13982,6 +14078,24 @@ private actor QuarkRefreshHTTPClient: HTTPClient {
                 statusCode: 404,
                 headers: [:],
                 body: Data()
+            )
+        }
+        if request.url.path.hasSuffix("/detail"), let detailEpisode {
+            let body = try JSONSerialization.data(
+                withJSONObject: [
+                    "list": [[
+                        "vod_id": "session-scoped-video",
+                        "vod_name": "Fixture",
+                        "vod_play_from": "夸克",
+                        "vod_play_url": "原画$\(detailEpisode)"
+                    ]]
+                ]
+            )
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: body
             )
         }
         guard request.url.path.hasSuffix("/play") else {

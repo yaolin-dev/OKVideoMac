@@ -1004,6 +1004,45 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(remaining.map(\.videoID), ["second"])
     }
 
+    func testHistorySelfHealReplacementIsAtomicAndRemovesOldIdentity()
+        async throws {
+        let store = try makeStore()
+        let configurationID = UUID()
+        let original = HistoryRecord(
+            configurationID: configurationID,
+            siteKey: "cloud",
+            videoID: "expired-session-id",
+            title: "楚门的世界（臻彩）",
+            sourceKey: "夸克",
+            sourceName: "夸克",
+            episodeName: "原画",
+            position: 2_224.9,
+            duration: 6_176.9
+        )
+        try await store.saveHistory(original, incognito: false)
+        let replacement = HistoryRecord(
+            configurationID: configurationID,
+            siteKey: "cloud",
+            videoID: "current-video-id",
+            title: "楚门的世界",
+            sourceKey: "夸克",
+            sourceName: "夸克",
+            episodeName: "原画",
+            position: original.position,
+            duration: original.duration
+        )
+
+        try await store.replaceHistory(
+            original,
+            with: replacement,
+            incognito: false
+        )
+        let records = try await store.history()
+
+        XCTAssertEqual(records, [replacement.sanitizedForPersistence()])
+        XCTAssertFalse(records.contains { $0.videoID == original.videoID })
+    }
+
     func testSettingsRoundTripAndDelete() async throws {
         let store = try makeStore()
         let value = JSONValue.object([

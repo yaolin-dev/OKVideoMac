@@ -354,6 +354,11 @@ public protocol FavoritesRepository {
 
 public protocol HistoryRepository {
     func saveHistory(_ history: HistoryRecord, incognito: Bool) async throws
+    func replaceHistory(
+        _ original: HistoryRecord,
+        with replacement: HistoryRecord,
+        incognito: Bool
+    ) async throws
     func history() async throws -> [HistoryRecord]
     @discardableResult
     func deleteHistory(

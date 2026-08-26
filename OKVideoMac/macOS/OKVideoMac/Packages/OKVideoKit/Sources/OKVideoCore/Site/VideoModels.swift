@@ -252,14 +252,21 @@ public struct PlayEpisode: Codable, Equatable, Hashable, Identifiable, Sendable 
 
     public var referenceIdentity: String?
 
+    /// A secret-free, provider-bound locator captured while detail data is
+    /// still available. Cloud providers can therefore persist a durable
+    /// history identity before the short-lived player response is resolved.
+    public var providerResourceReference: PlaybackResourceReference?
+
     public init(
         name: String,
         url: String,
-        referenceIdentity: String? = nil
+        referenceIdentity: String? = nil,
+        providerResourceReference: PlaybackResourceReference? = nil
     ) {
         self.name = name
         self.url = url
         self.referenceIdentity = referenceIdentity
+        self.providerResourceReference = providerResourceReference
     }
 }
 

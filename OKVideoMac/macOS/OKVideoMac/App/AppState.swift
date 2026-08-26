@@ -2361,6 +2361,7 @@ struct ActivePlaybackContext {
     var media: ResolvedMedia
     var playbackResult: SitePlaybackResult?
     var providerResourceReference: PlaybackResourceReference?
+    var replacedHistoryRecord: HistoryRecord? = nil
 }
 
 /// Keeps recently resolved provider media capabilities in memory only. Cloud
@@ -7173,6 +7174,7 @@ final class AppState: ObservableObject {
         _ item: HistoryRecord,
         preparationID: UUID
     ) async {
+        var recoveryFailure = "缺少稳定网盘文件标识"
         defer {
             if historyPlaybackPreparationID == preparationID {
                 historyPlaybackLoadingID = nil
@@ -7247,6 +7249,35 @@ final class AppState: ObservableObject {
             return
         }
 
+        let acceptedProviderReference = Self.acceptedHistoryProviderReference(
+            from: item,
+            provider: provider
+        )
+        if let acceptedProviderReference {
+            guard isCurrentHistoryPreparation(preparationID) else { return }
+            var context = Self.historyPlaybackContext(
+                record: item,
+                siteName: siteName,
+                episodeURL: acceptedProviderReference.stableResourceLocator
+            )
+            context.episode.referenceIdentity = acceptedProviderReference
+                .episodeIdentity
+            context.episode.providerResourceReference = acceptedProviderReference
+            context.source.referenceIdentity = acceptedProviderReference
+                .sourceIdentity
+            context.source.episodes = [context.episode]
+            context.detail.playSources = [context.source]
+            await startPlayback(
+                detail: context.detail,
+                source: context.source,
+                episode: context.episode,
+                origin: .history(item),
+                continuingRequestID: preparationID,
+                windowActivation: .preserveFocus
+            )
+            return
+        }
+
         do {
             let detail = try await provider.detail(id: item.videoID)
             guard isCurrentHistoryPreparation(preparationID) else { return }
@@ -7270,21 +7301,20 @@ final class AppState: ObservableObject {
             // name or a renamed route. Do not claim that the episode was
             // removed while the durable history reference can still rebuild a
             // valid playback URL below.
+            recoveryFailure = "最新详情中未找到原线路或原分集"
         } catch {
             // Search/cloud providers often expose session-scoped video IDs.
             // Continue with the durable episode reference or cached media
             // instead of surfacing a low-level empty-JSON error.
+            recoveryFailure = "旧详情 ID 已失效"
         }
 
-        let acceptedProviderReference = Self.acceptedHistoryProviderReference(
-            from: item,
-            provider: provider
+        let persistedEpisodeReference = item.episodeReference?.nonEmpty.flatMap(
+            Self.persistentHistoryEpisodeReference
         )
-        if let episodeReference = acceptedProviderReference?
-            .stableResourceLocator.nonEmpty
-            ?? item.episodeReference?.nonEmpty.flatMap(
-                Self.persistentHistoryEpisodeReference
-            ) {
+        if let episodeReference = persistedEpisodeReference,
+           !NodePlaybackReplayReference.isLocator(episodeReference),
+           !NodeProviderLocatorReference.isLocator(episodeReference) {
             guard isCurrentHistoryPreparation(preparationID) else { return }
             let context = Self.historyPlaybackContext(
                 record: item,
@@ -7314,39 +7344,54 @@ final class AppState: ObservableObject {
 
         do {
             let page = try await provider.search(
-                keyword: item.title,
+                keyword: Self.historySearchQuery(for: item.title) ?? item.title,
                 page: 1,
                 quick: false
             )
-            if let summary = Self.historySearchMatch(
+            let candidates = Self.historySearchCandidates(
                 in: page.items,
                 record: item
-            ) {
-                let detail = try await provider.detail(id: summary.videoID)
-                guard isCurrentHistoryPreparation(preparationID) else { return }
-                if let selection = Self.historyPlaybackSelection(
+            )
+            var resolved: [(VideoDetail, PlaySource, PlayEpisode)] = []
+            for summary in candidates.prefix(12) {
+                guard let detail = try? await provider.detail(
+                    id: summary.videoID
+                ), let selection = Self.historyPlaybackSelection(
                     in: detail,
                     record: item
-                ) {
-                    await startPlayback(
-                        detail: detail,
-                        source: selection.source,
-                        episode: selection.episode,
-                        origin: .history(item),
-                        continuingRequestID: preparationID,
-                        windowActivation: .preserveFocus
-                    )
-                    return
+                ) else {
+                    continue
                 }
+                resolved.append((detail, selection.source, selection.episode))
+            }
+            guard isCurrentHistoryPreparation(preparationID) else { return }
+            if resolved.count == 1, let match = resolved.first {
+                await startPlayback(
+                    detail: match.0,
+                    source: match.1,
+                    episode: match.2,
+                    origin: .history(item),
+                    continuingRequestID: preparationID,
+                    windowActivation: .preserveFocus
+                )
+                return
+            }
+            if resolved.count > 1 || candidates.count > 1 {
+                recoveryFailure = "找到多个同名结果，无法唯一匹配原线路和分集"
+            } else if candidates.isEmpty {
+                recoveryFailure += "，重新搜索也没有找到同名内容"
+            } else {
+                recoveryFailure = "已找到同名内容，但未匹配到原线路或原分集"
             }
         } catch {
             // A search retry is best effort. Present one actionable history
             // message below instead of a second provider decoding error.
+            recoveryFailure += "；重新搜索失败"
         }
 
         guard isCurrentHistoryPreparation(preparationID) else { return }
         failHistoryPlayback(
-            "原资源已变化，或当前来源无法重新定位原分集，请重新选择。",
+            "\(recoveryFailure)，请重新选择。",
             preparationID: preparationID
         )
     }
@@ -8224,6 +8269,9 @@ final class AppState: ObservableObject {
             var currentProviderReference = Self.acceptedHistoryProviderReference(
                 from: origin.historyRecord,
                 provider: provider
+            ) ?? Self.acceptedProviderResourceReference(
+                episode.providerResourceReference,
+                provider: provider
             )
             // User line selection is authoritative. Automatic attempts may use
             // configured parsers for that resource, but never silently move to
@@ -8233,7 +8281,8 @@ final class AppState: ObservableObject {
             // A history record with a provider-owned durable reference starts
             // with that provider's cache-bypassing refresh. A terminal Bridge
             // result is even more authoritative and therefore remains first.
-            let refreshFirst = authoritativePlaybackResult == nil
+            let refreshFirst = origin.isHistory
+                && authoritativePlaybackResult == nil
                 && currentProviderReference != nil
             let refreshAttempts = refreshFirst
                 ? [true, false]
@@ -11335,34 +11384,34 @@ final class AppState: ObservableObject {
         in items: [VideoSummary],
         record: HistoryRecord
     ) -> VideoSummary? {
+        let matches = historySearchCandidates(in: items, record: record)
+        return matches.count == 1 ? matches[0] : nil
+    }
+
+    static func historySearchCandidates(
+        in items: [VideoSummary],
+        record: HistoryRecord
+    ) -> [VideoSummary] {
         guard let query = historySearchQuery(for: record.title) else {
-            return nil
+            return []
         }
         let exactMatches = items.filter {
-            $0.title.compare(
+            historySearchQuery(for: $0.title)?.compare(
                 query,
-                options: [
-                    .caseInsensitive,
-                    .widthInsensitive,
-                    .diacriticInsensitive
-                ]
+                options: [.caseInsensitive, .widthInsensitive, .diacriticInsensitive]
             ) == .orderedSame
         }
-        if exactMatches.count == 1 {
-            return exactMatches[0]
-        }
         if !exactMatches.isEmpty {
-            return nil
+            return exactMatches
         }
 
-        let partialMatches = items.filter {
+        return items.filter {
             guard let candidate = historySearchQuery(for: $0.title) else {
                 return false
             }
             return candidate.localizedCaseInsensitiveContains(query)
                 || query.localizedCaseInsensitiveContains(candidate)
         }
-        return partialMatches.count == 1 ? partialMatches[0] : nil
     }
 
     static func historySearchQuery(for title: String) -> String? {
@@ -11382,7 +11431,26 @@ final class AppState: ObservableObject {
         ].contains(placeholder) else {
             return nil
         }
-        return query
+        var normalized = query
+        let decorationPatterns = [
+            #"[（(\[][\s]*(?:臻彩|4k|8k|蓝光|超清|高清|杜比|hdr|国语|中字|中文字幕)[\s]*[）)\]]"#,
+            #"(?:[._\-\s]+)(?:臻彩|4k|8k|蓝光|超清|高清|杜比|hdr|国语中字|中文字幕|中字)(?=$|[._\-\s])"#
+        ]
+        for pattern in decorationPatterns {
+            normalized = normalized.replacingOccurrences(
+                of: pattern,
+                with: " ",
+                options: [.regularExpression, .caseInsensitive]
+            )
+        }
+        normalized = normalized
+            .replacingOccurrences(
+                of: #"\s+"#,
+                with: " ",
+                options: .regularExpression
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.nonEmpty
     }
 
     private func loadActiveConfigurationContent() throws {
@@ -12611,7 +12679,17 @@ final class AppState: ObservableObject {
             episode: episode,
             media: media,
             playbackResult: playbackResult,
-            providerResourceReference: providerResourceReference
+            providerResourceReference: providerResourceReference,
+            replacedHistoryRecord: authoritativeHistoryRecord.flatMap {
+                let replacementID = HistoryRecord(
+                    configurationID: configurationID,
+                    siteKey: detail.summary.siteKey,
+                    videoID: detail.summary.videoID,
+                    title: detail.summary.title,
+                    sourceKey: source.id
+                ).id
+                return $0.id == replacementID ? nil : $0
+            }
         )
         livePlaybackChannel = nil
         livePlaybackStream = nil
@@ -12741,10 +12819,20 @@ final class AppState: ObservableObject {
         reloadHistoryAfterSaving: Bool
     ) async throws {
         guard let environment else { return }
-        try await environment.database.saveHistory(
-            write.record,
-            incognito: write.incognito
-        )
+        if let original = activePlayback?.replacedHistoryRecord,
+           original.id != write.record.id {
+            try await environment.database.replaceHistory(
+                original,
+                with: write.record,
+                incognito: write.incognito
+            )
+            activePlayback?.replacedHistoryRecord = nil
+        } else {
+            try await environment.database.saveHistory(
+                write.record,
+                incognito: write.incognito
+            )
+        }
         if reloadHistoryAfterSaving, !write.incognito {
             try await reloadHistory()
         }
