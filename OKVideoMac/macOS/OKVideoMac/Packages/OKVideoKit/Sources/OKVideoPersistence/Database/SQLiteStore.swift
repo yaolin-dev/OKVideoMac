@@ -137,7 +137,7 @@ public actor SQLiteStore:
         let openResult = sqlite3_open_v2(
             databaseURL.path,
             &handle,
-            SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
             nil
         )
         defer {
@@ -154,6 +154,28 @@ public actor SQLiteStore:
         }
 
         sqlite3_extended_result_codes(handle, 1)
+        // A read-only quick_check can report a transient WAL error while
+        // another OKVideoMac process is actively writing. Moving the database,
+        // WAL and SHM at that point detaches the live writer and makes all data
+        // disappear from the newly opened process. Require writer ownership
+        // before treating an integrity result as actionable corruption.
+        let ownershipResult = sqlite3_exec(
+            handle,
+            "BEGIN EXCLUSIVE TRANSACTION",
+            nil,
+            nil,
+            nil
+        )
+        if isCorruptionResult(ownershipResult) {
+            return true
+        }
+        guard ownershipResult == SQLITE_OK else {
+            return false
+        }
+        defer {
+            sqlite3_exec(handle, "ROLLBACK", nil, nil, nil)
+        }
+
         var statement: OpaquePointer?
         let prepareResult = sqlite3_prepare_v2(
             handle,

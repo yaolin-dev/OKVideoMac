@@ -18,7 +18,7 @@ struct AppEnvironment {
 
     @MainActor
     static func live() throws -> AppEnvironment {
-        let directories = try AppDirectories()
+        let directories = try runtimeDirectories()
         let httpClient = URLSessionHTTPClient()
         let imageConfiguration = URLSessionConfiguration.default
         imageConfiguration.httpMaximumConnectionsPerHost = 12
@@ -68,5 +68,39 @@ struct AppEnvironment {
                 )
             )
         )
+    }
+
+    /// Unit tests are hosted by the application executable, so constructing
+    /// the SwiftUI app also constructs an AppState before the first test runs.
+    /// Never let that test host open the user's real Application Support
+    /// database. Each bootstrap receives an isolated directory so tests cannot
+    /// race a concurrently running installed copy of OKVideoMac either.
+    static func runtimeDirectories(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        processIdentifier: Int32 = ProcessInfo.processInfo.processIdentifier,
+        fileManager: FileManager = .default
+    ) throws -> AppDirectories {
+        guard isXCTestHost(environment: environment) else {
+            return try AppDirectories(fileManager: fileManager)
+        }
+
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent(
+                "OKVideoMac-XCTest-\(processIdentifier)-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        return try AppDirectories(
+            applicationSupport: root.appendingPathComponent(
+                "Application Support",
+                isDirectory: true
+            ),
+            caches: root.appendingPathComponent("Caches", isDirectory: true),
+            fileManager: fileManager
+        )
+    }
+
+    static func isXCTestHost(environment: [String: String]) -> Bool {
+        environment["XCTestConfigurationFilePath"] != nil
+            || environment["XCTestBundlePath"] != nil
     }
 }

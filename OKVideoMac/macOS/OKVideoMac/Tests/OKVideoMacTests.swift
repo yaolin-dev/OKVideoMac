@@ -8,6 +8,32 @@ import OKVideoPersistence
 @testable import OKVideoMac
 
 final class OKVideoMacTests: XCTestCase {
+    func testXCTestHostUsesIsolatedRuntimeDirectories() throws {
+        let directories = try AppEnvironment.runtimeDirectories(
+            environment: ["XCTestConfigurationFilePath": "/tmp/test.xctestconfiguration"],
+            processIdentifier: 4242
+        )
+        let productionSupport = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/OKVideoMac")
+
+        XCTAssertNotEqual(
+            directories.applicationSupport.standardizedFileURL,
+            productionSupport.standardizedFileURL
+        )
+        XCTAssertTrue(
+            directories.applicationSupport.path.contains("OKVideoMac-XCTest-4242-")
+        )
+    }
+
+    func testProductionRuntimeDoesNotUseTestDirectoryPolicy() {
+        XCTAssertFalse(AppEnvironment.isXCTestHost(environment: [:]))
+        XCTAssertTrue(
+            AppEnvironment.isXCTestHost(
+                environment: ["XCTestBundlePath": "/tmp/OKVideoMacTests.xctest"]
+            )
+        )
+    }
+
     func testPortableBackupRoundTripPreservesConfigurationAndHistory() throws {
         let configurationID = UUID()
         let configuration = StoredConfiguration(
