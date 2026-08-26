@@ -61,6 +61,25 @@ enum ShortcutRoutePolicy {
     }
 }
 
+enum BrowserEscapeAction: Equatable {
+    case none
+    case stopSearch
+    case returnHome
+}
+
+enum BrowserEscapeRoutePolicy {
+    static func action(
+        isHomeSearchPresented: Bool,
+        isSearching: Bool,
+        hasBlockingPresentation: Bool
+    ) -> BrowserEscapeAction {
+        guard isHomeSearchPresented, !hasBlockingPresentation else {
+            return .none
+        }
+        return isSearching ? .stopSearch : .returnHome
+    }
+}
+
 struct ShortcutLiveSourceSelection: Equatable {
     let requestID: UUID
     let sourceID: UUID
@@ -2381,6 +2400,10 @@ private struct CloudAuthorizationContext {
     var providerInteraction: ConfigurationInteraction?
     var operation: PendingCloudOperation
     var submittedAt: Date?
+    /// First request-scoped observation that the provider is waiting for a
+    /// login QR. Unlike `submittedAt`, this also covers providers that open a
+    /// QR directly from `play()` without a preceding chooser click.
+    var qrExpectedAt: Date?
     var submittedGeneration: Int?
     var hasObservedPrompt: Bool
     var hasObservedQRCode: Bool
@@ -4714,6 +4737,7 @@ final class AppState: ObservableObject {
             providerInteraction: providerInteraction,
             operation: operation,
             submittedAt: nil,
+            qrExpectedAt: nil,
             submittedGeneration: nil,
             hasObservedPrompt: false,
             hasObservedQRCode: false,
@@ -5996,6 +6020,11 @@ final class AppState: ObservableObject {
               context.operationID == operationID else {
             return
         }
+        if providerInteraction.actionKind == .authorization,
+           !credentialPush,
+           context.qrExpectedAt == nil {
+            context.qrExpectedAt = Date()
+        }
         context.providerInteraction = providerInteraction
         if let owner = state.providerOwnerID?.nonEmpty {
             context.providerOwnerID = owner
@@ -6034,7 +6063,6 @@ final class AppState: ObservableObject {
             && snapshot != nil
         let expectsLoginQRCode = !credentialPush
             && snapshot == nil
-            && cloudAuthorizationContext?.submittedAt != nil
             && state.inputCount == 0
             && state.actionableControls.isEmpty
             && (providerInteraction.actionKind == .authorization
@@ -6049,8 +6077,9 @@ final class AppState: ObservableObject {
             default: break
             }
             guard expectsLoginQRCode else { return .idle }
-            if let submittedAt = cloudAuthorizationContext?.submittedAt,
-               Date().timeIntervalSince(submittedAt) >= 12 {
+            if let expectedAt = cloudAuthorizationContext?.qrExpectedAt
+                    ?? cloudAuthorizationContext?.submittedAt,
+               Date().timeIntervalSince(expectedAt) >= 12 {
                 return .notFound
             }
             return .generating
@@ -6140,8 +6169,10 @@ final class AppState: ObservableObject {
         let updated = CloudAuthorizationPrompt(
             id: previous?.id ?? UUID(),
             interactionID: operationID,
-            title: state.title.nonEmpty
-                ?? (interactionKind == .authorization ? "网盘授权" : "配置操作"),
+            title: qrState != .idle
+                ? "网盘授权"
+                : state.title.nonEmpty
+                    ?? (interactionKind == .authorization ? "网盘授权" : "配置操作"),
             interactionKind: interactionKind,
             semantic: semantic,
             transport: .native,
@@ -7595,6 +7626,30 @@ final class AppState: ObservableObject {
     func requestPlayerEscapeHandling() {
         guard allowsPlayerShortcuts else { return }
         shortcutPlayerEscapeRequest &+= 1
+    }
+
+    @discardableResult
+    func performBrowserEscapeShortcut() -> Bool {
+        guard allowsBrowserShortcuts else { return false }
+        let action = BrowserEscapeRoutePolicy.action(
+            isHomeSearchPresented: isHomeSearchPresented,
+            isSearching: isSearching,
+            hasBlockingPresentation: mainWindowCloudAuthorizationPrompt != nil
+                || nodeWebPresentation != nil
+                || selectedDetail != nil
+                || pendingDetailSummary != nil
+                || isQuickSwitcherPresented
+                || isShortcutHelpPresented
+        )
+        switch action {
+        case .none:
+            return false
+        case .stopSearch:
+            cancelSearch()
+        case .returnHome:
+            returnFromSearchToHome()
+        }
+        return true
     }
 
     func togglePlayerFullScreen() {

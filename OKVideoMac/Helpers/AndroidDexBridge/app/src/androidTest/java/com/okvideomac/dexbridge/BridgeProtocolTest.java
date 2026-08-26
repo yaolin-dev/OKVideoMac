@@ -863,6 +863,84 @@ public final class BridgeProtocolTest extends TestCase {
         assertFalse(isShowing(textDialog));
     }
 
+    public void testPlaybackQRCodePromotesBlockedRequestToAuthorization()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        String id = "interaction-playback-qr-" + UUID.randomUUID();
+        BridgeServer.beginAndActivateInteraction(
+                context,
+                id,
+                "playback",
+                "play"
+        );
+        BridgeActivity.prepareDialogHandoff(context, id);
+        AlertDialog dialog = showOwnedImageDialog(id, true);
+
+        JSONObject visible = awaitCapturedUI(context, id, 2_000L);
+        assertEquals("authorization", visible.getString("kind"));
+        assertEquals("playback", visible.getString("declaredKind"));
+        assertTrue(visible.getBoolean("authorizationPromoted"));
+        assertEquals("ready", visible.getString("qrStatus"));
+        assertTrue(BridgeActivity.snapshotUI(context, id).length > 100);
+
+        BridgeInteractionRegistry.cancel(id);
+        BridgeActivity.dismissUI(context, id);
+        assertFalse(isShowing(dialog));
+    }
+
+    public void testPlaybackOrdinaryImageDoesNotPromoteAuthorization()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        String id = "interaction-playback-image-" + UUID.randomUUID();
+        BridgeServer.beginAndActivateInteraction(
+                context,
+                id,
+                "playback",
+                "play"
+        );
+        BridgeActivity.prepareDialogHandoff(context, id);
+        AlertDialog dialog = showOwnedImageDialog(id, false);
+
+        JSONObject visible = awaitCapturedUI(context, id, 2_000L);
+        assertEquals("playback", visible.getString("kind"));
+        assertEquals("playback", visible.getString("declaredKind"));
+        assertFalse(visible.optBoolean("authorizationPromoted", false));
+        assertEquals(0, visible.getInt("qrImageCount"));
+
+        BridgeInteractionRegistry.cancel(id);
+        BridgeActivity.dismissUI(context, id);
+        assertFalse(isShowing(dialog));
+    }
+
+    public void testInvertedProviderQRCodeIsNormalizedForHost()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        String id = "interaction-inverted-qr-" + UUID.randomUUID();
+        BridgeServer.beginAndActivateInteraction(
+                context,
+                id,
+                "authorization",
+                "action"
+        );
+        BridgeActivity.prepareDialogHandoff(context, id);
+        AlertDialog dialog = showOwnedBitmapDialog(
+                id,
+                invertedQRCodeBitmap("okvideomac-inverted-login")
+        );
+
+        JSONObject visible = awaitCapturedUI(context, id, 2_000L);
+        assertEquals("ready", visible.getString("qrStatus"));
+        assertEquals(1, visible.getInt("qrImageCount"));
+        assertTrue(BridgeActivity.snapshotUI(context, id).length > 100);
+
+        BridgeInteractionRegistry.cancel(id);
+        BridgeActivity.dismissUI(context, id);
+        assertFalse(isShowing(dialog));
+    }
+
     public void testOrdinaryImageDoesNotPromoteConfigurationToAuthorization()
             throws Exception {
         Context context = InstrumentationRegistry.getInstrumentation()
@@ -2194,6 +2272,18 @@ public final class BridgeProtocolTest extends TestCase {
             String interactionID,
             boolean qrCode
     ) throws Exception {
+        return showOwnedBitmapDialog(
+                interactionID,
+                qrCode
+                        ? qrBitmap("okvideomac-legacy-login")
+                        : ordinaryBitmap()
+        );
+    }
+
+    private static AlertDialog showOwnedBitmapDialog(
+            String interactionID,
+            Bitmap bitmap
+    ) throws Exception {
         assertTrue(BridgeActionActivity.isReadyFor(interactionID));
         Context owner = com.github.catvod.Init.context();
         assertTrue(owner instanceof Activity);
@@ -2204,9 +2294,7 @@ public final class BridgeProtocolTest extends TestCase {
                 ImageView image = new ImageView((Activity) owner);
                 image.setLayoutParams(new ViewGroup.LayoutParams(320, 320));
                 image.setAdjustViewBounds(true);
-                image.setImageBitmap(qrCode
-                        ? qrBitmap("okvideomac-legacy-login")
-                        : ordinaryBitmap());
+                image.setImageBitmap(bitmap);
                 AlertDialog dialog = new AlertDialog.Builder((Activity) owner)
                         .setTitle("结构化配置界面")
                         .setView(image)
@@ -2277,6 +2365,31 @@ public final class BridgeProtocolTest extends TestCase {
         Bitmap bitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888);
         bitmap.eraseColor(Color.rgb(64, 128, 192));
         return bitmap;
+    }
+
+    private static Bitmap invertedQRCodeBitmap(String content) throws Exception {
+        Bitmap source = qrBitmap(content);
+        int width = source.getWidth();
+        int height = source.getHeight();
+        int[] pixels = new int[width * height];
+        source.getPixels(pixels, 0, width, 0, 0, width, height);
+        for (int index = 0; index < pixels.length; index++) {
+            int color = pixels[index];
+            pixels[index] = Color.argb(
+                    Color.alpha(color),
+                    255 - Color.red(color),
+                    255 - Color.green(color),
+                    255 - Color.blue(color)
+            );
+        }
+        source.recycle();
+        Bitmap output = Bitmap.createBitmap(
+                width,
+                height,
+                Bitmap.Config.ARGB_8888
+        );
+        output.setPixels(pixels, 0, width, 0, 0, width, height);
+        return output;
     }
 
     private static JSONObject awaitCapturedUI(

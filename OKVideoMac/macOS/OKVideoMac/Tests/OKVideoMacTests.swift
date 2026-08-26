@@ -74,6 +74,44 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testBrowserEscapeStopsSearchBeforeReturningHome() {
+        XCTAssertEqual(
+            BrowserEscapeRoutePolicy.action(
+                isHomeSearchPresented: true,
+                isSearching: true,
+                hasBlockingPresentation: false
+            ),
+            .stopSearch
+        )
+        XCTAssertEqual(
+            BrowserEscapeRoutePolicy.action(
+                isHomeSearchPresented: true,
+                isSearching: false,
+                hasBlockingPresentation: false
+            ),
+            .returnHome
+        )
+    }
+
+    func testBrowserEscapeDefersToForegroundPresentation() {
+        XCTAssertEqual(
+            BrowserEscapeRoutePolicy.action(
+                isHomeSearchPresented: true,
+                isSearching: true,
+                hasBlockingPresentation: true
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            BrowserEscapeRoutePolicy.action(
+                isHomeSearchPresented: false,
+                isSearching: false,
+                hasBlockingPresentation: false
+            ),
+            .none
+        )
+    }
+
     func testPlayerWindowCommandsRemainDistinctForTheSamePlaybackRequest() {
         let requestID = UUID()
         let first = PlayerWindowCommand(

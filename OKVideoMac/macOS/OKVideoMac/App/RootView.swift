@@ -220,12 +220,24 @@ struct RootView: View {
             value: state.isShortcutHelpPresented
         )
         .background {
-            WindowCloseObserver(
-                onClose: {},
-                onKeyChange: { isKey in
-                    state.setBrowserWindowKey(isKey)
+            ZStack {
+                WindowCloseObserver(
+                    onClose: {},
+                    onKeyChange: { isKey in
+                        state.setBrowserWindowKey(isKey)
+                    }
+                )
+                AppKeyCommandMonitor { event in
+                    let modifiers = event.modifierFlags.intersection(
+                        [.command, .option, .control, .shift]
+                    )
+                    guard modifiers.isEmpty, event.keyCode == 53 else {
+                        return false
+                    }
+                    return state.performBrowserEscapeShortcut()
                 }
-            )
+                .frame(width: 0, height: 0)
+            }
         }
     }
 
@@ -463,7 +475,8 @@ private struct ShortcutHelpView: View {
             ("⌘L", "打开点播配置"),
             ("⌘R", "刷新当前页面"),
             ("⌘[", "返回"),
-            ("⌘.", "停止当前搜索")
+            ("⌘.", "停止当前搜索"),
+            ("Esc", "停止搜索；再按返回首页")
         ]),
         ("播放器", [
             ("Space", "播放或暂停"),
@@ -475,6 +488,7 @@ private struct ShortcutHelpView: View {
             ("− / =", "音量减小或增大"),
             ("C / A", "字幕开关 / 下一音轨"),
             ("F", "进入或退出全屏"),
+            ("Esc", "关闭播放面板或退出全屏"),
             ("⇧, / ⇧.", "降低或提高播放速度"),
             ("⌘W", "关闭播放器窗口")
         ]),
@@ -821,7 +835,7 @@ final class AppKeyCommandMonitorView: NSView {
                   let window = self.window,
                   window.isKeyWindow,
                   event.window === window,
-                  !Self.isEditingText(in: window),
+                  (!Self.isEditingText(in: window) || event.keyCode == 53),
                   self.handler?(event) == true else {
                 return event
             }

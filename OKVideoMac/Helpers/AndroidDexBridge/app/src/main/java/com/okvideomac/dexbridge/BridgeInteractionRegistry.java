@@ -471,20 +471,26 @@ final class BridgeInteractionRegistry {
 
     /**
      * Legacy Spider packages often predate the structured action-kind field.
-     * Promote only a generic configuration action whose request-owned UI has
-     * supplied a structural authorization role. Provider/title strings are
-     * deliberately excluded: an ordering dialog or an ordinary image must
-     * retain its declared semantics even when its text resembles a login.
+     * Promote a generic configuration action or a playback request blocked by
+     * request-owned login UI. The original declared kind remains immutable, so
+     * a verified login can still deliver the original playback result. Provider
+     * and title strings are deliberately excluded: an ordering dialog or an
+     * ordinary image must retain its declared semantics even when its text
+     * resembles a login.
      */
     private static boolean shouldPromoteAuthorization(
             Interaction interaction,
             JSONObject ui
     ) {
         if (interaction == null || ui == null) return false;
-        if (!"configuration".equals(interaction.declaredKind)) return false;
-        if (!"configuration".equals(interaction.kind)) return false;
-        if (!("action".equals(interaction.method)
-                || "detail".equals(interaction.method))) {
+        if (!interaction.declaredKind.equals(interaction.kind)) return false;
+        boolean configurationRequest = "configuration".equals(
+                interaction.declaredKind
+        ) && ("action".equals(interaction.method)
+                || "detail".equals(interaction.method));
+        boolean playbackRequest = "playback".equals(interaction.declaredKind)
+                && "play".equals(interaction.method);
+        if (!configurationRequest && !playbackRequest) {
             return false;
         }
         if (!ui.optBoolean("visible", false)

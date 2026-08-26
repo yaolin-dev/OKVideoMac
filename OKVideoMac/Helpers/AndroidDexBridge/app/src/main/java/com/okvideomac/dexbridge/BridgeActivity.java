@@ -14,6 +14,7 @@ import android.os.Bundle;
 import android.os.Looper;
 import android.text.InputType;
 import android.text.method.PasswordTransformationMethod;
+import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
@@ -25,6 +26,7 @@ import android.widget.ImageView;
 import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.TextView;
+import android.webkit.WebView;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -32,8 +34,10 @@ import org.json.JSONObject;
 import com.google.zxing.BarcodeFormat;
 import com.google.zxing.BinaryBitmap;
 import com.google.zxing.DecodeHintType;
+import com.google.zxing.LuminanceSource;
 import com.google.zxing.MultiFormatReader;
 import com.google.zxing.RGBLuminanceSource;
+import com.google.zxing.common.GlobalHistogramBinarizer;
 import com.google.zxing.common.HybridBinarizer;
 
 import java.io.ByteArrayOutputStream;
@@ -50,6 +54,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class BridgeActivity extends Activity {
+    private static final String LOG_TAG = "OKVideoQR";
     private static final int UI_SCHEMA_VERSION = 3;
     private static volatile WeakReference<BridgeActivity> current =
             new WeakReference<>(null);
@@ -560,6 +565,14 @@ public final class BridgeActivity extends Activity {
             if (!signature.equals(lastUISignature)) {
                 lastUISignature = signature;
                 uiGeneration++;
+                Log.d(
+                        LOG_TAG,
+                        "ui=" + abbreviatedInteractionID(interactionID)
+                                + " roots=" + roots.size()
+                                + " images=" + imageCount
+                                + " qr=" + qrImageCount
+                                + " role=" + uiRole
+                );
             }
             state.put("visible", visible);
             state.put("title", title);
@@ -795,8 +808,13 @@ public final class BridgeActivity extends Activity {
             if (rendered == null) {
                 throw new IllegalStateException("Dialog has no drawable bounds");
             }
-            Bitmap bitmap = bitmapWithQuietZone(rendered);
+            Bitmap bitmap = preparedQRCodeBitmap(rendered);
             rendered.recycle();
+            if (bitmap == null) {
+                throw new IllegalStateException(
+                        "QR candidate could not be normalized"
+                );
+            }
             if (!ownsCurrentCapturedUI(id)) {
                 bitmap.recycle();
                 throw new IllegalStateException(
@@ -1148,7 +1166,7 @@ public final class BridgeActivity extends Activity {
                 if (!isCustomQRCodeCandidate(view)) continue;
                 inspected++;
                 if (isQRCodeView(view)) return view;
-                if (inspected >= 24) return null;
+                if (inspected >= 64) return null;
             }
         }
         return null;
@@ -1161,6 +1179,7 @@ public final class BridgeActivity extends Activity {
         int width = view.getWidth();
         int height = view.getHeight();
         if (width < 120 || height < 120) return false;
+        if (view instanceof WebView) return true;
         double ratio = width / (double) height;
         return ratio >= 0.65 && ratio <= 1.55;
     }
@@ -1364,41 +1383,85 @@ public final class BridgeActivity extends Activity {
     /** Returns only whether the image structurally decodes as QR data. */
     private static boolean isQRCodeImage(ImageView image) {
         Bitmap bitmap = null;
+        Bitmap prepared = null;
         try {
             bitmap = renderedImage(image);
-            return isQRCodeBitmap(bitmap);
+            prepared = preparedQRCodeBitmap(bitmap);
+            return prepared != null;
         } catch (Throwable ignored) {
             return false;
         } finally {
+            if (prepared != null && !prepared.isRecycled()) prepared.recycle();
             if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
         }
     }
 
     private static boolean isQRCodeView(View view) {
         Bitmap bitmap = null;
+        Bitmap prepared = null;
         try {
             bitmap = renderedView(view);
-            return isQRCodeBitmap(bitmap);
+            prepared = preparedQRCodeBitmap(bitmap);
+            return prepared != null;
         } catch (Throwable ignored) {
             return false;
         } finally {
+            if (prepared != null && !prepared.isRecycled()) prepared.recycle();
             if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
         }
     }
 
-    private static boolean isQRCodeBitmap(Bitmap bitmap) {
-        if (bitmap == null) return false;
+    /**
+     * Returns a request-local, decodable QR image suitable for the Mac host.
+     * Real cloud-provider codes are frequently padded, scaled, tinted, inverted
+     * or drawn inside a larger ImageView/WebView. Normalize those presentation
+     * differences before deciding that the provider did not publish a code.
+     */
+    private static Bitmap preparedQRCodeBitmap(Bitmap source) {
+        if (source == null || source.getWidth() < 21 || source.getHeight() < 21) {
+            return null;
+        }
+        ArrayList<Bitmap> candidates = new ArrayList<>();
+        try {
+            Bitmap padded = bitmapWithQuietZone(source);
+            candidates.add(padded);
+            Bitmap cropped = croppedToVisibleCode(source);
+            if (cropped != null) {
+                candidates.add(bitmapWithQuietZone(cropped));
+                cropped.recycle();
+            }
+            int baseCount = candidates.size();
+            for (int index = 0; index < baseCount; index++) {
+                candidates.add(invertedBitmap(candidates.get(index)));
+            }
+            for (int index = 0; index < candidates.size(); index++) {
+                Bitmap candidate = candidates.get(index);
+                if (!decodesQRCode(candidate)) continue;
+                for (int recycleIndex = 0;
+                        recycleIndex < candidates.size();
+                        recycleIndex++) {
+                    if (recycleIndex == index) continue;
+                    Bitmap unused = candidates.get(recycleIndex);
+                    if (!unused.isRecycled()) unused.recycle();
+                }
+                return candidate;
+            }
+        } catch (Throwable ignored) {
+            // The caller treats an undecodable image as ordinary provider UI.
+        }
+        for (Bitmap candidate : candidates) {
+            if (candidate != null && !candidate.isRecycled()) candidate.recycle();
+        }
+        return null;
+    }
+
+    private static boolean decodesQRCode(Bitmap bitmap) {
         try {
             int width = bitmap.getWidth();
             int height = bitmap.getHeight();
-            if (width < 21 || height < 21) return false;
             int[] pixels = new int[width * height];
             bitmap.getPixels(pixels, 0, width, 0, 0, width, height);
-            RGBLuminanceSource source = new RGBLuminanceSource(
-                    width,
-                    height,
-                    pixels
-            );
+            LuminanceSource source = new RGBLuminanceSource(width, height, pixels);
             EnumMap<DecodeHintType, Object> hints = new EnumMap<>(
                     DecodeHintType.class
             );
@@ -1407,14 +1470,103 @@ public final class BridgeActivity extends Activity {
                     Collections.singletonList(BarcodeFormat.QR_CODE)
             );
             hints.put(DecodeHintType.TRY_HARDER, Boolean.TRUE);
-            new MultiFormatReader().decode(
-                    new BinaryBitmap(new HybridBinarizer(source)),
-                    hints
+            return decodesQRCode(source, hints, true)
+                    || decodesQRCode(source, hints, false);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean decodesQRCode(
+            LuminanceSource source,
+            EnumMap<DecodeHintType, Object> hints,
+            boolean hybrid
+    ) {
+        try {
+            BinaryBitmap binary = new BinaryBitmap(
+                    hybrid
+                            ? new HybridBinarizer(source)
+                            : new GlobalHistogramBinarizer(source)
             );
+            new MultiFormatReader().decode(binary, hints);
             return true;
         } catch (Throwable ignored) {
             return false;
         }
+    }
+
+    private static Bitmap invertedBitmap(Bitmap source) {
+        int width = source.getWidth();
+        int height = source.getHeight();
+        int[] pixels = new int[width * height];
+        source.getPixels(pixels, 0, width, 0, 0, width, height);
+        for (int index = 0; index < pixels.length; index++) {
+            int color = pixels[index];
+            pixels[index] = Color.argb(
+                    Color.alpha(color),
+                    255 - Color.red(color),
+                    255 - Color.green(color),
+                    255 - Color.blue(color)
+            );
+        }
+        Bitmap output = Bitmap.createBitmap(
+                width,
+                height,
+                Bitmap.Config.ARGB_8888
+        );
+        output.setPixels(pixels, 0, width, 0, 0, width, height);
+        return output;
+    }
+
+    /** Removes provider padding before a fresh quiet zone is applied. */
+    private static Bitmap croppedToVisibleCode(Bitmap source) {
+        int width = source.getWidth();
+        int height = source.getHeight();
+        int[] pixels = new int[width * height];
+        source.getPixels(pixels, 0, width, 0, 0, width, height);
+        int left = width;
+        int top = height;
+        int right = -1;
+        int bottom = -1;
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int color = pixels[y * width + x];
+                if (Color.alpha(color) <= 16) continue;
+                int darkest = Math.min(
+                        Color.red(color),
+                        Math.min(Color.green(color), Color.blue(color))
+                );
+                if (darkest >= 235) continue;
+                left = Math.min(left, x);
+                top = Math.min(top, y);
+                right = Math.max(right, x);
+                bottom = Math.max(bottom, y);
+            }
+        }
+        if (right < left || bottom < top) return null;
+        int contentWidth = right - left + 1;
+        int contentHeight = bottom - top + 1;
+        if (contentWidth < 21 || contentHeight < 21) return null;
+        if (contentWidth >= width * 0.96 && contentHeight >= height * 0.96) {
+            return null;
+        }
+        int margin = Math.max(2, Math.max(contentWidth, contentHeight) / 50);
+        int cropLeft = Math.max(0, left - margin);
+        int cropTop = Math.max(0, top - margin);
+        int cropRight = Math.min(width, right + margin + 1);
+        int cropBottom = Math.min(height, bottom + margin + 1);
+        return Bitmap.createBitmap(
+                source,
+                cropLeft,
+                cropTop,
+                cropRight - cropLeft,
+                cropBottom - cropTop
+        );
+    }
+
+    private static String abbreviatedInteractionID(String interactionID) {
+        if (interactionID == null || interactionID.isEmpty()) return "none";
+        return interactionID.substring(0, Math.min(8, interactionID.length()));
     }
 
     private static Bitmap renderedImage(ImageView image) {
