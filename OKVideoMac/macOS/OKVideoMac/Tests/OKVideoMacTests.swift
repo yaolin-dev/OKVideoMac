@@ -8612,6 +8612,135 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     @MainActor
+    func testHistoryNavigationRecipeRebuildsFreshEpisodeAfterRestart() throws {
+        let configurationID = UUID()
+        let originalSource = PlaySource(
+            name: "夸父原1",
+            episodes: [
+                PlayEpisode(
+                    name: "[851.30MB] 凛丨冬下的罪恶 04.mp4",
+                    url: "expired-runtime-token"
+                )
+            ]
+        )
+        let originalDetail = VideoDetail(
+            summary: VideoSummary(
+                siteKey: "wanou",
+                siteName: "玩偶",
+                videoID: "129449",
+                title: "凛冬下的罪恶"
+            ),
+            playSources: [originalSource]
+        )
+        let recipe = AppState.historyNavigationRecipe(
+            detail: originalDetail,
+            source: originalSource,
+            episode: originalSource.episodes[0],
+            configurationID: configurationID,
+            position: 735.55
+        )
+        XCTAssertEqual(recipe.episode.normalizedFilename, "凛冬下的罪恶04")
+
+        let encoded = try JSONEncoder().encode(
+            HistoryPlaybackReference(
+                sourceIdentity: "legacy-source-digest",
+                resourceIdentity: "legacy-episode-digest",
+                navigationRecipe: recipe
+            )
+        )
+        let restartedReference = try JSONDecoder().decode(
+            HistoryPlaybackReference.self,
+            from: encoded
+        )
+        let record = HistoryRecord(
+            configurationID: configurationID,
+            siteKey: "wanou",
+            videoID: "129449",
+            title: "凛冬下的罪恶",
+            sourceName: "夸父原1",
+            episodeName: originalSource.episodes[0].name,
+            playbackReference: restartedReference,
+            position: 735.55,
+            duration: 1_199.872
+        )
+        let refreshedDetail = VideoDetail(
+            summary: originalDetail.summary,
+            playSources: [
+                PlaySource(
+                    name: "升级后的夸父线路",
+                    episodes: [
+                        PlayEpisode(
+                            name: "凛冬下的罪恶.04.mkv",
+                            url: "fresh-runtime-token"
+                        )
+                    ]
+                )
+            ]
+        )
+
+        let selection = AppState.historyPlaybackSelection(
+            in: refreshedDetail,
+            record: record
+        )
+        XCTAssertEqual(selection?.episode.url, "fresh-runtime-token")
+        XCTAssertEqual(AppState.historyResumePosition(from: record), 735.55)
+    }
+
+    @MainActor
+    func testHistoryNavigationRecipeOffersChoicesInsteadOfGuessing() {
+        let configurationID = UUID()
+        let recipe = HistoryNavigationRecipe(
+            configurationID: configurationID,
+            siteKey: "fixture",
+            detailID: "video-1",
+            source: HistoryNavigationSource(
+                flag: "旧线路",
+                name: "旧线路"
+            ),
+            episode: HistoryNavigationEpisode(
+                name: "影片 04.mp4",
+                normalizedFilename: "影片04",
+                episodeNumber: 4
+            )
+        )
+        let record = HistoryRecord(
+            configurationID: configurationID,
+            siteKey: "fixture",
+            videoID: "video-1",
+            title: "影片",
+            playbackReference: HistoryPlaybackReference(
+                sourceIdentity: "old-source",
+                resourceIdentity: "old-episode",
+                navigationRecipe: recipe
+            )
+        )
+        let detail = VideoDetail(
+            summary: VideoSummary(
+                siteKey: "fixture",
+                siteName: "Fixture",
+                videoID: "video-1",
+                title: "影片"
+            ),
+            playSources: [
+                PlaySource(
+                    name: "新线路 A",
+                    episodes: [PlayEpisode(name: "影片 04.mp4", url: "a")]
+                ),
+                PlaySource(
+                    name: "新线路 B",
+                    episodes: [PlayEpisode(name: "影片 04.mp4", url: "b")]
+                )
+            ]
+        )
+
+        XCTAssertNil(AppState.historyPlaybackSelection(in: detail, record: record))
+        XCTAssertEqual(
+            AppState.historyPlaybackChoices(in: detail, record: record).count,
+            2
+        )
+    }
+
+    @MainActor
     func testHistoryReferencePersistsOnlySafeReplayHeaders() {
         let source = PlaySource(
             name: "Display",

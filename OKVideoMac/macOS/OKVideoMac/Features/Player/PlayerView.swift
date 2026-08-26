@@ -64,7 +64,10 @@ struct PlayerView: View {
             }
 
             playbackStatusOverlay
-                .allowsHitTesting(false)
+                .allowsHitTesting(
+                    state.hasHistoryPlaybackChoices
+                        || (isFailed && state.canRetryHistoryPlayback)
+                )
 
             if state.isLivePlayback,
                let notice = state.livePlaybackNotice {
@@ -651,6 +654,44 @@ struct PlayerView: View {
                         .multilineTextAlignment(.center)
                         .lineLimit(5)
                         .frame(maxWidth: 560)
+                }
+
+                if state.hasHistoryPlaybackChoices {
+                    Text(state.playbackFailureSummary ?? "请选择要恢复的线路和分集")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.72))
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 620)
+
+                    ScrollView {
+                        VStack(spacing: 8) {
+                            ForEach(state.historyPlaybackChoices) { choice in
+                                Button {
+                                    state.chooseHistoryPlayback(choice.id)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(choice.title)
+                                            .font(.callout.weight(.semibold))
+                                            .lineLimit(1)
+                                        Text(choice.subtitle)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: 620, maxHeight: 230)
+
+                    Button("取消恢复") {
+                        state.cancelHistoryPlaybackChoices()
+                    }
+                    .buttonStyle(.bordered)
                 }
 
                 if isFailed, state.canRetryHistoryPlayback {

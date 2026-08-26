@@ -117,8 +117,151 @@ public struct FavoriteRecord: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+public struct HistoryNavigationSource: Codable, Equatable, Sendable {
+    public var providerStableID: String?
+    public var flag: String
+    public var name: String
+    public var index: Int?
+
+    public init(
+        providerStableID: String? = nil,
+        flag: String,
+        name: String,
+        index: Int? = nil
+    ) {
+        self.providerStableID = providerStableID
+        self.flag = flag
+        self.name = name
+        self.index = index
+    }
+}
+
+public struct HistoryNavigationEpisode: Codable, Equatable, Sendable {
+    public var providerStableID: String?
+    public var name: String
+    public var normalizedFilename: String
+    public var seasonNumber: Int?
+    public var episodeNumber: Int?
+    public var index: Int?
+
+    public init(
+        providerStableID: String? = nil,
+        name: String,
+        normalizedFilename: String,
+        seasonNumber: Int? = nil,
+        episodeNumber: Int? = nil,
+        index: Int? = nil
+    ) {
+        self.providerStableID = providerStableID
+        self.name = name
+        self.normalizedFilename = normalizedFilename
+        self.seasonNumber = seasonNumber
+        self.episodeNumber = episodeNumber
+        self.index = index
+    }
+}
+
+/// A credential-free recipe for replaying the user's navigation path.
+///
+/// The recipe deliberately stores presentation and structural identity only.
+/// Runtime episode URLs, signed media URLs, Cookies, Authorization values and
+/// local proxy capabilities are never representable here.
+public struct HistoryNavigationRecipe: Codable, Equatable, Sendable {
+    public static let currentVersion = 4
+
+    public var version: Int
+    public var configurationID: UUID
+    public var siteKey: String
+    public var detailID: String
+    public var source: HistoryNavigationSource
+    public var episode: HistoryNavigationEpisode
+    public var resumePosition: TimeInterval
+
+    public init(
+        version: Int = currentVersion,
+        configurationID: UUID,
+        siteKey: String,
+        detailID: String,
+        source: HistoryNavigationSource,
+        episode: HistoryNavigationEpisode,
+        resumePosition: TimeInterval = 0
+    ) {
+        self.version = version
+        self.configurationID = configurationID
+        self.siteKey = siteKey
+        self.detailID = detailID
+        self.source = source
+        self.episode = episode
+        self.resumePosition = max(0, resumePosition)
+    }
+}
+
+public extension HistoryNavigationRecipe {
+    func sanitizedForPersistence() -> HistoryNavigationRecipe? {
+        guard version > 0,
+              let siteKey = Self.safeDisplayValue(siteKey),
+              let detailID = Self.safeDisplayValue(detailID),
+              let sourceFlag = Self.safeDisplayValue(source.flag),
+              let sourceName = Self.safeDisplayValue(source.name),
+              let episodeName = Self.safeDisplayValue(episode.name),
+              let normalizedFilename = Self.safeDisplayValue(
+                episode.normalizedFilename
+              ) else {
+            return nil
+        }
+        let sourceStableID = source.providerStableID.flatMap {
+            PlaybackPersistencePolicy.sanitizedPlaybackIdentity($0)
+        }
+        let episodeStableID = episode.providerStableID.flatMap {
+            PlaybackPersistencePolicy.sanitizedPlaybackIdentity($0)
+        }
+        return HistoryNavigationRecipe(
+            configurationID: configurationID,
+            siteKey: siteKey,
+            detailID: detailID,
+            source: HistoryNavigationSource(
+                providerStableID: sourceStableID,
+                flag: sourceFlag,
+                name: sourceName,
+                index: Self.safeIndex(source.index)
+            ),
+            episode: HistoryNavigationEpisode(
+                providerStableID: episodeStableID,
+                name: episodeName,
+                normalizedFilename: normalizedFilename,
+                seasonNumber: Self.safeNumber(episode.seasonNumber),
+                episodeNumber: Self.safeNumber(episode.episodeNumber),
+                index: Self.safeIndex(episode.index)
+            ),
+            resumePosition: resumePosition.isFinite
+                ? max(0, resumePosition)
+                : 0
+        )
+    }
+
+    private static func safeDisplayValue(_ rawValue: String) -> String? {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty,
+              value.utf8.count <= 4_096,
+              !value.unicodeScalars.contains(where: {
+                CharacterSet.controlCharacters.contains($0)
+              }) else {
+            return nil
+        }
+        return value
+    }
+
+    private static func safeIndex(_ value: Int?) -> Int? {
+        value.flatMap { (0...100_000).contains($0) ? $0 : nil }
+    }
+
+    private static func safeNumber(_ value: Int?) -> Int? {
+        value.flatMap { (0...100_000).contains($0) ? $0 : nil }
+    }
+}
+
 public struct HistoryPlaybackReference: Codable, Equatable, Sendable {
-    public static let currentVersion = 3
+    public static let currentVersion = 4
 
     public var version: Int
     public var sourceIdentity: String
@@ -128,6 +271,9 @@ public struct HistoryPlaybackReference: Codable, Equatable, Sendable {
     /// runtime URL, Cookie, Authorization and loopback media-session token.
     /// It is optional so version 1/2 history JSON continues to decode.
     public var providerResourceReference: PlaybackResourceReference?
+    /// Exact credential-free navigation path captured when the user selects
+    /// the episode. Optional for version 1-3 records.
+    public var navigationRecipe: HistoryNavigationRecipe?
     /// Only non-sensitive request context may be persisted here. Cookie and
     /// Authorization are intentionally reacquired from the provider.
     public var replayHeaders: [String: String]
@@ -137,12 +283,14 @@ public struct HistoryPlaybackReference: Codable, Equatable, Sendable {
         sourceIdentity: String,
         resourceIdentity: String,
         providerResourceReference: PlaybackResourceReference? = nil,
+        navigationRecipe: HistoryNavigationRecipe? = nil,
         replayHeaders: [String: String] = [:]
     ) {
         self.version = version
         self.sourceIdentity = sourceIdentity
         self.resourceIdentity = resourceIdentity
         self.providerResourceReference = providerResourceReference
+        self.navigationRecipe = navigationRecipe
         self.replayHeaders = replayHeaders
     }
 }
@@ -165,6 +313,7 @@ public extension HistoryPlaybackReference {
                 .sanitizedProviderResourceReference(
                     providerResourceReference
                 ),
+            navigationRecipe: navigationRecipe?.sanitizedForPersistence(),
             replayHeaders: PlaybackPersistencePolicy.sanitizedReplayHeaders(
                 replayHeaders
             )
@@ -321,6 +470,12 @@ public extension HistoryRecord {
             .sanitizedMediaReference(mediaReference)
         record.playbackReference = playbackReference?
             .sanitizedForPersistence()
+        if let recipe = record.playbackReference?.navigationRecipe,
+           recipe.configurationID != record.configurationID
+                || recipe.siteKey != record.siteKey
+                || recipe.detailID != record.videoID {
+            record.playbackReference?.navigationRecipe = nil
+        }
         record.position = position.isFinite ? max(0, position) : 0
         record.duration = duration.isFinite ? max(0, duration) : 0
         if !watchedAt.timeIntervalSince1970.isFinite {

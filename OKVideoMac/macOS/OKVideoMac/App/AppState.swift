@@ -2364,6 +2364,33 @@ struct ActivePlaybackContext {
     var replacedHistoryRecord: HistoryRecord? = nil
 }
 
+struct HistoryPlaybackChoice: Identifiable, Equatable {
+    let id: UUID
+    let detail: VideoDetail
+    let source: PlaySource
+    let episode: PlayEpisode
+
+    init(
+        id: UUID = UUID(),
+        detail: VideoDetail,
+        source: PlaySource,
+        episode: PlayEpisode
+    ) {
+        self.id = id
+        self.detail = detail
+        self.source = source
+        self.episode = episode
+    }
+
+    var title: String {
+        detail.summary.title
+    }
+
+    var subtitle: String {
+        "\(source.name) · \(episode.name)"
+    }
+}
+
 /// Keeps recently resolved provider media capabilities in memory only. Cloud
 /// URLs, Cookies and bridge session IDs never cross the persistence boundary,
 /// but closing the player must not throw away a still-valid two-hour bridge
@@ -3162,6 +3189,7 @@ final class AppState: ObservableObject {
     @Published private(set) var favorites: [FavoriteRecord] = []
     @Published private(set) var history: [HistoryRecord] = []
     @Published private(set) var historyPlaybackLoadingID: HistoryRecord.ID?
+    @Published private(set) var historyPlaybackChoices: [HistoryPlaybackChoice] = []
     @Published private(set) var liveSources: [StoredLiveSource] = []
     @Published private(set) var loadedLivePlaylists: [UUID: LivePlaylist] = [:]
     @Published private(set) var loadedEPGGuides: [UUID: XMLTVGuide] = [:]
@@ -7114,6 +7142,7 @@ final class AppState: ObservableObject {
         historyPlaybackPreparationID = preparationID
         historyPlaybackLoadingID = item.id
         historyPlaybackRequestedItem = item
+        historyPlaybackChoices = []
         cancelAllPlaybackStartupGates()
         if let configurationID = item.configurationID
             ?? activeConfigurationRecord?.id {
@@ -7165,7 +7194,48 @@ final class AppState: ObservableObject {
         requestHistoryPlayback(item)
     }
 
+    var hasHistoryPlaybackChoices: Bool {
+        !historyPlaybackChoices.isEmpty
+    }
+
+    func chooseHistoryPlayback(_ choiceID: HistoryPlaybackChoice.ID) {
+        guard let item = historyPlaybackRequestedItem,
+              let choice = historyPlaybackChoices.first(where: {
+                $0.id == choiceID
+              }),
+              isPlayerPresented else { return }
+        let preparationID = historyPlaybackPreparationID
+        historyPlaybackChoices = []
+        historyPlaybackLoadingID = item.id
+        playbackFailureSummary = nil
+        playbackResolutionState = .restoringHistory
+        historyPlaybackTask?.cancel()
+        historyPlaybackTask = Task { @MainActor [weak self] in
+            guard let self,
+                  self.isCurrentHistoryPreparation(preparationID) else { return }
+            await self.startPlayback(
+                detail: choice.detail,
+                source: choice.source,
+                episode: choice.episode,
+                origin: .history(item),
+                continuingRequestID: preparationID,
+                windowActivation: .preserveFocus
+            )
+        }
+    }
+
+    func cancelHistoryPlaybackChoices() {
+        historyPlaybackChoices = []
+        let preparationID = historyPlaybackPreparationID
+        guard isCurrentHistoryPreparation(preparationID) else { return }
+        failHistoryPlayback(
+            "没有选择要恢复的线路和分集",
+            preparationID: preparationID
+        )
+    }
+
     func returnToHistoryAfterPlaybackFailure() {
+        historyPlaybackChoices = []
         selectSection(.history)
         Task { await closePlayer() }
     }
@@ -7278,14 +7348,24 @@ final class AppState: ObservableObject {
             return
         }
 
+        let recipeDetailID = item.playbackReference?.navigationRecipe.flatMap {
+            recipe in
+            recipe.configurationID == owningConfigurationID
+                && recipe.siteKey == item.siteKey
+                ? recipe.detailID.nonEmpty
+                : nil
+        }
         do {
-            let detail = try await provider.detail(id: item.videoID)
+            let detail = try await provider.detail(
+                id: recipeDetailID ?? item.videoID
+            )
             guard isCurrentHistoryPreparation(preparationID) else { return }
 
-            if let selection = Self.historyPlaybackSelection(
+            let selections = Self.historyPlaybackChoices(
                 in: detail,
                 record: item
-            ) {
+            )
+            if selections.count == 1, let selection = selections.first {
                 await startPlayback(
                     detail: detail,
                     source: selection.source,
@@ -7293,6 +7373,19 @@ final class AppState: ObservableObject {
                     origin: .history(item),
                     continuingRequestID: preparationID,
                     windowActivation: .preserveFocus
+                )
+                return
+            }
+            if selections.count > 1 {
+                presentHistoryPlaybackChoices(
+                    selections.map {
+                        HistoryPlaybackChoice(
+                            detail: detail,
+                            source: $0.source,
+                            episode: $0.episode
+                        )
+                    },
+                    preparationID: preparationID
                 )
                 return
             }
@@ -7352,32 +7445,46 @@ final class AppState: ObservableObject {
                 in: page.items,
                 record: item
             )
-            var resolved: [(VideoDetail, PlaySource, PlayEpisode)] = []
+            var resolved: [HistoryPlaybackChoice] = []
             for summary in candidates.prefix(12) {
                 guard let detail = try? await provider.detail(
                     id: summary.videoID
-                ), let selection = Self.historyPlaybackSelection(
-                    in: detail,
-                    record: item
                 ) else {
                     continue
                 }
-                resolved.append((detail, selection.source, selection.episode))
+                let selections = Self.historyPlaybackChoices(
+                    in: detail,
+                    record: item
+                )
+                resolved.append(contentsOf: selections.map {
+                    HistoryPlaybackChoice(
+                        detail: detail,
+                        source: $0.source,
+                        episode: $0.episode
+                    )
+                })
             }
             guard isCurrentHistoryPreparation(preparationID) else { return }
             if resolved.count == 1, let match = resolved.first {
                 await startPlayback(
-                    detail: match.0,
-                    source: match.1,
-                    episode: match.2,
+                    detail: match.detail,
+                    source: match.source,
+                    episode: match.episode,
                     origin: .history(item),
                     continuingRequestID: preparationID,
                     windowActivation: .preserveFocus
                 )
                 return
             }
-            if resolved.count > 1 || candidates.count > 1 {
-                recoveryFailure = "找到多个同名结果，无法唯一匹配原线路和分集"
+            if resolved.count > 1 {
+                presentHistoryPlaybackChoices(
+                    Array(resolved.prefix(12)),
+                    preparationID: preparationID
+                )
+                return
+            }
+            if candidates.count > 1 {
+                recoveryFailure = "找到多个同名结果，但没有唯一匹配原线路和分集"
             } else if candidates.isEmpty {
                 recoveryFailure += "，重新搜索也没有找到同名内容"
             } else {
@@ -7406,6 +7513,30 @@ final class AppState: ObservableObject {
         playbackResolutionState = .failed
         playbackFailureSummary = redactedMessage
         playerSnapshot.status = .failed(redactedMessage)
+        playerPresentedError = nil
+    }
+
+    private func presentHistoryPlaybackChoices(
+        _ choices: [HistoryPlaybackChoice],
+        preparationID: UUID
+    ) {
+        guard isCurrentHistoryPreparation(preparationID),
+              activePlayerRequestID == preparationID,
+              !choices.isEmpty else { return }
+        var seen = Set<String>()
+        historyPlaybackChoices = choices.filter { choice in
+            seen.insert(
+                [
+                    choice.detail.summary.siteKey,
+                    choice.detail.summary.videoID,
+                    choice.source.stableIdentity,
+                    choice.episode.stableIdentity
+                ].joined(separator: "|")
+            ).inserted
+        }
+        playbackResolutionState = .restoringHistory
+        playbackFailureSummary = "找到多个可能的原线路或分集，请选择一次；成功后会自动修复这条历史记录。"
+        playerSnapshot.status = .loading
         playerPresentedError = nil
     }
 
@@ -8147,6 +8278,7 @@ final class AppState: ObservableObject {
             historyPlaybackTask = nil
             historyPlaybackLoadingID = nil
             historyPlaybackRequestedItem = nil
+            historyPlaybackChoices = []
             historyPlaybackPreparationID = UUID()
         }
         if let pendingPlayback,
@@ -8238,6 +8370,14 @@ final class AppState: ObservableObject {
             requestID: sessionID,
             activation: windowActivation
         )
+        if !origin.isHistory {
+            await persistHistoryNavigationSelection(
+                detail: detail,
+                source: source,
+                episode: episode,
+                configurationID: playbackConfigurationID
+            )
+        }
         do {
             try await environment.player.prepareForPlayback(
                 requestID: sessionID
@@ -9119,6 +9259,7 @@ final class AppState: ObservableObject {
         historyPlaybackPreparationID = UUID()
         historyPlaybackLoadingID = nil
         historyPlaybackRequestedItem = nil
+        historyPlaybackChoices = []
         let clickRequestID = UUID()
         PlayerStartupTraceStore.shared.begin(
             requestID: clickRequestID,
@@ -9832,6 +9973,7 @@ final class AppState: ObservableObject {
         historyPlaybackPreparationID = UUID()
         historyPlaybackLoadingID = nil
         historyPlaybackRequestedItem = nil
+        historyPlaybackChoices = []
         playbackSessionID = UUID()
         activePlayerRequestID = UUID()
         playbackQualitySwitchSessionID = UUID()
@@ -9941,6 +10083,7 @@ final class AppState: ObservableObject {
         historyPlaybackPreparationID = UUID()
         historyPlaybackLoadingID = nil
         historyPlaybackRequestedItem = nil
+        historyPlaybackChoices = []
         playbackSessionID = UUID()
         activePlayerRequestID = UUID()
         playbackQualitySwitchSessionID = UUID()
@@ -11046,6 +11189,13 @@ final class AppState: ObservableObject {
         in detail: VideoDetail,
         record: HistoryRecord
     ) -> (source: PlaySource, episode: PlayEpisode)? {
+        if let recipe = record.playbackReference?.navigationRecipe,
+           let recipeSelection = historyRecipeSelection(
+            in: detail,
+            recipe: recipe
+           ) {
+            return recipeSelection
+        }
         let structuralSources = record.playbackReference.map { reference in
             detail.playSources.filter {
                 $0.stableIdentity == reference.sourceIdentity
@@ -11140,6 +11290,32 @@ final class AppState: ObservableObject {
                 return exactMatches[0]
             }
 
+            let normalizedFilename = historyNormalizedFilename(episodeName)
+            if !normalizedFilename.isEmpty {
+                let filenameMatches = preferredSources.flatMap { source in
+                    source.episodes.compactMap { episode in
+                        historyNormalizedFilename(episode.name)
+                            == normalizedFilename
+                            ? (source, episode)
+                            : nil
+                    }
+                }
+                if filenameMatches.count == 1 {
+                    return filenameMatches[0]
+                }
+                let globalFilenameMatches = detail.playSources.flatMap { source in
+                    source.episodes.compactMap { episode in
+                        historyNormalizedFilename(episode.name)
+                            == normalizedFilename
+                            ? (source, episode)
+                            : nil
+                    }
+                }
+                if globalFilenameMatches.count == 1 {
+                    return globalFilenameMatches[0]
+                }
+            }
+
             // Only use numbers explicitly encoded by both names. This never
             // infers an episode from its list position, so specials and lists
             // that do not begin at episode one remain safe.
@@ -11166,6 +11342,24 @@ final class AppState: ObservableObject {
                 if numberedMatches.count == 1 {
                     return numberedMatches[0]
                 }
+                let globalNumberedMatches: [(PlaySource, PlayEpisode)] = detail.playSources.flatMap { source in
+                    source.episodes.compactMap { candidate -> (PlaySource, PlayEpisode)? in
+                        let presentation = EpisodeNameParser.presentation(
+                            for: candidate
+                        )
+                        guard presentation.episodeNumber == recordedEpisode,
+                              !presentation.isSpecial else { return nil }
+                        if let recordedSeason = recordedPresentation.seasonNumber,
+                           let candidateSeason = presentation.seasonNumber,
+                           candidateSeason != recordedSeason {
+                            return nil
+                        }
+                        return (source, candidate)
+                    }
+                }
+                if globalNumberedMatches.count == 1 {
+                    return globalNumberedMatches[0]
+                }
             }
         }
 
@@ -11175,6 +11369,160 @@ final class AppState: ObservableObject {
             return (preferredSources[0], episode)
         }
         return nil
+    }
+
+    static func historyPlaybackChoices(
+        in detail: VideoDetail,
+        record: HistoryRecord
+    ) -> [(source: PlaySource, episode: PlayEpisode)] {
+        if let selection = historyPlaybackSelection(in: detail, record: record) {
+            return [selection]
+        }
+
+        let recipe = record.playbackReference?.navigationRecipe
+        let recordedName = recipe?.episode.name.nonEmpty
+            ?? record.episodeName?.nonEmpty
+        let normalizedFilename = recipe?.episode.normalizedFilename.nonEmpty
+            ?? recordedName.map(historyNormalizedFilename)
+        let recordedEpisodeNumber = recipe?.episode.episodeNumber
+            ?? recordedName.flatMap {
+                EpisodeNameParser.presentation(
+                    for: PlayEpisode(name: $0, url: "history-choice")
+                ).episodeNumber
+            }
+        let sourceNames = [
+            recipe?.source.flag.nonEmpty,
+            recipe?.source.name.nonEmpty,
+            record.sourceName?.nonEmpty
+        ].compactMap { $0 }
+
+        var matches: [(PlaySource, PlayEpisode)] = []
+        for source in detail.playSources {
+            let sourceMatches = sourceNames.contains { name in
+                source.name.compare(
+                    name,
+                    options: [.caseInsensitive, .widthInsensitive]
+                ) == .orderedSame
+            }
+            for episode in source.episodes {
+                let exactName = recordedName.map {
+                    episode.name.compare(
+                        $0,
+                        options: [.caseInsensitive, .widthInsensitive]
+                    ) == .orderedSame
+                } ?? false
+                let filenameMatch = normalizedFilename.map {
+                    !$0.isEmpty && historyNormalizedFilename(episode.name) == $0
+                } ?? false
+                let episodeNumberMatch = recordedEpisodeNumber.map {
+                    EpisodeNameParser.presentation(for: episode).episodeNumber
+                        == $0
+                } ?? false
+                if (sourceMatches && (exactName || filenameMatch || episodeNumberMatch))
+                    || filenameMatch {
+                    matches.append((source, episode))
+                }
+            }
+        }
+        return matches
+    }
+
+    private static func historyRecipeSelection(
+        in detail: VideoDetail,
+        recipe: HistoryNavigationRecipe
+    ) -> (source: PlaySource, episode: PlayEpisode)? {
+        struct ScoredMatch {
+            let source: PlaySource
+            let episode: PlayEpisode
+            let score: Int
+        }
+
+        var matches: [ScoredMatch] = []
+        for (sourceIndex, source) in detail.playSources.enumerated() {
+            var sourceScore = 0
+            if let stableID = recipe.source.providerStableID,
+               stableID == source.referenceIdentity
+                    || stableID == source.stableIdentity {
+                sourceScore = 1_000
+            } else if [recipe.source.flag, recipe.source.name].contains(where: {
+                source.name.compare(
+                    $0,
+                    options: [.caseInsensitive, .widthInsensitive]
+                ) == .orderedSame
+            }) {
+                sourceScore = 400
+            } else if recipe.source.index == sourceIndex {
+                sourceScore = 80
+            }
+
+            for (episodeIndex, episode) in source.episodes.enumerated() {
+                var episodeScore = 0
+                if let stableID = recipe.episode.providerStableID,
+                   stableID == episode.referenceIdentity
+                        || stableID == episode.stableIdentity {
+                    episodeScore = 1_200
+                } else if historyNormalizedFilename(episode.name)
+                            == recipe.episode.normalizedFilename,
+                          !recipe.episode.normalizedFilename.isEmpty {
+                    episodeScore = 700
+                } else if episode.name.compare(
+                    recipe.episode.name,
+                    options: [.caseInsensitive, .widthInsensitive]
+                ) == .orderedSame {
+                    episodeScore = 500
+                } else {
+                    let presentation = EpisodeNameParser.presentation(for: episode)
+                    if let episodeNumber = recipe.episode.episodeNumber,
+                       presentation.episodeNumber == episodeNumber,
+                       !presentation.isSpecial,
+                       recipe.episode.seasonNumber == nil
+                            || presentation.seasonNumber == nil
+                            || presentation.seasonNumber
+                                == recipe.episode.seasonNumber {
+                        episodeScore = 250
+                    } else if recipe.episode.index == episodeIndex {
+                        episodeScore = 70
+                    }
+                }
+                let score = sourceScore + episodeScore
+                if score >= 140 {
+                    matches.append(
+                        ScoredMatch(
+                            source: source,
+                            episode: episode,
+                            score: score
+                        )
+                    )
+                }
+            }
+        }
+        guard let bestScore = matches.map(\.score).max() else { return nil }
+        let best = matches.filter { $0.score == bestScore }
+        guard best.count == 1, let selection = best.first else { return nil }
+        return (selection.source, selection.episode)
+    }
+
+    static func historyNormalizedFilename(_ rawName: String) -> String {
+        var value = rawName.folding(
+            options: [.caseInsensitive, .widthInsensitive, .diacriticInsensitive],
+            locale: .current
+        ).lowercased()
+        value = value.replacingOccurrences(
+            of: #"\[[^\]]*(?:kb|mb|gb|tb|1080|2160|4k|8k)[^\]]*\]"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        value = value.replacingOccurrences(
+            of: #"\.(?:mp4|mkv|m2ts|ts|avi|mov|flv|wmv|webm)$"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        value = value.replacingOccurrences(of: "丨", with: "")
+        return String(value.filter { character in
+            character.unicodeScalars.allSatisfy {
+                CharacterSet.alphanumerics.contains($0)
+            }
+        })
     }
 
     private static func playbackMatches(
@@ -11194,6 +11542,7 @@ final class AppState: ObservableObject {
         source: PlaySource,
         episode: PlayEpisode,
         providerResourceReference: PlaybackResourceReference? = nil,
+        navigationRecipe: HistoryNavigationRecipe? = nil,
         headers: HTTPHeaders
     ) -> HistoryPlaybackReference {
         let sourceIdentity = PlaybackPersistencePolicy
@@ -11215,7 +11564,50 @@ final class AppState: ObservableObject {
             providerResourceReference: persistentProviderResourceReference(
                 providerResourceReference
             ),
+            navigationRecipe: navigationRecipe,
             replayHeaders: safeHistoryReplayHeaders(headers)
+        )
+    }
+
+    static func historyNavigationRecipe(
+        detail: VideoDetail,
+        source: PlaySource,
+        episode: PlayEpisode,
+        configurationID: UUID,
+        position: TimeInterval
+    ) -> HistoryNavigationRecipe {
+        let sourceIndex = detail.playSources.firstIndex(where: {
+            $0.id == source.id && $0.stableIdentity == source.stableIdentity
+        }) ?? detail.playSources.firstIndex(where: { $0.id == source.id })
+        let episodeIndex = source.episodes.firstIndex(where: {
+            $0.id == episode.id
+        }) ?? source.episodes.firstIndex(where: {
+            $0.stableIdentity == episode.stableIdentity
+        })
+        let presentation = EpisodeNameParser.presentation(for: episode)
+        return HistoryNavigationRecipe(
+            configurationID: configurationID,
+            siteKey: detail.summary.siteKey,
+            detailID: detail.summary.videoID,
+            source: HistoryNavigationSource(
+                providerStableID: source.referenceIdentity.flatMap {
+                    PlaybackPersistencePolicy.sanitizedPlaybackIdentity($0)
+                },
+                flag: source.name,
+                name: source.name,
+                index: sourceIndex
+            ),
+            episode: HistoryNavigationEpisode(
+                providerStableID: episode.referenceIdentity.flatMap {
+                    PlaybackPersistencePolicy.sanitizedPlaybackIdentity($0)
+                },
+                name: episode.name,
+                normalizedFilename: historyNormalizedFilename(episode.name),
+                seasonNumber: presentation.seasonNumber,
+                episodeNumber: presentation.episodeNumber,
+                index: episodeIndex
+            ),
+            resumePosition: position
         )
     }
 
@@ -11245,6 +11637,23 @@ final class AppState: ObservableObject {
         matches source: PlaySource,
         episode: PlayEpisode
     ) -> Bool {
+        if let recipe = record.playbackReference?.navigationRecipe {
+            let sourceMatches = recipe.source.providerStableID.map {
+                $0 == source.referenceIdentity || $0 == source.stableIdentity
+            } ?? [recipe.source.flag, recipe.source.name].contains(where: {
+                source.name.compare(
+                    $0,
+                    options: [.caseInsensitive, .widthInsensitive]
+                ) == .orderedSame
+            })
+            let episodeMatches = recipe.episode.providerStableID.map {
+                $0 == episode.referenceIdentity || $0 == episode.stableIdentity
+            } ?? (historyNormalizedFilename(episode.name)
+                    == recipe.episode.normalizedFilename)
+            if sourceMatches && episodeMatches {
+                return true
+            }
+        }
         if let reference = record.playbackReference {
             return reference.sourceIdentity == source.stableIdentity
                 && reference.resourceIdentity == episode.stableIdentity
@@ -11263,11 +11672,19 @@ final class AppState: ObservableObject {
         guard let record,
               record.position.isFinite,
               record.duration.isFinite,
-              record.position > 0,
-              record.duration == 0 || record.position < record.duration - 20 else {
+              (record.position > 0
+                || (record.playbackReference?.navigationRecipe?.resumePosition
+                    ?? 0) > 0) else {
             return nil
         }
-        return record.position
+        let position = record.position > 0
+            ? record.position
+            : record.playbackReference?.navigationRecipe?.resumePosition ?? 0
+        guard position.isFinite,
+              record.duration == 0 || position < record.duration - 20 else {
+            return nil
+        }
+        return position
     }
 
     private static func safeHistoryReplayHeaders(
@@ -12805,6 +13222,13 @@ final class AppState: ObservableObject {
                     source: playback.source,
                     episode: playback.episode,
                     providerResourceReference: providerResourceReference,
+                    navigationRecipe: Self.historyNavigationRecipe(
+                        detail: detail,
+                        source: playback.source,
+                        episode: playback.episode,
+                        configurationID: playback.configurationID,
+                        position: position
+                    ),
                     headers: playback.media.headers
                 ),
                 position: position,
@@ -12812,6 +13236,79 @@ final class AppState: ObservableObject {
             ),
             incognito: incognitoMode
         )
+    }
+
+    /// Capture the replay path at selection time. A crash, authorization
+    /// prompt or provider failure after this point must not leave a progress
+    /// row that knows the time but has forgotten how the episode was reached.
+    private func persistHistoryNavigationSelection(
+        detail: VideoDetail,
+        source: PlaySource,
+        episode: PlayEpisode,
+        configurationID: UUID
+    ) async {
+        guard !incognitoMode, let environment else { return }
+        let candidateID = HistoryRecord(
+            configurationID: configurationID,
+            siteKey: detail.summary.siteKey,
+            videoID: detail.summary.videoID,
+            title: detail.summary.title,
+            sourceKey: source.id
+        ).id
+        let existing = history.first(where: { $0.id == candidateID })
+            ?? history.first(where: {
+                $0.configurationID == configurationID
+                    && $0.siteKey == detail.summary.siteKey
+                    && $0.videoID == detail.summary.videoID
+                    && Self.historyRecord($0, matches: source, episode: episode)
+            })
+        let position = existing?.position ?? 0
+        let reference = Self.historyPlaybackReference(
+            source: source,
+            episode: episode,
+            providerResourceReference: episode.providerResourceReference,
+            navigationRecipe: Self.historyNavigationRecipe(
+                detail: detail,
+                source: source,
+                episode: episode,
+                configurationID: configurationID,
+                position: position
+            ),
+            headers: [:]
+        )
+        let record = HistoryRecord(
+            configurationID: configurationID,
+            siteKey: detail.summary.siteKey,
+            videoID: detail.summary.videoID,
+            title: detail.summary.title,
+            posterURL: detail.summary.posterURL,
+            sourceKey: source.id,
+            sourceName: source.name,
+            episodeName: episode.name,
+            episodeReference: Self.persistentHistoryEpisodeReference(
+                episode.url
+            ),
+            playbackReference: reference,
+            position: position,
+            duration: existing?.duration ?? 0,
+            watchedAt: existing?.watchedAt ?? Date()
+        )
+        do {
+            if let existing, existing.id != record.id {
+                try await environment.database.replaceHistory(
+                    existing,
+                    with: record,
+                    incognito: false
+                )
+            } else {
+                try await environment.database.saveHistory(
+                    record,
+                    incognito: false
+                )
+            }
+        } catch {
+            // History persistence is best effort and must never block playback.
+        }
     }
 
     private func persistPlaybackHistoryWrite(

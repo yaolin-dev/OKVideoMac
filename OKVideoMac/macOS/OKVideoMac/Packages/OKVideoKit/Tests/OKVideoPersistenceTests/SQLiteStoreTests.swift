@@ -398,6 +398,68 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertFalse(rawText.localizedCaseInsensitiveContains("authorization"))
     }
 
+    func testHistoryNavigationRecipeV4SurvivesDatabaseRestart() async throws {
+        let databaseURL = try makeDatabaseURL()
+        let configurationID = UUID()
+        let recipe = HistoryNavigationRecipe(
+            configurationID: configurationID,
+            siteKey: "wanou",
+            detailID: "129449",
+            source: HistoryNavigationSource(
+                flag: "夸父原1",
+                name: "夸父原1",
+                index: 2
+            ),
+            episode: HistoryNavigationEpisode(
+                name: "[851.30MB] 凛丨冬下的罪恶 04.mp4",
+                normalizedFilename: "凛冬下的罪恶04",
+                episodeNumber: 4,
+                index: 3
+            ),
+            resumePosition: 735.55
+        )
+        let record = HistoryRecord(
+            configurationID: configurationID,
+            siteKey: "wanou",
+            videoID: "129449",
+            title: "凛冬下的罪恶",
+            sourceName: "夸父原1",
+            episodeName: "[851.30MB] 凛丨冬下的罪恶 04.mp4",
+            playbackReference: HistoryPlaybackReference(
+                sourceIdentity: "source-identity",
+                resourceIdentity: "episode-identity",
+                navigationRecipe: recipe
+            ),
+            position: 735.55,
+            duration: 1_199.872
+        )
+
+        do {
+            let firstProcess = try SQLiteStore(databaseURL: databaseURL)
+            try await firstProcess.saveHistory(record, incognito: false)
+        }
+        let restartedProcess = try SQLiteStore(databaseURL: databaseURL)
+        let restartedHistory = try await restartedProcess.history()
+        let restored = try XCTUnwrap(restartedHistory.first)
+
+        XCTAssertEqual(restored.playbackReference?.version, 4)
+        XCTAssertEqual(restored.playbackReference?.navigationRecipe, recipe)
+        XCTAssertEqual(
+            try XCTUnwrap(
+                restored.playbackReference?.navigationRecipe?.resumePosition
+            ),
+            735.55,
+            accuracy: 0.001
+        )
+        let encoded = try JSONEncoder().encode(restored.playbackReference)
+        let text = try XCTUnwrap(String(data: encoded, encoding: .utf8))
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("cookie"))
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("stoken"))
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("authorization"))
+        XCTAssertFalse(text.contains("http://"))
+        XCTAssertFalse(text.contains("https://"))
+    }
+
     func testHistoryPersistenceBoundaryRejectsMaliciousValuesOnWriteAndRead()
         async throws {
         let databaseURL = try makeDatabaseURL()
@@ -755,6 +817,7 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(decoded.sourceIdentity, "source")
         XCTAssertEqual(decoded.resourceIdentity, "episode")
         XCTAssertNil(decoded.providerResourceReference)
+        XCTAssertNil(decoded.navigationRecipe)
         XCTAssertEqual(decoded.replayHeaders["User-Agent"], "Fixture")
     }
 
@@ -1017,7 +1080,8 @@ final class SQLiteStoreTests: XCTestCase {
             sourceName: "夸克",
             episodeName: "原画",
             position: 2_224.9,
-            duration: 6_176.9
+            duration: 6_176.9,
+            watchedAt: Date(timeIntervalSince1970: 1_800_000_000)
         )
         try await store.saveHistory(original, incognito: false)
         let replacement = HistoryRecord(
@@ -1029,7 +1093,8 @@ final class SQLiteStoreTests: XCTestCase {
             sourceName: "夸克",
             episodeName: "原画",
             position: original.position,
-            duration: original.duration
+            duration: original.duration,
+            watchedAt: original.watchedAt
         )
 
         try await store.replaceHistory(
