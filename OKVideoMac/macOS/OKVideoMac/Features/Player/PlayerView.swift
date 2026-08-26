@@ -1638,7 +1638,8 @@ struct PlayerView: View {
             return false
         }
         switch state.playbackResolutionState {
-        case .restoringHistory, .resolving, .validating, .loading, .retrying:
+        case .restoringHistory, .resolving, .preparingMedia, .validating,
+             .loading, .retrying:
             return true
         case .idle, .playing, .exhausted, .failed:
             break

@@ -84,6 +84,10 @@ struct NodeWebAuthorizationRequired: Error, LocalizedError, Equatable {
     let websiteURL: URL
     let title: String
     let message: String
+    var providerID: String? = nil
+    var authorizationStatusURL: URL? = nil
+    var authorizationCancelURL: URL? = nil
+    var baselineCredentialRevision: String? = nil
 
     var errorDescription: String? { message }
 }
@@ -503,6 +507,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     private let diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)?
     private let ensureRuntimeReady: (@Sendable () async throws -> URL)?
     private let configurationIdentity: String?
+    private let validatesMediaReadiness: Bool
     private let initializationGate = NodeSiteInitializationGate()
 
     var configurationWebsiteURL: URL {
@@ -532,7 +537,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         quarkPasscodeStore: QuarkPasscodeStoring = QuarkPasscodeDisabledStore(),
         playbackReplayStore: NodePlaybackReplayStoring =
             NodePlaybackDisabledReplayStore(),
-        configurationIdentity: String? = nil
+        configurationIdentity: String? = nil,
+        validatesMediaReadiness: Bool = false
     ) throws {
         guard Self.canHandle(site: site, baseURL: baseURL) else {
             throw AppError.spider("NodeHTTPSpiderSiteProvider 站点配置无效")
@@ -542,6 +548,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         self.httpClient = httpClient
         self.diagnosticReporter = diagnosticReporter
         self.ensureRuntimeReady = ensureRuntimeReady
+        self.validatesMediaReadiness = validatesMediaReadiness
         _ = quarkPasscodeStore
         _ = playbackReplayStore
         let normalizedConfigurationIdentity = configurationIdentity?
@@ -951,6 +958,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             baseURL: invocation.baseURL
         )
         result.url = transportSelection.url
+        if validatesMediaReadiness {
+            try await validatePlaybackMediaReadiness(
+                url: result.url,
+                headers: result.headers
+            )
+        }
         result.subtitles = result.subtitles.map { subtitle in
             URL(string: normalizePlaybackURL(
                 subtitle.absoluteString,
@@ -1242,6 +1255,14 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                     }
                 }
                 guard !(200...299).contains(response.statusCode) else {
+                    if let message = Self.serverMessage(from: value),
+                       Self.isAuthorizationMessage(message),
+                       method != "play" || !Self.hasPlayableURL(value) {
+                        throw await webAuthorizationRequired(
+                            message: message,
+                            baseURL: readyBaseURL
+                        )
+                    }
                     let immediateHostMessage = Self.decodeHostMessage(
                         response.headers["X-OKVideo-Host-Message"]
                     )
@@ -1268,7 +1289,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 let message = Self.serverMessage(from: value)
                     ?? "HTTP 状态码 \(response.statusCode)"
                 if Self.isAuthorizationMessage(message) {
-                    throw webAuthorizationRequired(
+                    throw await webAuthorizationRequired(
                         message: message,
                         baseURL: readyBaseURL
                     )
@@ -1414,12 +1435,69 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     private func webAuthorizationRequired(
         message: String,
         baseURL: URL
-    ) -> NodeWebAuthorizationRequired {
-        NodeWebAuthorizationRequired(
+    ) async -> NodeWebAuthorizationRequired {
+        let providerID = Self.authorizationProviderID(message: message)
+        let statusURL = providerID == "baidu"
+            ? baseURL.appendingPathComponent(
+                "website/baidu/authorization-state"
+            )
+            : nil
+        let cancelURL = providerID == "baidu"
+            ? baseURL.appendingPathComponent(
+                "website/baidu/authorization-cancel"
+            )
+            : nil
+        let baselineRevision: String?
+        if let statusURL {
+            baselineRevision = await authorizationState(
+                at: statusURL
+            )?.credentialRevision
+        } else {
+            baselineRevision = nil
+        }
+        return NodeWebAuthorizationRequired(
             websiteURL: baseURL.appendingPathComponent("website"),
             title: site.name.replacingOccurrences(of: "|", with: " "),
-            message: message
+            message: message,
+            providerID: providerID,
+            authorizationStatusURL: statusURL,
+            authorizationCancelURL: cancelURL,
+            baselineCredentialRevision: baselineRevision
         )
+    }
+
+    private struct AuthorizationState {
+        let credentialRevision: String?
+    }
+
+    private func authorizationState(at url: URL) async -> AuthorizationState? {
+        do {
+            let response = try await httpClient.send(
+                HTTPRequest(
+                    url: url,
+                    timeout: 3,
+                    maximumResponseBytes: 32 * 1_024,
+                    retryPolicy: .none,
+                    allowsNonSuccessfulStatus: true
+                )
+            )
+            guard response.statusCode == 200,
+                  let root = try? JSONDecoder().decode(
+                    JSONValue.self,
+                    from: response.body
+                  ),
+                  case .object(let object) = root,
+                  case .object(let data)? = object["data"] else {
+                return nil
+            }
+            let revision = data["credentialRevision"]?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return AuthorizationState(
+                credentialRevision: revision?.isEmpty == false ? revision : nil
+            )
+        } catch {
+            return nil
+        }
     }
 
     private func webAuthorizationRequired(
@@ -1587,6 +1665,95 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         }
     }
 
+    /// A player-authoritative cloud URL must still return actual media bytes.
+    /// This keeps JSON errors, login pages and zero-byte fallback URLs out of
+    /// the decoder's separate 12-second startup timeout.
+    private func validatePlaybackMediaReadiness(
+        url rawValue: String,
+        headers: HTTPHeaders
+    ) async throws {
+        guard let url = URL(string: rawValue),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+            throw AppError.playback("Spider 未返回有效的媒体地址")
+        }
+        var requestHeaders = headers
+        requestHeaders["Range"] = "bytes=0-65535"
+        var lastMessage = "媒体端点没有返回可用数据"
+        for attempt in 0..<3 {
+            try Task.checkCancellation()
+            do {
+                let response = try await httpClient.send(
+                    HTTPRequest(
+                        url: url,
+                        headers: requestHeaders,
+                        timeout: 15,
+                        maximumResponseBytes: 512 * 1_024,
+                        maximumRedirects: 6,
+                        retryPolicy: .none,
+                        allowsNonSuccessfulStatus: true
+                    )
+                )
+                if response.statusCode == 401 || response.statusCode == 403 {
+                    throw AppError.playback("网盘媒体授权已失效，请重新授权")
+                }
+                guard (200...299).contains(response.statusCode) else {
+                    throw AppError.playback(
+                        "媒体端点返回 HTTP \(response.statusCode)"
+                    )
+                }
+                guard Self.isUsableMediaProbeResponse(
+                    response,
+                    url: url
+                ) else {
+                    throw AppError.playback(
+                        "媒体端点返回了空数据、登录页或接口错误"
+                    )
+                }
+                return
+            } catch HTTPClientError.responseTooLarge {
+                // Exceeding the bounded probe proves that bytes are flowing.
+                return
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastMessage = error.localizedDescription
+            }
+            if attempt < 2 {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+        throw AppError.playback("网盘媒体准备失败：\(lastMessage)")
+    }
+
+    private static func isUsableMediaProbeResponse(
+        _ response: HTTPResponse,
+        url: URL
+    ) -> Bool {
+        guard !response.body.isEmpty else { return false }
+        let contentType = response.headers["Content-Type"]?
+            .lowercased() ?? ""
+        let prefix = String(
+            decoding: response.body.prefix(2_048),
+            as: UTF8.self
+        )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if contentType.contains("text/html")
+            || prefix.hasPrefix("<!doctype html")
+            || prefix.hasPrefix("<html") {
+            return false
+        }
+        if contentType.contains("application/json")
+            || prefix.hasPrefix("{")
+            || prefix.hasPrefix("[") {
+            return false
+        }
+        if isHLSURL(url.absoluteString) || contentType.contains("mpegurl") {
+            return prefix.uppercased().contains("#EXTM3U")
+        }
+        return response.body.count >= 16
+    }
+
     private static func isHLSURL(_ rawValue: String) -> Bool {
         let lowered = rawValue.lowercased()
         if lowered.contains(".m3u8") { return true }
@@ -1624,6 +1791,24 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             guard case .string(let message) = object[key] else { continue }
             let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty { return trimmed }
+        }
+        return nil
+    }
+
+    private static func hasPlayableURL(_ value: JSONValue) -> Bool {
+        guard case .object(let object) = value else { return false }
+        for key in ["url", "playUrl", "play_url"] {
+            guard case .string(let raw)? = object[key] else { continue }
+            let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if URL(string: value)?.scheme != nil { return true }
+        }
+        return false
+    }
+
+    private static func authorizationProviderID(message: String) -> String? {
+        let normalized = message.lowercased()
+        if normalized.contains("百度") || normalized.contains("bduss") {
+            return "baidu"
         }
         return nil
     }
@@ -1667,6 +1852,9 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         // and sends the user to an authorization screen that cannot fix it.
         if isExpiredQuarkShareTokenMessage(normalized) {
             return false
+        }
+        if normalized.contains("bduss") {
+            return true
         }
         let configurationHints = [
             "请先去配置中心", "请先到配置中心",

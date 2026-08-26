@@ -824,6 +824,67 @@ enum NodeBundleTrustState: String, Codable, Equatable, Sendable {
     case legacyTOFU
 }
 
+/// Applies narrowly-scoped runtime compatibility fixes after the downloaded
+/// bundle has passed its publisher integrity checks. The verified cache is
+/// never modified: a patched execution copy is generated for the current
+/// process and removed with the other Contract-B runtime files.
+enum NodeBundleRuntimeCompatibilityPatcher {
+    private static let supportedHost = "raw.githubusercontent.com"
+    private static let supportedPathSuffix =
+        "/Darklessing/catvod/refs/heads/main/douer/index.js"
+    private static let baiduStartMarker =
+        "var C40=qe(J6(),1),N40=qe(oa(),1);var bE="
+    private static let baiduEndMarker = "var Wqt=require(\"crypto\");"
+
+    static func patchedScript(
+        _ data: Data,
+        sourceURL: URL
+    ) throws -> Data? {
+        guard sourceURL.host?.lowercased() == supportedHost,
+              sourceURL.path.hasSuffix(supportedPathSuffix),
+              var source = String(data: data, encoding: .utf8),
+              let start = source.range(of: baiduStartMarker)?.lowerBound,
+              let end = source.range(
+                of: baiduEndMarker,
+                range: start..<source.endIndex
+              )?.lowerBound else {
+            return nil
+        }
+        let replacement = #"""
+var C40=qe(J6(),1),N40=qe(oa(),1);var bE="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",P7={NEW:"NEW",SCANNED:"SCANNED",CONFIRMED:"CONFIRMED",EXPIRED:"EXPIRED",CANCELED:"CANCELED",RETRYING:"RETRYING",RETRYABLE_ERROR:"RETRYABLE_ERROR"},zqt={encode(e,t=3e5){let r={data:e,expireTime:Date.now()+t};return Buffer.from(JSON.stringify(r)).toString("base64url")},decode(e){try{if(!e)return null;let t=JSON.parse(Buffer.from(e,"base64url").toString());return Date.now()>t.expireTime?null:t.data}catch{return null}}},qVe=require("crypto"),BVe=new Map,AVe="",v5n=async e=>(await e.db.getObjectDefault("/baidu",{}))["baidu_cookie"]??"",KVe=async e=>(await e.db.getObjectDefault("/baidu",{}))["credential_revision"]??"",GAe=async(e,t)=>{let r=qVe.randomUUID();await e.db.push("/baidu/baidu_cookie",t),await e.db.push("/baidu/credential_revision",r);return r};function E5n(){return qVe.randomUUID()}function zVe(){let e=Date.now();for(let[t,r]of BVe)r.expiresAt<=e&&BVe.delete(t);for(;BVe.size>12;){let t=BVe.keys().next().value;t&&BVe.delete(t)}}function HVe(e,t,r){return{authorizationSessionID:e?.id||"",status:t||e?.status||P7.NEW,message:r||e?.message||"",credentialRevision:e?.credentialRevision||"",expiresAt:e?.expiresAt||0}}async function VVe(e){let t=await ge.get("https://pan.baidu.com/api/gettemplatevariable",{params:{clienttype:0,app_id:250528,web:1,fields:'["username","uk"]'},headers:{"User-Agent":bE,Referer:"https://pan.baidu.com/",Cookie:e},timeout:15e3,validateStatus:()=>!0}),r=t?.data;if(t.status<200||t.status>=300||!r||Number(r.errno)!==0||!r.result)throw new Error("百度 Cookie 已写入但登录验证未通过");return!0}async function YAe(e){e.get("/qrcode",async(r,n)=>{try{zVe();if(AVe){let h=BVe.get(AVe);h&&!h.credentialRevision&&(h.cancelled=!0,h.status=P7.CANCELED,h.message="已生成新的二维码")}let i=E5n(),a=Date.now().toString(),s=Math.floor(Date.now()/1e3).toString(),o=`tangram_guid_${a}`,c=(await ge.get("https://passport.baidu.com/v2/api/getqrcode",{params:{lp:"pc",qrloginfrom:"pc",gid:i,callback:o,apiver:"v3",tt:s,tpl:"netdisk",_:a},headers:{"User-Agent":bE,Referer:"https://pan.baidu.com","sec-ch-ua-platform":'"Windows"',DNT:"1"},timeout:2e4})).data;if(typeof c!="string")throw new Error("响应格式错误");c=c.replace(/^[^(]*\(/,"").replace(/\);?$/,"");let u=JSON.parse(c);if(u.errno!==0)throw new Error(`获取二维码失败: ${u.errmsg||"未知错误"}`);let l=E5n(),d={id:l,sign:u.sign,channelId:u.channel_id,status:P7.NEW,message:"等待手机扫码",createdAt:Date.now(),expiresAt:Date.now()+3e5,cancelled:!1,pollPromise:null,exchangePromise:null,credentialRevision:""};BVe.set(l,d),AVe=l;let f=zqt.encode({sign:u.sign,channel_id:u.channel_id,authorizationSessionID:l}),p=await ge.get("https://"+u.imgurl,{responseType:"arraybuffer",headers:{"User-Agent":bE},timeout:2e4});n.header("X-Session-Key",f),n.header("X-Authorization-Session-ID",l),n.send(p.data)}catch(i){console.error("百度二维码获取失败:",i?.message||i),n.status(500).send({code:-1,message:i?.message||"获取二维码失败"})}}),e.post("/check-status",async(r,n)=>{let{sessionKey:i}=r.body,a=zqt.decode(i);if(!a)return n.send({code:0,data:HVe(null,P7.EXPIRED,"二维码会话已过期")});let s=BVe.get(a.authorizationSessionID);if(!s||s.sign!==a.sign)return n.send({code:0,data:HVe(null,P7.EXPIRED,"二维码会话不存在或已过期")});if(s.cancelled)return n.send({code:0,data:HVe(s,P7.CANCELED,s.message)});if(s.credentialRevision)return n.send({code:0,data:HVe(s,P7.CONFIRMED,"百度授权已验证")});try{s.pollPromise||(s.pollPromise=(async()=>{try{let o=Date.now().toString(),c=`tangram_guid_${o}`,u=(await ge.get("https://passport.baidu.com/channel/unicast",{params:{channel_id:s.sign,tpl:"netdisk",apiver:"v3",tt:Math.floor(Date.now()/1e3).toString(),callback:c,_:o},headers:{"User-Agent":bE,Referer:"https://pan.baidu.com"},timeout:2e4})).data;if(s.cancelled)return HVe(s,P7.CANCELED,"授权已取消");if(typeof u==="string"){let l=JSON.parse(u.replace(/^[^(]*\(/,"").replace(/\);?\s*$/,"").trim());if(l.errno===1){s.status=P7.NEW;s.message="等待手机扫码";return HVe(s)}if(l.errno===2){s.status=P7.EXPIRED;s.message="二维码已过期";return HVe(s)}if(l.errno===0&&l.channel_v){let d=JSON.parse(l.channel_v);if(d.status===1){s.status=P7.SCANNED;s.message="已扫码，等待手机确认";return HVe(s)}if(d.status===0&&d.v){s.exchangePromise||(s.exchangePromise=t(d.v,r.server,s));let f=await s.exchangePromise;if(s.cancelled)return HVe(s,P7.CANCELED,"授权已取消");s.credentialRevision=f,s.status=P7.CONFIRMED,s.message="百度授权已验证";return HVe(s)}}}s.status=P7.RETRYING,s.message="正在等待百度确认";return HVe(s)}catch(o){let c=String(o?.code||""),u=c==="ECONNABORTED"||c==="ETIMEDOUT";s.status=u?P7.RETRYING:P7.RETRYABLE_ERROR,s.message=u?"百度状态查询超时，正在重试":"百度状态查询暂时失败，正在重试";return HVe(s)}finally{s.pollPromise=null}})());let o=await s.pollPromise;n.send({code:0,data:o})}catch(o){n.send({code:0,data:HVe(s,P7.RETRYABLE_ERROR,o?.message||"百度状态查询失败，正在重试")})}});async function t(r,n,i){let a=Date.now().toString(),s=Math.floor(Date.now()/1e3).toString(),o=(await ge.get("https://passport.baidu.com/v3/login/main/qrbdusslogin",{params:{v:a,bduss:r,u:"https://pan.baidu.com/disk/main#/index?category=all",loginVersion:"v5",qrcode:"1",tpl:"netdisk",maskId:"",fileId:"",apiver:"v3",tt:a,traceid:"",time:s,alg:"v3",elapsed:"1"},headers:{"User-Agent":bE,Referer:"https://pan.baidu.com/","Accept-Language":"zh-CN,zh;q=0.9"},timeout:3e4})).data;if(i.cancelled)throw new Error("授权已取消");if(typeof o==="string"){o=o.replace(/^[^(]*\(/,"").replace(/\);?\s*$/,"").trim();let c=o.match(/"bduss":\s*"([^"]+)"/),u=o.match(/"stoken":\s*"([^"]+)"/),l=o.match(/"ptoken":\s*"([^"]+)"/),d=o.match(/"ubi":\s*"([^"]+)"/);if(c&&u&&l&&d){let f=c[1],p=u[1],m=l[1],g=encodeURIComponent(d[1]),b=Object.entries({newlogin:"1",UBI:g,STOKEN:p,BDUSS:f,PTOKEN:m,BDUSS_BFESS:f,STOKEN_BFESS:p,PTOKEN_BFESS:m,UBI_BFESS:g}).map(([_,S])=>`${_}=${S}`).join("; "),y=(await ge.get("https://passport.baidu.com/v3/login/api/auth/?return_type=5&tpl=netdisk&u=https://pan.baidu.com/disk/home",{headers:{"User-Agent":bE,Referer:"https://pan.baidu.com/",Cookie:b},maxRedirects:0,validateStatus:_=>_===302||_===200,timeout:2e4})).headers.location,w=`BDUSS=${f};STOKEN=${p};`;if(y){let _=(await ge.get(y,{headers:{"User-Agent":bE,Referer:"https://pan.baidu.com/",Cookie:b},maxRedirects:0,validateStatus:S=>S===302||S===200,timeout:2e4})).headers["set-cookie"],T=_?.find(S=>S.toLowerCase().includes("stoken"));T&&(w=`BDUSS=${f};${T.split(";")[0]};`)}if(i.cancelled)throw new Error("授权已取消");await VVe(w);if(i.cancelled)throw new Error("授权已取消");return await GAe(n,w)}}throw new Error("Cookie解析失败")}e.get("/authorization-state",async(r,n)=>{zVe();let i=AVe?BVe.get(AVe):null,a=await KVe(r.server);n.send({code:0,data:{...HVe(i,i?.status||"IDLE",i?.message||"等待生成百度二维码"),loggedIn:!!a,credentialRevision:i?.credentialRevision||a}})}),e.post("/authorization-cancel",async(r,n)=>{let i=String(r.body?.authorizationSessionID||AVe||""),a=BVe.get(i);a&&(a.cancelled=!0,a.status=P7.CANCELED,a.message="授权已取消"),n.send({code:0,data:HVe(a,P7.CANCELED,"授权已取消")})}),e.post("/cookie",async(r,n)=>{n.send({code:-1,message:"请使用 /check-status 接口"})}),e.get("/cookie",async(r,n)=>{let i=await KVe(r.server);n.send({code:0,data:{loggedIn:!!i,credentialRevision:i}})}),e.put("/cookie",async(r,n)=>{let i=String(r.body?.cookie||"").trim();if(!i){let a=await KVe(r.server);return n.send({code:0,data:{credentialRevision:a},message:"授权凭据已由服务端保存"})}try{await VVe(i);let a=await GAe(r.server,i);n.send({code:0,data:{credentialRevision:a},message:"Cookie 已验证并入库"})}catch(a){n.send({code:-1,message:a?.message||"Cookie 验证失败"})}})}
+"""#
+        source.replaceSubrange(start..<end, with: replacement)
+        let pollingStart = "d(),p.current=setInterval(async()=>{"
+        let serialPollingStart = "d();let R=async()=>{"
+        if let range = source.range(of: pollingStart) {
+            source.replaceSubrange(range, with: serialPollingStart)
+        }
+        let pollingEnd = "}catch(I){}},2e3),m.current="
+        let serialPollingEnd =
+            "}catch(I){};p.current&&(p.current=setTimeout(R,2e3))};"
+                + "p.current=setTimeout(R,0),m.current="
+        if let range = source.range(of: pollingEnd) {
+            source.replaceSubrange(range, with: serialPollingEnd)
+        }
+        // Baidu now commits and verifies credentials on the server. Its
+        // CONFIRMED response deliberately contains no Cookie, so the shared
+        // QR component must not issue the legacy second PUT.
+        let duplicateCookieWrite = "await E.put(t,{cookie:N})"
+        if let range = source.range(of: duplicateCookieWrite) {
+            source.replaceSubrange(
+                range,
+                with: "N&&await E.put(t,{cookie:N})"
+            )
+        }
+        guard let patched = source.data(using: .utf8) else {
+            throw NodeBundleRuntimeError.integrityRejected(
+                "百度兼容补丁生成了无效 UTF-8"
+            )
+        }
+        return patched
+    }
+}
+
 private extension NodeBundleTrustState {
     var diagnosticState: NodeTrustDiagnosticState {
         switch self {
@@ -2284,7 +2345,24 @@ actor NodeBundleRuntimeService {
             runtimeDirectory: bundle.runtimeDirectory,
             profileURL: profileURL
         )
-        activeContractCleanupURLs = launchPlan.cleanupURLs
+        var executableBundleURL = bundle.scriptURL
+        var cleanupURLs = launchPlan.cleanupURLs
+        if let patched = try NodeBundleRuntimeCompatibilityPatcher.patchedScript(
+            validatedBundleData,
+            sourceURL: bundle.finalScriptURL
+        ) {
+            let patchedURL = bundle.runtimeDirectory.appendingPathComponent(
+                "compat-index.js"
+            )
+            try patched.write(to: patchedURL, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: patchedURL.path
+            )
+            executableBundleURL = patchedURL
+            cleanupURLs.append(patchedURL)
+        }
+        activeContractCleanupURLs = cleanupURLs
         writer.write(
             NodeDiagnosticEvent(
                 timestamp: now(),
@@ -2359,7 +2437,7 @@ actor NodeBundleRuntimeService {
         process.arguments = [launcherURL.path]
         process.currentDirectoryURL = bundle.runtimeDirectory
         process.environment = try Self.sanitizedNodeEnvironment(
-            bundlePath: bundle.scriptURL,
+            bundlePath: executableBundleURL,
             runtimeDirectory: bundle.runtimeDirectory,
             temporaryDirectory: temporaryDirectory,
             contractAdditions: launchPlan.environmentAdditions
