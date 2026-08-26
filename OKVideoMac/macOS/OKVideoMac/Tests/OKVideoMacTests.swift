@@ -4771,8 +4771,59 @@ final class OKVideoMacTests: XCTestCase {
             MPVPlayerClient.isTimelineProperty("cache-buffering-state")
         )
         XCTAssertTrue(MPVPlayerClient.isTimelineProperty("cache-speed"))
+        XCTAssertFalse(MPVPlayerClient.isTimelineProperty("seeking"))
         XCTAssertFalse(MPVPlayerClient.isTimelineProperty("pause"))
         XCTAssertFalse(MPVPlayerClient.isTimelineProperty("volume"))
+    }
+
+    func testPlayerActivityOverlayRecognizesSeekAndCacheWaits() {
+        XCTAssertFalse(
+            PlayerActivityOverlayPolicy.isActive(
+                snapshot: PlayerSnapshot(status: .playing)
+            )
+        )
+        XCTAssertTrue(
+            PlayerActivityOverlayPolicy.isActive(
+                snapshot: PlayerSnapshot(
+                    status: .playing,
+                    isSeeking: true,
+                    seekTarget: 2_188
+                )
+            )
+        )
+        XCTAssertTrue(
+            PlayerActivityOverlayPolicy.isActive(
+                snapshot: PlayerSnapshot(
+                    status: .paused,
+                    isPausedForCache: true
+                )
+            )
+        )
+        XCTAssertTrue(
+            PlayerActivityOverlayPolicy.isActive(
+                snapshot: PlayerSnapshot(status: .buffering)
+            )
+        )
+        XCTAssertGreaterThan(
+            PlayerActivityOverlayPolicy.presentationDelayNanoseconds,
+            0
+        )
+        XCTAssertGreaterThan(
+            PlayerActivityOverlayPolicy.minimumVisibleDuration,
+            0
+        )
+    }
+
+    func testPlayerSnapshotKeepsOnlyValidSeekTargets() {
+        XCTAssertEqual(
+            PlayerSnapshot(
+                isSeeking: true,
+                seekTarget: 2_188
+            ).seekTarget,
+            2_188
+        )
+        XCTAssertNil(PlayerSnapshot(seekTarget: -.infinity).seekTarget)
+        XCTAssertNil(PlayerSnapshot(seekTarget: -1).seekTarget)
     }
 
     func testRenderUpdateGateResetsWhenSchedulingFinishesWithoutADraw() {

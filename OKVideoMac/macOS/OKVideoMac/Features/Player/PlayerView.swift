@@ -24,6 +24,9 @@ struct PlayerView: View {
     @State private var progressHoverFraction: Double?
     @State private var lastLiveChannelID: String?
     @State private var holdsPreviousLiveFrame = false
+    @State private var playbackActivityOverlayVisible = false
+    @State private var playbackActivityOverlayShownAt: Date?
+    @State private var playbackActivityOverlayTask: Task<Void, Never>?
     let onWindowChromeRestored: () -> Void
 
     private let speeds: [Double] = [0.5, 0.75, 1, 1.25, 1.5, 2]
@@ -135,6 +138,9 @@ struct PlayerView: View {
         .onAppear {
             lastLiveChannelID = state.livePlaybackChannel?.id
             revealControls()
+            updatePlaybackActivityOverlay(
+                isActive: hasTransientPlaybackActivity
+            )
         }
         .onDisappear {
             hideControlsTask?.cancel()
@@ -145,9 +151,16 @@ struct PlayerView: View {
             isLiveVolumeHovering = false
             activeUtilityPanel = nil
             inspectedPlayerEpisode = nil
+            playbackActivityOverlayTask?.cancel()
+            playbackActivityOverlayTask = nil
+            playbackActivityOverlayVisible = false
+            playbackActivityOverlayShownAt = nil
         }
         .onChange(of: state.playerSnapshot.status) { _ in
             revealControls()
+        }
+        .onChange(of: hasTransientPlaybackActivity) { isActive in
+            updatePlaybackActivityOverlay(isActive: isActive)
         }
         .onChange(of: state.livePlaybackChannel?.id) { channelID in
             handleLiveChannelChange(channelID)
@@ -668,7 +681,17 @@ struct PlayerView: View {
             .padding(.horizontal, 22)
             .padding(.vertical, 18)
             .frame(maxWidth: 500)
+            .background(Color.black.opacity(0.38))
+            .background(.ultraThinMaterial)
+            .clipShape(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.white.opacity(0.10), lineWidth: 1)
+            }
             .shadow(color: .black.opacity(0.72), radius: 3, y: 1)
+            .transition(.opacity.combined(with: .scale(scale: 0.97)))
         }
     }
 
@@ -1639,10 +1662,67 @@ struct PlayerView: View {
             break
         }
         switch state.playerSnapshot.status {
-        case .loading, .buffering:
+        case .loading:
             return true
         default:
-            return false
+            return playbackActivityOverlayVisible
+        }
+    }
+
+    private var hasTransientPlaybackActivity: Bool {
+        PlayerActivityOverlayPolicy.isActive(
+            snapshot: state.playerSnapshot
+        )
+    }
+
+    private func updatePlaybackActivityOverlay(isActive: Bool) {
+        playbackActivityOverlayTask?.cancel()
+        playbackActivityOverlayTask = nil
+
+        if isActive {
+            guard !playbackActivityOverlayVisible else { return }
+            playbackActivityOverlayTask = Task { @MainActor in
+                do {
+                    try await Task.sleep(
+                        nanoseconds: PlayerActivityOverlayPolicy
+                            .presentationDelayNanoseconds
+                    )
+                    try Task.checkCancellation()
+                    guard hasTransientPlaybackActivity else { return }
+                    playbackActivityOverlayVisible = true
+                    playbackActivityOverlayShownAt = Date()
+                } catch {
+                    return
+                }
+            }
+            return
+        }
+
+        guard playbackActivityOverlayVisible else {
+            playbackActivityOverlayShownAt = nil
+            return
+        }
+        let elapsed = playbackActivityOverlayShownAt.map {
+            Date().timeIntervalSince($0)
+        } ?? PlayerActivityOverlayPolicy.minimumVisibleDuration
+        let remaining = max(
+            0,
+            PlayerActivityOverlayPolicy.minimumVisibleDuration - elapsed
+        )
+        playbackActivityOverlayTask = Task { @MainActor in
+            do {
+                if remaining > 0 {
+                    try await Task.sleep(
+                        nanoseconds: UInt64(remaining * 1_000_000_000)
+                    )
+                }
+                try Task.checkCancellation()
+                guard !hasTransientPlaybackActivity else { return }
+                playbackActivityOverlayVisible = false
+                playbackActivityOverlayShownAt = nil
+            } catch {
+                return
+            }
         }
     }
 
@@ -2363,6 +2443,23 @@ enum PlayerControlVisibilityPolicy {
         // movement should reveal the overlay again.
         if isLivePlayback { return true }
         return !controlsHovering && isPlaying
+    }
+}
+
+enum PlayerActivityOverlayPolicy {
+    /// Avoid flashing an indicator for seeks that complete within one or two
+    /// rendered frames, while still acknowledging a real network/decoder wait.
+    static let presentationDelayNanoseconds: UInt64 = 200_000_000
+    static let minimumVisibleDuration: TimeInterval = 0.30
+
+    static func isActive(snapshot: PlayerSnapshot) -> Bool {
+        if snapshot.isSeeking || snapshot.isPausedForCache {
+            return true
+        }
+        if case .buffering = snapshot.status {
+            return true
+        }
+        return false
     }
 }
 

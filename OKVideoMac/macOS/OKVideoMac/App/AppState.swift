@@ -9737,11 +9737,17 @@ final class AppState: ObservableObject {
         // or coalesce mpv's time-pos notification after a seek, while the
         // decoded video has already moved to the requested frame.
         playerSnapshot.position = target
+        playerSnapshot.isSeeking = true
+        playerSnapshot.seekTarget = target
         do {
             try await player.seek(to: target)
         } catch {
             if playerSnapshot.position == target {
                 playerSnapshot.position = previousPosition
+            }
+            if playerSnapshot.seekTarget == target {
+                playerSnapshot.isSeeking = false
+                playerSnapshot.seekTarget = nil
             }
             show(error, title: "跳转失败")
         }
@@ -10478,6 +10484,18 @@ final class AppState: ObservableObject {
         if case .failed = playerSnapshot.status {
             return "播放失败"
         }
+        if playerSnapshot.isSeeking && playerSnapshot.isPausedForCache {
+            return cacheActivityDescription(prefix: "正在跳转并缓冲")
+        }
+        if playerSnapshot.isPausedForCache {
+            return cacheActivityDescription(prefix: "正在缓冲")
+        }
+        if playerSnapshot.isSeeking {
+            guard let target = playerSnapshot.seekTarget else {
+                return "正在跳转"
+            }
+            return "正在跳转到 \(Self.playbackTimeDescription(target))"
+        }
         switch playbackResolutionState {
         case .idle: return playerStatusDescription
         case .restoringHistory: return "正在恢复历史记录"
@@ -10489,6 +10507,26 @@ final class AppState: ObservableObject {
         case .exhausted: return "所有可用线路均已尝试"
         case .failed: return "播放准备失败"
         }
+    }
+
+    private func cacheActivityDescription(prefix: String) -> String {
+        let percent = Int(playerSnapshot.bufferedPercent.rounded())
+        guard (1..<100).contains(percent) else { return prefix }
+        return "\(prefix) \(percent)%"
+    }
+
+    private static func playbackTimeDescription(
+        _ value: TimeInterval
+    ) -> String {
+        guard value.isFinite, value >= 0 else { return "00:00" }
+        let totalSeconds = Int(value.rounded(.down))
+        let hours = totalSeconds / 3_600
+        let minutes = (totalSeconds % 3_600) / 60
+        let seconds = totalSeconds % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, seconds)
+        }
+        return String(format: "%02d:%02d", minutes, seconds)
     }
 
     var playerNetworkSpeedDescription: String {

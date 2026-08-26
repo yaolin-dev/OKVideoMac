@@ -365,6 +365,8 @@ final class MPVPlayerClient: PlayerClient {
         static let shutdown: Int32 = 1
         static let endFile: Int32 = 7
         static let fileLoaded: Int32 = 8
+        static let seek: Int32 = 20
+        static let playbackRestart: Int32 = 21
         static let propertyChange: Int32 = 22
         static let queueOverflow: Int32 = 24
     }
@@ -550,6 +552,9 @@ final class MPVPlayerClient: PlayerClient {
                     self.snapshot.duration = 0
                     self.snapshot.bufferedPercent = 0
                     self.snapshot.networkSpeedBytesPerSecond = 0
+                    self.snapshot.isSeeking = false
+                    self.snapshot.isPausedForCache = false
+                    self.snapshot.seekTarget = nil
                     self.snapshot.videoWidth = 0
                     self.snapshot.videoHeight = 0
                     self.snapshot.status = .loading
@@ -620,6 +625,7 @@ final class MPVPlayerClient: PlayerClient {
         try? await perform { client in
             self.completeLoad(.failure(CancellationError()))
             try self.command(["stop"], client: client)
+            self.clearTransientPlaybackActivity()
             self.snapshot.status = .stopped
             self.emitSnapshot()
         }
@@ -639,16 +645,23 @@ final class MPVPlayerClient: PlayerClient {
             ) else {
                 throw AppError.playback("跳转位置无效")
             }
-            try "time-pos".withCString { namePointer in
-                try self.library.checked(
-                    self.library.setPropertyDouble(client, namePointer, target),
-                    operation: "跳转"
-                )
-            }
-            // Do not make the UI depend exclusively on a later property-change
-            // event. A successful set means mpv accepted this seek target.
+            self.snapshot.isSeeking = true
+            self.snapshot.seekTarget = target
             self.snapshot.position = target
             self.emitSnapshot()
+            do {
+                try "time-pos".withCString { namePointer in
+                    try self.library.checked(
+                        self.library.setPropertyDouble(client, namePointer, target),
+                        operation: "跳转"
+                    )
+                }
+            } catch {
+                self.snapshot.isSeeking = false
+                self.snapshot.seekTarget = nil
+                self.emitSnapshot()
+                throw error
+            }
         }
     }
 
@@ -1225,7 +1238,8 @@ final class MPVPlayerClient: PlayerClient {
             (11, "cache-speed", NativeFormat.int64),
             (12, "eof-reached", NativeFormat.flag),
             (13, "dwidth", NativeFormat.int64),
-            (14, "dheight", NativeFormat.int64)
+            (14, "dheight", NativeFormat.int64),
+            (15, "seeking", NativeFormat.flag)
         ]
         for (identifier, name, format) in observations {
             try name.withCString { pointer in
@@ -1352,6 +1366,7 @@ final class MPVPlayerClient: PlayerClient {
                     mode: teardownMode
                 )
                 snapshot.status = .failed(message)
+                clearTransientPlaybackActivity()
                 isReplacingMedia = false
                 emitSnapshot()
                 completeLoad(
@@ -1366,6 +1381,7 @@ final class MPVPlayerClient: PlayerClient {
                 emitEndedIfNeeded()
             } else if event.endFileReason == 2 {
                 snapshot.status = .stopped
+                clearTransientPlaybackActivity()
                 emitSnapshot()
             } else if event.error < 0 {
                 let nativeMessage = library.errorString(for: event.error)
@@ -1381,6 +1397,7 @@ final class MPVPlayerClient: PlayerClient {
                     mode: teardownMode
                 )
                 snapshot.status = .failed(message)
+                clearTransientPlaybackActivity()
                 emitSnapshot()
                 continuation.yield(
                     .error(message, requestID: currentRequestID)
@@ -1388,6 +1405,16 @@ final class MPVPlayerClient: PlayerClient {
             }
         case NativeEvent.propertyChange:
             processProperty(event)
+        case NativeEvent.seek:
+            snapshot.isSeeking = true
+            emitSnapshot()
+        case NativeEvent.playbackRestart:
+            guard snapshot.isSeeking || snapshot.seekTarget != nil else {
+                break
+            }
+            snapshot.isSeeking = false
+            snapshot.seekTarget = nil
+            emitSnapshot()
         case NativeEvent.queueOverflow:
             continuation.yield(
                 .error(
@@ -1396,6 +1423,7 @@ final class MPVPlayerClient: PlayerClient {
                 )
             )
         case NativeEvent.shutdown:
+            clearTransientPlaybackActivity()
             snapshot.status = .stopped
             emitSnapshot()
         default:
@@ -1442,10 +1470,16 @@ final class MPVPlayerClient: PlayerClient {
                 return
             }
         case "paused-for-cache":
-            if event.flagValue != 0 {
+            snapshot.isPausedForCache = event.flagValue != 0
+            if snapshot.isPausedForCache {
                 snapshot.status = .buffering
             } else if snapshot.status == .buffering {
                 snapshot.status = .playing
+            }
+        case "seeking":
+            snapshot.isSeeking = event.flagValue != 0
+            if !snapshot.isSeeking {
+                snapshot.seekTarget = nil
             }
         case "cache-buffering-state":
             snapshot.bufferedPercent = min(max(event.doubleValue, 0), 100)
@@ -1496,12 +1530,19 @@ final class MPVPlayerClient: PlayerClient {
     private func emitEndedIfNeeded() {
         guard !didEmitEndedForCurrentMedia else { return }
         didEmitEndedForCurrentMedia = true
+        clearTransientPlaybackActivity()
         snapshot.status = .ended
         if snapshot.duration > 0 {
             snapshot.position = max(snapshot.position, snapshot.duration)
         }
         emitSnapshot()
         continuation.yield(.ended(requestID: currentRequestID))
+    }
+
+    private func clearTransientPlaybackActivity() {
+        snapshot.isSeeking = false
+        snapshot.isPausedForCache = false
+        snapshot.seekTarget = nil
     }
 
     private func emitTimelineSnapshot() {
