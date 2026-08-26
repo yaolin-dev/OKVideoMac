@@ -161,6 +161,62 @@ final class PlaybackResolverTests: XCTestCase {
         XCTAssertFalse(DefaultMediaProbe.isNodeRuntimeMediaProxy(url))
     }
 
+    func testAndroidBridgeMediaSessionRequiresReadableMediaBytes() async throws {
+        let url = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:19978/proxy/media/session-readable")
+        )
+        let client = ScriptedProbeHTTPClient(responses: [
+            HTTPResponse(
+                url: url,
+                statusCode: 200,
+                headers: ["Content-Type": "video/mp4"],
+                body: Data()
+            ),
+            HTTPResponse(
+                url: url,
+                statusCode: 206,
+                headers: [
+                    "Content-Type": "video/mp4",
+                    "Content-Range": "bytes 0-3/4096"
+                ],
+                body: Data([0, 0, 0, 24])
+            )
+        ])
+
+        let isValid = try await DefaultMediaProbe(httpClient: client)
+            .validate(url: url, headers: [:])
+
+        XCTAssertTrue(isValid)
+        let requests = await client.requests()
+        XCTAssertEqual(requests.map(\.method), [.head, .get])
+        XCTAssertEqual(requests.last?.headers["Range"], "bytes=0-65535")
+    }
+
+    func testAndroidBridgeMediaSessionRejectsJSONErrorBody() async throws {
+        let url = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:19978/proxy/media/session-error")
+        )
+        let client = ScriptedProbeHTTPClient(responses: [
+            HTTPResponse(
+                url: url,
+                statusCode: 200,
+                headers: ["Content-Type": "video/mp4"],
+                body: Data()
+            ),
+            HTTPResponse(
+                url: url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"error":"login required"}"#.utf8)
+            )
+        ])
+
+        let isValid = try await DefaultMediaProbe(httpClient: client)
+            .validate(url: url, headers: [:])
+
+        XCTAssertFalse(isValid)
+    }
+
     func testAndroidCloudOriginalProxyBypassIsRestrictedToExpectedEndpoint() throws {
         let matchingURL = try XCTUnwrap(
             URL(string: "http://127.0.0.1:16677/proxy/play/%E5%98%9F%E5%98%9F/movie/1.mp4")
@@ -439,6 +495,27 @@ final class PlaybackResolverTests: XCTestCase {
 private struct FailingProbeHTTPClient: HTTPClient {
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         throw HTTPClientError.transport("the preflight client must not be called")
+    }
+}
+
+private actor ScriptedProbeHTTPClient: HTTPClient {
+    private var remaining: [HTTPResponse]
+    private var recorded: [HTTPRequest] = []
+
+    init(responses: [HTTPResponse]) {
+        remaining = responses
+    }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        recorded.append(request)
+        guard !remaining.isEmpty else {
+            throw HTTPClientError.transport("missing scripted response")
+        }
+        return remaining.removeFirst()
+    }
+
+    func requests() -> [HTTPRequest] {
+        recorded
     }
 }
 

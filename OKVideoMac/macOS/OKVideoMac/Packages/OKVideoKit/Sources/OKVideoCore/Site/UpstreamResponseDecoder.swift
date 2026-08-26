@@ -730,10 +730,15 @@ public enum SpiderResponseMapper {
         site: SiteConfiguration
     ) throws -> SitePlaybackResult {
         let response = try decode(value, site: site, baseURL: nil)
+        // Match FongMi's playback contract: a provider-authored message is a
+        // terminal provider outcome even when the same object also contains a
+        // URL. Several legacy cloud spiders leave a stale/fallback URL beside
+        // `msg`; handing that URL to the player hides the real authorization
+        // or provider error behind a generic `loading failed`.
+        if let message = response.message {
+            throw ProviderPlaybackError(message)
+        }
         guard let player = response.player else {
-            if let message = response.message {
-                throw AppError.spider(message)
-            }
             throw AppError.spider("Spider 播放响应缺少 url")
         }
         return player

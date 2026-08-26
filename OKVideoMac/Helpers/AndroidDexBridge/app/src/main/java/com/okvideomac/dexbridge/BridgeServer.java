@@ -699,11 +699,19 @@ final class BridgeServer {
                     }
                     result = await(invocation);
                     if (interactive) {
-                        JSONObject returned =
-                                BridgeInteractionRegistry.invocationReturned(
-                                interactionID,
-                                isTerminalPlaybackResult(payload, result)
-                        );
+                        String providerMessage = "play".equals(
+                                payload.optString("method", "")
+                        ) ? DexSpiderRegistry.providerPlaybackMessage(result)
+                                : "";
+                        JSONObject returned = providerMessage.isEmpty()
+                                ? BridgeInteractionRegistry.invocationReturned(
+                                        interactionID,
+                                        isTerminalPlaybackResult(payload, result)
+                                )
+                                : BridgeInteractionRegistry.failedProviderMessage(
+                                        interactionID,
+                                        providerMessage
+                                );
                         if (returned.optBoolean("terminal", false)) {
                             releaseTerminalInteraction(context, interactionID);
                         }
@@ -739,10 +747,14 @@ final class BridgeServer {
                 writeJSON(output, 200, response);
             } catch (Throwable error) {
                 if (error instanceof MediaResponseCommittedException) {
-                    Throwable cause = error.getCause();
+                    MediaResponseCommittedException committed =
+                            (MediaResponseCommittedException) error;
+                    Throwable cause = committed.getCause();
                     Log.w(
                             TAG,
                             "Media relay ended after response started"
+                                    + " category=" + committed.category
+                                    + " bytes=" + committed.bytesWritten
                                     + " error="
                                     + (cause == null
                                     ? error.getClass().getSimpleName()
@@ -1616,6 +1628,7 @@ final class BridgeServer {
             );
         }
         rawHeaders.append("\r\n");
+        long bytesWritten = 0L;
         try {
             output.write(
                     rawHeaders.toString().getBytes(StandardCharsets.US_ASCII)
@@ -1624,30 +1637,70 @@ final class BridgeServer {
                 if (!headersOnly) {
                     byte[] buffer = new byte[MEDIA_COPY_BUFFER_BYTES];
                     int count;
-                    while ((count = stream.read(buffer)) != -1) {
-                        if (count == 0) continue;
+                    try {
+                        while ((count = stream.read(buffer)) != -1) {
+                            if (count == 0) continue;
+                            output.write(
+                                    Integer.toHexString(count).getBytes(
+                                            StandardCharsets.US_ASCII
+                                    )
+                            );
+                            output.write("\r\n".getBytes(StandardCharsets.US_ASCII));
+                            output.write(buffer, 0, count);
+                            output.write("\r\n".getBytes(StandardCharsets.US_ASCII));
+                            bytesWritten += count;
+                        }
+                    } catch (IOException upstreamFailure) {
+                        if (bytesWritten <= 0L) throw upstreamFailure;
+                        // OkHttp reports a ProtocolException when a provider
+                        // closes a nominal range before its declared length.
+                        // The response headers are already committed, so an
+                        // HTTP error is impossible. Close our chunked body
+                        // cleanly: libmpv can then observe a short range and
+                        // issue its own continuation request instead of seeing
+                        // a malformed chunk stream and `loading failed`.
                         output.write(
-                                Integer.toHexString(count).getBytes(
+                                "0\r\n\r\n".getBytes(
                                         StandardCharsets.US_ASCII
                                 )
                         );
-                        output.write("\r\n".getBytes(StandardCharsets.US_ASCII));
-                        output.write(buffer, 0, count);
-                        output.write("\r\n".getBytes(StandardCharsets.US_ASCII));
+                        output.flush();
+                        throw new MediaResponseCommittedException(
+                                upstreamFailure,
+                                bytesWritten,
+                                "truncated_upstream"
+                        );
                     }
                 }
                 output.write("0\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
                 output.flush();
             }
+        } catch (MediaResponseCommittedException error) {
+            throw error;
         } catch (IOException error) {
-            throw new MediaResponseCommittedException(error);
+            throw new MediaResponseCommittedException(
+                    error,
+                    bytesWritten,
+                    bytesWritten > 0L
+                            ? "client_transport_interrupted"
+                            : "relay_setup_failed"
+            );
         }
     }
 
     private static final class MediaResponseCommittedException
             extends IOException {
-        MediaResponseCommittedException(IOException cause) {
+        final long bytesWritten;
+        final String category;
+
+        MediaResponseCommittedException(
+                IOException cause,
+                long bytesWritten,
+                String category
+        ) {
             super("Media response ended after headers were committed", cause);
+            this.bytesWritten = bytesWritten;
+            this.category = category == null ? "relay_failed" : category;
         }
     }
 

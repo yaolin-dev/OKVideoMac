@@ -21,6 +21,7 @@ final class BridgeInteractionRegistry {
     private static final int MAX_INTERACTIONS = 64;
     private static final long RETENTION_MS = 10 * 60_000L;
     private static final long DELAYED_UI_GRACE_MS = 8_000L;
+    private static final long PLAYBACK_UI_GRACE_MS = 1_500L;
     private static final long TRANSIENT_QR_CAPTURE_GRACE_MS = 900L;
     private static final Map<String, Interaction> INTERACTIONS =
             new LinkedHashMap<>();
@@ -141,7 +142,15 @@ final class BridgeInteractionRegistry {
                 }
                 interaction.uiVisible = false;
                 if (now >= interaction.delayedUIDeadline) {
-                    if (interaction.sawUI) {
+                    if (interaction.playbackResultReady
+                            && !interaction.sawUI) {
+                        // A valid player result is authoritative only after a
+                        // short request-owned handoff window. Some legacy
+                        // spiders post their login dialog just after returning
+                        // a fallback URL; completing immediately would release
+                        // the Activity and lose that authorization surface.
+                        interaction.transition("completed", "completed");
+                    } else if (interaction.sawUI) {
                         if ("authorization".equals(interaction.kind)) {
                             // A QR/login surface disappearing only starts
                             // host-side verification. Refreshing a provider's
@@ -220,11 +229,10 @@ final class BridgeInteractionRegistry {
         interaction.invocationReturned = true;
         interaction.invocationReturnedAt = System.currentTimeMillis();
         if (!interaction.terminal() && completedWithProviderResult) {
-            // A structurally valid playback response is the provider's
-            // explicit terminal event. Do not impose the delayed-dialog grace
-            // on every successful movie start merely because playback is
-            // capable of showing an authorization prompt on failure.
-            interaction.transition("completed", "completed");
+            interaction.playbackResultReady = true;
+            interaction.delayedUIDeadline =
+                    interaction.invocationReturnedAt + PLAYBACK_UI_GRACE_MS;
+            interaction.transition("awaitingProviderUI", "stay");
         } else if (!interaction.terminal()
                 && interaction.expectsProviderUI
                 && !interaction.uiVisible) {
@@ -269,6 +277,19 @@ final class BridgeInteractionRegistry {
         Interaction interaction = INTERACTIONS.get(id);
         if (interaction == null) return missing(id);
         interaction.failure = clean(reason);
+        interaction.transition("failed", "failed");
+        return interaction.json();
+    }
+
+    static synchronized JSONObject failedProviderMessage(
+            String requestedID,
+            String message
+    ) {
+        String id = resolve(requestedID);
+        Interaction interaction = INTERACTIONS.get(id);
+        if (interaction == null) return missing(id);
+        interaction.failure = clean(message);
+        interaction.failureKind = "providerMessage";
         interaction.transition("failed", "failed");
         return interaction.json();
     }
@@ -513,6 +534,7 @@ final class BridgeInteractionRegistry {
         String phase = "started";
         String outcome = "none";
         String failure = "";
+        String failureKind = "";
         String uiSignature = "";
         JSONObject lastUI = emptyUI();
         JSONObject lastStableQRCodeUI;
@@ -521,6 +543,7 @@ final class BridgeInteractionRegistry {
         boolean submitted;
         boolean expectsProviderUI;
         boolean invocationReturned;
+        boolean playbackResultReady;
         boolean verificationPerformed;
         boolean authorizationPromoted;
         Boolean refreshPerformed;
@@ -582,6 +605,9 @@ final class BridgeInteractionRegistry {
                     value.put("graceDeadline", delayedUIDeadline);
                 }
                 if (!failure.isEmpty()) value.put("error", failure);
+                if (!failureKind.isEmpty()) {
+                    value.put("failureKind", failureKind);
+                }
             } catch (Throwable ignored) {
             }
             return value;

@@ -313,6 +313,25 @@ struct ConfigurationInteractionTerminalResponse: Equatable, Sendable {
     /// `nil` means the compatibility bridge did not report refresh state.
     /// Callers must not interpret it as either true or false.
     let refreshPerformed: Bool?
+    let failureKind: String?
+
+    init(
+        requestID: UUID,
+        outcome: ConfigurationInteraction.Outcome,
+        providerResult: JSONValue?,
+        error: String?,
+        httpStatusCode: Int?,
+        refreshPerformed: Bool?,
+        failureKind: String? = nil
+    ) {
+        self.requestID = requestID
+        self.outcome = outcome
+        self.providerResult = providerResult
+        self.error = error
+        self.httpStatusCode = httpStatusCode
+        self.refreshPerformed = refreshPerformed
+        self.failureKind = failureKind
+    }
 }
 
 /// Request-scoped bridge handle. The HTTP invocation and every later state,
@@ -2435,6 +2454,7 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         let verificationPerformed: Bool?
         let error: String?
         let refreshPerformed: Bool?
+        let failureKind: String?
     }
 
     private enum MonitoredInvocation: Sendable {
@@ -2832,6 +2852,11 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                     handle: interactionHandle
                 )
             }
+            if terminalResponse.failureKind == "providerMessage" {
+                throw ProviderPlaybackError(
+                    terminalResponse.error ?? "Spider 没有返回可播放媒体"
+                )
+            }
             throw AppError.spider(
                 Self.userFacingBridgeError(
                     terminalResponse.error
@@ -2944,7 +2969,8 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                 : nil,
             httpStatusCode: httpResponse.statusCode,
             refreshPerformed: bridgeResponse.interaction?.refreshPerformed
-                ?? bridgeResponse.refreshPerformed
+                ?? bridgeResponse.refreshPerformed,
+            failureKind: bridgeResponse.interaction?.failureKind
         )
     }
 
@@ -3024,7 +3050,9 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                             : nil,
                         httpStatusCode: httpResponse.statusCode,
                         refreshPerformed: interaction.refreshPerformed
-                            ?? initial.refreshPerformed
+                            ?? initial.refreshPerformed,
+                        failureKind: interaction.failureKind
+                            ?? initial.failureKind
                     )
                 }
                 lastError = nil

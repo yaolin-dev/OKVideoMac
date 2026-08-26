@@ -8523,6 +8523,13 @@ final class AppState: ObservableObject {
                             siteKey: detail.summary.siteKey
                         )
                         return
+                    } catch let providerError as ProviderPlaybackError {
+                        guard playbackSessionID == sessionID else { return }
+                        finishProviderPlaybackFailure(
+                            providerError,
+                            requestID: sessionID
+                        )
+                        return
                     } catch {
                         failures.append("重新获取播放详情失败：\(error.localizedDescription)")
                         playbackFailureSummary = error.localizedDescription
@@ -8607,6 +8614,13 @@ final class AppState: ObservableObject {
                             )
                         ),
                         siteKey: candidateDetail.summary.siteKey
+                    )
+                    return
+                } catch let providerError as ProviderPlaybackError {
+                    guard playbackSessionID == sessionID else { return }
+                    finishProviderPlaybackFailure(
+                        providerError,
+                        requestID: sessionID
                     )
                     return
                 } catch {
@@ -8763,6 +8777,19 @@ final class AppState: ObservableObject {
             flag: flag,
             episodeURL: episodeURL
         )
+    }
+
+    private func finishProviderPlaybackFailure(
+        _ error: ProviderPlaybackError,
+        requestID: UUID
+    ) {
+        guard playbackSessionID == requestID else { return }
+        let message = LogRedactor.text(error.localizedDescription)
+        playbackResolutionState = .failed
+        playbackFailureSummary = message
+        playerSnapshot.status = .failed(message)
+        pendingPlayback = nil
+        presentPlaybackErrorOnce(message, requestID: requestID)
     }
 
     static func playbackFailureMessage(

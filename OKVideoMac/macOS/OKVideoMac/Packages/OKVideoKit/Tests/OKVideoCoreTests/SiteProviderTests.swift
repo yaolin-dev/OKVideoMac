@@ -1034,7 +1034,35 @@ final class SiteProviderTests: XCTestCase {
                 site: site
             )
         ) { error in
-            XCTAssertEqual(error as? AppError, .spider("未扫码授权无法观看"))
+            XCTAssertEqual(
+                error as? ProviderPlaybackError,
+                ProviderPlaybackError("未扫码授权无法观看")
+            )
+        }
+    }
+
+    func testSpiderPlayerPrefersProviderMessageOverFallbackURL() throws {
+        let site = SiteConfiguration(
+            key: "drive-message",
+            name: "Drive Message",
+            type: 3,
+            api: "csp_Fixture"
+        )
+
+        XCTAssertThrowsError(
+            try SpiderResponseMapper.player(
+                .object([
+                    "parse": .integer(0),
+                    "url": .string("https://fallback.example.invalid/movie.mp4"),
+                    "msg": .string("账号未授权，无法获取播放地址")
+                ]),
+                site: site
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ProviderPlaybackError,
+                ProviderPlaybackError("账号未授权，无法获取播放地址")
+            )
         }
     }
 

@@ -186,10 +186,12 @@ public struct DefaultMediaProbe: MediaProbe {
             )
             let accepted = Self.looksLikeMedia(response)
                 || MediaURLClassifier.isDirectMediaURL(url.absoluteString)
-            if accepted || !isAndroidBridgeSession { return accepted }
+            if !isAndroidBridgeSession { return accepted }
             // A provider-owned Android loopback server may omit Content-Type
-            // on HEAD. Continue with a bounded Range GET so a real 4xx/5xx
-            // from the bridge is not hidden behind libmpv's `loading failed`.
+            // on HEAD, and a successful HEAD still proves no media bytes are
+            // readable. Always continue with a bounded Range GET so empty,
+            // HTML, JSON and truncated bridge responses are rejected before
+            // libmpv can reduce them to a generic `loading failed`.
         } catch let error as HTTPClientError {
             switch error {
             case .statusCode, .invalidResponse:
@@ -211,9 +213,11 @@ public struct DefaultMediaProbe: MediaProbe {
                     retryPolicy: .none
                 )
             )
+            if isAndroidBridgeSession {
+                return Self.looksLikeMediaBytes(response)
+            }
             return Self.looksLikeMedia(response)
                 || MediaURLClassifier.isDirectMediaURL(url.absoluteString)
-                || (isAndroidBridgeSession && !response.body.isEmpty)
         } catch HTTPClientError.responseTooLarge
                     where MediaURLClassifier.isDirectMediaURL(url.absoluteString)
                         || isAndroidBridgeSession {
@@ -231,6 +235,29 @@ public struct DefaultMediaProbe: MediaProbe {
             || contentType.contains("mpegurl")
             || contentType.contains("dash+xml")
             || contentType.contains("octet-stream")
+    }
+
+    private static func looksLikeMediaBytes(_ response: HTTPResponse) -> Bool {
+        guard !response.body.isEmpty else { return false }
+        let contentType = response.headers["Content-Type"]?.lowercased() ?? ""
+        if contentType.contains("json")
+            || contentType.contains("text/html")
+            || contentType.contains("application/xhtml") {
+            return false
+        }
+        let prefix = response.body.prefix(512)
+        if let text = String(data: prefix, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+           text.hasPrefix("{")
+            || text.hasPrefix("[")
+            || text.hasPrefix("<!doctype html")
+            || text.hasPrefix("<html") {
+            return false
+        }
+        return looksLikeMedia(response)
+            || response.statusCode == 206
+            || contentType.isEmpty
     }
 
     static func isAndroidCloudOriginalProxy(_ url: URL) -> Bool {

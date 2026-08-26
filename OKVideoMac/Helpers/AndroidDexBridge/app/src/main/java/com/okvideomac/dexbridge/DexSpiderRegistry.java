@@ -293,6 +293,7 @@ final class DexSpiderRegistry {
     static boolean isPlayableResult(Object value) {
         if (!(value instanceof JSONObject)) return false;
         JSONObject object = (JSONObject) value;
+        if (!providerPlaybackMessage(object).isEmpty()) return false;
         Object url = object.opt("url");
         if (url instanceof String) {
             return !((String) url).trim().isEmpty();
@@ -318,6 +319,22 @@ final class DexSpiderRegistry {
             }
         }
         return false;
+    }
+
+    /**
+     * Returns the provider-authored terminal playback message without
+     * interpreting its language or attempting to infer an account provider.
+     */
+    static String providerPlaybackMessage(Object value) {
+        if (!(value instanceof JSONObject)) return "";
+        JSONObject object = (JSONObject) value;
+        for (String key : new String[] {"msg", "errMsg", "error"}) {
+            Object raw = object.opt(key);
+            if (raw == null || raw == JSONObject.NULL) continue;
+            String message = String.valueOf(raw).trim();
+            if (!message.isEmpty()) return message;
+        }
+        return "";
     }
 
     private String takeCompletedPlayback(String key) {

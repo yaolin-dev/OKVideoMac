@@ -327,7 +327,8 @@ public final class BridgeProtocolTest extends TestCase {
         assertFalse(visible.getBoolean("terminal"));
     }
 
-    public void testValidPlaybackResultCompletesWithoutUIGrace() throws Exception {
+    public void testValidPlaybackResultWaitsForDelayedAuthorizationUI()
+            throws Exception {
         String id = BridgeInteractionRegistry.begin(
                 "interaction-playback",
                 "playback",
@@ -340,6 +341,44 @@ public final class BridgeProtocolTest extends TestCase {
         JSONObject state = BridgeInteractionRegistry.invocationReturned(
                 id,
                 DexSpiderRegistry.isPlayableResult(playable)
+        );
+        assertEquals("awaitingProviderUI", state.getString("phase"));
+        assertEquals("stay", state.getString("outcome"));
+        assertFalse(state.getBoolean("terminal"));
+
+        JSONObject visible = BridgeInteractionRegistry.observeUI(
+                id,
+                new JSONObject()
+                        .put("visible", true)
+                        .put("uiRole", "qrCode")
+                        .put("qrImageCount", 1)
+                        .put("authorizationCandidate", true)
+        );
+        assertEquals("authorization", visible.getString("kind"));
+        assertEquals("awaitingUser", visible.getString("phase"));
+        assertFalse(visible.getBoolean("terminal"));
+    }
+
+    public void testValidPlaybackResultCompletesAfterUIGrace() throws Exception {
+        String id = BridgeInteractionRegistry.begin(
+                "interaction-playback-complete",
+                "playback",
+                "play"
+        );
+        JSONObject playable = new JSONObject()
+                .put("parse", 0)
+                .put("url", "http://127.0.0.1:9978/proxy/media/session");
+        BridgeInteractionRegistry.expectProviderUI(id);
+        JSONObject pending = BridgeInteractionRegistry.invocationReturned(
+                id,
+                DexSpiderRegistry.isPlayableResult(playable)
+        );
+        assertFalse(pending.getBoolean("terminal"));
+
+        Thread.sleep(1_550L);
+        JSONObject state = BridgeInteractionRegistry.observeUI(
+                id,
+                new JSONObject().put("visible", false)
         );
         assertEquals("completed", state.getString("phase"));
         assertEquals("completed", state.getString("outcome"));
@@ -363,6 +402,14 @@ public final class BridgeProtocolTest extends TestCase {
                 new JSONObject().put("method", "detail"),
                 playable
         ));
+        JSONObject providerError = new JSONObject()
+                .put("url", "https://media.example/fallback")
+                .put("msg", "provider login required");
+        assertFalse(DexSpiderRegistry.isPlayableResult(providerError));
+        assertEquals(
+                "provider login required",
+                DexSpiderRegistry.providerPlaybackMessage(providerError)
+        );
     }
 
     public void testHiddenUIDoesNotManufactureCompletion() throws Exception {
@@ -1530,9 +1577,6 @@ public final class BridgeProtocolTest extends TestCase {
                 while ((count = input.read(buffer)) != -1) {
                     firstBytes.write(buffer, 0, count);
                 }
-                fail("A truncated range must remain visible to the player");
-            } catch (java.io.IOException expected) {
-                // The player owns the next request after this premature EOF.
             } finally {
                 first.disconnect();
             }
