@@ -2532,6 +2532,11 @@ private enum PendingNodeOperation {
             return false
         }
     }
+
+    var playbackRequestID: UUID? {
+        guard case .playback(_, let playback) = self else { return nil }
+        return playback.requestID
+    }
 }
 
 private enum AppStateTiming {
@@ -3322,7 +3327,11 @@ final class AppState: ObservableObject {
             } else {
                 progress(.parsing)
             }
-            let payload = try await loadConfigurationForImport(source)
+            let importedConfigurationID = UUID()
+            let payload = try await loadConfigurationForImport(
+                source,
+                configurationID: importedConfigurationID
+            )
             try ensureConfigurationImportIsActive(operationID)
             let sourceDetails: (StoredConfigurationSourceKind, String?)
             switch source {
@@ -3334,6 +3343,7 @@ final class AppState: ObservableObject {
                 sourceDetails = (.pasted, nil)
             }
             let record = StoredConfiguration(
+                id: importedConfigurationID,
                 name: name?.nonEmpty ?? source.displayName,
                 sourceKind: sourceDetails.0,
                 sourceValue: sourceDetails.1,
@@ -3716,7 +3726,10 @@ final class AppState: ObservableObject {
            let sourceURL = URL(string: sourceValue),
            NodeBundleRuntimeService.supports(sourceURL) {
             let loaded = try await environment.nodeBundleRuntime
-                .loadConfiguration(from: sourceURL)
+                .loadConfiguration(
+                    from: sourceURL,
+                    configurationID: record.id
+                )
             try Task.checkCancellation()
             var updated = record
             updated.baseURL = loaded.baseURL
@@ -5219,6 +5232,11 @@ final class AppState: ObservableObject {
             await performHomeAction(item)
         case .playback(_, let playback):
             guard playback.detail.summary.siteKey == identity.siteKey else {
+                return
+            }
+            guard playback.requestID == activePlayerRequestID,
+                  playback.requestID == playbackSessionID,
+                  isPlayerPresented else {
                 return
             }
             await startPlayback(
@@ -9534,6 +9552,8 @@ final class AppState: ObservableObject {
         liveSourceValidationTasks = [:]
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = nil
+        pendingNodeOperation = nil
+        nodeWebPresentation = nil
         playerEventTask?.cancel()
         playerEventTask = nil
         nodeRuntimeStatusTask?.cancel()
@@ -9611,6 +9631,10 @@ final class AppState: ObservableObject {
                 markPendingPlaybackCancelled: false,
                 cancellationReason: .user
             )
+        }
+        if pendingNodeOperation?.playbackRequestID == activePlayerRequestID {
+            pendingNodeOperation = nil
+            nodeWebPresentation = nil
         }
         isClosingPlayer = true
         defer { isClosingPlayer = false }
@@ -11110,7 +11134,10 @@ final class AppState: ObservableObject {
            NodeBundleRuntimeService.supports(url) {
             do {
                 let loaded = try await environment.nodeBundleRuntime
-                    .loadConfiguration(from: url)
+                    .loadConfiguration(
+                        from: url,
+                        configurationID: activeConfigurationRecord?.id
+                    )
                 activeNodeRuntimeEndpoint = loaded.baseURL
                 nodeRuntimeUnavailableReason = ""
                 return loaded
@@ -11125,7 +11152,8 @@ final class AppState: ObservableObject {
     }
 
     private func loadConfigurationForImport(
-        _ source: ConfigurationSource
+        _ source: ConfigurationSource,
+        configurationID: UUID
     ) async throws -> ImportedConfigurationPayload {
         guard let environment else {
             throw AppError.configuration("应用环境尚未初始化")
@@ -11133,7 +11161,10 @@ final class AppState: ObservableObject {
         if case .remote(let url) = source,
            NodeBundleRuntimeService.supports(url) {
             let loaded = try await environment.nodeBundleRuntime
-                .loadConfiguration(from: url)
+                .loadConfiguration(
+                    from: url,
+                    configurationID: configurationID
+                )
             try Task.checkCancellation()
             return ImportedConfigurationPayload(
                 loaded: loaded,
@@ -11163,7 +11194,10 @@ final class AppState: ObservableObject {
         let loaded: LoadedConfiguration
         do {
             loaded = try await environment.nodeBundleRuntime
-                .loadConfiguration(from: sourceURL)
+                .loadConfiguration(
+                    from: sourceURL,
+                    configurationID: record.id
+                )
             activeNodeRuntimeEndpoint = loaded.baseURL
             nodeRuntimeUnavailableReason = ""
         } catch {
@@ -11660,7 +11694,8 @@ final class AppState: ObservableObject {
                             },
                             ensureRuntimeReady: {
                                 try await nodeBundleRuntime.ensureReady(
-                                    from: nodeSourceURL
+                                    from: nodeSourceURL,
+                                    configurationID: activeConfigurationID
                                 )
                             },
                             configurationIdentity: activeConfigurationID?

@@ -763,6 +763,61 @@ struct NodeBundleSourceDescriptor: Equatable, Sendable {
     }
 }
 
+struct NodeRuntimeProfileNamespace: Equatable, Sendable {
+    let configurationIdentity: String
+    let sourceIdentity: String
+    let publisherIdentity: String
+    let storageKey: String
+
+    init(
+        configurationID: UUID?,
+        descriptor: NodeBundleSourceDescriptor
+    ) {
+        configurationIdentity = configurationID?.uuidString.lowercased()
+            ?? "unassigned"
+        sourceIdentity = descriptor.checksumURL.absoluteString
+        publisherIdentity = descriptor.sourceID?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).nonEmptyProfileValue ?? Self.originIdentity(for: descriptor.checksumURL)
+        storageKey = Self.sha256Hex(
+            Data(
+                [
+                    configurationIdentity,
+                    sourceIdentity,
+                    publisherIdentity
+                ]
+                    .joined(separator: "\u{0}")
+                    .utf8
+            )
+        )
+    }
+
+    static func originIdentityForMigration(sourceURLString: String?) -> String {
+        guard let sourceURLString, let url = URL(string: sourceURLString) else {
+            return "unknown-publisher"
+        }
+        return originIdentity(for: url)
+    }
+
+    private static func originIdentity(for url: URL) -> String {
+        var components = URLComponents()
+        components.scheme = url.scheme?.lowercased()
+        components.host = url.host?.lowercased()
+        components.port = url.port
+        return components.string ?? url.host?.lowercased() ?? "unknown-publisher"
+    }
+
+    private static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+private extension String {
+    var nonEmptyProfileValue: String? {
+        isEmpty ? nil : self
+    }
+}
+
 enum NodeBundleTrustState: String, Codable, Equatable, Sendable {
     case httpsTransport
     case publisherSHA256
@@ -808,13 +863,20 @@ actor NodeBundleRuntimeService {
     }
 
     private enum StartupSource: Sendable {
-        case descriptor(NodeBundleSourceDescriptor)
-        case cached(CachedBundle)
+        case descriptor(NodeBundleSourceDescriptor, NodeRuntimeProfileNamespace)
+        case cached(CachedBundle, NodeRuntimeProfileNamespace)
 
         var cacheKey: String {
             switch self {
-            case .descriptor(let descriptor): descriptor.cacheKey
-            case .cached(let bundle): bundle.cacheKey
+            case .descriptor(let descriptor, _): descriptor.cacheKey
+            case .cached(let bundle, _): bundle.cacheKey
+            }
+        }
+
+        var profileNamespace: NodeRuntimeProfileNamespace {
+            switch self {
+            case .descriptor(_, let namespace), .cached(_, let namespace):
+                return namespace
             }
         }
     }
@@ -849,16 +911,19 @@ actor NodeBundleRuntimeService {
     private var activeDiagnosticWriter: NodeDiagnosticLogWriter?
     private var diagnosticWriters: [String: NodeDiagnosticLogWriter] = [:]
     private var activeBundleCacheKey: String?
+    private var activeProfileStorageKey: String?
     private var activeContractCleanupURLs: [URL] = []
     private var serviceBaseURL: URL?
     private var status: NodeRuntimeStatus = .stopped
     private var statusContinuations: [UUID: AsyncStream<NodeRuntimeStatus>.Continuation] = [:]
     private var desiredBundle: CachedBundle?
+    private var desiredProfileNamespace: NodeRuntimeProfileNamespace?
     private var processGeneration = UUID()
     private var restartTask: Task<Void, Never>?
     private var healthMonitorTask: Task<Void, Never>?
     private var restartAttempt = 0
     private var startupCacheKey: String?
+    private var startupProfileStorageKey: String?
     private var startupGeneration: UUID?
 
     static let restartDelays: [TimeInterval] = [1, 2, 5]
@@ -942,8 +1007,14 @@ actor NodeBundleRuntimeService {
         NodeBundleSourceDescriptor.supports(url)
     }
 
-    func loadConfiguration(from sourceURL: URL) async throws -> LoadedConfiguration {
-        let baseURL = try await ensureReady(from: sourceURL)
+    func loadConfiguration(
+        from sourceURL: URL,
+        configurationID: UUID? = nil
+    ) async throws -> LoadedConfiguration {
+        let baseURL = try await ensureReady(
+            from: sourceURL,
+            configurationID: configurationID
+        )
         try Task.checkCancellation()
         let configURL = baseURL.appendingPathComponent("config")
         let response = try await localHTTPClient.send(
@@ -971,10 +1042,17 @@ actor NodeBundleRuntimeService {
     /// Returns only after the selected contract's readiness policy succeeds.
     /// Contract A retains its `/health` identity check; Contract B requires an
     /// observed loopback listener plus a validated `/config` capability.
-    func ensureReady(from sourceURL: URL) async throws -> URL {
+    func ensureReady(
+        from sourceURL: URL,
+        configurationID: UUID? = nil
+    ) async throws -> URL {
         let descriptor = try NodeBundleSourceDescriptor(url: sourceURL)
+        let profileNamespace = NodeRuntimeProfileNamespace(
+            configurationID: configurationID,
+            descriptor: descriptor
+        )
         return try await ensureReady(
-            source: .descriptor(descriptor),
+            source: .descriptor(descriptor, profileNamespace),
             automaticRestart: false
         )
     }
@@ -986,8 +1064,10 @@ actor NodeBundleRuntimeService {
         healthMonitorTask = nil
         startupGeneration = nil
         startupCacheKey = nil
+        startupProfileStorageKey = nil
         await sharedStartup.cancel()
         desiredBundle = nil
+        desiredProfileNamespace = nil
         restartAttempt = 0
         stopProcess(publishing: .stopped)
     }
@@ -1797,6 +1877,175 @@ actor NodeBundleRuntimeService {
         return runtime
     }
 
+    private func contractBProfileURL(
+        for namespace: NodeRuntimeProfileNamespace,
+        currentBundle: CachedBundle
+    ) throws -> URL {
+        let profileDirectory = applicationSupportDirectory
+            .appendingPathComponent("NodeProfiles", isDirectory: true)
+            .appendingPathComponent(namespace.storageKey, isDirectory: true)
+        try secureDirectory(profileDirectory)
+        let profileURL = profileDirectory.appendingPathComponent(
+            "contract-b-profile.json"
+        )
+        if FileManager.default.fileExists(atPath: profileURL.path) {
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: profileURL.path
+            )
+            return profileURL
+        }
+
+        guard let legacy = try legacyProfileCandidate(
+            for: namespace,
+            currentBundle: currentBundle
+        ) else {
+            return profileURL
+        }
+        let data = try validatedProfileData(at: legacy.profileURL)
+        let backups = profileDirectory.appendingPathComponent(
+            "Backups",
+            isDirectory: true
+        )
+        try secureDirectory(backups)
+        let timestamp = Int(now().timeIntervalSince1970)
+        let backupURL = backups.appendingPathComponent(
+            "contract-b-profile-\(timestamp)-\(legacy.cacheKey.prefix(12)).json"
+        )
+        try data.write(to: backupURL, options: [.atomic])
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: backupURL.path
+        )
+        try data.write(to: profileURL, options: [.atomic])
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: profileURL.path
+        )
+        return profileURL
+    }
+
+    private struct LegacyProfileCandidate {
+        let profileURL: URL
+        let cacheKey: String
+        let modifiedAt: Date
+    }
+
+    private func legacyProfileCandidate(
+        for namespace: NodeRuntimeProfileNamespace,
+        currentBundle: CachedBundle
+    ) throws -> LegacyProfileCandidate? {
+        let manager = FileManager.default
+        let runtimeRoot = applicationSupportDirectory.appendingPathComponent(
+            "NodeRuntime",
+            isDirectory: true
+        )
+        guard let runtimeDirectories = try? manager.contentsOfDirectory(
+            at: runtimeRoot,
+            includingPropertiesForKeys: [
+                .isDirectoryKey,
+                .isSymbolicLinkKey,
+                .contentModificationDateKey
+            ],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+        var candidates: [LegacyProfileCandidate] = []
+        for directory in runtimeDirectories {
+            let values = try directory.resourceValues(forKeys: [
+                .isDirectoryKey,
+                .isSymbolicLinkKey,
+                .contentModificationDateKey
+            ])
+            guard values.isDirectory == true,
+                  values.isSymbolicLink != true else { continue }
+            let cacheKey = directory.lastPathComponent
+            let profileURL = directory.appendingPathComponent(
+                "contract-b-profile.json"
+            )
+            guard manager.fileExists(atPath: profileURL.path) else { continue }
+            let belongsToCurrentSource: Bool
+            if cacheKey == currentBundle.cacheKey {
+                belongsToCurrentSource = true
+            } else {
+                belongsToCurrentSource = legacyCacheMetadata(
+                    cacheKey: cacheKey,
+                    matches: namespace
+                )
+            }
+            guard belongsToCurrentSource,
+                  (try? validatedProfileData(at: profileURL)) != nil else {
+                continue
+            }
+            let profileValues = try profileURL.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            )
+            candidates.append(
+                LegacyProfileCandidate(
+                    profileURL: profileURL,
+                    cacheKey: cacheKey,
+                    modifiedAt: profileValues.contentModificationDate
+                        ?? values.contentModificationDate
+                        ?? .distantPast
+                )
+            )
+        }
+        return candidates.max { $0.modifiedAt < $1.modifiedAt }
+    }
+
+    private func legacyCacheMetadata(
+        cacheKey: String,
+        matches namespace: NodeRuntimeProfileNamespace
+    ) -> Bool {
+        let metadataURL = cacheURL(for: cacheKey)
+            .appendingPathComponent("metadata.json")
+        guard let data = try? Data(contentsOf: metadataURL),
+              let metadata = try? JSONDecoder().decode(
+                  CacheMetadata.self,
+                  from: data
+              ) else {
+            return false
+        }
+        let values = metadata.pinIdentity
+            .split(separator: "\n")
+            .reduce(into: [String: String]()) { result, line in
+                let components = line.split(
+                    separator: "=",
+                    maxSplits: 1,
+                    omittingEmptySubsequences: false
+                )
+                guard components.count == 2 else { return }
+                result[String(components[0])] = String(components[1])
+            }
+        let source = values["request"]
+        let publisher = values["source"].flatMap { $0 == "-" ? nil : $0 }
+            ?? NodeRuntimeProfileNamespace.originIdentityForMigration(
+                sourceURLString: source
+            )
+        return source == namespace.sourceIdentity
+            && publisher == namespace.publisherIdentity
+    }
+
+    private func validatedProfileData(at url: URL) throws -> Data {
+        let values = try url.resourceValues(forKeys: [
+            .isRegularFileKey,
+            .isSymbolicLinkKey,
+            .fileSizeKey
+        ])
+        guard values.isRegularFile == true,
+              values.isSymbolicLink != true,
+              let size = values.fileSize,
+              size <= 1_024 * 1_024 else {
+            throw NodeBundleRuntimeError.configurationContractInvalid
+        }
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        guard (try JSONSerialization.jsonObject(with: data)) is [String: Any] else {
+            throw NodeBundleRuntimeError.configurationContractInvalid
+        }
+        return data
+    }
+
     private func secureDirectory(_ directory: URL) throws {
         try FileManager.default.createDirectory(
             at: directory,
@@ -1815,7 +2064,9 @@ actor NodeBundleRuntimeService {
     ) async throws -> URL {
         try Task.checkCancellation()
         let cacheKey = source.cacheKey
+        let profileStorageKey = source.profileNamespace.storageKey
         if activeBundleCacheKey == cacheKey,
+           activeProfileStorageKey == profileStorageKey,
            process?.isRunning == true,
            let serviceBaseURL,
            case .running(let publishedURL) = status,
@@ -1823,15 +2074,19 @@ actor NodeBundleRuntimeService {
             return serviceBaseURL
         }
 
-        if let startupCacheKey, let generation = startupGeneration {
+        if let startupCacheKey,
+           let startupProfileStorageKey,
+           let generation = startupGeneration {
+            let joinsCurrentStartup = startupCacheKey == cacheKey
+                && startupProfileStorageKey == profileStorageKey
             recordStartupLifecycle(
                 code: .runtimeStartupJoined,
-                message: startupCacheKey == cacheKey
+                message: joinsCurrentStartup
                     ? "Joined existing Node runtime startup"
                     : "Waiting for another Node runtime startup to finish",
                 cacheKey: cacheKey
             )
-            if startupCacheKey == cacheKey {
+            if joinsCurrentStartup {
                 do {
                     let endpoint = try await sharedStartup.run(
                         sessionID: generation
@@ -1873,6 +2128,7 @@ actor NodeBundleRuntimeService {
         let generation = UUID()
         startupGeneration = generation
         startupCacheKey = cacheKey
+        startupProfileStorageKey = profileStorageKey
         recordStartupLifecycle(
             code: .runtimeStartRequested,
             message: automaticRestart
@@ -1912,6 +2168,7 @@ actor NodeBundleRuntimeService {
         guard startupGeneration == generation else { return }
         startupGeneration = nil
         startupCacheKey = nil
+        startupProfileStorageKey = nil
     }
 
     private func performStartup(
@@ -1921,9 +2178,9 @@ actor NodeBundleRuntimeService {
         do {
             let bundle: CachedBundle
             switch source {
-            case .descriptor(let descriptor):
+            case .descriptor(let descriptor, _):
                 bundle = try await obtainBundle(descriptor)
-            case .cached(let cached):
+            case .cached(let cached, _):
                 bundle = cached
             }
             try Task.checkCancellation()
@@ -1932,12 +2189,17 @@ actor NodeBundleRuntimeService {
                 throw CancellationError()
             }
             desiredBundle = bundle
+            desiredProfileNamespace = source.profileNamespace
             stopProcess(publishing: .starting)
-            let endpoint = try await startProcess(bundle)
+            let endpoint = try await startProcess(
+                bundle,
+                profileNamespace: source.profileNamespace
+            )
             guard startupGeneration == generation else {
                 throw CancellationError()
             }
             activeBundleCacheKey = bundle.cacheKey
+            activeProfileStorageKey = source.profileNamespace.storageKey
             return endpoint
         } catch {
             if startupGeneration == generation {
@@ -1983,7 +2245,10 @@ actor NodeBundleRuntimeService {
         )
     }
 
-    private func startProcess(_ bundle: CachedBundle) async throws -> URL {
+    private func startProcess(
+        _ bundle: CachedBundle,
+        profileNamespace: NodeRuntimeProfileNamespace
+    ) async throws -> URL {
         try validateBundleForExecution(bundle)
         let validatedBundleData = try Data(
             contentsOf: bundle.scriptURL,
@@ -2008,9 +2273,16 @@ actor NodeBundleRuntimeService {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        let profileURL = contract == .hostIntegrated
+            ? try contractBProfileURL(
+                for: profileNamespace,
+                currentBundle: bundle
+            )
+            : nil
         let launchPlan = try NodeRuntimeContractFactory.makePlan(
             contract: contract,
-            runtimeDirectory: bundle.runtimeDirectory
+            runtimeDirectory: bundle.runtimeDirectory,
+            profileURL: profileURL
         )
         activeContractCleanupURLs = launchPlan.cleanupURLs
         writer.write(
@@ -2306,6 +2578,7 @@ actor NodeBundleRuntimeService {
         outputPipe = nil
         process = nil
         activeBundleCacheKey = nil
+        activeProfileStorageKey = nil
         removeActiveContractArtifacts()
         serviceBaseURL = nil
         if let newStatus {
@@ -2334,6 +2607,7 @@ actor NodeBundleRuntimeService {
         outputPipe = nil
         process = nil
         activeBundleCacheKey = nil
+        activeProfileStorageKey = nil
         removeActiveContractArtifacts()
         serviceBaseURL = nil
         healthMonitorTask?.cancel()
@@ -2446,10 +2720,11 @@ actor NodeBundleRuntimeService {
         restartTask = nil
         guard case .restarting(let currentAttempt, _) = status,
               currentAttempt == attempt,
-              let bundle = desiredBundle else { return }
+              let bundle = desiredBundle,
+              let profileNamespace = desiredProfileNamespace else { return }
         do {
             _ = try await ensureReady(
-                source: .cached(bundle),
+                source: .cached(bundle, profileNamespace),
                 automaticRestart: true
             )
         } catch {

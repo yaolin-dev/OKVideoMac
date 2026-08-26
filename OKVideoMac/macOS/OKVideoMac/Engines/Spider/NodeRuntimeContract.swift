@@ -117,7 +117,8 @@ enum NodeRuntimeLoopbackPortAllocator {
 enum NodeRuntimeContractFactory {
     static func makePlan(
         contract: NodeRuntimeContractKind,
-        runtimeDirectory: URL
+        runtimeDirectory: URL,
+        profileURL: URL? = nil
     ) throws -> NodeRuntimeLaunchPlan {
         switch contract {
         case .service:
@@ -133,12 +134,11 @@ enum NodeRuntimeContractFactory {
             let config = try ContractBConfigBuilder.buildMinimumConfiguration()
             let configURL = runtimeDirectory.appendingPathComponent("contract-b-config.json")
             let stateURL = runtimeDirectory.appendingPathComponent("contract-b-state.json")
-            // The profile belongs to the verified Node bundle identity because
-            // `runtimeDirectory` is derived from the descriptor cache key. It
-            // deliberately survives process restarts, unlike listener state.
-            let profileURL = runtimeDirectory.appendingPathComponent(
-                "contract-b-profile.json"
-            )
+            // Runtime state remains bundle-version scoped, while credentials
+            // live in a stable configuration/source/publisher namespace.
+            guard let profileURL else {
+                throw NodeBundleRuntimeError.configurationContractInvalid
+            }
             let port = try NodeRuntimeLoopbackPortAllocator.allocate()
             do {
                 try config.write(to: configURL, options: .atomic)

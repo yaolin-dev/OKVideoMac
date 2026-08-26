@@ -82,12 +82,11 @@ public enum PlaybackPersistencePolicy {
             return nil
         }
         // Node provider locators cross a third-party runtime boundary and may
-        // be JWTs or refresh tokens despite being labelled "stable". Only
-        // host-generated digest handles (or the legacy secret-free Quark
-        // identity codec) are permitted in SQLite.
+        // be JWTs or refresh tokens despite being labelled "stable". Persist
+        // only the secret-free Quark share/file identity. Legacy nhr1/npr1
+        // handles depended on host replay storage and are intentionally dead.
         if reference.providerKind == "node-http-spider" {
-            let allowedPrefixes = ["nhr1.", "npr1.", "qhr1."]
-            guard allowedPrefixes.contains(where: locator.hasPrefix) else {
+            guard locator.hasPrefix("qhr1.") else {
                 return nil
             }
         }

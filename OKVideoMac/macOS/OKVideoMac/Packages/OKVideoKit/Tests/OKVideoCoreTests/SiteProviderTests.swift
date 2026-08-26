@@ -908,6 +908,40 @@ final class SiteProviderTests: XCTestCase {
         )
     }
 
+    func testPlayerReadsSecretFreeCloudStableDescription() throws {
+        let value: JSONValue = .object([
+            "parse": .integer(0),
+            "url": .string("http://127.0.0.1:18988/src/down/ephemeral"),
+            "providerResourceReference": .object([
+                "schemaVersion": .integer(1),
+                "providerVersion": .integer(1),
+                "stableResourceLocator": .string("quark-share-file"),
+                "stability": .string("providerStable"),
+                "stableDescription": .object([
+                    "provider": .string("quark"),
+                    "shareId": .string("share-123"),
+                    "fileId": .string("file-456"),
+                    "sourceKey": .string("quark-line"),
+                    "episodeName": .string("第 1 集")
+                ])
+            ])
+        ])
+
+        let descriptor = try XCTUnwrap(
+            SpiderResponseMapper.providerPlaybackResourceDescriptor(value)
+        )
+        XCTAssertEqual(
+            descriptor.stableDescription,
+            ProviderPlaybackStableDescription(
+                provider: "quark",
+                shareID: "share-123",
+                fileID: "file-456",
+                sourceKey: "quark-line",
+                episodeName: "第 1 集"
+            )
+        )
+    }
+
     func testPlayerRejectsImplicitOrSensitiveProviderResourceDescriptor() {
         let implicit: JSONValue = .object([
             "url": .string("http://127.0.0.1:18988/src/down/ephemeral")

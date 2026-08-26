@@ -527,17 +527,45 @@ public struct ProviderPlaybackResourceDescriptor: Equatable, Hashable, Sendable 
     public var providerVersion: Int
     public var stableResourceLocator: String
     public var stability: PlaybackResourceReference.Stability
+    public var stableDescription: ProviderPlaybackStableDescription?
 
     public init(
         schemaVersion: Int,
         providerVersion: Int,
         stableResourceLocator: String,
-        stability: PlaybackResourceReference.Stability
+        stability: PlaybackResourceReference.Stability,
+        stableDescription: ProviderPlaybackStableDescription? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.providerVersion = providerVersion
         self.stableResourceLocator = stableResourceLocator
         self.stability = stability
+        self.stableDescription = stableDescription
+    }
+}
+
+/// Secret-free semantic identity optionally published by a cloud Spider.
+/// Cookies, share tokens, download URLs and authorization headers are never
+/// members of this contract.
+public struct ProviderPlaybackStableDescription: Codable, Equatable, Hashable, Sendable {
+    public var provider: String
+    public var shareID: String
+    public var fileID: String
+    public var sourceKey: String
+    public var episodeName: String
+
+    public init(
+        provider: String,
+        shareID: String,
+        fileID: String,
+        sourceKey: String,
+        episodeName: String
+    ) {
+        self.provider = provider
+        self.shareID = shareID
+        self.fileID = fileID
+        self.sourceKey = sourceKey
+        self.episodeName = episodeName
     }
 }
 

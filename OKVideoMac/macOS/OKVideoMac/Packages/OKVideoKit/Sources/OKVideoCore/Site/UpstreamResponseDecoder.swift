@@ -768,12 +768,53 @@ public enum SpiderResponseMapper {
               safeLocator == rawLocator else {
             return nil
         }
+        let stableDescription: ProviderPlaybackStableDescription?
+        if case .object(let description) = reference["stableDescription"] {
+            guard let provider = boundedStableDescriptionString(
+                description["provider"]
+            ), let shareID = boundedStableDescriptionString(
+                description["shareId"]
+            ), let fileID = boundedStableDescriptionString(
+                description["fileId"]
+            ), let sourceKey = boundedStableDescriptionString(
+                description["sourceKey"]
+            ), let episodeName = boundedStableDescriptionString(
+                description["episodeName"]
+            ), provider.caseInsensitiveCompare("quark") == .orderedSame else {
+                return nil
+            }
+            stableDescription = ProviderPlaybackStableDescription(
+                provider: provider.lowercased(),
+                shareID: shareID,
+                fileID: fileID,
+                sourceKey: sourceKey,
+                episodeName: episodeName
+            )
+        } else {
+            stableDescription = nil
+        }
         return ProviderPlaybackResourceDescriptor(
             schemaVersion: schemaVersion,
             providerVersion: providerVersion,
             stableResourceLocator: safeLocator,
-            stability: stability
+            stability: stability,
+            stableDescription: stableDescription
         )
+    }
+
+    private static func boundedStableDescriptionString(
+        _ value: JSONValue?
+    ) -> String? {
+        guard case .string(let rawValue) = value else { return nil }
+        let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty,
+              normalized.utf8.count <= 4_096,
+              !normalized.unicodeScalars.contains(where: {
+                  CharacterSet.controlCharacters.contains($0)
+              }) else {
+            return nil
+        }
+        return normalized
     }
 
     private static func topLevelObject(

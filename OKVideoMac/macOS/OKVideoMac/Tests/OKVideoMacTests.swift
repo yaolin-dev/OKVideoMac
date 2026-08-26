@@ -10748,8 +10748,12 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             readinessTimeout: 5,
             readinessPollInterval: 0.02
         )
+        let configurationID = UUID()
 
-        let firstEndpoint = try await service.ensureReady(from: fixture.sourceURL)
+        let firstEndpoint = try await service.ensureReady(
+            from: fixture.sourceURL,
+            configurationID: configurationID
+        )
         let (writeData, writeResponse) = try await URLSession.shared.data(
             from: firstEndpoint.appendingPathComponent("profile-write")
         )
@@ -10765,10 +10769,14 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         await service.stop()
 
         let descriptor = try NodeBundleSourceDescriptor(url: fixture.sourceURL)
-        let runtimeDirectory = fixture.applicationSupportDirectory
-            .appendingPathComponent("NodeRuntime")
-            .appendingPathComponent(descriptor.cacheKey)
-        let profileURL = runtimeDirectory.appendingPathComponent(
+        let namespace = NodeRuntimeProfileNamespace(
+            configurationID: configurationID,
+            descriptor: descriptor
+        )
+        let profileURL = fixture.applicationSupportDirectory
+            .appendingPathComponent("NodeProfiles")
+            .appendingPathComponent(namespace.storageKey)
+            .appendingPathComponent(
             "contract-b-profile.json"
         )
         XCTAssertTrue(FileManager.default.fileExists(atPath: profileURL.path))
@@ -10779,16 +10787,23 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         let unrelatedDescriptor = try NodeBundleSourceDescriptor(
             url: unrelatedURL
         )
-        XCTAssertNotEqual(descriptor.cacheKey, unrelatedDescriptor.cacheKey)
+        let unrelatedNamespace = NodeRuntimeProfileNamespace(
+            configurationID: configurationID,
+            descriptor: unrelatedDescriptor
+        )
+        XCTAssertNotEqual(namespace.storageKey, unrelatedNamespace.storageKey)
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: fixture.applicationSupportDirectory
-                .appendingPathComponent("NodeRuntime")
-                .appendingPathComponent(unrelatedDescriptor.cacheKey)
+                .appendingPathComponent("NodeProfiles")
+                .appendingPathComponent(unrelatedNamespace.storageKey)
                 .appendingPathComponent("contract-b-profile.json")
                 .path
         ))
 
-        let secondEndpoint = try await service.ensureReady(from: fixture.sourceURL)
+        let secondEndpoint = try await service.ensureReady(
+            from: fixture.sourceURL,
+            configurationID: configurationID
+        )
         let (readData, readResponse) = try await URLSession.shared.data(
             from: secondEndpoint.appendingPathComponent("profile-read")
         )
@@ -10799,6 +10814,103 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
         XCTAssertEqual(profile["marker"], "persisted")
         XCTAssertEqual(profile["privateValue"], "fixture-private")
+        await service.stop()
+    }
+
+    func testContractBProfileNamespaceSurvivesBundleVersionAndPinChanges() throws {
+        let configurationID = UUID()
+        let first = try NodeBundleSourceDescriptor(url: XCTUnwrap(URL(
+            string: "https://fixture.invalid/index.js.md5#source=publisher-a&version=7&sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )))
+        let upgraded = try NodeBundleSourceDescriptor(url: XCTUnwrap(URL(
+            string: "https://fixture.invalid/index.js.md5#source=publisher-a&version=8&sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        )))
+        XCTAssertNotEqual(first.cacheKey, upgraded.cacheKey)
+        XCTAssertEqual(
+            NodeRuntimeProfileNamespace(
+                configurationID: configurationID,
+                descriptor: first
+            ).storageKey,
+            NodeRuntimeProfileNamespace(
+                configurationID: configurationID,
+                descriptor: upgraded
+            ).storageKey
+        )
+        XCTAssertNotEqual(
+            NodeRuntimeProfileNamespace(
+                configurationID: configurationID,
+                descriptor: first
+            ).storageKey,
+            NodeRuntimeProfileNamespace(
+                configurationID: UUID(),
+                descriptor: first
+            ).storageKey
+        )
+    }
+
+    func testContractBProfileMigratesLegacyHashDirectoryWithBackup() async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(
+                nodeContractBFixtureScript(startDelayMilliseconds: 0).utf8
+            ),
+            sourceFragment: "source=migration-fixture&version=9"
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let descriptor = try NodeBundleSourceDescriptor(url: fixture.sourceURL)
+        let legacyRuntime = fixture.applicationSupportDirectory
+            .appendingPathComponent("NodeRuntime")
+            .appendingPathComponent(descriptor.cacheKey)
+        try FileManager.default.createDirectory(
+            at: legacyRuntime,
+            withIntermediateDirectories: true
+        )
+        let legacyProfile = legacyRuntime.appendingPathComponent(
+            "contract-b-profile.json"
+        )
+        try Data(
+            #"{"marker":"legacy","privateValue":"legacy-cookie"}"#.utf8
+        ).write(to: legacyProfile)
+        let configurationID = UUID()
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+
+        let endpoint = try await service.ensureReady(
+            from: fixture.sourceURL,
+            configurationID: configurationID
+        )
+        let (readData, _) = try await URLSession.shared.data(
+            from: endpoint.appendingPathComponent("profile-read")
+        )
+        let profile = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: readData) as? [String: String]
+        )
+        XCTAssertEqual(profile["marker"], "legacy")
+        XCTAssertEqual(profile["privateValue"], "legacy-cookie")
+
+        let namespace = NodeRuntimeProfileNamespace(
+            configurationID: configurationID,
+            descriptor: descriptor
+        )
+        let profileDirectory = fixture.applicationSupportDirectory
+            .appendingPathComponent("NodeProfiles")
+            .appendingPathComponent(namespace.storageKey)
+        let backups = try FileManager.default.contentsOfDirectory(
+            at: profileDirectory.appendingPathComponent("Backups"),
+            includingPropertiesForKeys: nil
+        )
+        XCTAssertEqual(backups.count, 1)
+        XCTAssertTrue(backups[0].lastPathComponent.hasPrefix(
+            "contract-b-profile-"
+        ))
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: profileDirectory
+                .appendingPathComponent("contract-b-profile.json").path
+        )
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
         await service.stop()
     }
 
@@ -12046,13 +12158,12 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             result.url,
             "http://127.0.0.1:18988/spider/fixture/4/proxy/media?id=1"
         )
-        let reference = try XCTUnwrap(result.resourceReference)
-        XCTAssertEqual(reference.configurationIdentity, configurationIdentity)
-        XCTAssertTrue(reference.stableResourceLocator.hasPrefix("nhr1."))
+        XCTAssertNil(result.resourceReference)
         XCTAssertEqual(
-            replayStore.replay(for: reference.stableResourceLocator),
-            NodePlaybackReplay(flag: "直链", episodeURL: "episode")
+            result.mediaSession?.resourceReference.providerKind,
+            "node-http-spider-runtime"
         )
+        XCTAssertNil(replayStore.replay(for: "episode"))
     }
 
     func testNodePlayerRespectsProviderOrderForRuntimeOwnedTransports()
@@ -12098,12 +12209,12 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                 "https://media.example.invalid/original?id=1"
             ]
         )
-        let reference = try XCTUnwrap(result.resourceReference)
-        XCTAssertEqual(reference.configurationIdentity, configurationIdentity)
+        XCTAssertNil(result.resourceReference)
         XCTAssertEqual(
-            replayStore.replay(for: reference.stableResourceLocator),
-            NodePlaybackReplay(flag: "direct", episodeURL: "episode")
+            result.mediaSession?.resourceReference.configurationIdentity,
+            configurationIdentity
         )
+        XCTAssertNil(replayStore.replay(for: "episode"))
         XCTAssertEqual(result.mediaSession?.rangePolicy, .unsupported)
     }
 
@@ -12260,68 +12371,30 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                 "durable reference leaked \(forbidden)"
             )
         }
-        XCTAssertEqual(
+        XCTAssertNil(
             passcodeStore.passcode(
                 for: QuarkEpisodeReference.credentialAccount(for: identity)
             ),
-            "2468"
+            "the host must not persist extraction codes as credentials"
         )
     }
 
-    func testNodeProviderRefreshesDurableQuarkHistoryBeforePlayback() async throws {
-        let passcodeStore = QuarkPasscodeMemoryStore()
+    func testNodePlayerNeverDereferencesDurableQuarkHistoryInHost() async throws {
         let client = QuarkRefreshHTTPClient(firstPlayFailure: .none)
-        let provider = try makeNodeProvider(
-            httpClient: client,
-            quarkPasscodeStore: passcodeStore
-        )
-        let original = try makeQuarkEpisodeReference(
-            stoken: "expired-stoken",
-            passcode: "2468"
-        )
+        let provider = try makeNodeProvider(httpClient: client)
         let durable = QuarkEpisodeReference.durableHistoryReference(
-            original,
-            passcodeStore: passcodeStore
+            try makeQuarkEpisodeReference(stoken: "expired-stoken")
         )
 
-        let result = try await provider.player(
-            flag: "夸克",
-            episodeURL: durable
-        )
+        _ = try await provider.player(flag: "夸克", episodeURL: durable)
         let requests = await client.capturedRequests()
-        let playRequests = requests.filter { $0.url.path.hasSuffix("/play") }
-        let tokenRequests = requests.filter {
+        XCTAssertFalse(requests.contains {
             $0.url == QuarkEpisodeReference.shareTokenURL
-        }
-
-        XCTAssertEqual(result.url, "https://media.example.invalid/video.m3u8")
-        XCTAssertEqual(tokenRequests.count, 1)
-        XCTAssertEqual(playRequests.count, 1)
-        XCTAssertEqual(
-            try quarkTokenRequestPasscode(from: tokenRequests[0]),
-            "2468"
+        })
+        let playRequest = try XCTUnwrap(
+            requests.first { $0.url.path.hasSuffix("/play") }
         )
-        let refreshedEpisode = try nodeEpisodeID(from: playRequests[0])
-        XCTAssertEqual(
-            QuarkEpisodeReference.identity(from: refreshedEpisode),
-            QuarkEpisodeReference.identity(from: original)
-        )
-        XCTAssertEqual(
-            try quarkStoken(from: refreshedEpisode),
-            "fresh-stoken"
-        )
-        let refreshedData = try XCTUnwrap(
-            Data(
-                base64Encoded: refreshedEpisode,
-                options: .ignoreUnknownCharacters
-            )
-        )
-        let refreshedText = try XCTUnwrap(
-            String(data: refreshedData, encoding: .utf8)
-        ).lowercased()
-        XCTAssertFalse(refreshedText.contains("passcode"))
-        XCTAssertFalse(refreshedText.contains("password"))
-        XCTAssertFalse(refreshedText.contains("2468"))
+        XCTAssertEqual(try nodeEpisodeID(from: playRequest), durable)
     }
 
     func testNodePlayerReturnsStableOpaqueQuarkResourceReference() async throws {
@@ -12404,7 +12477,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
     }
 
-    func testNodePlayerWrapsExplicitGenericProviderStableReference()
+    func obsolete_testNodePlayerWrapsExplicitGenericProviderStableReference()
         async throws {
         let configurationIdentity = UUID().uuidString.lowercased()
         let stableLocator = "node-item-42-file-7"
@@ -12455,7 +12528,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains(stableLocator))
     }
 
-    func testNodeGenericStableReferencePersistsAndRefreshesAfterRestart()
+    func obsolete_testNodeGenericStableReferencePersistsAndRefreshesAfterRestart()
         async throws {
         let configurationIdentity = UUID().uuidString.lowercased()
         let stableLocator = "node-library-17-resource-99"
@@ -12581,7 +12654,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         })
     }
 
-    func testNodePlayerKeepsCompatibilityReplayCapabilityOutOfHistory()
+    func obsolete_testNodePlayerKeepsCompatibilityReplayCapabilityOutOfHistory()
         async throws {
         let configurationIdentity = UUID().uuidString.lowercased()
         let unsafeLocators: [String?] = [
@@ -12626,7 +12699,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         }
     }
 
-    func testNodeSecureReplayReferenceRefreshesExactResourceAfterRestart()
+    func obsolete_testNodeSecureReplayReferenceRefreshesExactResourceAfterRestart()
         async throws {
         let configurationIdentity = UUID().uuidString.lowercased()
         let replayStore = NodePlaybackReplayMemoryStore()
@@ -12714,7 +12787,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
     }
 
-    func testNodeSecureReplayReferenceFallsBackToCurrentDetailWhenStoreMissing()
+    func obsolete_testNodeSecureReplayReferenceFallsBackToCurrentDetailWhenStoreMissing()
         async throws {
         let configurationIdentity = UUID().uuidString.lowercased()
         let initialStore = NodePlaybackReplayMemoryStore()
@@ -12760,7 +12833,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertFalse(requests.contains { $0.url.path.hasSuffix("/search") })
     }
 
-    func testNodeLoopbackPlayFailsClosedWhenSecureReplayCannotBeStored()
+    func obsolete_testNodeLoopbackPlayFailsClosedWhenSecureReplayCannotBeStored()
         async throws {
         let client = NodeStableReferenceHTTPClient(stableLocator: nil)
         let provider = try makeGenericNodeProvider(
@@ -12835,7 +12908,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertFalse(provider.acceptsPlaybackResourceReference(expired))
     }
 
-    func testNodeRefreshReplaysStableQuarkLocatorWithoutSearchOrDetail()
+    func obsolete_testNodeRefreshReplaysStableQuarkLocatorWithoutSearchOrDetail()
         async throws {
         let configurationIdentity = UUID().uuidString.lowercased()
         let passcodeStore = QuarkPasscodeMemoryStore()
@@ -13024,7 +13097,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(try nodeEpisodeID(from: playRequests[0]), episode)
     }
 
-    func testNodeProviderPrefersCurrentQuarkPasscodeOverStoredValue() async throws {
+    func obsolete_testNodeProviderPrefersCurrentQuarkPasscodeOverStoredValue() async throws {
         let passcodeStore = QuarkPasscodeMemoryStore()
         let client = QuarkRefreshHTTPClient(firstPlayFailure: .expiredStoken)
         let episode = try makeQuarkEpisodeReference(
@@ -13057,7 +13130,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
     }
 
-    func testNodeProviderRefreshesExplicit41016OnceAndRetriesPlayOnce() async throws {
+    func obsolete_testNodeProviderRefreshesExplicit41016OnceAndRetriesPlayOnce() async throws {
         let client = QuarkRefreshHTTPClient(firstPlayFailure: .expiredStoken)
         let provider = try makeNodeProvider(httpClient: client)
         let episode = try makeQuarkEpisodeReference(stoken: "expired-stoken")
@@ -13082,7 +13155,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
     }
 
-    func testNodeProviderRecoversFromLegacyMissingTaskErrorWithoutBlindRetry() async throws {
+    func obsolete_testNodeProviderRecoversFromLegacyMissingTaskErrorWithoutBlindRetry() async throws {
         let client = QuarkRefreshHTTPClient(firstPlayFailure: .missingTask)
         let provider = try makeNodeProvider(httpClient: client)
         let episode = try makeQuarkEpisodeReference(stoken: "expired-stoken")
@@ -13100,7 +13173,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
     }
 
-    func testQuarkRefreshFailurePreservesOriginalErrorCode() async throws {
+    func obsolete_testQuarkRefreshFailurePreservesOriginalErrorCode() async throws {
         let client = NodeProviderStubHTTPClient { request in
             XCTAssertEqual(request.url, QuarkEpisodeReference.shareTokenURL)
             return HTTPResponse(
@@ -13123,6 +13196,122 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         } catch {
             XCTAssertTrue(error.localizedDescription.contains("41016"))
             XCTAssertTrue(error.localizedDescription.contains("stoken 过期"))
+        }
+    }
+
+    func testNodeGenericPlaybackKeepsHistorySecretFreeWithoutReplayStore()
+        async throws {
+        let replayStore = NodePlaybackReplayMemoryStore()
+        let provider = try makeGenericNodeProvider(
+            httpClient: NodeStableReferenceHTTPClient(stableLocator: nil),
+            configurationIdentity: UUID().uuidString.lowercased(),
+            playbackReplayStore: replayStore
+        )
+
+        let result = try await provider.player(
+            flag: "cloud-original",
+            episodeURL: "opaque-file-42?authorization=runtime-only"
+        )
+
+        XCTAssertNil(result.resourceReference)
+        XCTAssertEqual(result.mediaSession?.transport, .providerLoopback)
+        XCTAssertEqual(
+            result.mediaSession?.resourceReference.providerKind,
+            "node-http-spider-runtime"
+        )
+        XCTAssertTrue(
+            result.mediaSession?.resourceReference.stableResourceLocator
+                .hasPrefix("runtime-v1.") == true
+        )
+        XCTAssertNil(
+            PlaybackPersistencePolicy.sanitizedProviderResourceReference(
+                result.mediaSession?.resourceReference
+            )
+        )
+    }
+
+    func testNodeExpiredCloudTokenDoesNotTriggerHostTokenRefreshOrRetry()
+        async throws {
+        let client = QuarkRefreshHTTPClient(firstPlayFailure: .expiredStoken)
+        let provider = try makeNodeProvider(httpClient: client)
+        let episode = try makeQuarkEpisodeReference(stoken: "expired-stoken")
+
+        do {
+            _ = try await provider.player(flag: "夸克", episodeURL: episode)
+            XCTFail("Spider business failure must be returned to the caller")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("stoken 过期"))
+        }
+
+        let requests = await client.capturedRequests()
+        XCTAssertEqual(
+            requests.filter { $0.url.path.hasSuffix("/play") }.count,
+            1
+        )
+        XCTAssertFalse(requests.contains {
+            $0.url == QuarkEpisodeReference.shareTokenURL
+        })
+    }
+
+    func testNodeHistoryRefreshLoadsCurrentDetailBeforePlayer() async throws {
+        let client = NodeStableReferenceHTTPClient(
+            stableLocator: nil,
+            detailEpisode: "fresh-episode-42",
+            detailSourceName: "cloud-original"
+        )
+        let provider = try makeGenericNodeProvider(
+            httpClient: client,
+            configurationIdentity: UUID().uuidString.lowercased()
+        )
+
+        let refreshed = try await provider.refreshPlayback(
+            PlaybackRefreshRequest(
+                videoID: "history-video",
+                title: "重复标题",
+                sourceIdentity: "obsolete-source-identity",
+                resourceIdentity: "obsolete-resource-identity",
+                sourceName: "cloud-original",
+                episodeName: "历史分集",
+                episodeReference: "nhr1.obsolete",
+                providerResourceReference: nil
+            )
+        )
+
+        XCTAssertEqual(refreshed.episode.url, "fresh-episode-42")
+        XCTAssertTrue(refreshed.playbackResult.mediaSession?.refreshPerformed == true)
+        let requests = await client.capturedRequests()
+        let detailIndex = try XCTUnwrap(
+            requests.firstIndex { $0.url.path.hasSuffix("/detail") }
+        )
+        let playIndex = try XCTUnwrap(
+            requests.firstIndex { $0.url.path.hasSuffix("/play") }
+        )
+        XCTAssertLessThan(detailIndex, playIndex)
+    }
+
+    func testLegacyNodeReplayReferencesAreNotAccepted() throws {
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let provider = try makeGenericNodeProvider(
+            httpClient: NodeStableReferenceHTTPClient(stableLocator: nil),
+            configurationIdentity: configurationIdentity
+        )
+        for locator in ["nhr1.deadbeef", "npr1.deadbeef"] {
+            let reference = PlaybackResourceReference(
+                configurationIdentity: configurationIdentity,
+                siteIdentity: "nodejs_stable_fixture",
+                providerKind: "node-http-spider",
+                providerVersion: 1,
+                stableResourceLocator: locator,
+                sourceIdentity: "source",
+                episodeIdentity: "episode",
+                stability: .providerStable
+            )
+            XCTAssertFalse(provider.acceptsPlaybackResourceReference(reference))
+            XCTAssertNil(
+                PlaybackPersistencePolicy.sanitizedProviderResourceReference(
+                    reference
+                )
+            )
         }
     }
 
@@ -13150,7 +13339,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         httpClient: HTTPClient,
         configurationIdentity: String,
         playbackReplayStore: NodePlaybackReplayStoring =
-            NodePlaybackKeychainReplayStore()
+            NodePlaybackDisabledReplayStore()
     ) throws -> NodeHTTPSpiderSiteProvider {
         try NodeHTTPSpiderSiteProvider(
             site: SiteConfiguration(
