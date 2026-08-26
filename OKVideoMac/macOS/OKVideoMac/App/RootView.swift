@@ -623,8 +623,7 @@ struct NodeConfigurationView: View {
 
                 HStack(spacing: 12) {
                     Label(
-                        presentation.authorizationMessage
-                            ?? "请用对应网盘 App 扫码，页面显示登录成功后再继续。",
+                        "请用对应网盘 App 扫码，页面显示登录成功后再继续。",
                         systemImage: "qrcode.viewfinder"
                     )
                     .font(.caption)
@@ -633,33 +632,12 @@ struct NodeConfigurationView: View {
                     Button("关闭") {
                         state.cancelNodeConfiguration()
                     }
-                    if presentation.providerID == "baidu" {
-                        Label(
-                            presentation.isAuthorizationConfirmed
-                                ? "授权已确认，正在续播"
-                                : "等待服务端确认",
-                            systemImage: presentation.isAuthorizationConfirmed
-                                ? "checkmark.circle.fill"
-                                : "clock"
-                        )
-                        .foregroundColor(
-                            presentation.isAuthorizationConfirmed
-                                ? .green
-                                : .secondary
-                        )
-                    } else {
-                        Button {
-                            Task {
-                                await state.completeNodeConfigurationAndRetry()
-                            }
-                        } label: {
-                            Label(
-                                "授权完成并重试",
-                                systemImage: "arrow.right.circle.fill"
-                            )
-                        }
-                        .buttonStyle(.borderedProminent)
+                    Button {
+                        Task { await state.completeNodeConfigurationAndRetry() }
+                    } label: {
+                        Label("授权完成并重试", systemImage: "arrow.right.circle.fill")
                     }
+                    .buttonStyle(.borderedProminent)
                 }
                 .padding(.horizontal, 18)
                 .frame(height: 64)

@@ -4,7 +4,6 @@ public enum PlaybackResolutionState: Equatable, Sendable {
     case idle
     case restoringHistory
     case resolving
-    case preparingMedia
     case validating
     case loading
     case playing

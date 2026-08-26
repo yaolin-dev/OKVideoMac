@@ -1273,16 +1273,6 @@ struct NodeWebPresentation: Identifiable, Equatable {
     let url: URL
     let title: String
     let message: String
-    let providerID: String?
-    let authorizationStatusURL: URL?
-    let authorizationCancelURL: URL?
-    let baselineCredentialRevision: String?
-    var authorizationSessionID: String?
-    var credentialRevision: String?
-    var authorizationStatus: String?
-    var authorizationMessage: String?
-    var isAuthorizationConfirmed: Bool
-    var hasAutomaticRetryStarted: Bool
     var revision: Int
 }
 
@@ -1443,26 +1433,6 @@ enum NodeAuthorizationRetryPolicy {
             && availableSiteKeys.contains(pendingIdentity.siteKey)
             && (!requiresSelectedHomeSource
                 || selectedSiteKey == pendingIdentity.siteKey)
-    }
-}
-
-enum NodeAuthorizationContinuationPolicy {
-    static func shouldContinue(
-        status: String,
-        baselineCredentialRevision: String?,
-        currentCredentialRevision: String?,
-        boundSessionID: String?,
-        returnedSessionID: String?,
-        alreadyStarted: Bool
-    ) -> Bool {
-        let revision = currentCredentialRevision?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return status == "CONFIRMED"
-            && revision?.isEmpty == false
-            && revision != baselineCredentialRevision
-            && boundSessionID != nil
-            && boundSessionID == returnedSessionID
-            && !alreadyStarted
     }
 }
 
@@ -3451,7 +3421,6 @@ final class AppState: ObservableObject {
     private var categoryLoadSessionID = UUID()
     private var playerEventTask: Task<Void, Never>?
     private var cloudAuthorizationPollTask: Task<Void, Never>?
-    private var nodeAuthorizationMonitorTask: Task<Void, Never>?
     private var cloudAuthorizationSessionID = UUID()
     private var configurationInteractionCoordinator =
         ConfigurationInteractionCoordinator()
@@ -5707,26 +5676,8 @@ final class AppState: ObservableObject {
             url: authorization.websiteURL,
             title: authorization.title.nonEmpty ?? "网盘配置中心",
             message: authorization.message,
-            providerID: authorization.providerID,
-            authorizationStatusURL: authorization.authorizationStatusURL,
-            authorizationCancelURL: authorization.authorizationCancelURL,
-            baselineCredentialRevision:
-                authorization.baselineCredentialRevision,
-            authorizationSessionID: nil,
-            credentialRevision: nil,
-            authorizationStatus: authorization.providerID == "baidu"
-                ? "IDLE"
-                : nil,
-            authorizationMessage: authorization.providerID == "baidu"
-                ? "等待生成百度二维码"
-                : nil,
-            isAuthorizationConfirmed: false,
-            hasAutomaticRetryStarted: false,
             revision: 0
         )
-        if authorization.providerID == "baidu" {
-            startNodeAuthorizationMonitoring()
-        }
     }
 
     func refreshNodeConfigurationWebsite() {
@@ -5742,37 +5693,13 @@ final class AppState: ObservableObject {
             playbackResolutionState = .idle
             playbackFailureSummary = nil
         }
-        cancelNodeAuthorizationMonitoring(
-            presentation: nodeWebPresentation,
-            notifyRuntime: true
-        )
         pendingNodeOperation = nil
         nodeWebPresentation = nil
     }
 
     func completeNodeConfigurationAndRetry() async {
-        guard nodeWebPresentation?.providerID != "baidu"
-                || nodeWebPresentation?.isAuthorizationConfirmed == true else {
-            return
-        }
-        await completeNodeConfigurationAndRetry(
-            expectedPresentationID: nodeWebPresentation?.id
-        )
-    }
-
-    private func completeNodeConfigurationAndRetry(
-        expectedPresentationID: UUID?
-    ) async {
         let pending = pendingNodeOperation
         let presentation = nodeWebPresentation
-        guard expectedPresentationID == nil
-                || presentation?.id == expectedPresentationID else {
-            return
-        }
-        cancelNodeAuthorizationMonitoring(
-            presentation: presentation,
-            notifyRuntime: false
-        )
         pendingNodeOperation = nil
         nodeWebPresentation = nil
         guard let pending, let presentation else { return }
@@ -5826,144 +5753,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func startNodeAuthorizationMonitoring() {
-        nodeAuthorizationMonitorTask?.cancel()
-        guard let presentation = nodeWebPresentation,
-              presentation.providerID == "baidu",
-              let statusURL = presentation.authorizationStatusURL,
-              let environment else { return }
-        let presentationID = presentation.id
-        let client = configuredHTTPClient(environment: environment)
-        nodeAuthorizationMonitorTask = Task { [weak self] in
-            while !Task.isCancelled {
-                do {
-                    let response = try await client.send(
-                        HTTPRequest(
-                            url: statusURL,
-                            timeout: 4,
-                            maximumResponseBytes: 32 * 1_024,
-                            retryPolicy: .none,
-                            allowsNonSuccessfulStatus: true
-                        )
-                    )
-                    guard !Task.isCancelled else { return }
-                    guard response.statusCode == 200,
-                          let state = Self.nodeAuthorizationState(
-                            from: response.body
-                          ) else {
-                        try await Task.sleep(nanoseconds: 1_000_000_000)
-                        continue
-                    }
-                    guard let self,
-                          var current = self.nodeWebPresentation,
-                          current.id == presentationID else { return }
-                    if let sessionID = state.authorizationSessionID,
-                       !sessionID.isEmpty,
-                       current.authorizationSessionID != sessionID {
-                        current.authorizationSessionID = sessionID
-                        current.isAuthorizationConfirmed = false
-                        current.hasAutomaticRetryStarted = false
-                    }
-                    current.authorizationStatus = state.status
-                    current.authorizationMessage = state.message
-                    current.credentialRevision = state.credentialRevision
-                    if NodeAuthorizationContinuationPolicy.shouldContinue(
-                        status: state.status,
-                        baselineCredentialRevision:
-                            current.baselineCredentialRevision,
-                        currentCredentialRevision: state.credentialRevision,
-                        boundSessionID: current.authorizationSessionID,
-                        returnedSessionID: state.authorizationSessionID,
-                        alreadyStarted: current.hasAutomaticRetryStarted
-                    ) {
-                        current.isAuthorizationConfirmed = true
-                        current.hasAutomaticRetryStarted = true
-                        current.authorizationMessage = "授权已验证，正在继续播放…"
-                        self.nodeWebPresentation = current
-                        await self.completeNodeConfigurationAndRetry(
-                            expectedPresentationID: presentationID
-                        )
-                        return
-                    }
-                    self.nodeWebPresentation = current
-                } catch is CancellationError {
-                    return
-                } catch {
-                    guard let self,
-                          var current = self.nodeWebPresentation,
-                          current.id == presentationID else { return }
-                    current.authorizationStatus = "RETRYING"
-                    current.authorizationMessage = "正在等待百度确认…"
-                    self.nodeWebPresentation = current
-                }
-                do {
-                    try await Task.sleep(nanoseconds: 1_000_000_000)
-                } catch {
-                    return
-                }
-            }
-        }
-    }
-
-    private struct NodeAuthorizationStateSnapshot {
-        let authorizationSessionID: String?
-        let status: String
-        let message: String?
-        let credentialRevision: String?
-    }
-
-    private static func nodeAuthorizationState(
-        from body: Data
-    ) -> NodeAuthorizationStateSnapshot? {
-        guard let root = try? JSONDecoder().decode(JSONValue.self, from: body),
-              case .object(let object) = root,
-              case .object(let data)? = object["data"],
-              let status = data["status"]?.stringValue else {
-            return nil
-        }
-        return NodeAuthorizationStateSnapshot(
-            authorizationSessionID: data["authorizationSessionID"]?.stringValue,
-            status: status,
-            message: data["message"]?.stringValue,
-            credentialRevision: data["credentialRevision"]?.stringValue
-        )
-    }
-
-    private func cancelNodeAuthorizationMonitoring(
-        presentation: NodeWebPresentation?,
-        notifyRuntime: Bool
-    ) {
-        nodeAuthorizationMonitorTask?.cancel()
-        nodeAuthorizationMonitorTask = nil
-        guard notifyRuntime,
-              let presentation,
-              presentation.providerID == "baidu",
-              let cancelURL = presentation.authorizationCancelURL,
-              let environment else { return }
-        let client = configuredHTTPClient(environment: environment)
-        let body = try? JSONEncoder().encode(
-            JSONValue.object([
-                "authorizationSessionID": .string(
-                    presentation.authorizationSessionID ?? ""
-                )
-            ])
-        )
-        Task {
-            _ = try? await client.send(
-                HTTPRequest(
-                    url: cancelURL,
-                    method: .post,
-                    headers: ["Content-Type": "application/json"],
-                    body: body,
-                    timeout: 3,
-                    maximumResponseBytes: 8 * 1_024,
-                    retryPolicy: .none,
-                    allowsNonSuccessfulStatus: true
-                )
-            )
-        }
-    }
-
     private func activeSourceIdentity(
         for siteKey: String
     ) -> HomeContentIdentity? {
@@ -5983,10 +5772,6 @@ final class AppState: ObservableObject {
               pending.sourceIdentity.siteKey != nextSiteKey else {
             return
         }
-        cancelNodeAuthorizationMonitoring(
-            presentation: nodeWebPresentation,
-            notifyRuntime: true
-        )
         pendingNodeOperation = nil
         nodeWebPresentation = nil
     }
@@ -9015,9 +8800,6 @@ final class AppState: ObservableObject {
                     if let refreshedPlaybackResult {
                         result = refreshedPlaybackResult
                     } else {
-                        if provider is NodeHTTPSpiderSiteProvider {
-                            playbackResolutionState = .preparingMedia
-                        }
                         result = try await requestSitePlayback(
                             provider: provider,
                             flag: candidateSource.name,
@@ -10457,10 +10239,6 @@ final class AppState: ObservableObject {
         liveSourceValidationTasks = [:]
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = nil
-        cancelNodeAuthorizationMonitoring(
-            presentation: nodeWebPresentation,
-            notifyRuntime: true
-        )
         pendingNodeOperation = nil
         nodeWebPresentation = nil
         playerEventTask?.cancel()
@@ -10542,10 +10320,6 @@ final class AppState: ObservableObject {
             )
         }
         if pendingNodeOperation?.playbackRequestID == activePlayerRequestID {
-            cancelNodeAuthorizationMonitoring(
-                presentation: nodeWebPresentation,
-                notifyRuntime: true
-            )
             pendingNodeOperation = nil
             nodeWebPresentation = nil
         }
@@ -11413,7 +11187,6 @@ final class AppState: ObservableObject {
         case .idle: return playerStatusDescription
         case .restoringHistory: return "正在恢复历史记录"
         case .resolving: return "正在获取或解析播放地址"
-        case .preparingMedia: return "正在获取并验证网盘媒体"
         case .validating: return "正在验证媒体线路"
         case .loading: return "播放器正在连接媒体"
         case .playing: return playerStatusDescription
@@ -12351,10 +12124,6 @@ final class AppState: ObservableObject {
     }
 
     private func resetSearchForConfigurationChange() {
-        cancelNodeAuthorizationMonitoring(
-            presentation: nodeWebPresentation,
-            notifyRuntime: true
-        )
         pendingNodeOperation = nil
         nodeWebPresentation = nil
         cancelSearch()
@@ -12823,8 +12592,7 @@ final class AppState: ObservableObject {
                                 )
                             },
                             configurationIdentity: activeConfigurationID?
-                                .uuidString,
-                            validatesMediaReadiness: true
+                                .uuidString
                         )) ?? UnsupportedSiteProvider(site: site)
                     } else if let baseURL,
                               NodeHTTPSpiderSiteProvider.canHandle(
@@ -12840,8 +12608,7 @@ final class AppState: ObservableObject {
                                 Task { await runtime?.recordDiagnosticEvent(event) }
                             },
                             configurationIdentity: activeConfigurationID?
-                                .uuidString,
-                            validatesMediaReadiness: true
+                                .uuidString
                         )) ?? UnsupportedSiteProvider(site: site)
                     } else {
                         // `okNodeRuntime` is exclusive ownership metadata. A
