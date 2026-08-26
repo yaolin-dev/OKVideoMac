@@ -1855,7 +1855,14 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
     ) -> SitePlaybackResult {
         var result = input
         result.headers = siteHeaders.merging(result.headers)
-        result.validationPolicy = .playerAuthoritative
+        // `parse=1` / `jx=1` is an unresolved page URL, not a provider-owned
+        // media request. Marking every Android result player-authoritative
+        // caused PlaybackResolutionAttemptContext to remove all configured
+        // parsers before resolution, so QY and similar lines could never use
+        // the parser supplied by a TVBox configuration.
+        result.validationPolicy = result.needsParsing
+            ? .preflight
+            : .playerAuthoritative
         return result
     }
 

@@ -152,6 +152,15 @@ final class PlaybackResolverTests: XCTestCase {
         XCTAssertTrue(DefaultMediaProbe.isNodeRuntimeMediaProxy(url))
     }
 
+    func testAndroidBridgeMediaSessionIsNotMisclassifiedAsNodeProxy() throws {
+        let url = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:19978/proxy/media/session-123")
+        )
+
+        XCTAssertTrue(DefaultMediaProbe.isAndroidBridgeMediaSession(url))
+        XCTAssertFalse(DefaultMediaProbe.isNodeRuntimeMediaProxy(url))
+    }
+
     func testAndroidCloudOriginalProxyBypassIsRestrictedToExpectedEndpoint() throws {
         let matchingURL = try XCTUnwrap(
             URL(string: "http://127.0.0.1:16677/proxy/play/%E5%98%9F%E5%98%9F/movie/1.mp4")
@@ -191,6 +200,63 @@ final class PlaybackResolverTests: XCTestCase {
             guard case .resolved(let media) = event else { return false }
             return media.url.absoluteString == "https://media.example.invalid/direct.m3u8"
                 && media.parserName == nil
+        })
+    }
+
+    func testParserRequiredCandidateExplainsMissingParser() async {
+        let resolver = PlaybackResolver(
+            parseExecutor: FixtureParseExecutor(results: [:]),
+            mediaProbe: FixtureMediaProbe(validURLs: [])
+        )
+        let request = PlaybackResolutionRequest(
+            candidates: [candidate(
+                source: "QY",
+                url: "https://player.example.invalid/watch/42",
+                needsParsing: true
+            )],
+            parsers: []
+        )
+
+        let events = await collect(resolver.resolve(request))
+
+        XCTAssertTrue(events.contains { event in
+            guard case .failed(let message) = event else { return false }
+            return message.contains("线路返回待解析地址")
+                && message.contains("没有可用解析器")
+        })
+    }
+
+    func testAndroidBridgeFailureDiagnosesUpstreamBeforeReportingMPVError() async {
+        let url = "http://127.0.0.1:19978/proxy/media/session-123"
+        let resolver = PlaybackResolver(
+            parseExecutor: FixtureParseExecutor(results: [:]),
+            mediaProbe: FixtureMediaProbe(validURLs: [])
+        )
+        let result = SitePlaybackResult(
+            url: url,
+            needsParsing: false,
+            flag: "fixture",
+            validationPolicy: .playerAuthoritative
+        )
+        let request = PlaybackResolutionRequest(
+            candidates: [PlaybackCandidate(
+                siteKey: "fixture",
+                siteName: "Fixture",
+                sourceName: "VIP",
+                episodeName: "Episode 2",
+                result: result
+            )],
+            parsers: []
+        )
+
+        let events = await collect(resolver.resolve(request) { _, _ in
+            throw AppError.playback("loading failed")
+        })
+
+        XCTAssertTrue(events.contains { event in
+            guard case .failed(let message) = event else { return false }
+            return message.contains("Android 内部播放代理")
+                && message.contains("没有返回媒体数据")
         })
     }
 

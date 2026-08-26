@@ -6321,6 +6321,19 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
     }
 
+    func testAndroidPlaybackContractKeepsParserRequiredResultResolvable() {
+        let result = AndroidDexSpiderSiteProvider.applyingPlaybackRequestContract(
+            to: SitePlaybackResult(
+                url: "https://player.example.invalid/watch/42",
+                needsParsing: true,
+                flag: "QY"
+            ),
+            siteHeaders: [:]
+        )
+
+        XCTAssertEqual(result.validationPolicy, .preflight)
+    }
+
     func testAndroidBridgeSendsSiteHeadersOnlyForPlaybackRequests() {
         let headers = [
             "Cookie": "request-scoped-secret",

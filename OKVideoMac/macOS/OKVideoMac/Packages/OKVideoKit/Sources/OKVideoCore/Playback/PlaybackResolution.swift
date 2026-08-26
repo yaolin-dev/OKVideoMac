@@ -171,6 +171,8 @@ public struct DefaultMediaProbe: MediaProbe {
             return true
         }
 
+        let isAndroidBridgeSession = Self.isAndroidBridgeMediaSession(url)
+
         do {
             let response = try await httpClient.send(
                 HTTPRequest(
@@ -182,8 +184,12 @@ public struct DefaultMediaProbe: MediaProbe {
                     retryPolicy: .none
                 )
             )
-            return Self.looksLikeMedia(response)
+            let accepted = Self.looksLikeMedia(response)
                 || MediaURLClassifier.isDirectMediaURL(url.absoluteString)
+            if accepted || !isAndroidBridgeSession { return accepted }
+            // A provider-owned Android loopback server may omit Content-Type
+            // on HEAD. Continue with a bounded Range GET so a real 4xx/5xx
+            // from the bridge is not hidden behind libmpv's `loading failed`.
         } catch let error as HTTPClientError {
             switch error {
             case .statusCode, .invalidResponse:
@@ -207,8 +213,10 @@ public struct DefaultMediaProbe: MediaProbe {
             )
             return Self.looksLikeMedia(response)
                 || MediaURLClassifier.isDirectMediaURL(url.absoluteString)
+                || (isAndroidBridgeSession && !response.body.isEmpty)
         } catch HTTPClientError.responseTooLarge
-                    where MediaURLClassifier.isDirectMediaURL(url.absoluteString) {
+                    where MediaURLClassifier.isDirectMediaURL(url.absoluteString)
+                        || isAndroidBridgeSession {
             // Some VOD providers ignore Range and return a complete, very large
             // media playlist. Receiving more than the probe limit still proves
             // that the direct media endpoint is reachable.
@@ -250,8 +258,21 @@ public struct DefaultMediaProbe: MediaProbe {
               url.port != nil else {
             return false
         }
+        guard !isAndroidBridgeMediaSession(url) else { return false }
         return (url.path.hasPrefix("/spider/") && url.path.contains("/proxy"))
             || url.path.hasPrefix("/proxy/")
+    }
+
+    static func isAndroidBridgeMediaSession(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "http",
+              ["127.0.0.1", "localhost", "::1"].contains(
+                url.host?.lowercased() ?? ""
+              ),
+              url.port == 19_978 else {
+            return false
+        }
+        return url.path.hasPrefix("/proxy/media/")
+            || url.path.hasPrefix("/v1/media-sessions/")
     }
 }
 
@@ -385,6 +406,11 @@ public struct PlaybackResolver {
                 options.append((nil, candidate.result.url))
             }
             options.append(contentsOf: parserOrder.map { ($0, candidate.result.url) })
+            if options.isEmpty, candidate.result.needsParsing {
+                failureMessages.append(
+                    "\(candidate.sourceName)/解析：线路返回待解析地址，但当前配置没有可用解析器"
+                )
+            }
 
             for (parser, inputURL) in options {
                 guard attemptNumber < request.maximumAttempts else {
@@ -460,7 +486,33 @@ public struct PlaybackResolver {
                     )
                     continuation.yield(.state(.loading))
                     if let mediaLoader {
-                        try await mediaLoader(resolved, attempt)
+                        do {
+                            try await mediaLoader(resolved, attempt)
+                        } catch {
+                            if candidate.result.validationPolicy
+                                == .playerAuthoritative,
+                               DefaultMediaProbe.isAndroidBridgeMediaSession(
+                                parsed.url
+                               ) {
+                                do {
+                                    let reachable = try await mediaProbe.validate(
+                                        url: parsed.url,
+                                        headers: parsed.headers
+                                    )
+                                    if !reachable {
+                                        throw AppError.playback(
+                                            "Android 内部播放代理没有返回媒体数据"
+                                        )
+                                    }
+                                } catch {
+                                    throw AppError.playback(
+                                        "Android 内部播放代理无法取得上游媒体："
+                                            + error.localizedDescription
+                                    )
+                                }
+                            }
+                            throw error
+                        }
                         continuation.yield(.state(.playing))
                     }
                     continuation.yield(.resolved(resolved))
