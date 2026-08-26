@@ -266,6 +266,61 @@ public actor SQLiteStore:
         }
     }
 
+    /// Restores one portable configuration and its history as a single unit.
+    /// Existing newer data wins, while every imported history row is remapped
+    /// to the resolved local configuration identity before it is written.
+    public func restoreConfigurationAndHistory(
+        configuration importedConfiguration: StoredConfiguration,
+        history importedHistory: [HistoryRecord]
+    ) throws -> ConfigurationHistoryRestoreResult {
+        try connection.transaction {
+            let existingConfigurations = try readConfigurations()
+            let matchingConfiguration = existingConfigurations.first {
+                $0.id == importedConfiguration.id
+            } ?? existingConfigurations.first {
+                $0.sourceKind == importedConfiguration.sourceKind
+                    && $0.sourceValue == importedConfiguration.sourceValue
+                    && $0.rawData == importedConfiguration.rawData
+            }
+            let targetID = matchingConfiguration?.id
+                ?? importedConfiguration.id
+
+            var restoredConfiguration: StoredConfiguration
+            if let existing = matchingConfiguration,
+               existing.updatedAt > importedConfiguration.updatedAt {
+                restoredConfiguration = existing
+            } else {
+                restoredConfiguration = importedConfiguration
+                restoredConfiguration.id = targetID
+            }
+            restoredConfiguration.isActive = true
+            try writeConfiguration(restoredConfiguration)
+
+            var changedHistoryCount = 0
+            for importedRecord in importedHistory {
+                var record = importedRecord.sanitizedForPersistence()
+                record.configurationID = targetID
+                changedHistoryCount += try writeHistory(
+                    record,
+                    onlyWhenNewer: true
+                )
+            }
+
+            let configurations = try readConfigurations()
+            guard let committedConfiguration = configurations.first(where: {
+                $0.id == targetID
+            }) else {
+                throw AppError.database("备份配置写入后无法读取")
+            }
+            return ConfigurationHistoryRestoreResult(
+                configuration: committedConfiguration,
+                configurations: configurations,
+                consideredHistoryCount: importedHistory.count,
+                changedHistoryCount: changedHistoryCount
+            )
+        }
+    }
+
     public func configurations() throws -> [StoredConfiguration] {
         try readConfigurations()
     }
@@ -469,10 +524,21 @@ public actor SQLiteStore:
 
     public func saveHistory(_ history: HistoryRecord, incognito: Bool) throws {
         guard !incognito else { return }
-        let history = history.sanitizedForPersistence()
+        _ = try writeHistory(history, onlyWhenNewer: false)
+    }
+
+    @discardableResult
+    private func writeHistory(
+        _ originalHistory: HistoryRecord,
+        onlyWhenNewer: Bool
+    ) throws -> Int {
+        let history = originalHistory.sanitizedForPersistence()
         let playbackReference = try history.playbackReference.map {
             String(decoding: try JSONEncoder().encode($0), as: UTF8.self)
         }
+        let mergeGuard = onlyWhenNewer
+            ? " WHERE excluded.watched_at > history.watched_at"
+            : ""
         try connection.execute(
             """
             INSERT INTO history (
@@ -492,6 +558,7 @@ public actor SQLiteStore:
                 duration = excluded.duration,
                 watched_at = excluded.watched_at,
                 playback_reference = excluded.playback_reference
+            \(mergeGuard)
             """,
             bindings: [
                 .text(history.configurationID?.uuidString.lowercased() ?? ""),
@@ -510,6 +577,7 @@ public actor SQLiteStore:
                 .optional(playbackReference)
             ]
         )
+        return connection.lastChangedRowCount()
     }
 
     public func history() throws -> [HistoryRecord] {

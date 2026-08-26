@@ -22,6 +22,7 @@
 		6C218C2C6AAC7BA83B2DB968 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = ED0F982CA57DBEA3A9CBF1FE /* LICENSE */; };
 		6CDA157B1D9D80E812D81034 /* FavoritesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEE09C76DBAB9FF2328487B7 /* FavoritesView.swift */; };
 		6E4F5AA244E052ECA855ECA6 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17AF967B0C8608167C0A2531 /* SettingsView.swift */; };
+		7133DE14D3CE9A20F56BADFF /* PortableBackup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E49D86C26BE1BB599E9FAA5 /* PortableBackup.swift */; };
 		7AD66D8D9EBE463C430F6C00 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 217FFD299EC1C10BDAC94A93 /* Assets.xcassets */; };
 		7D745EAFB36BEFB59EF64D70 /* OKVideoCore in Frameworks */ = {isa = PBXBuildFile; productRef = 2C5893FD1E3264FC60A92F7D /* OKVideoCore */; };
 		7EF03B9631AC9E4D3F4246CC /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7765776920879CB4CD0A540 /* HomeView.swift */; };
@@ -75,6 +76,7 @@
 		7C3F9E94B5A9587197666CC3 /* WKWebSniffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WKWebSniffer.swift; sourceTree = "<group>"; };
 		7EDCFE690A729EE506C02030 /* OKVideoMacTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OKVideoMacTests.swift; sourceTree = "<group>"; };
 		8AB307256CE6590A5494384D /* THIRD_PARTY_LICENSES.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = THIRD_PARTY_LICENSES.md; sourceTree = "<group>"; };
+		9E49D86C26BE1BB599E9FAA5 /* PortableBackup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortableBackup.swift; sourceTree = "<group>"; };
 		A406AD3C9358F59A462C9AB8 /* NodeBundleRuntimeService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeBundleRuntimeService.swift; sourceTree = "<group>"; };
 		ADFC0D6C3C9A30793D7813B3 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		BCC0FBAF18592C722D283D81 /* LiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveView.swift; sourceTree = "<group>"; };
@@ -249,6 +251,7 @@
 				ADFC0D6C3C9A30793D7813B3 /* AppState.swift */,
 				63284B4134B72C9ECD12EE1B /* ImageRepository.swift */,
 				50471B253F948DFB29DE1F74 /* OKVideoMacApp.swift */,
+				9E49D86C26BE1BB599E9FAA5 /* PortableBackup.swift */,
 				115FFC7F2FD723B0F12E0D2D /* RootView.swift */,
 			);
 			path = App;
@@ -536,6 +539,7 @@
 				195449ECEC9D9787554618E1 /* NodeRuntimeContract.swift in Sources */,
 				3F316183E2F6BADC6631BC5D /* OKVideoMacApp.swift in Sources */,
 				34E5D648D9127134BBCC6933 /* PlayerView.swift in Sources */,
+				7133DE14D3CE9A20F56BADFF /* PortableBackup.swift in Sources */,
 				A079B159324210117BB52A09 /* QuickJSSpiderRuntime.swift in Sources */,
 				A3B0AE14D90BC82289D17D61 /* RootView.swift in Sources */,
 				B1BEEF638AD2DF98A1887EA2 /* SearchView.swift in Sources */,
@@ -602,7 +606,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 86;
+				CURRENT_PROJECT_VERSION = 87;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -621,7 +625,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				MARKETING_VERSION = 0.3.61;
+				MARKETING_VERSION = 0.3.62;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -746,7 +750,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 86;
+				CURRENT_PROJECT_VERSION = 87;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -759,7 +763,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				MARKETING_VERSION = 0.3.61;
+				MARKETING_VERSION = 0.3.62;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

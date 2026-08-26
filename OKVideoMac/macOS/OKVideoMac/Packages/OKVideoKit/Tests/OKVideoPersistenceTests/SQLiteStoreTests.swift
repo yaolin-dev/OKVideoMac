@@ -71,6 +71,112 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(activeID, imported.id)
     }
 
+    func testConfigurationHistoryRestoreRemapsAndWritesAtomically() async throws {
+        let store = try makeStore()
+        let imported = StoredConfiguration(
+            name: "Imported",
+            sourceKind: .remote,
+            sourceValue: "https://example.invalid/config.json",
+            rawData: Data(#"{"sites":[]}"#.utf8),
+            updatedAt: Date(timeIntervalSince1970: 100),
+            isActive: true
+        )
+        let first = HistoryRecord(
+            configurationID: imported.id,
+            siteKey: "fixture",
+            videoID: "video-1",
+            title: "First",
+            sourceKey: "line-1",
+            position: 10,
+            watchedAt: Date(timeIntervalSince1970: 110)
+        )
+        let second = HistoryRecord(
+            configurationID: imported.id,
+            siteKey: "fixture",
+            videoID: "video-2",
+            title: "Second",
+            sourceKey: "line-2",
+            position: 20,
+            watchedAt: Date(timeIntervalSince1970: 120)
+        )
+
+        let result = try await store.restoreConfigurationAndHistory(
+            configuration: imported,
+            history: [first, second]
+        )
+        let storedHistory = try await store.history()
+        let activeID = try await store.activeConfiguration()?.id
+
+        XCTAssertEqual(result.configuration.id, imported.id)
+        XCTAssertEqual(result.consideredHistoryCount, 2)
+        XCTAssertEqual(result.changedHistoryCount, 2)
+        XCTAssertEqual(storedHistory.count, 2)
+        XCTAssertTrue(storedHistory.allSatisfy {
+            $0.configurationID == imported.id
+        })
+        XCTAssertEqual(activeID, imported.id)
+    }
+
+    func testConfigurationHistoryRestoreKeepsNewerLocalData() async throws {
+        let store = try makeStore()
+        let configurationID = UUID()
+        let current = StoredConfiguration(
+            id: configurationID,
+            name: "Current",
+            sourceKind: .remote,
+            sourceValue: "https://example.invalid/config.json",
+            rawData: Data(#"{"sites":[{"key":"new"}]}"#.utf8),
+            updatedAt: Date(timeIntervalSince1970: 300),
+            isActive: true
+        )
+        try await store.saveConfiguration(current)
+        try await store.saveHistory(
+            HistoryRecord(
+                configurationID: configurationID,
+                siteKey: "fixture",
+                videoID: "video-1",
+                title: "Current",
+                sourceKey: "line-1",
+                position: 80,
+                watchedAt: Date(timeIntervalSince1970: 300)
+            ),
+            incognito: false
+        )
+        let olderConfiguration = StoredConfiguration(
+            id: configurationID,
+            name: "Older Backup",
+            sourceKind: .remote,
+            sourceValue: "https://example.invalid/config.json",
+            rawData: Data(#"{"sites":[]}"#.utf8),
+            updatedAt: Date(timeIntervalSince1970: 100),
+            isActive: true
+        )
+        let olderHistory = HistoryRecord(
+            configurationID: configurationID,
+            siteKey: "fixture",
+            videoID: "video-1",
+            title: "Older",
+            sourceKey: "line-1",
+            position: 10,
+            watchedAt: Date(timeIntervalSince1970: 100)
+        )
+
+        let result = try await store.restoreConfigurationAndHistory(
+            configuration: olderConfiguration,
+            history: [olderHistory]
+        )
+        let activeConfiguration = try await store.activeConfiguration()
+        let storedConfiguration = try XCTUnwrap(activeConfiguration)
+        let history = try await store.history()
+        let storedHistory = try XCTUnwrap(history.first)
+
+        XCTAssertEqual(result.changedHistoryCount, 0)
+        XCTAssertEqual(storedConfiguration.name, "Current")
+        XCTAssertEqual(storedConfiguration.rawData, current.rawData)
+        XCTAssertEqual(storedHistory.position, 80)
+        XCTAssertEqual(storedHistory.title, "Current")
+    }
+
     func testCancelledImportedConfigurationDoesNotPersistOrDeactivate() async throws {
         let store = try makeStore()
         let original = StoredConfiguration(

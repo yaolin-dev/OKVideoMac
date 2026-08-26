@@ -38,6 +38,25 @@ public struct StoredConfiguration: Equatable, Identifiable, Sendable {
     }
 }
 
+public struct ConfigurationHistoryRestoreResult: Sendable {
+    public var configuration: StoredConfiguration
+    public var configurations: [StoredConfiguration]
+    public var consideredHistoryCount: Int
+    public var changedHistoryCount: Int
+
+    public init(
+        configuration: StoredConfiguration,
+        configurations: [StoredConfiguration],
+        consideredHistoryCount: Int,
+        changedHistoryCount: Int
+    ) {
+        self.configuration = configuration
+        self.configurations = configurations
+        self.consideredHistoryCount = consideredHistoryCount
+        self.changedHistoryCount = changedHistoryCount
+    }
+}
+
 public enum StoredLiveSourceKind: String, Codable, Sendable {
     case remote
     case localFile

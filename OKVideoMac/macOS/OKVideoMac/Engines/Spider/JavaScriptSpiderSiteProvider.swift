@@ -3939,8 +3939,8 @@ struct AndroidInstalledPackageContinuity: Equatable, Sendable {
 }
 
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.37"
-    static let bridgeVersionCode = 49
+    static let bridgeVersion = "0.3.38"
+    static let bridgeVersionCode = 50
     static let bridgeApplicationID = "com.okvideomac.dexbridge"
     static let bridgeCertificateSHA256 =
         "33e95ef23b662f2629a23df892aaff52ae6216f7492cfb559a63d37247a059e0"

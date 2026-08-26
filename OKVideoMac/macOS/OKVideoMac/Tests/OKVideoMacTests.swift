@@ -8,6 +8,105 @@ import OKVideoPersistence
 @testable import OKVideoMac
 
 final class OKVideoMacTests: XCTestCase {
+    func testPortableBackupRoundTripPreservesConfigurationAndHistory() throws {
+        let configurationID = UUID()
+        let configuration = StoredConfiguration(
+            id: configurationID,
+            name: "Fixture",
+            sourceKind: .remote,
+            sourceValue: "https://example.invalid/config.json",
+            baseURL: URL(string: "https://example.invalid/"),
+            rawData: Data(#"{"sites":[]}"#.utf8),
+            updatedAt: Date(timeIntervalSince1970: 100),
+            isActive: true
+        )
+        let history = HistoryRecord(
+            configurationID: configurationID,
+            siteKey: "fixture",
+            videoID: "video-1",
+            title: "Fixture Video",
+            sourceKey: "line-1",
+            sourceName: "Line One",
+            episodeName: "Episode 2",
+            episodeReference: "episode-2",
+            position: 42,
+            duration: 100,
+            watchedAt: Date(timeIntervalSince1970: 200)
+        )
+
+        let data = try PortableBackupCodec.encode(
+            configuration: configuration,
+            history: [history],
+            appVersion: "1.2.3",
+            appBuild: "456",
+            createdAt: Date(timeIntervalSince1970: 300)
+        )
+        let decoded = try PortableBackupCodec.decode(data)
+
+        XCTAssertEqual(decoded.manifest.schemaVersion, 1)
+        XCTAssertEqual(decoded.manifest.historyCount, 1)
+        XCTAssertEqual(decoded.payload.configuration.id, configurationID)
+        XCTAssertEqual(decoded.payload.configuration.name, "Fixture")
+        XCTAssertEqual(decoded.payload.configuration.rawData, configuration.rawData)
+        XCTAssertEqual(decoded.payload.history, [history])
+    }
+
+    func testPortableBackupRejectsPayloadChecksumMismatch() throws {
+        let configuration = StoredConfiguration(
+            name: "Fixture",
+            sourceKind: .pasted,
+            rawData: Data(#"{"sites":[]}"#.utf8),
+            isActive: true
+        )
+        let data = try PortableBackupCodec.encode(
+            configuration: configuration,
+            history: [],
+            appVersion: "1",
+            appBuild: "1"
+        )
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        var envelope = try decoder.decode(
+            PortableBackupEnvelope.self,
+            from: data
+        )
+        envelope.payload.append(0)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        let corrupted = try encoder.encode(envelope)
+
+        XCTAssertThrowsError(try PortableBackupCodec.decode(corrupted)) {
+            XCTAssertEqual($0 as? PortableBackupError, .checksumMismatch)
+        }
+    }
+
+    func testPortableBackupRejectsUnsafeHistoryReference() throws {
+        let configuration = StoredConfiguration(
+            name: "Fixture",
+            sourceKind: .pasted,
+            rawData: Data(#"{"sites":[]}"#.utf8),
+            isActive: true
+        )
+        let unsafeHistory = HistoryRecord(
+            configurationID: configuration.id,
+            siteKey: "fixture",
+            videoID: "video-1",
+            title: "Fixture",
+            mediaReference: "https://example.invalid/signed.m3u8?token=secret"
+        )
+
+        XCTAssertThrowsError(
+            try PortableBackupCodec.encode(
+                configuration: configuration,
+                history: [unsafeHistory],
+                appVersion: "1",
+                appBuild: "1"
+            )
+        ) {
+            XCTAssertEqual($0 as? PortableBackupError, .invalidHistory)
+        }
+    }
+
     func testShortcutRoutePolicyGivesPlayerWindowPriority() {
         XCTAssertEqual(
             ShortcutRoutePolicy.context(

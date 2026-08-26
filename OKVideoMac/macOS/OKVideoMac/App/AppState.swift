@@ -101,6 +101,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     case liveSources
     case playback
     case cache
+    case backup
     case advanced
 
     var id: String { rawValue }
@@ -9107,6 +9108,241 @@ final class AppState: ObservableObject {
             )
         } catch {
             throw AppError.filesystem("无法导出配置：\(error.localizedDescription)")
+        }
+    }
+
+    func exportPortableBackup(
+        to url: URL
+    ) async throws -> PortableBackupPreview {
+        guard let environment, let configuration = activeConfigurationRecord else {
+            throw AppError.configuration("请先导入并启用一个点播配置")
+        }
+        let allHistory = try await environment.database.history()
+        let history = allHistory.filter {
+            $0.configurationID == configuration.id
+        }
+        let appVersion = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String ?? "未知"
+        let appBuild = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleVersion"
+        ) as? String ?? "未知"
+        let createdAt = Date()
+        let data = try await Task.detached(priority: .userInitiated) {
+            try PortableBackupCodec.encode(
+                configuration: configuration,
+                history: history,
+                appVersion: appVersion,
+                appBuild: appBuild,
+                createdAt: createdAt
+            )
+        }.value
+        try writePortableBackupData(data, to: url)
+        return PortableBackupPreview(
+            fileURL: url,
+            createdAt: createdAt,
+            appVersion: appVersion,
+            appBuild: appBuild,
+            configurationName: configuration.name,
+            historyCount: history.count
+        )
+    }
+
+    func inspectPortableBackup(
+        at url: URL
+    ) async throws -> PortableBackupPreview {
+        let data = try readPortableBackupData(from: url)
+        let decoded = try await Task.detached(priority: .userInitiated) {
+            try PortableBackupCodec.decode(data)
+        }.value
+        _ = try ConfigurationParser().parse(
+            decoded.payload.configuration.rawData
+        )
+        return PortableBackupPreview(
+            fileURL: url,
+            createdAt: decoded.manifest.createdAt,
+            appVersion: decoded.manifest.appVersion,
+            appBuild: decoded.manifest.appBuild,
+            configurationName: decoded.payload.configuration.name,
+            historyCount: decoded.payload.history.count
+        )
+    }
+
+    func importPortableBackup(
+        from url: URL
+    ) async throws -> PortableBackupImportSummary {
+        guard let environment else {
+            throw AppError.configuration("应用环境尚未初始化")
+        }
+        let data = try readPortableBackupData(from: url)
+        let decoded = try await Task.detached(priority: .userInitiated) {
+            try PortableBackupCodec.decode(data)
+        }.value
+        _ = try ConfigurationParser().parse(
+            decoded.payload.configuration.rawData
+        )
+
+        // A failed or unwanted merge must always have a user-owned recovery
+        // point. This backup is written before the database transaction.
+        let safetyBackupURL = try await createPreImportSafetyBackup()
+        let result = try await environment.database
+            .restoreConfigurationAndHistory(
+                configuration: decoded.payload.configuration.storedConfiguration,
+                history: decoded.payload.history
+            )
+
+        cancelActiveCloudAuthorizationInteraction(nextIdentity: nil)
+        resetSearchForConfigurationChange()
+        configurationRefreshSessionID = UUID()
+        configurationRefreshTask?.cancel()
+        configurationRefreshTask = nil
+        configurations = result.configurations
+        activeConfigurationRecord = result.configuration
+        activeNodeRuntimeEndpoint = nil
+        nodeRuntimeUnavailableReason = "Node Runtime 将在使用配置时准备"
+        try loadActiveConfigurationContent()
+        if activeConfigurationUsesNodeRuntime {
+            do {
+                try await prepareActiveNodeConfigurationIfNeeded()
+                try loadActiveConfigurationContent()
+            } catch {
+                // The validated snapshot and history have already committed.
+                // Keep restoration successful and let the existing runtime
+                // status UI explain why this provider is temporarily offline.
+                nodeRuntimeUnavailableReason = error.localizedDescription
+                rebuildProviders()
+            }
+        } else {
+            await environment.nodeBundleRuntime.stop()
+        }
+        await loadSearchSiteScope()
+        _ = await prepareActiveConfigurationHome(
+            reportLoadErrors: false,
+            entryReason: .configurationSwitch
+        )
+        try await reloadHistory()
+
+        return PortableBackupImportSummary(
+            configurationName: result.configuration.name,
+            historyCount: result.consideredHistoryCount,
+            changedHistoryCount: result.changedHistoryCount,
+            safetyBackupURL: safetyBackupURL
+        )
+    }
+
+    private func createPreImportSafetyBackup() async throws -> URL? {
+        guard let environment, let configuration = activeConfigurationRecord else {
+            return nil
+        }
+        let allHistory = try await environment.database.history()
+        let history = allHistory.filter {
+            $0.configurationID == configuration.id
+        }
+        let appVersion = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String ?? "未知"
+        let appBuild = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleVersion"
+        ) as? String ?? "未知"
+        let data = try await Task.detached(priority: .utility) {
+            try PortableBackupCodec.encode(
+                configuration: configuration,
+                history: history,
+                appVersion: appVersion,
+                appBuild: appBuild
+            )
+        }.value
+        let directory = environment.directories.applicationSupport
+            .appendingPathComponent("Backups", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
+            let url = directory.appendingPathComponent(
+                "BeforeImport-\(formatter.string(from: Date())).okvideobackup"
+            )
+            try writePortableBackupData(data, to: url)
+            try pruneSafetyBackups(in: directory, keeping: 5)
+            return url
+        } catch let error as AppError {
+            throw error
+        } catch {
+            throw AppError.filesystem(
+                "无法创建导入前安全备份：\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func pruneSafetyBackups(
+        in directory: URL,
+        keeping limit: Int
+    ) throws {
+        let fileManager = FileManager.default
+        let files = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ).filter {
+            $0.lastPathComponent.hasPrefix("BeforeImport-")
+                && $0.pathExtension == "okvideobackup"
+        }.sorted {
+            let left = (try? $0.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            ).contentModificationDate) ?? .distantPast
+            let right = (try? $1.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            ).contentModificationDate) ?? .distantPast
+            return left > right
+        }
+        for url in files.dropFirst(max(1, limit)) {
+            try fileManager.removeItem(at: url)
+        }
+    }
+
+    private func readPortableBackupData(from url: URL) throws -> Data {
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        do {
+            let attributes = try FileManager.default.attributesOfItem(
+                atPath: url.path
+            )
+            if let size = attributes[.size] as? NSNumber,
+               size.intValue > PortableBackupCodec.maximumArchiveByteCount {
+                throw PortableBackupError.fileTooLarge
+            }
+            return try Data(contentsOf: url, options: .mappedIfSafe)
+        } catch let error as PortableBackupError {
+            throw error
+        } catch {
+            throw AppError.filesystem(
+                "无法读取备份文件：\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func writePortableBackupData(
+        _ data: Data,
+        to url: URL
+    ) throws {
+        do {
+            try data.write(to: url, options: [.atomic])
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: url.path
+            )
+        } catch {
+            throw AppError.filesystem(
+                "无法写入备份文件：\(error.localizedDescription)"
+            )
         }
     }
 
