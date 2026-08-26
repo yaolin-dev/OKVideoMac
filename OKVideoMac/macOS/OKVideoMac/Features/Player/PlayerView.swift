@@ -628,15 +628,7 @@ struct PlayerView: View {
     @ViewBuilder
     private var playbackStatusOverlay: some View {
         if shouldShowStatusOverlay {
-            VStack(spacing: 12) {
-                if isFailed {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 34))
-                        .foregroundColor(.orange)
-                } else {
-                    AppActivityIndicator(size: .regular, tint: .white)
-                }
-
+            VStack(spacing: 8) {
                 Text(state.playbackStageDescription)
                     .font(.headline)
                 Text(state.playerNetworkSpeedDescription)
@@ -678,20 +670,10 @@ struct PlayerView: View {
                 }
             }
             .foregroundColor(.white)
-            .padding(.horizontal, 22)
-            .padding(.vertical, 18)
-            .frame(maxWidth: 500)
-            .background(Color.black.opacity(0.38))
-            .background(.ultraThinMaterial)
-            .clipShape(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.white.opacity(0.10), lineWidth: 1)
-            }
-            .shadow(color: .black.opacity(0.72), radius: 3, y: 1)
-            .transition(.opacity.combined(with: .scale(scale: 0.97)))
+            .padding(.horizontal, 24)
+            .frame(maxWidth: 600)
+            .shadow(color: .black.opacity(0.95), radius: 4, y: 1)
+            .transition(.opacity)
         }
     }
 
