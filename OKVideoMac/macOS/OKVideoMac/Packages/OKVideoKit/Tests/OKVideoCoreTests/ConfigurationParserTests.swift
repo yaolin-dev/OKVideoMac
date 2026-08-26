@@ -63,6 +63,85 @@ final class ConfigurationParserTests: XCTestCase {
         }
     }
 
+    func testTVBoxLineAndBlockCommentsAreAcceptedWithoutChangingURLs() throws {
+        let text = #"""
+        {
+          // A disabled TVBox site may remain in a shared configuration.
+          "sites": [
+            {
+              "key": "fixture",
+              "name": "Fixture",
+              "type": 1,
+              "api": "https://example.invalid/api//path"
+            }
+          ],
+          /* Providers also use block comments between top-level fields. */
+          "lives": []
+        }
+        """#
+
+        let configuration = try ConfigurationParser().parse(text)
+
+        XCTAssertEqual(configuration.sites.count, 1)
+        XCTAssertEqual(
+            configuration.sites[0].api,
+            "https://example.invalid/api//path"
+        )
+    }
+
+    func testTVBoxTrailingCommasAreAccepted() throws {
+        let text = #"""
+        {
+          "sites": [
+            {
+              "key": "fixture",
+              "name": "Fixture",
+              "type": 1,
+              "api": "https://example.invalid/api",
+            },
+          ],
+        }
+        """#
+
+        let configuration = try ConfigurationParser().parse(text)
+
+        XCTAssertEqual(configuration.sites.map(\.key), ["fixture"])
+    }
+
+    func testUnterminatedTVBoxBlockCommentIsRejected() {
+        let data = Data(#"{"sites":[] /* never closed"#.utf8)
+
+        XCTAssertThrowsError(try ConfigurationParser().parse(data)) { error in
+            XCTAssertEqual(
+                error as? AppError,
+                .decoding("JSON 块注释未闭合")
+            )
+        }
+    }
+
+    func testDuplicateKeyDetectionStillRunsAfterCommentNormalization() {
+        let data = Data(
+            #"{"sites":[],/* keep validation */"future":{"name":1,"name":2}}"#.utf8
+        )
+
+        XCTAssertThrowsError(try ConfigurationParser().parse(data)) { error in
+            XCTAssertEqual(
+                error as? AppError,
+                .configuration("JSON 对象 future 存在重复字段：name")
+            )
+        }
+    }
+
+    func testJSON5FeaturesRemainRejected() {
+        let singleQuoted = Data("{'sites': []}".utf8)
+        let unquotedKey = Data("{sites: []}".utf8)
+        let nonFinite = Data(#"{"sites":[],"value":NaN}"#.utf8)
+
+        XCTAssertThrowsError(try ConfigurationParser().parse(singleQuoted))
+        XCTAssertThrowsError(try ConfigurationParser().parse(unquotedKey))
+        XCTAssertThrowsError(try ConfigurationParser().parse(nonFinite))
+    }
+
     func testOversizedConfigurationIsRejectedBeforeDecode() {
         let data = Data(repeating: 0x20, count: ConfigurationParser.maximumConfigurationSize + 1)
         XCTAssertThrowsError(try ConfigurationParser().parse(data))

@@ -366,75 +366,86 @@ private struct ConfigurationImportSheet: View {
     @State private var submissionTask: Task<Void, Never>?
     @State private var activeOperationID: UUID?
     @State private var importError: UserFacingError?
+    @State private var importSummary: ConfigurationImportSummary?
+    @State private var liveSyncResult: EmbeddedLiveSourceSyncResult?
+    @State private var liveSyncTask: Task<Void, Never>?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("导入点播配置")
-                .font(.title2)
-            Text("支持 JSON、图片或 Base64 包装格式；直播列表不会在这里导入。")
-                .font(.callout)
-                .foregroundColor(.secondary)
-            Picker("方式", selection: $mode) {
-                ForEach(Mode.allCases) { mode in
-                    Text(mode.rawValue).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .disabled(isSubmitting)
-
-            TextField("点播配置名称（可选）", text: $name)
-                .disabled(isSubmitting)
-            if mode == .remote {
-                ImportURLTextField(
-                    text: $remoteURL,
-                    placeholder: "https://example.com/config.json"
-                )
-                    .frame(height: 22)
-                    .disabled(isSubmitting)
-                Text("普通配置允许 HTTP/HTTPS。远程 Node bundle 建议 HTTPS；最终为 HTTP 时需在 .js.md5 地址后附 #sha256=<64位哈希>，可再附 &source=<源ID>&version=<版本>。")
-                    .font(.caption)
+        ZStack {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("导入点播配置")
+                    .font(.title2)
+                Text("支持 JSON、有限 JSONC、图片或 Base64 包装格式；完成后可选择同步其中的直播列表。")
+                    .font(.callout)
                     .foregroundColor(.secondary)
-            } else {
-                TextEditor(text: $pastedText)
-                    .font(.system(.body, design: .monospaced))
-                    .frame(minHeight: 240)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .stroke(Color.secondary.opacity(0.3))
-                    )
-                    .disabled(isSubmitting)
-                TextField("相对资源基准 URL（可选）", text: $baseURL)
-                    .disabled(isSubmitting)
-            }
-            Spacer()
-            if let importPhase {
-                HStack(spacing: 8) {
-                    AppActivityIndicator(size: .small)
-                    Text(importPhase.title)
-                        .font(.callout)
-                        .foregroundColor(.secondary)
-                }
-            }
-            HStack {
-                Spacer()
-                Button("取消") {
-                    cancelOrDismiss()
-                }
-                .disabled(isCommitInProgress)
-                Button {
-                    importValue()
-                } label: {
-                    if isSubmitting {
-                        HStack(spacing: 6) {
-                            AppActivityIndicator(size: .small)
-                            Text("导入中")
-                        }
-                    } else {
-                        Text("导入")
+                Picker("方式", selection: $mode) {
+                    ForEach(Mode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
                     }
                 }
-                .keyboardShortcut(.defaultAction)
-                .disabled(!canImport)
+                .pickerStyle(.segmented)
+                .disabled(isSubmitting)
+
+                TextField("点播配置名称（可选）", text: $name)
+                    .disabled(isSubmitting)
+                if mode == .remote {
+                    ImportURLTextField(
+                        text: $remoteURL,
+                        placeholder: "https://example.com/config.json"
+                    )
+                    .frame(height: 22)
+                    .disabled(isSubmitting)
+                    Text("普通配置允许 HTTP/HTTPS。远程 Node bundle 建议 HTTPS；最终为 HTTP 时需在 .js.md5 地址后附 #sha256=<64位哈希>，可再附 &source=<源ID>&version=<版本>。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    TextEditor(text: $pastedText)
+                        .font(.system(.body, design: .monospaced))
+                        .frame(minHeight: 240)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(Color.secondary.opacity(0.3))
+                        )
+                        .disabled(isSubmitting)
+                    TextField("相对资源基准 URL（可选）", text: $baseURL)
+                        .disabled(isSubmitting)
+                }
+                Spacer()
+                if let importPhase {
+                    HStack(spacing: 8) {
+                        AppActivityIndicator(size: .small)
+                        Text(importPhase.title)
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                HStack {
+                    Spacer()
+                    Button("取消") {
+                        cancelOrDismiss()
+                    }
+                    .disabled(isCommitInProgress)
+                    Button {
+                        importValue()
+                    } label: {
+                        if isSubmitting {
+                            HStack(spacing: 6) {
+                                AppActivityIndicator(size: .small)
+                                Text("导入中")
+                            }
+                        } else {
+                            Text("导入")
+                        }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canImport)
+                }
+            }
+
+            if let importSummary {
+                completionView(importSummary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(nsColor: .windowBackgroundColor))
             }
         }
         .padding(22)
@@ -509,13 +520,13 @@ private struct ConfigurationImportSheet: View {
             activeOperationID = nil
             submissionTask = nil
             switch result {
-            case .success where !Task.isCancelled:
+            case .success(let summary) where !Task.isCancelled:
                 importPhase = nil
-                isPresented = false
+                importSummary = summary
             case .failure(let error):
                 importPhase = nil
                 importError = error
-            case .cancelled, .success:
+            case .cancelled, .success(_):
                 importPhase = nil
             }
         }
@@ -545,6 +556,104 @@ private struct ConfigurationImportSheet: View {
         importPhase = nil
         if shouldCancel {
             task?.cancel()
+        }
+        liveSyncTask?.cancel()
+        liveSyncTask = nil
+    }
+
+    @ViewBuilder
+    private func completionView(
+        _ summary: ConfigurationImportSummary
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("配置导入成功", systemImage: "checkmark.circle.fill")
+                .font(.title2)
+                .foregroundColor(.green)
+            Text(summary.configurationName)
+                .font(.headline)
+            Text(
+                "已识别 \(summary.siteCount) 个站点："
+                    + "\(summary.javaDexSiteCount) 个需要 Android Bridge，"
+                    + "\(summary.javaScriptSiteCount) 个使用 JavaScript，"
+                    + "\(summary.otherSiteCount) 个使用其他内置能力。"
+            )
+            .fixedSize(horizontal: false, vertical: true)
+
+            if summary.androidBridgeUnavailable,
+               summary.javaDexSiteCount > 0 {
+                Label(
+                    "Android Bridge 当前不可用，\(summary.javaDexSiteCount) 个 Java/Dex 站点已导入但暂时不能运行。",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .foregroundColor(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if summary.liveCount > 0 {
+                Text(
+                    "另外发现 \(summary.liveCount) 个直播配置；"
+                        + "其中 \(summary.synchronizableLiveCount) 个可同步到“直播源”。"
+                        + (summary.unsupportedLiveCount > 0
+                            ? " \(summary.unsupportedLiveCount) 个动态直播插件暂不支持同步。"
+                            : "")
+                )
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let liveSyncResult {
+                Label(
+                    "直播源同步完成：新增 \(liveSyncResult.importedCount) 个，"
+                        + "跳过 \(liveSyncResult.skippedCount) 个，"
+                        + "失败 \(liveSyncResult.failedCount) 个。",
+                    systemImage: liveSyncResult.failedCount == 0
+                        ? "checkmark.circle"
+                        : "exclamationmark.triangle"
+                )
+                .foregroundColor(
+                    liveSyncResult.failedCount == 0 ? .secondary : .orange
+                )
+            }
+
+            Spacer()
+            HStack {
+                Spacer()
+                Button("完成") {
+                    isPresented = false
+                }
+                .disabled(liveSyncTask != nil)
+                if summary.synchronizableLiveCount > 0,
+                   liveSyncResult == nil {
+                    Button {
+                        synchronizeLives(from: summary)
+                    } label: {
+                        if liveSyncTask != nil {
+                            HStack(spacing: 6) {
+                                AppActivityIndicator(size: .small)
+                                Text("正在同步")
+                            }
+                        } else {
+                            Text("同步直播源")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(liveSyncTask != nil)
+                }
+            }
+        }
+    }
+
+    private func synchronizeLives(
+        from summary: ConfigurationImportSummary
+    ) {
+        guard liveSyncTask == nil else { return }
+        liveSyncTask = Task {
+            let result = await state.synchronizeEmbeddedLiveSources(
+                configurationID: summary.configurationID
+            )
+            guard !Task.isCancelled else { return }
+            liveSyncResult = result
+            liveSyncTask = nil
         }
     }
 

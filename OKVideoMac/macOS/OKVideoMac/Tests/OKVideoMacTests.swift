@@ -9750,6 +9750,96 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
     }
 
+    func testConfigurationImportCapabilitySummarySeparatesRuntimesAndLives()
+        throws {
+        let baseURL = try XCTUnwrap(
+            URL(string: "https://configuration.invalid/config.json")
+        )
+        let digest = "1fb66ff185ea35252d2ae2a07d058ec1"
+        let configuration = FongMiConfiguration(
+            spider: "https://configuration.invalid/provider.jpg;md5;\(digest)",
+            sites: [
+                SiteConfiguration(
+                    key: "java",
+                    name: "Java",
+                    type: 3,
+                    api: "csp_Java"
+                ),
+                SiteConfiguration(
+                    key: "javascript",
+                    name: "JavaScript",
+                    type: 3,
+                    api: "https://configuration.invalid/provider.js"
+                ),
+                SiteConfiguration(
+                    key: "api",
+                    name: "API",
+                    type: 1,
+                    api: "https://configuration.invalid/api"
+                )
+            ],
+            lives: [
+                LiveConfiguration(
+                    name: "Remote",
+                    url: "./live.m3u"
+                ),
+                LiveConfiguration(
+                    name: "Dynamic",
+                    api: "csp_DynamicLive"
+                )
+            ]
+        )
+
+        let summary = ConfigurationImportCapabilityAnalyzer.summary(
+            configurationID: UUID(),
+            configurationName: "Fixture",
+            configuration: configuration,
+            baseURL: baseURL,
+            androidBridgeUnavailable: true
+        )
+
+        XCTAssertEqual(summary.siteCount, 3)
+        XCTAssertEqual(summary.javaDexSiteCount, 1)
+        XCTAssertEqual(summary.javaScriptSiteCount, 1)
+        XCTAssertEqual(summary.otherSiteCount, 1)
+        XCTAssertEqual(summary.liveCount, 2)
+        XCTAssertEqual(summary.synchronizableLiveCount, 1)
+        XCTAssertEqual(summary.unsupportedLiveCount, 1)
+        XCTAssertTrue(summary.androidBridgeUnavailable)
+    }
+
+    func testEmbeddedLiveSourceIncludesTopLevelHeaders() throws {
+        let live = LiveConfiguration(
+            name: "Inline",
+            userAgent: "Fixture Agent",
+            referer: "https://referer.invalid/",
+            header: ["X-Default": "one"],
+            groups: [
+                LiveGroupConfiguration(
+                    name: "News",
+                    channels: [
+                        LiveChannelConfiguration(
+                            name: "Channel",
+                            urls: ["https://stream.invalid/live.m3u8"],
+                            header: ["X-Default": "overridden"]
+                        )
+                    ]
+                )
+            ]
+        )
+
+        let playlist = try LiveSourceParser().parse(
+            EmbeddedLiveSourcePolicy.inlineData(for: live)
+        )
+        let headers = try XCTUnwrap(
+            playlist.groups.first?.channels.first?.streams.first?.headers
+        )
+
+        XCTAssertEqual(headers["User-Agent"], "Fixture Agent")
+        XCTAssertEqual(headers["Referer"], "https://referer.invalid/")
+        XCTAssertEqual(headers["X-Default"], "overridden")
+    }
+
     func testContentAddressedLocalJavaScriptNeverRoutesToAndroid() throws {
         let baseURL = try XCTUnwrap(
             URL(string: "https://configuration.invalid/config.json")

@@ -184,9 +184,148 @@ enum PlayerErrorPresentationPolicy {
 }
 
 enum ImportOperationResult {
-    case success
+    case success(ConfigurationImportSummary)
     case cancelled
     case failure(UserFacingError)
+}
+
+struct ConfigurationImportSummary: Equatable {
+    let configurationID: UUID
+    let configurationName: String
+    let siteCount: Int
+    let javaDexSiteCount: Int
+    let javaScriptSiteCount: Int
+    let otherSiteCount: Int
+    let liveCount: Int
+    let synchronizableLiveCount: Int
+    let unsupportedLiveCount: Int
+    let androidBridgeUnavailable: Bool
+}
+
+struct EmbeddedLiveSourceSyncResult: Equatable {
+    let importedCount: Int
+    let skippedCount: Int
+    let failedCount: Int
+}
+
+enum ConfigurationImportCapabilityAnalyzer {
+    static func summary(
+        configurationID: UUID,
+        configurationName: String,
+        configuration: FongMiConfiguration,
+        baseURL: URL?,
+        androidBridgeUnavailable: Bool
+    ) -> ConfigurationImportSummary {
+        var javaDexSiteCount = 0
+        var javaScriptSiteCount = 0
+        for site in configuration.sites {
+            if SiteProviderRoutingPolicy.javaDexJarReference(
+                site: site,
+                configurationSpider: configuration.spider,
+                baseURL: baseURL
+            ) != nil {
+                javaDexSiteCount += 1
+            } else if SiteProviderRoutingPolicy.localJavaScriptURL(
+                site: site,
+                configurationSpider: configuration.spider,
+                baseURL: baseURL
+            ) != nil || SiteProviderRoutingPolicy
+                .hasExclusiveNodeRuntimeOwnership(site) {
+                javaScriptSiteCount += 1
+            }
+        }
+        let synchronizableLiveCount = configuration.lives.filter {
+            EmbeddedLiveSourcePolicy.canSynchronize($0, baseURL: baseURL)
+        }.count
+        return ConfigurationImportSummary(
+            configurationID: configurationID,
+            configurationName: configurationName,
+            siteCount: configuration.sites.count,
+            javaDexSiteCount: javaDexSiteCount,
+            javaScriptSiteCount: javaScriptSiteCount,
+            otherSiteCount: max(
+                0,
+                configuration.sites.count - javaDexSiteCount
+                    - javaScriptSiteCount
+            ),
+            liveCount: configuration.lives.count,
+            synchronizableLiveCount: synchronizableLiveCount,
+            unsupportedLiveCount: configuration.lives.count
+                - synchronizableLiveCount,
+            androidBridgeUnavailable: androidBridgeUnavailable
+        )
+    }
+}
+
+enum EmbeddedLiveSourcePolicy {
+    static func canSynchronize(
+        _ live: LiveConfiguration,
+        baseURL: URL?
+    ) -> Bool {
+        !live.groups.isEmpty || remoteURL(for: live, baseURL: baseURL) != nil
+    }
+
+    static func remoteURL(
+        for live: LiveConfiguration,
+        baseURL: URL?
+    ) -> URL? {
+        for reference in [live.url, live.api].compactMap({ $0 }) {
+            let trimmed = reference.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            guard !trimmed.hasPrefix("csp_") else { continue }
+            guard let url = try? ResourceResolver.resolve(
+                trimmed,
+                relativeTo: baseURL
+            ), ["http", "https"].contains(
+                url.scheme?.lowercased() ?? ""
+            ) else {
+                continue
+            }
+            return url
+        }
+        return nil
+    }
+
+    static func inlineData(for live: LiveConfiguration) throws -> Data {
+        var groups = live.groups
+        var defaults = live.header
+        if let userAgent = live.userAgent {
+            defaults["User-Agent"] = userAgent
+        }
+        if let referer = live.referer {
+            defaults["Referer"] = referer
+        }
+        if let origin = live.origin {
+            defaults["Origin"] = origin
+        }
+        if !defaults.isEmpty {
+            for groupIndex in groups.indices {
+                for channelIndex in groups[groupIndex].channels.indices {
+                    var merged = defaults
+                    merged.merge(
+                        groups[groupIndex].channels[channelIndex].header
+                    ) { _, channelValue in channelValue }
+                    groups[groupIndex].channels[channelIndex].header = merged
+                }
+            }
+        }
+        return try JSONEncoder().encode(groups)
+    }
+
+    static func defaultHeaders(for live: LiveConfiguration) -> [String: String] {
+        var headers = live.header
+        if let userAgent = live.userAgent {
+            headers["User-Agent"] = userAgent
+        }
+        if let referer = live.referer {
+            headers["Referer"] = referer
+        }
+        if let origin = live.origin {
+            headers["Origin"] = origin
+        }
+        return headers
+    }
 }
 
 private struct ImportedConfigurationPayload {
@@ -3399,7 +3538,16 @@ final class AppState: ObservableObject {
                 entryReason: .configurationSwitch
             )
             try await reloadHistory()
-            return .success
+            let summary = ConfigurationImportCapabilityAnalyzer.summary(
+                configurationID: record.id,
+                configurationName: record.name,
+                configuration: payload.loaded.configuration,
+                baseURL: payload.loaded.baseURL,
+                androidBridgeUnavailable: androidRuntimeStatus.phase
+                    == .unavailable
+                    || androidRuntimeStatus.phase == .failed
+            )
+            return .success(summary)
         } catch is CancellationError {
             return .cancelled
         } catch {
@@ -8560,6 +8708,103 @@ final class AppState: ObservableObject {
             show(error, title: "直播源加载失败")
             return false
         }
+    }
+
+    func synchronizeEmbeddedLiveSources(
+        configurationID: UUID
+    ) async -> EmbeddedLiveSourceSyncResult {
+        guard let environment,
+              activeConfigurationRecord?.id == configurationID,
+              let configuration = activeConfiguration else {
+            return EmbeddedLiveSourceSyncResult(
+                importedCount: 0,
+                skippedCount: 0,
+                failedCount: 0
+            )
+        }
+
+        isLoading = true
+        defer { isLoading = false }
+        let baseURL = activeConfigurationRecord?.baseURL
+        var importedCount = 0
+        var skippedCount = 0
+        var failedCount = 0
+
+        for live in configuration.lives {
+            do {
+                try Task.checkCancellation()
+                let record: StoredLiveSource
+                let playlist: LivePlaylist
+
+                if !live.groups.isEmpty {
+                    let data = try EmbeddedLiveSourcePolicy.inlineData(for: live)
+                    if liveSources.contains(where: {
+                        $0.sourceKind == .pasted
+                            && $0.name == live.name
+                            && $0.rawData == data
+                    }) {
+                        skippedCount += 1
+                        continue
+                    }
+                    playlist = try LiveSourceParser().parse(
+                        data,
+                        baseURL: baseURL
+                    )
+                    record = StoredLiveSource(
+                        name: live.name,
+                        sourceKind: .pasted,
+                        baseURL: baseURL,
+                        rawData: data
+                    )
+                } else if let url = EmbeddedLiveSourcePolicy.remoteURL(
+                    for: live,
+                    baseURL: baseURL
+                ) {
+                    if liveSources.contains(where: {
+                        $0.sourceKind == .remote
+                            && $0.sourceValue == url.absoluteString
+                    }) {
+                        skippedCount += 1
+                        continue
+                    }
+                    let loaded = try await environment.liveSourceLoader.load(
+                        .remote(url)
+                    )
+                    playlist = loaded.playlist.applyingDefaultHeaders(
+                        EmbeddedLiveSourcePolicy.defaultHeaders(for: live)
+                    )
+                    record = StoredLiveSource(
+                        name: live.name,
+                        sourceKind: .remote,
+                        sourceValue: url.absoluteString,
+                        baseURL: loaded.baseURL,
+                        rawData: loaded.rawData,
+                        updatedAt: loaded.loadedAt
+                    )
+                } else {
+                    skippedCount += 1
+                    continue
+                }
+
+                try await environment.database.saveLiveSource(record)
+                loadedLivePlaylists[record.id] = playlist
+                startLiveSourceBackgroundWork(for: record, playlist: playlist)
+                importedCount += 1
+            } catch is CancellationError {
+                break
+            } catch {
+                failedCount += 1
+            }
+        }
+
+        if let refreshed = try? await environment.database.liveSources() {
+            liveSources = refreshed
+        }
+        return EmbeddedLiveSourceSyncResult(
+            importedCount: importedCount,
+            skippedCount: skippedCount,
+            failedCount: failedCount
+        )
     }
 
     func loadLiveSource(_ source: StoredLiveSource) async {
