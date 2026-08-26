@@ -12,6 +12,206 @@ final class MultiSiteSearchTests: XCTestCase {
         XCTAssertEqual(MultiSiteSearch().maximumDeepPageSites, 12)
     }
 
+    func testSearchQueryPlanBuildsSafePunctuationFallbacks() {
+        let chinesePlan = SearchQueryPlan("你好，李焕英")
+        XCTAssertEqual(chinesePlan.original, "你好，李焕英")
+        XCTAssertEqual(chinesePlan.fallback, "你好李焕英")
+        XCTAssertEqual(SearchQueryPlan("《楚门的世界》").fallback, "楚门的世界")
+        XCTAssertEqual(SearchQueryPlan("哈利·波特").fallback, "哈利波特")
+        XCTAssertEqual(
+            SearchQueryPlan("Spider: Homecoming").fallback,
+            "Spider Homecoming"
+        )
+    }
+
+    func testSearchQueryPlanPreservesSemanticTitleSymbols() {
+        for keyword in ["C++", "C#", "Spider-Man", "Fate/stay night", "3.15", "K-ON!"] {
+            XCTAssertNil(SearchQueryPlan(keyword).fallback, keyword)
+            XCTAssertNotEqual(
+                SearchTitleNormalizer.comparisonKey(keyword),
+                SearchTitleNormalizer.comparisonKey(
+                    keyword.replacingOccurrences(of: "+", with: "")
+                        .replacingOccurrences(of: "#", with: "")
+                        .replacingOccurrences(of: "/", with: "")
+                        .replacingOccurrences(of: "-", with: "")
+                        .replacingOccurrences(of: ".", with: "")
+                        .replacingOccurrences(of: "!", with: "")
+                ),
+                keyword
+            )
+        }
+    }
+
+    func testOriginalMatchingResultDoesNotTriggerFallback() async {
+        let recorder = AdaptiveSearchInvocationRecorder()
+        let provider = AdaptiveSearchFixtureProvider(
+            recorder: recorder,
+            originalItems: [
+                VideoSummary(
+                    siteKey: "adaptive",
+                    siteName: "Adaptive",
+                    videoID: "original",
+                    title: "你好李焕英"
+                )
+            ],
+            fallbackPages: [:]
+        )
+
+        _ = await collect(
+            MultiSiteSearch().search(
+                providers: [provider],
+                keyword: "你好，李焕英"
+            )
+        )
+
+        let invocations = await recorder.invocations
+        XCTAssertEqual(
+            invocations,
+            [AdaptiveSearchInvocation(keyword: "你好，李焕英", page: 1)]
+        )
+    }
+
+    func testEmptyOriginalResultTriggersOneFallbackAndKeepsFallbackForPaging()
+        async {
+        let recorder = AdaptiveSearchInvocationRecorder()
+        let provider = AdaptiveSearchFixtureProvider(
+            recorder: recorder,
+            originalItems: [],
+            fallbackPages: [
+                1: [
+                    VideoSummary(
+                        siteKey: "adaptive",
+                        siteName: "Adaptive",
+                        videoID: "one",
+                        title: "你好李焕英"
+                    )
+                ],
+                2: [
+                    VideoSummary(
+                        siteKey: "adaptive",
+                        siteName: "Adaptive",
+                        videoID: "two",
+                        title: "你好李焕英 续集"
+                    )
+                ]
+            ]
+        )
+
+        let events = await collect(
+            MultiSiteSearch(maximumPagesPerSite: 2).search(
+                providers: [provider],
+                keyword: "你好，李焕英"
+            )
+        )
+
+        XCTAssertEqual(finalSnapshot(in: events)?.items.map(\.videoID), ["one", "two"])
+        let invocations = await recorder.invocations
+        XCTAssertEqual(
+            invocations,
+            [
+                AdaptiveSearchInvocation(keyword: "你好，李焕英", page: 1),
+                AdaptiveSearchInvocation(keyword: "你好李焕英", page: 1),
+                AdaptiveSearchInvocation(keyword: "你好李焕英", page: 2)
+            ]
+        )
+    }
+
+    func testOriginalProviderFailureDoesNotTriggerPunctuationFallback() async {
+        let recorder = AdaptiveSearchInvocationRecorder()
+        let provider = AdaptiveSearchFixtureProvider(
+            recorder: recorder,
+            originalItems: [],
+            fallbackPages: [:],
+            failsOriginalRequest: true
+        )
+
+        let events = await collect(
+            MultiSiteSearch().search(
+                providers: [provider],
+                keyword: "你好，李焕英"
+            )
+        )
+
+        let invocations = await recorder.invocations
+        XCTAssertEqual(
+            invocations,
+            [AdaptiveSearchInvocation(keyword: "你好，李焕英", page: 1)]
+        )
+        XCTAssertTrue(events.contains { event in
+            guard case .failure(let failure) = event else { return false }
+            return failure.siteKey == provider.site.key
+        })
+    }
+
+    func testUnrelatedOriginalResultsAreMergedWithFallbackWithoutDuplicates()
+        async {
+        let recorder = AdaptiveSearchInvocationRecorder()
+        let duplicate = VideoSummary(
+            siteKey: "adaptive",
+            siteName: "Adaptive",
+            videoID: "duplicate",
+            title: "其他影片"
+        )
+        let provider = AdaptiveSearchFixtureProvider(
+            recorder: recorder,
+            originalItems: [duplicate],
+            fallbackPages: [
+                1: [
+                    duplicate,
+                    VideoSummary(
+                        siteKey: "adaptive",
+                        siteName: "Adaptive",
+                        videoID: "match",
+                        title: "你好李焕英"
+                    )
+                ]
+            ]
+        )
+
+        let events = await collect(
+            MultiSiteSearch().search(
+                providers: [provider],
+                keyword: "你好，李焕英"
+            )
+        )
+
+        XCTAssertEqual(
+            finalSnapshot(in: events)?.items.map(\.videoID),
+            ["match", "duplicate"]
+        )
+        let invocations = await recorder.invocations
+        XCTAssertEqual(invocations.map(\.keyword), ["你好，李焕英", "你好李焕英"])
+    }
+
+    func testRelaxedTitleMatchRanksAheadOfUnrelatedResults() async {
+        let provider = SearchFixtureProvider(
+            site: fixtureSite(key: "punctuation-rank"),
+            result: .success([
+                VideoSummary(
+                    siteKey: "punctuation-rank",
+                    siteName: "Punctuation Rank",
+                    videoID: "unrelated",
+                    title: "其他影片"
+                ),
+                VideoSummary(
+                    siteKey: "punctuation-rank",
+                    siteName: "Punctuation Rank",
+                    videoID: "match",
+                    title: "你好李焕英"
+                )
+            ])
+        )
+
+        let events = await collect(
+            MultiSiteSearch().search(
+                providers: [provider],
+                keyword: "你好，李焕英"
+            )
+        )
+
+        XCTAssertEqual(finalSnapshot(in: events)?.items.first?.videoID, "match")
+    }
+
     func testSearchIsolatesFailureAndDeduplicatesSiteResults() async {
         let good = SearchFixtureProvider(
             site: SiteConfiguration(key: "good", name: "Good", type: 1, api: "https://example.invalid"),
@@ -75,7 +275,7 @@ final class MultiSiteSearchTests: XCTestCase {
         XCTAssertEqual(clusters.first { $0.year == "2025" }?.sources.map(\.videoID), ["10"])
     }
 
-    func testSymbolVariantsRemainSeparateAndPrimarySourceStaysStable() {
+    func testSafePunctuationVariantsClusterAndPrimarySourceStaysStable() {
         let values = [
             VideoSummary(
                 siteKey: "z",
@@ -104,14 +304,13 @@ final class MultiSiteSearchTests: XCTestCase {
 
         let clusters = SearchResultAggregator.cluster(values)
 
-        XCTAssertEqual(clusters.count, 2)
+        XCTAssertEqual(clusters.count, 1)
         XCTAssertEqual(clusters[0].primary?.siteKey, "z")
         XCTAssertEqual(
             clusters[0].primary?.posterURL?.absoluteString,
             "https://example.invalid/first.jpg"
         )
-        XCTAssertEqual(clusters[0].sources.map(\.siteKey), ["z", "a"])
-        XCTAssertEqual(clusters[1].title, "群体")
+        XCTAssertEqual(clusters[0].sources.map(\.siteKey), ["z", "a", "plain"])
     }
 
     func testSearchableValueTwoIsExcludedLikeFongMi() async {
@@ -551,6 +750,35 @@ final class MultiSiteSearchTests: XCTestCase {
         XCTAssertTrue(didCancel)
     }
 
+    func testCancellingConsumerCancelsInFlightFallbackSearch() async throws {
+        let recorder = SearchCancellationRecorder()
+        let provider = FallbackCancellableSearchFixtureProvider(
+            recorder: recorder
+        )
+        let stream = MultiSiteSearch(
+            maximumConcurrency: 1,
+            siteTimeout: 5
+        ).search(providers: [provider], keyword: "你好，李焕英")
+        let consumer = Task {
+            for await _ in stream {}
+        }
+
+        for _ in 0..<100 where !(await recorder.started) {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let didStart = await recorder.started
+        XCTAssertTrue(didStart)
+
+        consumer.cancel()
+        await consumer.value
+
+        for _ in 0..<100 where !(await recorder.cancelled) {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let didCancel = await recorder.cancelled
+        XCTAssertTrue(didCancel)
+    }
+
     func testCancelRejectsLateUncooperativeProviderResult() async throws {
         let recorder = SearchEventRecorder()
         let stream = MultiSiteSearch(
@@ -876,6 +1104,76 @@ private actor SearchPageRecorder {
     }
 }
 
+private struct AdaptiveSearchInvocation: Equatable, Sendable {
+    let keyword: String
+    let page: Int
+}
+
+private actor AdaptiveSearchInvocationRecorder {
+    private(set) var invocations: [AdaptiveSearchInvocation] = []
+
+    func record(keyword: String, page: Int) {
+        invocations.append(
+            AdaptiveSearchInvocation(keyword: keyword, page: page)
+        )
+    }
+}
+
+private struct AdaptiveSearchFixtureProvider: SiteProvider {
+    let recorder: AdaptiveSearchInvocationRecorder
+    let originalItems: [VideoSummary]
+    let fallbackPages: [Int: [VideoSummary]]
+    var failsOriginalRequest = false
+    let site = SiteConfiguration(
+        key: "adaptive",
+        name: "Adaptive",
+        type: 1,
+        api: "https://example.invalid"
+    )
+    let capability: SiteCapability = .standardJSON
+
+    func home() async throws -> SiteHome {
+        SiteHome(categories: [], recommendations: [])
+    }
+
+    func category(
+        id: String,
+        page: Int,
+        filters: [String: String]
+    ) async throws -> VideoPage {
+        VideoPage(items: [], pagination: Pagination(page: page, pageCount: 0))
+    }
+
+    func detail(id: String) async throws -> VideoDetail {
+        throw AppError.site("unused")
+    }
+
+    func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
+        await recorder.record(keyword: keyword, page: page)
+        if keyword == "你好，李焕英" {
+            if failsOriginalRequest {
+                throw AppError.site("fixture failure")
+            }
+            return VideoPage(
+                items: originalItems,
+                pagination: Pagination(page: page, pageCount: 1)
+            )
+        }
+        let items = fallbackPages[page] ?? []
+        return VideoPage(
+            items: items,
+            pagination: Pagination(
+                page: page,
+                pageCount: fallbackPages.keys.max() ?? 1
+            )
+        )
+    }
+
+    func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
+        throw AppError.site("unused")
+    }
+}
+
 private actor SearchCancellationRecorder {
     private(set) var started = false
     private(set) var cancelled = false
@@ -916,6 +1214,54 @@ private struct CancellableSearchFixtureProvider: SiteProvider {
     }
 
     func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
+        await recorder.markStarted()
+        do {
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+        } catch {
+            await recorder.markCancelled()
+            throw error
+        }
+        return VideoPage(items: [], pagination: Pagination(page: page, pageCount: 1))
+    }
+
+    func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
+        throw AppError.site("unused")
+    }
+}
+
+private struct FallbackCancellableSearchFixtureProvider: SiteProvider {
+    let recorder: SearchCancellationRecorder
+    let site = SiteConfiguration(
+        key: "fallback-cancellable",
+        name: "Fallback Cancellable",
+        type: 1,
+        api: "https://example.invalid"
+    )
+    let capability: SiteCapability = .standardJSON
+
+    func home() async throws -> SiteHome {
+        SiteHome(categories: [], recommendations: [])
+    }
+
+    func category(
+        id: String,
+        page: Int,
+        filters: [String: String]
+    ) async throws -> VideoPage {
+        VideoPage(items: [], pagination: Pagination(page: page, pageCount: 0))
+    }
+
+    func detail(id: String) async throws -> VideoDetail {
+        throw AppError.site("unused")
+    }
+
+    func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
+        if keyword == "你好，李焕英" {
+            return VideoPage(
+                items: [],
+                pagination: Pagination(page: page, pageCount: 1)
+            )
+        }
         await recorder.markStarted()
         do {
             try await Task.sleep(nanoseconds: 5_000_000_000)

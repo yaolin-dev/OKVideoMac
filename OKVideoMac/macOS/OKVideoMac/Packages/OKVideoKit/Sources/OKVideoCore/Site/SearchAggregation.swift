@@ -54,12 +54,7 @@ public enum SearchResultAggregator {
     }
 
     private static func clusterKey(_ item: VideoSummary) -> String {
-        let foldedTitle = item.title
-            .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
-            .precomposedStringWithCanonicalMapping
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .split(whereSeparator: \.isWhitespace)
-            .joined(separator: " ")
+        let foldedTitle = SearchTitleNormalizer.comparisonKey(item.title)
         let year = item.year?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nonEmpty ?? "<unknown>"

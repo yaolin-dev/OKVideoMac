@@ -70,7 +70,7 @@ public struct MultiSiteSearchProviderPolicy: Equatable, Sendable {
 }
 
 private enum PageSearchOutcome: Sendable {
-    case page(VideoPage)
+    case page(VideoPage, keyword: String)
     case failure(String)
     case deadlineReached
     case cancelled
@@ -110,6 +110,7 @@ private struct InitialPageResult: Sendable {
 
 private struct BackgroundSearchState: Sendable {
     var providerIndex: Int
+    var keyword: String
     var nextPage: Int
     var explicitPageCount: Int?
     var seenIDs: Set<String>
@@ -146,9 +147,12 @@ private struct FirstPageRelevance: Comparable, Sendable {
 
 private enum SearchMatchTier: Int, Comparable, Sendable {
     case unrelated = 0
-    case contains = 1
-    case prefix = 2
-    case exact = 3
+    case relaxedContains = 1
+    case strictContains = 2
+    case relaxedPrefix = 3
+    case strictPrefix = 4
+    case relaxedExact = 5
+    case strictExact = 6
 
     static func < (lhs: Self, rhs: Self) -> Bool {
         lhs.rawValue < rhs.rawValue
@@ -323,11 +327,11 @@ private struct SearchCandidatePool: Sendable {
         var relevance = FirstPageRelevance(totalCount: items.count)
         for item in items {
             switch matchTier(title: item.title, keyword: keyword) {
-            case .exact:
+            case .strictExact, .relaxedExact:
                 relevance.exactCount += 1
-            case .prefix:
+            case .strictPrefix, .relaxedPrefix:
                 relevance.prefixCount += 1
-            case .contains:
+            case .strictContains, .relaxedContains:
                 relevance.containsCount += 1
             case .unrelated:
                 break
@@ -340,23 +344,27 @@ private struct SearchCandidatePool: Sendable {
         title: String,
         keyword: String
     ) -> SearchMatchTier {
-        let foldedTitle = folded(title)
-        let foldedKeyword = folded(keyword)
-        guard !foldedKeyword.isEmpty else { return .unrelated }
-        if foldedTitle == foldedKeyword { return .exact }
-        if foldedTitle.hasPrefix(foldedKeyword) { return .prefix }
-        if foldedTitle.contains(foldedKeyword) { return .contains }
+        let strictTitle = SearchTitleNormalizer.strictKey(title)
+        let strictKeyword = SearchTitleNormalizer.strictKey(keyword)
+        guard !strictKeyword.isEmpty else { return .unrelated }
+        if strictTitle == strictKeyword { return .strictExact }
+        if strictTitle.hasPrefix(strictKeyword) { return .strictPrefix }
+        if strictTitle.contains(strictKeyword) { return .strictContains }
+
+        let relaxedTitle = SearchTitleNormalizer.comparisonKey(title)
+        let relaxedKeyword = SearchTitleNormalizer.comparisonKey(keyword)
+        guard !relaxedKeyword.isEmpty else { return .unrelated }
+        if relaxedTitle == relaxedKeyword { return .relaxedExact }
+        if relaxedTitle.hasPrefix(relaxedKeyword) { return .relaxedPrefix }
+        if relaxedTitle.contains(relaxedKeyword) { return .relaxedContains }
         return .unrelated
     }
 
-    private static func folded(_ value: String) -> String {
-        value
-            .folding(
-                options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
-                locale: .current
-            )
-            .precomposedStringWithCanonicalMapping
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+    static func hasMeaningfulMatch(
+        in items: [VideoSummary],
+        keyword: String
+    ) -> Bool {
+        items.contains { matchTier(title: $0.title, keyword: keyword) != .unrelated }
     }
 }
 
@@ -478,7 +486,7 @@ public struct MultiSiteSearch {
                         }
                         let provider = enabled[result.providerIndex]
                         switch result.outcome {
-                        case .page(let page):
+                        case .page(let page, let resolvedKeyword):
                             let items = Self.deduplicatedWithinSite(page.items)
                             if pool.ingest(items) {
                                 continuation.yield(.snapshot(pool.snapshot))
@@ -498,6 +506,7 @@ public struct MultiSiteSearch {
                                 backgroundStates.append(
                                     BackgroundSearchState(
                                         providerIndex: result.providerIndex,
+                                        keyword: resolvedKeyword,
                                         nextPage: 2,
                                         explicitPageCount: pageCount,
                                         seenIDs: Set(items.map(\.id)),
@@ -507,7 +516,7 @@ public struct MultiSiteSearch {
                                         ),
                                         relevance: SearchCandidatePool.relevance(
                                             of: items,
-                                            keyword: keyword
+                                            keyword: resolvedKeyword
                                         )
                                     )
                                 )
@@ -589,7 +598,6 @@ public struct MultiSiteSearch {
                                 await searchBackgroundPages(
                                     state: state,
                                     providers: enabled,
-                                    keyword: keyword,
                                     quick: quick,
                                     deadline: deadline,
                                     providerPolicies: providerPolicies
@@ -666,27 +674,68 @@ public struct MultiSiteSearch {
         quick: Bool,
         deadline: Date
     ) async -> PageSearchOutcome {
-        let remaining = deadline.timeIntervalSinceNow
-        guard remaining > 0 else { return .deadlineReached }
+        let plan = SearchQueryPlan(keyword)
         let providerTimeout = Self.effectiveSiteTimeout(
             base: siteTimeout,
             capability: provider.capability
         )
-        let timeout = min(providerTimeout, remaining)
-        return await searchPageWithTimeout(
+        let siteDeadline = min(
+            deadline,
+            Date().addingTimeInterval(providerTimeout)
+        )
+        let remaining = siteDeadline.timeIntervalSinceNow
+        guard remaining > 0 else { return .deadlineReached }
+        let originalOutcome = await searchPageWithTimeout(
             provider: provider,
-            keyword: keyword,
+            keyword: plan.original,
             page: 1,
             quick: quick,
-            timeout: timeout,
-            deadlineLimited: remaining <= providerTimeout
+            timeout: remaining,
+            deadlineLimited: siteDeadline == deadline
         )
+        guard case .page(let originalPage, _) = originalOutcome,
+              let fallback = plan.fallback,
+              originalPage.items.isEmpty
+                || !SearchCandidatePool.hasMeaningfulMatch(
+                    in: originalPage.items,
+                    keyword: plan.original
+                ) else {
+            return originalOutcome
+        }
+
+        let fallbackRemaining = siteDeadline.timeIntervalSinceNow
+        guard fallbackRemaining > 0 else { return originalOutcome }
+        let fallbackOutcome = await searchPageWithTimeout(
+            provider: provider,
+            keyword: fallback,
+            page: 1,
+            quick: quick,
+            timeout: fallbackRemaining,
+            deadlineLimited: siteDeadline == deadline
+        )
+        switch fallbackOutcome {
+        case .page(let fallbackPage, _):
+            var seenIDs = Set<String>()
+            let mergedItems = (originalPage.items + fallbackPage.items).filter {
+                seenIDs.insert($0.id).inserted
+            }
+            return .page(
+                VideoPage(
+                    items: mergedItems,
+                    pagination: fallbackPage.pagination
+                ),
+                keyword: fallback
+            )
+        case .cancelled:
+            return .cancelled
+        case .failure, .deadlineReached:
+            return originalOutcome
+        }
     }
 
     private func searchBackgroundPages(
         state initialState: BackgroundSearchState,
         providers: [SiteProvider],
-        keyword: String,
         quick: Bool,
         deadline: Date,
         providerPolicies: [String: MultiSiteSearchProviderPolicy]
@@ -721,13 +770,13 @@ public struct MultiSiteSearch {
             )
             switch await searchPageWithTimeout(
                 provider: provider,
-                keyword: keyword,
+                keyword: state.keyword,
                 page: state.nextPage,
                 quick: quick,
                 timeout: min(providerTimeout, remaining),
                 deadlineLimited: remaining <= providerTimeout
             ) {
-            case .page(let page):
+            case .page(let page, _):
                 guard !page.items.isEmpty else { break searchLoop }
                 var newItems: [VideoSummary] = []
                 for item in page.items where state.seenIDs.insert(item.id).inserted {
@@ -811,7 +860,7 @@ public struct MultiSiteSearch {
                     page: page,
                     quick: quick
                 )
-                await firstOutcome.resolve(.page(result))
+                await firstOutcome.resolve(.page(result, keyword: keyword))
             } catch is CancellationError {
                 await firstOutcome.resolve(.cancelled)
             } catch {
