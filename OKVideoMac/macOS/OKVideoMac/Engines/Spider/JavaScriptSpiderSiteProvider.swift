@@ -1328,31 +1328,56 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         return result
     }
 
-    /// Restores semantics which are part of a known Java/Dex provider's home
-    /// contract but are not encoded in CatVod's generic `class` objects.
-    ///
-    /// MyDriveGuard always exposes `peizhi` as a host configuration entry.
-    /// After authorization it appends media providers (for example Quark), so
-    /// the old singleton-empty-category fallback can no longer identify that
-    /// entry.  Bind the meaning to the provider class and its stable contract
-    /// identifier; never infer it from a localized display title.
+    /// Adds missing semantics for legacy providers. New providers should emit
+    /// `contentKind`/`tag` directly; this adapter is deliberately confined to
+    /// translating an old wire contract and is not used by the UI to decide
+    /// whether a native dashboard is available.
     static func applyingHomeContract(
         to home: SiteHome,
         site: SiteConfiguration
     ) -> SiteHome {
-        guard MyDriveGuardActionContract.supportsAccountAuthorization(
-            api: site.api
-        ) else {
-            return home
-        }
         var updated = home
-        for index in updated.categories.indices
-        where updated.categories[index].id == "peizhi" {
-            updated.categories[index].contentKind = .action
-        }
         updated.actionItems = updated.actionItems.map(
             MyDriveGuardActionContract.applying(to:)
         )
+        let normalizedAPI = site.api.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let isLegacyDrive = normalizedAPI == MyDriveGuardActionContract.providerAPI
+        let isLegacySettings = normalizedAPI
+            == MyDriveGuardActionContract.configurationCenterAPI
+        if isLegacyDrive || isLegacySettings {
+            for index in updated.categories.indices
+            where updated.categories[index].id == "peizhi" {
+                updated.categories[index].contentKind = .action
+            }
+        }
+        // MyDriveGuard documents all non-configuration classes as actual
+        // browsable directories. FishConfig does not: its similarly named
+        // classes are settings-center columns and must remain unknown so the
+        // host preserves the upstream surface instead of inventing drives.
+        if isLegacyDrive {
+            for index in updated.categories.indices
+            where updated.categories[index].id != "peizhi" {
+                updated.categories[index].contentKind = .media
+            }
+        } else if isLegacySettings {
+            for index in updated.categories.indices {
+                updated.categories[index].contentKind = .action
+            }
+        } else if updated.categories.allSatisfy({ $0.contentKind == nil }),
+                  updated.actionItems.contains(where: {
+                      ["authorization", "command", "order"]
+                          .contains($0.tag?.lowercased() ?? "")
+                  }) {
+            // A provider variant that exposes a configuration action surface
+            // but no category semantics is kept as settings. This is a safe
+            // degradation: every upstream entry remains reachable and none is
+            // advertised as a verified directory.
+            for index in updated.categories.indices {
+                updated.categories[index].contentKind = .action
+            }
+        }
         return updated
     }
 
@@ -1364,14 +1389,11 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         _ home: SiteHome,
         site: SiteConfiguration
     ) -> Bool {
-        guard MyDriveGuardActionContract.supportsAccountAuthorization(
-            api: site.api
-        ) else {
-            return false
-        }
-        return applyingHomeContract(to: home, site: site).categories.contains {
-            $0.resolvedContentKind == .media
-        }
+        let normalized = applyingHomeContract(to: home, site: site)
+        return normalized.categories.contains { $0.contentKind == .media }
+            && normalized.actionItems.contains {
+                $0.tag?.lowercased() == "authorization"
+            }
     }
 
     func homeConfirmsAuthorization(_ home: SiteHome) -> Bool {

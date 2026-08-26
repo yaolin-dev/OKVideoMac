@@ -1720,6 +1720,29 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testHomeActionFallbackPreservesEveryStructuredSettingsEntry() {
+        let home = SiteHome(
+            categories: (1...12).map {
+                VideoCategory(
+                    id: "setting-\($0)",
+                    name: "设置 \($0)",
+                    contentKind: .action
+                )
+            },
+            recommendations: []
+        )
+
+        let enhanced = HomePresentationPolicy.addingActionCategoryFallback(
+            to: home,
+            siteKey: "settings",
+            siteName: "设置中心"
+        )
+
+        XCTAssertEqual(enhanced.actionItems.count, 12)
+        XCTAssertEqual(enhanced.actionItems.first?.itemID, "setting-1")
+        XCTAssertEqual(enhanced.actionItems.last?.itemID, "setting-12")
+    }
+
     func testHomePresentationLoadsStructuralActionCategoryWhenItemsAreNotInline() {
         let home = SiteHome(
             categories: [
@@ -1899,7 +1922,16 @@ final class OKVideoMacTests: XCTestCase {
                 VideoCategory(id: "peizhi", name: "Arbitrary host action"),
                 VideoCategory(id: "夸父", name: "Arbitrary media provider")
             ],
-            recommendations: []
+            recommendations: [],
+            actionItems: [
+                SiteActionItem(
+                    siteKey: site.key,
+                    siteName: site.name,
+                    itemID: "login",
+                    title: "Account chooser",
+                    action: "LoginShow"
+                )
+            ]
         )
 
         let normalized = AndroidDexSpiderSiteProvider.applyingHomeContract(
@@ -2038,6 +2070,47 @@ final class OKVideoMacTests: XCTestCase {
             normalized.categories.first?.resolvedContentKind,
             .media
         )
+        XCTAssertFalse(
+            AndroidDexSpiderSiteProvider.homeConfirmsAuthorization(
+                normalized,
+                site: site
+            )
+        )
+    }
+
+    func testProviderVariantWithStructuredConfigurationActionsPreservesAllEntries() {
+        let site = SiteConfiguration(
+            key: "variant",
+            name: "Renamed Settings",
+            type: 3,
+            api: "csp_RenamedProvider"
+        )
+        let home = SiteHome(
+            categories: (1...10).map {
+                VideoCategory(id: "entry-\($0)", name: "Entry \($0)")
+            },
+            recommendations: [],
+            actionItems: [
+                SiteActionItem(
+                    siteKey: site.key,
+                    siteName: site.name,
+                    itemID: "login",
+                    title: "Login",
+                    action: "LoginShow"
+                )
+            ]
+        )
+
+        let normalized = AndroidDexSpiderSiteProvider.applyingHomeContract(
+            to: home,
+            site: site
+        )
+
+        XCTAssertEqual(
+            normalized.categories.map(\.resolvedContentKind),
+            Array(repeating: .action, count: 10)
+        )
+        XCTAssertEqual(normalized.actionItems.first?.tag, "authorization")
         XCTAssertFalse(
             AndroidDexSpiderSiteProvider.homeConfirmsAuthorization(
                 normalized,
@@ -2800,25 +2873,38 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testCloudAccountStatusSharesAcrossConfigurationsForSameProvider() {
-        let providerID = CloudAccountProviderIdentity.identifier(
+    func testCloudAccountStatusIsScopedByConfigurationAndSource() {
+        let first = CloudAccountProviderIdentity.scopedIdentifier(
             capability: .javaDexSpider,
-            api: "csp_MyDriveGuard"
+            api: "csp_MyDriveGuard",
+            configurationID: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+            siteKey: "drive",
+            sourceFingerprint: "publisher-a"
+        )!
+        let second = CloudAccountProviderIdentity.scopedIdentifier(
+            capability: .javaDexSpider,
+            api: "csp_MyDriveGuard",
+            configurationID: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
+            siteKey: "drive",
+            sourceFingerprint: "publisher-b"
         )!
         var store = CloudAccountStatusStore()
 
         XCTAssertTrue(
             store.observe(
                 title: "我的夸父 - 已登录",
-                providerID: providerID
+                providerID: first
             )
         )
         XCTAssertEqual(
             store.reconciledTitle(
                 "我的夸父 - 未登录",
-                providerID: providerID
+                providerID: first
             ),
             "我的夸父 - 已登录"
+        )
+        XCTAssertNil(
+            store.status(providerID: second, matchingAccountLabel: "夸父")
         )
     }
 
@@ -2846,7 +2932,11 @@ final class OKVideoMacTests: XCTestCase {
             api: "csp_FishConfig"
         )
         let home = SiteHome(
-            categories: [VideoCategory(id: "peizhi", name: "网盘设置")],
+            categories: [
+                VideoCategory(id: "peizhi", name: "网盘设置"),
+                VideoCategory(id: "mobile", name: "移动云盘"),
+                VideoCategory(id: "115", name: "115 网盘")
+            ],
             recommendations: [],
             actionItems: [
                 SiteActionItem(
@@ -2863,10 +2953,18 @@ final class OKVideoMacTests: XCTestCase {
             site: site
         )
         XCTAssertEqual(
-            normalized.categories.first?.resolvedContentKind,
-            .action
+            normalized.categories.map(\.resolvedContentKind),
+            [.action, .action, .action]
         )
         XCTAssertEqual(normalized.actionItems.first?.tag, "authorization")
+        XCTAssertTrue(
+            CloudDriveCapabilityResolver.descriptors(
+                home: normalized,
+                sourceScope: "scope",
+                providerID: "provider",
+                store: CloudAccountStatusStore()
+            ).isEmpty
+        )
     }
 
     func testCloudAccountStatusReconcilesStatusOnlyConfigurationCard() {
@@ -9436,16 +9534,53 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertFalse(description.contains("token"))
     }
 
-    func testMyDriveAccountDoesNotOfferBrowseWithoutCategory() {
-        let account = MyDriveAccountPresentation(
-            kind: .quark,
+    func testCloudDriveDescriptorDoesNotOfferBrowseWithoutCategory() {
+        let account = CloudDriveDescriptor(
+            id: "future-drive",
+            displayName: "未来网盘",
+            accountKey: "future",
+            sourceScope: "scope",
             authorizationStatus: .authenticated,
-            categoryID: nil
+            categoryID: nil,
+            loginAction: nil,
+            logoutAction: nil
         )
 
         XCTAssertEqual(account.authorizationText, "已登录")
         XCTAssertFalse(account.canBrowse)
         XCTAssertEqual(account.availabilityText, "未返回可访问目录")
+    }
+
+    func testCloudDriveResolverSupportsArbitraryDriveCountsWithoutInferringLogin() {
+        let authorization = SiteActionItem(
+            siteKey: "drive",
+            siteName: "Drive",
+            itemID: "login",
+            title: "登录网盘",
+            tag: "authorization",
+            action: "login"
+        )
+        let categories = (1...20).map {
+            VideoCategory(
+                id: "drive-\($0)",
+                name: "网盘 \($0)",
+                contentKind: .media
+            )
+        }
+        let descriptors = CloudDriveCapabilityResolver.descriptors(
+            home: SiteHome(
+                categories: categories,
+                recommendations: [],
+                actionItems: [authorization]
+            ),
+            sourceScope: "scope",
+            providerID: "provider",
+            store: CloudAccountStatusStore()
+        )
+
+        XCTAssertEqual(descriptors.count, 20)
+        XCTAssertTrue(descriptors.allSatisfy(\.canBrowse))
+        XCTAssertTrue(descriptors.allSatisfy { $0.authorizationStatus == nil })
     }
 
     private func videoSummary(id: String) -> VideoSummary {

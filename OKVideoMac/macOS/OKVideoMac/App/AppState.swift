@@ -462,13 +462,16 @@ struct CloudAccountStatusRecord: Codable, Equatable, Sendable {
     var verifiedAt: Date
 }
 
-/// A credential-free, application-wide snapshot of cloud account state.
+/// A credential-free, source-scoped snapshot of cloud account state.
 /// Android remains the sole owner of Cookie/Token data. This store persists
 /// only provider/account identity, a tri-state result and its verification
-/// time so equivalent providers can retain presentation state across source
-/// configuration switches.
+/// time. The provider identity includes configuration, site and publisher
+/// source material so similarly named providers cannot share state.
 struct CloudAccountStatusStore: Codable, Equatable, Sendable {
-    static let settingKey = "cloud.accountStatus.v1"
+    // v1 keyed records only by runtime type + API and allowed unrelated
+    // configurations to share an inferred login state.  v2 is intentionally
+    // loaded from a new key; old inferred records are not migrated.
+    static let settingKey = "cloud.accountStatus.v2"
 
     private(set) var records: [CloudAccountStatusRecord] = []
 
@@ -567,6 +570,22 @@ struct CloudAccountStatusStore: Codable, Equatable, Sendable {
     ) -> Bool {
         set(
             .authenticated,
+            for: CloudAccountStatusKey(
+                providerID: providerID,
+                accountKey: accountKey
+            ),
+            verifiedAt: now
+        )
+    }
+
+    @discardableResult
+    mutating func confirmUnauthenticated(
+        providerID: String,
+        accountKey: String,
+        now: Date = Date()
+    ) -> Bool {
+        set(
+            .unauthenticated,
             for: CloudAccountStatusKey(
                 providerID: providerID,
                 accountKey: accountKey
@@ -774,59 +793,24 @@ enum CloudAccountIdentityPolicy {
     }
 }
 
-enum MyDriveAccountKind: String, CaseIterable, Codable, Identifiable, Sendable {
-    case quark
-    case baidu
-    case uc
-    case ali
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .quark: return "夸克网盘"
-        case .baidu: return "百度网盘"
-        case .uc: return "UC 网盘"
-        case .ali: return "阿里云盘"
-        }
-    }
-
-    var accountLabel: String {
-        switch self {
-        case .quark: return "夸克"
-        case .baidu: return "百度"
-        case .uc: return "UC"
-        case .ali: return "阿里"
-        }
-    }
-
-    var cleanAction: String {
-        switch self {
-        case .quark: return "quarkClean"
-        case .baidu: return "BdClean"
-        case .uc: return "ucClean"
-        case .ali: return "aliClean"
-        }
-    }
-
-    var systemImage: String {
-        switch self {
-        case .quark: return "q.circle.fill"
-        case .baidu: return "b.circle.fill"
-        case .uc: return "u.circle.fill"
-        case .ali: return "a.circle.fill"
-        }
-    }
-}
-
-struct MyDriveAccountPresentation: Identifiable, Equatable, Sendable {
-    let kind: MyDriveAccountKind
+struct CloudDriveDescriptor: Identifiable, Equatable, Sendable {
+    let id: String
+    let displayName: String
+    let accountKey: String
+    let sourceScope: String
     let authorizationStatus: CloudAccountSnapshotStatus?
     let categoryID: String?
+    let loginAction: SiteActionItem?
+    let logoutAction: SiteActionItem?
 
-    var id: String { kind.id }
-    var displayName: String { kind.displayName }
-    var systemImage: String { kind.systemImage }
+    var systemImage: String {
+        let initial = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            .first.map(String.init)?.lowercased() ?? "externaldrive"
+        if initial.range(of: "^[a-z0-9]$", options: .regularExpression) != nil {
+            return "\(initial).circle.fill"
+        }
+        return "externaldrive.fill"
+    }
     var canBrowse: Bool { categoryID != nil }
 
     var authorizationText: String {
@@ -840,6 +824,63 @@ struct MyDriveAccountPresentation: Identifiable, Equatable, Sendable {
 
     var availabilityText: String {
         canBrowse ? "已启用 · 可浏览" : "未返回可访问目录"
+    }
+}
+
+/// Builds the native enhancement only from protocol semantics. Display names
+/// are used for labels and optional action association, never to decide that a
+/// category is a drive or that an account is authenticated.
+enum CloudDriveCapabilityResolver {
+    static func descriptors(
+        home: SiteHome,
+        sourceScope: String,
+        providerID: String,
+        store: CloudAccountStatusStore
+    ) -> [CloudDriveDescriptor] {
+        let directories = home.categories.filter { $0.contentKind == .media }
+        let authorizationActions = home.actionItems.filter {
+            $0.tag?.lowercased() == "authorization"
+        }
+        guard !directories.isEmpty, !authorizationActions.isEmpty else {
+            return []
+        }
+        let commandActions = home.actionItems.filter {
+            $0.tag?.lowercased() == "command"
+        }
+        return directories.map { category in
+            let accountKey = CloudAccountStatusTitlePolicy.accountKey(
+                in: category.name
+            ) ?? category.id.lowercased()
+            let matchingLogin = authorizationActions.first(where: {
+                CloudAccountIdentityPolicy.matches($0.title, category.name)
+                    || CloudAccountIdentityPolicy.matches(
+                        $0.remarks ?? "",
+                        category.name
+                    )
+            }) ?? (authorizationActions.count == 1
+                ? authorizationActions.first
+                : nil)
+            let matchingLogout = commandActions.first(where: {
+                CloudAccountIdentityPolicy.matches($0.title, category.name)
+                    || CloudAccountIdentityPolicy.matches(
+                        $0.remarks ?? "",
+                        category.name
+                    )
+            })
+            return CloudDriveDescriptor(
+                id: "directory:\(category.id.lowercased())",
+                displayName: category.name,
+                accountKey: accountKey,
+                sourceScope: sourceScope,
+                authorizationStatus: store.status(
+                    providerID: providerID,
+                    matchingAccountLabel: accountKey
+                ),
+                categoryID: category.id,
+                loginAction: matchingLogin,
+                logoutAction: matchingLogout
+            )
+        }
     }
 }
 
@@ -982,6 +1023,25 @@ enum CloudAccountProviderIdentity {
         ).lowercased()
         guard !normalizedAPI.isEmpty else { return nil }
         return "\(capability.rawValue.lowercased()):\(normalizedAPI)"
+    }
+
+    static func scopedIdentifier(
+        capability: SiteCapability,
+        api: String,
+        configurationID: UUID,
+        siteKey: String,
+        sourceFingerprint: String
+    ) -> String? {
+        guard let runtime = identifier(capability: capability, api: api) else {
+            return nil
+        }
+        let value = [
+            "v2", configurationID.uuidString.lowercased(),
+            siteKey.lowercased(), runtime, sourceFingerprint
+        ].joined(separator: "|")
+        return SHA256.hash(data: Data(value.utf8)).map {
+            String(format: "%02x", $0)
+        }.joined()
     }
 }
 
@@ -2075,12 +2135,14 @@ enum HomePresentationPolicy {
         siteKey: String,
         siteName: String
     ) -> SiteHome {
-        guard home.actionItems.isEmpty,
-              let category = firstActionCategory(in: home) else {
+        let categories = home.categories.filter {
+            $0.resolvedContentKind == .action
+        }
+        guard home.actionItems.isEmpty, !categories.isEmpty else {
             return home
         }
         var updated = home
-        updated.actionItems = [
+        updated.actionItems = categories.map { category in
             SiteActionItem(
                 siteKey: siteKey,
                 siteName: siteName,
@@ -2088,7 +2150,7 @@ enum HomePresentationPolicy {
                 title: category.name,
                 remarks: "打开配置功能"
             )
-        ]
+        }
         return updated
     }
 
@@ -3294,6 +3356,10 @@ final class AppState: ObservableObject {
         NativeMyDriveOrderEditor?
     @Published private(set) var myDriveDirectoryStatusMessage: String?
     @Published private(set) var isRefreshingMyDriveDirectory = false
+    @Published private(set) var activeCloudDriveDirectory:
+        CloudDriveDescriptor?
+    @Published private(set) var isLoadingCloudDriveDirectory = false
+    @Published private(set) var cloudDriveDirectoryError: String?
     @Published var searchKeyword = ""
     @Published private(set) var homeToolbarSearchFocusRequest: UInt64 = 0
     @Published private(set) var searchResults: [VideoSummary] = []
@@ -3419,6 +3485,8 @@ final class AppState: ObservableObject {
     private var homeLoadSessionID = UUID()
     private var homeContentIdentity: HomeContentIdentity?
     private var categoryLoadSessionID = UUID()
+    private var cloudDriveDirectorySessionID = UUID()
+    private var cloudDriveDirectoryLoadTask: Task<Bool, Never>?
     private var playerEventTask: Task<Void, Never>?
     private var cloudAuthorizationPollTask: Task<Void, Never>?
     private var cloudAuthorizationSessionID = UUID()
@@ -3439,7 +3507,7 @@ final class AppState: ObservableObject {
     private var cloudAuthorizationContext: CloudAuthorizationContext?
     private var cloudAccountStatusStore = CloudAccountStatusStore()
     private var nativeMyDrivePreferenceStore = NativeMyDrivePreferenceStore()
-    private var pendingNativeMyDriveAuthorizationKind: MyDriveAccountKind?
+    private var pendingNativeMyDriveAuthorizationAccountKey: String?
     private var pendingNodeOperation: PendingNodeOperation?
     private var playbackSessionID = UUID()
     private var activePlayerRequestID = UUID()
@@ -4077,6 +4145,12 @@ final class AppState: ObservableObject {
         nativeMyDriveOrderEditor = nil
         myDriveDirectoryStatusMessage = nil
         isRefreshingMyDriveDirectory = false
+        cloudDriveDirectorySessionID = UUID()
+        cloudDriveDirectoryLoadTask?.cancel()
+        cloudDriveDirectoryLoadTask = nil
+        activeCloudDriveDirectory = nil
+        isLoadingCloudDriveDirectory = false
+        cloudDriveDirectoryError = nil
 
         var activeRecord = prepared.record
         activeRecord.isActive = true
@@ -4148,6 +4222,12 @@ final class AppState: ObservableObject {
         homeLoadErrorMessage = nil
         nativeMyDriveOrderEditor = nil
         myDriveDirectoryStatusMessage = nil
+        cloudDriveDirectorySessionID = UUID()
+        cloudDriveDirectoryLoadTask?.cancel()
+        cloudDriveDirectoryLoadTask = nil
+        activeCloudDriveDirectory = nil
+        isLoadingCloudDriveDirectory = false
+        cloudDriveDirectoryError = nil
         selectedSiteKey = key
         discardHomeContentIfNeeded(for: currentHomeContentIdentity)
         selectedCategoryID = nil
@@ -4384,9 +4464,9 @@ final class AppState: ObservableObject {
                     remarks: "打开配置功能"
                 )
             )
-            if let providerID = CloudAccountProviderIdentity.identifier(
-                capability: provider.capability,
-                api: provider.site.api
+            if let providerID = scopedCloudAccountProviderID(
+                provider: provider,
+                siteKey: key
             ) {
                 updatedHome.actionItems = CloudAccountStatusPresentationPolicy
                     .applying(
@@ -4663,80 +4743,99 @@ final class AppState: ObservableObject {
     }
 
     var isNativeMyDriveHome: Bool {
-        guard let key = selectedSiteKey,
-              let provider = providers[key] else { return false }
-        return MyDriveGuardActionContract.supportsAccountAuthorization(
-            api: provider.site.api
-        )
+        !cloudDriveDescriptors.isEmpty
     }
 
-    var myDriveAccountPresentations: [MyDriveAccountPresentation] {
-        guard isNativeMyDriveHome,
-              let providerID = currentCloudAccountProviderID else {
+    var cloudDriveDescriptors: [CloudDriveDescriptor] {
+        guard let home = siteHome,
+              let providerID = currentCloudAccountProviderID,
+              let sourceScope = currentCloudAccountSourceScope else {
             return []
         }
-        let categories = siteHome?.categories.filter {
-            $0.resolvedContentKind == .media
-        } ?? []
-        let available = MyDriveAccountKind.allCases.map(\.id)
+        let descriptors = CloudDriveCapabilityResolver.descriptors(
+            home: home,
+            sourceScope: sourceScope,
+            providerID: providerID,
+            store: cloudAccountStatusStore
+        )
         let preferred = nativeMyDrivePreferenceStore.order(
             for: nativeMyDrivePreferenceNamespace(.cloudProviders)
         )
         let orderedIDs = NativeMyDrivePreferenceStore.reconciledOrder(
             preferred: preferred,
-            available: available
+            available: descriptors.map(\.id)
         )
-        return orderedIDs.compactMap { identifier in
-            guard let kind = MyDriveAccountKind(rawValue: identifier) else {
-                return nil
-            }
-            let category = categories.first {
-                CloudAccountIdentityPolicy.matches(
-                    "\($0.id) \($0.name)",
-                    kind.accountLabel
-                )
-            }
-            let storedStatus = cloudAccountStatusStore.status(
-                providerID: providerID,
-                matchingAccountLabel: kind.accountLabel
-            )
-            return MyDriveAccountPresentation(
-                kind: kind,
-                authorizationStatus: storedStatus ?? (category == nil
-                    ? nil
-                    : .authenticated),
-                categoryID: category?.id
-            )
-        }
+        let byID = Dictionary(uniqueKeysWithValues: descriptors.map { ($0.id, $0) })
+        return orderedIDs.compactMap { byID[$0] }
     }
 
     private var currentCloudAccountProviderID: String? {
         guard let key = selectedSiteKey,
               let provider = providers[key] else { return nil }
-        return CloudAccountProviderIdentity.identifier(
+        return scopedCloudAccountProviderID(provider: provider, siteKey: key)
+    }
+
+    private var currentCloudAccountSourceScope: String? {
+        guard let configuration = activeConfigurationRecord,
+              let key = selectedSiteKey else { return nil }
+        return "\(configuration.id.uuidString.lowercased())|\(key.lowercased())"
+    }
+
+    private func scopedCloudAccountProviderID(
+        provider: SiteProvider,
+        siteKey: String
+    ) -> String? {
+        guard let configuration = activeConfigurationRecord else { return nil }
+        func stableSource(_ value: String?) -> String {
+            guard var value = value?.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ), !value.isEmpty else { return "" }
+            if let range = value.range(
+                of: ";md5;",
+                options: [.caseInsensitive]
+            ) {
+                value = String(value[..<range.lowerBound])
+            }
+            if let fragment = value.firstIndex(of: "#") {
+                value = String(value[..<fragment])
+            }
+            return value.lowercased()
+        }
+        let sourceMaterial = [
+            stableSource(configuration.sourceValue),
+            stableSource(configuration.baseURL?.absoluteString),
+            stableSource(activeConfiguration?.spider),
+            stableSource(provider.site.jar),
+            provider.site.api.lowercased()
+        ].joined(separator: "|")
+        let sourceFingerprint = SHA256.hash(data: Data(sourceMaterial.utf8)).map {
+            String(format: "%02x", $0)
+        }.joined()
+        return CloudAccountProviderIdentity.scopedIdentifier(
             capability: provider.capability,
-            api: provider.site.api
+            api: provider.site.api,
+            configurationID: configuration.id,
+            siteKey: siteKey,
+            sourceFingerprint: sourceFingerprint
         )
     }
 
-    func authorizeMyDriveAccount(_ kind: MyDriveAccountKind) async {
-        guard let item = siteHome?.actionItems.first(where: {
-            $0.action == MyDriveGuardActionContract.loginAction
-        }) else {
+    func authorizeCloudDrive(_ descriptor: CloudDriveDescriptor) async {
+        guard descriptor.sourceScope == currentCloudAccountSourceScope,
+              let item = descriptor.loginAction else {
             show(
                 AppError.site("Spider 未返回可用的网盘授权入口。"),
                 title: "无法授权"
             )
             return
         }
-        pendingNativeMyDriveAuthorizationKind = kind
+        pendingNativeMyDriveAuthorizationAccountKey = descriptor.accountKey
         await performHomeAction(item)
     }
 
-    func logoutMyDriveAccount(_ kind: MyDriveAccountKind) async {
-        guard let item = siteHome?.actionItems.first(where: {
-            $0.action == kind.cleanAction
-        }) else {
+    func logoutCloudDrive(_ descriptor: CloudDriveDescriptor) async {
+        guard descriptor.sourceScope == currentCloudAccountSourceScope,
+              let item = descriptor.logoutAction else {
             show(
                 AppError.site("Spider 未返回该账号的退出操作。"),
                 title: "无法退出登录"
@@ -4747,9 +4846,65 @@ final class AppState: ObservableObject {
         await refreshMyDriveDirectory(waitForCategory: false)
     }
 
-    func openMyDriveAccount(_ account: MyDriveAccountPresentation) async {
-        guard let categoryID = account.categoryID else { return }
-        _ = await loadCategory(id: categoryID)
+    func openCloudDrive(_ descriptor: CloudDriveDescriptor) async {
+        guard descriptor.sourceScope == currentCloudAccountSourceScope,
+              let categoryID = descriptor.categoryID else { return }
+        cloudDriveDirectorySessionID = UUID()
+        let sessionID = cloudDriveDirectorySessionID
+        cloudDriveDirectoryLoadTask?.cancel()
+        activeCloudDriveDirectory = descriptor
+        cloudDriveDirectoryError = nil
+        isLoadingCloudDriveDirectory = true
+        let task = Task { [weak self] in
+            guard let self else { return false }
+            return await self.loadCategory(
+                id: categoryID,
+                reportErrors: false
+            )
+        }
+        cloudDriveDirectoryLoadTask = task
+        Task { [weak self, task] in
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            guard let self,
+                  self.cloudDriveDirectorySessionID == sessionID,
+                  self.isLoadingCloudDriveDirectory else { return }
+            task.cancel()
+            self.categoryLoadSessionID = UUID()
+            self.isLoadingCloudDriveDirectory = false
+            self.cloudDriveDirectoryError = "目录加载超过 15 秒，可重试或返回选择其他入口。"
+        }
+        let loaded = await task.value
+        guard cloudDriveDirectorySessionID == sessionID else { return }
+        isLoadingCloudDriveDirectory = false
+        cloudDriveDirectoryLoadTask = nil
+        if !loaded {
+            cloudDriveDirectoryError = cloudDriveDirectoryError
+                ?? "Spider 没有返回可访问的目录。"
+        } else if categoryPage?.items.isEmpty == false,
+                  let providerID = currentCloudAccountProviderID {
+            if cloudAccountStatusStore.confirmAuthenticated(
+                providerID: providerID,
+                accountKey: descriptor.accountKey
+            ) {
+                await persistCloudAccountStatusStore()
+            }
+        }
+    }
+
+    func closeCloudDriveDirectory() {
+        cloudDriveDirectorySessionID = UUID()
+        cloudDriveDirectoryLoadTask?.cancel()
+        cloudDriveDirectoryLoadTask = nil
+        categoryLoadSessionID = UUID()
+        activeCloudDriveDirectory = nil
+        isLoadingCloudDriveDirectory = false
+        cloudDriveDirectoryError = nil
+        clearCategory()
+    }
+
+    func retryCloudDriveDirectory() async {
+        guard let descriptor = activeCloudDriveDirectory else { return }
+        await openCloudDrive(descriptor)
     }
 
     func refreshMyDriveDirectory() async {
@@ -4795,7 +4950,7 @@ final class AppState: ObservableObject {
         let available: [NativeMyDriveOrderItem]
         switch kind {
         case .cloudProviders:
-            available = MyDriveAccountKind.allCases.map {
+            available = cloudDriveDescriptors.map {
                 NativeMyDriveOrderItem(id: $0.id, title: $0.displayName)
             }
         case .playbackSources:
@@ -5796,9 +5951,9 @@ final class AppState: ObservableObject {
         guard let provider = providers[context.sourceIdentity.siteKey] else {
             return nil
         }
-        return CloudAccountProviderIdentity.identifier(
-            capability: provider.capability,
-            api: provider.site.api
+        return scopedCloudAccountProviderID(
+            provider: provider,
+            siteKey: context.sourceIdentity.siteKey
         )
     }
 
@@ -5900,10 +6055,10 @@ final class AppState: ObservableObject {
         provider: SiteProvider,
         command: String
     ) async {
-        guard let providerID = CloudAccountProviderIdentity.identifier(
-            capability: provider.capability,
-            api: provider.site.api
-        ), cloudAccountStatusStore.invalidate(
+        guard let providerID = scopedCloudAccountProviderID(
+                provider: provider,
+                siteKey: provider.site.key
+              ), cloudAccountStatusStore.invalidate(
             providerID: providerID,
             command: command
         ) else {
@@ -5944,7 +6099,7 @@ final class AppState: ObservableObject {
         cloudAuthorizationPrompt = nil
         cloudAuthorizationInput = ""
         cloudAuthorizationContext = nil
-        pendingNativeMyDriveAuthorizationKind = nil
+        pendingNativeMyDriveAuthorizationAccountKey = nil
         if markPendingPlaybackCancelled, hadPendingPlayback {
             let message = "已取消网盘授权"
             playbackResolutionState = .failed
@@ -6753,19 +6908,19 @@ final class AppState: ObservableObject {
     }
 
     private func submitPendingNativeMyDriveAuthorizationIfPossible() async {
-        guard let kind = pendingNativeMyDriveAuthorizationKind,
+        guard let accountKey = pendingNativeMyDriveAuthorizationAccountKey,
               let context = cloudAuthorizationContext,
               myDriveLoginStatusAction(for: context) != nil,
               cloudAuthorizationPrompt?.lifecyclePhase == .presenting,
               let action = cloudAuthorizationPrompt?.actions.first(where: {
                   CloudAccountIdentityPolicy.matches(
                     $0.providerTitle,
-                    kind.accountLabel
+                    accountKey
                   )
               }) else { return }
         // Clear before submitting because the Bridge may publish several
         // equivalent chooser snapshots while the selected row is opening.
-        pendingNativeMyDriveAuthorizationKind = nil
+        pendingNativeMyDriveAuthorizationAccountKey = nil
         await submitCloudAuthorization(action: action)
     }
 
@@ -7353,7 +7508,7 @@ final class AppState: ObservableObject {
         cloudAuthorizationPrompt = nil
         cloudAuthorizationInput = ""
         cloudAuthorizationContext = nil
-        pendingNativeMyDriveAuthorizationKind = nil
+        pendingNativeMyDriveAuthorizationAccountKey = nil
         configurationInteractionCoordinator.clear(context.operationID)
         configurationInteractionTerminalTask = nil
         switch context.operation {
@@ -7378,7 +7533,7 @@ final class AppState: ObservableObject {
                 await loadSelectedSiteHome(refreshConfigurationIfNeeded: false)
                 if let loginStatusActionToReopen {
                     let refreshedAction = siteHome?.actionItems.first(where: {
-                        $0.action == MyDriveGuardActionContract.loginAction
+                        $0.tag?.lowercased() == "authorization"
                     }) ?? loginStatusActionToReopen
                     await performHomeAction(refreshedAction)
                 }
@@ -7400,7 +7555,7 @@ final class AppState: ObservableObject {
                 }
                 if let loginStatusActionToReopen {
                     let refreshedAction = siteHome?.actionItems.first(where: {
-                        $0.action == MyDriveGuardActionContract.loginAction
+                        $0.tag?.lowercased() == "authorization"
                     }) ?? loginStatusActionToReopen
                     await performHomeAction(refreshedAction)
                 }
@@ -7416,19 +7571,12 @@ final class AppState: ObservableObject {
     private func myDriveLoginStatusAction(
         for context: CloudAuthorizationContext
     ) -> SiteActionItem? {
-        guard let provider = providers[context.sourceIdentity.siteKey]
-                as? AndroidDexSpiderSiteProvider,
-              MyDriveGuardActionContract.supportsAccountAuthorization(
-                api: provider.site.api
-              ) else {
-            return nil
-        }
         switch context.operation {
         case .homeAction(let item)
-            where item.action == MyDriveGuardActionContract.loginAction:
+            where item.tag?.lowercased() == "authorization":
             return item
         case .detail(let summary)
-            where summary.action == MyDriveGuardActionContract.loginAction:
+            where summary.tag?.lowercased() == "authorization":
             return SiteActionItem(summary: summary)
         default:
             return nil
@@ -12315,10 +12463,10 @@ final class AppState: ObservableObject {
         to home: SiteHome,
         identity: HomeContentIdentity
     ) -> SiteHome {
-        guard let provider = providers[identity.siteKey],
-              MyDriveGuardActionContract.supportsAccountAuthorization(
-                api: provider.site.api
-              ) else { return home }
+        guard home.categories.contains(where: { $0.contentKind == .media }),
+              home.actionItems.contains(where: {
+                  $0.tag?.lowercased() == "authorization"
+              }) else { return home }
         var updated = home
         let preferred = nativeMyDrivePreferenceStore.order(
             for: nativeMyDrivePreferenceNamespace(
@@ -12348,29 +12496,13 @@ final class AppState: ObservableObject {
     private static func nativeMyDriveCategoryIdentifier(
         _ category: VideoCategory
     ) -> String {
-        let identity = "\(category.id) \(category.name)"
-        if CloudAccountIdentityPolicy.matches(identity, "夸克") {
-            return MyDriveAccountKind.quark.id
-        }
-        if CloudAccountIdentityPolicy.matches(identity, "百度") {
-            return MyDriveAccountKind.baidu.id
-        }
-        if CloudAccountIdentityPolicy.matches(identity, "UC") {
-            return MyDriveAccountKind.uc.id
-        }
-        if CloudAccountIdentityPolicy.matches(identity, "阿里") {
-            return MyDriveAccountKind.ali.id
-        }
-        return "category:\(category.id.lowercased())"
+        "directory:\(category.id.lowercased())"
     }
 
     private func applyingNativePlaybackSourceOrder(
         to detail: VideoDetail
     ) -> VideoDetail {
-        guard let provider = providers[detail.summary.siteKey],
-              MyDriveGuardActionContract.supportsAccountAuthorization(
-                api: provider.site.api
-              ) else { return detail }
+        guard providers[detail.summary.siteKey] != nil else { return detail }
         let preferred = nativeMyDrivePreferenceStore.order(
             for: nativeMyDrivePreferenceNamespace(
                 .playbackSources,
@@ -12397,9 +12529,7 @@ final class AppState: ObservableObject {
     ) async {
         guard let identity = currentHomeContentIdentity,
               let provider = providers[identity.siteKey],
-              MyDriveGuardActionContract.supportsAccountAuthorization(
-                api: provider.site.api
-              ) else { return }
+              !cloudDriveDescriptors.isEmpty else { return }
         isRefreshingMyDriveDirectory = true
         myDriveDirectoryStatusMessage = waitForCategory
             ? "授权已确认，正在等待 Spider 返回网盘目录…"
@@ -12419,7 +12549,7 @@ final class AppState: ObservableObject {
                     reportCategoryErrors: false
                 )
                 let media = siteHome?.categories.filter {
-                    $0.resolvedContentKind == .media
+                    $0.contentKind == .media
                 } ?? []
                 let category = accountKey.flatMap { target in
                     media.first {
@@ -12432,10 +12562,11 @@ final class AppState: ObservableObject {
                 if let category {
                     myDriveDirectoryStatusMessage = nil
                     if waitForCategory {
-                        _ = await loadCategory(
-                            id: category.id,
-                            reportErrors: false
-                        )
+                        if let descriptor = cloudDriveDescriptors.first(where: {
+                            $0.categoryID == category.id
+                        }) {
+                            await openCloudDrive(descriptor)
+                        }
                     }
                     return
                 }

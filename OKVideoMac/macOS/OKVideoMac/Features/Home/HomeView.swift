@@ -63,7 +63,9 @@ struct HomeView: View {
 
     @ViewBuilder
     private var content: some View {
-        if let key = state.selectedSiteKey,
+        if let descriptor = state.activeCloudDriveDirectory {
+            cloudDriveDirectory(descriptor)
+        } else if let key = state.selectedSiteKey,
            state.siteCapability(for: key) == .unsupportedSpider {
             EmptyStateView(
                 systemImage: "shippingbox",
@@ -238,9 +240,65 @@ struct HomeView: View {
     private var visibleHomeActionItems: [SiteActionItem] {
         let items = state.siteHome?.actionItems ?? []
         guard state.isNativeMyDriveHome else { return items }
+        let representedIDs = Set(state.cloudDriveDescriptors.flatMap {
+            [$0.loginAction?.id, $0.logoutAction?.id].compactMap { $0 }
+        })
         return items.filter {
-            !MyDriveGuardActionContract.isNativeDashboardAction($0.action)
-                || $0.action == "pushCkShow"
+            !representedIDs.contains($0.id)
+                && MyDriveGuardActionContract.nativeOrderKind(for: $0.action) == nil
+        }
+    }
+
+    private func cloudDriveDirectory(
+        _ descriptor: CloudDriveDescriptor
+    ) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(spacing: 12) {
+                    Button {
+                        state.closeCloudDriveDirectory()
+                    } label: {
+                        Label("返回我的网盘", systemImage: "chevron.left")
+                    }
+                    .buttonStyle(.borderless)
+                    Divider().frame(height: 20)
+                    Image(systemName: descriptor.systemImage)
+                        .foregroundColor(.accentColor)
+                    Text(descriptor.displayName)
+                        .font(.title2.weight(.semibold))
+                    Spacer()
+                    Button {
+                        Task { await state.retryCloudDriveDirectory() }
+                    } label: {
+                        Label("刷新", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(state.isLoadingCloudDriveDirectory)
+                }
+
+                if state.isLoadingCloudDriveDirectory {
+                    AppActivityLabel("正在连接 Spider 并加载根目录…")
+                        .frame(maxWidth: .infinity, minHeight: 180)
+                } else if let error = state.cloudDriveDirectoryError {
+                    EmptyStateView(
+                        systemImage: "externaldrive.badge.exclamationmark",
+                        title: "网盘目录暂不可用",
+                        message: error
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 240)
+                } else if let page = state.categoryPage {
+                    if page.items.isEmpty {
+                        EmptyStateView(
+                            systemImage: "folder",
+                            title: "目录为空",
+                            message: "Spider 已响应，但没有返回可显示的文件或目录。"
+                        )
+                        .frame(maxWidth: .infinity, minHeight: 240)
+                    } else {
+                        homeItemGrid(page.items)
+                    }
+                }
+            }
+            .padding()
         }
     }
 
@@ -746,7 +804,7 @@ private struct NativeMyDriveDashboard: View {
                 alignment: .leading,
                 spacing: 12
             ) {
-                ForEach(state.myDriveAccountPresentations) { account in
+                ForEach(state.cloudDriveDescriptors) { account in
                     NativeMyDriveAccountCard(account: account)
                 }
             }
@@ -756,7 +814,7 @@ private struct NativeMyDriveDashboard: View {
 
 private struct NativeMyDriveAccountCard: View {
     @EnvironmentObject private var state: AppState
-    let account: MyDriveAccountPresentation
+    let account: CloudDriveDescriptor
     @State private var confirmsLogout = false
 
     var body: some View {
@@ -784,7 +842,10 @@ private struct NativeMyDriveAccountCard: View {
                     Button("退出登录", role: .destructive) {
                         confirmsLogout = true
                     }
-                    .disabled(account.authorizationStatus == .unauthenticated)
+                    .disabled(
+                        account.authorizationStatus == .unauthenticated
+                            || account.logoutAction == nil
+                    )
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
@@ -799,7 +860,7 @@ private struct NativeMyDriveAccountCard: View {
             HStack {
                 if account.canBrowse {
                     Button("进入网盘") {
-                        Task { await state.openMyDriveAccount(account) }
+                        Task { await state.openCloudDrive(account) }
                     }
                     .buttonStyle(.borderedProminent)
                 }
@@ -808,8 +869,9 @@ private struct NativeMyDriveAccountCard: View {
                         ? "重新授权"
                         : "登录"
                 ) {
-                    Task { await state.authorizeMyDriveAccount(account.kind) }
+                    Task { await state.authorizeCloudDrive(account) }
                 }
+                .disabled(account.loginAction == nil)
                 Spacer()
             }
         }
@@ -823,7 +885,7 @@ private struct NativeMyDriveAccountCard: View {
         .alert("退出\(account.displayName)？", isPresented: $confirmsLogout) {
             Button("取消", role: .cancel) {}
             Button("退出登录", role: .destructive) {
-                Task { await state.logoutMyDriveAccount(account.kind) }
+                Task { await state.logoutCloudDrive(account) }
             }
         } message: {
             Text("将由 Spider 删除该网盘的本地授权信息。")
@@ -928,7 +990,7 @@ private struct NativeMyDriveOrderSheet: View {
         let defaults: [String]
         switch editor.kind {
         case .cloudProviders:
-            defaults = MyDriveAccountKind.allCases.map(\.id)
+            defaults = state.cloudDriveDescriptors.map(\.id)
         case .playbackSources:
             defaults = ["original", "unlimited", "smart"]
         }
