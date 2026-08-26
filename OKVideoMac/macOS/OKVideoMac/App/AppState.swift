@@ -774,6 +774,157 @@ enum CloudAccountIdentityPolicy {
     }
 }
 
+enum MyDriveAccountKind: String, CaseIterable, Codable, Identifiable, Sendable {
+    case quark
+    case baidu
+    case uc
+    case ali
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .quark: return "夸克网盘"
+        case .baidu: return "百度网盘"
+        case .uc: return "UC 网盘"
+        case .ali: return "阿里云盘"
+        }
+    }
+
+    var accountLabel: String {
+        switch self {
+        case .quark: return "夸克"
+        case .baidu: return "百度"
+        case .uc: return "UC"
+        case .ali: return "阿里"
+        }
+    }
+
+    var cleanAction: String {
+        switch self {
+        case .quark: return "quarkClean"
+        case .baidu: return "BdClean"
+        case .uc: return "ucClean"
+        case .ali: return "aliClean"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .quark: return "q.circle.fill"
+        case .baidu: return "b.circle.fill"
+        case .uc: return "u.circle.fill"
+        case .ali: return "a.circle.fill"
+        }
+    }
+}
+
+struct MyDriveAccountPresentation: Identifiable, Equatable, Sendable {
+    let kind: MyDriveAccountKind
+    let authorizationStatus: CloudAccountSnapshotStatus?
+    let categoryID: String?
+
+    var id: String { kind.id }
+    var displayName: String { kind.displayName }
+    var systemImage: String { kind.systemImage }
+    var canBrowse: Bool { categoryID != nil }
+
+    var authorizationText: String {
+        switch authorizationStatus {
+        case .authenticated: return "已登录"
+        case .unauthenticated: return "未登录"
+        case .pending: return "正在确认"
+        case nil: return "状态未确认"
+        }
+    }
+
+    var availabilityText: String {
+        canBrowse ? "已启用 · 可浏览" : "未返回可访问目录"
+    }
+}
+
+enum NativeMyDriveOrderKind: String, Codable, Identifiable, Sendable {
+    case cloudProviders
+    case playbackSources
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .cloudProviders: return "网盘优先级"
+        case .playbackSources: return "播放线路优先级"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .cloudProviders:
+            return "调整宿主中网盘入口的显示与选择顺序。"
+        case .playbackSources:
+            return "详情返回后按此顺序排列可见播放线路。"
+        }
+    }
+}
+
+struct NativeMyDriveOrderItem: Identifiable, Equatable, Codable, Sendable {
+    let id: String
+    let title: String
+}
+
+struct NativeMyDriveOrderEditor: Identifiable, Equatable, Sendable {
+    let kind: NativeMyDriveOrderKind
+    let items: [NativeMyDriveOrderItem]
+
+    var id: String { kind.id }
+    var title: String { kind.title }
+    var subtitle: String { kind.subtitle }
+}
+
+struct NativeMyDrivePreferenceStore: Codable, Equatable, Sendable {
+    static let settingKey = "mydrive.nativePreferences.v1"
+    private(set) var orders: [String: [String]] = [:]
+
+    init(orders: [String: [String]] = [:]) {
+        self.orders = orders
+    }
+
+    init?(setting: JSONValue) {
+        guard case .string(let encoded) = setting,
+              let data = Data(base64Encoded: encoded),
+              let decoded = try? JSONDecoder().decode(Self.self, from: data)
+        else { return nil }
+        self = decoded
+    }
+
+    var setting: JSONValue? {
+        guard let data = try? JSONEncoder().encode(self) else { return nil }
+        return .string(data.base64EncodedString())
+    }
+
+    func order(for namespace: String) -> [String] {
+        orders[namespace] ?? []
+    }
+
+    mutating func setOrder(_ identifiers: [String], for namespace: String) {
+        orders[namespace] = Self.reconciledOrder(
+            preferred: identifiers,
+            available: identifiers
+        )
+    }
+
+    static func reconciledOrder(
+        preferred: [String],
+        available: [String]
+    ) -> [String] {
+        let availableSet = Set(available)
+        var seen = Set<String>()
+        let retained = preferred.filter {
+            availableSet.contains($0) && seen.insert($0).inserted
+        }
+        return retained + available.filter { seen.insert($0).inserted }
+    }
+}
+
 enum CloudAccountStatusPresentationPolicy {
     static func applying(
         to items: [SiteActionItem],
@@ -3139,6 +3290,10 @@ final class AppState: ObservableObject {
     @Published private(set) var categoryPage: VideoPage?
     @Published private(set) var homePresentationSelection:
         HomePresentationSelection = .empty
+    @Published private(set) var nativeMyDriveOrderEditor:
+        NativeMyDriveOrderEditor?
+    @Published private(set) var myDriveDirectoryStatusMessage: String?
+    @Published private(set) var isRefreshingMyDriveDirectory = false
     @Published var searchKeyword = ""
     @Published private(set) var homeToolbarSearchFocusRequest: UInt64 = 0
     @Published private(set) var searchResults: [VideoSummary] = []
@@ -3283,6 +3438,8 @@ final class AppState: ObservableObject {
     private var playerEpisodePreparationTask: Task<Void, Never>?
     private var cloudAuthorizationContext: CloudAuthorizationContext?
     private var cloudAccountStatusStore = CloudAccountStatusStore()
+    private var nativeMyDrivePreferenceStore = NativeMyDrivePreferenceStore()
+    private var pendingNativeMyDriveAuthorizationKind: MyDriveAccountKind?
     private var pendingNodeOperation: PendingNodeOperation?
     private var playbackSessionID = UUID()
     private var activePlayerRequestID = UUID()
@@ -3917,6 +4074,9 @@ final class AppState: ObservableObject {
         homeLoadSessionID = UUID()
         categoryLoadSessionID = UUID()
         detailLoadSessionID = UUID()
+        nativeMyDriveOrderEditor = nil
+        myDriveDirectoryStatusMessage = nil
+        isRefreshingMyDriveDirectory = false
 
         var activeRecord = prepared.record
         activeRecord.isActive = true
@@ -3986,6 +4146,8 @@ final class AppState: ObservableObject {
         categoryPaginationError = nil
         isHomeLoading = true
         homeLoadErrorMessage = nil
+        nativeMyDriveOrderEditor = nil
+        myDriveDirectoryStatusMessage = nil
         selectedSiteKey = key
         discardHomeContentIfNeeded(for: currentHomeContentIdentity)
         selectedCategoryID = nil
@@ -4332,7 +4494,7 @@ final class AppState: ObservableObject {
                 await persistSelectedSitePreference(key)
             }
             let didApplyPresentation = await applyHomePresentation(
-                loaded,
+                siteHome ?? loaded,
                 identity: contentIdentity,
                 reportCategoryErrors: reportErrors
             )
@@ -4424,7 +4586,7 @@ final class AppState: ObservableObject {
             pendingDetailSummary = nil
             switch selection {
             case .detail(let detail):
-                selectedDetail = detail
+                selectedDetail = applyingNativePlaybackSourceOrder(to: detail)
             case .search(let query):
                 selectedDetail = nil
                 presentHomeSearch()
@@ -4500,7 +4662,199 @@ final class AppState: ObservableObject {
         }
     }
 
+    var isNativeMyDriveHome: Bool {
+        guard let key = selectedSiteKey,
+              let provider = providers[key] else { return false }
+        return MyDriveGuardActionContract.supportsAccountAuthorization(
+            api: provider.site.api
+        )
+    }
+
+    var myDriveAccountPresentations: [MyDriveAccountPresentation] {
+        guard isNativeMyDriveHome,
+              let providerID = currentCloudAccountProviderID else {
+            return []
+        }
+        let categories = siteHome?.categories.filter {
+            $0.resolvedContentKind == .media
+        } ?? []
+        let available = MyDriveAccountKind.allCases.map(\.id)
+        let preferred = nativeMyDrivePreferenceStore.order(
+            for: nativeMyDrivePreferenceNamespace(.cloudProviders)
+        )
+        let orderedIDs = NativeMyDrivePreferenceStore.reconciledOrder(
+            preferred: preferred,
+            available: available
+        )
+        return orderedIDs.compactMap { identifier in
+            guard let kind = MyDriveAccountKind(rawValue: identifier) else {
+                return nil
+            }
+            let category = categories.first {
+                CloudAccountIdentityPolicy.matches(
+                    "\($0.id) \($0.name)",
+                    kind.accountLabel
+                )
+            }
+            let storedStatus = cloudAccountStatusStore.status(
+                providerID: providerID,
+                matchingAccountLabel: kind.accountLabel
+            )
+            return MyDriveAccountPresentation(
+                kind: kind,
+                authorizationStatus: storedStatus ?? (category == nil
+                    ? nil
+                    : .authenticated),
+                categoryID: category?.id
+            )
+        }
+    }
+
+    private var currentCloudAccountProviderID: String? {
+        guard let key = selectedSiteKey,
+              let provider = providers[key] else { return nil }
+        return CloudAccountProviderIdentity.identifier(
+            capability: provider.capability,
+            api: provider.site.api
+        )
+    }
+
+    func authorizeMyDriveAccount(_ kind: MyDriveAccountKind) async {
+        guard let item = siteHome?.actionItems.first(where: {
+            $0.action == MyDriveGuardActionContract.loginAction
+        }) else {
+            show(
+                AppError.site("Spider 未返回可用的网盘授权入口。"),
+                title: "无法授权"
+            )
+            return
+        }
+        pendingNativeMyDriveAuthorizationKind = kind
+        await performHomeAction(item)
+    }
+
+    func logoutMyDriveAccount(_ kind: MyDriveAccountKind) async {
+        guard let item = siteHome?.actionItems.first(where: {
+            $0.action == kind.cleanAction
+        }) else {
+            show(
+                AppError.site("Spider 未返回该账号的退出操作。"),
+                title: "无法退出登录"
+            )
+            return
+        }
+        await performHomeAction(item)
+        await refreshMyDriveDirectory(waitForCategory: false)
+    }
+
+    func openMyDriveAccount(_ account: MyDriveAccountPresentation) async {
+        guard let categoryID = account.categoryID else { return }
+        _ = await loadCategory(id: categoryID)
+    }
+
+    func refreshMyDriveDirectory() async {
+        await refreshMyDriveDirectory(waitForCategory: false)
+    }
+
+    func presentNativeMyDriveOrderEditor(_ kind: NativeMyDriveOrderKind) {
+        nativeMyDriveOrderEditor = NativeMyDriveOrderEditor(
+            kind: kind,
+            items: nativeMyDriveOrderItems(for: kind)
+        )
+    }
+
+    func dismissNativeMyDriveOrderEditor() {
+        nativeMyDriveOrderEditor = nil
+    }
+
+    func saveNativeMyDriveOrder(
+        kind: NativeMyDriveOrderKind,
+        items: [NativeMyDriveOrderItem]
+    ) async {
+        nativeMyDrivePreferenceStore.setOrder(
+            items.map(\.id),
+            for: nativeMyDrivePreferenceNamespace(kind)
+        )
+        await persistNativeMyDrivePreferenceStore()
+        nativeMyDriveOrderEditor = nil
+        if let home = siteHome,
+           let identity = currentHomeContentIdentity {
+            siteHome = applyingNativeMyDriveCategoryOrder(
+                to: home,
+                identity: identity
+            )
+        }
+        if let detail = selectedDetail {
+            selectedDetail = applyingNativePlaybackSourceOrder(to: detail)
+        }
+    }
+
+    private func nativeMyDriveOrderItems(
+        for kind: NativeMyDriveOrderKind
+    ) -> [NativeMyDriveOrderItem] {
+        let available: [NativeMyDriveOrderItem]
+        switch kind {
+        case .cloudProviders:
+            available = MyDriveAccountKind.allCases.map {
+                NativeMyDriveOrderItem(id: $0.id, title: $0.displayName)
+            }
+        case .playbackSources:
+            if let sources = selectedDetail?.playSources, !sources.isEmpty {
+                available = sources.map {
+                    NativeMyDriveOrderItem(
+                        id: Self.nativePlaybackSourceIdentifier($0),
+                        title: $0.name
+                    )
+                }
+            } else {
+                available = [
+                    NativeMyDriveOrderItem(id: "original", title: "原画"),
+                    NativeMyDriveOrderItem(id: "unlimited", title: "无限"),
+                    NativeMyDriveOrderItem(id: "smart", title: "智能转码")
+                ]
+            }
+        }
+        let preferred = nativeMyDrivePreferenceStore.order(
+            for: nativeMyDrivePreferenceNamespace(kind)
+        )
+        let orderedIDs = NativeMyDrivePreferenceStore.reconciledOrder(
+            preferred: preferred,
+            available: available.map(\.id)
+        )
+        let byID = Dictionary(uniqueKeysWithValues: available.map { ($0.id, $0) })
+        return orderedIDs.compactMap { byID[$0] }
+    }
+
+    private func nativeMyDrivePreferenceNamespace(
+        _ kind: NativeMyDriveOrderKind,
+        siteKey: String? = nil
+    ) -> String {
+        let configurationID = activeConfigurationRecord?.id.uuidString
+            .lowercased() ?? "none"
+        return "\(configurationID)|\(siteKey ?? selectedSiteKey ?? "none")|\(kind.rawValue)"
+    }
+
+    private static func nativePlaybackSourceIdentifier(
+        _ source: PlaySource
+    ) -> String {
+        let normalized = source.name.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).lowercased()
+        if normalized.contains("原画") { return "original" }
+        if normalized.contains("无限") { return "unlimited" }
+        if normalized.contains("智能") { return "smart" }
+        return source.referenceIdentity?.nonEmpty
+            ?? "name:\(normalized)"
+    }
+
     func performHomeAction(_ item: SiteActionItem) async {
+        if isNativeMyDriveHome,
+           let kind = MyDriveGuardActionContract.nativeOrderKind(
+               for: item.action
+           ) {
+            presentNativeMyDriveOrderEditor(kind)
+            return
+        }
         guard let provider = providers[item.siteKey] else {
             show(
                 AppError.site("该功能所属站点当前不可用"),
@@ -5590,6 +5944,7 @@ final class AppState: ObservableObject {
         cloudAuthorizationPrompt = nil
         cloudAuthorizationInput = ""
         cloudAuthorizationContext = nil
+        pendingNativeMyDriveAuthorizationKind = nil
         if markPendingPlaybackCancelled, hadPendingPlayback {
             let message = "已取消网盘授权"
             playbackResolutionState = .failed
@@ -6394,6 +6749,24 @@ final class AppState: ObservableObject {
         if updated != previous {
             cloudAuthorizationPrompt = updated
         }
+        await submitPendingNativeMyDriveAuthorizationIfPossible()
+    }
+
+    private func submitPendingNativeMyDriveAuthorizationIfPossible() async {
+        guard let kind = pendingNativeMyDriveAuthorizationKind,
+              let context = cloudAuthorizationContext,
+              myDriveLoginStatusAction(for: context) != nil,
+              cloudAuthorizationPrompt?.lifecyclePhase == .presenting,
+              let action = cloudAuthorizationPrompt?.actions.first(where: {
+                  CloudAccountIdentityPolicy.matches(
+                    $0.providerTitle,
+                    kind.accountLabel
+                  )
+              }) else { return }
+        // Clear before submitting because the Bridge may publish several
+        // equivalent chooser snapshots while the selected row is opening.
+        pendingNativeMyDriveAuthorizationKind = nil
+        await submitCloudAuthorization(action: action)
     }
 
     private func startCloudAuthorizationPolling() {
@@ -6932,11 +7305,20 @@ final class AppState: ObservableObject {
             }
             return false
         }()
-        let loginStatusActionToReopen = completionSemantic.isAuthorization
+        let myDriveLoginAction = completionSemantic.isAuthorization
             ? myDriveLoginStatusAction(for: context)
             : nil
+        let usesNativeMyDriveDashboard = myDriveLoginAction != nil
+            && isNativeMyDriveHome
+        let myDriveAuthorizationAccountKey = context
+            .myDriveAuthorizationTarget?.accountKey
+        let loginStatusActionToReopen = usesNativeMyDriveDashboard
+            ? nil
+            : myDriveLoginAction
         let completionStatus: String
-        if loginStatusActionToReopen != nil {
+        if usesNativeMyDriveDashboard {
+            completionStatus = "授权已确认，正在等待网盘目录…"
+        } else if loginStatusActionToReopen != nil {
             completionStatus = "二维码流程已结束，正在刷新账号状态…"
         } else if isPlaybackOperation && completionSemantic.isAuthorization {
             completionStatus = "授权成功，正在继续播放…"
@@ -6953,7 +7335,8 @@ final class AppState: ObservableObject {
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = nil
         let completionDelay: UInt64
-        if loginStatusActionToReopen != nil
+        if usesNativeMyDriveDashboard
+            || loginStatusActionToReopen != nil
             || (isPlaybackOperation && completionSemantic.isAuthorization) {
             completionDelay = 350_000_000
         } else if completionSemantic.isAuthorization {
@@ -6970,6 +7353,7 @@ final class AppState: ObservableObject {
         cloudAuthorizationPrompt = nil
         cloudAuthorizationInput = ""
         cloudAuthorizationContext = nil
+        pendingNativeMyDriveAuthorizationKind = nil
         configurationInteractionCoordinator.clear(context.operationID)
         configurationInteractionTerminalTask = nil
         switch context.operation {
@@ -7004,7 +7388,16 @@ final class AppState: ObservableObject {
         case .homeAction:
             if selectedSection == .home,
                selectedSiteKey == context.sourceIdentity.siteKey {
-                await loadSelectedSiteHome(refreshConfigurationIfNeeded: false)
+                if usesNativeMyDriveDashboard {
+                    await refreshMyDriveDirectory(
+                        waitForCategory: true,
+                        accountKey: myDriveAuthorizationAccountKey
+                    )
+                } else {
+                    await loadSelectedSiteHome(
+                        refreshConfigurationIfNeeded: false
+                    )
+                }
                 if let loginStatusActionToReopen {
                     let refreshedAction = siteHome?.actionItems.first(where: {
                         $0.action == MyDriveGuardActionContract.loginAction
@@ -11845,7 +12238,7 @@ final class AppState: ObservableObject {
             .restoringHomeContract(in: cached) ?? cached
         publishHomeContent(restored, identity: contentIdentity)
         _ = await applyHomePresentation(
-            restored,
+            siteHome ?? restored,
             identity: contentIdentity,
             loadsCategoryContent: loadsCategoryContent
         )
@@ -11900,10 +12293,13 @@ final class AppState: ObservableObject {
         let siteName = providers[identity.siteKey]?.site.name
             ?? visibleSites.first(where: { $0.key == identity.siteKey })?.name
             ?? identity.siteKey
-        let publishedHome = HomePresentationPolicy.addingActionCategoryFallback(
-            to: home,
-            siteKey: identity.siteKey,
-            siteName: siteName
+        let publishedHome = applyingNativeMyDriveCategoryOrder(
+            to: HomePresentationPolicy.addingActionCategoryFallback(
+                to: home,
+                siteKey: identity.siteKey,
+                siteName: siteName
+            ),
+            identity: identity
         )
         guard HomeContentPublicationPolicy.shouldPublish(
             currentHome: siteHome,
@@ -11913,6 +12309,152 @@ final class AppState: ObservableObject {
         ) else { return }
         homeContentIdentity = identity
         siteHome = publishedHome
+    }
+
+    private func applyingNativeMyDriveCategoryOrder(
+        to home: SiteHome,
+        identity: HomeContentIdentity
+    ) -> SiteHome {
+        guard let provider = providers[identity.siteKey],
+              MyDriveGuardActionContract.supportsAccountAuthorization(
+                api: provider.site.api
+              ) else { return home }
+        var updated = home
+        let preferred = nativeMyDrivePreferenceStore.order(
+            for: nativeMyDrivePreferenceNamespace(
+                .cloudProviders,
+                siteKey: identity.siteKey
+            )
+        )
+        let media = home.categories.filter {
+            $0.resolvedContentKind == .media
+        }
+        let nonMedia = home.categories.filter {
+            $0.resolvedContentKind != .media
+        }
+        let rankedMedia = media.enumerated().sorted { lhs, rhs in
+            let left = Self.nativeMyDriveCategoryIdentifier(lhs.element)
+            let right = Self.nativeMyDriveCategoryIdentifier(rhs.element)
+            let leftRank = preferred.firstIndex(of: left) ?? Int.max
+            let rightRank = preferred.firstIndex(of: right) ?? Int.max
+            return leftRank == rightRank
+                ? lhs.offset < rhs.offset
+                : leftRank < rightRank
+        }.map(\.element)
+        updated.categories = rankedMedia + nonMedia
+        return updated
+    }
+
+    private static func nativeMyDriveCategoryIdentifier(
+        _ category: VideoCategory
+    ) -> String {
+        let identity = "\(category.id) \(category.name)"
+        if CloudAccountIdentityPolicy.matches(identity, "夸克") {
+            return MyDriveAccountKind.quark.id
+        }
+        if CloudAccountIdentityPolicy.matches(identity, "百度") {
+            return MyDriveAccountKind.baidu.id
+        }
+        if CloudAccountIdentityPolicy.matches(identity, "UC") {
+            return MyDriveAccountKind.uc.id
+        }
+        if CloudAccountIdentityPolicy.matches(identity, "阿里") {
+            return MyDriveAccountKind.ali.id
+        }
+        return "category:\(category.id.lowercased())"
+    }
+
+    private func applyingNativePlaybackSourceOrder(
+        to detail: VideoDetail
+    ) -> VideoDetail {
+        guard let provider = providers[detail.summary.siteKey],
+              MyDriveGuardActionContract.supportsAccountAuthorization(
+                api: provider.site.api
+              ) else { return detail }
+        let preferred = nativeMyDrivePreferenceStore.order(
+            for: nativeMyDrivePreferenceNamespace(
+                .playbackSources,
+                siteKey: detail.summary.siteKey
+            )
+        )
+        guard !preferred.isEmpty else { return detail }
+        var updated = detail
+        updated.playSources = detail.playSources.enumerated().sorted { lhs, rhs in
+            let left = Self.nativePlaybackSourceIdentifier(lhs.element)
+            let right = Self.nativePlaybackSourceIdentifier(rhs.element)
+            let leftRank = preferred.firstIndex(of: left) ?? Int.max
+            let rightRank = preferred.firstIndex(of: right) ?? Int.max
+            return leftRank == rightRank
+                ? lhs.offset < rhs.offset
+                : leftRank < rightRank
+        }.map(\.element)
+        return updated
+    }
+
+    private func refreshMyDriveDirectory(
+        waitForCategory: Bool,
+        accountKey: String? = nil
+    ) async {
+        guard let identity = currentHomeContentIdentity,
+              let provider = providers[identity.siteKey],
+              MyDriveGuardActionContract.supportsAccountAuthorization(
+                api: provider.site.api
+              ) else { return }
+        isRefreshingMyDriveDirectory = true
+        myDriveDirectoryStatusMessage = waitForCategory
+            ? "授权已确认，正在等待 Spider 返回网盘目录…"
+            : "正在刷新网盘状态…"
+        defer { isRefreshingMyDriveDirectory = false }
+        let deadline = Date().addingTimeInterval(waitForCategory ? 10 : 0)
+        repeat {
+            do {
+                let loaded = try await provider.home()
+                guard currentHomeContentIdentity == identity else { return }
+                publishHomeContent(loaded, identity: identity)
+                await cacheSiteHome(loaded, identity: identity)
+                _ = await applyHomePresentation(
+                    siteHome ?? loaded,
+                    identity: identity,
+                    loadsCategoryContent: false,
+                    reportCategoryErrors: false
+                )
+                let media = siteHome?.categories.filter {
+                    $0.resolvedContentKind == .media
+                } ?? []
+                let category = accountKey.flatMap { target in
+                    media.first {
+                        CloudAccountIdentityPolicy.matches(
+                            "\($0.id) \($0.name)",
+                            target
+                        )
+                    }
+                } ?? (accountKey == nil ? media.first : nil)
+                if let category {
+                    myDriveDirectoryStatusMessage = nil
+                    if waitForCategory {
+                        _ = await loadCategory(
+                            id: category.id,
+                            reportErrors: false
+                        )
+                    }
+                    return
+                }
+            } catch {
+                if !waitForCategory {
+                    myDriveDirectoryStatusMessage = error.localizedDescription
+                    return
+                }
+            }
+            guard waitForCategory, Date() < deadline else { break }
+            do {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            } catch {
+                return
+            }
+        } while true
+        myDriveDirectoryStatusMessage = accountKey == nil
+            ? "Spider 暂未返回可访问的网盘目录。"
+            : "授权成功，但 Spider 在 10 秒内未返回该网盘目录。"
     }
 
     private func applyHomePresentation(
@@ -12272,6 +12814,11 @@ final class AppState: ObservableObject {
         ), let stored = CloudAccountStatusStore(setting: value) {
             cloudAccountStatusStore = stored
         }
+        if let value = try await environment.database.setting(
+            forKey: NativeMyDrivePreferenceStore.settingKey
+        ), let stored = NativeMyDrivePreferenceStore(setting: value) {
+            nativeMyDrivePreferenceStore = stored
+        }
         await loadSearchSiteScope()
     }
 
@@ -12281,6 +12828,15 @@ final class AppState: ObservableObject {
         try? await environment.database.setSetting(
             setting,
             forKey: CloudAccountStatusStore.settingKey
+        )
+    }
+
+    private func persistNativeMyDrivePreferenceStore() async {
+        guard let environment,
+              let setting = nativeMyDrivePreferenceStore.setting else { return }
+        try? await environment.database.setSetting(
+            setting,
+            forKey: NativeMyDrivePreferenceStore.settingKey
         )
     }
 

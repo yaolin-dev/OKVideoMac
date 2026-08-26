@@ -9385,6 +9385,69 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(byYear.first?.title, "乙")
     }
 
+    func testMyDriveNativeOrderActionsRemainDistinct() {
+        XCTAssertEqual(
+            MyDriveGuardActionContract.nativeOrderKind(for: "panSortShow"),
+            .cloudProviders
+        )
+        XCTAssertEqual(
+            MyDriveGuardActionContract.nativeOrderKind(
+                for: "panSourceSortShow"
+            ),
+            .playbackSources
+        )
+        XCTAssertNil(
+            MyDriveGuardActionContract.nativeOrderKind(for: "LoginShow")
+        )
+        XCTAssertTrue(
+            MyDriveGuardActionContract.isNativeDashboardAction("quarkClean")
+        )
+    }
+
+    func testNativeMyDriveOrderReconcilesAddedAndRemovedItems() {
+        XCTAssertEqual(
+            NativeMyDrivePreferenceStore.reconciledOrder(
+                preferred: ["baidu", "quark", "removed", "baidu"],
+                available: ["quark", "baidu", "uc", "ali"]
+            ),
+            ["baidu", "quark", "uc", "ali"]
+        )
+    }
+
+    func testNativeMyDrivePreferenceRoundTripIsCredentialFree() throws {
+        var store = NativeMyDrivePreferenceStore()
+        store.setOrder(
+            ["smart", "original", "unlimited"],
+            for: "configuration|MDrive|playbackSources"
+        )
+        let restored = try XCTUnwrap(
+            store.setting.flatMap(NativeMyDrivePreferenceStore.init(setting:))
+        )
+
+        XCTAssertEqual(restored, store)
+        XCTAssertEqual(
+            restored.order(
+                for: "configuration|MDrive|playbackSources"
+            ),
+            ["smart", "original", "unlimited"]
+        )
+        let description = String(describing: restored).lowercased()
+        XCTAssertFalse(description.contains("cookie"))
+        XCTAssertFalse(description.contains("token"))
+    }
+
+    func testMyDriveAccountDoesNotOfferBrowseWithoutCategory() {
+        let account = MyDriveAccountPresentation(
+            kind: .quark,
+            authorizationStatus: .authenticated,
+            categoryID: nil
+        )
+
+        XCTAssertEqual(account.authorizationText, "已登录")
+        XCTAssertFalse(account.canBrowse)
+        XCTAssertEqual(account.availabilityText, "未返回可访问目录")
+    }
+
     private func videoSummary(id: String) -> VideoSummary {
         VideoSummary(
             siteKey: "fixture",

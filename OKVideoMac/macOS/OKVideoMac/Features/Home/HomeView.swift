@@ -16,6 +16,19 @@ struct HomeView: View {
             }
         }
         .background(AppSurfacePalette.background.ignoresSafeArea())
+        .sheet(
+            item: Binding(
+                get: { state.nativeMyDriveOrderEditor },
+                set: { value in
+                    if value == nil {
+                        state.dismissNativeMyDriveOrderEditor()
+                    }
+                }
+            )
+        ) { editor in
+            NativeMyDriveOrderSheet(editor: editor)
+                .environmentObject(state)
+        }
     }
 
     @ViewBuilder
@@ -70,8 +83,12 @@ struct HomeView: View {
                 GeometryReader { viewport in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 20) {
-                            if !home.recommendations.isEmpty
-                                || !mediaCategories.isEmpty {
+                            if state.isNativeMyDriveHome {
+                                NativeMyDriveDashboard()
+                            }
+                            if !state.isNativeMyDriveHome
+                                && (!home.recommendations.isEmpty
+                                    || !mediaCategories.isEmpty) {
                                 Text("分类")
                                     .font(.title2)
                                 ScrollView(.horizontal, showsIndicators: false) {
@@ -117,8 +134,8 @@ struct HomeView: View {
                                     .padding(.vertical, 8)
                                 }
                             }
-                            if !home.actionItems.isEmpty {
-                                Text("功能")
+                            if !visibleHomeActionItems.isEmpty {
+                                Text(state.isNativeMyDriveHome ? "高级操作" : "功能")
                                     .font(.title2)
                                 LazyVGrid(
                                     columns: [
@@ -130,7 +147,7 @@ struct HomeView: View {
                                     alignment: .leading,
                                     spacing: 12
                                 ) {
-                                    ForEach(home.actionItems) { item in
+                                    ForEach(visibleHomeActionItems) { item in
                                         HomeActionCard(item: item) {
                                             Task {
                                                 await state.performHomeAction(item)
@@ -216,6 +233,15 @@ struct HomeView: View {
         state.siteHome?.categories.filter {
             $0.resolvedContentKind == .media
         } ?? []
+    }
+
+    private var visibleHomeActionItems: [SiteActionItem] {
+        let items = state.siteHome?.actionItems ?? []
+        guard state.isNativeMyDriveHome else { return items }
+        return items.filter {
+            !MyDriveGuardActionContract.isNativeDashboardAction($0.action)
+                || $0.action == "pushCkShow"
+        }
     }
 
     private func synchronizeFilterSelection() {
@@ -664,6 +690,254 @@ struct SourceSwitchFeedbackView: View {
         .font(.caption)
         .lineLimit(1)
         .frame(maxWidth: compact ? 190 : nil, alignment: .leading)
+    }
+}
+
+private struct NativeMyDriveDashboard: View {
+    @EnvironmentObject private var state: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("我的网盘")
+                        .font(.title2)
+                    Text("账号授权与目录可用性分开显示")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button {
+                    Task { await state.refreshMyDriveDirectory() }
+                } label: {
+                    Label("刷新状态", systemImage: "arrow.clockwise")
+                }
+                .disabled(state.isRefreshingMyDriveDirectory)
+                Button {
+                    state.presentNativeMyDriveOrderEditor(.cloudProviders)
+                } label: {
+                    Label("网盘优先级", systemImage: "arrow.up.arrow.down")
+                }
+                Button {
+                    state.presentNativeMyDriveOrderEditor(.playbackSources)
+                } label: {
+                    Label("播放线路优先级", systemImage: "list.number")
+                }
+            }
+
+            if let message = state.myDriveDirectoryStatusMessage {
+                HStack(spacing: 8) {
+                    if state.isRefreshingMyDriveDirectory {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "info.circle")
+                            .foregroundColor(.secondary)
+                    }
+                    Text(message)
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            LazyVGrid(
+                columns: [
+                    GridItem(.adaptive(minimum: 300, maximum: 420), spacing: 12)
+                ],
+                alignment: .leading,
+                spacing: 12
+            ) {
+                ForEach(state.myDriveAccountPresentations) { account in
+                    NativeMyDriveAccountCard(account: account)
+                }
+            }
+        }
+    }
+}
+
+private struct NativeMyDriveAccountCard: View {
+    @EnvironmentObject private var state: AppState
+    let account: MyDriveAccountPresentation
+    @State private var confirmsLogout = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 11) {
+                Image(systemName: account.systemImage)
+                    .font(.title2)
+                    .foregroundColor(.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(account.displayName)
+                        .font(.headline)
+                    HStack(spacing: 6) {
+                        statusBadge(
+                            account.authorizationText,
+                            active: account.authorizationStatus == .authenticated
+                        )
+                        statusBadge(
+                            account.canBrowse ? "可浏览" : "暂不可浏览",
+                            active: account.canBrowse
+                        )
+                    }
+                }
+                Spacer()
+                Menu {
+                    Button("退出登录", role: .destructive) {
+                        confirmsLogout = true
+                    }
+                    .disabled(account.authorizationStatus == .unauthenticated)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            }
+
+            Text(account.availabilityText)
+                .font(.callout)
+                .foregroundColor(account.canBrowse ? .secondary : .orange)
+
+            HStack {
+                if account.canBrowse {
+                    Button("进入网盘") {
+                        Task { await state.openMyDriveAccount(account) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                Button(
+                    account.authorizationStatus == .authenticated
+                        ? "重新授权"
+                        : "登录"
+                ) {
+                    Task { await state.authorizeMyDriveAccount(account.kind) }
+                }
+                Spacer()
+            }
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+        .alert("退出\(account.displayName)？", isPresented: $confirmsLogout) {
+            Button("取消", role: .cancel) {}
+            Button("退出登录", role: .destructive) {
+                Task { await state.logoutMyDriveAccount(account.kind) }
+            }
+        } message: {
+            Text("将由 Spider 删除该网盘的本地授权信息。")
+        }
+    }
+
+    private func statusBadge(_ title: String, active: Bool) -> some View {
+        Text(title)
+            .font(.caption2.weight(.medium))
+            .foregroundColor(active ? .green : .secondary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background((active ? Color.green : Color.secondary).opacity(0.1))
+            .clipShape(Capsule())
+    }
+}
+
+private struct NativeMyDriveOrderSheet: View {
+    @EnvironmentObject private var state: AppState
+    let editor: NativeMyDriveOrderEditor
+    @State private var items: [NativeMyDriveOrderItem]
+
+    init(editor: NativeMyDriveOrderEditor) {
+        self.editor = editor
+        _items = State(initialValue: editor.items)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(editor.title)
+                    .font(.title2.weight(.semibold))
+                Text(editor.subtitle)
+                    .font(.callout)
+                    .foregroundColor(.secondary)
+            }
+
+            List {
+                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                    HStack(spacing: 12) {
+                        Image(systemName: "line.3.horizontal")
+                            .foregroundColor(.secondary)
+                            .accessibilityHidden(true)
+                        Text(item.title)
+                        Spacer()
+                        Button {
+                            move(index: index, offset: -1)
+                        } label: {
+                            Image(systemName: "chevron.up")
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(index == 0)
+                        .help("上移\(item.title)")
+                        Button {
+                            move(index: index, offset: 1)
+                        } label: {
+                            Image(systemName: "chevron.down")
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(index == items.count - 1)
+                        .help("下移\(item.title)")
+                    }
+                    .padding(.vertical, 5)
+                }
+                .onMove { source, destination in
+                    items.move(fromOffsets: source, toOffset: destination)
+                }
+            }
+            .listStyle(.inset)
+
+            HStack {
+                Button("恢复默认") {
+                    restoreDefaultOrder()
+                }
+                Spacer()
+                Button("取消") {
+                    state.dismissNativeMyDriveOrderEditor()
+                }
+                Button("保存") {
+                    Task {
+                        await state.saveNativeMyDriveOrder(
+                            kind: editor.kind,
+                            items: items
+                        )
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(22)
+        .frame(width: 560, height: 460)
+    }
+
+    private func move(index: Int, offset: Int) {
+        let destination = index + offset
+        guard items.indices.contains(index),
+              items.indices.contains(destination) else { return }
+        items.swapAt(index, destination)
+    }
+
+    private func restoreDefaultOrder() {
+        let defaults: [String]
+        switch editor.kind {
+        case .cloudProviders:
+            defaults = MyDriveAccountKind.allCases.map(\.id)
+        case .playbackSources:
+            defaults = ["original", "unlimited", "smart"]
+        }
+        let order = NativeMyDrivePreferenceStore.reconciledOrder(
+            preferred: defaults,
+            available: items.map(\.id)
+        )
+        let byID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+        items = order.compactMap { byID[$0] }
     }
 }
 

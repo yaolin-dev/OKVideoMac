@@ -1181,6 +1181,30 @@ enum MyDriveGuardActionContract {
         }
     }
 
+    static func nativeOrderKind(
+        for action: String?
+    ) -> NativeMyDriveOrderKind? {
+        switch action?.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "panSortShow":
+            return .cloudProviders
+        case "panSourceSortShow":
+            return .playbackSources
+        default:
+            return nil
+        }
+    }
+
+    static func isNativeDashboardAction(_ action: String?) -> Bool {
+        guard let action = action?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ) else { return false }
+        return action == loginAction
+            || action == "pushCkShow"
+            || nativeOrderKind(for: action) != nil
+            || ["ucClean", "quarkClean", "BdClean", "aliClean"]
+                .contains(action)
+    }
+
     static func applying(to item: SiteActionItem) -> SiteActionItem {
         guard item.tag?.trimmingCharacters(in: .whitespacesAndNewlines)
             .isEmpty != false,
