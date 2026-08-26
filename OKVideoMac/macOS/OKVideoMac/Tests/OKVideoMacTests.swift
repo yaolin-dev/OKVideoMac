@@ -1775,12 +1775,17 @@ final class OKVideoMacTests: XCTestCase {
             pagination: Pagination(page: 1, pageCount: 1)
         )
 
+        let items = HomePresentationPolicy.actionItems(
+            from: page,
+            inheritedFrom: category
+        )
+        XCTAssertEqual(items.map(\.itemID), ["action-item", "movie-item"])
         XCTAssertEqual(
-            HomePresentationPolicy.actionItems(
-                from: page,
-                inheritedFrom: category
-            ).map(\.itemID),
-            ["action-item", "movie-item"]
+            items.map(\.resolvedRoute),
+            [
+                .providerSelection(itemID: "action-item"),
+                .providerSelection(itemID: "movie-item")
+            ]
         )
     }
 
@@ -1831,6 +1836,10 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(restored.actionItems.count, 1)
         XCTAssertEqual(restored.actionItems.first?.itemID, "settings-entry")
         XCTAssertEqual(restored.actionItems.first?.title, "配置入口")
+        XCTAssertEqual(
+            restored.actionItems.first?.resolvedRoute,
+            .actionCategory(categoryID: "settings-entry")
+        )
         XCTAssertEqual(
             HomePresentationPolicy.selection(for: restored, preserving: nil),
             .actions

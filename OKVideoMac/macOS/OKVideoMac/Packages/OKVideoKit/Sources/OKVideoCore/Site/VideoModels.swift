@@ -13,6 +13,17 @@ public enum VideoContentKind: String, Codable, Equatable, Hashable, Sendable {
     case unsupported
 }
 
+/// The concrete operation behind a home-screen function entry.
+///
+/// A configuration category is navigation, not an executable Spider action.
+/// Keeping that distinction in the persisted model prevents an action-category
+/// identifier from ever being sent to `detailContent()` as a fallback.
+public enum HomeFunctionRoute: Codable, Equatable, Hashable, Sendable {
+    case actionCategory(categoryID: String)
+    case command(action: String)
+    case providerSelection(itemID: String)
+}
+
 public struct VideoCategory: Codable, Equatable, Hashable, Identifiable, Sendable {
     public var id: String
     public var name: String
@@ -121,6 +132,7 @@ public struct SiteActionItem: Codable, Equatable, Hashable, Identifiable, Sendab
     public var remarks: String?
     public var tag: String?
     public var action: String?
+    public var route: HomeFunctionRoute?
 
     public init(
         siteKey: String,
@@ -129,7 +141,8 @@ public struct SiteActionItem: Codable, Equatable, Hashable, Identifiable, Sendab
         title: String,
         remarks: String? = nil,
         tag: String? = nil,
-        action: String? = nil
+        action: String? = nil,
+        route: HomeFunctionRoute? = nil
     ) {
         self.siteKey = siteKey
         self.siteName = siteName
@@ -138,6 +151,7 @@ public struct SiteActionItem: Codable, Equatable, Hashable, Identifiable, Sendab
         self.remarks = remarks
         self.tag = tag
         self.action = action
+        self.route = route
     }
 
     public init(summary: VideoSummary) {
@@ -148,8 +162,26 @@ public struct SiteActionItem: Codable, Equatable, Hashable, Identifiable, Sendab
             title: summary.title,
             remarks: summary.remarks,
             tag: summary.tag,
-            action: summary.action
+            action: summary.action,
+            route: summary.action.flatMap { action in
+                let value = action.trimmingCharacters(in: .whitespacesAndNewlines)
+                return value.isEmpty ? nil : .command(action: value)
+            } ?? .providerSelection(itemID: summary.videoID)
         )
+    }
+
+    /// Legacy cached action items did not persist a route. Preserve their
+    /// existing explicitly action-classified behavior while new category
+    /// entries always carry `.actionCategory`.
+    public var resolvedRoute: HomeFunctionRoute {
+        if let route { return route }
+        if let action {
+            let value = action.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty {
+                return .command(action: value)
+            }
+        }
+        return .providerSelection(itemID: itemID)
     }
 
     /// Compatibility adapter for existing provider detail/action selection.

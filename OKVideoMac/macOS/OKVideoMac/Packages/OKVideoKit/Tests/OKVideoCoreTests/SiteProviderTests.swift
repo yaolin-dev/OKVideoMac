@@ -593,6 +593,32 @@ final class SiteProviderTests: XCTestCase {
         XCTAssertTrue(home.actionItems.isEmpty)
     }
 
+    func testHomeFunctionRouteRoundTripsAndLegacyActionsRemainCompatible() throws {
+        let category = SiteActionItem(
+            siteKey: "drive",
+            siteName: "Drive",
+            itemID: "settings",
+            title: "Settings",
+            route: .actionCategory(categoryID: "settings")
+        )
+        let decoded = try JSONDecoder().decode(
+            SiteActionItem.self,
+            from: JSONEncoder().encode(category)
+        )
+        XCTAssertEqual(
+            decoded.resolvedRoute,
+            .actionCategory(categoryID: "settings")
+        )
+
+        let legacy = try JSONDecoder().decode(
+            SiteActionItem.self,
+            from: Data(
+                #"{"siteKey":"drive","siteName":"Drive","itemID":"login","title":"Login","action":"LoginShow"}"#.utf8
+            )
+        )
+        XCTAssertEqual(legacy.resolvedRoute, .command(action: "LoginShow"))
+    }
+
     func testBlankDetailPlaceholderIsRecognizedAsAction() throws {
         let site = SiteConfiguration(
             key: "settings",

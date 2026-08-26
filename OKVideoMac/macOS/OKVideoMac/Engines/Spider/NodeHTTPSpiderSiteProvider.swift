@@ -667,11 +667,18 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     }
 
     func select(action item: SiteActionItem) async throws -> SiteSelectionResult {
-        try await select(
-            id: item.itemID,
-            fallbackSummary: item.selectionSummary,
-            awaitsHostAction: true
-        )
+        switch item.resolvedRoute {
+        case .actionCategory:
+            throw AppError.spider("配置分类必须先加载操作列表，不能作为影视详情打开")
+        case .command(let action):
+            return .action(try await self.action(action))
+        case .providerSelection(let itemID):
+            return try await select(
+                id: itemID,
+                fallbackSummary: item.selectionSummary,
+                awaitsHostAction: true
+            )
+        }
     }
 
     private func select(

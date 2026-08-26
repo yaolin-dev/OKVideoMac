@@ -1125,6 +1125,16 @@ struct NodeWebPresentation: Identifiable, Equatable {
     var revision: Int
 }
 
+struct ConfigurationCategoryPresentation: Identifiable, Equatable {
+    let id: UUID
+    let sourceIdentity: HomeContentIdentity
+    let categoryID: String
+    let title: String
+    var items: [SiteActionItem]
+    var isLoading: Bool
+    var errorMessage: String?
+}
+
 struct SearchSiteOption: Identifiable, Equatable {
     var id: String { key }
     let key: String
@@ -1935,7 +1945,8 @@ enum HomePresentationPolicy {
                 siteName: siteName,
                 itemID: category.id,
                 title: category.name,
-                remarks: "打开配置功能"
+                remarks: "打开配置功能",
+                route: .actionCategory(categoryID: category.id)
             )
         ]
         return updated
@@ -3244,6 +3255,8 @@ final class AppState: ObservableObject {
     @Published var cloudAuthorizationPrompt: CloudAuthorizationPrompt?
     @Published var cloudAuthorizationInput = ""
     @Published private(set) var nodeWebPresentation: NodeWebPresentation?
+    @Published private(set) var configurationCategoryPresentation:
+        ConfigurationCategoryPresentation?
     @Published private(set) var androidRuntimeStatus: AndroidRuntimeStatus = .checking
     @Published private(set) var androidRuntimeContinuityStatus:
         AndroidRuntimeContinuityStatus = .checking
@@ -3293,6 +3306,7 @@ final class AppState: ObservableObject {
     private var homeLoadSessionID = UUID()
     private var homeContentIdentity: HomeContentIdentity?
     private var categoryLoadSessionID = UUID()
+    private var configurationCategoryLoadSessionID = UUID()
     private var playerEventTask: Task<Void, Never>?
     private var activeSeekConfirmationID: UUID?
     private var cloudAuthorizationPollTask: Task<Void, Never>?
@@ -4196,6 +4210,121 @@ final class AppState: ObservableObject {
         } ?? .empty
     }
 
+    func openConfigurationCategory(_ item: SiteActionItem) async {
+        guard case .actionCategory(let categoryID) = item.resolvedRoute else {
+            await performHomeAction(item)
+            return
+        }
+        guard let identity = currentHomeContentIdentity,
+              identity.siteKey == item.siteKey,
+              let category = siteHome?.categories.first(where: {
+                  $0.id == categoryID && $0.resolvedContentKind == .action
+              }) else {
+            show(
+                AppError.site("配置页面已更新，请重新打开"),
+                title: item.title
+            )
+            return
+        }
+        configurationCategoryLoadSessionID = UUID()
+        let sessionID = configurationCategoryLoadSessionID
+        let presentationID = UUID()
+        configurationCategoryPresentation = ConfigurationCategoryPresentation(
+            id: presentationID,
+            sourceIdentity: identity,
+            categoryID: categoryID,
+            title: category.name,
+            items: [],
+            isLoading: true,
+            errorMessage: nil
+        )
+        await loadConfigurationCategory(
+            presentationID: presentationID,
+            sessionID: sessionID,
+            category: category
+        )
+    }
+
+    func refreshConfigurationCategory() async {
+        guard let presentation = configurationCategoryPresentation,
+              presentation.sourceIdentity == currentHomeContentIdentity,
+              let category = siteHome?.categories.first(where: {
+                  $0.id == presentation.categoryID
+                    && $0.resolvedContentKind == .action
+              }) else {
+            closeConfigurationCategory()
+            show(
+                AppError.site("配置页面已更新，请重新打开"),
+                title: "配置中心"
+            )
+            return
+        }
+        configurationCategoryLoadSessionID = UUID()
+        let sessionID = configurationCategoryLoadSessionID
+        configurationCategoryPresentation?.isLoading = true
+        configurationCategoryPresentation?.errorMessage = nil
+        await loadConfigurationCategory(
+            presentationID: presentation.id,
+            sessionID: sessionID,
+            category: category
+        )
+    }
+
+    func closeConfigurationCategory() {
+        configurationCategoryLoadSessionID = UUID()
+        configurationCategoryPresentation = nil
+    }
+
+    private func loadConfigurationCategory(
+        presentationID: UUID,
+        sessionID: UUID,
+        category: VideoCategory
+    ) async {
+        guard let identity = currentHomeContentIdentity,
+              let provider = providers[identity.siteKey] else {
+            closeConfigurationCategory()
+            return
+        }
+        do {
+            let page = try await provider.actionCategory(
+                id: category.id,
+                page: 1,
+                filters: HomePresentationPolicy.defaultFilters(for: category)
+            )
+            guard configurationCategoryLoadSessionID == sessionID,
+                  currentHomeContentIdentity == identity,
+                  configurationCategoryPresentation?.id == presentationID else {
+                return
+            }
+            let items = HomePresentationPolicy.actionItems(
+                from: page,
+                inheritedFrom: category
+            )
+            configurationCategoryPresentation?.items = items
+            configurationCategoryPresentation?.isLoading = false
+            configurationCategoryPresentation?.errorMessage = items.isEmpty
+                ? "该配置分类没有返回可执行操作。"
+                : nil
+        } catch is CancellationError {
+            guard configurationCategoryLoadSessionID == sessionID,
+                  configurationCategoryPresentation?.id == presentationID else {
+                return
+            }
+            configurationCategoryPresentation?.isLoading = false
+        } catch {
+            guard configurationCategoryLoadSessionID == sessionID,
+                  currentHomeContentIdentity == identity,
+                  configurationCategoryPresentation?.id == presentationID else {
+                return
+            }
+            configurationCategoryPresentation?.isLoading = false
+            configurationCategoryPresentation?.errorMessage =
+                AsyncCancellationPolicy.isCancellation(error)
+                ? nil
+                : error.localizedDescription
+        }
+    }
+
     @discardableResult
     private func loadActionCategory(
         id: String,
@@ -4249,7 +4378,8 @@ final class AppState: ObservableObject {
                     siteName: provider.site.name,
                     itemID: actionCategory.id,
                     title: actionCategory.name,
-                    remarks: "打开配置功能"
+                    remarks: "打开配置功能",
+                    route: .actionCategory(categoryID: actionCategory.id)
                 )
             )
             if let providerID = CloudAccountProviderIdentity.identifier(
@@ -4537,6 +4667,16 @@ final class AppState: ObservableObject {
                 title: item.title
             )
             return
+        }
+        switch item.resolvedRoute {
+        case .actionCategory:
+            await openConfigurationCategory(item)
+            return
+        case .command(let action):
+            await performSiteAction(action, title: item.title, provider: provider)
+            return
+        case .providerSelection:
+            break
         }
         let operation = PendingCloudOperation.homeAction(item)
         if provider.capability == .javaDexSpider {
@@ -12379,6 +12519,9 @@ final class AppState: ObservableObject {
         if siteHome != nil {
             siteHome = nil
         }
+        if configurationCategoryPresentation != nil {
+            closeConfigurationCategory()
+        }
         homeContentIdentity = nil
     }
 
@@ -12400,6 +12543,13 @@ final class AppState: ObservableObject {
             incomingHome: publishedHome,
             incomingIdentity: identity
         ) else { return }
+        if let presentation = configurationCategoryPresentation,
+           presentation.sourceIdentity != identity || siteHome != publishedHome {
+            // A refreshed home may replace request-scoped action identifiers.
+            // Close the old list rather than allowing stale actions to cross
+            // a login, provider reload, or configuration generation change.
+            closeConfigurationCategory()
+        }
         homeContentIdentity = identity
         siteHome = publishedHome
     }

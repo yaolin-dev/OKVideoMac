@@ -1506,7 +1506,10 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         action item: SiteActionItem,
         interactionID: UUID?
     ) async throws -> SiteSelectionResult {
-        if let rawAction = item.action {
+        switch item.resolvedRoute {
+        case .actionCategory:
+            throw AppError.spider("配置分类必须先加载操作列表，不能作为影视详情打开")
+        case .command(let rawAction):
             let action = rawAction.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !action.isEmpty else {
                 throw AppError.spider("配置动作内容为空")
@@ -1520,20 +1523,21 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
                     interactionID: interactionID
                 )
             )
+        case .providerSelection(let itemID):
+            return try SpiderResponseMapper.selection(
+                await invoke(
+                    method: "detail",
+                    arguments: [.array([.string(itemID)])],
+                    monitorsAuthorization: true,
+                    interactionKind: Self.interactionActionKind(tag: item.tag),
+                    interactionID: interactionID
+                ),
+                site: site,
+                baseURL: baseURL,
+                fallbackSummary: item.selectionSummary,
+                allowsPlaceholderAction: true
+            )
         }
-        return try SpiderResponseMapper.selection(
-            await invoke(
-                method: "detail",
-                arguments: [.array([.string(item.itemID)])],
-                monitorsAuthorization: true,
-                interactionKind: Self.interactionActionKind(tag: item.tag),
-                interactionID: interactionID
-            ),
-            site: site,
-            baseURL: baseURL,
-            fallbackSummary: item.selectionSummary,
-            allowsPlaceholderAction: true
-        )
     }
 
     func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {

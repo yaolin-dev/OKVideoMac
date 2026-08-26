@@ -184,6 +184,12 @@ struct RootView: View {
             }
         }
         .overlay {
+            if let presentation = state.configurationCategoryPresentation {
+                ConfigurationCategoryView(presentation: presentation)
+                    .environmentObject(state)
+            }
+        }
+        .overlay {
             if let prompt = state.mainWindowCloudAuthorizationPrompt {
                 CloudAuthorizationView(prompt: prompt)
                     .environmentObject(state)
@@ -560,6 +566,176 @@ private struct ShortcutHelpView: View {
             }
             .shadow(color: .black.opacity(0.24), radius: 28, y: 12)
         }
+    }
+}
+
+private struct ConfigurationCategoryView: View {
+    @EnvironmentObject private var state: AppState
+    let presentation: ConfigurationCategoryPresentation
+
+    var body: some View {
+        ZStack {
+            backdrop
+            card
+        }
+        .zIndex(900)
+    }
+
+    private var backdrop: some View {
+        Color.black.opacity(0.42)
+            .ignoresSafeArea()
+    }
+
+    private var card: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            content
+                .frame(minHeight: 300)
+            Divider()
+            footer
+        }
+        .frame(width: 680, height: 620)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .shadow(radius: 28, y: 12)
+        .padding(24)
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "slider.horizontal.3")
+                .font(.title2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(presentation.title)
+                    .font(.headline)
+                Text("配置中心")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button {
+                refresh()
+            } label: {
+                Label("刷新", systemImage: "arrow.clockwise")
+            }
+            .disabled(refreshIsDisabled)
+        }
+        .padding(18)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if presentation.isLoading {
+            loadingContent
+        } else if let message = presentation.errorMessage {
+            errorContent(message)
+        } else {
+            actionList
+        }
+    }
+
+    private var loadingContent: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text("正在读取当前配置操作…")
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func errorContent(_ message: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.largeTitle)
+                .foregroundStyle(.orange)
+            Text(message)
+                .multilineTextAlignment(.center)
+            Button("重试") {
+                refresh()
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var actionList: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(Array(presentation.items.enumerated()), id: \.element.id) { index, item in
+                    ConfigurationCategoryRow(
+                        item: item,
+                        isDisabled: state.isConfigurationInteractionActive
+                    ) {
+                        Task { await state.performHomeAction(item) }
+                    }
+                    if index < presentation.items.count - 1 {
+                        Divider().padding(.leading, 56)
+                    }
+                }
+            }
+            .background(
+                Color(nsColor: .controlBackgroundColor),
+                in: RoundedRectangle(cornerRadius: 11)
+            )
+            .padding(18)
+        }
+    }
+
+    private var footer: some View {
+        HStack {
+            Text("关闭后会回到原来的网盘目录和浏览位置。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("关闭") {
+                state.closeConfigurationCategory()
+            }
+            .keyboardShortcut(.cancelAction)
+        }
+        .padding(18)
+    }
+
+    private var refreshIsDisabled: Bool {
+        presentation.isLoading || state.isConfigurationInteractionActive
+    }
+
+    private func refresh() {
+        Task { await state.refreshConfigurationCategory() }
+    }
+}
+
+private struct ConfigurationCategoryRow: View {
+    let item: SiteActionItem
+    let isDisabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                Image(systemName: "slider.horizontal.3")
+                    .frame(width: 24)
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.title)
+                        .foregroundStyle(.primary)
+                    if let remarks = item.remarks?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !remarks.isEmpty {
+                        Text(remarks)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+            .padding(.horizontal, 18)
+            .frame(minHeight: 58)
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
     }
 }
 
