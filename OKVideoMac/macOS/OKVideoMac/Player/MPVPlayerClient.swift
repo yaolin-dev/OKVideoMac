@@ -647,15 +647,17 @@ final class MPVPlayerClient: PlayerClient {
             }
             self.snapshot.isSeeking = true
             self.snapshot.seekTarget = target
-            self.snapshot.position = target
             self.emitSnapshot()
             do {
-                try "time-pos".withCString { namePointer in
-                    try self.library.checked(
-                        self.library.setPropertyDouble(client, namePointer, target),
-                        operation: "跳转"
-                    )
-                }
+                let targetValue = String(
+                    format: "%.3f",
+                    locale: Locale(identifier: "en_US_POSIX"),
+                    target
+                )
+                try self.command(
+                    ["seek", targetValue, "absolute+keyframes"],
+                    client: client
+                )
             } catch {
                 self.snapshot.isSeeking = false
                 self.snapshot.seekTarget = nil

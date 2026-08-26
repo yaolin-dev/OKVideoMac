@@ -2623,13 +2623,14 @@ struct PlaybackResolutionAttemptContext: Equatable, Sendable {
         configuredParsers: [ParseConfiguration],
         maximumAttempts: Int
     ) -> PlaybackResolutionRequest {
-        // A player-authoritative result is already the provider's final,
-        // authenticated media request. Generic parsers cannot renew that
-        // capability and must not consume the retry budget that belongs to the
-        // provider's same-resource refresh.
-        let eligibleParsers = result.validationPolicy == .playerAuthoritative
-            ? []
-            : configuredParsers
+        // A provider-final result is already the provider's authenticated
+        // media request. Generic parsers cannot renew that capability and
+        // must not consume the retry budget that belongs to the provider's
+        // same-resource refresh. `providerPreflight` still validates bytes in
+        // PlaybackResolver; it merely forbids unrelated parser rewriting.
+        let eligibleParsers = result.validationPolicy == .preflight
+            ? configuredParsers
+            : []
         return PlaybackResolutionRequest(
             candidates: [
                 PlaybackCandidate(
@@ -3293,6 +3294,7 @@ final class AppState: ObservableObject {
     private var homeContentIdentity: HomeContentIdentity?
     private var categoryLoadSessionID = UUID()
     private var playerEventTask: Task<Void, Never>?
+    private var activeSeekConfirmationID: UUID?
     private var cloudAuthorizationPollTask: Task<Void, Never>?
     private var cloudAuthorizationSessionID = UUID()
     private var configurationInteractionCoordinator =
@@ -8445,6 +8447,17 @@ final class AppState: ObservableObject {
                     refreshedPlaybackResult = targetIndex == 0
                         ? authoritativePlaybackResult
                         : nil
+                } else if !origin.isHistory {
+                    // Ordinary playback already owns an exact detail, flag and
+                    // episode URL selected by the user. Retry playerContent
+                    // once with that same tuple so a transient cloud dlink can
+                    // be rebuilt. Never invoke history-navigation matching
+                    // here: fuzzy source/episode relocation can mask the real
+                    // media failure with an unrelated "无法唯一匹配" error.
+                    candidateDetail = detail
+                    candidateSource = source
+                    candidateEpisode = episode
+                    refreshedPlaybackResult = nil
                 } else {
                     // A retry is a true same-resource refresh. Fetch current
                     // detail again so expiring episode references, provider
@@ -10001,6 +10014,7 @@ final class AppState: ObservableObject {
         historyPlaybackLoadingID = nil
         historyPlaybackRequestedItem = nil
         historyPlaybackChoices = []
+        activeSeekConfirmationID = nil
         playbackSessionID = UUID()
         activePlayerRequestID = UUID()
         playbackQualitySwitchSessionID = UUID()
@@ -10111,6 +10125,7 @@ final class AppState: ObservableObject {
         historyPlaybackLoadingID = nil
         historyPlaybackRequestedItem = nil
         historyPlaybackChoices = []
+        activeSeekConfirmationID = nil
         playbackSessionID = UUID()
         activePlayerRequestID = UUID()
         playbackQualitySwitchSessionID = UUID()
@@ -10197,18 +10212,48 @@ final class AppState: ObservableObject {
             return
         }
         let previousPosition = playerSnapshot.position
-        // Publish the accepted target immediately. Some network sources delay
-        // or coalesce mpv's time-pos notification after a seek, while the
-        // decoded video has already moved to the requested frame.
-        playerSnapshot.position = target
+        let confirmationID = UUID()
+        activeSeekConfirmationID = confirmationID
         playerSnapshot.isSeeking = true
         playerSnapshot.seekTarget = target
         do {
             try await player.seek(to: target)
-        } catch {
-            if playerSnapshot.position == target {
-                playerSnapshot.position = previousPosition
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline {
+                try Task.checkCancellation()
+                guard activeSeekConfirmationID == confirmationID else { return }
+                let tolerance = max(3, min(12, playerSnapshot.duration * 0.002))
+                if !playerSnapshot.isSeeking,
+                   abs(playerSnapshot.position - target) <= tolerance {
+                    activeSeekConfirmationID = nil
+                    return
+                }
+                try await Task.sleep(nanoseconds: 100_000_000)
             }
+            guard activeSeekConfirmationID == confirmationID else { return }
+            activeSeekConfirmationID = nil
+            // The command was accepted but mpv never reported a restart near
+            // the target. Restore the previous timeline point once so a
+            // sequential-only HLS proxy does not leave the UI out of sync.
+            try? await player.seek(to: previousPosition)
+            playerSnapshot.position = previousPosition
+            playerSnapshot.isSeeking = false
+            playerSnapshot.seekTarget = nil
+            show(
+                AppError.playback(
+                    "当前转码线路不支持随机跳转，请切换原画或其他清晰度"
+                ),
+                title: "跳转失败"
+            )
+        } catch is CancellationError {
+            if activeSeekConfirmationID == confirmationID {
+                activeSeekConfirmationID = nil
+                playerSnapshot.isSeeking = false
+                playerSnapshot.seekTarget = nil
+            }
+        } catch {
+            activeSeekConfirmationID = nil
+            playerSnapshot.position = previousPosition
             if playerSnapshot.seekTarget == target {
                 playerSnapshot.isSeeking = false
                 playerSnapshot.seekTarget = nil

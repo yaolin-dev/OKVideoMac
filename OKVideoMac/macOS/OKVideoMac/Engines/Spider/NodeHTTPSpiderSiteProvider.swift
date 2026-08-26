@@ -782,7 +782,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                     needsParsing: false,
                     flag: flag,
                     headers: HTTPHeaders(site.header),
-                    validationPolicy: .playerAuthoritative
+                    validationPolicy: .providerPreflight
                 )
             }
             throw error
@@ -924,7 +924,11 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         // provider contract. Player-response headers override them, but must
         // not replace the whole request context.
         result.headers = HTTPHeaders(site.header).merging(result.headers)
-        result.validationPolicy = .playerAuthoritative
+        // A Node Spider may return an expired dlink, an HTML login page or a
+        // JSON error with HTTP 200. Unlike an in-process player, the host can
+        // safely validate this transport with the complete request headers.
+        // Do not let a syntactically valid URL bypass the media-byte probe.
+        result.validationPolicy = .providerPreflight
         result.resourceReference = playbackResourceReference(
             flag: flag,
             episodeURL: episodeURL,
@@ -1494,7 +1498,10 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
 
     /// Prefer the decoder-selected original/direct transport. A Node relay is
     /// a fallback only when the direct file does not implement byte ranges.
-    /// HLS manifests always stay direct so mpv owns manifest/segment seeking.
+    /// An HLS URL is seekable only after its VOD playlist and a non-leading
+    /// segment have both been read successfully. Merely ending in `.m3u8`
+    /// proves neither random access nor that the provider proxy maps segment
+    /// sequence numbers correctly.
     private func preferredPlaybackTransport(
         selectedURL: String,
         qualities: [PlaybackQuality],
@@ -1502,9 +1509,13 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         baseURL: URL
     ) async -> PlaybackTransportSelection {
         if Self.isHLSURL(selectedURL) {
+            let supportsSeek = await supportsHLSRandomAccess(
+                url: selectedURL,
+                headers: headers
+            )
             return PlaybackTransportSelection(
                 url: selectedURL,
-                rangePolicy: .providerDefined
+                rangePolicy: supportsSeek ? .forward : .unsupported
             )
         }
 
@@ -1525,9 +1536,13 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                !isOwnedByRuntime($0.url, baseURL: baseURL)
                    && Self.isHLSURL($0.url)
            }) {
+            let supportsSeek = await supportsHLSRandomAccess(
+                url: hls.url,
+                headers: headers
+            )
             return PlaybackTransportSelection(
                 url: hls.url,
-                rangePolicy: .providerDefined
+                rangePolicy: supportsSeek ? .forward : .unsupported
             )
         }
 
@@ -1585,6 +1600,225 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         } catch {
             return false
         }
+    }
+
+    private struct HLSMediaPlaylist {
+        let segments: [URL]
+        let auxiliaryResources: [URL]
+        let duration: TimeInterval
+        let isVOD: Bool
+    }
+
+    private func supportsHLSRandomAccess(
+        url rawValue: String,
+        headers: HTTPHeaders
+    ) async -> Bool {
+        guard let url = URL(string: rawValue),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+            return false
+        }
+        do {
+            let playlist = try await loadHLSMediaPlaylist(
+                url: url,
+                headers: headers,
+                remainingMasterDepth: 2
+            )
+            guard playlist.isVOD,
+                  playlist.duration > 0,
+                  playlist.segments.count >= 2 else {
+                return false
+            }
+
+            // Probe a segment away from the beginning. Sequential-only proxy
+            // implementations often serve 0.ts successfully but fail here.
+            let middleIndex = min(
+                playlist.segments.count - 1,
+                max(1, playlist.segments.count / 2)
+            )
+            guard try await hasReadableMediaBytes(
+                at: playlist.segments[middleIndex],
+                headers: headers
+            ) else {
+                return false
+            }
+
+            // EXT-X-MAP and EXT-X-KEY participate in random access too. Check
+            // their rewritten URLs when present so an apparently valid media
+            // segment cannot advertise a broken initialization/key resource.
+            for resource in playlist.auxiliaryResources {
+                guard try await hasReadableResource(
+                    at: resource,
+                    headers: headers
+                ) else {
+                    return false
+                }
+            }
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            return false
+        }
+    }
+
+    private func loadHLSMediaPlaylist(
+        url: URL,
+        headers: HTTPHeaders,
+        remainingMasterDepth: Int
+    ) async throws -> HLSMediaPlaylist {
+        let response = try await httpClient.send(
+            HTTPRequest(
+                url: url,
+                headers: headers,
+                timeout: 8,
+                maximumResponseBytes: 2 * 1_024 * 1_024,
+                maximumRedirects: 4,
+                retryPolicy: .none,
+                allowsNonSuccessfulStatus: true
+            )
+        )
+        guard (200...299).contains(response.statusCode),
+              let text = String(data: response.body, encoding: .utf8),
+              text.trimmingCharacters(in: .whitespacesAndNewlines)
+                .hasPrefix("#EXTM3U") else {
+            throw AppError.playback("HLS 清单不可读")
+        }
+
+        let lines = text.components(separatedBy: .newlines).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if lines.contains(where: { $0.hasPrefix("#EXT-X-STREAM-INF:") }) {
+            guard remainingMasterDepth > 0,
+                  let variant = Self.firstHLSVariant(in: lines, baseURL: url)
+            else {
+                throw AppError.playback("HLS 主清单没有可用变体")
+            }
+            return try await loadHLSMediaPlaylist(
+                url: variant,
+                headers: headers,
+                remainingMasterDepth: remainingMasterDepth - 1
+            )
+        }
+
+        let segmentURLs = lines.compactMap { line -> URL? in
+            guard !line.isEmpty, !line.hasPrefix("#") else { return nil }
+            return URL(string: line, relativeTo: url)?.absoluteURL
+        }
+        var duration: TimeInterval = 0
+        var auxiliary: [URL] = []
+        for line in lines {
+            if line.hasPrefix("#EXTINF:"),
+               let value = line.dropFirst("#EXTINF:".count)
+                .split(separator: ",", maxSplits: 1)
+                .first,
+               let seconds = TimeInterval(value) {
+                duration += max(0, seconds)
+            }
+            if line.hasPrefix("#EXT-X-KEY:")
+                || line.hasPrefix("#EXT-X-MAP:") {
+                if let rawURI = Self.hlsAttribute(
+                    named: "URI",
+                    in: line
+                ), let resource = URL(
+                    string: rawURI,
+                    relativeTo: url
+                )?.absoluteURL {
+                    auxiliary.append(resource)
+                }
+            }
+        }
+        let isVOD = lines.contains("#EXT-X-ENDLIST")
+            || lines.contains(where: {
+                $0.uppercased().hasPrefix("#EXT-X-PLAYLIST-TYPE:VOD")
+            })
+        return HLSMediaPlaylist(
+            segments: segmentURLs,
+            auxiliaryResources: Array(Set(auxiliary)),
+            duration: duration,
+            isVOD: isVOD
+        )
+    }
+
+    private func hasReadableMediaBytes(
+        at url: URL,
+        headers: HTTPHeaders
+    ) async throws -> Bool {
+        var requestHeaders = headers
+        requestHeaders["Range"] = "bytes=0-65535"
+        let response = try await httpClient.send(
+            HTTPRequest(
+                url: url,
+                headers: requestHeaders,
+                timeout: 8,
+                maximumResponseBytes: 256 * 1_024,
+                maximumRedirects: 4,
+                retryPolicy: .none,
+                allowsNonSuccessfulStatus: true
+            )
+        )
+        guard (200...299).contains(response.statusCode),
+              !response.body.isEmpty else { return false }
+        let contentType = response.headers["Content-Type"]?.lowercased() ?? ""
+        if contentType.contains("json") || contentType.contains("html") {
+            return false
+        }
+        let prefix = String(
+            data: response.body.prefix(512),
+            encoding: .utf8
+        )?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return prefix?.hasPrefix("{") != true
+            && prefix?.hasPrefix("[") != true
+            && prefix?.hasPrefix("<!doctype html") != true
+            && prefix?.hasPrefix("<html") != true
+    }
+
+    private func hasReadableResource(
+        at url: URL,
+        headers: HTTPHeaders
+    ) async throws -> Bool {
+        let response = try await httpClient.send(
+            HTTPRequest(
+                url: url,
+                headers: headers,
+                timeout: 8,
+                maximumResponseBytes: 512 * 1_024,
+                maximumRedirects: 4,
+                retryPolicy: .none,
+                allowsNonSuccessfulStatus: true
+            )
+        )
+        return (200...299).contains(response.statusCode)
+            && !response.body.isEmpty
+    }
+
+    private static func firstHLSVariant(
+        in lines: [String],
+        baseURL: URL
+    ) -> URL? {
+        for index in lines.indices where lines[index].hasPrefix(
+            "#EXT-X-STREAM-INF:"
+        ) {
+            var next = index + 1
+            while next < lines.count {
+                let line = lines[next]
+                if !line.isEmpty, !line.hasPrefix("#") {
+                    return URL(string: line, relativeTo: baseURL)?.absoluteURL
+                }
+                next += 1
+            }
+        }
+        return nil
+    }
+
+    private static func hlsAttribute(
+        named name: String,
+        in line: String
+    ) -> String? {
+        let marker = "\(name)=\""
+        guard let start = line.range(of: marker) else { return nil }
+        let remainder = line[start.upperBound...]
+        guard let end = remainder.firstIndex(of: "\"") else { return nil }
+        return String(remainder[..<end])
     }
 
     private static func isHLSURL(_ rawValue: String) -> Bool {

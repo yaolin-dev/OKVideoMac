@@ -12441,7 +12441,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(result.headers["User-Agent"], "Site Agent")
         XCTAssertEqual(result.headers["Referer"], "https://response.example/")
         XCTAssertEqual(result.headers["Cookie"], "session=fixture")
-        XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
+        XCTAssertEqual(result.validationPolicy, .providerPreflight)
     }
 
     func testNodeHomeDoesNotInferActionFromCategoryIdentifier() async throws {
@@ -12632,7 +12632,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(result.mediaSession?.rangePolicy, .forward)
     }
 
-    func testNodePlayerLeavesHLSDirectWithoutFileRangeProbe() async throws {
+    func testNodePlayerMarksHLSSeekableOnlyAfterRandomSegmentProbe() async throws {
         let hlsURL = "https://media.example.invalid/master.m3u8?token=fixture"
         let site = SiteConfiguration(
             key: "nodejs_fixture",
@@ -12642,7 +12642,35 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             extra: ["okNodeRuntime": .bool(true)]
         )
         let client = NodeProviderStubHTTPClient { request in
-            XCTAssertNotEqual(request.url.absoluteString, hlsURL)
+            if request.url.absoluteString == hlsURL {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 200,
+                    headers: ["Content-Type": "application/vnd.apple.mpegurl"],
+                    body: Data(
+                        """
+                        #EXTM3U
+                        #EXT-X-PLAYLIST-TYPE:VOD
+                        #EXTINF:10,
+                        0.ts
+                        #EXTINF:10,
+                        1.ts
+                        #EXTINF:10,
+                        2.ts
+                        #EXT-X-ENDLIST
+                        """.utf8
+                    )
+                )
+            }
+            if request.url.path.hasSuffix("/1.ts") {
+                XCTAssertEqual(request.headers["Range"], "bytes=0-65535")
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 206,
+                    headers: ["Content-Type": "video/mp2t"],
+                    body: Data([0x47, 0x40, 0x00, 0x10])
+                )
+            }
             return HTTPResponse(
                 url: request.url,
                 statusCode: request.url.path.hasSuffix("/init") ? 404 : 200,
@@ -12662,7 +12690,63 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         let result = try await provider.player(flag: "hls", episodeURL: "episode")
 
         XCTAssertEqual(result.url, hlsURL)
-        XCTAssertEqual(result.mediaSession?.rangePolicy, .providerDefined)
+        XCTAssertEqual(result.mediaSession?.rangePolicy, .forward)
+    }
+
+    func testNodePlayerMarksSequentialOnlyHLSAsUnsupportedForSeek() async throws {
+        let hlsURL = "https://media.example.invalid/linear.m3u8"
+        let site = SiteConfiguration(
+            key: "nodejs_fixture",
+            name: "Fixture",
+            type: 4,
+            api: "/spider/fixture/4",
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.absoluteString == hlsURL {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 200,
+                    headers: ["Content-Type": "application/vnd.apple.mpegurl"],
+                    body: Data(
+                        """
+                        #EXTM3U
+                        #EXT-X-PLAYLIST-TYPE:VOD
+                        #EXTINF:10,
+                        0.ts
+                        #EXTINF:10,
+                        1.ts
+                        #EXT-X-ENDLIST
+                        """.utf8
+                    )
+                )
+            }
+            if request.url.path.hasSuffix("/1.ts") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 403,
+                    headers: ["Content-Type": "application/json"],
+                    body: Data(#"{"error":"expired"}"#.utf8)
+                )
+            }
+            return HTTPResponse(
+                url: request.url,
+                statusCode: request.url.path.hasSuffix("/init") ? 404 : 200,
+                headers: ["Content-Type": "application/json"],
+                body: request.url.path.hasSuffix("/init")
+                    ? Data()
+                    : Data(#"{"parse":0,"url":"https://media.example.invalid/linear.m3u8"}"#.utf8)
+            )
+        }
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        let result = try await provider.player(flag: "hls", episodeURL: "episode")
+
+        XCTAssertEqual(result.mediaSession?.rangePolicy, .unsupported)
     }
 
     func testNodePlayerKeepsSharedQualitySelectionForRemoteTransports()
@@ -13387,7 +13471,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         let parseExecutor = PlaybackParseInvocationRecorder()
         let resolver = PlaybackResolver(
             parseExecutor: parseExecutor,
-            mediaProbe: RejectingPlaybackMediaProbe()
+            mediaProbe: AcceptingPlaybackMediaProbe()
         )
         var obsoleteAttempts = 0
         for await event in resolver.resolve(
@@ -14360,9 +14444,9 @@ private actor PlaybackParseInvocationRecorder: ParseExecutor {
     }
 }
 
-private struct RejectingPlaybackMediaProbe: MediaProbe {
+private struct AcceptingPlaybackMediaProbe: MediaProbe {
     func validate(url: URL, headers: HTTPHeaders) async throws -> Bool {
-        false
+        true
     }
 }
 

@@ -658,6 +658,9 @@ public struct SitePlaybackResult: Equatable, Sendable {
     public enum ValidationPolicy: Equatable, Sendable {
         /// Use the generic HEAD/range reachability probe before loading.
         case preflight
+        /// The provider produced its final media request, so generic parsers
+        /// must not rewrite it, but the host must still verify media bytes.
+        case providerPreflight
         /// The provider produced an authenticated or short-lived resource;
         /// the player load is the only authoritative validity check.
         case playerAuthoritative

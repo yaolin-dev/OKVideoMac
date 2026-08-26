@@ -166,15 +166,15 @@ public struct DefaultMediaProbe: MediaProbe {
         // length. libmpv handles this server correctly, so let the player do
         // the authoritative load check for this one controlled loopback
         // endpoint instead of rejecting every original-quality line here.
-        if Self.isAndroidCloudOriginalProxy(url)
-            || Self.isNodeRuntimeMediaProxy(url) {
+        if Self.isAndroidCloudOriginalProxy(url) {
             return true
         }
 
         let isAndroidBridgeSession = Self.isAndroidBridgeMediaSession(url)
+        let isNodeRuntimeProxy = Self.isNodeRuntimeMediaProxy(url)
 
         do {
-            let response = try await httpClient.send(
+            _ = try await httpClient.send(
                 HTTPRequest(
                     url: url,
                     method: .head,
@@ -184,14 +184,10 @@ public struct DefaultMediaProbe: MediaProbe {
                     retryPolicy: .none
                 )
             )
-            let accepted = Self.looksLikeMedia(response)
-                || MediaURLClassifier.isDirectMediaURL(url.absoluteString)
-            if !isAndroidBridgeSession { return accepted }
-            // A provider-owned Android loopback server may omit Content-Type
-            // on HEAD, and a successful HEAD still proves no media bytes are
-            // readable. Always continue with a bounded Range GET so empty,
-            // HTML, JSON and truncated bridge responses are rejected before
-            // libmpv can reduce them to a generic `loading failed`.
+            // HEAD is advisory only. A successful status or media-looking
+            // Content-Type does not prove that a short-lived cloud URL can
+            // return bytes with the supplied Cookie/Referer. Always continue
+            // with the bounded Range GET below.
         } catch let error as HTTPClientError {
             switch error {
             case .statusCode, .invalidResponse:
@@ -210,14 +206,30 @@ public struct DefaultMediaProbe: MediaProbe {
                     headers: probeHeaders,
                     timeout: 10,
                     maximumResponseBytes: 512 * 1_024,
-                    retryPolicy: .none
+                    maximumRedirects: 4,
+                    retryPolicy: .none,
+                    allowsNonSuccessfulStatus: true
                 )
             )
-            if isAndroidBridgeSession {
-                return Self.looksLikeMediaBytes(response)
+            switch response.statusCode {
+            case 200...299:
+                break
+            case 401, 403:
+                throw AppError.playback("媒体授权已失效，请重新登录网盘")
+            case 404, 410:
+                throw AppError.playback("临时播放地址或分享已失效，请重新解析")
+            default:
+                throw AppError.playback(
+                    "媒体线路返回 HTTP 状态码 \(response.statusCode)"
+                )
             }
-            return Self.looksLikeMedia(response)
-                || MediaURLClassifier.isDirectMediaURL(url.absoluteString)
+            let valid = Self.looksLikeMediaBytes(response)
+            if !valid, isNodeRuntimeProxy || isAndroidBridgeSession {
+                throw AppError.playback(
+                    "网盘播放地址没有返回真实媒体数据"
+                )
+            }
+            return valid
         } catch HTTPClientError.responseTooLarge
                     where MediaURLClassifier.isDirectMediaURL(url.absoluteString)
                         || isAndroidBridgeSession {
@@ -492,7 +504,8 @@ public struct PlaybackResolver {
                     }
                     continuation.yield(.state(.validating))
                     let requiresPreflight = parser != nil
-                        || candidate.result.validationPolicy == .preflight
+                        || candidate.result.validationPolicy
+                            != .playerAuthoritative
                     if requiresPreflight {
                         guard try await mediaProbe.validate(
                             url: parsed.url,

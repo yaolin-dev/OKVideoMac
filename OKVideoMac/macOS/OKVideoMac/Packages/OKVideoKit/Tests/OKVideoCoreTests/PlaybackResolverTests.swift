@@ -140,16 +140,37 @@ final class PlaybackResolverTests: XCTestCase {
         XCTAssertTrue(isValid)
     }
 
-    func testNodeRuntimeMediaProxyBypassesUnsupportedHeadPreflight() async throws {
-        let probe = DefaultMediaProbe(httpClient: FailingProbeHTTPClient())
+    func testNodeRuntimeMediaProxyRequiresReadableMediaBytes() async throws {
         let url = try XCTUnwrap(
             URL(string: "http://127.0.0.1:18989/spider/wexyueyue/proxy/media?id=fixture")
         )
+        let client = ScriptedProbeHTTPClient(responses: [
+            HTTPResponse(
+                url: url,
+                statusCode: 200,
+                headers: [:],
+                body: Data()
+            ),
+            HTTPResponse(
+                url: url,
+                statusCode: 206,
+                headers: [
+                    "Content-Type": "video/mp4",
+                    "Content-Range": "bytes 0-3/4096"
+                ],
+                body: Data([0, 0, 0, 24])
+            )
+        ])
 
-        let isValid = try await probe.validate(url: url, headers: [:])
+        let isValid = try await DefaultMediaProbe(httpClient: client)
+            .validate(url: url, headers: ["Cookie": "session=fixture"])
 
         XCTAssertTrue(isValid)
         XCTAssertTrue(DefaultMediaProbe.isNodeRuntimeMediaProxy(url))
+        let requests = await client.requests()
+        XCTAssertEqual(requests.map(\.method), [.head, .get])
+        XCTAssertEqual(requests.last?.headers["Range"], "bytes=0-65535")
+        XCTAssertEqual(requests.last?.headers["Cookie"], "session=fixture")
     }
 
     func testAndroidBridgeMediaSessionIsNotMisclassifiedAsNodeProxy() throws {
@@ -211,10 +232,16 @@ final class PlaybackResolverTests: XCTestCase {
             )
         ])
 
-        let isValid = try await DefaultMediaProbe(httpClient: client)
-            .validate(url: url, headers: [:])
-
-        XCTAssertFalse(isValid)
+        do {
+            _ = try await DefaultMediaProbe(httpClient: client)
+                .validate(url: url, headers: [:])
+            XCTFail("JSON provider error must not pass the media probe")
+        } catch let error as AppError {
+            XCTAssertEqual(
+                error,
+                .playback("网盘播放地址没有返回真实媒体数据")
+            )
+        }
     }
 
     func testAndroidCloudOriginalProxyBypassIsRestrictedToExpectedEndpoint() throws {
