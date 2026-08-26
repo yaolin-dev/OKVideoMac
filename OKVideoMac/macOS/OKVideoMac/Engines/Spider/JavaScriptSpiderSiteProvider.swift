@@ -2048,6 +2048,7 @@ enum AndroidRuntimeFailureCategory: String, Codable, Sendable {
     case emulatorLaunchFailed
     case emulatorLaunchTimedOut
     case emulatorOwnershipMismatch
+    case emulatorRuntimeConflict
     case androidBootTimedOut
     case emulatorNetworkUnavailable
     case bridgeAPKMissing
@@ -2213,6 +2214,8 @@ struct AndroidRuntimeFailureError: LocalizedError, Sendable {
             return "Android Emulator 未能正常启动，请导出诊断后重试。"
         case .emulatorOwnershipMismatch:
             return "无法安全确认专用 Android Emulator，已停止操作其他设备。"
+        case .emulatorRuntimeConflict:
+            return "检测到其他 Emulator 使用了记录端口，未执行任何操作。"
         case .androidBootTimedOut:
             return "Android 系统启动超时，兼容环境没有在预期时间内完成启动。"
         case .emulatorNetworkUnavailable:
@@ -3906,6 +3909,7 @@ struct AndroidPortForwardIdentity: Codable, Equatable, Sendable {
 struct AndroidRuntimeIdentity: Codable, Equatable, Sendable {
     let schema: Int
     var generation: String
+    var systemBootIdentifier: String?
     let sdkRoot: URL
     let emulatorExecutable: URL
     let avdName: String
@@ -3915,6 +3919,33 @@ struct AndroidRuntimeIdentity: Codable, Equatable, Sendable {
     let serial: String
     let forwards: [AndroidPortForwardIdentity]
     let launchedAt: Date
+}
+
+enum AndroidRuntimeProcessIdentityState: Equatable, Sendable {
+    case owned
+    case exited
+    case reusedByOtherProcess
+}
+
+enum AndroidRuntimeStaleRecordReason: Equatable, Sendable {
+    case previousSystemBoot
+    case processExited
+    case pidReused
+}
+
+enum AndroidRuntimeRecordDecision: Equatable, Sendable {
+    case reuseOwnedRuntime
+    case clearStaleRecord(AndroidRuntimeStaleRecordReason)
+    case rejectConflictingRuntime
+}
+
+private struct AndroidRuntimeOwnershipObservation: Sendable {
+    let processState: AndroidRuntimeProcessIdentityState
+    let deviceReachable: Bool
+    let deviceOwned: Bool
+    let decision: AndroidRuntimeRecordDecision
+
+    var processOwned: Bool { processState == .owned }
 }
 
 private struct AndroidLegacyAVDCandidate: Sendable {
@@ -4000,6 +4031,7 @@ actor AndroidDexBridgeRuntime {
     private let defaults: UserDefaults
     private let baseEnvironment: [String: String]
     private let homeDirectory: URL
+    private let currentBootIdentifier: String
     private var userSelectedSDKRoot: String?
     private var emulatorProcess: Process?
     private var emulatorLogHandle: FileHandle?
@@ -4082,6 +4114,7 @@ actor AndroidDexBridgeRuntime {
         self.defaults = defaults
         baseEnvironment = environment
         homeDirectory = fileManager.homeDirectoryForCurrentUser
+        currentBootIdentifier = Self.systemBootIdentifier()
         userSelectedSDKRoot = defaults.string(
             forKey: AndroidToolchainResolver.userSDKRootDefaultsKey
         )
@@ -4174,6 +4207,9 @@ actor AndroidDexBridgeRuntime {
                for: probeErrorCategory
            ) {
             category = bridgeCategory
+        } else if lowercased.contains("其他 emulator")
+                    || lowercased.contains("记录端口") {
+            category = .emulatorRuntimeConflict
         } else if lowercased.contains("所有权") || lowercased.contains("身份") {
             category = .emulatorOwnershipMismatch
         } else {
@@ -4263,11 +4299,63 @@ actor AndroidDexBridgeRuntime {
         return nil
     }
 
-    static func failedRuntimeRecordCanBeCleared(
+    static func processIdentityState(
         processPresent: Bool,
-        deviceReachable: Bool
-    ) -> Bool {
-        !processPresent && !deviceReachable
+        processOwned: Bool
+    ) -> AndroidRuntimeProcessIdentityState {
+        if processOwned {
+            return .owned
+        }
+        return processPresent ? .reusedByOtherProcess : .exited
+    }
+
+    static func runtimeRecordDecision(
+        recordedBootIdentifier: String?,
+        currentBootIdentifier: String,
+        processPresent: Bool,
+        processOwned: Bool,
+        deviceReachable: Bool,
+        deviceOwned: Bool
+    ) -> AndroidRuntimeRecordDecision {
+        if let recordedBootIdentifier,
+           recordedBootIdentifier != currentBootIdentifier {
+            return deviceReachable
+                ? .rejectConflictingRuntime
+                : .clearStaleRecord(.previousSystemBoot)
+        }
+
+        let processState = processIdentityState(
+            processPresent: processPresent,
+            processOwned: processOwned
+        )
+        if processState == .owned {
+            if deviceReachable && !deviceOwned {
+                return .rejectConflictingRuntime
+            }
+            return .reuseOwnedRuntime
+        }
+        guard !deviceReachable else {
+            return .rejectConflictingRuntime
+        }
+        switch processState {
+        case .owned:
+            return .reuseOwnedRuntime
+        case .exited:
+            return .clearStaleRecord(.processExited)
+        case .reusedByOtherProcess:
+            return .clearStaleRecord(.pidReused)
+        }
+    }
+
+    static func systemBootIdentifier() -> String {
+        var bootTime = timeval()
+        var size = MemoryLayout<timeval>.size
+        if sysctlbyname("kern.boottime", &bootTime, &size, nil, 0) == 0 {
+            return "\(bootTime.tv_sec):\(bootTime.tv_usec)"
+        }
+        let estimatedBoot = Date().timeIntervalSince1970
+            - ProcessInfo.processInfo.systemUptime
+        return "estimated:\(Int64(estimatedBoot))"
     }
 
     private func preserveFailure(_ failure: AndroidRuntimeFailureError) {
@@ -4289,14 +4377,23 @@ actor AndroidDexBridgeRuntime {
         }
 
         if fileManager.fileExists(atPath: manifestURL.path) {
-            guard let identity = loadIdentity() else {
+            guard var identity = loadIdentity() else {
                 return .failed("Android 运行记录损坏，需要重新初始化")
             }
             guard let toolchain = resolver().toolchain(at: identity.sdkRoot) else {
                 return .failed("原 Android SDK 已不可用，无法安全确认运行实例")
             }
-            if verifyProcessOwnership(identity, toolchain: toolchain) {
-                guard verifyDeviceOwnership(identity, toolchain: toolchain) else {
+            let observation = observeRuntimeOwnership(
+                identity,
+                toolchain: toolchain
+            )
+            switch observation.decision {
+            case .reuseOwnedRuntime:
+                if identity.systemBootIdentifier == nil {
+                    identity.systemBootIdentifier = currentBootIdentifier
+                    try? saveIdentity(identity)
+                }
+                guard observation.deviceReachable else {
                     return .starting(progress: 0.45)
                 }
                 if (try? await isHealthy(
@@ -4310,12 +4407,14 @@ actor AndroidDexBridgeRuntime {
                     return .running
                 }
                 return .starting(progress: 0.70)
+            case let .clearStaleRecord(reason):
+                appendStaleRecordRecovery(reason)
+                clearRuntimeRecord()
+            case .rejectConflictingRuntime:
+                return .failed(
+                    "检测到其他 Emulator 使用了记录端口，未执行任何操作"
+                )
             }
-            if processExecutablePath(pid: identity.pid) != nil
-                || deviceIsReachable(identity, toolchain: toolchain) {
-                return .failed("无法安全确认 Android 实例所有权；请重新初始化")
-            }
-            try? fileManager.removeItem(at: manifestURL)
         }
 
         ready = false
@@ -4944,24 +5043,56 @@ actor AndroidDexBridgeRuntime {
         guard let identity = loadIdentity() else {
             return
         }
-        guard let toolchain = resolver().toolchain(at: identity.sdkRoot),
-              verifyOwnership(identity, toolchain: toolchain) else {
-            if processExecutablePath(pid: identity.pid) == nil,
-               !deviceIsReachable(
-                    identity,
-                    toolchain: resolver().toolchain(at: identity.sdkRoot)
-                ) {
-                clearRuntimeRecord()
-            } else {
-                let failure = classifiedFailure(
+        guard let toolchain = resolver().toolchain(at: identity.sdkRoot) else {
+            preserveFailure(
+                classifiedFailure(
                     for: AppError.spider(
-                        "无法安全确认 Android 实例所有权，已拒绝停止任何 Emulator"
+                        "原 Android SDK 已不可用，未执行任何 Emulator 操作"
                     ),
                     stage: .stopping
                 )
-                preserveFailure(failure)
-            }
+            )
             return
+        }
+        let observation = observeRuntimeOwnership(
+            identity,
+            toolchain: toolchain
+        )
+        switch observation.decision {
+        case let .clearStaleRecord(reason):
+            appendStaleRecordRecovery(reason)
+            clearRuntimeRecord()
+            return
+        case .rejectConflictingRuntime:
+            preserveFailure(
+                classifiedFailure(
+                    for: AppError.spider(
+                        "检测到其他 Emulator 使用了记录端口，未执行任何操作"
+                    ),
+                    stage: .stopping
+                )
+            )
+            return
+        case .reuseOwnedRuntime:
+            if !observation.deviceOwned {
+                _ = Darwin.kill(identity.pid, SIGTERM)
+                for _ in 0..<20 {
+                    if processExecutablePath(pid: identity.pid) == nil {
+                        clearRuntimeRecord()
+                        return
+                    }
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                }
+                preserveFailure(
+                    classifiedFailure(
+                        for: AppError.spider(
+                            "专用 Android Emulator 未确认停止；已保留运行记录以防误操作"
+                        ),
+                        stage: .stopping
+                    )
+                )
+                return
+            }
         }
         do {
             try removeOwnedPortForwards(identity, toolchain: toolchain)
@@ -5005,27 +5136,47 @@ actor AndroidDexBridgeRuntime {
     func ensureReady() async throws {
         if ready {
             guard let identity = loadIdentity(),
-                  let toolchain = resolver().toolchain(at: identity.sdkRoot),
-                  verifyOwnership(identity, toolchain: toolchain) else {
+                  let toolchain = resolver().toolchain(at: identity.sdkRoot)
+            else {
                 ready = false
                 throw AppError.spider(
                     "Android 运行实例所有权校验失败，已拒绝继续操作"
                 )
             }
-            if let lastNetworkCheck,
-               Date().timeIntervalSince(lastNetworkCheck)
-                    < Self.networkCheckInterval {
-                return
-            }
-            if try await isHealthy(
+            let observation = observeRuntimeOwnership(
                 identity,
-                toolchain: toolchain,
-                acceptVersionMismatch: acceptsNewerBridge
-            ) {
-                lastNetworkCheck = Date()
-                return
+                toolchain: toolchain
+            )
+            switch observation.decision {
+            case let .clearStaleRecord(reason):
+                appendStaleRecordRecovery(reason)
+                clearRuntimeRecord()
+                ready = false
+            case .rejectConflictingRuntime:
+                ready = false
+                throw classifiedFailure(
+                    for: AppError.spider(
+                        "检测到其他 Emulator 使用了记录端口，未执行任何操作"
+                    )
+                )
+            case .reuseOwnedRuntime:
+                if observation.deviceOwned {
+                    if let lastNetworkCheck,
+                       Date().timeIntervalSince(lastNetworkCheck)
+                            < Self.networkCheckInterval {
+                        return
+                    }
+                    if try await isHealthy(
+                        identity,
+                        toolchain: toolchain,
+                        acceptVersionMismatch: acceptsNewerBridge
+                    ) {
+                        lastNetworkCheck = Date()
+                        return
+                    }
+                }
+                ready = false
             }
-            ready = false
         }
         if let readinessTask {
             return try await readinessTask.value
@@ -5045,9 +5196,31 @@ actor AndroidDexBridgeRuntime {
 
     func resetAuthorizationUI() async throws {
         guard let identity = loadIdentity(),
-              let toolchain = resolver().toolchain(at: identity.sdkRoot),
-              verifyOwnership(identity, toolchain: toolchain) else {
+              let toolchain = resolver().toolchain(at: identity.sdkRoot) else {
             throw AppError.spider("Android 运行实例所有权校验失败")
+        }
+        let observation = observeRuntimeOwnership(
+            identity,
+            toolchain: toolchain
+        )
+        switch observation.decision {
+        case let .clearStaleRecord(reason):
+            appendStaleRecordRecovery(reason)
+            clearRuntimeRecord()
+            try await prepareRuntime()
+            return
+        case .rejectConflictingRuntime:
+            throw classifiedFailure(
+                for: AppError.spider(
+                    "检测到其他 Emulator 使用了记录端口，未执行任何操作"
+                )
+            )
+        case .reuseOwnedRuntime:
+            guard observation.deviceOwned else {
+                ready = false
+                try await prepareRuntime()
+                return
+            }
         }
 
         ready = false
@@ -5114,7 +5287,7 @@ actor AndroidDexBridgeRuntime {
             try createRuntimeDirectories()
 
             if fileManager.fileExists(atPath: manifestURL.path) {
-                guard let recorded = loadIdentity() else {
+                guard var recorded = loadIdentity() else {
                     throw AppError.spider(
                         "Android 运行记录损坏；为避免误操作其他设备，已停止"
                     )
@@ -5126,19 +5299,33 @@ actor AndroidDexBridgeRuntime {
                         "原 Android SDK 已不可用，无法安全复用运行实例"
                     )
                 }
-                if verifyOwnership(recorded, toolchain: recordedToolchain) {
+                let observation = observeRuntimeOwnership(
+                    recorded,
+                    toolchain: recordedToolchain
+                )
+                switch observation.decision {
+                case .reuseOwnedRuntime:
+                    if recorded.systemBootIdentifier == nil {
+                        recorded.systemBootIdentifier = currentBootIdentifier
+                        try saveIdentity(recorded)
+                    }
                     activeIdentity = recorded
                     activeToolchain = recordedToolchain
-                } else if processExecutablePath(pid: recorded.pid) != nil
-                            || deviceIsReachable(
-                                recorded,
-                                toolchain: recordedToolchain
-                            ) {
-                    throw AppError.spider(
-                        "Android 实例身份与运行记录不一致；已拒绝继续操作"
-                    )
-                } else {
+                case let .clearStaleRecord(reason):
+                    appendStaleRecordRecovery(reason)
+                    if reason == .previousSystemBoot {
+                        operationStatus = .starting(
+                            "检测到电脑重启后的旧运行记录，正在重新连接。",
+                            progress: AndroidRuntimeStartupStage.locatingSDK.progress
+                                ?? 0
+                        )
+                        await Task.yield()
+                    }
                     clearRuntimeRecord()
+                case .rejectConflictingRuntime:
+                    throw AppError.spider(
+                        "检测到其他 Emulator 使用了记录端口，未执行任何操作"
+                    )
                 }
             }
 
@@ -6399,6 +6586,7 @@ actor AndroidDexBridgeRuntime {
             let identity = AndroidRuntimeIdentity(
                 schema: Self.manifestSchema,
                 generation: generation,
+                systemBootIdentifier: currentBootIdentifier,
                 sdkRoot: toolchain.sdkRoot,
                 emulatorExecutable: toolchain.emulator,
                 avdName: Self.avdName,
@@ -6439,23 +6627,23 @@ actor AndroidDexBridgeRuntime {
         toolchain: AndroidToolchain,
         deviceRequired: Bool
     ) throws -> Bool {
-        let processPresent = processExecutablePath(pid: identity.pid) != nil
-        let processOwned = processPresent
-            && verifyProcessOwnership(identity, toolchain: toolchain)
-        let deviceReachable = deviceIsReachable(
+        let observation = observeRuntimeOwnership(
             identity,
             toolchain: toolchain
         )
-        let deviceOwned = deviceReachable
-            && verifyDeviceOwnership(identity, toolchain: toolchain)
-        guard let category = Self.managedRuntimeFailureCategory(
-            processPresent: processPresent,
-            processOwned: processOwned,
-            deviceRequired: deviceRequired,
-            deviceReachable: deviceReachable,
-            deviceOwned: deviceOwned
-        ) else {
-            return deviceOwned
+        let category: AndroidRuntimeFailureCategory?
+        switch observation.decision {
+        case .reuseOwnedRuntime:
+            category = deviceRequired && !observation.deviceReachable
+                ? .adbUnavailable : nil
+        case let .clearStaleRecord(reason):
+            category = reason == .processExited
+                ? .runtimeExited : .emulatorOwnershipMismatch
+        case .rejectConflictingRuntime:
+            category = .emulatorRuntimeConflict
+        }
+        guard let category else {
+            return observation.deviceOwned
         }
 
         let message: String
@@ -6466,6 +6654,8 @@ actor AndroidDexBridgeRuntime {
             message = "专用 Android Emulator 设备已断开"
         case .emulatorOwnershipMismatch:
             message = "专用 Android Emulator 所有权校验失败；已拒绝继续操作"
+        case .emulatorRuntimeConflict:
+            message = "检测到其他 Emulator 使用了记录端口，未执行任何操作"
         default:
             message = "专用 Android Emulator 生命周期校验失败"
         }
@@ -6476,6 +6666,56 @@ actor AndroidDexBridgeRuntime {
                 category: category,
                 message: message
             )
+        )
+    }
+
+    private func observeRuntimeOwnership(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) -> AndroidRuntimeOwnershipObservation {
+        let processPresent = processExecutablePath(pid: identity.pid) != nil
+        let processOwned = processPresent
+            && verifyProcessOwnership(identity, toolchain: toolchain)
+        let deviceReachable = deviceIsReachable(
+            identity,
+            toolchain: toolchain
+        )
+        let deviceOwned = deviceReachable
+            && verifyDeviceOwnership(identity, toolchain: toolchain)
+        return AndroidRuntimeOwnershipObservation(
+            processState: Self.processIdentityState(
+                processPresent: processPresent,
+                processOwned: processOwned
+            ),
+            deviceReachable: deviceReachable,
+            deviceOwned: deviceOwned,
+            decision: Self.runtimeRecordDecision(
+                recordedBootIdentifier: identity.systemBootIdentifier,
+                currentBootIdentifier: currentBootIdentifier,
+                processPresent: processPresent,
+                processOwned: processOwned,
+                deviceReachable: deviceReachable,
+                deviceOwned: deviceOwned
+            )
+        )
+    }
+
+    private func appendStaleRecordRecovery(
+        _ reason: AndroidRuntimeStaleRecordReason
+    ) {
+        let detail: String
+        switch reason {
+        case .previousSystemBoot:
+            detail = "检测到电脑重启后的旧运行记录，正在重新连接"
+        case .processExited:
+            detail = "旧 Emulator 已退出，清除运行记录后重新连接"
+        case .pidReused:
+            detail = "旧 Emulator PID 已被其他进程复用；仅清除运行记录"
+        }
+        appendEvent(
+            stage: currentStage,
+            event: "stale_runtime_record_cleared",
+            detail: detail
         )
     }
 
@@ -6678,19 +6918,29 @@ actor AndroidDexBridgeRuntime {
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain
     ) async -> Bool {
-        let processPresent = processExecutablePath(pid: identity.pid) != nil
-        let deviceReachable = deviceIsReachable(
+        let observation = observeRuntimeOwnership(
             identity,
             toolchain: toolchain
         )
-        if Self.failedRuntimeRecordCanBeCleared(
-            processPresent: processPresent,
-            deviceReachable: deviceReachable
-        ) {
+        switch observation.decision {
+        case let .clearStaleRecord(reason):
+            appendStaleRecordRecovery(reason)
             clearRuntimeRecord()
             return true
+        case .rejectConflictingRuntime:
+            return false
+        case .reuseOwnedRuntime:
+            break
         }
-        guard verifyOwnership(identity, toolchain: toolchain) else {
+        if !observation.deviceOwned {
+            _ = Darwin.kill(identity.pid, SIGTERM)
+            for _ in 0..<20 {
+                if processExecutablePath(pid: identity.pid) == nil {
+                    clearRuntimeRecord()
+                    return true
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
             return false
         }
         try? removeOwnedPortForwards(identity, toolchain: toolchain)

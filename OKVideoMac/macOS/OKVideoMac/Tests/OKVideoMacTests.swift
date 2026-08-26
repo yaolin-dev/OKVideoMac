@@ -6923,25 +6923,85 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testAndroidFailedRuntimeRecordClearsOnlyAfterProcessAndDeviceExit() {
-        XCTAssertTrue(
-            AndroidDexBridgeRuntime.failedRuntimeRecordCanBeCleared(
-                processPresent: false,
-                deviceReachable: false
-            )
-        )
-        XCTAssertFalse(
-            AndroidDexBridgeRuntime.failedRuntimeRecordCanBeCleared(
+    func testAndroidRuntimeClearsPreviousBootRecordWhenSerialIsUnreachable() {
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.runtimeRecordDecision(
+                recordedBootIdentifier: "previous-boot",
+                currentBootIdentifier: "current-boot",
                 processPresent: true,
-                deviceReachable: false
-            )
+                processOwned: false,
+                deviceReachable: false,
+                deviceOwned: false
+            ),
+            .clearStaleRecord(.previousSystemBoot)
         )
-        XCTAssertFalse(
-            AndroidDexBridgeRuntime.failedRuntimeRecordCanBeCleared(
-                processPresent: false,
-                deviceReachable: true
-            )
+    }
+
+    func testAndroidRuntimeClearsReusedPIDWithoutTouchingThatProcess() {
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.processIdentityState(
+                processPresent: true,
+                processOwned: false
+            ),
+            .reusedByOtherProcess
         )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.runtimeRecordDecision(
+                recordedBootIdentifier: "current-boot",
+                currentBootIdentifier: "current-boot",
+                processPresent: true,
+                processOwned: false,
+                deviceReachable: false,
+                deviceOwned: false
+            ),
+            .clearStaleRecord(.pidReused)
+        )
+    }
+
+    func testAndroidRuntimeRejectsReachableSerialFromPreviousBoot() {
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.runtimeRecordDecision(
+                recordedBootIdentifier: "previous-boot",
+                currentBootIdentifier: "current-boot",
+                processPresent: true,
+                processOwned: false,
+                deviceReachable: true,
+                deviceOwned: false
+            ),
+            .rejectConflictingRuntime
+        )
+    }
+
+    func testAndroidRuntimeAdoptsLegacyManifestOnlyForOwnedProcess() {
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.runtimeRecordDecision(
+                recordedBootIdentifier: nil,
+                currentBootIdentifier: "current-boot",
+                processPresent: true,
+                processOwned: true,
+                deviceReachable: false,
+                deviceOwned: false
+            ),
+            .reuseOwnedRuntime
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.runtimeRecordDecision(
+                recordedBootIdentifier: nil,
+                currentBootIdentifier: "current-boot",
+                processPresent: true,
+                processOwned: false,
+                deviceReachable: false,
+                deviceOwned: false
+            ),
+            .clearStaleRecord(.pidReused)
+        )
+    }
+
+    func testAndroidRuntimeBootIdentifierIsStableWithinBoot() {
+        let first = AndroidDexBridgeRuntime.systemBootIdentifier()
+        let second = AndroidDexBridgeRuntime.systemBootIdentifier()
+        XCTAssertFalse(first.isEmpty)
+        XCTAssertEqual(first, second)
     }
 
     func testAndroidLastFailureRemainsVisibleAfterOperationStops() throws {
