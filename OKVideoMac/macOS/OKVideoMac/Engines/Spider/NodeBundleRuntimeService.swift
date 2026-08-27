@@ -1247,16 +1247,37 @@ actor NodeBundleRuntimeService {
             var site = rawSite
             site["okNodeRuntime"] = true
             let searchable = (site["searchable"] as? NSNumber)?.intValue
-            // CatPaw metadata omits `searchable` for settings, push and other
-            // utility routes. ConfigurationParser's compatibility default is
-            // deliberately permissive for older TVBox sources, so Node must
-            // publish the absence as an explicit lack of search capability.
-            site["searchable"] = searchable ?? 0
-            site["okNodeCapabilities"] = searchable.map { value in
-                value == 0 ? [] : ["search"]
-            } ?? []
-            if searchable == nil, site["configurable"] as? Bool == true {
-                site["okNodeConfigurationRequired"] = true
+            let publishedCapabilities = (site["okNodeCapabilities"] as? [Any])?
+                .compactMap { $0 as? String }
+            if let publishedCapabilities {
+                let supportsSearch = publishedCapabilities.contains("search")
+                site["okNodeCapabilities"] = publishedCapabilities
+                site["okNodeSearchCapabilityState"] = supportsSearch
+                    ? "supported"
+                    : "unsupported"
+                site["searchable"] = searchable ?? (supportsSearch ? 1 : 0)
+            } else if let searchable {
+                // FongMi's declared tri-state remains authoritative when the
+                // Spider publishes it: 0 is unsupported, 1 is enabled and 2
+                // is user-disabled. It describes search selection, not the
+                // rest of the Spider's routes.
+                site["searchable"] = searchable
+                site["okNodeSearchCapabilityState"] = searchable == 0
+                    ? "unsupported"
+                    : "supported"
+                site["okNodeCapabilities"] = searchable == 0
+                    ? []
+                    : ["search"]
+            } else {
+                // CatPawOpen copies Spider metadata into `/config` separately
+                // from registering `spider.api`. Many real search providers
+                // therefore omit `searchable` even though POST `/search`
+                // exists. Preserve that distinction as `unknown` and keep the
+                // provider eligible until an exact route-not-found response
+                // proves otherwise.
+                site["searchable"] = 1
+                site["okNodeSearchCapabilityState"] = "unknown"
+                site.removeValue(forKey: "okNodeCapabilities")
             }
             if let bundleIdentity {
                 site["okNodeBundleIdentity"] = bundleIdentity

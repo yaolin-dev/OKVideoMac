@@ -1226,6 +1226,37 @@ enum SearchScopeSiteAvailability: Equatable, Sendable {
     case unavailable(String)
 }
 
+enum NodeSearchCapabilityState: Equatable, Sendable {
+    case supported
+    case unsupported
+    case unknown
+}
+
+enum NodeSearchCapabilityPolicy {
+    static func declaredState(for site: SiteConfiguration) -> NodeSearchCapabilityState {
+        switch site.extra["okNodeSearchCapabilityState"]?.stringValue {
+        case "supported":
+            return .supported
+        case "unsupported":
+            return .unsupported
+        case "unknown":
+            return .unknown
+        default:
+            break
+        }
+
+        // Compatibility with normalized configurations produced before the
+        // explicit state marker was introduced. An absent capability list is
+        // not negative evidence; only a present empty list is.
+        if case .array(let values)? = site.extra["okNodeCapabilities"] {
+            return values.compactMap(\.stringValue).contains("search")
+                ? .supported
+                : .unsupported
+        }
+        return site.searchable == 0 ? .unsupported : .unknown
+    }
+}
+
 struct SearchScopeSiteOption: Identifiable, Equatable, Sendable {
     var id: String { key }
     let key: String
@@ -8422,7 +8453,8 @@ final class AppState: ObservableObject {
                       unsupportedNodeSearchRouteIdentities.contains(identity) {
                 availability = .unavailable("Spider 未提供搜索接口")
             } else if site.extra["okNodeRuntime"] == .bool(true),
-                      !nodeCapabilities(for: site).contains("search") {
+                      NodeSearchCapabilityPolicy.declaredState(for: site)
+                        == .unsupported {
                 availability = .unavailable("Spider 未提供搜索接口")
             } else if site.searchable == 0 {
                 availability = .unavailable("站点未提供搜索能力")
@@ -8442,13 +8474,6 @@ final class AppState: ObservableObject {
                 availability: availability
             )
         }
-    }
-
-    private func nodeCapabilities(for site: SiteConfiguration) -> Set<String> {
-        guard case .array(let values)? = site.extra["okNodeCapabilities"] else {
-            return []
-        }
-        return Set(values.compactMap(\.stringValue))
     }
 
     private func nodeSearchCapabilityIdentity(

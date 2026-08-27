@@ -6972,6 +6972,38 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testAndroidRuntimeMigratesSmallLegacyBootTimeDrift() {
+        let current = "session:529E73D0-0DF3-43B0-8E76-E85456E4B7AF"
+            + "|legacy:1787069808:898337"
+
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.bootIdentifiersReferToSameBoot(
+                "1787069804:796892",
+                current
+            )
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.runtimeRecordDecision(
+                recordedBootIdentifier: "1787069804:796892",
+                currentBootIdentifier: current,
+                processPresent: true,
+                processOwned: true,
+                deviceReachable: true,
+                deviceOwned: true
+            ),
+            .reuseOwnedRuntime
+        )
+    }
+
+    func testAndroidRuntimeNeverIgnoresBootSessionUUIDMismatch() {
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.bootIdentifiersReferToSameBoot(
+                "session:AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA|legacy:1000:0",
+                "session:BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB|legacy:1001:0"
+            )
+        )
+    }
+
     func testAndroidRuntimeClearsReusedPIDWithoutTouchingThatProcess() {
         XCTAssertEqual(
             AndroidDexBridgeRuntime.processIdentityState(
@@ -9668,8 +9700,16 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(site.key, "nodejs_fixture")
         XCTAssertEqual(site.api, "/spider/fixture/3")
         XCTAssertEqual(site.extra["okNodeRuntime"], .bool(true))
-        XCTAssertEqual(site.searchable, 0)
-        XCTAssertEqual(site.extra["okNodeCapabilities"], .array([]))
+        XCTAssertEqual(site.searchable, 1)
+        XCTAssertEqual(
+            site.extra["okNodeSearchCapabilityState"],
+            .string("unknown")
+        )
+        XCTAssertNil(site.extra["okNodeCapabilities"])
+        XCTAssertEqual(
+            NodeSearchCapabilityPolicy.declaredState(for: site),
+            .unknown
+        )
         XCTAssertEqual(configuration.danmaku, "/danmu")
     }
 
@@ -9700,10 +9740,65 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(home.indexs, 1)
         XCTAssertEqual(home.extra["filterable"], .integer(1))
         XCTAssertEqual(disabled.hide, 1)
-        XCTAssertEqual(disabled.searchable, 0)
+        XCTAssertEqual(disabled.searchable, 1)
+        XCTAssertEqual(
+            utility.extra["okNodeSearchCapabilityState"],
+            .string("unsupported")
+        )
+        XCTAssertEqual(
+            home.extra["okNodeSearchCapabilityState"],
+            .string("supported")
+        )
+        XCTAssertEqual(
+            disabled.extra["okNodeSearchCapabilityState"],
+            .string("unknown")
+        )
         XCTAssertEqual(
             home.extra["okNodeCapabilities"],
             .array([.string("search")])
+        )
+        XCTAssertNil(disabled.extra["okNodeCapabilities"])
+        XCTAssertEqual(
+            NodeSearchCapabilityPolicy.declaredState(for: utility),
+            .unsupported
+        )
+        XCTAssertEqual(
+            NodeSearchCapabilityPolicy.declaredState(for: home),
+            .supported
+        )
+    }
+
+    func testNodePublishedCapabilityListTakesPrecedenceOverMissingSearchable() throws {
+        let source = Data(
+            #"{"sites":[{"key":"with-search","name":"With Search","type":3,"api":"/spider/with/3","okNodeCapabilities":["search","detail"]},{"key":"without-search","name":"Without Search","type":3,"api":"/spider/without/3","okNodeCapabilities":["home","detail"]}]}"#.utf8
+        )
+
+        let normalized = try NodeBundleRuntimeService.normalizeConfiguration(source)
+        let configuration = try ConfigurationParser().parse(normalized)
+        let withSearch = try XCTUnwrap(
+            configuration.sites.first(where: { $0.key == "with-search" })
+        )
+        let withoutSearch = try XCTUnwrap(
+            configuration.sites.first(where: { $0.key == "without-search" })
+        )
+
+        XCTAssertEqual(withSearch.searchable, 1)
+        XCTAssertEqual(
+            withSearch.extra["okNodeCapabilities"],
+            .array([.string("search"), .string("detail")])
+        )
+        XCTAssertEqual(
+            NodeSearchCapabilityPolicy.declaredState(for: withSearch),
+            .supported
+        )
+        XCTAssertEqual(withoutSearch.searchable, 0)
+        XCTAssertEqual(
+            withoutSearch.extra["okNodeCapabilities"],
+            .array([.string("home"), .string("detail")])
+        )
+        XCTAssertEqual(
+            NodeSearchCapabilityPolicy.declaredState(for: withoutSearch),
+            .unsupported
         )
     }
 
@@ -9732,10 +9827,23 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(short.searchable, 2)
         XCTAssertEqual(short.extra["okNodeCatalogDisabled"], .bool(true))
         XCTAssertEqual(short.extra["okNodeCapabilities"], .array([.string("search")]))
+        XCTAssertEqual(
+            short.extra["okNodeSearchCapabilityState"],
+            .string("supported")
+        )
         XCTAssertEqual(short.extra["okNodeBundleIdentity"], .string("bundle-v1"))
         XCTAssertEqual(short.extra["okNodeProfileRevision"], .string("profile-v2"))
-        XCTAssertEqual(settings.searchable, 0)
-        XCTAssertEqual(settings.extra["okNodeConfigurationRequired"], .bool(true))
+        XCTAssertEqual(settings.searchable, 2)
+        XCTAssertEqual(
+            settings.extra["okNodeSearchCapabilityState"],
+            .string("unknown")
+        )
+        XCTAssertNil(settings.extra["okNodeCapabilities"])
+        XCTAssertNil(settings.extra["okNodeConfigurationRequired"])
+        XCTAssertEqual(
+            NodeSearchCapabilityPolicy.declaredState(for: settings),
+            .unknown
+        )
     }
 
     func testNodeBundleMD5Compatibility() {

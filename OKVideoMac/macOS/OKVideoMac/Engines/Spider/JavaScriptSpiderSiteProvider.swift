@@ -4322,7 +4322,10 @@ actor AndroidDexBridgeRuntime {
         deviceOwned: Bool
     ) -> AndroidRuntimeRecordDecision {
         if let recordedBootIdentifier,
-           recordedBootIdentifier != currentBootIdentifier {
+           !bootIdentifiersReferToSameBoot(
+               recordedBootIdentifier,
+               currentBootIdentifier
+           ) {
             return deviceReachable
                 ? .rejectConflictingRuntime
                 : .clearStaleRecord(.previousSystemBoot)
@@ -4352,14 +4355,89 @@ actor AndroidDexBridgeRuntime {
     }
 
     static func systemBootIdentifier() -> String {
+        if let sessionUUID = bootSessionUUID() {
+            if let legacyIdentifier = legacySystemBootIdentifier() {
+                return "session:\(sessionUUID)|legacy:\(legacyIdentifier)"
+            }
+            return "session:\(sessionUUID)"
+        }
+        return legacySystemBootIdentifier()
+            ?? "estimated:\(Int64(Date().timeIntervalSince1970 - ProcessInfo.processInfo.systemUptime))"
+    }
+
+    static func bootIdentifiersReferToSameBoot(
+        _ recorded: String,
+        _ current: String
+    ) -> Bool {
+        if recorded == current { return true }
+
+        let recordedSession = bootSessionUUID(from: recorded)
+        let currentSession = bootSessionUUID(from: current)
+        if let recordedSession, let currentSession {
+            return recordedSession.caseInsensitiveCompare(currentSession)
+                == .orderedSame
+        }
+
+        guard let recordedSeconds = legacyBootSeconds(from: recorded),
+              let currentSeconds = legacyBootSeconds(from: current) else {
+            return false
+        }
+        // `kern.boottime` is expressed in wall-clock time and can drift when
+        // macOS corrects its clock. It is retained only to migrate manifests
+        // written before the stable boot-session UUID was introduced.
+        return abs(recordedSeconds - currentSeconds) <= 300
+    }
+
+    private static func bootSessionUUID() -> String? {
+        var size = 0
+        guard sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0,
+              size > 1 else { return nil }
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctlbyname(
+            "kern.bootsessionuuid",
+            &buffer,
+            &size,
+            nil,
+            0
+        ) == 0 else { return nil }
+        let value = String(cString: buffer).trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        return value.isEmpty ? nil : value
+    }
+
+    private static func legacySystemBootIdentifier() -> String? {
         var bootTime = timeval()
         var size = MemoryLayout<timeval>.size
         if sysctlbyname("kern.boottime", &bootTime, &size, nil, 0) == 0 {
             return "\(bootTime.tv_sec):\(bootTime.tv_usec)"
         }
-        let estimatedBoot = Date().timeIntervalSince1970
-            - ProcessInfo.processInfo.systemUptime
-        return "estimated:\(Int64(estimatedBoot))"
+        return nil
+    }
+
+    private static func bootSessionUUID(from identifier: String) -> String? {
+        guard identifier.hasPrefix("session:") else { return nil }
+        return identifier
+            .dropFirst("session:".count)
+            .split(separator: "|", maxSplits: 1)
+            .first
+            .map(String.init)
+    }
+
+    private static func legacyBootSeconds(from identifier: String) -> Int64? {
+        let legacy: Substring
+        if let range = identifier.range(of: "|legacy:") {
+            legacy = identifier[range.upperBound...]
+        } else if identifier.hasPrefix("estimated:") {
+            legacy = identifier.dropFirst("estimated:".count)
+        } else if !identifier.hasPrefix("session:") {
+            legacy = Substring(identifier)
+        } else {
+            return nil
+        }
+        guard let seconds = legacy.split(separator: ":", maxSplits: 1).first
+        else { return nil }
+        return Int64(seconds)
     }
 
     private func preserveFailure(_ failure: AndroidRuntimeFailureError) {
@@ -4393,7 +4471,7 @@ actor AndroidDexBridgeRuntime {
             )
             switch observation.decision {
             case .reuseOwnedRuntime:
-                if identity.systemBootIdentifier == nil {
+                if identity.systemBootIdentifier != currentBootIdentifier {
                     identity.systemBootIdentifier = currentBootIdentifier
                     try? saveIdentity(identity)
                 }
@@ -5309,7 +5387,7 @@ actor AndroidDexBridgeRuntime {
                 )
                 switch observation.decision {
                 case .reuseOwnedRuntime:
-                    if recorded.systemBootIdentifier == nil {
+                    if recorded.systemBootIdentifier != currentBootIdentifier {
                         recorded.systemBootIdentifier = currentBootIdentifier
                         try saveIdentity(recorded)
                     }
