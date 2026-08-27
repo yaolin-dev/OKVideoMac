@@ -11479,6 +11479,79 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         await service.stop()
     }
 
+    func testContractBOwnershipEndpointNormalizesOnlyCurrentRuntimeWebsite()
+        async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(
+                nodeContractBFixtureScript(
+                    startDelayMilliseconds: 0,
+                    startsAuxiliaryListener: true
+                ).utf8
+            )
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+        let endpoint = try await service.ensureReady(from: fixture.sourceURL)
+        let (addressData, _) = try await URLSession.shared.data(
+            from: endpoint.appendingPathComponent("auxiliary")
+        )
+        let address = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: addressData)
+                as? [String: Any]
+        )
+        let port = try XCTUnwrap(address["port"] as? Int)
+
+        func ownershipURL(_ rawURL: String) throws -> URL {
+            var components = URLComponents(
+                url: endpoint.appendingPathComponent(
+                    "__okvideo/owned-loopback"
+                ),
+                resolvingAgainstBaseURL: false
+            )
+            components?.queryItems = [
+                URLQueryItem(name: "url", value: rawURL)
+            ]
+            return try XCTUnwrap(components?.url)
+        }
+
+        let (ownedData, ownedResponse) = try await URLSession.shared.data(
+            from: ownershipURL(
+                "http://192.168.1.114:\(port)/website"
+            )
+        )
+        XCTAssertEqual((ownedResponse as? HTTPURLResponse)?.statusCode, 200)
+        let ownedObject = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: ownedData)
+                as? [String: Any]
+        )
+        let normalizedURL = try XCTUnwrap(
+            URL(string: ownedObject["url"] as? String ?? "")
+        )
+        XCTAssertEqual(normalizedURL.host, "127.0.0.1")
+        XCTAssertEqual(normalizedURL.port, port)
+        XCTAssertEqual(normalizedURL.path, "/website")
+
+        let (_, wrongPathResponse) = try await URLSession.shared.data(
+            from: ownershipURL(
+                "http://192.168.1.114:\(port)/ordinary-media"
+            )
+        )
+        XCTAssertEqual(
+            (wrongPathResponse as? HTTPURLResponse)?.statusCode,
+            404
+        )
+        let (_, unownedResponse) = try await URLSession.shared.data(
+            from: ownershipURL("http://192.168.1.114:1/website")
+        )
+        XCTAssertEqual((unownedResponse as? HTTPURLResponse)?.statusCode, 404)
+        await service.stop()
+    }
+
     func testContractBQueuesAuthorizationCompletionAfterWebChallenge() async throws {
         let fixture = try makeLegacyCacheFixture(
             script: Data(
@@ -13506,6 +13579,270 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(home.categories.first?.resolvedContentKind, .media)
         XCTAssertEqual(home.recommendations.map(\.videoID), ["arbitrary-action"])
         XCTAssertTrue(home.actionItems.isEmpty)
+    }
+
+    func testNodeHomePromotesOwnedWebsiteCategoryAndItsImplicitCards()
+        async throws {
+        let categoryID = "http://192.168.1.114:50205/website"
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.path.hasSuffix("/init") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            if request.url.path == "/__okvideo/owned-loopback" {
+                XCTAssertEqual(
+                    URLComponents(
+                        url: request.url,
+                        resolvingAgainstBaseURL: false
+                    )?.queryItems?.first(where: { $0.name == "url" })?.value,
+                    categoryID
+                )
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 200,
+                    headers: ["Content-Type": "application/json"],
+                    body: Data(
+                        #"{"url":"http://127.0.0.1:50205/website"}"#.utf8
+                    )
+                )
+            }
+            if request.url.path.hasSuffix("/home") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 200,
+                    headers: ["Content-Type": "application/json"],
+                    body: Data(
+                        """
+                        {"class":[{"type_id":"\(categoryID)","type_name":"配置"}],"list":[]}
+                        """.utf8
+                    )
+                )
+            }
+            if request.url.path.hasSuffix("/homeVod") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 200,
+                    headers: ["Content-Type": "application/json"],
+                    body: Data(#"{"list":[]}"#.utf8)
+                )
+            }
+            if request.url.path.hasSuffix("/category") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 200,
+                    headers: ["Content-Type": "application/json"],
+                    body: Data(
+                        #"{"list":[{"vod_id":"qr","vod_name":"扫码配置"},{"vod_id":"click","vod_name":"点击配置"}],"page":1,"pagecount":1}"#.utf8
+                    )
+                )
+            }
+            if request.url.path.contains("/__okvideo/host-message/") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 204,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            throw HTTPClientError.statusCode(404)
+        }
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: nodeLifecycleFixtureSite,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        let home = try await provider.home()
+        XCTAssertEqual(home.categories.first?.id, categoryID)
+        XCTAssertEqual(home.categories.first?.resolvedContentKind, .action)
+
+        let page = try await provider.actionCategory(
+            id: categoryID,
+            page: 1,
+            filters: [:]
+        )
+        XCTAssertEqual(page.items.map(\.videoID), ["qr", "click"])
+        XCTAssertTrue(
+            page.items.allSatisfy { $0.resolvedContentKind == .action }
+        )
+    }
+
+    func testNodeHomeRejectsWebsiteCategoryOwnedByAnotherPort() async throws {
+        let categoryID = "http://192.168.1.114:50206/website"
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.path.hasSuffix("/init") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            if request.url.path == "/__okvideo/owned-loopback" {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: request.url.path.hasSuffix("/home")
+                    ? Data(
+                        """
+                        {"class":[{"type_id":"\(categoryID)","type_name":"外部页面"}],"list":[]}
+                        """.utf8
+                    )
+                    : Data(#"{"list":[]}"#.utf8)
+            )
+        }
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: nodeLifecycleFixtureSite,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        let home = try await provider.home()
+
+        XCTAssertEqual(home.categories.first?.resolvedContentKind, .media)
+        XCTAssertTrue(home.actionItems.isEmpty)
+    }
+
+    func testNodeCategoryPreservesExplicitActionAndFolderBeforeDetail()
+        async throws {
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.path.hasSuffix("/init") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            XCTAssertTrue(request.url.path.hasSuffix("/category"))
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(
+                    #"{"list":[{"vod_id":"media","vod_name":"影片"},{"vod_id":"configure","vod_name":"配置","action":"login"},{"vod_id":"folder","vod_name":"目录","cate":{}}],"page":1,"pagecount":1}"#.utf8
+                )
+            )
+        }
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: nodeLifecycleFixtureSite,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        let page = try await provider.category(
+            id: "ordinary",
+            page: 1,
+            filters: [:]
+        )
+
+        XCTAssertEqual(page.items.map(\.videoID), ["media", "configure", "folder"])
+        XCTAssertEqual(page.items[1].resolvedContentKind, .action)
+        XCTAssertTrue(page.items[2].isFolder)
+    }
+
+    func testNodePlaceholderDetailWaitsForCorrelatedLateWebMessage()
+        async throws {
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.path.hasSuffix("/init") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            if request.url.path.contains("/__okvideo/host-message/") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 200,
+                    headers: ["Content-Type": "application/json"],
+                    body: Data(
+                        #"{"action":"openInternalWebview","opt":{"url":"http://127.0.0.1:18988/website"}}"#.utf8
+                    )
+                )
+            }
+            XCTAssertTrue(request.url.path.hasSuffix("/detail"))
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(
+                    #"{"list":[{"vod_id":"implicit","vod_name":"配置占位"}]}"#.utf8
+                )
+            )
+        }
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: nodeLifecycleFixtureSite,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+        let summary = VideoSummary(
+            siteKey: nodeLifecycleFixtureSite.key,
+            siteName: nodeLifecycleFixtureSite.name,
+            videoID: "implicit",
+            title: "配置占位"
+        )
+
+        do {
+            _ = try await provider.select(summary: summary)
+            XCTFail("占位详情之后到达的配置消息不应丢失")
+        } catch let authorization as NodeWebAuthorizationRequired {
+            XCTAssertEqual(
+                authorization.websiteURL.absoluteString,
+                "http://127.0.0.1:18988/website"
+            )
+        }
+    }
+
+    func testNodeConfigurationWebViewAllowsOnlyExactRuntimeOrigin() throws {
+        let origin = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:50205/website")
+        )
+        XCTAssertTrue(
+            NodeConfigurationNavigationPolicy.isOwnedRuntimeURL(
+                try XCTUnwrap(
+                    URL(string: "http://127.0.0.1:50205/website/settings")
+                ),
+                origin: origin
+            )
+        )
+        XCTAssertFalse(
+            NodeConfigurationNavigationPolicy.isOwnedRuntimeURL(
+                try XCTUnwrap(
+                    URL(string: "http://127.0.0.1:50206/website")
+                ),
+                origin: origin
+            )
+        )
+        XCTAssertFalse(
+            NodeConfigurationNavigationPolicy.isOwnedRuntimeURL(
+                try XCTUnwrap(
+                    URL(string: "http://localhost:50205/website")
+                ),
+                origin: origin
+            )
+        )
+        XCTAssertFalse(
+            NodeConfigurationNavigationPolicy.isOwnedRuntimeURL(
+                try XCTUnwrap(
+                    URL(string: "https://127.0.0.1:50205/website")
+                ),
+                origin: origin
+            )
+        )
     }
 
     func testNodePlayerRewritesRuntimeProxyToLoopback() async throws {

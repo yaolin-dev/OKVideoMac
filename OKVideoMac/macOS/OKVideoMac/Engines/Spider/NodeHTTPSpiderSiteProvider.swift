@@ -690,12 +690,21 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             body: [:],
             maximumAttempts: 2
         )
-        let result = try SpiderResponseMapper.home(
+        var result = try SpiderResponseMapper.home(
             home.value,
             homeVideoValue: homeVideo?.value,
             site: site,
             baseURL: home.baseURL
         )
+        for index in result.categories.indices
+        where result.categories[index].resolvedContentKind == .media {
+            if await ownedLegacyConfigurationWebsite(
+                result.categories[index].id,
+                runtimeBaseURL: home.baseURL
+            ) != nil {
+                result.categories[index].contentKind = .action
+            }
+        }
         guard !site.categories.isEmpty else { return result }
         let allowed = Set(site.categories)
         return SiteHome(
@@ -710,11 +719,17 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         page: Int,
         filters: [String: String]
     ) async throws -> VideoPage {
-        try await category(
+        let readyBaseURL = try await runtimeBaseURL()
+        let isLegacyConfiguration = await ownedLegacyConfigurationWebsite(
+            id,
+            runtimeBaseURL: readyBaseURL
+        ) != nil
+        return try await category(
             id: id,
             page: page,
             filters: filters,
-            awaitsHostAction: false
+            awaitsHostAction: isLegacyConfiguration,
+            mapsEntirePageAsActions: isLegacyConfiguration
         )
     }
 
@@ -727,7 +742,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             id: id,
             page: page,
             filters: filters,
-            awaitsHostAction: true
+            awaitsHostAction: true,
+            mapsEntirePageAsActions: true
         )
     }
 
@@ -735,7 +751,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         id: String,
         page: Int,
         filters: [String: String],
-        awaitsHostAction: Bool
+        awaitsHostAction: Bool,
+        mapsEntirePageAsActions: Bool
     ) async throws -> VideoPage {
         let values = filters.mapValues(JSONValue.string)
         let invocation = try await invoke(
@@ -760,7 +777,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 baseURL: invocation.baseURL
             )
         }
-        if awaitsHostAction {
+        if mapsEntirePageAsActions {
             return try SpiderResponseMapper.actionPage(
                 invocation.value,
                 site: site,
@@ -768,7 +785,10 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 page: page
             )
         }
-        return try SpiderResponseMapper.page(
+        // A regular FongMi category may mix media, folder and explicit action
+        // cards. Preserve that protocol metadata so the host can dispatch an
+        // action before considering folder/detail navigation.
+        return try SpiderResponseMapper.javaDexCategoryPage(
             invocation.value,
             site: site,
             baseURL: invocation.baseURL,
@@ -835,15 +855,48 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 baseURL: invocation.baseURL
             )
         }
-        let selection = try SpiderResponseMapper.selection(
-            invocation.value,
-            site: site,
-            baseURL: invocation.baseURL,
-            fallbackSummary: fallbackSummary,
-            allowsPlaceholderAction:
-                fallbackSummary?.resolvedContentKind == .action
-        )
-        return attachDurableEpisodeReferences(to: selection)
+        do {
+            let selection = try SpiderResponseMapper.selection(
+                invocation.value,
+                site: site,
+                baseURL: invocation.baseURL,
+                fallbackSummary: fallbackSummary,
+                allowsPlaceholderAction:
+                    fallbackSummary?.resolvedContentKind == .action
+            )
+            if !awaitsHostAction,
+               Self.shouldAwaitLateConfigurationMessage(after: selection),
+               let hostMessage = try await awaitRelevantHostMessage(
+                initial: nil,
+                invocationID: invocation.invocationID,
+                baseURL: invocation.baseURL,
+                waitMilliseconds: 1_250
+               ), hostMessage.action == "openInternalWebview" {
+                throw try webAuthorizationRequired(
+                    hostMessage: hostMessage,
+                    invocationID: invocation.invocationID,
+                    baseURL: invocation.baseURL
+                )
+            }
+            return attachDurableEpisodeReferences(to: selection)
+        } catch let authorization as NodeWebAuthorizationRequired {
+            throw authorization
+        } catch {
+            if !awaitsHostAction,
+               let hostMessage = try? await awaitRelevantHostMessage(
+                initial: nil,
+                invocationID: invocation.invocationID,
+                baseURL: invocation.baseURL,
+                waitMilliseconds: 1_250
+               ), hostMessage.action == "openInternalWebview" {
+                throw try webAuthorizationRequired(
+                    hostMessage: hostMessage,
+                    invocationID: invocation.invocationID,
+                    baseURL: invocation.baseURL
+                )
+            }
+            throw error
+        }
     }
 
     func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
@@ -1531,26 +1584,26 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                     let immediateHostMessage = Self.decodeHostMessage(
                         response.headers["X-OKVideo-Host-Message"]
                     )
+                    let effectiveInvocationID = response.headers[
+                        "X-OKVideo-Invocation-ID"
+                    ] ?? invocationID
                     let hostMessage: HostMessage?
-                    if let immediateHostMessage {
-                        hostMessage = immediateHostMessage
-                    } else if hostMessageWaitMilliseconds > 0 {
-                        hostMessage = try await awaitHostMessage(
-                            invocationID: response.headers[
-                                "X-OKVideo-Invocation-ID"
-                            ] ?? invocationID,
+                    if hostMessageWaitMilliseconds > 0 {
+                        hostMessage = try await awaitRelevantHostMessage(
+                            initial: immediateHostMessage,
+                            invocationID: effectiveInvocationID,
                             baseURL: readyBaseURL,
                             waitMilliseconds: hostMessageWaitMilliseconds
                         )
+                    } else if let immediateHostMessage {
+                        hostMessage = immediateHostMessage
                     } else {
                         hostMessage = nil
                     }
                     return InvocationResult(
                         value: value,
                         baseURL: readyBaseURL,
-                        invocationID: response.headers[
-                            "X-OKVideo-Invocation-ID"
-                        ] ?? invocationID,
+                        invocationID: effectiveInvocationID,
                         hostMessage: hostMessage
                     )
                 }
@@ -1909,6 +1962,116 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             throw AppError.spider(
                 "Node 宿主操作回传失败：HTTP 状态码 \(response.statusCode)"
             )
+        }
+    }
+
+    /// Consumes only messages owned by one invocation. Sniff requests are
+    /// answered in place and do not hide a following configuration challenge.
+    private func awaitRelevantHostMessage(
+        initial: HostMessage?,
+        invocationID: String,
+        baseURL: URL,
+        waitMilliseconds: Int
+    ) async throws -> HostMessage? {
+        let deadline = Date().addingTimeInterval(
+            TimeInterval(max(waitMilliseconds, 0)) / 1_000
+        )
+        var message = initial
+        while !Task.isCancelled {
+            if let current = message {
+                if current.action == "sniff" {
+                    await performHostSniff(
+                        current,
+                        invocationID: invocationID,
+                        baseURL: baseURL
+                    )
+                    message = nil
+                } else {
+                    return current
+                }
+            }
+            let remaining = Int(
+                max(0, deadline.timeIntervalSinceNow * 1_000)
+            )
+            guard remaining > 0 else { return nil }
+            message = try await awaitHostMessage(
+                invocationID: invocationID,
+                baseURL: baseURL,
+                waitMilliseconds: min(remaining, 2_000)
+            )
+        }
+        throw CancellationError()
+    }
+
+    private func ownedLegacyConfigurationWebsite(
+        _ rawValue: String,
+        runtimeBaseURL: URL
+    ) async -> URL? {
+        guard Self.isLegacyConfigurationWebsiteCandidate(rawValue) else {
+            return nil
+        }
+        var components = URLComponents(
+            url: runtimeBaseURL
+                .appendingPathComponent("__okvideo")
+                .appendingPathComponent("owned-loopback"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [URLQueryItem(name: "url", value: rawValue)]
+        guard let endpoint = components?.url,
+              let response = try? await httpClient.send(
+                HTTPRequest(
+                    url: endpoint,
+                    method: .get,
+                    timeout: 2,
+                    maximumResponseBytes: 4 * 1_024,
+                    retryPolicy: .none,
+                    allowsNonSuccessfulStatus: true
+                )
+              ), response.statusCode == 200,
+              let value = try? JSONDecoder().decode(
+                JSONValue.self,
+                from: response.body
+              ), let normalized = value.objectValue?["url"]?.stringValue,
+              let url = URL(string: normalized),
+              Self.isNormalizedOwnedConfigurationWebsite(url) else {
+            return nil
+        }
+        return url
+    }
+
+    private static func isLegacyConfigurationWebsiteCandidate(
+        _ rawValue: String
+    ) -> Bool {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, value.utf8.count <= 2_048,
+              let url = URL(string: value),
+              url.scheme?.lowercased() == "http",
+              url.port != nil else {
+            return false
+        }
+        return url.path == "/website" || url.path == "/website/"
+    }
+
+    private static func isNormalizedOwnedConfigurationWebsite(
+        _ url: URL
+    ) -> Bool {
+        guard url.scheme?.lowercased() == "http",
+              ["127.0.0.1", "localhost", "::1"].contains(
+                url.host?.lowercased() ?? ""
+              ), url.port != nil else {
+            return false
+        }
+        return url.path == "/website" || url.path == "/website/"
+    }
+
+    private static func shouldAwaitLateConfigurationMessage(
+        after selection: SiteSelectionResult
+    ) -> Bool {
+        switch selection {
+        case .detail(let detail):
+            return detail.playSources.allSatisfy { $0.episodes.isEmpty }
+        case .action, .search:
+            return true
         }
     }
 

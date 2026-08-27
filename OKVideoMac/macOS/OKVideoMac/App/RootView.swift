@@ -761,6 +761,7 @@ enum PlayerSurfaceBackdropPolicy {
 struct NodeConfigurationView: View {
     @EnvironmentObject private var state: AppState
     let presentation: NodeWebPresentation
+    @State private var pageState: NodeConfigurationPageState = .loading
 
     private var isVerifying: Bool {
         presentation.lifecycleState == .verifying
@@ -795,6 +796,7 @@ struct NodeConfigurationView: View {
                     }
                     Spacer(minLength: 12)
                     Button {
+                        pageState = .loading
                         state.refreshNodeConfigurationWebsite()
                     } label: {
                         Label("刷新", systemImage: "arrow.clockwise")
@@ -806,11 +808,55 @@ struct NodeConfigurationView: View {
 
                 Divider()
 
-                NodeConfigurationWebView(
-                    url: presentation.url,
-                    revision: presentation.revision
-                )
-                .background(Color(nsColor: .textBackgroundColor))
+                ZStack {
+                    NodeConfigurationWebView(
+                        url: presentation.url,
+                        revision: presentation.revision,
+                        pageState: $pageState
+                    )
+                    .background(Color(nsColor: .textBackgroundColor))
+
+                    switch pageState {
+                    case .loading:
+                        VStack(spacing: 12) {
+                            AppActivityIndicator(size: .regular)
+                            Text("正在打开配置页…")
+                                .font(.callout.weight(.semibold))
+                            Text("正在连接当前 CatPaw Runtime")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(24)
+                        .background(.regularMaterial)
+                        .clipShape(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        )
+                    case .failed(let message):
+                        VStack(spacing: 12) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 28, weight: .semibold))
+                                .foregroundColor(.orange)
+                            Text("配置页不可用")
+                                .font(.headline)
+                            Text(message)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: 420)
+                            Button("重新加载") {
+                                pageState = .loading
+                                state.refreshNodeConfigurationWebsite()
+                            }
+                        }
+                        .padding(28)
+                        .background(.regularMaterial)
+                        .clipShape(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        )
+                    case .ready:
+                        EmptyView()
+                    }
+                }
 
                 Divider()
 
@@ -895,12 +941,36 @@ struct NodeConfigurationView: View {
     }
 }
 
+enum NodeConfigurationPageState: Equatable {
+    case loading
+    case ready
+    case failed(String)
+}
+
+enum NodeConfigurationNavigationPolicy {
+    static func isOwnedRuntimeURL(_ candidate: URL, origin: URL) -> Bool {
+        guard candidate.scheme?.lowercased() == "http",
+              origin.scheme?.lowercased() == "http",
+              let candidateHost = candidate.host?.lowercased(),
+              let originHost = origin.host?.lowercased(),
+              candidateHost == originHost else {
+            return false
+        }
+        return effectivePort(candidate) == effectivePort(origin)
+    }
+
+    private static func effectivePort(_ url: URL) -> Int? {
+        url.port ?? (url.scheme?.lowercased() == "http" ? 80 : nil)
+    }
+}
+
 private struct NodeConfigurationWebView: NSViewRepresentable {
     let url: URL
     let revision: Int
+    @Binding var pageState: NodeConfigurationPageState
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(origin: url, pageState: $pageState)
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -910,18 +980,63 @@ private struct NodeConfigurationWebView: NSViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         context.coordinator.lastRevision = revision
+        context.coordinator.origin = url
         webView.load(URLRequest(url: url))
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.origin = url
+        context.coordinator.pageState = $pageState
         guard context.coordinator.lastRevision != revision else { return }
         context.coordinator.lastRevision = revision
+        DispatchQueue.main.async {
+            context.coordinator.pageState.wrappedValue = .loading
+        }
         webView.load(URLRequest(url: url))
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var lastRevision = -1
+        var origin: URL
+        var pageState: Binding<NodeConfigurationPageState>
+
+        init(origin: URL, pageState: Binding<NodeConfigurationPageState>) {
+            self.origin = origin
+            self.pageState = pageState
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didStartProvisionalNavigation navigation: WKNavigation?
+        ) {
+            pageState.wrappedValue = .loading
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didFinish navigation: WKNavigation?
+        ) {
+            pageState.wrappedValue = .ready
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didFail navigation: WKNavigation?,
+            withError error: Error
+        ) {
+            guard !Self.isCancellation(error) else { return }
+            pageState.wrappedValue = .failed(Self.message(for: error))
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didFailProvisionalNavigation navigation: WKNavigation?,
+            withError error: Error
+        ) {
+            guard !Self.isCancellation(error) else { return }
+            pageState.wrappedValue = .failed(Self.message(for: error))
+        }
 
         func webView(
             _ webView: WKWebView,
@@ -932,13 +1047,19 @@ private struct NodeConfigurationWebView: NSViewRepresentable {
                 decisionHandler(.cancel)
                 return
             }
-            if Self.isLocalNodeURL(url) {
+            if NodeConfigurationNavigationPolicy.isOwnedRuntimeURL(
+                url,
+                origin: origin
+            ) {
                 decisionHandler(.allow)
             } else if ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
                 NSWorkspace.shared.open(url)
                 decisionHandler(.cancel)
-            } else {
+            } else if url.scheme?.lowercased() == "about" {
                 decisionHandler(.allow)
+            } else {
+                NSWorkspace.shared.open(url)
+                decisionHandler(.cancel)
             }
         }
 
@@ -952,7 +1073,10 @@ private struct NodeConfigurationWebView: NSViewRepresentable {
                   let url = navigationAction.request.url else {
                 return nil
             }
-            if Self.isLocalNodeURL(url) {
+            if NodeConfigurationNavigationPolicy.isOwnedRuntimeURL(
+                url,
+                origin: origin
+            ) {
                 webView.load(URLRequest(url: url))
             } else {
                 NSWorkspace.shared.open(url)
@@ -960,10 +1084,17 @@ private struct NodeConfigurationWebView: NSViewRepresentable {
             return nil
         }
 
-        private static func isLocalNodeURL(_ url: URL) -> Bool {
-            ["127.0.0.1", "localhost", "::1"].contains(
-                url.host?.lowercased() ?? ""
-            )
+        private static func message(for error: Error) -> String {
+            let urlError = error as? URLError
+            if [.cannotConnectToHost, .networkConnectionLost, .cannotFindHost]
+                .contains(urlError?.code) {
+                return "Node 已重启或配置页地址已经失效，请关闭后重新打开配置入口。"
+            }
+            return "配置页加载失败：\(error.localizedDescription)"
+        }
+
+        private static func isCancellation(_ error: Error) -> Bool {
+            (error as? URLError)?.code == .cancelled
         }
     }
 }

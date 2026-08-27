@@ -1072,6 +1072,29 @@ enum NodeRuntimeContractFactory {
           return;
         }
         const requestURL = new URL(request.url || '/', 'http://127.0.0.1');
+        if (request.method === 'GET' &&
+            requestURL.pathname === '/__okvideo/owned-loopback') {
+          const normalized = normalizeOwnedLoopbackURL(
+            requestURL.searchParams.get('url') || ''
+          );
+          let isConfigurationWebsite = false;
+          if (normalized) {
+            try {
+              const normalizedURL = new URL(normalized);
+              isConfigurationWebsite = normalizedURL.pathname === '/website' ||
+                normalizedURL.pathname === '/website/';
+            } catch (_) {}
+          }
+          if (!normalized || !isConfigurationWebsite) {
+            response.statusCode = 404;
+            response.end();
+            return;
+          }
+          response.statusCode = 200;
+          response.setHeader('Content-Type', 'application/json; charset=utf-8');
+          response.end(JSON.stringify({url: normalized}));
+          return;
+        }
         const replyPrefix = '/__okvideo/host-message-reply/';
         if (request.method === 'POST' && requestURL.pathname.startsWith(replyPrefix)) {
           const parts = requestURL.pathname.slice(replyPrefix.length).split('/');
