@@ -8519,9 +8519,8 @@ final class AppState: ObservableObject {
               ) else {
             return nil
         }
-        return "当前 CatPaw 运行 profile 未生成 AList、Emby 或 WebDAV 动态站点。"
-            + "如需与其他客户端使用相同挂载，请到“设置 → 点播配置”导入其导出的 "
-            + "test0.db.json；导入后会立即刷新，无需重启。"
+        return "当前 CatPaw 资源未提供可验证的默认配置，"
+            + "依赖账号或挂载的动态站点可能不会出现。"
     }
 
     var visibleSearchClusters: [SearchResultCluster] {

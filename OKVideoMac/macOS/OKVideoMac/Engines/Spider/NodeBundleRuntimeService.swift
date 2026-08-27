@@ -646,6 +646,14 @@ struct NodeBundleSourceDescriptor: Equatable, Sendable {
     let cacheKey: String
     let legacyCacheKey: String
 
+    var companionConfigurationScriptURL: URL? {
+        Self.companionConfigurationURL(for: scriptURL, checksum: false)
+    }
+
+    var companionConfigurationChecksumURL: URL? {
+        Self.companionConfigurationURL(for: scriptURL, checksum: true)
+    }
+
     static func supports(_ url: URL) -> Bool {
         guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
             return false
@@ -758,6 +766,22 @@ struct NodeBundleSourceDescriptor: Equatable, Sendable {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    private static func companionConfigurationURL(
+        for scriptURL: URL,
+        checksum: Bool
+    ) -> URL? {
+        guard var components = URLComponents(
+            url: scriptURL,
+            resolvingAgainstBaseURL: false
+        ) else { return nil }
+        let path = components.percentEncodedPath
+        guard path.lowercased().hasSuffix(".js") else { return nil }
+        components.percentEncodedPath = String(path.dropLast(3))
+            + ".config.js"
+            + (checksum ? ".md5" : "")
+        return components.url
+    }
+
     private static func sha256Hex(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
@@ -854,6 +878,14 @@ struct NodeProfileRevisionSnapshot: Equatable, Sendable {
 }
 
 actor NodeBundleRuntimeService {
+    private struct CompanionConfiguration: Sendable {
+        let data: Data
+        let md5: String
+        let sha256: String
+        let finalChecksumURL: URL
+        let finalScriptURL: URL
+    }
+
     private struct CachedBundle: Sendable {
         let sourceID: String?
         let cacheKey: String
@@ -865,6 +897,7 @@ actor NodeBundleRuntimeService {
         let finalScriptURL: URL
         let runtimeDirectory: URL
         let trustState: NodeBundleTrustState
+        let configurationData: Data?
     }
 
     private enum StartupSource: Sendable {
@@ -893,6 +926,34 @@ actor NodeBundleRuntimeService {
         let md5: String
         let sha256: String
         let trustState: NodeBundleTrustState?
+        let configurationMD5: String?
+        let configurationSHA256: String?
+        let finalConfigurationChecksumURL: URL?
+        let finalConfigurationScriptURL: URL?
+
+        init(
+            pinIdentity: String,
+            finalChecksumURL: URL,
+            finalScriptURL: URL,
+            md5: String,
+            sha256: String,
+            trustState: NodeBundleTrustState?,
+            configurationMD5: String? = nil,
+            configurationSHA256: String? = nil,
+            finalConfigurationChecksumURL: URL? = nil,
+            finalConfigurationScriptURL: URL? = nil
+        ) {
+            self.pinIdentity = pinIdentity
+            self.finalChecksumURL = finalChecksumURL
+            self.finalScriptURL = finalScriptURL
+            self.md5 = md5
+            self.sha256 = sha256
+            self.trustState = trustState
+            self.configurationMD5 = configurationMD5
+            self.configurationSHA256 = configurationSHA256
+            self.finalConfigurationChecksumURL = finalConfigurationChecksumURL
+            self.finalConfigurationScriptURL = finalConfigurationScriptURL
+        }
     }
 
     private static let maximumScriptSize = 16 * 1_024 * 1_024
@@ -1705,18 +1766,28 @@ actor NodeBundleRuntimeService {
         let trustState: NodeBundleTrustState = descriptor.expectedSHA256 == nil
             ? .httpsTransport
             : .publisherSHA256
+        let companion = await downloadCompanionConfiguration(
+            descriptor,
+            headers: headers,
+            writer: writer
+        )
         let metadata = CacheMetadata(
             pinIdentity: descriptor.pinIdentity,
             finalChecksumURL: checksumResponse.url,
             finalScriptURL: scriptResponse.url,
             md5: checksum,
             sha256: actualSHA256,
-            trustState: trustState
+            trustState: trustState,
+            configurationMD5: companion?.md5,
+            configurationSHA256: companion?.sha256,
+            finalConfigurationChecksumURL: companion?.finalChecksumURL,
+            finalConfigurationScriptURL: companion?.finalScriptURL
         )
         let cacheURL = try installCacheAtomically(
             descriptor: descriptor,
             script: scriptResponse.body,
             checksum: checksum,
+            configuration: companion?.data,
             metadata: metadata
         )
         let cached = try loadCachedBundle(descriptor, cacheURL: cacheURL)
@@ -1732,6 +1803,86 @@ actor NodeBundleRuntimeService {
             )
         )
         return cached
+    }
+
+    private func downloadCompanionConfiguration(
+        _ descriptor: NodeBundleSourceDescriptor,
+        headers: HTTPHeaders,
+        writer: NodeDiagnosticLogWriter
+    ) async -> CompanionConfiguration? {
+        guard let checksumURL = descriptor.companionConfigurationChecksumURL,
+              let scriptURL = descriptor.companionConfigurationScriptURL
+        else { return nil }
+        do {
+            let checksumResponse = try await sendBundleRequest(
+                HTTPRequest(
+                    url: checksumURL,
+                    headers: headers,
+                    timeout: 20,
+                    maximumResponseBytes: 256,
+                    retryPolicy: HTTPRetryPolicy(maximumRetries: 2),
+                    allowsNonSuccessfulStatus: true
+                )
+            )
+            guard (200...299).contains(checksumResponse.statusCode) else {
+                return nil
+            }
+            let checksum = try checksumResponse.text()
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard checksum.range(
+                of: "^[0-9a-f]{32}$",
+                options: .regularExpression
+            ) != nil else {
+                throw NodeBundleRuntimeError.integrityRejected(
+                    "上游 index.config.js.md5 格式无效"
+                )
+            }
+
+            let scriptResponse = try await sendBundleRequest(
+                HTTPRequest(
+                    url: scriptURL,
+                    headers: headers,
+                    timeout: 30,
+                    maximumResponseBytes: Self.maximumConfigurationSize,
+                    retryPolicy: HTTPRetryPolicy(maximumRetries: 2),
+                    allowsNonSuccessfulStatus: true
+                )
+            )
+            guard (200...299).contains(scriptResponse.statusCode) else {
+                return nil
+            }
+            guard Self.md5Hex(scriptResponse.body) == checksum else {
+                throw NodeBundleRuntimeError.integrityRejected(
+                    "上游 index.config.js MD5 不匹配"
+                )
+            }
+            _ = try Self.requiresTrustedSHA256(
+                finalChecksumURL: checksumResponse.url,
+                finalScriptURL: scriptResponse.url
+            )
+            let normalized = try ContractBCompanionConfigParser
+                .normalizedConfiguration(from: scriptResponse.body)
+            return CompanionConfiguration(
+                data: normalized,
+                md5: checksum,
+                sha256: Self.sha256Hex(normalized),
+                finalChecksumURL: checksumResponse.url,
+                finalScriptURL: scriptResponse.url
+            )
+        } catch {
+            // A companion is an optional extension to Contract B. Reject only
+            // the companion on transport, integrity, or static-grammar errors;
+            // the already verified executable bundle can still use the bounded
+            // minimum configuration.
+            record(
+                error: error,
+                context: .bundleTransport,
+                descriptor: descriptor,
+                writer: writer
+            )
+            return nil
+        }
     }
 
     private func sendBundleRequest(_ request: HTTPRequest) async throws -> HTTPResponse {
@@ -1758,6 +1909,9 @@ actor NodeBundleRuntimeService {
     ) throws -> CachedBundle {
         let scriptURL = cacheURL.appendingPathComponent("index.js")
         let checksumURL = cacheURL.appendingPathComponent("index.js.md5")
+        let configurationURL = cacheURL.appendingPathComponent(
+            "index.config.json"
+        )
         let metadataURL = cacheURL.appendingPathComponent("metadata.json")
         let metadata: CacheMetadata
         do {
@@ -1808,6 +1962,23 @@ actor NodeBundleRuntimeService {
         )
         let trustState = metadata.trustState
             ?? (descriptor.expectedSHA256 == nil ? .httpsTransport : .publisherSHA256)
+        let configurationData: Data?
+        if let configurationSHA256 = metadata.configurationSHA256 {
+            let data = try Data(
+                contentsOf: configurationURL,
+                options: .mappedIfSafe
+            )
+            guard data.count <= Self.maximumConfigurationSize,
+                  Self.sha256Hex(data) == configurationSHA256 else {
+                throw NodeBundleRuntimeError.integrityRejected(
+                    "缓存 index.config.json SHA-256 不匹配"
+                )
+            }
+            try ContractBConfigBuilder.validate(data)
+            configurationData = data
+        } else {
+            configurationData = nil
+        }
         return CachedBundle(
             sourceID: descriptor.sourceID,
             cacheKey: descriptor.cacheKey,
@@ -1818,7 +1989,8 @@ actor NodeBundleRuntimeService {
             finalChecksumURL: metadata.finalChecksumURL,
             finalScriptURL: metadata.finalScriptURL,
             runtimeDirectory: try runtimeDirectory(for: descriptor),
-            trustState: trustState
+            trustState: trustState,
+            configurationData: configurationData
         )
     }
 
@@ -1910,6 +2082,7 @@ actor NodeBundleRuntimeService {
         descriptor: NodeBundleSourceDescriptor,
         script: Data,
         checksum: String,
+        configuration: Data? = nil,
         metadata: CacheMetadata,
         beforeCommit: (() throws -> Void)? = nil
     ) throws -> URL {
@@ -1929,11 +2102,20 @@ actor NodeBundleRuntimeService {
         }
         let scriptURL = staging.appendingPathComponent("index.js")
         let checksumURL = staging.appendingPathComponent("index.js.md5")
+        let configurationURL = staging.appendingPathComponent(
+            "index.config.json"
+        )
         let metadataURL = staging.appendingPathComponent("metadata.json")
         try script.write(to: scriptURL, options: .atomic)
         try Data(checksum.utf8).write(to: checksumURL, options: .atomic)
+        if let configuration {
+            try ContractBConfigBuilder.validate(configuration)
+            try configuration.write(to: configurationURL, options: .atomic)
+        }
         try JSONEncoder().encode(metadata).write(to: metadataURL, options: .atomic)
-        for file in [scriptURL, checksumURL, metadataURL] {
+        var files = [scriptURL, checksumURL, metadataURL]
+        if configuration != nil { files.append(configurationURL) }
+        for file in files {
             try FileManager.default.setAttributes(
                 [.posixPermissions: 0o600],
                 ofItemAtPath: file.path
@@ -2122,6 +2304,86 @@ actor NodeBundleRuntimeService {
             ofItemAtPath: profileURL.path
         )
         return profileURL
+    }
+
+    private func seedContractBDefaults(
+        _ defaults: Data,
+        profileURL: URL,
+        runtimeDirectory: URL
+    ) throws {
+        try ContractBConfigBuilder.validate(defaults)
+        let revision = Self.sha256Hex(defaults)
+        try mergeContractBDefaultsIfNeeded(
+            defaults,
+            into: profileURL,
+            markerURL: profileURL.deletingLastPathComponent()
+                .appendingPathComponent("publisher-defaults.sha256"),
+            revision: revision,
+            createsMissingTarget: true
+        )
+
+        let databaseURL = runtimeDirectory.appendingPathComponent(
+            "test0.db.json"
+        )
+        try mergeContractBDefaultsIfNeeded(
+            defaults,
+            into: databaseURL,
+            markerURL: runtimeDirectory.appendingPathComponent(
+                "publisher-defaults.sha256"
+            ),
+            revision: revision,
+            createsMissingTarget: false
+        )
+    }
+
+    private func mergeContractBDefaultsIfNeeded(
+        _ defaults: Data,
+        into targetURL: URL,
+        markerURL: URL,
+        revision: String,
+        createsMissingTarget: Bool
+    ) throws {
+        if let currentRevision = try? String(
+            contentsOf: markerURL,
+            encoding: .utf8
+        ).trimmingCharacters(in: .whitespacesAndNewlines),
+           currentRevision == revision {
+            return
+        }
+
+        let manager = FileManager.default
+        let output: Data
+        if manager.fileExists(atPath: targetURL.path) {
+            let values = try targetURL.resourceValues(forKeys: [
+                .isRegularFileKey,
+                .isSymbolicLinkKey,
+                .fileSizeKey
+            ])
+            guard values.isRegularFile == true,
+                  values.isSymbolicLink != true,
+                  let size = values.fileSize,
+                  size <= Self.maximumConfigurationSize else {
+                throw NodeBundleRuntimeError.configurationContractInvalid
+            }
+            output = try ContractBConfigBuilder.mergeDefaults(
+                defaults,
+                userValues: Data(contentsOf: targetURL, options: .mappedIfSafe)
+            )
+        } else {
+            guard createsMissingTarget else { return }
+            output = defaults
+        }
+
+        try output.write(to: targetURL, options: .atomic)
+        try manager.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: targetURL.path
+        )
+        try Data(revision.utf8).write(to: markerURL, options: .atomic)
+        try manager.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: markerURL.path
+        )
     }
 
     private struct LegacyProfileCandidate {
@@ -2483,11 +2745,21 @@ actor NodeBundleRuntimeService {
                 currentBundle: bundle
             )
             : nil
+        if contract == .hostIntegrated,
+           let profileURL,
+           let configurationData = bundle.configurationData {
+            try seedContractBDefaults(
+                configurationData,
+                profileURL: profileURL,
+                runtimeDirectory: bundle.runtimeDirectory
+            )
+        }
         activeProfileURL = profileURL
         let launchPlan = try NodeRuntimeContractFactory.makePlan(
             contract: contract,
             runtimeDirectory: bundle.runtimeDirectory,
-            profileURL: profileURL
+            profileURL: profileURL,
+            configurationData: bundle.configurationData
         )
         activeContractCleanupURLs = launchPlan.cleanupURLs
         writer.write(
@@ -2509,7 +2781,9 @@ actor NodeBundleRuntimeService {
                     category: .runtime,
                     severity: .info,
                     code: .runtimeConfigurationValidated,
-                    message: "Contract B minimum host configuration validated",
+                message: bundle.configurationData == nil
+                    ? "Contract B fallback host configuration validated"
+                    : "Contract B publisher companion configuration validated",
                     sourceID: bundle.sourceID,
                     cacheKey: bundle.cacheKey
                 )

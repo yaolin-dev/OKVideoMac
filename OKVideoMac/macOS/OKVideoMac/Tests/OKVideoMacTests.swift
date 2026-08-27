@@ -9771,6 +9771,14 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             "https://example.invalid/index.js"
         )
         XCTAssertEqual(
+            descriptor.companionConfigurationChecksumURL?.absoluteString,
+            "https://example.invalid/index.config.js.md5"
+        )
+        XCTAssertEqual(
+            descriptor.companionConfigurationScriptURL?.absoluteString,
+            "https://example.invalid/index.config.js"
+        )
+        XCTAssertEqual(
             descriptor.authorizationHeader,
             "Basic " + Data("fixture:secret".utf8).base64EncodedString()
         )
@@ -10092,6 +10100,109 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(
             ((object["pans"] as? [String: Any])?["list"] as? [Any])?.count,
             0
+        )
+    }
+
+    func testContractBCompanionConfigurationParsesStaticCatPawExport() throws {
+        let source = Data(
+            #"""
+            var __helper = () => { throw new Error("must not run"); };
+            var index_config_default = {
+              sites: { list: [], },
+              pans: { list: [], },
+              danmu: { urls: ['https://fixture.invalid/danmu'], autoPush: false },
+              color: [],
+              tgsou: { url: "https://fixture.invalid/tg", page: 1 },
+              alist: { list: [{ name: '测试', server: 'https://alist.invalid' }] }
+            };
+            """#.utf8
+        )
+
+        let normalized = try ContractBCompanionConfigParser
+            .normalizedConfiguration(from: source)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: normalized) as? [String: Any]
+        )
+
+        XCTAssertEqual(
+            (object["tgsou"] as? [String: Any])?["url"] as? String,
+            "https://fixture.invalid/tg"
+        )
+        XCTAssertEqual(
+            ((object["alist"] as? [String: Any])?["list"] as? [Any])?.count,
+            1
+        )
+    }
+
+    func testContractBCompanionConfigurationRejectsExecutableValues() {
+        let source = Data(
+            #"""
+            export default {
+              sites: { list: [] }, pans: { list: [] },
+              danmu: { urls: [], autoPush: false }, color: [],
+              tgsou: { url: getSecret() }
+            };
+            """#.utf8
+        )
+
+        XCTAssertThrowsError(
+            try ContractBCompanionConfigParser.normalizedConfiguration(
+                from: source
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? NodeBundleRuntimeError,
+                .configurationContractInvalid
+            )
+        }
+    }
+
+    func testRealContractBCompanionConfigurationFromEnvironment() throws {
+        guard let path = ProcessInfo.processInfo.environment[
+            "OKVIDEO_CONTRACT_B_CONFIG_SAMPLE"
+        ], !path.isEmpty else {
+            throw XCTSkip("Real Contract B companion config was not supplied")
+        }
+        let normalized = try ContractBCompanionConfigParser
+            .normalizedConfiguration(from: Data(contentsOf: URL(fileURLWithPath: path)))
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: normalized) as? [String: Any]
+        )
+
+        XCTAssertNotNil(object["tgsou"] as? [String: Any])
+        XCTAssertNotNil(object["alist"] as? [String: Any])
+        XCTAssertNotNil(object["emby"] as? [String: Any])
+        XCTAssertNotNil(object["webdav"] as? [String: Any])
+    }
+
+    func testContractBDefaultsAddMissingPublisherValuesWithoutOverwritingUserData()
+        throws {
+        let defaults = Data(
+            #"{"sites":{"list":[]},"pans":{"list":[]},"danmu":{"urls":[],"autoPush":false},"color":[],"tgsou":{"url":"https://default.invalid"},"alist":{"list":[{"name":"default"}]}}"#.utf8
+        )
+        let userValues = Data(
+            #"{"sites":{"list":[]},"pans":{"list":[]},"danmu":{"urls":[],"autoPush":true},"color":[],"tgsou":{"url":"https://user.invalid"}}"#.utf8
+        )
+
+        let merged = try ContractBConfigBuilder.mergeDefaults(
+            defaults,
+            userValues: userValues
+        )
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: merged) as? [String: Any]
+        )
+
+        XCTAssertEqual(
+            (object["tgsou"] as? [String: Any])?["url"] as? String,
+            "https://user.invalid"
+        )
+        XCTAssertEqual(
+            (object["danmu"] as? [String: Any])?["autoPush"] as? Bool,
+            true
+        )
+        XCTAssertEqual(
+            ((object["alist"] as? [String: Any])?["list"] as? [Any])?.count,
+            1
         )
     }
 

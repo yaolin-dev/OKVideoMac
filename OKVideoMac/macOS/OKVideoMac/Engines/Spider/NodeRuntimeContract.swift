@@ -45,8 +45,8 @@ enum NodeRuntimeContractDetector {
 }
 
 enum ContractBConfigBuilder {
-    /// Only the common, data-only host schema is supplied. Remote companion
-    /// JavaScript is intentionally not evaluated or required.
+    /// This remains the compatibility fallback for bundles that do not ship a
+    /// separately checksummed, data-only companion configuration.
     static func buildMinimumConfiguration() throws -> Data {
         let object: [String: Any] = [
             "sites": ["list": []],
@@ -74,6 +74,301 @@ enum ContractBConfigBuilder {
         else {
             throw NodeBundleRuntimeError.configurationContractInvalid
         }
+    }
+
+    static func mergeDefaults(_ defaults: Data, userValues: Data) throws -> Data {
+        try validate(defaults)
+        guard defaults.count <= 1_024 * 1_024,
+              userValues.count <= 1_024 * 1_024,
+              let defaultObject = try JSONSerialization.jsonObject(with: defaults)
+                as? [String: Any],
+              let userObject = try JSONSerialization.jsonObject(with: userValues)
+                as? [String: Any]
+        else {
+            throw NodeBundleRuntimeError.configurationContractInvalid
+        }
+        let merged = merge(defaults: defaultObject, userValues: userObject)
+        let data = try JSONSerialization.data(
+            withJSONObject: merged,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+        try validate(data)
+        return data
+    }
+
+    private static func merge(
+        defaults: [String: Any],
+        userValues: [String: Any]
+    ) -> [String: Any] {
+        var result = defaults
+        for (key, userValue) in userValues {
+            if let defaultDictionary = result[key] as? [String: Any],
+               let userDictionary = userValue as? [String: Any] {
+                result[key] = merge(
+                    defaults: defaultDictionary,
+                    userValues: userDictionary
+                )
+            } else {
+                // Persisted user values always win, including an intentionally
+                // empty list or string.
+                result[key] = userValue
+            }
+        }
+        return result
+    }
+}
+
+/// Extracts the static object exported by CatPaw's `index.config.js` without
+/// evaluating the companion JavaScript. The accepted grammar is deliberately
+/// limited to JSON-compatible literals plus JavaScript identifier keys,
+/// comments, single-quoted strings, and trailing commas.
+enum ContractBCompanionConfigParser {
+    private static let assignmentMarkers = [
+        "var index_config_default =",
+        "let index_config_default =",
+        "const index_config_default =",
+        "export default"
+    ]
+
+    static func normalizedConfiguration(from data: Data) throws -> Data {
+        guard data.count <= 1_024 * 1_024,
+              let source = String(data: data, encoding: .utf8),
+              let markerRange = assignmentMarkers.compactMap({ marker in
+                  source.range(of: marker).map { (range: $0, marker: marker) }
+              }).min(by: { $0.range.lowerBound < $1.range.lowerBound })
+        else {
+            throw NodeBundleRuntimeError.configurationContractInvalid
+        }
+        let suffix = source[markerRange.range.upperBound...]
+        var parser = StaticJavaScriptValueParser(String(suffix))
+        let value = try parser.parseRootObject()
+        let normalized = try JSONSerialization.data(
+            withJSONObject: value,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+        try ContractBConfigBuilder.validate(normalized)
+        return normalized
+    }
+}
+
+private struct StaticJavaScriptValueParser {
+    private let scalars: [UnicodeScalar]
+    private var index = 0
+    private var valueCount = 0
+    private let maximumDepth = 64
+    private let maximumValues = 100_000
+
+    init(_ source: String) {
+        scalars = Array(source.unicodeScalars)
+    }
+
+    mutating func parseRootObject() throws -> [String: Any] {
+        skipTrivia()
+        guard peek() == "{" else { throw invalid }
+        let value = try parseValue(depth: 0)
+        guard let object = value as? [String: Any] else { throw invalid }
+        skipTrivia()
+        guard peek() == ";" || peek() == nil else { throw invalid }
+        return object
+    }
+
+    private var invalid: NodeBundleRuntimeError {
+        .configurationContractInvalid
+    }
+
+    private mutating func parseValue(depth: Int) throws -> Any {
+        guard depth <= maximumDepth, valueCount < maximumValues else {
+            throw invalid
+        }
+        valueCount += 1
+        skipTrivia()
+        guard let scalar = peek() else { throw invalid }
+        switch scalar {
+        case "{": return try parseObject(depth: depth + 1)
+        case "[": return try parseArray(depth: depth + 1)
+        case "\"", "'": return try parseString()
+        case "-", "0"..."9": return try parseNumber()
+        default:
+            let identifier = try parseIdentifier()
+            switch identifier {
+            case "true": return true
+            case "false": return false
+            case "null": return NSNull()
+            default: throw invalid
+            }
+        }
+    }
+
+    private mutating func parseObject(depth: Int) throws -> [String: Any] {
+        try consume("{")
+        skipTrivia()
+        var result: [String: Any] = [:]
+        if consumeIf("}") { return result }
+        while true {
+            skipTrivia()
+            let key: String
+            if peek() == "\"" || peek() == "'" {
+                key = try parseString()
+            } else {
+                key = try parseIdentifier()
+            }
+            guard !key.isEmpty else { throw invalid }
+            skipTrivia()
+            try consume(":")
+            result[key] = try parseValue(depth: depth)
+            skipTrivia()
+            if consumeIf("}") { return result }
+            try consume(",")
+            skipTrivia()
+            if consumeIf("}") { return result }
+        }
+    }
+
+    private mutating func parseArray(depth: Int) throws -> [Any] {
+        try consume("[")
+        skipTrivia()
+        var result: [Any] = []
+        if consumeIf("]") { return result }
+        while true {
+            result.append(try parseValue(depth: depth))
+            skipTrivia()
+            if consumeIf("]") { return result }
+            try consume(",")
+            skipTrivia()
+            if consumeIf("]") { return result }
+        }
+    }
+
+    private mutating func parseString() throws -> String {
+        guard let quote = peek(), quote == "\"" || quote == "'" else {
+            throw invalid
+        }
+        index += 1
+        var result = String.UnicodeScalarView()
+        while let scalar = peek() {
+            index += 1
+            if scalar == quote { return String(result) }
+            guard scalar != "\n" && scalar != "\r" else { throw invalid }
+            guard scalar == "\\" else {
+                result.append(scalar)
+                continue
+            }
+            guard let escaped = peek() else { throw invalid }
+            index += 1
+            switch escaped {
+            case "\"", "'", "\\", "/": result.append(escaped)
+            case "b": result.append("\u{0008}")
+            case "f": result.append("\u{000C}")
+            case "n": result.append("\n")
+            case "r": result.append("\r")
+            case "t": result.append("\t")
+            case "v": result.append("\u{000B}")
+            case "x": result.append(try parseEscapedScalar(digits: 2))
+            case "u": result.append(try parseEscapedScalar(digits: 4))
+            default: throw invalid
+            }
+        }
+        throw invalid
+    }
+
+    private mutating func parseEscapedScalar(digits: Int) throws -> UnicodeScalar {
+        guard index + digits <= scalars.count else { throw invalid }
+        let text = String(String.UnicodeScalarView(scalars[index..<(index + digits)]))
+        guard let value = UInt32(text, radix: 16),
+              let scalar = UnicodeScalar(value),
+              !(0xD800...0xDFFF).contains(value)
+        else { throw invalid }
+        index += digits
+        return scalar
+    }
+
+    private mutating func parseNumber() throws -> NSNumber {
+        let start = index
+        if consumeIf("-") {}
+        guard let first = peek(), ("0"..."9").contains(first) else { throw invalid }
+        if first == "0" {
+            index += 1
+        } else {
+            while let scalar = peek(), ("0"..."9").contains(scalar) { index += 1 }
+        }
+        if consumeIf(".") {
+            guard let digit = peek(), ("0"..."9").contains(digit) else { throw invalid }
+            while let scalar = peek(), ("0"..."9").contains(scalar) { index += 1 }
+        }
+        if peek() == "e" || peek() == "E" {
+            index += 1
+            if peek() == "+" || peek() == "-" { index += 1 }
+            guard let digit = peek(), ("0"..."9").contains(digit) else { throw invalid }
+            while let scalar = peek(), ("0"..."9").contains(scalar) { index += 1 }
+        }
+        let text = String(String.UnicodeScalarView(scalars[start..<index]))
+        guard let value = Double(text), value.isFinite else { throw invalid }
+        if !text.contains(".") && !text.lowercased().contains("e"),
+           let integer = Int64(text) {
+            return NSNumber(value: integer)
+        }
+        return NSNumber(value: value)
+    }
+
+    private mutating func parseIdentifier() throws -> String {
+        guard let first = peek(), isIdentifierStart(first) else { throw invalid }
+        let start = index
+        index += 1
+        while let scalar = peek(), isIdentifierContinuation(scalar) { index += 1 }
+        return String(String.UnicodeScalarView(scalars[start..<index]))
+    }
+
+    private func isIdentifierStart(_ scalar: UnicodeScalar) -> Bool {
+        scalar == "_" || scalar == "$"
+            || ("a"..."z").contains(scalar)
+            || ("A"..."Z").contains(scalar)
+    }
+
+    private func isIdentifierContinuation(_ scalar: UnicodeScalar) -> Bool {
+        isIdentifierStart(scalar) || ("0"..."9").contains(scalar)
+    }
+
+    private mutating func skipTrivia() {
+        while index < scalars.count {
+            if CharacterSet.whitespacesAndNewlines.contains(scalars[index]) {
+                index += 1
+                continue
+            }
+            guard scalars[index] == "/", index + 1 < scalars.count else { return }
+            if scalars[index + 1] == "/" {
+                index += 2
+                while index < scalars.count,
+                      scalars[index] != "\n", scalars[index] != "\r" {
+                    index += 1
+                }
+                continue
+            }
+            if scalars[index + 1] == "*" {
+                index += 2
+                while index + 1 < scalars.count,
+                      !(scalars[index] == "*" && scalars[index + 1] == "/") {
+                    index += 1
+                }
+                if index + 1 < scalars.count { index += 2 }
+                continue
+            }
+            return
+        }
+    }
+
+    private func peek() -> UnicodeScalar? {
+        index < scalars.count ? scalars[index] : nil
+    }
+
+    @discardableResult
+    private mutating func consumeIf(_ expected: UnicodeScalar) -> Bool {
+        guard peek() == expected else { return false }
+        index += 1
+        return true
+    }
+
+    private mutating func consume(_ expected: UnicodeScalar) throws {
+        guard consumeIf(expected) else { throw invalid }
     }
 }
 
@@ -118,7 +413,8 @@ enum NodeRuntimeContractFactory {
     static func makePlan(
         contract: NodeRuntimeContractKind,
         runtimeDirectory: URL,
-        profileURL: URL? = nil
+        profileURL: URL? = nil,
+        configurationData: Data? = nil
     ) throws -> NodeRuntimeLaunchPlan {
         switch contract {
         case .service:
@@ -131,7 +427,9 @@ enum NodeRuntimeContractFactory {
                 cleanupURLs: []
             )
         case .hostIntegrated:
-            let config = try ContractBConfigBuilder.buildMinimumConfiguration()
+            let config = try configurationData
+                ?? ContractBConfigBuilder.buildMinimumConfiguration()
+            try ContractBConfigBuilder.validate(config)
             let configURL = runtimeDirectory.appendingPathComponent("contract-b-config.json")
             let stateURL = runtimeDirectory.appendingPathComponent("contract-b-state.json")
             // Runtime state remains bundle-version scoped, while credentials
