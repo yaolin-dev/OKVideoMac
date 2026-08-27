@@ -13198,12 +13198,12 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             result.mediaSession?.resourceReference.providerKind,
             "node-http-spider-runtime"
         )
-        XCTAssertEqual(result.validationPolicy, .providerPreflight)
+        XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
         XCTAssertEqual(result.mediaSession?.rangePolicy, .providerDefined)
         XCTAssertNil(replayStore.replay(for: "episode"))
     }
 
-    func testNodePlayerKeepsDecoderSelectedOriginalWithoutTransportProbe()
+    func testNodePlayerKeepsProviderOrderedRelayWithoutTransportProbe()
         async throws {
         let configurationIdentity = UUID().uuidString.lowercased()
         let replayStore = NodePlaybackReplayMemoryStore()
@@ -13237,7 +13237,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
 
         XCTAssertEqual(
             result.url,
-            "https://media.example.invalid/original?id=1"
+            "http://127.0.0.1:18988/spider/fixture/4/proxy/stream?id=1"
         )
         XCTAssertEqual(
             result.qualities.map(\.url),
@@ -13256,7 +13256,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
     }
 
-    func testNodePlayerKeepsDirectOriginalWithoutDuplicateRangeProbe()
+    func testNodePlayerKeepsFirstCloudTransportWithoutDuplicateRangeProbe()
         async throws {
         let directURL = "https://media.example.invalid/original?id=1"
         let site = SiteConfiguration(
@@ -13299,8 +13299,11 @@ final class NodeBundleCompatibilityTests: XCTestCase {
 
         let result = try await provider.player(flag: "direct", episodeURL: "episode")
 
-        XCTAssertEqual(result.url, directURL)
-        XCTAssertEqual(result.mediaSession?.transport, .compatibilityDirect)
+        XCTAssertEqual(
+            result.url,
+            "http://127.0.0.1:18988/spider/fixture/4/proxy/stream?id=1"
+        )
+        XCTAssertEqual(result.mediaSession?.transport, .providerLoopback)
         XCTAssertEqual(result.mediaSession?.rangePolicy, .providerDefined)
         XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
     }
@@ -13424,7 +13427,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
     }
 
-    func testNodePlayerKeepsSharedQualitySelectionForRemoteTransports()
+    func testNodePlayerKeepsProviderOrderForRemoteTransports()
         async throws {
         let site = SiteConfiguration(
             key: "nodejs_fixture",
@@ -13453,7 +13456,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
 
         XCTAssertEqual(
             result.url,
-            "https://media.example.invalid/original"
+            "https://media.example.invalid/relay"
         )
     }
 

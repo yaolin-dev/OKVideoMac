@@ -330,8 +330,9 @@ enum UpstreamResponseDecoder {
 
     /// Matches FongMi's `UrlAdapter`: player responses may return either one
     /// URL, alternating quality-name/URL pairs, or a persisted Url object. Keep
-    /// every quality for the player and prefer the provider's original/source
-    /// stream even when a stale persisted position points at a smart variant.
+    /// every quality for the player and honor the provider's array order or
+    /// explicit position. CatPaw cloud spiders deliberately put their managed
+    /// proxy before the short-lived original redirect.
     private static func playerURLSelection(_ value: JSONValue?) -> (
         url: String,
         qualities: [PlaybackQuality]
@@ -380,20 +381,10 @@ enum UpstreamResponseDecoder {
         fallbackPosition: Int
     ) -> (url: String, qualities: [PlaybackQuality])? {
         guard !qualities.isEmpty else { return nil }
-        let selected = qualities.first(where: { isOriginalQualityName($0.name) })
-            ?? (qualities.indices.contains(fallbackPosition)
-                ? qualities[fallbackPosition]
-                : qualities[0])
+        let selected = qualities.indices.contains(fallbackPosition)
+            ? qualities[fallbackPosition]
+            : qualities[0]
         return (selected.url, qualities)
-    }
-
-    private static func isOriginalQualityName(_ name: String) -> Bool {
-        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        return normalized.contains("原画")
-            || normalized.contains("原畫")
-            || normalized.contains("original")
-            || normalized.contains("source")
     }
 
     private static func nonEmptyTrimmed(_ value: String) -> String? {

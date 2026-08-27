@@ -984,14 +984,13 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             selectedURL: result.url
         )
         result.url = transportSelection.url
-        // Remote direct/HLS URLs should go straight to libmpv. Probing them
-        // first duplicates the player's request and adds several seconds to
-        // every start. Provider-owned loopback proxies remain preflighted once
-        // because some bundles mask an upstream 401/403 behind HTTP 200.
-        result.validationPolicy = isOwnedByRuntime(
-            result.url,
-            baseURL: invocation.baseURL
-        ) ? .providerPreflight : .playerAuthoritative
+        // CatPaw's cloud routes are active capabilities, not passive files:
+        // `/proxy/.../down` streams through its range-aware cache, while
+        // `/proxy/.../redirect` mints a short-lived download URL. A host probe
+        // would become the first consumer and make libmpv repeat that work (or
+        // consume a one-shot redirect), so the player must issue the only
+        // media request for both loopback and remote provider transports.
+        result.validationPolicy = .playerAuthoritative
         result.subtitles = result.subtitles.map { subtitle in
             URL(string: normalizePlaybackURL(
                 subtitle.absoluteString,
@@ -1676,9 +1675,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     }
 
     /// Honor the transport selected by the Spider response. Network probing is
-    /// intentionally not performed here: the player is authoritative for
-    /// remote URLs, while provider loopback URLs receive one bounded media-byte
-    /// validation in `DefaultMediaProbe`.
+    /// intentionally not performed here because CatPaw loopback URLs may mint
+    /// a short-lived redirect or begin a provider-managed streaming session.
     private func preferredPlaybackTransport(
         selectedURL: String
     ) -> PlaybackTransportSelection {

@@ -482,7 +482,7 @@ final class SiteProviderTests: XCTestCase {
         )
     }
 
-    func testPlayerPrefersOriginalQualityOverFongMiURLObjectPosition() throws {
+    func testPlayerHonorsFongMiURLObjectPositionWithOriginalQuality() throws {
         let site = SiteConfiguration(
             key: "quality-object",
             name: "Quality Object",
@@ -499,7 +499,7 @@ final class SiteProviderTests: XCTestCase {
 
         XCTAssertEqual(
             response.player?.url,
-            "https://media.example.invalid/original.mp4"
+            "https://media.example.invalid/smart.m3u8"
         )
         XCTAssertEqual(response.player?.qualities.map(\.name), ["Original", "Smart"])
     }
@@ -525,7 +525,7 @@ final class SiteProviderTests: XCTestCase {
         )
     }
 
-    func testPlayerFindsOriginalQualityWhenItIsNotFirstInArray() throws {
+    func testPlayerKeepsProviderOrderWhenOriginalQualityIsSecond() throws {
         let site = SiteConfiguration(
             key: "quality-array-original-second",
             name: "Quality Array Original Second",
@@ -542,7 +542,7 @@ final class SiteProviderTests: XCTestCase {
 
         XCTAssertEqual(
             response.player?.url,
-            "https://media.example.invalid/original.mp4"
+            "https://media.example.invalid/smart.m3u8"
         )
         XCTAssertEqual(response.player?.qualities.map(\.name), ["智能", "原画质"])
     }
