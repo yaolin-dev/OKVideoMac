@@ -211,7 +211,7 @@ struct SearchView: View {
         }
         if state.isSearching {
             return "首批已完成 \(state.searchFirstPageCompletedSiteCount)/"
-                + "\(state.searchTotalSiteCount) 个站点；后台补充已完成 "
+                + "\(state.searchTotalSiteCount) 个站点；站点处理已结束 "
                 + "\(state.searchCompletedSiteCount)/"
                 + "\(state.searchTotalSiteCount)，结果会增量显示。"
         }
@@ -333,7 +333,7 @@ private struct SearchProgressIndicator: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text("首批 \(firstPageCompleted) / \(total) · 完成 \(completed) / \(total)")
+            Text("首批 \(firstPageCompleted) / \(total) · 已结束 \(completed) / \(total)")
                 .font(.caption2.monospacedDigit())
                 .foregroundColor(.secondary)
             ProgressView(value: progress)
@@ -344,7 +344,7 @@ private struct SearchProgressIndicator: View {
         .accessibilityLabel("搜索进度")
         .accessibilityValue(
             "首批已完成 \(firstPageCompleted) / \(total) 个站点，"
-                + "后台补充已完成 \(completed) / \(total) 个站点"
+                + "站点处理已结束 \(completed) / \(total) 个站点"
         )
     }
 }
