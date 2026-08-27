@@ -980,10 +980,23 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 )
             )
         }
-        let transportSelection = preferredPlaybackTransport(
-            selectedURL: result.url
+        let selectedProviderURL = result.url
+        let transportSelection = await preferredPlaybackTransport(
+            selectedURL: selectedProviderURL,
+            headers: result.headers
         )
         result.url = transportSelection.url
+        if result.url != selectedProviderURL {
+            result.qualities = result.qualities.map { quality in
+                guard quality.url == selectedProviderURL else {
+                    return quality
+                }
+                return PlaybackQuality(
+                    name: quality.name,
+                    url: result.url
+                )
+            }
+        }
         // CatPaw's cloud routes are active capabilities, not passive files:
         // `/proxy/.../down` streams through its range-aware cache, while
         // `/proxy/.../redirect` mints a short-lived download URL. A host probe
@@ -1678,12 +1691,75 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     /// intentionally not performed here because CatPaw loopback URLs may mint
     /// a short-lived redirect or begin a provider-managed streaming session.
     private func preferredPlaybackTransport(
-        selectedURL: String
-    ) -> PlaybackTransportSelection {
+        selectedURL: String,
+        headers: HTTPHeaders
+    ) async -> PlaybackTransportSelection {
+        if let prepared = await preparedBaiduOriginalTransport(
+            selectedURL: selectedURL,
+            headers: headers
+        ) {
+            return prepared
+        }
         return PlaybackTransportSelection(
             url: selectedURL,
             rangePolicy: .providerDefined
         )
+    }
+
+    /// CatPaw's Baidu adapter currently returns the signed `d.pcs.baidu.com`
+    /// gateway together with a provider-specific User-Agent and Referer. The
+    /// gateway immediately redirects to a CDN host. Preparing that redirect
+    /// with the exact provider headers avoids a libmpv/FFmpeg redirect race on
+    /// a reused player client, and moves only one byte before playback. The
+    /// resulting CDN URL is still short-lived and remains runtime-only.
+    private func preparedBaiduOriginalTransport(
+        selectedURL: String,
+        headers: HTTPHeaders
+    ) async -> PlaybackTransportSelection? {
+        guard let url = URL(string: selectedURL),
+              url.scheme?.lowercased() == "https",
+              url.host?.lowercased() == "d.pcs.baidu.com",
+              headers["User-Agent"]?.isEmpty == false,
+              headers["Referer"]?.isEmpty == false else {
+            return nil
+        }
+
+        var probeHeaders = headers
+        probeHeaders["Range"] = "bytes=0-0"
+        do {
+            let response = try await httpClient.send(
+                HTTPRequest(
+                    url: url,
+                    headers: probeHeaders,
+                    timeout: 8,
+                    maximumResponseBytes: 64 * 1_024,
+                    maximumRedirects: 4,
+                    retryPolicy: .none,
+                    allowsNonSuccessfulStatus: true
+                )
+            )
+            guard (200...299).contains(response.statusCode),
+                  ["http", "https"].contains(
+                    response.url.scheme?.lowercased() ?? ""
+                  ) else {
+                return nil
+            }
+            let rangePolicy: PlaybackMediaSession.RangePolicy =
+                response.statusCode == 206
+                    || response.headers["Content-Range"]?.isEmpty == false
+                ? .forward
+                : .providerDefined
+            return PlaybackTransportSelection(
+                url: response.url.absoluteString,
+                rangePolicy: rangePolicy
+            )
+        } catch {
+            // Compatibility fallback: a bundle may return a valid signed URL
+            // whose CDN rejects a one-byte probe. Let libmpv remain the
+            // authoritative consumer instead of turning preparation into a
+            // new playback failure.
+            return nil
+        }
     }
 
     private func isOwnedByRuntime(

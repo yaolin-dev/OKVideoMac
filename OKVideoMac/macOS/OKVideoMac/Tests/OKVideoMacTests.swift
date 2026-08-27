@@ -13014,6 +13014,72 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
     }
 
+    func testNodePlayerPreparesBaiduRedirectWithProviderHeaders() async throws {
+        let gatewayURL = "https://d.pcs.baidu.com/file/opaque?sign=runtime-only"
+        let finalURL = "https://appall01.baidupcs.com/file/opaque?sign=runtime-only"
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.path.hasSuffix("/init") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            if request.url.absoluteString == gatewayURL {
+                XCTAssertEqual(request.headers["Range"], "bytes=0-0")
+                XCTAssertEqual(request.headers["User-Agent"], "BaiduNetdisk")
+                XCTAssertEqual(
+                    request.headers["Referer"],
+                    "https://pan.baidu.com/"
+                )
+                return HTTPResponse(
+                    url: try XCTUnwrap(URL(string: finalURL)),
+                    statusCode: 206,
+                    headers: [
+                        "Content-Type": "video/mp4",
+                        "Content-Range": "bytes 0-0/4096"
+                    ],
+                    body: Data([0])
+                )
+            }
+            XCTAssertTrue(request.url.path.hasSuffix("/play"))
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(
+                    #"{"parse":0,"url":["原画","https://d.pcs.baidu.com/file/opaque?sign=runtime-only"],"header":{"User-Agent":"BaiduNetdisk","Referer":"https://pan.baidu.com/"}}"#.utf8
+                )
+            )
+        }
+        let site = SiteConfiguration(
+            key: "nodejs_baidu_fixture",
+            name: "Baidu Fixture",
+            type: 3,
+            api: "/spider/baidu-fixture/3",
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        let result = try await provider.player(
+            flag: "百度",
+            episodeURL: "opaque-episode"
+        )
+
+        XCTAssertEqual(result.url, finalURL)
+        XCTAssertEqual(result.qualities.map(\.url), [finalURL])
+        XCTAssertEqual(result.headers["User-Agent"], "BaiduNetdisk")
+        XCTAssertEqual(result.headers["Referer"], "https://pan.baidu.com/")
+        XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
+        XCTAssertEqual(result.mediaSession?.rangePolicy, .forward)
+        XCTAssertEqual(result.mediaSession?.transport, .compatibilityDirect)
+    }
+
     func testNodePlayerRoutesOpaqueCloudDirectLinkFailureToConfiguration()
         async throws {
         let site = SiteConfiguration(
