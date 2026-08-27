@@ -77,6 +77,7 @@ struct ConfigurationView: View {
     let embedded: Bool
     @State private var showingImport = false
     @State private var showingFileImporter = false
+    @State private var showingCatPawProfileImporter = false
     @State private var pendingDelete: StoredConfiguration?
 
     init(embedded: Bool = false) {
@@ -119,6 +120,23 @@ struct ConfigurationView: View {
                 )
             }
         }
+        .fileImporter(
+            isPresented: $showingCatPawProfileImporter,
+            allowedContentTypes: [.json],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                if let url = urls.first {
+                    Task { await state.importCatPawProfile(from: url) }
+                }
+            case .failure(let error):
+                state.presentedError = UserFacingError(
+                    title: "无法选择 CatPaw 配置",
+                    message: error.localizedDescription
+                )
+            }
+        }
         .alert(
             item: $pendingDelete
         ) { record in
@@ -146,6 +164,12 @@ struct ConfigurationView: View {
                 } label: {
                     Label("选择点播配置文件", systemImage: "folder")
                 }
+                Button {
+                    showingCatPawProfileImporter = true
+                } label: {
+                    Label("导入 CatPaw 配置", systemImage: "person.crop.circle.badge.plus")
+                }
+                .disabled(!state.canImportCatPawProfile)
                 Spacer()
                 Button {
                     Task { await state.refreshActiveConfiguration() }
@@ -204,6 +228,20 @@ struct ConfigurationView: View {
                 Button("导入…") {
                     showingImport = true
                 }
+            }
+
+            SettingsDivider()
+
+            SettingsControlRow(
+                icon: "person.crop.circle.badge.plus",
+                color: .orange,
+                title: "导入 CatPaw 配置",
+                subtitle: "选择 test0.db.json；账号与挂载只写入受保护的运行 profile"
+            ) {
+                Button("选择…") {
+                    showingCatPawProfileImporter = true
+                }
+                .disabled(!state.canImportCatPawProfile)
             }
 
             SettingsDivider()

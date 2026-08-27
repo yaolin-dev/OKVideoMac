@@ -1,15 +1,88 @@
 import Foundation
 
+public enum SearchFailureCategory: String, Equatable, Sendable {
+    case unsupportedRoute
+    case configurationRequired
+    case scriptError
+    case upstreamUnavailable
+    case timeout
+    case transport
+    case provider
+}
+
 public struct SearchFailure: Equatable, Sendable {
     public var siteKey: String
     public var siteName: String
     public var message: String
+    public var category: SearchFailureCategory
+    public var isRetryable: Bool
 
-    public init(siteKey: String, siteName: String, message: String) {
+    public init(
+        siteKey: String,
+        siteName: String,
+        message: String,
+        category: SearchFailureCategory? = nil,
+        isRetryable: Bool = false
+    ) {
         self.siteKey = siteKey
         self.siteName = siteName
         self.message = message
+        self.category = category ?? Self.classify(message)
+        self.isRetryable = isRetryable
     }
+
+    public static func classify(_ message: String) -> SearchFailureCategory {
+        let value = message.lowercased()
+        if value.contains("route post:")
+            && value.contains("/search")
+            && value.contains("not found") {
+            return .unsupportedRoute
+        }
+        if value.contains("未登录") || value.contains("登录")
+            || value.contains("cookie") || value.contains("token")
+            || value.contains("账号") || value.contains("挂载") {
+            return .configurationRequired
+        }
+        if value.contains("typeerror") || value.contains("referenceerror")
+            || value.contains("cannot read properties")
+            || value.contains("is not a function") {
+            return .scriptError
+        }
+        if value.contains("搜索超时") || value.contains("timed out")
+            || value.contains("timeout") || value.contains("超时") {
+            return .timeout
+        }
+        if value.contains("econn") || value.contains("network")
+            || value.contains("dns") || value.contains("连接") {
+            return .transport
+        }
+        if value.contains("上游") || value.contains("http 5")
+            || value.contains("http 状态码 5") || value.contains("bad gateway") {
+            return .upstreamUnavailable
+        }
+        return .provider
+    }
+}
+
+/// A provider can publish an exact search failure classification without
+/// forcing the aggregate scheduler to reverse-engineer HTTP status codes or
+/// JavaScript exceptions from a localized message.
+public struct SiteSearchError: Error, LocalizedError, Equatable, Sendable {
+    public var message: String
+    public var category: SearchFailureCategory
+    public var isRetryable: Bool
+
+    public init(
+        _ message: String,
+        category: SearchFailureCategory,
+        isRetryable: Bool = false
+    ) {
+        self.message = message
+        self.category = category
+        self.isRetryable = isRetryable
+    }
+
+    public var errorDescription: String? { message }
 }
 
 public enum MultiSiteSearchTermination: String, Equatable, Sendable {
@@ -45,9 +118,25 @@ public struct MultiSiteSearchSnapshot: Equatable, Sendable {
 public enum MultiSiteSearchEvent: Equatable, Sendable {
     case snapshot(MultiSiteSearchSnapshot)
     case failure(SearchFailure)
+    case siteOutcome(SearchSiteOutcome)
     case siteFirstPageCompleted(siteKey: String)
     case siteCompleted(siteKey: String)
     case finished(MultiSiteSearchTermination)
+}
+
+public enum SearchSiteOutcome: Equatable, Sendable {
+    case success(siteKey: String, siteName: String, resultCount: Int)
+    case failure(SearchFailure)
+    case cancelled(siteKey: String, siteName: String)
+
+    public var siteKey: String {
+        switch self {
+        case .success(let siteKey, _, _), .cancelled(let siteKey, _):
+            return siteKey
+        case .failure(let failure):
+            return failure.siteKey
+        }
+    }
 }
 
 /// Per-provider aggregate-search limits. Providers that share one runtime can
@@ -71,9 +160,15 @@ public struct MultiSiteSearchProviderPolicy: Equatable, Sendable {
 
 private enum PageSearchOutcome: Sendable {
     case page(VideoPage, keyword: String)
-    case failure(String)
+    case failure(PageSearchFailure)
     case deadlineReached
     case cancelled
+}
+
+private struct PageSearchFailure: Sendable {
+    var message: String
+    var category: SearchFailureCategory
+    var isRetryable: Bool
 }
 
 private actor FirstPageSearchOutcome {
@@ -108,6 +203,10 @@ private struct InitialPageResult: Sendable {
     var outcome: PageSearchOutcome
 }
 
+private struct RetriableInitialFailure: Sendable {
+    var providerIndex: Int
+}
+
 private struct BackgroundSearchState: Sendable {
     var providerIndex: Int
     var keyword: String
@@ -121,7 +220,7 @@ private struct BackgroundSearchState: Sendable {
 private struct BackgroundSearchResult: Sendable {
     var providerIndex: Int
     var items: [VideoSummary]
-    var failureMessage: String?
+    var failure: PageSearchFailure?
     var reachedDeadline: Bool
 }
 
@@ -378,12 +477,12 @@ public struct MultiSiteSearch {
     public let maximumDeepPageSites: Int
 
     public init(
-        maximumConcurrency: Int = 12,
+        maximumConcurrency: Int = 20,
         siteTimeout: TimeInterval = 20,
         overallDeadline: TimeInterval = 25,
         maximumPagesPerSite: Int = 3,
-        maximumResultsPerSite: Int = 40,
-        maximumRetainedCandidates: Int = 500,
+        maximumResultsPerSite: Int = .max,
+        maximumRetainedCandidates: Int = .max,
         maximumDeepPageSites: Int = 12
     ) {
         self.maximumConcurrency = max(1, maximumConcurrency)
@@ -404,8 +503,10 @@ public struct MultiSiteSearch {
         AsyncStream { continuation in
             let task = Task {
                 defer { continuation.finish() }
-                let enabled = providers.filter { $0.site.searchable == 1 }
-                let deadline = Date().addingTimeInterval(overallDeadline)
+                // `searchable == 2` is FongMi's user-disabled state, not an
+                // unsupported protocol capability. The caller decides whether
+                // that site was explicitly re-enabled for this search.
+                let enabled = providers
                 var pool = SearchCandidatePool(
                     keyword: keyword,
                     maximumRetainedCandidates: maximumRetainedCandidates,
@@ -414,6 +515,8 @@ public struct MultiSiteSearch {
                 var backgroundStates: [BackgroundSearchState] = []
                 var providerFailureCount = 0
                 var reachedDeadline = false
+                var retriableInitialFailures: [RetriableInitialFailure] = []
+                var siteResultCounts: [String: Int] = [:]
 
                 // Page one is progressive, but bounded. Providers sharing a
                 // constrained runtime (for example CatPawOpen's Node process)
@@ -468,8 +571,7 @@ public struct MultiSiteSearch {
                                     outcome: await initialPageOutcome(
                                         provider: enabled[index],
                                         keyword: keyword,
-                                        quick: quick,
-                                        deadline: deadline
+                                        quick: quick
                                     )
                                 )
                             }
@@ -488,6 +590,7 @@ public struct MultiSiteSearch {
                         switch result.outcome {
                         case .page(let page, let resolvedKeyword):
                             let items = Self.deduplicatedWithinSite(page.items)
+                            siteResultCounts[provider.site.key] = items.count
                             if pool.ingest(items) {
                                 continuation.yield(.snapshot(pool.snapshot))
                             }
@@ -522,23 +625,41 @@ public struct MultiSiteSearch {
                                 )
                             } else {
                                 continuation.yield(
+                                    .siteOutcome(
+                                        .success(
+                                            siteKey: provider.site.key,
+                                            siteName: provider.site.name,
+                                            resultCount: items.count
+                                        )
+                                    )
+                                )
+                                continuation.yield(
                                     .siteCompleted(siteKey: provider.site.key)
                                 )
                             }
-                        case .failure(let message):
-                            providerFailureCount += 1
-                            continuation.yield(
-                                .failure(
-                                    SearchFailure(
-                                        siteKey: provider.site.key,
-                                        siteName: provider.site.name,
-                                        message: message
+                        case .failure(let failure):
+                            if failure.isRetryable {
+                                retriableInitialFailures.append(
+                                    RetriableInitialFailure(
+                                        providerIndex: result.providerIndex
                                     )
                                 )
-                            )
-                            continuation.yield(
-                                .siteCompleted(siteKey: provider.site.key)
-                            )
+                            } else {
+                                providerFailureCount += 1
+                                let searchFailure = SearchFailure(
+                                    siteKey: provider.site.key,
+                                    siteName: provider.site.name,
+                                    message: failure.message,
+                                    category: failure.category
+                                )
+                                continuation.yield(
+                                    .failure(searchFailure)
+                                )
+                                continuation.yield(.siteOutcome(.failure(searchFailure)))
+                                continuation.yield(
+                                    .siteCompleted(siteKey: provider.site.key)
+                                )
+                            }
                         case .deadlineReached:
                             reachedDeadline = true
                             continuation.yield(
@@ -564,9 +685,169 @@ public struct MultiSiteSearch {
                     return
                 }
 
-                if deadline.timeIntervalSinceNow <= 0 {
-                    reachedDeadline = true
+                // Retry only transient page-one failures, and only after every
+                // enabled site has received its first request opportunity.
+                // This prevents a flaky provider from occupying a worker while
+                // fast providers are still waiting to start.
+                if !retriableInitialFailures.isEmpty {
+                    await withTaskGroup(of: InitialPageResult.self) { group in
+                        var pendingIndexes = retriableInitialFailures.map(
+                            \.providerIndex
+                        )
+                        var activeCount = 0
+                        var activeGroupCounts: [String: Int] = [:]
+
+                        func canStart(_ index: Int) -> Bool {
+                            guard activeCount < maximumConcurrency else {
+                                return false
+                            }
+                            guard let policy = providerPolicies[
+                                enabled[index].site.key
+                            ],
+                            let groupKey = policy.concurrencyGroup,
+                            let groupLimit = policy.maximumGroupConcurrency else {
+                                return true
+                            }
+                            return activeGroupCounts[groupKey, default: 0]
+                                < groupLimit
+                        }
+
+                        func recordStarted(_ index: Int) {
+                            activeCount += 1
+                            guard let groupKey = providerPolicies[
+                                enabled[index].site.key
+                            ]?.concurrencyGroup else { return }
+                            activeGroupCounts[groupKey, default: 0] += 1
+                        }
+
+                        func recordFinished(_ index: Int) {
+                            activeCount = max(0, activeCount - 1)
+                            guard let groupKey = providerPolicies[
+                                enabled[index].site.key
+                            ]?.concurrencyGroup else { return }
+                            let remaining = activeGroupCounts[
+                                groupKey,
+                                default: 0
+                            ] - 1
+                            if remaining > 0 {
+                                activeGroupCounts[groupKey] = remaining
+                            } else {
+                                activeGroupCounts.removeValue(forKey: groupKey)
+                            }
+                        }
+
+                        func scheduleAvailable() {
+                            while activeCount < maximumConcurrency,
+                                  let position = pendingIndexes.firstIndex(
+                                    where: canStart
+                                  ) {
+                                let index = pendingIndexes.remove(at: position)
+                                recordStarted(index)
+                                group.addTask {
+                                    InitialPageResult(
+                                        providerIndex: index,
+                                        outcome: await initialPageOutcome(
+                                            provider: enabled[index],
+                                            keyword: keyword,
+                                            quick: quick
+                                        )
+                                    )
+                                }
+                            }
+                        }
+
+                        scheduleAvailable()
+                        while let result = await group.next() {
+                            recordFinished(result.providerIndex)
+                            guard !Task.isCancelled else {
+                                group.cancelAll()
+                                break
+                            }
+                            let provider = enabled[result.providerIndex]
+                            switch result.outcome {
+                            case .page(let page, let resolvedKeyword):
+                                let items = Self.deduplicatedWithinSite(page.items)
+                                siteResultCounts[provider.site.key] = items.count
+                                if pool.ingest(items) {
+                                    continuation.yield(.snapshot(pool.snapshot))
+                                }
+                                let pageCount = page.pagination.pageCount.flatMap {
+                                    $0 > 0 ? $0 : nil
+                                }
+                                let providerMaximumPages = providerPolicies[
+                                    provider.site.key
+                                ]?.maximumPagesPerSite ?? maximumPagesPerSite
+                                if !items.isEmpty,
+                                   pageCount.map({ $0 > 1 }) ?? true,
+                                   providerMaximumPages > 1,
+                                   pool.retainedCount(for: provider.site.key)
+                                    < maximumResultsPerSite {
+                                    backgroundStates.append(
+                                        BackgroundSearchState(
+                                            providerIndex: result.providerIndex,
+                                            keyword: resolvedKeyword,
+                                            nextPage: 2,
+                                            explicitPageCount: pageCount,
+                                            seenIDs: Set(items.map(\.id)),
+                                            candidateCount: min(
+                                                items.count,
+                                                maximumResultsPerSite
+                                            ),
+                                            relevance: SearchCandidatePool.relevance(
+                                                of: items,
+                                                keyword: resolvedKeyword
+                                            )
+                                        )
+                                    )
+                                } else {
+                                    continuation.yield(
+                                        .siteOutcome(
+                                            .success(
+                                                siteKey: provider.site.key,
+                                                siteName: provider.site.name,
+                                                resultCount: items.count
+                                            )
+                                        )
+                                    )
+                                    continuation.yield(
+                                        .siteCompleted(siteKey: provider.site.key)
+                                    )
+                                }
+                            case .failure(let failure):
+                                providerFailureCount += 1
+                                let searchFailure = SearchFailure(
+                                    siteKey: provider.site.key,
+                                    siteName: provider.site.name,
+                                    message: failure.message,
+                                    category: failure.category,
+                                    isRetryable: failure.isRetryable
+                                )
+                                continuation.yield(
+                                    .failure(searchFailure)
+                                )
+                                continuation.yield(.siteOutcome(.failure(searchFailure)))
+                                continuation.yield(
+                                    .siteCompleted(siteKey: provider.site.key)
+                                )
+                            case .deadlineReached:
+                                reachedDeadline = true
+                                continuation.yield(
+                                    .siteCompleted(siteKey: provider.site.key)
+                                )
+                            case .cancelled:
+                                break
+                            }
+                            scheduleAvailable()
+                        }
+                    }
                 }
+
+                // Every eligible provider gets an independent first-page
+                // timeout and therefore a real request opportunity. The
+                // aggregate deadline only bounds optional background paging;
+                // slow providers cannot consume the budget before queued
+                // providers have even started.
+                let deadline = Date().addingTimeInterval(overallDeadline)
 
                 if !reachedDeadline,
                    maximumDeepPageSites > 0,
@@ -585,6 +866,19 @@ public struct MultiSiteSearch {
                     )
                     for state in backgroundStates
                         where !selectedProviderIndexes.contains(state.providerIndex) {
+                        let provider = enabled[state.providerIndex]
+                        continuation.yield(
+                            .siteOutcome(
+                                .success(
+                                    siteKey: provider.site.key,
+                                    siteName: provider.site.name,
+                                    resultCount: siteResultCounts[
+                                        provider.site.key,
+                                        default: 0
+                                    ]
+                                )
+                            )
+                        )
                         continuation.yield(
                             .siteCompleted(
                                 siteKey: enabled[state.providerIndex].site.key
@@ -614,14 +908,28 @@ public struct MultiSiteSearch {
                             if pool.ingest(result.items) {
                                 continuation.yield(.snapshot(pool.snapshot))
                             }
-                            if let message = result.failureMessage {
+                            siteResultCounts[provider.site.key, default: 0]
+                                += result.items.count
+                            if let failure = result.failure {
                                 providerFailureCount += 1
+                                let searchFailure = SearchFailure(
+                                    siteKey: provider.site.key,
+                                    siteName: provider.site.name,
+                                    message: failure.message,
+                                    category: failure.category
+                                )
+                                continuation.yield(.failure(searchFailure))
+                                continuation.yield(.siteOutcome(.failure(searchFailure)))
+                            } else {
                                 continuation.yield(
-                                    .failure(
-                                        SearchFailure(
+                                    .siteOutcome(
+                                        .success(
                                             siteKey: provider.site.key,
                                             siteName: provider.site.name,
-                                            message: message
+                                            resultCount: siteResultCounts[
+                                                provider.site.key,
+                                                default: 0
+                                            ]
                                         )
                                     )
                                 )
@@ -634,6 +942,19 @@ public struct MultiSiteSearch {
                     }
                 } else {
                     for state in backgroundStates {
+                        let provider = enabled[state.providerIndex]
+                        continuation.yield(
+                            .siteOutcome(
+                                .success(
+                                    siteKey: provider.site.key,
+                                    siteName: provider.site.name,
+                                    resultCount: siteResultCounts[
+                                        provider.site.key,
+                                        default: 0
+                                    ]
+                                )
+                            )
+                        )
                         continuation.yield(
                             .siteCompleted(
                                 siteKey: enabled[state.providerIndex].site.key
@@ -671,18 +992,14 @@ public struct MultiSiteSearch {
     private func initialPageOutcome(
         provider: SiteProvider,
         keyword: String,
-        quick: Bool,
-        deadline: Date
+        quick: Bool
     ) async -> PageSearchOutcome {
         let plan = SearchQueryPlan(keyword)
         let providerTimeout = Self.effectiveSiteTimeout(
             base: siteTimeout,
             capability: provider.capability
         )
-        let siteDeadline = min(
-            deadline,
-            Date().addingTimeInterval(providerTimeout)
-        )
+        let siteDeadline = Date().addingTimeInterval(providerTimeout)
         let remaining = siteDeadline.timeIntervalSinceNow
         guard remaining > 0 else { return .deadlineReached }
         let originalOutcome = await searchPageWithTimeout(
@@ -691,7 +1008,7 @@ public struct MultiSiteSearch {
             page: 1,
             quick: quick,
             timeout: remaining,
-            deadlineLimited: siteDeadline == deadline
+            deadlineLimited: false
         )
         guard case .page(let originalPage, _) = originalOutcome,
               let fallback = plan.fallback,
@@ -711,7 +1028,7 @@ public struct MultiSiteSearch {
             page: 1,
             quick: quick,
             timeout: fallbackRemaining,
-            deadlineLimited: siteDeadline == deadline
+            deadlineLimited: false
         )
         switch fallbackOutcome {
         case .page(let fallbackPage, _):
@@ -760,7 +1077,7 @@ public struct MultiSiteSearch {
                 return BackgroundSearchResult(
                     providerIndex: state.providerIndex,
                     items: collected,
-                    failureMessage: nil,
+                    failure: nil,
                     reachedDeadline: true
                 )
             }
@@ -791,25 +1108,25 @@ public struct MultiSiteSearch {
                     state.explicitPageCount = pageCount
                 }
                 state.nextPage += 1
-            case .failure(let message):
+            case .failure(let failure):
                 return BackgroundSearchResult(
                     providerIndex: state.providerIndex,
                     items: collected,
-                    failureMessage: message,
+                    failure: failure,
                     reachedDeadline: false
                 )
             case .deadlineReached:
                 return BackgroundSearchResult(
                     providerIndex: state.providerIndex,
                     items: collected,
-                    failureMessage: nil,
+                    failure: nil,
                     reachedDeadline: true
                 )
             case .cancelled:
                 return BackgroundSearchResult(
                     providerIndex: state.providerIndex,
                     items: [],
-                    failureMessage: nil,
+                    failure: nil,
                     reachedDeadline: false
                 )
             }
@@ -818,7 +1135,7 @@ public struct MultiSiteSearch {
         return BackgroundSearchResult(
             providerIndex: state.providerIndex,
             items: collected,
-            failureMessage: nil,
+            failure: nil,
             reachedDeadline: false
         )
     }
@@ -863,8 +1180,27 @@ public struct MultiSiteSearch {
                 await firstOutcome.resolve(.page(result, keyword: keyword))
             } catch is CancellationError {
                 await firstOutcome.resolve(.cancelled)
+            } catch let error as SiteSearchError {
+                await firstOutcome.resolve(
+                    .failure(
+                        PageSearchFailure(
+                            message: error.message,
+                            category: error.category,
+                            isRetryable: error.isRetryable
+                        )
+                    )
+                )
             } catch {
-                await firstOutcome.resolve(.failure(error.localizedDescription))
+                let message = error.localizedDescription
+                await firstOutcome.resolve(
+                    .failure(
+                        PageSearchFailure(
+                            message: message,
+                            category: SearchFailure.classify(message),
+                            isRetryable: false
+                        )
+                    )
+                )
             }
         }
         let timeoutTask = Task {
@@ -877,7 +1213,13 @@ public struct MultiSiteSearch {
                     await firstOutcome.resolve(.deadlineReached)
                 } else {
                     await firstOutcome.resolve(
-                        .failure("搜索超时（\(max(1, Int(timeout))) 秒）")
+                        .failure(
+                            PageSearchFailure(
+                                message: "搜索超时（\(max(1, Int(timeout))) 秒）",
+                                category: .timeout,
+                                isRetryable: false
+                            )
+                        )
                     )
                 }
             } catch {

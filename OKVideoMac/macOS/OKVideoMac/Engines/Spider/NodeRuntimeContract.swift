@@ -664,7 +664,13 @@ enum NodeRuntimeContractFactory {
     }, 1000);
 
     try {
-      const config = validateConfig(JSON.parse(fs.readFileSync(configPath, 'utf8')));
+      const minimumConfig = validateConfig(
+        JSON.parse(fs.readFileSync(configPath, 'utf8'))
+      );
+      let config = minimumConfig;
+      const profile = readProfile();
+      try { config = validateConfig(profile); }
+      catch (_) { config = minimumConfig; }
       runtime = require(bundlePath);
       if (!runtime || typeof runtime.start !== 'function' || typeof runtime.stop !== 'function') {
         throw new Error('contract-b lifecycle exports rejected');

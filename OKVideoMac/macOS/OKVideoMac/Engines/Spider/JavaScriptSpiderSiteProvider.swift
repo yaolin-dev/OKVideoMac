@@ -1054,7 +1054,7 @@ final class JavaScriptSpiderSiteProvider: SiteProvider {
     }
 
     func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
-        guard site.searchable == 1, !quick || site.quickSearch == 1 else {
+        guard site.searchable != 0, !quick || site.quickSearch == 1 else {
             return VideoPage(items: [], pagination: Pagination(page: page, pageCount: 0))
         }
         return try SpiderResponseMapper.page(
@@ -1541,7 +1541,7 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
     }
 
     func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
-        guard site.searchable == 1, !quick || site.quickSearch == 1 else {
+        guard site.searchable != 0, !quick || site.quickSearch == 1 else {
             return VideoPage(items: [], pagination: Pagination(page: page, pageCount: 0))
         }
         let arguments: [JSONValue]

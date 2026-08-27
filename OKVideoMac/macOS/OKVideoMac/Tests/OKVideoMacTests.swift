@@ -9668,6 +9668,8 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(site.key, "nodejs_fixture")
         XCTAssertEqual(site.api, "/spider/fixture/3")
         XCTAssertEqual(site.extra["okNodeRuntime"], .bool(true))
+        XCTAssertEqual(site.searchable, 0)
+        XCTAssertEqual(site.extra["okNodeCapabilities"], .array([]))
         XCTAssertEqual(configuration.danmaku, "/danmu")
     }
 
@@ -9698,6 +9700,42 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(home.indexs, 1)
         XCTAssertEqual(home.extra["filterable"], .integer(1))
         XCTAssertEqual(disabled.hide, 1)
+        XCTAssertEqual(disabled.searchable, 0)
+        XCTAssertEqual(
+            home.extra["okNodeCapabilities"],
+            .array([.string("search")])
+        )
+    }
+
+    func testNodeFullConfigurationAddsDisabledSearchableCatalogueSites() throws {
+        let enabled = Data(
+            #"{"sites":[{"key":"enabled","name":"Enabled","type":3,"api":"/spider/enabled/3","searchable":1}]}"#.utf8
+        )
+        let catalogue = Data(
+            #"{"sites":[{"key":"enabled","name":"Enabled","type":3,"api":"/spider/enabled/3","searchable":1},{"key":"short","name":"久久短剧","type":3,"api":"/spider/short/3","searchable":2},{"key":"settings","name":"设置中心","type":3,"api":"/spider/settings/3","configurable":true}]}"#.utf8
+        )
+
+        let normalized = try NodeBundleRuntimeService.normalizeConfiguration(
+            enabled,
+            catalogData: catalogue,
+            bundleIdentity: "bundle-v1",
+            profileRevision: "profile-v2"
+        )
+        let configuration = try ConfigurationParser().parse(normalized)
+        let short = try XCTUnwrap(
+            configuration.sites.first(where: { $0.key == "short" })
+        )
+        let settings = try XCTUnwrap(
+            configuration.sites.first(where: { $0.key == "settings" })
+        )
+
+        XCTAssertEqual(short.searchable, 2)
+        XCTAssertEqual(short.extra["okNodeCatalogDisabled"], .bool(true))
+        XCTAssertEqual(short.extra["okNodeCapabilities"], .array([.string("search")]))
+        XCTAssertEqual(short.extra["okNodeBundleIdentity"], .string("bundle-v1"))
+        XCTAssertEqual(short.extra["okNodeProfileRevision"], .string("profile-v2"))
+        XCTAssertEqual(settings.searchable, 0)
+        XCTAssertEqual(settings.extra["okNodeConfigurationRequired"], .bool(true))
     }
 
     func testNodeBundleMD5Compatibility() {
@@ -11218,6 +11256,64 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         await service.stop()
     }
 
+    func testContractBImportedFullProfileBecomesStartupConfiguration() async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(
+                nodeContractBFixtureScript(startDelayMilliseconds: 0).utf8
+            ),
+            sourceFragment: "source=profile-import-fixture&version=1"
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+        let configurationID = UUID()
+        _ = try await service.ensureReady(
+            from: fixture.sourceURL,
+            configurationID: configurationID
+        )
+        let profileData = Data(
+            #"{"sites":{"list":[{"key":"alist-mounted","enable":true}]},"pans":{"list":[]},"danmu":{"urls":[],"autoPush":false},"color":[],"secretMarker":"profile-only"}"#.utf8
+        )
+
+        _ = try await service.importProfile(
+            profileData,
+            from: fixture.sourceURL,
+            configurationID: configurationID
+        )
+        guard case .running(let endpoint) = await service.currentStatus() else {
+            return XCTFail("profile import should restart into running state")
+        }
+        let (startupData, _) = try await URLSession.shared.data(
+            from: endpoint.appendingPathComponent("startup-config")
+        )
+        let startupConfig = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: startupData) as? [String: Any]
+        )
+        XCTAssertEqual(startupConfig["secretMarker"] as? String, "profile-only")
+
+        let descriptor = try NodeBundleSourceDescriptor(url: fixture.sourceURL)
+        let namespace = NodeRuntimeProfileNamespace(
+            configurationID: configurationID,
+            descriptor: descriptor
+        )
+        let profileURL = fixture.applicationSupportDirectory
+            .appendingPathComponent("NodeProfiles")
+            .appendingPathComponent(namespace.storageKey)
+            .appendingPathComponent("contract-b-profile.json")
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: profileURL.path
+        )
+        XCTAssertEqual(
+            (attributes[.posixPermissions] as? NSNumber)?.intValue,
+            0o600
+        )
+        await service.stop()
+    }
+
     func testContractBProfileNamespaceSurvivesBundleVersionAndPinChanges() throws {
         let configurationID = UUID()
         let first = try NodeBundleSourceDescriptor(url: XCTUnwrap(URL(
@@ -11866,6 +11962,8 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                       response.end('{}');
                     });
                   }
+                } else if (request.url === '/startup-config') {
+                  response.end(JSON.stringify(config));
                 } else if (request.url === '/spider/contract_b/3/home') {
                   response.end(JSON.stringify({class:[],list:[]}));
                 } else if (request.url === '/auxiliary') {
@@ -12192,7 +12290,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(searchCount, 1)
     }
 
-    func testNodeSearchRetriesOneTransient503() async throws {
+    func testNodeSearchPublishesTransient503ForAggregateRetry() async throws {
         let client = NodeSearchRetryHTTPClient(mode: .transient503)
         let provider = try NodeHTTPSpiderSiteProvider(
             site: nodeLifecycleFixtureSite,
@@ -12200,15 +12298,85 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             httpClient: client
         )
 
-        let page = try await provider.search(
-            keyword: "fixture",
-            page: 1,
-            quick: false
+        do {
+            _ = try await provider.search(
+                keyword: "fixture",
+                page: 1,
+                quick: false
+            )
+            XCTFail("provider must leave retry scheduling to MultiSiteSearch")
+        } catch let error as SiteSearchError {
+            XCTAssertEqual(error.category, .upstreamUnavailable)
+            XCTAssertTrue(error.isRetryable)
+        }
+        let searchCount = await client.searchCount
+        XCTAssertEqual(searchCount, 1)
+    }
+
+    func testNodeSearchOnlyClassifiesExactFastifySearch404AsUnsupported() async throws {
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.path.hasSuffix("/init") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 404,
+                headers: ["Content-Type": "application/json"],
+                body: Data(
+                    #"{"message":"Route POST:/spider/fixture/3/search not found"}"#.utf8
+                )
+            )
+        }
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: nodeLifecycleFixtureSite,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
         )
 
-        XCTAssertTrue(page.items.isEmpty)
-        let searchCount = await client.searchCount
-        XCTAssertEqual(searchCount, 2)
+        do {
+            _ = try await provider.search(keyword: "fixture", page: 1, quick: false)
+            XCTFail("missing route must fail")
+        } catch let error as SiteSearchError {
+            XCTAssertEqual(error.category, .unsupportedRoute)
+            XCTAssertFalse(error.isRetryable)
+        }
+    }
+
+    func testNodeSearchDoesNotMisclassifyGenericUpstream404AsMissingRoute() async throws {
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.path.hasSuffix("/init") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 404,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"message":"upstream video not found"}"#.utf8)
+            )
+        }
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: nodeLifecycleFixtureSite,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        do {
+            _ = try await provider.search(keyword: "fixture", page: 1, quick: false)
+            XCTFail("upstream 404 must fail")
+        } catch let error as SiteSearchError {
+            XCTAssertEqual(error.category, .provider)
+            XCTAssertFalse(error.isRetryable)
+        }
     }
 
     func testNodeProviderSurfacesCloudLoginAsNativeWebAuthorization() async throws {

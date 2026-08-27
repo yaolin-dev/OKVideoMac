@@ -848,6 +848,11 @@ struct NodeBundleCacheSnapshot: Equatable, Sendable {
     let trustState: NodeBundleTrustState
 }
 
+struct NodeProfileRevisionSnapshot: Equatable, Sendable {
+    let storageKey: String
+    let revision: String
+}
+
 actor NodeBundleRuntimeService {
     private struct CachedBundle: Sendable {
         let sourceID: String?
@@ -912,15 +917,20 @@ actor NodeBundleRuntimeService {
     private var diagnosticWriters: [String: NodeDiagnosticLogWriter] = [:]
     private var activeBundleCacheKey: String?
     private var activeProfileStorageKey: String?
+    private var activeProfileURL: URL?
     private var activeContractCleanupURLs: [URL] = []
     private var serviceBaseURL: URL?
     private var status: NodeRuntimeStatus = .stopped
     private var statusContinuations: [UUID: AsyncStream<NodeRuntimeStatus>.Continuation] = [:]
+    private var profileRevisionContinuations:
+        [UUID: AsyncStream<NodeProfileRevisionSnapshot>.Continuation] = [:]
     private var desiredBundle: CachedBundle?
     private var desiredProfileNamespace: NodeRuntimeProfileNamespace?
     private var processGeneration = UUID()
     private var restartTask: Task<Void, Never>?
     private var healthMonitorTask: Task<Void, Never>?
+    private var profileMonitorTask: Task<Void, Never>?
+    private var lastProfileRevisionSnapshot: NodeProfileRevisionSnapshot?
     private var restartAttempt = 0
     private var startupCacheKey: String?
     private var startupProfileStorageKey: String?
@@ -1026,7 +1036,29 @@ actor NodeBundleRuntimeService {
             )
         )
         try Task.checkCancellation()
-        let normalized = try Self.normalizeConfiguration(response.body)
+        // CatPawOpen's `/config` intentionally contains only currently enabled
+        // sites. `/full-config` is the authoritative capability catalogue used
+        // by its own settings UI. Read it best-effort so user-disabled and
+        // dynamically configured AList/TG providers remain discoverable
+        // without making that optional endpoint a readiness requirement.
+        let fullConfigResponse = try? await localHTTPClient.send(
+            HTTPRequest(
+                url: baseURL.appendingPathComponent("full-config"),
+                timeout: 5,
+                maximumResponseBytes: Self.maximumConfigurationSize,
+                maximumRedirects: 0,
+                retryPolicy: .none
+            )
+        )
+        let catalogData = fullConfigResponse.flatMap { response in
+            (200..<300).contains(response.statusCode) ? response.body : nil
+        }
+        let normalized = try Self.normalizeConfiguration(
+            response.body,
+            catalogData: catalogData,
+            bundleIdentity: activeBundleCacheKey,
+            profileRevision: Self.profileRevision(at: activeProfileURL)
+        )
         try Task.checkCancellation()
         let parsed = try ConfigurationParser().parse(normalized)
         try Task.checkCancellation()
@@ -1062,6 +1094,8 @@ actor NodeBundleRuntimeService {
         restartTask = nil
         healthMonitorTask?.cancel()
         healthMonitorTask = nil
+        profileMonitorTask?.cancel()
+        profileMonitorTask = nil
         startupGeneration = nil
         startupCacheKey = nil
         startupProfileStorageKey = nil
@@ -1087,6 +1121,74 @@ actor NodeBundleRuntimeService {
         }
     }
 
+    func profileRevisionUpdates() -> AsyncStream<NodeProfileRevisionSnapshot> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            profileRevisionContinuations[id] = continuation
+            if let lastProfileRevisionSnapshot {
+                continuation.yield(lastProfileRevisionSnapshot)
+            }
+            continuation.onTermination = { [weak self] _ in
+                Task { await self?.removeProfileRevisionContinuation(id) }
+            }
+        }
+    }
+
+    @discardableResult
+    func importProfile(
+        _ data: Data,
+        from sourceURL: URL,
+        configurationID: UUID
+    ) async throws -> NodeProfileRevisionSnapshot {
+        try ContractBConfigBuilder.validate(data)
+        let descriptor = try NodeBundleSourceDescriptor(url: sourceURL)
+        let namespace = NodeRuntimeProfileNamespace(
+            configurationID: configurationID,
+            descriptor: descriptor
+        )
+        _ = try await ensureReady(
+            source: .descriptor(descriptor, namespace),
+            automaticRestart: false
+        )
+        guard let bundle = desiredBundle else {
+            throw NodeBundleRuntimeError.endpointUnavailable(
+                "Node Runtime 尚未准备好"
+            )
+        }
+        let bundleData = try Data(
+            contentsOf: bundle.scriptURL,
+            options: .mappedIfSafe
+        )
+        guard try NodeRuntimeContractDetector.detect(
+            validatedBundleData: bundleData
+        ) == .hostIntegrated else {
+            throw NodeBundleRuntimeError.configurationContractInvalid
+        }
+        let profileURL = try contractBProfileURL(
+            for: namespace,
+            currentBundle: bundle
+        )
+        try data.write(to: profileURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: profileURL.path
+        )
+
+        restartTask?.cancel()
+        restartTask = nil
+        stopProcess(publishing: .starting)
+        _ = try await ensureReady(
+            source: .cached(bundle, namespace),
+            automaticRestart: false
+        )
+        let snapshot = NodeProfileRevisionSnapshot(
+            storageKey: namespace.storageKey,
+            revision: Self.profileRevision(at: profileURL)
+        )
+        publishProfileRevision(snapshot)
+        return snapshot
+    }
+
     func currentStatus() -> NodeRuntimeStatus {
         status
     }
@@ -1101,18 +1203,38 @@ actor NodeBundleRuntimeService {
         )
     }
 
-    static func normalizeConfiguration(_ data: Data) throws -> Data {
+    static func normalizeConfiguration(
+        _ data: Data,
+        catalogData: Data? = nil,
+        bundleIdentity: String? = nil,
+        profileRevision: String? = nil
+    ) throws -> Data {
         guard var root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw AppError.configuration("Node 服务的 /config 未返回 JSON 对象")
         }
 
+        func rawSites(in object: [String: Any]) -> [[String: Any]]? {
+            if let directSites = object["sites"] as? [[String: Any]] {
+                return directSites
+            }
+            if let video = object["video"] as? [String: Any],
+               let videoSites = video["sites"] as? [[String: Any]] {
+                return videoSites
+            }
+            return nil
+        }
+
+        func siteKey(in site: [String: Any]) -> String? {
+            guard let value = site["key"] as? String else { return nil }
+            let key = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return key.isEmpty ? nil : key
+        }
+
         var sites: [[String: Any]]
-        if let directSites = root["sites"] as? [[String: Any]] {
-            sites = directSites
-        } else if let video = root["video"] as? [String: Any],
-                  let videoSites = video["sites"] as? [[String: Any]] {
-            sites = videoSites
-            if root["danmaku"] == nil,
+        if let configuredSites = rawSites(in: root) {
+            sites = configuredSites
+            if let video = root["video"] as? [String: Any],
+               root["danmaku"] == nil,
                let danmaku = video["danmuSearchUrl"] as? String,
                !danmaku.isEmpty {
                 root["danmaku"] = danmaku
@@ -1121,14 +1243,59 @@ actor NodeBundleRuntimeService {
             throw AppError.configuration("Node 服务的 /config 缺少 video.sites")
         }
 
-        sites = sites.map { rawSite in
+        func decoratedSite(_ rawSite: [String: Any]) -> [String: Any] {
             var site = rawSite
             site["okNodeRuntime"] = true
+            let searchable = (site["searchable"] as? NSNumber)?.intValue
+            // CatPaw metadata omits `searchable` for settings, push and other
+            // utility routes. ConfigurationParser's compatibility default is
+            // deliberately permissive for older TVBox sources, so Node must
+            // publish the absence as an explicit lack of search capability.
+            site["searchable"] = searchable ?? 0
+            site["okNodeCapabilities"] = searchable.map { value in
+                value == 0 ? [] : ["search"]
+            } ?? []
+            if searchable == nil, site["configurable"] as? Bool == true {
+                site["okNodeConfigurationRequired"] = true
+            }
+            if let bundleIdentity {
+                site["okNodeBundleIdentity"] = bundleIdentity
+            }
+            if let profileRevision {
+                site["okNodeProfileRevision"] = profileRevision
+            }
             if site["hide"] == nil, let enabled = site["enable"] as? Bool, !enabled {
                 site["hide"] = 1
             }
             return site
         }
+        sites = sites.map(decoratedSite)
+
+        if let catalogData,
+           let catalogRoot = try? JSONSerialization.jsonObject(with: catalogData)
+                as? [String: Any],
+           let catalogueSites = rawSites(in: catalogRoot) {
+            var knownKeys = Set(
+                sites.compactMap(siteKey)
+            )
+            for rawSite in catalogueSites {
+                guard let key = siteKey(in: rawSite),
+                      knownKeys.insert(key).inserted else { continue }
+                var site = decoratedSite(rawSite)
+                site["okNodeCatalogDisabled"] = true
+                // Keep catalogue-only providers out of the Home source menu,
+                // while retaining them for the search scope editor/provider
+                // registry. A non-zero searchable value is the FongMi
+                // user-disabled state and can be explicitly re-enabled.
+                site["hide"] = 1
+                let searchable = (site["searchable"] as? NSNumber)?.intValue ?? 0
+                if searchable != 0 {
+                    site["searchable"] = 2
+                }
+                sites.append(site)
+            }
+        }
+
         root["sites"] = sites
 
         do {
@@ -1141,6 +1308,17 @@ actor NodeBundleRuntimeService {
                 "无法转换 Node 服务配置：\(error.localizedDescription)"
             )
         }
+    }
+
+    private static func profileRevision(at url: URL?) -> String {
+        guard let url,
+              let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+              data.count <= 1_024 * 1_024 else {
+            return "unconfigured"
+        }
+        return SHA256.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     static func md5Hex(_ data: Data) -> String {
@@ -2200,6 +2378,11 @@ actor NodeBundleRuntimeService {
             }
             activeBundleCacheKey = bundle.cacheKey
             activeProfileStorageKey = source.profileNamespace.storageKey
+            startProfileMonitor(
+                generation: processGeneration,
+                profileURL: activeProfileURL,
+                storageKey: source.profileNamespace.storageKey
+            )
             return endpoint
         } catch {
             if startupGeneration == generation {
@@ -2279,6 +2462,7 @@ actor NodeBundleRuntimeService {
                 currentBundle: bundle
             )
             : nil
+        activeProfileURL = profileURL
         let launchPlan = try NodeRuntimeContractFactory.makePlan(
             contract: contract,
             runtimeDirectory: bundle.runtimeDirectory,
@@ -2569,6 +2753,8 @@ actor NodeBundleRuntimeService {
     private func stopProcess(publishing newStatus: NodeRuntimeStatus?) {
         healthMonitorTask?.cancel()
         healthMonitorTask = nil
+        profileMonitorTask?.cancel()
+        profileMonitorTask = nil
         process?.terminationHandler = nil
         if let process, process.isRunning {
             process.terminate()
@@ -2579,6 +2765,7 @@ actor NodeBundleRuntimeService {
         process = nil
         activeBundleCacheKey = nil
         activeProfileStorageKey = nil
+        activeProfileURL = nil
         removeActiveContractArtifacts()
         serviceBaseURL = nil
         if let newStatus {
@@ -2608,6 +2795,7 @@ actor NodeBundleRuntimeService {
         process = nil
         activeBundleCacheKey = nil
         activeProfileStorageKey = nil
+        activeProfileURL = nil
         removeActiveContractArtifacts()
         serviceBaseURL = nil
         healthMonitorTask?.cancel()
@@ -2657,6 +2845,46 @@ actor NodeBundleRuntimeService {
                 }
             }
         }
+    }
+
+    private func startProfileMonitor(
+        generation: UUID,
+        profileURL: URL?,
+        storageKey: String
+    ) {
+        profileMonitorTask?.cancel()
+        guard let profileURL else { return }
+        let initial = NodeProfileRevisionSnapshot(
+            storageKey: storageKey,
+            revision: Self.profileRevision(at: profileURL)
+        )
+        publishProfileRevision(initial)
+        profileMonitorTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                await self.pollProfileRevision(
+                    generation: generation,
+                    profileURL: profileURL,
+                    storageKey: storageKey
+                )
+            }
+        }
+    }
+
+    private func pollProfileRevision(
+        generation: UUID,
+        profileURL: URL,
+        storageKey: String
+    ) {
+        guard generation == processGeneration,
+              activeProfileStorageKey == storageKey else { return }
+        publishProfileRevision(
+            NodeProfileRevisionSnapshot(
+                storageKey: storageKey,
+                revision: Self.profileRevision(at: profileURL)
+            )
+        )
     }
 
     private func handleHealthFailure(generation: UUID) {
@@ -2740,8 +2968,20 @@ actor NodeBundleRuntimeService {
         }
     }
 
+    private func publishProfileRevision(_ snapshot: NodeProfileRevisionSnapshot) {
+        guard snapshot != lastProfileRevisionSnapshot else { return }
+        lastProfileRevisionSnapshot = snapshot
+        for continuation in profileRevisionContinuations.values {
+            continuation.yield(snapshot)
+        }
+    }
+
     private func removeStatusContinuation(_ id: UUID) {
         statusContinuations[id] = nil
+    }
+
+    private func removeProfileRevisionContinuation(_ id: UUID) {
+        profileRevisionContinuations[id] = nil
     }
 
     private func validateBundleForExecution(_ bundle: CachedBundle) throws {

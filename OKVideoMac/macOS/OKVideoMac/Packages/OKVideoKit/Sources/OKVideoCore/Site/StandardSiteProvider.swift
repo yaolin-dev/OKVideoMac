@@ -97,7 +97,7 @@ public final class StandardSiteProvider: SiteProvider {
     }
 
     public func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
-        guard site.searchable == 1 else {
+        guard site.searchable != 0 else {
             return VideoPage(items: [], pagination: Pagination(page: page, pageCount: 0))
         }
         if quick, site.quickSearch != 1 {

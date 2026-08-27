@@ -1150,7 +1150,7 @@ enum SearchSiteScopeMode: String, CaseIterable, Identifiable, Sendable {
 }
 
 struct SearchSiteScope: Equatable, Sendable {
-    static let schemaVersion = 2
+    static let schemaVersion = 3
 
     var mode: SearchSiteScopeMode
     var selectedSiteKeys: Set<String>
@@ -1220,13 +1220,52 @@ enum SearchConfigurationFingerprint {
     }
 }
 
+enum SearchScopeSiteAvailability: Equatable, Sendable {
+    case enabled
+    case userDisabled
+    case unavailable(String)
+}
+
 struct SearchScopeSiteOption: Identifiable, Equatable, Sendable {
     var id: String { key }
     let key: String
     let name: String
-    let unavailableReason: String?
+    let availability: SearchScopeSiteAvailability
 
-    var isSearchable: Bool { unavailableReason == nil }
+    init(
+        key: String,
+        name: String,
+        availability: SearchScopeSiteAvailability
+    ) {
+        self.key = key
+        self.name = name
+        self.availability = availability
+    }
+
+    // Retain the original initializer for persisted-scope policy tests and
+    // callers that only distinguish available/unavailable providers.
+    init(key: String, name: String, unavailableReason: String?) {
+        self.init(
+            key: key,
+            name: name,
+            availability: unavailableReason.map(
+                SearchScopeSiteAvailability.unavailable
+            ) ?? .enabled
+        )
+    }
+
+    var unavailableReason: String? {
+        guard case .unavailable(let reason) = availability else { return nil }
+        return reason
+    }
+
+    var isSearchable: Bool {
+        if case .unavailable = availability { return false }
+        return true
+    }
+
+    var isEnabledByDefault: Bool { availability == .enabled }
+    var isUserDisabled: Bool { availability == .userDisabled }
 }
 
 enum SearchSiteScopePolicy {
@@ -1234,14 +1273,20 @@ enum SearchSiteScopePolicy {
         scope: SearchSiteScope,
         options: [SearchScopeSiteOption]
     ) -> Set<String> {
-        let searchableKeys = Set(
+        let selectableKeys = Set(
             options.lazy.filter(\.isSearchable).map(\.key)
         )
+        let defaultKeys = Set(
+            options.lazy.filter(\.isEnabledByDefault).map(\.key)
+        )
+        let explicitlyReenabledKeys = Set(
+            options.lazy.filter(\.isUserDisabled).map(\.key)
+        ).intersection(scope.selectedSiteKeys)
         switch scope.mode {
         case .all:
-            return searchableKeys
+            return defaultKeys.union(explicitlyReenabledKeys)
         case .custom:
-            return searchableKeys.intersection(scope.selectedSiteKeys)
+            return selectableKeys.intersection(scope.selectedSiteKeys)
         }
     }
 }
@@ -1268,7 +1313,7 @@ enum SearchProviderSelectionPolicy {
             // search only the site that supplied the metadata. Respect the
             // protocol's searchable/hidden/runtime flags, but deliberately
             // ignore the user's manual-search subset for this one launch.
-            return Set(options.lazy.filter(\.isSearchable).map(\.key))
+            return Set(options.lazy.filter(\.isEnabledByDefault).map(\.key))
         }
     }
 }
@@ -3183,12 +3228,13 @@ final class AppState: ObservableObject {
     @Published private(set) var searchResults: [VideoSummary] = []
     @Published private(set) var searchClusters: [SearchResultCluster] = []
     @Published private(set) var searchFailures: [SearchFailure] = []
+    @Published private(set) var searchSiteOutcomes: [String: SearchSiteOutcome] = [:]
     @Published private(set) var searchFirstPageCompletedSiteCount = 0
     @Published private(set) var searchCompletedSiteCount = 0
     @Published private(set) var searchTotalSiteCount = 0
     @Published private(set) var searchReceivedCandidateCount = 0
-    @Published private(set) var searchMaximumRetainedCandidates = 500
-    @Published private(set) var searchMaximumResultsPerSite = 40
+    @Published private(set) var searchMaximumRetainedCandidates = Int.max
+    @Published private(set) var searchMaximumResultsPerSite = Int.max
     @Published private(set) var searchDidDiscardCandidates = false
     @Published private(set) var searchTermination: MultiSiteSearchTermination?
     @Published private(set) var previousSearchTermination:
@@ -3302,6 +3348,7 @@ final class AppState: ObservableObject {
     private var providers: [String: SiteProvider] = [:]
     private var searchTask: Task<Void, Never>?
     private var searchSessionGate = SearchSessionGate()
+    private var unsupportedNodeSearchRouteIdentities = Set<String>()
     private var detailLoadSessionID = UUID()
     private var homeLoadSessionID = UUID()
     private var homeContentIdentity: HomeContentIdentity?
@@ -3353,6 +3400,8 @@ final class AppState: ObservableObject {
     private var configurationRefreshTask: Task<Bool, Never>?
     private var configurationRefreshSessionID = UUID()
     private var nodeRuntimeStatusTask: Task<Void, Never>?
+    private var nodeProfileRevisionTask: Task<Void, Never>?
+    private var observedNodeProfileRevision: NodeProfileRevisionSnapshot?
     private var activeNodeRuntimeEndpoint: URL?
     private var lastReadyNodeRuntimeEndpoint: URL?
     private var nodeRuntimeUnavailableReason = "Node Runtime 尚未启动"
@@ -3401,6 +3450,7 @@ final class AppState: ObservableObject {
     func start() async {
         guard !hasCompletedStartup, let environment else { return }
         startNodeRuntimeStatusMonitoring()
+        startNodeProfileRevisionMonitoring()
         isLoading = true
         defer {
             isLoading = false
@@ -3624,6 +3674,45 @@ final class AppState: ObservableObject {
             force: true,
             reportErrors: true
         )
+    }
+
+    var canImportCatPawProfile: Bool {
+        activeConfigurationUsesNodeRuntime
+            && activeConfigurationRecord?.id != nil
+    }
+
+    func importCatPawProfile(from fileURL: URL) async {
+        guard let environment,
+              let record = activeConfigurationRecord,
+              let sourceURL = activeNodeRuntimeSourceURL else {
+            show(
+                AppError.configuration("请先启用一个 CatPawOpen Node 配置。"),
+                title: "无法导入 CatPaw 配置"
+            )
+            return
+        }
+        let scoped = fileURL.startAccessingSecurityScopedResource()
+        defer {
+            if scoped { fileURL.stopAccessingSecurityScopedResource() }
+        }
+        do {
+            let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
+            _ = try await environment.nodeBundleRuntime.importProfile(
+                data,
+                from: sourceURL,
+                configurationID: record.id
+            )
+            _ = await refreshActiveConfigurationIfNeeded(
+                force: true,
+                reportErrors: true
+            )
+            presentedError = UserFacingError(
+                title: "CatPaw 配置已导入",
+                message: "动态站点目录已按新 profile 重新加载，无需重启应用。"
+            )
+        } catch {
+            show(error, title: "无法导入 CatPaw 配置")
+        }
     }
 
     static func shouldAutomaticallyRefreshConfiguration(
@@ -5519,6 +5608,15 @@ final class AppState: ObservableObject {
         pendingNodeOperation = nil
         nodeWebPresentation = nil
         guard let pending, let presentation else { return }
+        if activeConfigurationUsesNodeRuntime {
+            // Configuration/login pages can add dynamic AList mounts or alter
+            // the enabled site list. Re-read the local CatPawOpen catalogue
+            // before deciding whether the original operation still exists.
+            _ = await refreshActiveConfigurationIfNeeded(
+                force: true,
+                reportErrors: false
+            )
+        }
         let identity = pending.sourceIdentity
         guard NodeAuthorizationRetryPolicy.shouldRetry(
             pendingIdentity: identity,
@@ -7880,12 +7978,13 @@ final class AppState: ObservableObject {
         searchResults = []
         searchClusters = []
         searchFailures = []
+        searchSiteOutcomes = [:]
         searchFirstPageCompletedSiteCount = 0
         searchCompletedSiteCount = 0
         searchTotalSiteCount = 0
         searchReceivedCandidateCount = 0
-        searchMaximumRetainedCandidates = 500
-        searchMaximumResultsPerSite = 40
+        searchMaximumRetainedCandidates = .max
+        searchMaximumResultsPerSite = .max
         searchDidDiscardCandidates = false
         searchTermination = nil
         isSearching = false
@@ -7901,6 +8000,28 @@ final class AppState: ObservableObject {
         searchKeyword = trimmed
         guard !trimmed.isEmpty else { return }
 
+        // Profile revisions refresh `/config` and `/full-config` in the
+        // background. Keep catalogue maintenance off the foreground search
+        // path so an optional/older `/full-config` endpoint can never add a
+        // multi-second delay before the first provider request is submitted.
+        isSearching = true
+        searchTask = Task { [weak self] in
+            guard let self else { return }
+            guard !Task.isCancelled,
+                  self.searchSessionGate.accepts(sessionID) else { return }
+            await self.executeSearch(
+                keyword: trimmed,
+                context: context,
+                sessionID: sessionID
+            )
+        }
+    }
+
+    private func executeSearch(
+        keyword: String,
+        context: SearchLaunchContext,
+        sessionID: UUID
+    ) async {
         let selectedKeys = SearchProviderSelectionPolicy.effectiveSiteKeys(
             context: context,
             scope: searchSiteScope,
@@ -7913,16 +8034,23 @@ final class AppState: ObservableObject {
                 AppError.configuration("当前自定义搜索范围没有可用站点，请重新选择。"),
                 title: "搜索范围不可用"
             )
+            isSearching = false
+            searchTask = nil
             return
         }
-        let searchableProviders: [SiteProvider] = supportedSites.compactMap { site in
+        let searchableProviders: [SiteProvider] = searchCatalogSites.compactMap { site in
             guard selectedKeys.contains(site.key),
-                  site.searchable == 1 else { return nil }
+                  site.searchable != 0 else { return nil }
             return providers[site.key]
         }
         activeSearchSiteKeys = Set(searchableProviders.map { $0.site.key })
         searchTotalSiteCount = searchableProviders.count
         isSearching = !searchableProviders.isEmpty
+        guard !searchableProviders.isEmpty else {
+            searchTermination = .completed
+            searchTask = nil
+            return
+        }
         let aggregatePolicies: [String: MultiSiteSearchProviderPolicy] = Dictionary(
             uniqueKeysWithValues: searchableProviders.compactMap {
                 provider -> (String, MultiSiteSearchProviderPolicy)? in
@@ -7931,78 +8059,80 @@ final class AppState: ObservableObject {
                     provider.site.key,
                     MultiSiteSearchProviderPolicy(
                         concurrencyGroup: "node-http-runtime",
-                        maximumGroupConcurrency: 4,
+                        maximumGroupConcurrency: 20,
                         maximumPagesPerSite: 1
                     )
                 )
             }
         )
-        let stream = MultiSiteSearch().search(
+        let stream = MultiSiteSearch(maximumConcurrency: 20).search(
             providers: searchableProviders,
-            keyword: trimmed,
+            keyword: keyword,
             providerPolicies: aggregatePolicies
         )
-        searchTask = Task { [weak self] in
-            var firstPageCompletedSiteKeys = Set<String>()
-            var completedSiteKeys = Set<String>()
-            var pendingSnapshot: MultiSiteSearchSnapshot?
-            var lastSnapshotRefresh = Date.distantPast
+        var firstPageCompletedSiteKeys = Set<String>()
+        var completedSiteKeys = Set<String>()
+        var pendingSnapshot: MultiSiteSearchSnapshot?
+        var lastSnapshotRefresh = Date.distantPast
 
-            let applySnapshot: (MultiSiteSearchSnapshot) -> Void = { [weak self] snapshot in
-                guard let self,
-                      self.searchSessionGate.accepts(sessionID) else { return }
-                // MultiSiteSearch is the semantic owner of relevance,
-                // retention, eviction and per-site diversity. AppState only
-                // publishes its authoritative retained snapshot.
-                self.searchResults = snapshot.items
-                self.searchClusters = SearchResultAggregator.cluster(snapshot.items)
-                self.searchReceivedCandidateCount = snapshot.receivedCandidateCount
-                self.searchMaximumRetainedCandidates =
-                    snapshot.maximumRetainedCandidates
-                self.searchMaximumResultsPerSite = snapshot.maximumResultsPerSite
-                self.searchDidDiscardCandidates = snapshot.didDiscardCandidates
-            }
+        let applySnapshot: (MultiSiteSearchSnapshot) -> Void = { [weak self] snapshot in
+            guard let self,
+                  self.searchSessionGate.accepts(sessionID) else { return }
+            // MultiSiteSearch is the semantic owner of relevance, retention,
+            // eviction and per-site diversity. AppState only publishes its
+            // authoritative retained snapshot.
+            self.searchResults = snapshot.items
+            self.searchClusters = SearchResultAggregator.cluster(snapshot.items)
+            self.searchReceivedCandidateCount = snapshot.receivedCandidateCount
+            self.searchMaximumRetainedCandidates = snapshot.maximumRetainedCandidates
+            self.searchMaximumResultsPerSite = snapshot.maximumResultsPerSite
+            self.searchDidDiscardCandidates = snapshot.didDiscardCandidates
+        }
 
-            for await event in stream {
-                guard let self,
-                      self.searchSessionGate.accepts(sessionID) else {
-                    return
+        for await event in stream {
+            guard searchSessionGate.accepts(sessionID) else { return }
+            switch event {
+            case .snapshot(let snapshot):
+                pendingSnapshot = snapshot
+                let now = Date()
+                if now.timeIntervalSince(lastSnapshotRefresh) >= 0.12 {
+                    applySnapshot(snapshot)
+                    pendingSnapshot = nil
+                    lastSnapshotRefresh = now
                 }
-                switch event {
-                case .snapshot(let snapshot):
-                    pendingSnapshot = snapshot
-                    let now = Date()
-                    if now.timeIntervalSince(lastSnapshotRefresh) >= 0.12 {
-                        applySnapshot(snapshot)
-                        pendingSnapshot = nil
-                        lastSnapshotRefresh = now
-                    }
-                case .failure(let failure):
-                    self.searchFailures.append(failure)
-                case .siteFirstPageCompleted(let siteKey):
-                    if firstPageCompletedSiteKeys.insert(siteKey).inserted {
-                        self.searchFirstPageCompletedSiteCount =
-                            firstPageCompletedSiteKeys.count
-                    }
-                case .siteCompleted(let siteKey):
-                    if completedSiteKeys.insert(siteKey).inserted {
-                        self.searchCompletedSiteCount = completedSiteKeys.count
-                    }
-                case .finished(let termination):
-                    if let pendingSnapshot {
-                        applySnapshot(pendingSnapshot)
-                    }
-                    self.searchTermination = termination
-                    self.isSearching = false
+            case .failure(let failure):
+                searchFailures.append(failure)
+                if failure.category == .unsupportedRoute,
+                   let site = searchCatalogSites.first(where: {
+                    $0.key == failure.siteKey
+                   }),
+                   let identity = nodeSearchCapabilityIdentity(for: site) {
+                    unsupportedNodeSearchRouteIdentities.insert(identity)
                 }
-            }
-            if self?.searchSessionGate.accepts(sessionID) == true {
+            case .siteOutcome(let outcome):
+                searchSiteOutcomes[outcome.siteKey] = outcome
+            case .siteFirstPageCompleted(let siteKey):
+                if firstPageCompletedSiteKeys.insert(siteKey).inserted {
+                    searchFirstPageCompletedSiteCount = firstPageCompletedSiteKeys.count
+                }
+            case .siteCompleted(let siteKey):
+                if completedSiteKeys.insert(siteKey).inserted {
+                    searchCompletedSiteCount = completedSiteKeys.count
+                }
+            case .finished(let termination):
                 if let pendingSnapshot {
                     applySnapshot(pendingSnapshot)
                 }
-                self?.isSearching = false
-                self?.searchTask = nil
+                searchTermination = termination
+                isSearching = false
             }
+        }
+        if searchSessionGate.accepts(sessionID) {
+            if let pendingSnapshot {
+                applySnapshot(pendingSnapshot)
+            }
+            isSearching = false
+            searchTask = nil
         }
     }
 
@@ -8282,24 +8412,54 @@ final class AppState: ObservableObject {
     }
 
     var searchScopeSiteOptions: [SearchScopeSiteOption] {
-        (activeConfiguration?.sites ?? []).map { site in
-            let reason: String?
-            if site.hide != 0 {
-                reason = "配置中已隐藏"
-            } else if site.searchable != 1 {
-                reason = "站点声明不支持搜索"
+        searchCatalogSites.map { site in
+            let isCatalogueDisabled = site.extra["okNodeCatalogDisabled"]
+                == .bool(true)
+            let availability: SearchScopeSiteAvailability
+            if site.extra["okNodeConfigurationRequired"] == .bool(true) {
+                availability = .unavailable("未配置账号或挂载")
+            } else if let identity = nodeSearchCapabilityIdentity(for: site),
+                      unsupportedNodeSearchRouteIdentities.contains(identity) {
+                availability = .unavailable("Spider 未提供搜索接口")
+            } else if site.extra["okNodeRuntime"] == .bool(true),
+                      !nodeCapabilities(for: site).contains("search") {
+                availability = .unavailable("Spider 未提供搜索接口")
+            } else if site.searchable == 0 {
+                availability = .unavailable("站点未提供搜索能力")
+            } else if site.hide != 0, !isCatalogueDisabled {
+                availability = .unavailable("配置中已隐藏")
             } else if providers[site.key]?.capability == .unsupportedSpider
                         || providers[site.key] == nil {
-                reason = "当前运行环境不支持"
+                availability = .unavailable("当前运行环境不支持")
+            } else if site.searchable == 2 || isCatalogueDisabled {
+                availability = .userDisabled
             } else {
-                reason = nil
+                availability = .enabled
             }
             return SearchScopeSiteOption(
                 key: site.key,
                 name: site.name,
-                unavailableReason: reason
+                availability: availability
             )
         }
+    }
+
+    private func nodeCapabilities(for site: SiteConfiguration) -> Set<String> {
+        guard case .array(let values)? = site.extra["okNodeCapabilities"] else {
+            return []
+        }
+        return Set(values.compactMap(\.stringValue))
+    }
+
+    private func nodeSearchCapabilityIdentity(
+        for site: SiteConfiguration
+    ) -> String? {
+        guard site.extra["okNodeRuntime"] == .bool(true),
+              let bundle = site.extra["okNodeBundleIdentity"]?.stringValue,
+              let revision = site.extra["okNodeProfileRevision"]?.stringValue else {
+            return nil
+        }
+        return [bundle, revision, site.key].joined(separator: "\u{1f}")
     }
 
     var effectiveSearchSiteKeys: Set<String> {
@@ -8311,11 +8471,14 @@ final class AppState: ObservableObject {
 
     var searchScopeSummary: String {
         let total = searchScopeSiteOptions.filter(\.isSearchable).count
+        let selected = effectiveSearchSiteKeys.count
         switch searchSiteScope.mode {
         case .all:
-            return "范围：全部 \(total)"
+            return selected == total
+                ? "范围：全部 \(total)"
+                : "范围：已启用 \(selected)/\(total)"
         case .custom:
-            return "范围：已选 \(effectiveSearchSiteKeys.count)/\(total)"
+            return "范围：已选 \(selected)/\(total)"
         }
     }
 
@@ -10175,6 +10338,8 @@ final class AppState: ObservableObject {
         playerEventTask = nil
         nodeRuntimeStatusTask?.cancel()
         nodeRuntimeStatusTask = nil
+        nodeProfileRevisionTask?.cancel()
+        nodeProfileRevisionTask = nil
         configurationActivationTask?.cancel()
         configurationActivationTask = nil
         configurationSwitchFeedbackDismissTask?.cancel()
@@ -10862,6 +11027,15 @@ final class AppState: ObservableObject {
 
     var visibleSites: [SiteConfiguration] {
         (activeConfiguration?.sites ?? []).filter { $0.hide == 0 }
+    }
+
+    /// Includes CatPawOpen catalogue entries that are intentionally absent
+    /// from its enabled `/config`, while keeping them out of the Home source
+    /// menu. These entries can be explicitly re-enabled in Search scope.
+    var searchCatalogSites: [SiteConfiguration] {
+        (activeConfiguration?.sites ?? []).filter {
+            $0.hide == 0 || $0.extra["okNodeCatalogDisabled"] == .bool(true)
+        }
     }
 
     var supportedSites: [SiteConfiguration] {
@@ -12228,6 +12402,31 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func startNodeProfileRevisionMonitoring() {
+        guard nodeProfileRevisionTask == nil, let environment else { return }
+        nodeProfileRevisionTask = Task { @MainActor [weak self] in
+            let updates = await environment.nodeBundleRuntime
+                .profileRevisionUpdates()
+            for await snapshot in updates {
+                guard !Task.isCancelled, let self else { return }
+                let previous = self.observedNodeProfileRevision
+                self.observedNodeProfileRevision = snapshot
+                guard let previous,
+                      previous.storageKey == snapshot.storageKey,
+                      previous.revision != snapshot.revision,
+                      self.activeConfigurationUsesNodeRuntime,
+                      !self.isSwitchingConfiguration,
+                      self.configurationImportOperationID == nil else {
+                    continue
+                }
+                _ = await self.refreshActiveConfigurationIfNeeded(
+                    force: true,
+                    reportErrors: false
+                )
+            }
+        }
+    }
+
     private func applyNodeRuntimeStatus(_ status: NodeRuntimeStatus) {
         if isSwitchingConfiguration {
             if case .running(let endpoint) = status {
@@ -12366,6 +12565,7 @@ final class AppState: ObservableObject {
         searchResults = []
         searchClusters = []
         searchFailures = []
+        searchSiteOutcomes = [:]
         searchFirstPageCompletedSiteCount = 0
         searchCompletedSiteCount = 0
         searchTotalSiteCount = 0
@@ -12659,7 +12859,7 @@ final class AppState: ObservableObject {
         let nodeBundleRuntime = environment.nodeBundleRuntime
         let activeConfigurationID = activeConfigurationRecord?.id
         providers = Dictionary(
-            uniqueKeysWithValues: visibleSites.map { site in
+            uniqueKeysWithValues: searchCatalogSites.map { site in
                 let provider: SiteProvider
                 let nodeOwned = SiteProviderRoutingPolicy
                     .hasExclusiveNodeRuntimeOwnership(site)

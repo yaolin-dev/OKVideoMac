@@ -712,7 +712,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     }
 
     func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
-        guard site.searchable == 1, !quick || site.quickSearch == 1 else {
+        guard site.searchable != 0, !quick || site.quickSearch == 1 else {
             return VideoPage(
                 items: [],
                 pagination: Pagination(page: page, pageCount: 0)
@@ -727,17 +727,26 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 "page": .string(String(page)),
                 "pg": .string(String(page))
             ],
-            // Aggregate search may retry one genuinely transient transport
-            // failure, but empty results and provider/business errors are
-            // authoritative and must not create duplicate Node work.
-            maximumAttempts: 2
+            // A first-pass aggregate search must invoke each CatPawOpen route
+            // exactly once. Retrying here occupies another Node worker and
+            // delays sites that have not received their first request yet.
+            maximumAttempts: 1
         )
-        return try SpiderResponseMapper.page(
+        let result = try SpiderResponseMapper.page(
             invocation.value,
             site: site,
             baseURL: invocation.baseURL,
             page: page
         )
+        if result.items.isEmpty,
+           let message = Self.serverMessage(from: invocation.value),
+           Self.isUpstreamUnavailableMessage(message) {
+            throw SiteSearchError(
+                "\(site.name) 搜索失败：\(message)",
+                category: .upstreamUnavailable
+            )
+        }
+        return result
     }
 
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
@@ -1284,6 +1293,13 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                         baseURL: readyBaseURL
                     )
                 }
+                if method == "search" {
+                    throw Self.searchError(
+                        siteName: site.name,
+                        statusCode: response.statusCode,
+                        message: message
+                    )
+                }
                 if attempt + 1 < attempts,
                    Self.isTransientHTTPStatus(response.statusCode) {
                     try await retryDelay(after: attempt)
@@ -1294,6 +1310,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 )
             } catch let authorization as NodeWebAuthorizationRequired {
                 throw authorization
+            } catch let error as SiteSearchError {
+                throw error
             } catch {
                 if attempt + 1 < attempts,
                    Self.isTransientTransportError(error) {
@@ -1315,6 +1333,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                         originalURL: lastEndpoint
                     )
                 )
+                if method == "search" {
+                    throw Self.searchTransportError(
+                        siteName: site.name,
+                        error: error
+                    )
+                }
                 throw error
             }
         }
@@ -1322,7 +1346,108 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     }
 
     private static func isTransientHTTPStatus(_ statusCode: Int) -> Bool {
-        statusCode == 502 || statusCode == 503
+        statusCode == 502 || statusCode == 503 || statusCode == 504
+    }
+
+    private static func searchError(
+        siteName: String,
+        statusCode: Int,
+        message: String
+    ) -> SiteSearchError {
+        let fullMessage = "\(siteName) search 失败：\(message)"
+        let value = message.lowercased()
+        if statusCode == 404,
+           value.contains("route post:"),
+           value.contains("/search"),
+           value.contains("not found") {
+            return SiteSearchError(
+                fullMessage,
+                category: .unsupportedRoute
+            )
+        }
+        if isAuthorizationMessage(message)
+            || value.contains("账号")
+            || value.contains("挂载")
+            || value.contains("cookie")
+            || value.contains("token") {
+            return SiteSearchError(
+                fullMessage,
+                category: .configurationRequired
+            )
+        }
+        if value.contains("typeerror")
+            || value.contains("referenceerror")
+            || value.contains("cannot read properties")
+            || value.contains("is not a function") {
+            return SiteSearchError(fullMessage, category: .scriptError)
+        }
+        if statusCode == 408 || statusCode == 429 {
+            return SiteSearchError(
+                fullMessage,
+                category: .upstreamUnavailable,
+                isRetryable: true
+            )
+        }
+        if isTransientHTTPStatus(statusCode) {
+            return SiteSearchError(
+                fullMessage,
+                category: .upstreamUnavailable,
+                isRetryable: true
+            )
+        }
+        if isUpstreamUnavailableMessage(message) {
+            return SiteSearchError(
+                fullMessage,
+                category: .upstreamUnavailable
+            )
+        }
+        return SiteSearchError(fullMessage, category: .provider)
+    }
+
+    private static func searchTransportError(
+        siteName: String,
+        error: Error
+    ) -> SiteSearchError {
+        let message = "\(siteName) search 失败：\(error.localizedDescription)"
+        guard let clientError = error as? HTTPClientError else {
+            return SiteSearchError(
+                message,
+                category: SearchFailure.classify(error.localizedDescription)
+            )
+        }
+        switch clientError {
+        case .timeout:
+            return SiteSearchError(
+                message,
+                category: .timeout,
+                isRetryable: true
+            )
+        case .transport, .invalidResponse:
+            return SiteSearchError(
+                message,
+                category: .transport,
+                isRetryable: true
+            )
+        case .statusCode(let code):
+            return searchError(
+                siteName: siteName,
+                statusCode: code,
+                message: error.localizedDescription
+            )
+        case .cancelled:
+            return SiteSearchError(message, category: .transport)
+        case .invalidScheme, .responseTooLarge, .tooManyRedirects:
+            return SiteSearchError(message, category: .provider)
+        }
+    }
+
+    private static func isUpstreamUnavailableMessage(_ message: String) -> Bool {
+        let value = message.lowercased()
+        return value.contains("上游")
+            || value.contains("all upstream")
+            || value.contains("no upstream")
+            || value.contains("bad gateway")
+            || value.contains("service unavailable")
     }
 
     private static func isTransientTransportError(_ error: Error) -> Bool {

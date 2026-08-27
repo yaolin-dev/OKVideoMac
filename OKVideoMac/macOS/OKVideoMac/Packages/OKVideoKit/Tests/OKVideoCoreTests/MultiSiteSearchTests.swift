@@ -2,13 +2,13 @@ import XCTest
 @testable import OKVideoCore
 
 final class MultiSiteSearchTests: XCTestCase {
-    func testDefaultSearchBudgetIsBoundedForDesktopResources() {
-        XCTAssertEqual(MultiSiteSearch().maximumConcurrency, 12)
+    func testDefaultSearchBudgetKeepsCompleteFirstPageResults() {
+        XCTAssertEqual(MultiSiteSearch().maximumConcurrency, 20)
         XCTAssertEqual(MultiSiteSearch().siteTimeout, 20)
         XCTAssertEqual(MultiSiteSearch().overallDeadline, 25)
         XCTAssertEqual(MultiSiteSearch().maximumPagesPerSite, 3)
-        XCTAssertEqual(MultiSiteSearch().maximumResultsPerSite, 40)
-        XCTAssertEqual(MultiSiteSearch().maximumRetainedCandidates, 500)
+        XCTAssertEqual(MultiSiteSearch().maximumResultsPerSite, .max)
+        XCTAssertEqual(MultiSiteSearch().maximumRetainedCandidates, .max)
         XCTAssertEqual(MultiSiteSearch().maximumDeepPageSites, 12)
     }
 
@@ -313,7 +313,7 @@ final class MultiSiteSearchTests: XCTestCase {
         XCTAssertEqual(clusters[0].sources.map(\.siteKey), ["z", "a", "plain"])
     }
 
-    func testSearchableValueTwoIsExcludedLikeFongMi() async {
+    func testExplicitlySelectedSearchableValueTwoIsExecuted() async {
         let disabled = SearchFixtureProvider(
             site: SiteConfiguration(
                 key: "disabled",
@@ -340,7 +340,7 @@ final class MultiSiteSearchTests: XCTestCase {
             events.append(event)
         }
 
-        XCTAssertEqual(events, [.finished(.completed)])
+        XCTAssertEqual(finalSnapshot(in: events)?.items.count, 1)
     }
 
     func testRetainedSnapshotKeepsCompletionOrderWithinSameRelevanceTier() async {
@@ -595,7 +595,7 @@ final class MultiSiteSearchTests: XCTestCase {
         XCTAssertEqual(requestedPages, [1])
     }
 
-    func testFirstPageRetainsAtMostFortyResultsFromOneSite() async {
+    func testFirstPageRetainsAllResultsFromOneSite() async {
         let provider = SearchFixtureProvider(
             site: fixtureSite(key: "bulk"),
             result: .success(makeItems(siteKey: "bulk", count: 75))
@@ -606,12 +606,12 @@ final class MultiSiteSearchTests: XCTestCase {
         )
         let snapshot = finalSnapshot(in: events)
 
-        XCTAssertEqual(snapshot?.items.count, 40)
-        XCTAssertEqual(snapshot?.maximumResultsPerSite, 40)
-        XCTAssertEqual(snapshot?.didDiscardCandidates, true)
+        XCTAssertEqual(snapshot?.items.count, 75)
+        XCTAssertEqual(snapshot?.maximumResultsPerSite, .max)
+        XCTAssertEqual(snapshot?.didDiscardCandidates, false)
     }
 
-    func testRetainedCandidatePoolNeverExceedsFiveHundred() async {
+    func testDefaultRetainedCandidatePoolKeepsAllUniqueResults() async {
         let providers: [SiteProvider] = (0..<15).map { siteIndex in
             let key = "site-\(siteIndex)"
             return SearchFixtureProvider(
@@ -626,9 +626,9 @@ final class MultiSiteSearchTests: XCTestCase {
         let snapshot = finalSnapshot(in: events)
         let siteCounts = Dictionary(grouping: snapshot?.items ?? [], by: \.siteKey)
 
-        XCTAssertEqual(snapshot?.items.count, 500)
-        XCTAssertTrue(siteCounts.values.allSatisfy { $0.count <= 40 })
-        XCTAssertEqual(snapshot?.didDiscardCandidates, true)
+        XCTAssertEqual(snapshot?.items.count, 900)
+        XCTAssertTrue(siteCounts.values.allSatisfy { $0.count == 60 })
+        XCTAssertEqual(snapshot?.didDiscardCandidates, false)
     }
 
     func testLateExactMatchReplacesRetainedLowRelevanceResult() async {
@@ -689,11 +689,11 @@ final class MultiSiteSearchTests: XCTestCase {
         XCTAssertGreaterThan(counts["diverse"]?.count ?? 0, 0)
     }
 
-    func testGlobalDeadlineStopsSearchAndReportsDeadlineState() async {
+    func testFirstPageUsesIndependentSiteTimeoutInsteadOfGlobalDeadline() async {
         let startedAt = Date()
         let events = await collect(
             MultiSiteSearch(
-                siteTimeout: 5,
+                siteTimeout: 0.05,
                 overallDeadline: 0.05
             ).search(
                 providers: [UncooperativeSearchFixtureProvider()],
@@ -702,7 +702,59 @@ final class MultiSiteSearchTests: XCTestCase {
         )
 
         XCTAssertLessThan(Date().timeIntervalSince(startedAt), 0.3)
-        XCTAssertEqual(events.last, .finished(.deadlineReached))
+        XCTAssertEqual(events.last, .finished(.completedWithProviderFailures))
+        XCTAssertTrue(events.contains { event in
+            guard case .failure(let failure) = event else { return false }
+            return failure.category == .timeout
+        })
+    }
+
+    func testFixedNineSiteFixtureRetainsAllOneHundredNinetyEightResults() async {
+        let counts = [1, 5, 48, 8, 2, 94, 3, 1, 36]
+        let providers: [SiteProvider] = counts.enumerated().map { index, count in
+            let key = "acceptance-\(index)"
+            return SearchFixtureProvider(
+                site: fixtureSite(key: key),
+                result: .success(makeItems(siteKey: key, count: count))
+            )
+        }
+
+        let events = await collect(
+            MultiSiteSearch(maximumPagesPerSite: 1).search(
+                providers: providers,
+                keyword: "fixture"
+            )
+        )
+        let items = finalSnapshot(in: events)?.items ?? []
+        let bySite = Dictionary(grouping: items, by: \.siteKey)
+
+        XCTAssertEqual(items.count, 198)
+        XCTAssertEqual(bySite["acceptance-2"]?.count, 48)
+        XCTAssertEqual(bySite["acceptance-5"]?.count, 94)
+        XCTAssertFalse(finalSnapshot(in: events)?.didDiscardCandidates ?? true)
+    }
+
+    func testTransientRetryRunsOnlyAfterEverySiteFirstPass() async {
+        let recorder = RetryPhaseRecorder()
+        let providers: [SiteProvider] = [
+            RetryPhaseProvider(key: "flaky", isFlaky: true, recorder: recorder),
+            RetryPhaseProvider(key: "fast-a", isFlaky: false, recorder: recorder),
+            RetryPhaseProvider(key: "fast-b", isFlaky: false, recorder: recorder)
+        ]
+
+        let events = await collect(
+            MultiSiteSearch(maximumConcurrency: 2, maximumPagesPerSite: 1)
+                .search(providers: providers, keyword: "fixture")
+        )
+        let invocations = await recorder.invocations
+
+        XCTAssertEqual(
+            Set(invocations.prefix(3)),
+            Set(["flaky", "fast-a", "fast-b"])
+        )
+        XCTAssertEqual(invocations.last, "flaky")
+        XCTAssertEqual(finalSnapshot(in: events)?.items.count, 3)
+        XCTAssertEqual(events.last, .finished(.completed))
     }
 
     func testOnlyTopTwelveFirstPageProvidersReceiveDeepRequests() async {
@@ -1392,6 +1444,77 @@ private struct SearchFixtureProvider: SiteProvider {
         }
         return VideoPage(
             items: try result.get(),
+            pagination: Pagination(page: page, pageCount: 1)
+        )
+    }
+
+    func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
+        throw AppError.site("unused")
+    }
+}
+
+private actor RetryPhaseRecorder {
+    private(set) var invocations: [String] = []
+    private var attempts: [String: Int] = [:]
+
+    func begin(_ key: String) -> Int {
+        invocations.append(key)
+        attempts[key, default: 0] += 1
+        return attempts[key, default: 0]
+    }
+}
+
+private struct RetryPhaseProvider: SiteProvider {
+    let site: SiteConfiguration
+    let isFlaky: Bool
+    let recorder: RetryPhaseRecorder
+    let capability: SiteCapability = .standardJSON
+
+    init(key: String, isFlaky: Bool, recorder: RetryPhaseRecorder) {
+        site = SiteConfiguration(
+            key: key,
+            name: key,
+            type: 1,
+            api: "https://example.invalid"
+        )
+        self.isFlaky = isFlaky
+        self.recorder = recorder
+    }
+
+    func home() async throws -> SiteHome {
+        SiteHome(categories: [], recommendations: [])
+    }
+
+    func category(
+        id: String,
+        page: Int,
+        filters: [String: String]
+    ) async throws -> VideoPage {
+        VideoPage(items: [], pagination: Pagination(page: page, pageCount: 0))
+    }
+
+    func detail(id: String) async throws -> VideoDetail {
+        throw AppError.site("unused")
+    }
+
+    func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
+        let attempt = await recorder.begin(site.key)
+        if isFlaky, attempt == 1 {
+            throw SiteSearchError(
+                "temporary transport interruption",
+                category: .transport,
+                isRetryable: true
+            )
+        }
+        return VideoPage(
+            items: [
+                VideoSummary(
+                    siteKey: site.key,
+                    siteName: site.name,
+                    videoID: "result",
+                    title: keyword
+                )
+            ],
             pagination: Pagination(page: page, pageCount: 1)
         )
     }

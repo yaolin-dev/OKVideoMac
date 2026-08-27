@@ -24,9 +24,9 @@ struct SearchView: View {
                         title: emptyStateTitle,
                         message: emptyStateMessage
                     )
-                    if !state.searchFailures.isEmpty {
-                        SearchFailureSummary(
-                            failures: state.searchFailures
+                    if !state.searchSiteOutcomes.isEmpty {
+                        SearchSiteOutcomeSummary(
+                            outcomes: Array(state.searchSiteOutcomes.values)
                         )
                         .padding(.horizontal)
                         .padding(.bottom)
@@ -143,9 +143,9 @@ struct SearchView: View {
                         mergesDuplicateTitles: $mergesDuplicateTitles
                     )
 
-                    if !state.searchFailures.isEmpty {
-                        SearchFailureSummary(
-                            failures: state.searchFailures
+                    if !state.searchSiteOutcomes.isEmpty {
+                        SearchSiteOutcomeSummary(
+                            outcomes: Array(state.searchSiteOutcomes.values)
                         )
                     }
                     SearchClusterGrid(
@@ -224,7 +224,7 @@ struct SearchView: View {
     private var emptyCompletionMessage: String {
         switch state.searchTermination {
         case .deadlineReached:
-            return "搜索已到达 25 秒截止时间，没有站点返回匹配内容。"
+            return "首轮搜索已完成；后台补页已到达时间上限。"
         case .cancelled:
             return "搜索已取消。"
         case .supersededByNewSearch:
@@ -359,6 +359,10 @@ struct SearchScopeEditorContent: View {
         Set(options.lazy.filter(\.isSearchable).map(\.key))
     }
 
+    private var defaultSearchableKeys: Set<String> {
+        Set(options.lazy.filter(\.isEnabledByDefault).map(\.key))
+    }
+
     private var filteredOptions: [SearchScopeSiteOption] {
         let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return options }
@@ -374,7 +378,7 @@ struct SearchScopeEditorContent: View {
             set: { newMode in
                 if newMode == .custom,
                    selectedKeys.intersection(searchableKeys).isEmpty {
-                    selectedKeys.formUnion(searchableKeys)
+                    selectedKeys.formUnion(defaultSearchableKeys)
                 }
                 mode = newMode
             }
@@ -409,7 +413,7 @@ struct SearchScopeEditorContent: View {
                 }
                 .controlSize(.small)
             } else {
-                Text("配置新增可搜索站点后会自动加入范围。")
+                Text("源中已启用的站点会自动加入；标记为停用的站点可在下方单独开启。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -431,10 +435,13 @@ struct SearchScopeEditorContent: View {
 
     private func siteRow(_ option: SearchScopeSiteOption) -> some View {
         let isSelected = mode == .all
-            ? option.isSearchable
+            ? option.isEnabledByDefault || (
+                option.isUserDisabled && selectedKeys.contains(option.key)
+            )
             : selectedKeys.contains(option.key)
         return Button {
-            guard mode == .custom, option.isSearchable else { return }
+            guard option.isSearchable,
+                  mode == .custom || option.isUserDisabled else { return }
             if selectedKeys.contains(option.key) {
                 selectedKeys.remove(option.key)
             } else {
@@ -455,6 +462,10 @@ struct SearchScopeEditorContent: View {
                         Text(reason)
                             .font(.caption2)
                             .foregroundColor(.secondary)
+                    } else if option.isUserDisabled {
+                        Text("源中已停用 · 可为搜索单独启用")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
                     }
                 }
                 Spacer()
@@ -472,7 +483,7 @@ struct SearchScopeEditorContent: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(mode == .all || !option.isSearchable)
+        .disabled(!option.isSearchable || (mode == .all && !option.isUserDisabled))
         .appInteractiveHover(cornerRadius: 8, selected: isSelected)
     }
 }
@@ -612,6 +623,10 @@ private struct SearchResultToolbar: View {
     }
 
     private var retentionSummary: String {
+        if maximumRetainedCandidates == .max,
+           maximumResultsPerSite == .max {
+            return "完整保留各站首批结果 · 未进行每站或总量裁剪"
+        }
         if didDiscardCandidates, rawResultCount >= maximumRetainedCandidates {
             return "已展示相关度最高的前 \(maximumRetainedCandidates) 条"
                 + " · 每站最多 \(maximumResultsPerSite) 条"
@@ -629,7 +644,7 @@ private struct SearchResultToolbar: View {
         case .completedWithProviderFailures:
             return " · 部分站点失败"
         case .deadlineReached:
-            return " · 已到达 25 秒截止时间"
+            return " · 后台补页已到达时间上限"
         case .cancelled:
             return " · 已取消"
         case .supersededByNewSearch:
@@ -803,23 +818,35 @@ private struct SearchFolderGrid: View {
     }
 }
 
-private struct SearchFailureSummary: View {
-    let failures: [SearchFailure]
+private struct SearchSiteOutcomeSummary: View {
+    let outcomes: [SearchSiteOutcome]
+
+    private var ordered: [SearchSiteOutcome] {
+        outcomes.sorted { $0.siteKey.localizedStandardCompare($1.siteKey) == .orderedAscending }
+    }
+
+    private var failureCount: Int {
+        outcomes.reduce(into: 0) { count, outcome in
+            if case .failure = outcome { count += 1 }
+        }
+    }
 
     var body: some View {
         DisclosureGroup {
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(
-                    Array(failures.enumerated()),
-                    id: \.offset
-                ) { _, failure in
+                    ordered,
+                    id: \.siteKey
+                ) { outcome in
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(failure.siteName)
+                        Text(outcome.title)
                             .font(.caption.bold())
-                        Text(failure.message)
+                        if let detail = outcome.detail {
+                            Text(detail)
                             .font(.caption2)
                             .foregroundColor(.secondary)
                             .textSelection(.enabled)
+                        }
                     }
                 }
             }
@@ -828,9 +855,9 @@ private struct SearchFailureSummary: View {
             HStack(spacing: 7) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundColor(.orange)
-                Text("\(failures.count) 个站点未响应")
+                Text("站点结果 (outcomes.count) 个")
                     .fontWeight(.medium)
-                Text("其他结果仍可使用")
+                Text(failureCount == 0 ? "均已完成" : "其中 (failureCount) 个失败")
                     .foregroundColor(.secondary)
                 Spacer()
                 Text("查看详情")
@@ -841,11 +868,48 @@ private struct SearchFailureSummary: View {
         .foregroundColor(.primary)
         .padding(.horizontal, 11)
         .padding(.vertical, 8)
-        .background(Color.orange.opacity(0.07))
+        .background((failureCount == 0 ? Color.green : Color.orange).opacity(0.07))
         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(Color.orange.opacity(0.2), lineWidth: 1)
+                .stroke(
+                    (failureCount == 0 ? Color.green : Color.orange).opacity(0.2),
+                    lineWidth: 1
+                )
+        }
+    }
+}
+
+private extension SearchSiteOutcome {
+    var title: String {
+        switch self {
+        case .success(_, let siteName, let resultCount):
+            return resultCount == 0
+                ? "\(siteName) · 搜索成功但结果为空"
+                : "\(siteName) · 搜索成功并返回 \(resultCount) 条"
+        case .failure(let failure):
+            return "\(failure.siteName) · \(failure.categoryTitle)"
+        case .cancelled(_, let siteName):
+            return "\(siteName) · 用户取消"
+        }
+    }
+
+    var detail: String? {
+        guard case .failure(let failure) = self else { return nil }
+        return failure.message
+    }
+}
+
+private extension SearchFailure {
+    var categoryTitle: String {
+        switch category {
+        case .unsupportedRoute: return "未提供搜索路由"
+        case .configurationRequired: return "需要配置或登录"
+        case .scriptError: return "脚本错误"
+        case .upstreamUnavailable: return "上游不可用"
+        case .timeout: return "搜索超时"
+        case .transport: return "网络连接失败"
+        case .provider: return "站点返回错误"
         }
     }
 }
