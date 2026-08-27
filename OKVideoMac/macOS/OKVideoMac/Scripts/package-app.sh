@@ -196,6 +196,9 @@ xcodebuild \
   -configuration Release \
   -destination 'platform=macOS,arch=arm64' \
   -derivedDataPath "$DERIVED_DATA" \
+  ARCHS=arm64 \
+  ONLY_ACTIVE_ARCH=YES \
+  EXCLUDED_ARCHS=x86_64 \
   CODE_SIGNING_ALLOWED=NO \
   ENABLE_CODE_COVERAGE=NO \
   clean build
