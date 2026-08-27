@@ -13027,6 +13027,10 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                 )
             }
             if request.url.absoluteString == gatewayURL {
+                XCTAssertEqual(
+                    request.redirectedHeaderFields,
+                    ["Range", "Referer", "User-Agent"]
+                )
                 XCTAssertEqual(request.headers["Range"], "bytes=0-0")
                 XCTAssertEqual(request.headers["User-Agent"], "BaiduNetdisk")
                 XCTAssertEqual(

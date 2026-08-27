@@ -197,6 +197,47 @@ final class HTTPClientTests: XCTestCase {
         XCTAssertEqual(diagnostics.contentType, "image/jpeg")
     }
 
+    func testRedirectDelegateReappliesOptInMediaHeadersAcrossOrigin() throws {
+        let origin = try XCTUnwrap(
+            URL(string: "https://d.pcs.baidu.com/file/signed")
+        )
+        let destination = try XCTUnwrap(
+            URL(string: "https://appall01.baidupcs.com/file/signed")
+        )
+        var proposed = URLRequest(url: destination)
+        proposed.setValue("URLSession", forHTTPHeaderField: "User-Agent")
+        proposed.setValue("Bearer secret", forHTTPHeaderField: "Authorization")
+        let delegate = RedirectDelegate(
+            maximumRedirects: 4,
+            redirectedHeaders: [
+                "Range": "bytes=0-0",
+                "Referer": "https://pan.baidu.com/",
+                "User-Agent": "netdisk;P2SP;android-android;"
+            ]
+        )
+
+        let redirected = delegate.preparedRedirectRequest(
+            proposed,
+            originalURL: origin
+        )
+
+        XCTAssertEqual(
+            redirected.value(forHTTPHeaderField: "Range"),
+            "bytes=0-0"
+        )
+        XCTAssertEqual(
+            redirected.value(forHTTPHeaderField: "Referer"),
+            "https://pan.baidu.com/"
+        )
+        XCTAssertEqual(
+            redirected.value(forHTTPHeaderField: "User-Agent"),
+            "netdisk;P2SP;android-android;"
+        )
+        XCTAssertNil(
+            redirected.value(forHTTPHeaderField: "Authorization")
+        )
+    }
+
     private func makeClient() -> URLSessionHTTPClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]

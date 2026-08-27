@@ -1734,6 +1734,11 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                     timeout: 8,
                     maximumResponseBytes: 64 * 1_024,
                     maximumRedirects: 4,
+                    redirectedHeaderFields: [
+                        "Range",
+                        "Referer",
+                        "User-Agent"
+                    ],
                     retryPolicy: .none,
                     allowsNonSuccessfulStatus: true
                 )
