@@ -1267,6 +1267,11 @@ final class OKVideoMacTests: XCTestCase {
             SearchScopeSiteOption(key: "a", name: "A", unavailableReason: nil),
             SearchScopeSiteOption(key: "b", name: "B", unavailableReason: nil),
             SearchScopeSiteOption(
+                key: "source-disabled",
+                name: "Source Disabled",
+                availability: .userDisabled
+            ),
+            SearchScopeSiteOption(
                 key: "disabled",
                 name: "Disabled",
                 unavailableReason: "站点声明不支持搜索"
@@ -1275,7 +1280,50 @@ final class OKVideoMacTests: XCTestCase {
 
         XCTAssertEqual(
             SearchSiteScopePolicy.effectiveSiteKeys(scope: .all, options: options),
-            ["a", "b"]
+            ["a", "b", "source-disabled"]
+        )
+    }
+
+    func testCustomSearchScopeCanStillExcludeSourceDisabledSite() {
+        let options = [
+            SearchScopeSiteOption(key: "a", name: "A", unavailableReason: nil),
+            SearchScopeSiteOption(
+                key: "source-disabled",
+                name: "Source Disabled",
+                availability: .userDisabled
+            )
+        ]
+        let scope = SearchSiteScope(mode: .custom, selectedSiteKeys: ["a"])
+
+        XCTAssertEqual(
+            SearchSiteScopePolicy.effectiveSiteKeys(scope: scope, options: options),
+            ["a"]
+        )
+    }
+
+    func testDynamicSiteCatalogRecognizesProfileGeneratedProviders() {
+        let staticSite = SiteConfiguration(
+            key: "nodejs_bili_all",
+            name: "Bili",
+            type: 3,
+            api: "/spider/bili_all/3"
+        )
+        let dynamicSite = SiteConfiguration(
+            key: "nodejs_alist_profile-generated",
+            name: "AList",
+            type: 3,
+            api: "/spider/alist_profile-generated/3"
+        )
+
+        XCTAssertFalse(
+            NodeDynamicSiteCatalogPolicy.containsConfiguredProvider(
+                in: [staticSite]
+            )
+        )
+        XCTAssertTrue(
+            NodeDynamicSiteCatalogPolicy.containsConfiguredProvider(
+                in: [staticSite, dynamicSite]
+            )
         )
     }
 

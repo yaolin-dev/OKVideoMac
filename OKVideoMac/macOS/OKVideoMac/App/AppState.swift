@@ -1334,17 +1334,31 @@ enum SearchSiteScopePolicy {
         let selectableKeys = Set(
             options.lazy.filter(\.isSearchable).map(\.key)
         )
-        let defaultKeys = Set(
-            options.lazy.filter(\.isEnabledByDefault).map(\.key)
-        )
-        let explicitlyReenabledKeys = Set(
-            options.lazy.filter(\.isUserDisabled).map(\.key)
-        ).intersection(scope.selectedSiteKeys)
         switch scope.mode {
         case .all:
-            return defaultKeys.union(explicitlyReenabledKeys)
+            // "All sites" is literal: CatPawOpen's searchable == 2 is a
+            // source-side preference, not evidence that POST /search cannot
+            // return data. Users who want to omit a site can switch to the
+            // custom scope. This also prevents a useful provider such as the
+            // short-drama route from silently disappearing from aggregate
+            // search merely because another client disabled it.
+            return selectableKeys
         case .custom:
             return selectableKeys.intersection(scope.selectedSiteKeys)
+        }
+    }
+}
+
+enum NodeDynamicSiteCatalogPolicy {
+    private static let dynamicKeyPrefixes = [
+        "nodejs_alist_",
+        "nodejs_emby_",
+        "nodejs_webdav_"
+    ]
+
+    static func containsConfiguredProvider(in sites: [SiteConfiguration]) -> Bool {
+        sites.contains { site in
+            dynamicKeyPrefixes.contains { site.key.hasPrefix($0) }
         }
     }
 }
@@ -8496,6 +8510,18 @@ final class AppState: ObservableObject {
         case .custom:
             return "范围：已选 \(selected)/\(total)"
         }
+    }
+
+    var searchRuntimeProfileNotice: String? {
+        guard activeConfigurationUsesNodeRuntime,
+              !NodeDynamicSiteCatalogPolicy.containsConfiguredProvider(
+                in: searchCatalogSites
+              ) else {
+            return nil
+        }
+        return "当前 CatPaw 运行 profile 未生成 AList、Emby 或 WebDAV 动态站点。"
+            + "如需与其他客户端使用相同挂载，请到“设置 → 点播配置”导入其导出的 "
+            + "test0.db.json；导入后会立即刷新，无需重启。"
     }
 
     var visibleSearchClusters: [SearchResultCluster] {

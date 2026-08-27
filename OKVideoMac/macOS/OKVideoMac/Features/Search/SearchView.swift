@@ -11,6 +11,11 @@ struct SearchView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if !state.searchKeyword.isEmpty,
+               let notice = state.searchRuntimeProfileNotice {
+                SearchRuntimeProfileNotice(message: notice)
+                Divider()
+            }
             if let folder = state.currentSearchFolder {
                 SearchFolderBrowser(
                     page: folder,
@@ -359,10 +364,6 @@ struct SearchScopeEditorContent: View {
         Set(options.lazy.filter(\.isSearchable).map(\.key))
     }
 
-    private var defaultSearchableKeys: Set<String> {
-        Set(options.lazy.filter(\.isEnabledByDefault).map(\.key))
-    }
-
     private var filteredOptions: [SearchScopeSiteOption] {
         let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return options }
@@ -378,7 +379,7 @@ struct SearchScopeEditorContent: View {
             set: { newMode in
                 if newMode == .custom,
                    selectedKeys.intersection(searchableKeys).isEmpty {
-                    selectedKeys.formUnion(defaultSearchableKeys)
+                    selectedKeys.formUnion(searchableKeys)
                 }
                 mode = newMode
             }
@@ -413,7 +414,7 @@ struct SearchScopeEditorContent: View {
                 }
                 .controlSize(.small)
             } else {
-                Text("当前配置中已启用的站点都会发起搜索；标记为停用的站点可在下方单独开启。")
+                Text("当前目录中所有可运行站点都会发起搜索，包括源中标记为停用的站点；如需排除请切换到自定义。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -435,13 +436,10 @@ struct SearchScopeEditorContent: View {
 
     private func siteRow(_ option: SearchScopeSiteOption) -> some View {
         let isSelected = mode == .all
-            ? option.isEnabledByDefault || (
-                option.isUserDisabled && selectedKeys.contains(option.key)
-            )
+            ? option.isSearchable
             : selectedKeys.contains(option.key)
         return Button {
-            guard option.isSearchable,
-                  mode == .custom || option.isUserDisabled else { return }
+            guard option.isSearchable, mode == .custom else { return }
             if selectedKeys.contains(option.key) {
                 selectedKeys.remove(option.key)
             } else {
@@ -463,7 +461,11 @@ struct SearchScopeEditorContent: View {
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     } else if option.isUserDisabled {
-                        Text("源中已停用 · 可为搜索单独启用")
+                        Text(
+                            mode == .all
+                                ? "源中已停用 · 全部模式仍会搜索"
+                                : "源中已停用 · 可为搜索单独启用"
+                        )
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
@@ -483,8 +485,28 @@ struct SearchScopeEditorContent: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(!option.isSearchable || (mode == .all && !option.isUserDisabled))
+        .disabled(!option.isSearchable || mode == .all)
         .appInteractiveHover(cornerRadius: 8, selected: isSelected)
+    }
+}
+
+private struct SearchRuntimeProfileNotice: View {
+    let message: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "person.crop.circle.badge.exclamationmark")
+                .foregroundColor(.orange)
+            Text(message)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(Color.orange.opacity(0.07))
+        .accessibilityElement(children: .combine)
     }
 }
 
