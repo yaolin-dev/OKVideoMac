@@ -555,6 +555,7 @@ enum NodeRuntimeContractFactory {
     const invocations = new Map();
     const pendingHostReplies = new Map();
     const invocationTTLMilliseconds = 65000;
+    const authorizationInvocationTTLMilliseconds = 5 * 60 * 1000;
     const originalFetch = globalThis.fetch;
     const originalHTTPRequest = http.request;
     const originalHTTPSRequest = https.request;
@@ -689,7 +690,22 @@ enum NodeRuntimeContractFactory {
       if (value.action === 'openInternalWebview') {
         const url = normalizeOwnedLoopbackURL(value.opt.url);
         if (!url) return null;
-        return { action: 'openInternalWebview', opt: { url } };
+        const opt = { url };
+        for (const key of ['challengeID', 'provider', 'profileRevision', 'transport']) {
+          if (typeof value.opt[key] === 'string' && value.opt[key].length <= 256) {
+            opt[key] = value.opt[key];
+          }
+        }
+        return { action: 'openInternalWebview', opt };
+      }
+      if (value.action === 'authorizationCompleted') {
+        const opt = {};
+        for (const key of ['challengeID', 'provider', 'profileRevision']) {
+          if (typeof value.opt[key] === 'string' && value.opt[key].length <= 256) {
+            opt[key] = value.opt[key];
+          }
+        }
+        return { action: 'authorizationCompleted', opt };
       }
       if (value.action !== 'sniff') return null;
       if (typeof value.opt.url !== 'string' || value.opt.url.length === 0 ||
@@ -790,7 +806,9 @@ enum NodeRuntimeContractFactory {
         if (invocations.get(context.id) !== context) return;
         invocations.delete(context.id);
         for (const waiter of context.waiters.splice(0)) waiter(null);
-      }, invocationTTLMilliseconds);
+      }, context.authorizationChallenge
+        ? authorizationInvocationTTLMilliseconds
+        : invocationTTLMilliseconds);
       if (typeof context.removalTimer.unref === 'function') context.removalTimer.unref();
     }
 
@@ -801,22 +819,25 @@ enum NodeRuntimeContractFactory {
     }
 
     function publishHostMessage(context, message) {
-      if (!context || context.hostMessage || context.consumed) return false;
-      context.hostMessage = message;
-      for (const waiter of context.waiters.splice(0)) waiter(message);
+      if (!context || context.hostMessages.length >= 8) return false;
+      if (message.action === 'openInternalWebview') {
+        context.authorizationChallenge = true;
+      }
+      const waiter = context.waiters.shift();
+      if (waiter) waiter(message);
+      else context.hostMessages.push(message);
       return true;
     }
 
     function pollHostMessage(request, response, invocationID, waitMilliseconds) {
       const context = invocations.get(invocationID);
-      if (!context || context.consumed) {
+      if (!context) {
         response.statusCode = 404;
         response.end();
         return;
       }
-      if (context.hostMessage) {
-        const message = context.hostMessage;
-        context.consumed = true;
+      if (context.hostMessages.length > 0) {
+        const message = context.hostMessages.shift();
         deliverHostMessage(response, message);
         scheduleInvocationRemoval(context);
         return;
@@ -835,7 +856,6 @@ enum NodeRuntimeContractFactory {
         const index = context.waiters.indexOf(finish);
         if (index >= 0) context.waiters.splice(index, 1);
         if (message) {
-          context.consumed = true;
           deliverHostMessage(response, message);
         } else {
           response.statusCode = 204;
@@ -972,6 +992,8 @@ enum NodeRuntimeContractFactory {
         }
         response.setHeader('Content-Type', 'application/json; charset=utf-8');
 
+        const invocationID = invocationIDFromRequest(request);
+        const context = invocationID ? invocations.get(invocationID) : null;
         if (value && value.action === 'queryProfile') {
           response.statusCode = 200;
           response.end(JSON.stringify(readProfile()));
@@ -979,14 +1001,23 @@ enum NodeRuntimeContractFactory {
         }
         if (value && value.action === 'saveProfile') {
           const saved = writeProfile(value.opt);
+          if (saved && context) {
+            let profileRevision = null;
+            try {
+              profileRevision = crypto.createHash('sha256')
+                .update(fs.readFileSync(profilePath)).digest('hex');
+            } catch (_) {}
+            publishHostMessage(context, {
+              action: 'authorizationCompleted',
+              opt: profileRevision ? { profileRevision } : {}
+            });
+          }
           response.statusCode = saved ? 200 : 400;
           response.end(saved ? '{"ok":true}' : '{"ok":false}');
           return;
         }
 
         let accepted = acceptHostMessage(value);
-        const invocationID = invocationIDFromRequest(request);
-        const context = invocationID ? invocations.get(invocationID) : null;
         if (!accepted || !publishHostMessage(context, accepted)) accepted = null;
         if (accepted && accepted.action === 'sniff') {
           const key = pendingHostReplyKey(invocationID, accepted.requestID);
@@ -1021,10 +1052,10 @@ enum NodeRuntimeContractFactory {
     }
 
     function attachHostMessageHeader(context) {
-      if (context.response.headersSent || !context.hostMessage || context.attached) return;
-      const encoded = Buffer.from(JSON.stringify(context.hostMessage), 'utf8').toString('base64');
+      if (context.response.headersSent || context.hostMessages.length === 0 || context.attached) return;
+      const message = context.hostMessages.shift();
+      const encoded = Buffer.from(JSON.stringify(message), 'utf8').toString('base64');
       context.attached = true;
-      context.consumed = true;
       context.response.setHeader('X-OKVideo-Host-Message', encoded);
     }
 
@@ -1085,9 +1116,9 @@ enum NodeRuntimeContractFactory {
         const context = {
           id: invocationID,
           response,
-          hostMessage: null,
+          hostMessages: [],
           attached: false,
-          consumed: false,
+          authorizationChallenge: false,
           waiters: [],
           removalTimer: null
         };

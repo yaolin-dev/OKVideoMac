@@ -1124,11 +1124,24 @@ struct CloudAuthorizationPrompt: Identifiable, Equatable {
 
 struct NodeWebPresentation: Identifiable, Equatable {
     let id: UUID
+    let challengeID: UUID
     let sourceIdentity: HomeContentIdentity
     let url: URL
     let title: String
     let message: String
+    let provider: String?
+    let transport: String
+    let presentationTarget: CloudAuthorizationPresentationTarget
+    var lifecycleState: NodeAuthorizationLifecycleState
+    var status: String?
+    var allowsAutomaticRetry: Bool
     var revision: Int
+}
+
+enum NodeAuthorizationLifecycleState: Equatable {
+    case waiting
+    case verifying
+    case needsManualRetry
 }
 
 struct ConfigurationCategoryPresentation: Identifiable, Equatable {
@@ -2862,6 +2875,17 @@ private enum PendingNodeOperation {
         guard case .playback(_, let playback) = self else { return nil }
         return playback.requestID
     }
+
+    var presentationTarget: CloudAuthorizationPresentationTarget {
+        switch self {
+        case .detail:
+            return .detail
+        case .playback(_, let playback):
+            return .player(requestID: playback.requestID)
+        case .category, .siteAction, .homeAction:
+            return .mainWindow
+        }
+    }
 }
 
 private enum AppStateTiming {
@@ -3439,6 +3463,36 @@ final class AppState: ObservableObject {
         return prompt
     }
 
+    var mainWindowNodeWebPresentation: NodeWebPresentation? {
+        guard let presentation = nodeWebPresentation,
+              presentation.presentationTarget == .mainWindow else {
+            return nil
+        }
+        return presentation
+    }
+
+    var detailNodeWebPresentation: NodeWebPresentation? {
+        guard let presentation = nodeWebPresentation,
+              presentation.presentationTarget == .detail else {
+            return nil
+        }
+        return presentation
+    }
+
+    var playerNodeWebPresentation: NodeWebPresentation? {
+        guard let presentation = nodeWebPresentation,
+              case .player(let requestID) = presentation.presentationTarget,
+              CloudAuthorizationPlaybackOwnershipPolicy.isCurrent(
+                requestID: requestID,
+                activeRequestID: activePlayerRequestID,
+                playbackSessionID: playbackSessionID,
+                isPlayerPresented: isPlayerPresented
+              ) else {
+            return nil
+        }
+        return presentation
+    }
+
     private let environment: AppEnvironment?
     private let playerRenderSurfaceGate = PlayerRenderSurfaceReadinessGate()
     private var configurationImportOperationID: UUID?
@@ -3459,6 +3513,8 @@ final class AppState: ObservableObject {
     private var playerEventTask: Task<Void, Never>?
     private var activeSeekConfirmationID: UUID?
     private var cloudAuthorizationPollTask: Task<Void, Never>?
+    private var nodeAuthorizationCompletionTask: Task<Void, Never>?
+    private var nodeAuthorizationAutoRetryRequestID: UUID?
     private var cloudAuthorizationSessionID = UUID()
     private var configurationInteractionCoordinator =
         ConfigurationInteractionCoordinator()
@@ -5687,15 +5743,61 @@ final class AppState: ObservableObject {
         _ authorization: NodeWebAuthorizationRequired,
         pending: PendingNodeOperation
     ) {
+        if let previous = nodeWebPresentation {
+            nodeAuthorizationCompletionTask?.cancel()
+            Task {
+                await NodeAuthorizationSignalCenter.shared.cancel(
+                    previous.challengeID
+                )
+            }
+        }
         pendingNodeOperation = pending
+        let allowsAutomaticRetry = pending.playbackRequestID.map {
+            $0 != nodeAuthorizationAutoRetryRequestID
+        } ?? true
         nodeWebPresentation = NodeWebPresentation(
             id: UUID(),
+            challengeID: authorization.challengeID,
             sourceIdentity: pending.sourceIdentity,
             url: authorization.websiteURL,
             title: authorization.title.nonEmpty ?? "网盘配置中心",
             message: authorization.message,
+            provider: authorization.provider,
+            transport: authorization.transport,
+            presentationTarget: pending.presentationTarget,
+            lifecycleState: allowsAutomaticRetry
+                ? .waiting
+                : .needsManualRetry,
+            status: allowsAutomaticRetry
+                ? "授权成功后将自动继续当前播放。"
+                : "本次播放已经自动验证过一次；为避免重复转存，请确认后手动重试。",
+            allowsAutomaticRetry: allowsAutomaticRetry,
             revision: 0
         )
+        let challengeID = authorization.challengeID
+        nodeAuthorizationCompletionTask?.cancel()
+        nodeAuthorizationCompletionTask = Task { @MainActor [weak self] in
+            let signals = await NodeAuthorizationSignalCenter.shared.signals(
+                for: challengeID
+            )
+            for await _ in signals {
+                guard !Task.isCancelled, let self,
+                      self.nodeWebPresentation?.challengeID == challengeID else {
+                    return
+                }
+                guard self.nodeWebPresentation?.allowsAutomaticRetry == true else {
+                    var presentation = self.nodeWebPresentation
+                    presentation?.lifecycleState = .needsManualRetry
+                    presentation?.status = "已收到授权完成信号；为避免重复执行网盘操作，请手动重试。"
+                    self.nodeWebPresentation = presentation
+                    return
+                }
+                await self.completeNodeConfigurationAndRetry(
+                    automatically: true
+                )
+                return
+            }
+        }
     }
 
     func refreshNodeConfigurationWebsite() {
@@ -5705,6 +5807,14 @@ final class AppState: ObservableObject {
     }
 
     func cancelNodeConfiguration() {
+        let challengeID = nodeWebPresentation?.challengeID
+        nodeAuthorizationCompletionTask?.cancel()
+        nodeAuthorizationCompletionTask = nil
+        if let challengeID {
+            Task {
+                await NodeAuthorizationSignalCenter.shared.cancel(challengeID)
+            }
+        }
         if case .playback = pendingNodeOperation {
             // User cancellation is a neutral terminal state. Do not turn it
             // into a playback failure that can later surface as a stale alert.
@@ -5715,13 +5825,28 @@ final class AppState: ObservableObject {
         nodeWebPresentation = nil
     }
 
-    func completeNodeConfigurationAndRetry() async {
-        let pending = pendingNodeOperation
-        let presentation = nodeWebPresentation
-        pendingNodeOperation = nil
-        nodeWebPresentation = nil
-        guard let pending, let presentation else { return }
-        if activeConfigurationUsesNodeRuntime {
+    func completeNodeConfigurationAndRetry(
+        automatically: Bool = false,
+        configurationAlreadyRefreshed: Bool = false
+    ) async {
+        guard let pending = pendingNodeOperation,
+              var presentation = nodeWebPresentation else { return }
+        if automatically, let requestID = pending.playbackRequestID {
+            guard requestID != nodeAuthorizationAutoRetryRequestID else {
+                presentation.lifecycleState = .needsManualRetry
+                presentation.status = "自动续播已执行过一次，请确认授权状态后手动重试。"
+                presentation.allowsAutomaticRetry = false
+                nodeWebPresentation = presentation
+                return
+            }
+            nodeAuthorizationAutoRetryRequestID = requestID
+        }
+        presentation.lifecycleState = .verifying
+        presentation.status = automatically
+            ? "已检测到授权完成，正在恢复当前播放…"
+            : "正在刷新授权状态并重新解析当前内容…"
+        nodeWebPresentation = presentation
+        if activeConfigurationUsesNodeRuntime && !configurationAlreadyRefreshed {
             // Configuration/login pages can add dynamic AList mounts or alter
             // the enabled site list. Re-read the local CatPawOpen catalogue
             // before deciding whether the original operation still exists.
@@ -5729,6 +5854,10 @@ final class AppState: ObservableObject {
                 force: true,
                 reportErrors: false
             )
+        }
+        guard pendingNodeOperation?.sourceIdentity == pending.sourceIdentity,
+              nodeWebPresentation?.challengeID == presentation.challengeID else {
+            return
         }
         let identity = pending.sourceIdentity
         guard NodeAuthorizationRetryPolicy.shouldRetry(
@@ -5741,8 +5870,16 @@ final class AppState: ObservableObject {
         ) else {
             // A source/configuration switch supersedes the pending request.
             // Its late completion is expected and must not alert the user.
+            cancelNodeConfiguration()
             return
         }
+        nodeAuthorizationCompletionTask?.cancel()
+        nodeAuthorizationCompletionTask = nil
+        await NodeAuthorizationSignalCenter.shared.cancel(
+            presentation.challengeID
+        )
+        pendingNodeOperation = nil
+        nodeWebPresentation = nil
         switch pending {
         case .category(_, let siteKey, let id, let page, let filters):
             guard siteKey == identity.siteKey else { return }
@@ -5775,6 +5912,8 @@ final class AppState: ObservableObject {
                 episode: playback.episode,
                 origin: playback.origin,
                 configurationID: playback.configurationID,
+                continuingRequestID: playback.requestID,
+                authorizationRetry: true,
                 windowActivation: .preserveFocus
             )
         }
@@ -5798,6 +5937,13 @@ final class AppState: ObservableObject {
               pending.requiresSelectedHomeSource,
               pending.sourceIdentity.siteKey != nextSiteKey else {
             return
+        }
+        nodeAuthorizationCompletionTask?.cancel()
+        nodeAuthorizationCompletionTask = nil
+        if let challengeID = nodeWebPresentation?.challengeID {
+            Task {
+                await NodeAuthorizationSignalCenter.shared.cancel(challengeID)
+            }
         }
         pendingNodeOperation = nil
         nodeWebPresentation = nil
@@ -8645,6 +8791,7 @@ final class AppState: ObservableObject {
         authoritativePlaybackResult: SitePlaybackResult? = nil,
         configurationID requestedConfigurationID: UUID? = nil,
         continuingRequestID: UUID? = nil,
+        authorizationRetry: Bool = false,
         windowActivation: PlayerWindowActivationPolicy = .userInitiated
     ) async {
         guard !isShutdownRequested,
@@ -8668,10 +8815,28 @@ final class AppState: ObservableObject {
             return
         }
         if let continuingRequestID {
-            guard origin.isHistory,
-                  historyPlaybackPreparationID == continuingRequestID,
-                  activePlayerRequestID == continuingRequestID else { return }
+            if authorizationRetry {
+                guard activePlayerRequestID == continuingRequestID,
+                      playbackSessionID == continuingRequestID,
+                      isPlayerPresented else { return }
+            } else {
+                guard origin.isHistory,
+                      historyPlaybackPreparationID == continuingRequestID,
+                      activePlayerRequestID == continuingRequestID else { return }
+            }
         } else if !origin.isHistory {
+            if let presentation = playerNodeWebPresentation {
+                nodeAuthorizationCompletionTask?.cancel()
+                nodeAuthorizationCompletionTask = nil
+                Task {
+                    await NodeAuthorizationSignalCenter.shared.cancel(
+                        presentation.challengeID
+                    )
+                }
+                pendingNodeOperation = nil
+                nodeWebPresentation = nil
+            }
+            nodeAuthorizationAutoRetryRequestID = nil
             historyPlaybackTask?.cancel()
             historyPlaybackTask = nil
             historyPlaybackLoadingID = nil
@@ -10425,6 +10590,11 @@ final class AppState: ObservableObject {
         liveSourceValidationTasks = [:]
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = nil
+        nodeAuthorizationCompletionTask?.cancel()
+        nodeAuthorizationCompletionTask = nil
+        if let challengeID = nodeWebPresentation?.challengeID {
+            await NodeAuthorizationSignalCenter.shared.cancel(challengeID)
+        }
         pendingNodeOperation = nil
         nodeWebPresentation = nil
         playerEventTask?.cancel()
@@ -10508,6 +10678,11 @@ final class AppState: ObservableObject {
             )
         }
         if pendingNodeOperation?.playbackRequestID == activePlayerRequestID {
+            nodeAuthorizationCompletionTask?.cancel()
+            nodeAuthorizationCompletionTask = nil
+            if let challengeID = nodeWebPresentation?.challengeID {
+                await NodeAuthorizationSignalCenter.shared.cancel(challengeID)
+            }
             pendingNodeOperation = nil
             nodeWebPresentation = nil
         }
@@ -12516,6 +12691,13 @@ final class AppState: ObservableObject {
                     force: true,
                     reportErrors: false
                 )
+                if self.playerNodeWebPresentation?.allowsAutomaticRetry == true,
+                   self.pendingNodeOperation?.playbackRequestID != nil {
+                    await self.completeNodeConfigurationAndRetry(
+                        automatically: true,
+                        configurationAlreadyRefreshed: true
+                    )
+                }
             }
         }
     }
@@ -12653,6 +12835,13 @@ final class AppState: ObservableObject {
 
     private func resetSearchForConfigurationChange() {
         detailHomeSearchReturnSnapshot = nil
+        nodeAuthorizationCompletionTask?.cancel()
+        nodeAuthorizationCompletionTask = nil
+        if let challengeID = nodeWebPresentation?.challengeID {
+            Task {
+                await NodeAuthorizationSignalCenter.shared.cancel(challengeID)
+            }
+        }
         pendingNodeOperation = nil
         nodeWebPresentation = nil
         cancelSearch()

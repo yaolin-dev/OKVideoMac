@@ -2,6 +2,12 @@ import CryptoKit
 import Foundation
 import OKVideoCore
 
+private func nodeNonEmpty(_ value: String?) -> String? {
+    guard let value else { return nil }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+}
+
 private actor NodeSiteInitializationGate {
     private enum State {
         case initializing([CheckedContinuation<Void, Error>])
@@ -95,11 +101,91 @@ struct NodeRuntimeUnavailableSiteProvider: SiteProvider {
 }
 
 struct NodeWebAuthorizationRequired: Error, LocalizedError, Equatable {
+    let challengeID: UUID
     let websiteURL: URL
     let title: String
     let message: String
+    let provider: String?
+    let profileRevision: String?
+    let transport: String
 
     var errorDescription: String? { message }
+}
+
+struct NodeAuthorizationCompletionSignal: Equatable, Sendable {
+    let challengeID: UUID
+    let provider: String?
+    let profileRevision: String?
+}
+
+actor NodeAuthorizationSignalCenter {
+    static let shared = NodeAuthorizationSignalCenter()
+
+    private var completed: [UUID: NodeAuthorizationCompletionSignal] = [:]
+    private var continuations:
+        [UUID: [UUID: AsyncStream<NodeAuthorizationCompletionSignal>.Continuation]] = [:]
+    private var monitors: [UUID: Task<Void, Never>] = [:]
+
+    func register(challengeID: UUID, monitor: Task<Void, Never>) {
+        guard completed[challengeID] == nil else {
+            monitor.cancel()
+            return
+        }
+        monitors[challengeID]?.cancel()
+        monitors[challengeID] = monitor
+    }
+
+    func signals(
+        for challengeID: UUID
+    ) -> AsyncStream<NodeAuthorizationCompletionSignal> {
+        let continuationID = UUID()
+        return AsyncStream { continuation in
+            if let signal = completed[challengeID] {
+                continuation.yield(signal)
+                continuation.finish()
+            } else {
+                continuations[challengeID, default: [:]][continuationID] = continuation
+            }
+            continuation.onTermination = { _ in
+                Task {
+                    await NodeAuthorizationSignalCenter.shared.removeContinuation(
+                        challengeID: challengeID,
+                        continuationID: continuationID
+                    )
+                }
+            }
+        }
+    }
+
+    func publish(_ signal: NodeAuthorizationCompletionSignal) {
+        guard completed[signal.challengeID] == nil else { return }
+        completed[signal.challengeID] = signal
+        monitors[signal.challengeID] = nil
+        let listeners = continuations.removeValue(forKey: signal.challengeID) ?? [:]
+        for continuation in listeners.values {
+            continuation.yield(signal)
+            continuation.finish()
+        }
+    }
+
+    func cancel(_ challengeID: UUID) {
+        monitors.removeValue(forKey: challengeID)?.cancel()
+        completed[challengeID] = nil
+        let listeners = continuations.removeValue(forKey: challengeID) ?? [:]
+        for continuation in listeners.values {
+            continuation.finish()
+        }
+    }
+
+    private func removeContinuation(
+        challengeID: UUID,
+        continuationID: UUID
+    ) {
+        continuations[challengeID]?[continuationID] = nil
+        if continuations[challengeID]?.isEmpty == true {
+            continuations[challengeID] = nil
+        }
+    }
 }
 
 @MainActor
@@ -525,7 +611,13 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     private struct InvocationResult {
         let value: JSONValue
         let baseURL: URL
+        let invocationID: String
         let hostMessage: HostMessage?
+    }
+
+    private enum PlaybackInvocationEvent: @unchecked Sendable {
+        case response(HTTPResponse)
+        case hostMessage(HostMessage)
     }
 
     let site: SiteConfiguration
@@ -660,8 +752,13 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             maximumAttempts: 2,
             hostMessageWaitMilliseconds: awaitsHostAction ? 1_000 : 0
         )
-        if let hostMessage = invocation.hostMessage {
-            throw try webAuthorizationRequired(hostMessage: hostMessage)
+        if let hostMessage = invocation.hostMessage,
+           hostMessage.action == "openInternalWebview" {
+            throw try webAuthorizationRequired(
+                hostMessage: hostMessage,
+                invocationID: invocation.invocationID,
+                baseURL: invocation.baseURL
+            )
         }
         if awaitsHostAction {
             return try SpiderResponseMapper.actionPage(
@@ -730,9 +827,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             maximumAttempts: 2,
             hostMessageWaitMilliseconds: awaitsHostAction ? 1_000 : 0
         )
-        if let hostMessage = invocation.hostMessage {
+        if let hostMessage = invocation.hostMessage,
+           hostMessage.action == "openInternalWebview" {
             throw try webAuthorizationRequired(
-                hostMessage: hostMessage
+                hostMessage: hostMessage,
+                invocationID: invocation.invocationID,
+                baseURL: invocation.baseURL
             )
         }
         let selection = try SpiderResponseMapper.selection(
@@ -1010,8 +1110,13 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             // it cannot repair an expired token and can duplicate work.
             maximumAttempts: 1
         )
-        if let hostMessage = invocation.hostMessage {
-            throw try webAuthorizationRequired(hostMessage: hostMessage)
+        if let hostMessage = invocation.hostMessage,
+           hostMessage.action == "openInternalWebview" {
+            throw try webAuthorizationRequired(
+                hostMessage: hostMessage,
+                invocationID: invocation.invocationID,
+                baseURL: invocation.baseURL
+            )
         }
         var result: SitePlaybackResult
         do {
@@ -1020,6 +1125,20 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 site: site
             )
         } catch let providerError as ProviderPlaybackError {
+            if Self.shouldAwaitLateAuthorizationMessage(
+                providerError.localizedDescription,
+                flag: flag
+            ), let hostMessage = try? await awaitHostMessage(
+                invocationID: invocation.invocationID,
+                baseURL: invocation.baseURL,
+                waitMilliseconds: 1_250
+            ), hostMessage.action == "openInternalWebview" {
+                throw try webAuthorizationRequired(
+                    hostMessage: hostMessage,
+                    invocationID: invocation.invocationID,
+                    baseURL: invocation.baseURL
+                )
+            }
             if Self.isPlaybackAuthorizationMessage(
                 providerError.localizedDescription,
                 flag: flag
@@ -1306,9 +1425,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             body: ["action": .string(action)],
             hostMessageWaitMilliseconds: 1_000
         )
-        if let hostMessage = invocation.hostMessage {
+        if let hostMessage = invocation.hostMessage,
+           hostMessage.action == "openInternalWebview" {
             throw try webAuthorizationRequired(
-                hostMessage: hostMessage
+                hostMessage: hostMessage,
+                invocationID: invocation.invocationID,
+                baseURL: invocation.baseURL
             )
         }
         return invocation.value
@@ -1352,37 +1474,40 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                     allowsNonSuccessfulStatus: true
                 )
                 let response: HTTPResponse
-                var concurrentHostMessage: HostMessage?
                 if method == "play",
                    site.extra["okNodeHostMessageBridge"] == .bool(true) {
-                    let routeTask = Task {
-                        try await httpClient.send(routeRequest)
-                    }
-                    let hostTask = Task {
-                        try await monitorPlaybackHostMessages(
-                            invocationID: invocationID,
-                            baseURL: readyBaseURL
-                        )
-                    }
-                    do {
-                        response = try await withTaskCancellationHandler {
-                            try await routeTask.value
-                        } onCancel: {
-                            routeTask.cancel()
-                            hostTask.cancel()
-                            Task { @MainActor in
-                                NodeHostSniffBridge.cancel()
-                            }
+                    let event = try await withThrowingTaskGroup(
+                        of: PlaybackInvocationEvent.self
+                    ) { group in
+                        group.addTask { [httpClient] in
+                            .response(try await httpClient.send(routeRequest))
                         }
-                        hostTask.cancel()
-                        concurrentHostMessage = try? await hostTask.value
-                    } catch {
-                        routeTask.cancel()
-                        hostTask.cancel()
+                        group.addTask { [self] in
+                            .hostMessage(
+                                try await monitorPlaybackHostMessages(
+                                    invocationID: invocationID,
+                                    baseURL: readyBaseURL
+                                )
+                            )
+                        }
+                        guard let event = try await group.next() else {
+                            throw CancellationError()
+                        }
+                        group.cancelAll()
+                        return event
+                    }
+                    switch event {
+                    case .response(let routeResponse):
+                        response = routeResponse
+                    case .hostMessage(let hostMessage):
                         Task { @MainActor in
                             NodeHostSniffBridge.cancel()
                         }
-                        throw error
+                        throw try webAuthorizationRequired(
+                            hostMessage: hostMessage,
+                            invocationID: invocationID,
+                            baseURL: readyBaseURL
+                        )
                     }
                 } else {
                     response = try await httpClient.send(routeRequest)
@@ -1407,9 +1532,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                         response.headers["X-OKVideo-Host-Message"]
                     )
                     let hostMessage: HostMessage?
-                    if let concurrentHostMessage {
-                        hostMessage = concurrentHostMessage
-                    } else if let immediateHostMessage {
+                    if let immediateHostMessage {
                         hostMessage = immediateHostMessage
                     } else if hostMessageWaitMilliseconds > 0 {
                         hostMessage = try await awaitHostMessage(
@@ -1425,11 +1548,33 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                     return InvocationResult(
                         value: value,
                         baseURL: readyBaseURL,
+                        invocationID: response.headers[
+                            "X-OKVideo-Invocation-ID"
+                        ] ?? invocationID,
                         hostMessage: hostMessage
                     )
                 }
                 let message = Self.serverMessage(from: value)
                     ?? "HTTP 状态码 \(response.statusCode)"
+                if method == "play",
+                   Self.shouldAwaitLateAuthorizationMessage(
+                       message,
+                       flag: body["flag"]?.stringValue ?? ""
+                   ), let hostMessage = try? await awaitHostMessage(
+                       invocationID: response.headers[
+                           "X-OKVideo-Invocation-ID"
+                       ] ?? invocationID,
+                       baseURL: readyBaseURL,
+                       waitMilliseconds: 1_250
+                   ), hostMessage.action == "openInternalWebview" {
+                    throw try webAuthorizationRequired(
+                        hostMessage: hostMessage,
+                        invocationID: response.headers[
+                            "X-OKVideo-Invocation-ID"
+                        ] ?? invocationID,
+                        baseURL: readyBaseURL
+                    )
+                }
                 if Self.isAuthorizationMessage(message) {
                     throw webAuthorizationRequired(
                         message: message,
@@ -1636,7 +1781,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     private func monitorPlaybackHostMessages(
         invocationID: String,
         baseURL: URL
-    ) async throws -> HostMessage? {
+    ) async throws -> HostMessage {
         while !Task.isCancelled {
             if let message = try await awaitHostMessage(
                 invocationID: invocationID,
@@ -1649,9 +1794,11 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                         invocationID: invocationID,
                         baseURL: baseURL
                     )
-                    return nil
+                    continue
                 }
-                return message
+                if message.action == "openInternalWebview" {
+                    return message
+                }
             }
             try await Task.sleep(nanoseconds: 100_000_000)
         }
@@ -1884,17 +2031,24 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         baseURL: URL
     ) -> NodeWebAuthorizationRequired {
         NodeWebAuthorizationRequired(
+            challengeID: UUID(),
             websiteURL: baseURL.appendingPathComponent("website"),
             title: site.name.replacingOccurrences(of: "|", with: " "),
-            message: message
+            message: message,
+            provider: site.name.replacingOccurrences(of: "|", with: " "),
+            profileRevision: site.extra["okNodeProfileRevision"]?.stringValue,
+            transport: "web"
         )
     }
 
     private func webAuthorizationRequired(
-        hostMessage: HostMessage
+        hostMessage: HostMessage,
+        invocationID: String,
+        baseURL: URL
     ) throws -> NodeWebAuthorizationRequired {
         guard hostMessage.action == "openInternalWebview",
-              let rawURL = hostMessage.opt.objectValue?["url"]?.stringValue,
+              let options = hostMessage.opt.objectValue,
+              let rawURL = options["url"]?.stringValue,
               let url = URL(string: rawURL),
               url.scheme?.lowercased() == "http",
               ["127.0.0.1", "localhost", "::1"].contains(
@@ -1903,11 +2057,98 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
               url.port != nil else {
             throw AppError.spider("Node 站点请求了不受支持的宿主操作")
         }
+        let providerChallengeID = options["challengeID"]?.stringValue
+        let challengeID = providerChallengeID.flatMap(UUID.init(uuidString:))
+            ?? UUID()
+        let provider = nodeNonEmpty(options["provider"]?.stringValue)
+            ?? site.name.replacingOccurrences(of: "|", with: " ")
+        let profileRevision = nodeNonEmpty(
+            options["profileRevision"]?.stringValue
+        )
+            ?? site.extra["okNodeProfileRevision"]?.stringValue
+        let transport = nodeNonEmpty(options["transport"]?.stringValue) ?? "web"
+        let monitor = Task { [weak self] in
+            guard let self else { return }
+            await self.monitorAuthorizationCompletion(
+                challengeID: challengeID,
+                providerChallengeID: providerChallengeID,
+                provider: provider,
+                invocationID: invocationID,
+                baseURL: baseURL
+            )
+        }
+        Task {
+            await NodeAuthorizationSignalCenter.shared.register(
+                challengeID: challengeID,
+                monitor: monitor
+            )
+        }
         return NodeWebAuthorizationRequired(
+            challengeID: challengeID,
             websiteURL: url,
             title: site.name.replacingOccurrences(of: "|", with: " "),
-            message: "请在内置页面中完成此功能。"
+            message: "等待网盘授权，请使用对应网盘 App 扫码。",
+            provider: provider,
+            profileRevision: profileRevision,
+            transport: transport
         )
+    }
+
+    private func monitorAuthorizationCompletion(
+        challengeID: UUID,
+        providerChallengeID: String?,
+        provider: String?,
+        invocationID: String,
+        baseURL: URL
+    ) async {
+        while !Task.isCancelled {
+            do {
+                guard let message = try await awaitHostMessage(
+                    invocationID: invocationID,
+                    baseURL: baseURL,
+                    waitMilliseconds: 2_000
+                ) else {
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                    continue
+                }
+                if message.action == "sniff" {
+                    await performHostSniff(
+                        message,
+                        invocationID: invocationID,
+                        baseURL: baseURL
+                    )
+                    continue
+                }
+                guard message.action == "authorizationCompleted" else {
+                    continue
+                }
+                let options = message.opt.objectValue ?? [:]
+                if let expected = nodeNonEmpty(providerChallengeID),
+                   let actual = nodeNonEmpty(
+                    options["challengeID"]?.stringValue
+                   ),
+                   expected != actual {
+                    continue
+                }
+                await NodeAuthorizationSignalCenter.shared.publish(
+                    NodeAuthorizationCompletionSignal(
+                        challengeID: challengeID,
+                        provider: nodeNonEmpty(
+                            options["provider"]?.stringValue
+                        )
+                            ?? provider,
+                        profileRevision: nodeNonEmpty(
+                            options["profileRevision"]?.stringValue
+                        )
+                    )
+                )
+                return
+            } catch is CancellationError {
+                return
+            } catch {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
     }
 
     private static func decodeHostMessage(_ encoded: String?) -> HostMessage? {
@@ -2188,5 +2429,20 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         ]
         return providerHints.contains(where: normalized.contains)
             && opaqueCloudFailureHints.contains(where: normalized.contains)
+    }
+
+    private static func shouldAwaitLateAuthorizationMessage(
+        _ message: String,
+        flag: String
+    ) -> Bool {
+        if isPlaybackAuthorizationMessage(message, flag: flag) {
+            return true
+        }
+        let normalized = message.lowercased()
+        return normalized.contains("播放地址为空")
+            || normalized.contains("empty play")
+            || normalized.contains("empty url")
+            || normalized.contains("loading failed")
+            || normalized.contains("no playable url")
     }
 }

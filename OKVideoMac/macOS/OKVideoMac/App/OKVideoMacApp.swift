@@ -466,6 +466,13 @@ private struct PlayerPlaybackWindowRoot: View {
                     .environment(\.colorScheme, .dark)
                     .zIndex(1_000)
             }
+
+            if let presentation = appState.playerNodeWebPresentation {
+                NodeConfigurationView(presentation: presentation)
+                    .environmentObject(appState)
+                    .environment(\.colorScheme, .dark)
+                    .zIndex(1_100)
+            }
         }
         .frame(minWidth: 800, minHeight: 450)
         .background(Color.black)

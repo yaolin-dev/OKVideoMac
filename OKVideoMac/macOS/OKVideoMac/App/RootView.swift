@@ -196,7 +196,7 @@ struct RootView: View {
             }
         }
         .overlay {
-            if let presentation = state.nodeWebPresentation {
+            if let presentation = state.mainWindowNodeWebPresentation {
                 NodeConfigurationView(presentation: presentation)
                     .environmentObject(state)
             }
@@ -762,6 +762,15 @@ struct NodeConfigurationView: View {
     @EnvironmentObject private var state: AppState
     let presentation: NodeWebPresentation
 
+    private var isVerifying: Bool {
+        presentation.lifecycleState == .verifying
+    }
+
+    private var isPlayerAuthorization: Bool {
+        if case .player = presentation.presentationTarget { return true }
+        return false
+    }
+
     var body: some View {
         ZStack {
             Color.black.opacity(0.52)
@@ -773,9 +782,13 @@ struct NodeConfigurationView: View {
                         .font(.system(size: 23, weight: .semibold))
                         .foregroundColor(.accentColor)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(presentation.title)
+                        Text(isPlayerAuthorization ? "等待网盘授权" : presentation.title)
                             .font(.headline)
-                        Text(presentation.message)
+                        Text(
+                            isPlayerAuthorization
+                                ? "请使用对应网盘 App 扫码，授权成功后会自动继续播放。"
+                                : presentation.message
+                        )
                             .font(.caption)
                             .foregroundColor(.secondary)
                             .lineLimit(2)
@@ -786,6 +799,7 @@ struct NodeConfigurationView: View {
                     } label: {
                         Label("刷新", systemImage: "arrow.clockwise")
                     }
+                    .disabled(isVerifying)
                 }
                 .padding(.horizontal, 18)
                 .frame(height: 68)
@@ -801,12 +815,25 @@ struct NodeConfigurationView: View {
                 Divider()
 
                 HStack(spacing: 12) {
-                    Label(
-                        "请用对应网盘 App 扫码，页面显示登录成功后再继续。",
-                        systemImage: "qrcode.viewfinder"
-                    )
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                    if isVerifying {
+                        AppActivityIndicator(size: .small)
+                    } else {
+                        Image(systemName: footerSystemImage)
+                            .foregroundColor(footerColor)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(footerTitle)
+                            .font(.caption.weight(.semibold))
+                        if let status = presentation.status,
+                           !status.trimmingCharacters(
+                            in: .whitespacesAndNewlines
+                           ).isEmpty {
+                            Text(status)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
                     Spacer()
                     Button("关闭") {
                         state.cancelNodeConfiguration()
@@ -814,9 +841,10 @@ struct NodeConfigurationView: View {
                     Button {
                         Task { await state.completeNodeConfigurationAndRetry() }
                     } label: {
-                        Label("授权完成并重试", systemImage: "arrow.right.circle.fill")
+                        Label("我已授权，立即验证", systemImage: "arrow.right.circle.fill")
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(isVerifying)
                 }
                 .padding(.horizontal, 18)
                 .frame(height: 64)
@@ -839,6 +867,31 @@ struct NodeConfigurationView: View {
             .padding(26)
         }
         .zIndex(2_000)
+    }
+
+    private var footerTitle: String {
+        switch presentation.lifecycleState {
+        case .waiting:
+            return presentation.allowsAutomaticRetry
+                ? "正在等待授权完成信号"
+                : "请确认授权状态后手动验证"
+        case .verifying:
+            return "正在验证授权并恢复原请求"
+        case .needsManualRetry:
+            return "需要手动确认"
+        }
+    }
+
+    private var footerSystemImage: String {
+        switch presentation.lifecycleState {
+        case .waiting: return "qrcode.viewfinder"
+        case .verifying: return "arrow.triangle.2.circlepath"
+        case .needsManualRetry: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var footerColor: Color {
+        presentation.lifecycleState == .needsManualRetry ? .orange : .accentColor
     }
 }
 

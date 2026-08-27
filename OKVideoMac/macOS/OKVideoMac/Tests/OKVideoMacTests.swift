@@ -11479,6 +11479,72 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         await service.stop()
     }
 
+    func testContractBQueuesAuthorizationCompletionAfterWebChallenge() async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(
+                nodeContractBFixtureScript(startDelayMilliseconds: 0).utf8
+            )
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+        let endpoint = try await service.ensureReady(from: fixture.sourceURL)
+        let invocationID = UUID().uuidString.lowercased()
+        var request = URLRequest(
+            url: endpoint.appendingPathComponent("authorization-sequence")
+        )
+        request.httpMethod = "POST"
+        request.setValue(
+            invocationID,
+            forHTTPHeaderField: "X-OKVideo-Invocation-ID"
+        )
+
+        let (_, businessResponse) = try await URLSession.shared.data(for: request)
+        let businessHTTP = try XCTUnwrap(businessResponse as? HTTPURLResponse)
+        let encoded = try XCTUnwrap(
+            businessHTTP.value(forHTTPHeaderField: "X-OKVideo-Host-Message")
+        )
+        let challengeData = try XCTUnwrap(Data(base64Encoded: encoded))
+        let challenge = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: challengeData) as? [String: Any]
+        )
+        let challengeOptions = try XCTUnwrap(
+            challenge["opt"] as? [String: Any]
+        )
+        XCTAssertEqual(challenge["action"] as? String, "openInternalWebview")
+        XCTAssertEqual(challengeOptions["provider"] as? String, "fixture-cloud")
+        XCTAssertEqual(challengeOptions["transport"] as? String, "qr")
+
+        var pollComponents = URLComponents(
+            url: endpoint.appendingPathComponent(
+                "__okvideo/host-message/\(invocationID)"
+            ),
+            resolvingAgainstBaseURL: false
+        )
+        pollComponents?.queryItems = [URLQueryItem(name: "wait", value: "1000")]
+        let (completionData, completionResponse) = try await URLSession.shared.data(
+            from: try XCTUnwrap(pollComponents?.url)
+        )
+        XCTAssertEqual(
+            (completionResponse as? HTTPURLResponse)?.statusCode,
+            200
+        )
+        let completion = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: completionData)
+                as? [String: Any]
+        )
+        let completionOptions = try XCTUnwrap(
+            completion["opt"] as? [String: Any]
+        )
+        XCTAssertEqual(completion["action"] as? String, "authorizationCompleted")
+        XCTAssertEqual((completionOptions["profileRevision"] as? String)?.count, 64)
+        await service.stop()
+    }
+
     func testContractBBridgesSniffResultBackToOriginalNodeRequest() async throws {
         let fixture = try makeLegacyCacheFixture(
             script: Data(
@@ -12534,6 +12600,34 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                   }).then(async (profileResponse) => {
                     response.statusCode = profileResponse.status;
                     response.end(await profileResponse.text());
+                  }).catch(() => {
+                    response.statusCode = 500;
+                    response.end(JSON.stringify({ok:false}));
+                  });
+                } else if (request.url === '/authorization-sequence') {
+                  const hostURL = `http://127.0.0.1:${catDartServerPort()}/msg`;
+                  const challengeID = '00000000-0000-0000-0000-000000000001';
+                  fetch(hostURL, {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({
+                      action: 'openInternalWebview',
+                      opt: {
+                        url: `http://127.0.0.1:${catDartServerPort()}/website`,
+                        challengeID,
+                        provider: 'fixture-cloud',
+                        transport: 'qr'
+                      }
+                    })
+                  }).then(() => fetch(hostURL, {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({
+                      action: 'saveProfile',
+                      opt: {authorized: true}
+                    })
+                  })).then(() => {
+                    response.end(JSON.stringify({ok:true}));
                   }).catch(() => {
                     response.statusCode = 500;
                     response.end(JSON.stringify({ok:false}));

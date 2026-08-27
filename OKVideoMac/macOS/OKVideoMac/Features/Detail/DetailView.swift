@@ -51,6 +51,12 @@ struct DetailLoadingView: View {
             }
             .padding(14)
         }
+        .overlay {
+            if let presentation = state.detailNodeWebPresentation {
+                NodeConfigurationView(presentation: presentation)
+                    .environmentObject(state)
+            }
+        }
     }
 }
 
@@ -94,6 +100,12 @@ struct DetailView: View {
         .overlay {
             if let prompt = state.detailCloudAuthorizationPrompt {
                 CloudAuthorizationView(prompt: prompt)
+                    .environmentObject(state)
+            }
+        }
+        .overlay {
+            if let presentation = state.detailNodeWebPresentation {
+                NodeConfigurationView(presentation: presentation)
                     .environmentObject(state)
             }
         }
