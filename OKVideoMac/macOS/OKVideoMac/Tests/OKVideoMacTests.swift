@@ -9961,6 +9961,84 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertNil(environment["SSH_AUTH_SOCK"])
     }
 
+    func testNodeSystemProxyEnvironmentBridgesStaticWebProxyAndBypassesLoopback() {
+        let environment = NodeSystemProxyEnvironment.environment(from: [
+            "HTTPEnable": 1,
+            "HTTPProxy": "127.0.0.1",
+            "HTTPPort": 29_758,
+            "HTTPSEnable": 1,
+            "HTTPSProxy": "proxy.example",
+            "HTTPSPort": 8_443,
+            "ExceptionsList": [
+                "*.local",
+                "10.0.0.0/8",
+                "bad\nINJECTED=value"
+            ]
+        ])
+
+        XCTAssertEqual(environment["HTTP_PROXY"], "http://127.0.0.1:29758")
+        XCTAssertEqual(environment["http_proxy"], environment["HTTP_PROXY"])
+        XCTAssertEqual(environment["HTTPS_PROXY"], "http://proxy.example:8443")
+        XCTAssertEqual(environment["https_proxy"], environment["HTTPS_PROXY"])
+        let noProxy = environment["NO_PROXY"] ?? ""
+        XCTAssertTrue(noProxy.contains("127.0.0.1"))
+        XCTAssertTrue(noProxy.contains("localhost"))
+        XCTAssertTrue(noProxy.contains("*.local"))
+        XCTAssertTrue(noProxy.contains("10.0.0.0/8"))
+        XCTAssertFalse(noProxy.contains("INJECTED"))
+        XCTAssertEqual(environment["no_proxy"], noProxy)
+    }
+
+    func testNodeSystemProxyEnvironmentRejectsDisabledOrMalformedProxy() {
+        XCTAssertTrue(NodeSystemProxyEnvironment.environment(from: [
+            "HTTPEnable": 0,
+            "HTTPProxy": "127.0.0.1",
+            "HTTPPort": 29_758
+        ]).isEmpty)
+        XCTAssertTrue(NodeSystemProxyEnvironment.environment(from: [
+            "HTTPEnable": 1,
+            "HTTPProxy": "proxy.example\nNODE_OPTIONS=--inspect",
+            "HTTPPort": 29_758
+        ]).isEmpty)
+        XCTAssertTrue(NodeSystemProxyEnvironment.environment(from: [
+            "HTTPEnable": 1,
+            "HTTPProxy": "proxy.example",
+            "HTTPPort": 70_000
+        ]).isEmpty)
+    }
+
+    func testNodeEnvironmentAcceptsOnlyValidatedSystemProxyValues() throws {
+        let runtime = URL(fileURLWithPath: "/tmp/okvideo-node-runtime")
+        let environment = try NodeBundleRuntimeService.sanitizedNodeEnvironment(
+            bundlePath: runtime.appendingPathComponent("index.js"),
+            runtimeDirectory: runtime,
+            temporaryDirectory: runtime.appendingPathComponent("tmp"),
+            systemProxyEnvironment: [
+                "HTTPS_PROXY": "http://127.0.0.1:29758",
+                "NO_PROXY": "127.0.0.1,localhost"
+            ]
+        )
+        XCTAssertEqual(environment["HTTPS_PROXY"], "http://127.0.0.1:29758")
+        XCTAssertEqual(environment["NO_PROXY"], "127.0.0.1,localhost")
+
+        XCTAssertThrowsError(try NodeBundleRuntimeService.sanitizedNodeEnvironment(
+            bundlePath: runtime.appendingPathComponent("index.js"),
+            runtimeDirectory: runtime,
+            temporaryDirectory: runtime.appendingPathComponent("tmp"),
+            systemProxyEnvironment: [
+                "NODE_OPTIONS": "--inspect"
+            ]
+        ))
+        XCTAssertThrowsError(try NodeBundleRuntimeService.sanitizedNodeEnvironment(
+            bundlePath: runtime.appendingPathComponent("index.js"),
+            runtimeDirectory: runtime,
+            temporaryDirectory: runtime.appendingPathComponent("tmp"),
+            systemProxyEnvironment: [
+                "HTTPS_PROXY": "http://user:secret@proxy.example:8080"
+            ]
+        ))
+    }
+
     func testContractDetectorKeepsContractAAndFindsHostIntegratedContractB() throws {
         let contractA = Data(
             "module.exports={start(){},stop(){}};".utf8
@@ -10686,6 +10764,31 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             attributes[.posixPermissions] as? NSNumber
         )
         XCTAssertEqual(permissions.intValue & 0o777, 0o600)
+    }
+
+    func testNodeDiagnosticLogBoundsOversizedSpiderOutputBeforeSanitizing() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("okvideo-node-log-bound-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true
+        )
+        let logURL = root.appendingPathComponent("node.log")
+        let writer = NodeDiagnosticLogWriter(
+            logURL: logURL,
+            maximumBytes: 64 * 1_024,
+            retainedFileCount: 1
+        )
+
+        writer.writeNodeOutput(Data(String(repeating: "x", count: 256 * 1_024).utf8))
+        writer.writeNodeOutput(Data("\nnext line\n".utf8))
+        writer.close()
+
+        let contents = try String(contentsOf: logURL)
+        XCTAssertTrue(contents.contains("<node output truncated>"))
+        XCTAssertTrue(contents.contains("next line"))
+        XCTAssertLessThan(Data(contents.utf8).count, 20 * 1_024)
     }
 
     func testRuntimeInitializationPurgesLogsFromAllLegacyCacheKeysOnce() throws {

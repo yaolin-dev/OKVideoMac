@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import OKVideoCore
+import SystemConfiguration
 
 enum NodeDiagnosticCategory: String, Codable, Equatable, Sendable {
     case transport
@@ -311,12 +312,15 @@ enum NodeDiagnosticClassifier {
 }
 
 final class NodeDiagnosticLogWriter: @unchecked Sendable {
+    private static let maximumNodeOutputLineBytes = 8 * 1_024
+
     private let lock = NSLock()
     private let logURL: URL
     private let maximumBytes: Int
     private let retainedFileCount: Int
     private var handle: FileHandle?
     private var pendingNodeOutput = Data()
+    private var pendingNodeOutputWasTruncated = false
 
     init(logURL: URL, maximumBytes: Int, retainedFileCount: Int) {
         self.logURL = logURL
@@ -336,24 +340,31 @@ final class NodeDiagnosticLogWriter: @unchecked Sendable {
 
     func writeNodeOutput(_ data: Data) {
         lock.lock()
-        pendingNodeOutput.append(data)
-        var lines: [Data] = []
-        while let newline = pendingNodeOutput.firstIndex(of: 0x0A) {
-            lines.append(pendingNodeOutput.prefix(upTo: newline))
-            pendingNodeOutput.removeSubrange(...newline)
+        var lines: [(data: Data, wasTruncated: Bool)] = []
+        let segments = data.split(separator: 0x0A, omittingEmptySubsequences: false)
+        for (index, segment) in segments.enumerated() {
+            appendNodeOutputSegmentLocked(segment)
+            guard index < segments.count - 1 else { continue }
+            lines.append((pendingNodeOutput, pendingNodeOutputWasTruncated))
+            pendingNodeOutput.removeAll(keepingCapacity: true)
+            pendingNodeOutputWasTruncated = false
         }
         lock.unlock()
         for line in lines {
-            writeNodeLine(line)
+            writeNodeLine(line.data, wasTruncated: line.wasTruncated)
         }
     }
 
     func flushNodeOutput() {
         lock.lock()
         let remaining = pendingNodeOutput
+        let wasTruncated = pendingNodeOutputWasTruncated
         pendingNodeOutput.removeAll(keepingCapacity: false)
+        pendingNodeOutputWasTruncated = false
         lock.unlock()
-        if !remaining.isEmpty { writeNodeLine(remaining) }
+        if !remaining.isEmpty {
+            writeNodeLine(remaining, wasTruncated: wasTruncated)
+        }
     }
 
     func close() {
@@ -365,11 +376,25 @@ final class NodeDiagnosticLogWriter: @unchecked Sendable {
         lock.unlock()
     }
 
-    private func writeNodeLine(_ data: Data) {
-        let raw = String(decoding: data, as: UTF8.self)
-        let sanitized = String(
-            Self.sanitizedNodeOutput(raw).prefix(64 * 1_024)
+    private func appendNodeOutputSegmentLocked(_ segment: Data.SubSequence) {
+        let remainingCapacity = max(
+            0,
+            Self.maximumNodeOutputLineBytes - pendingNodeOutput.count
         )
+        if remainingCapacity > 0 {
+            pendingNodeOutput.append(contentsOf: segment.prefix(remainingCapacity))
+        }
+        if segment.count > remainingCapacity {
+            pendingNodeOutputWasTruncated = true
+        }
+    }
+
+    private func writeNodeLine(_ data: Data, wasTruncated: Bool) {
+        let raw = String(decoding: data, as: UTF8.self)
+        var sanitized = Self.sanitizedNodeOutput(raw)
+        if wasTruncated {
+            sanitized += " … <node output truncated>"
+        }
         write(
             NodeDiagnosticEvent(
                 category: .spiderSite,
@@ -492,6 +517,108 @@ final class NodeDiagnosticLogWriter: @unchecked Sendable {
 
     private func rotatedURL(_ index: Int) -> URL {
         URL(fileURLWithPath: logURL.path + ".\(index)")
+    }
+}
+
+enum NodeSystemProxyEnvironment {
+    private static let loopbackBypassEntries = [
+        "127.0.0.1",
+        "localhost",
+        "::1",
+        "[::1]"
+    ]
+
+    static func current() -> [String: String] {
+        guard let settings = SCDynamicStoreCopyProxies(nil) as? [String: Any] else {
+            return [:]
+        }
+        return environment(from: settings)
+    }
+
+    static func environment(from settings: [String: Any]) -> [String: String] {
+        let httpProxy = proxyURL(
+            enabled: settings["HTTPEnable"],
+            host: settings["HTTPProxy"],
+            port: settings["HTTPPort"]
+        )
+        let httpsProxy = proxyURL(
+            enabled: settings["HTTPSEnable"],
+            host: settings["HTTPSProxy"],
+            port: settings["HTTPSPort"]
+        )
+        guard httpProxy != nil || httpsProxy != nil else { return [:] }
+
+        var environment: [String: String] = [:]
+        if let value = httpProxy {
+            environment["HTTP_PROXY"] = value
+            environment["http_proxy"] = value
+        }
+        if let value = httpsProxy ?? httpProxy {
+            environment["HTTPS_PROXY"] = value
+            environment["https_proxy"] = value
+        }
+
+        let exceptionEntries = (settings["ExceptionsList"] as? [Any])?
+            .compactMap { sanitizedBypassEntry($0 as? String) } ?? []
+        let bypass = orderedUnique(loopbackBypassEntries + exceptionEntries)
+            .joined(separator: ",")
+        environment["NO_PROXY"] = bypass
+        environment["no_proxy"] = bypass
+        return environment
+    }
+
+    private static func proxyURL(
+        enabled: Any?,
+        host: Any?,
+        port: Any?
+    ) -> String? {
+        guard numericValue(enabled) != 0,
+              let rawHost = host as? String else { return nil }
+        let normalizedHost = rawHost.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !normalizedHost.isEmpty,
+              normalizedHost.utf8.count <= 255,
+              !normalizedHost.unicodeScalars.contains(where: {
+                  CharacterSet.whitespacesAndNewlines.contains($0)
+                      || CharacterSet.controlCharacters.contains($0)
+              }),
+              let proxyPort = numericValue(port),
+              (1...65_535).contains(proxyPort) else { return nil }
+        var components = URLComponents()
+        // macOS's HTTP and Secure Web Proxy settings both describe an HTTP
+        // CONNECT proxy. They are not the scheme of the eventual upstream.
+        components.scheme = "http"
+        components.host = normalizedHost
+        components.port = proxyPort
+        guard let url = components.url,
+              url.user == nil,
+              url.password == nil else { return nil }
+        return url.absoluteString
+    }
+
+    private static func numericValue(_ value: Any?) -> Int? {
+        if let value = value as? NSNumber { return value.intValue }
+        if let value = value as? Int { return value }
+        if let value = value as? String { return Int(value) }
+        return nil
+    }
+
+    private static func sanitizedBypassEntry(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty,
+              normalized.utf8.count <= 255,
+              normalized.unicodeScalars.allSatisfy({ scalar in
+                  CharacterSet.alphanumerics.contains(scalar)
+                      || ".*-_:/[]".unicodeScalars.contains(scalar)
+              }) else { return nil }
+        return normalized
+    }
+
+    private static func orderedUnique(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values.filter { seen.insert($0.lowercased()).inserted }
     }
 }
 
@@ -1395,7 +1522,8 @@ actor NodeBundleRuntimeService {
         runtimeDirectory: URL,
         temporaryDirectory: URL,
         parentPID: Int32 = ProcessInfo.processInfo.processIdentifier,
-        contractAdditions: [String: String] = [:]
+        contractAdditions: [String: String] = [:],
+        systemProxyEnvironment: [String: String] = [:]
     ) throws -> [String: String] {
         var environment = [
             "HOST": "127.0.0.1",
@@ -1409,6 +1537,23 @@ actor NodeBundleRuntimeService {
             "OKVIDEO_BUNDLE_PATH": bundlePath.path,
             "OKVIDEO_PARENT_PID": String(parentPID)
         ]
+        let allowedProxyNames = Set([
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "no_proxy"
+        ])
+        guard Set(systemProxyEnvironment.keys).isSubset(of: allowedProxyNames),
+              systemProxyEnvironment.allSatisfy({ name, value in
+                  Self.isValidNodeProxyEnvironmentValue(name: name, value: value)
+              }) else {
+            throw NodeBundleRuntimeError.invalidNodeEnvironment(
+                "系统代理配置包含无效值"
+            )
+        }
+        environment.merge(systemProxyEnvironment) { _, proxyValue in proxyValue }
         let allowedContractBNames = Set([
             "DEV_HTTP_PORT",
             "OKVIDEO_CONTRACT_B_CONFIG_PATH",
@@ -1433,6 +1578,31 @@ actor NodeBundleRuntimeService {
             )
         }
         return environment
+    }
+
+    private static func isValidNodeProxyEnvironmentValue(
+        name: String,
+        value: String
+    ) -> Bool {
+        guard !value.isEmpty,
+              value.utf8.count <= 4_096,
+              !value.unicodeScalars.contains(where: {
+                  CharacterSet.controlCharacters.contains($0)
+              }) else { return false }
+        if name.lowercased() == "no_proxy" {
+            return value.split(separator: ",", omittingEmptySubsequences: false)
+                .allSatisfy { !$0.isEmpty }
+        }
+        guard let components = URLComponents(string: value),
+              components.scheme?.lowercased() == "http",
+              components.host?.isEmpty == false,
+              components.port.map({ (1...65_535).contains($0) }) == true,
+              components.user == nil,
+              components.password == nil,
+              components.path.isEmpty || components.path == "/",
+              components.query == nil,
+              components.fragment == nil else { return false }
+        return true
     }
 
     static func validateBundleDataForExecution(
@@ -2567,7 +2737,8 @@ actor NodeBundleRuntimeService {
             bundlePath: bundle.scriptURL,
             runtimeDirectory: bundle.runtimeDirectory,
             temporaryDirectory: temporaryDirectory,
-            contractAdditions: launchPlan.environmentAdditions
+            contractAdditions: launchPlan.environmentAdditions,
+            systemProxyEnvironment: NodeSystemProxyEnvironment.current()
         )
         process.standardOutput = pipe
         process.standardError = pipe
