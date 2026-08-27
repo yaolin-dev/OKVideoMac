@@ -12313,6 +12313,42 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(searchCount, 1)
     }
 
+    func testNodeSearchPreservesWrappedConnectionResetForAggregateRetry() async throws {
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.path.hasSuffix("/init") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 500,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"message":"read ECONNRESET"}"#.utf8)
+            )
+        }
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: nodeLifecycleFixtureSite,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        do {
+            _ = try await provider.search(
+                keyword: "fixture",
+                page: 1,
+                quick: false
+            )
+            XCTFail("wrapped connection reset must be surfaced")
+        } catch let error as SiteSearchError {
+            XCTAssertEqual(error.category, .transport)
+            XCTAssertTrue(error.isRetryable)
+        }
+    }
+
     func testNodeSearchOnlyClassifiesExactFastifySearch404AsUnsupported() async throws {
         let client = NodeProviderStubHTTPClient { request in
             if request.url.path.hasSuffix("/init") {

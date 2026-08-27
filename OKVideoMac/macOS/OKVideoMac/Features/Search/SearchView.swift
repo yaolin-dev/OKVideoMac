@@ -853,11 +853,19 @@ private struct SearchSiteOutcomeSummary: View {
             .padding(.top, 8)
         } label: {
             HStack(spacing: 7) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundColor(.orange)
-                Text("站点结果 (outcomes.count) 个")
+                Image(
+                    systemName: failureCount == 0
+                        ? "checkmark.circle.fill"
+                        : "exclamationmark.triangle.fill"
+                )
+                    .foregroundColor(failureCount == 0 ? .green : .orange)
+                Text("站点结果 \(outcomes.count) 个")
                     .fontWeight(.medium)
-                Text(failureCount == 0 ? "均已完成" : "其中 (failureCount) 个失败")
+                Text(
+                    failureCount == 0
+                        ? "均已完成"
+                        : "其中 \(failureCount) 个失败"
+                )
                     .foregroundColor(.secondary)
                 Spacer()
                 Text("查看详情")

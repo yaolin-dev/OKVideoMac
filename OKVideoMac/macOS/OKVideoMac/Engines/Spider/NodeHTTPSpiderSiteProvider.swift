@@ -1381,6 +1381,17 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             || value.contains("is not a function") {
             return SiteSearchError(fullMessage, category: .scriptError)
         }
+        // CatPawOpen commonly wraps an upstream socket failure in its own
+        // HTTP 500 JSON response. Preserve the underlying transport meaning
+        // so the aggregate scheduler retries it once after every site's first
+        // pass instead of reporting a permanent provider/business failure.
+        if isTransientTransportMessage(message) {
+            return SiteSearchError(
+                fullMessage,
+                category: .transport,
+                isRetryable: true
+            )
+        }
         if statusCode == 408 || statusCode == 429 {
             return SiteSearchError(
                 fullMessage,
@@ -1448,6 +1459,21 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             || value.contains("no upstream")
             || value.contains("bad gateway")
             || value.contains("service unavailable")
+    }
+
+    private static func isTransientTransportMessage(_ message: String) -> Bool {
+        let value = message.lowercased()
+        return value.contains("econnreset")
+            || value.contains("econnrefused")
+            || value.contains("etimedout")
+            || value.contains("eai_again")
+            || value.contains("enotfound")
+            || value.contains("epipe")
+            || value.contains("socket hang up")
+            || value.contains("connection reset")
+            || value.contains("connection closed")
+            || value.contains("network connection was lost")
+            || value.contains("unexpected eof")
     }
 
     private static func isTransientTransportError(_ error: Error) -> Bool {
