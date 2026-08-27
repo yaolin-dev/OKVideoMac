@@ -398,7 +398,15 @@ enum UpstreamResponseDecoder {
 
     private static func nonEmptyTrimmed(_ value: String) -> String? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        guard !trimmed.isEmpty else { return nil }
+        // Some Node bundles stringify an empty object/array when a cloud
+        // resolver fails. Those sentinel values are business failures, not
+        // relative media URLs, and must never reach libmpv.
+        let sentinel = trimmed.lowercased()
+        guard !["{}", "[]", "null", "undefined"].contains(sentinel) else {
+            return nil
+        }
+        return trimmed
     }
 
     private static func decodeHeaders(_ value: JSONValue?) -> [String: String] {
@@ -466,8 +474,39 @@ enum UpstreamResponseDecoder {
     }
 
     private static func firstNonEmptyString(_ values: JSONValue?...) -> String? {
-        values.lazy.compactMap(string).first {
-            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        values.lazy.compactMap { messageString($0) }.first
+    }
+
+    /// CatPaw bundles are not consistent about error shape. In addition to a
+    /// plain `error` string, Axios/Fastify wrappers often return an object such
+    /// as `{ error: { message: "..." } }`. Preserve that business message so
+    /// the host can classify authorization failures before opening the player.
+    private static func messageString(
+        _ value: JSONValue?,
+        depth: Int = 0
+    ) -> String? {
+        guard depth < 4 else { return nil }
+        switch value {
+        case .string(let value):
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        case .integer(let value):
+            return String(value)
+        case .number(let value):
+            return String(value)
+        case .object(let object):
+            for key in ["message", "msg", "errMsg", "error", "detail", "reason"] {
+                if let message = messageString(object[key], depth: depth + 1) {
+                    return message
+                }
+            }
+            return nil
+        case .array(let values):
+            return values.lazy.compactMap {
+                messageString($0, depth: depth + 1)
+            }.first
+        case .bool, .null, nil:
+            return nil
         }
     }
 }

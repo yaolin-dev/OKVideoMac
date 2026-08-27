@@ -1092,6 +1092,54 @@ final class SiteProviderTests: XCTestCase {
         }
     }
 
+    func testSpiderPlayerSurfacesNestedProviderError() throws {
+        let site = SiteConfiguration(
+            key: "nested-error",
+            name: "Nested Error",
+            type: 4,
+            api: "/spider/nested/4"
+        )
+
+        XCTAssertThrowsError(
+            try SpiderResponseMapper.player(
+                .object([
+                    "parse": .integer(0),
+                    "url": .array([]),
+                    "error": .object([
+                        "message": .string("百度网盘 Cookie 已失效")
+                    ])
+                ]),
+                site: site
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ProviderPlaybackError,
+                ProviderPlaybackError("百度网盘 Cookie 已失效")
+            )
+        }
+    }
+
+    func testSpiderPlayerRejectsStringifiedEmptyURLSentinels() throws {
+        let site = SiteConfiguration(
+            key: "empty-url",
+            name: "Empty URL",
+            type: 4,
+            api: "/spider/empty/4"
+        )
+
+        for sentinel in ["{}", "[]", "null", "undefined"] {
+            XCTAssertThrowsError(
+                try SpiderResponseMapper.player(
+                    .object([
+                        "parse": .integer(0),
+                        "url": .string(sentinel)
+                    ]),
+                    site: site
+                )
+            )
+        }
+    }
+
     func testPlaybackRefreshSearchesAfterStaleDetailLosesResource() async throws {
         let oldSource = PlaySource(
             name: "旧线路名",

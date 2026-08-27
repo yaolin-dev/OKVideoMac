@@ -147,12 +147,6 @@ final class PlaybackResolverTests: XCTestCase {
         let client = ScriptedProbeHTTPClient(responses: [
             HTTPResponse(
                 url: url,
-                statusCode: 200,
-                headers: [:],
-                body: Data()
-            ),
-            HTTPResponse(
-                url: url,
                 statusCode: 206,
                 headers: [
                     "Content-Type": "video/mp4",
@@ -168,9 +162,23 @@ final class PlaybackResolverTests: XCTestCase {
         XCTAssertTrue(isValid)
         XCTAssertTrue(DefaultMediaProbe.isNodeRuntimeMediaProxy(url))
         let requests = await client.requests()
-        XCTAssertEqual(requests.map(\.method), [.head, .get])
-        XCTAssertEqual(requests.last?.headers["Range"], "bytes=0-65535")
+        XCTAssertEqual(requests.map(\.method), [.get])
+        XCTAssertEqual(requests.last?.headers["Range"], "bytes=0-16383")
         XCTAssertEqual(requests.last?.headers["Cookie"], "session=fixture")
+    }
+
+    func testNodeRuntimeMediaProxyAcceptsLargeBodyWhenServerIgnoresRange()
+        async throws {
+        let url = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:18989/spider/fixture/4/proxy/media?id=large")
+        )
+        let probe = DefaultMediaProbe(
+            httpClient: ResponseTooLargeProbeHTTPClient()
+        )
+
+        let isValid = try await probe.validate(url: url, headers: [:])
+
+        XCTAssertTrue(isValid)
     }
 
     func testAndroidBridgeMediaSessionIsNotMisclassifiedAsNodeProxy() throws {
@@ -189,12 +197,6 @@ final class PlaybackResolverTests: XCTestCase {
         let client = ScriptedProbeHTTPClient(responses: [
             HTTPResponse(
                 url: url,
-                statusCode: 200,
-                headers: ["Content-Type": "video/mp4"],
-                body: Data()
-            ),
-            HTTPResponse(
-                url: url,
                 statusCode: 206,
                 headers: [
                     "Content-Type": "video/mp4",
@@ -209,8 +211,8 @@ final class PlaybackResolverTests: XCTestCase {
 
         XCTAssertTrue(isValid)
         let requests = await client.requests()
-        XCTAssertEqual(requests.map(\.method), [.head, .get])
-        XCTAssertEqual(requests.last?.headers["Range"], "bytes=0-65535")
+        XCTAssertEqual(requests.map(\.method), [.get])
+        XCTAssertEqual(requests.last?.headers["Range"], "bytes=0-16383")
     }
 
     func testAndroidBridgeMediaSessionRejectsJSONErrorBody() async throws {
@@ -218,12 +220,6 @@ final class PlaybackResolverTests: XCTestCase {
             URL(string: "http://127.0.0.1:19978/proxy/media/session-error")
         )
         let client = ScriptedProbeHTTPClient(responses: [
-            HTTPResponse(
-                url: url,
-                statusCode: 200,
-                headers: ["Content-Type": "video/mp4"],
-                body: Data()
-            ),
             HTTPResponse(
                 url: url,
                 statusCode: 200,
@@ -522,6 +518,15 @@ final class PlaybackResolverTests: XCTestCase {
 private struct FailingProbeHTTPClient: HTTPClient {
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         throw HTTPClientError.transport("the preflight client must not be called")
+    }
+}
+
+private struct ResponseTooLargeProbeHTTPClient: HTTPClient {
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        throw HTTPClientError.responseTooLarge(
+            limit: request.maximumResponseBytes,
+            actual: request.maximumResponseBytes + 1
+        )
     }
 }
 

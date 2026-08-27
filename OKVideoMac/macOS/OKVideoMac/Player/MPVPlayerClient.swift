@@ -5,9 +5,9 @@ enum PlayerTeardownMode: String, CaseIterable, Sendable {
     case warmStop
     case fullDestroy
 
-    /// Internal rollback switch. The production default is fullDestroy; an
-    /// explicit warmStop override can be used if a deployment exposes a
-    /// lifecycle regression.
+    /// Internal rollback switch. Reusing the initialized libmpv client avoids
+    /// rebuilding the native player on every episode; fullDestroy remains an
+    /// explicit rollback for deployments that expose a lifecycle regression.
     static let defaultsKey = "player.teardownMode"
     static let environmentKey = "OKVIDEOMAC_PLAYER_TEARDOWN_MODE"
 
@@ -23,7 +23,7 @@ enum PlayerTeardownMode: String, CaseIterable, Sendable {
            let mode = PlayerTeardownMode(rawValue: raw) {
             return mode
         }
-        return .fullDestroy
+        return .warmStop
     }
 }
 

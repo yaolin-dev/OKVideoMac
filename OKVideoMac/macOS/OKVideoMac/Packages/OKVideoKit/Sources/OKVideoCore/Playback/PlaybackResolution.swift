@@ -173,39 +173,18 @@ public struct DefaultMediaProbe: MediaProbe {
         let isAndroidBridgeSession = Self.isAndroidBridgeMediaSession(url)
         let isNodeRuntimeProxy = Self.isNodeRuntimeMediaProxy(url)
 
-        do {
-            _ = try await httpClient.send(
-                HTTPRequest(
-                    url: url,
-                    method: .head,
-                    headers: headers,
-                    timeout: 10,
-                    maximumResponseBytes: 1_024,
-                    retryPolicy: .none
-                )
-            )
-            // HEAD is advisory only. A successful status or media-looking
-            // Content-Type does not prove that a short-lived cloud URL can
-            // return bytes with the supplied Cookie/Referer. Always continue
-            // with the bounded Range GET below.
-        } catch let error as HTTPClientError {
-            switch error {
-            case .statusCode, .invalidResponse:
-                break
-            default:
-                throw error
-            }
-        }
-
         var probeHeaders = headers
-        probeHeaders["Range"] = "bytes=0-65535"
+        // A single bounded byte request proves both reachability and body
+        // shape. HEAD is frequently unsupported by cloud proxies and doing
+        // both requests doubles startup latency without adding evidence.
+        probeHeaders["Range"] = "bytes=0-16383"
         do {
             let response = try await httpClient.send(
                 HTTPRequest(
                     url: url,
                     headers: probeHeaders,
-                    timeout: 10,
-                    maximumResponseBytes: 512 * 1_024,
+                    timeout: 8,
+                    maximumResponseBytes: 128 * 1_024,
                     maximumRedirects: 4,
                     retryPolicy: .none,
                     allowsNonSuccessfulStatus: true
@@ -232,7 +211,8 @@ public struct DefaultMediaProbe: MediaProbe {
             return valid
         } catch HTTPClientError.responseTooLarge
                     where MediaURLClassifier.isDirectMediaURL(url.absoluteString)
-                        || isAndroidBridgeSession {
+                        || isAndroidBridgeSession
+                        || isNodeRuntimeProxy {
             // Some VOD providers ignore Range and return a complete, very large
             // media playlist. Receiving more than the probe limit still proves
             // that the direct media endpoint is reachable.

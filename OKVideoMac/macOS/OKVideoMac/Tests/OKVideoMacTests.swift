@@ -880,7 +880,7 @@ final class OKVideoMacTests: XCTestCase {
                 environment: [:],
                 defaults: defaults
             ),
-            .fullDestroy
+            .warmStop
         )
 
         defaults.set(
@@ -912,7 +912,7 @@ final class OKVideoMacTests: XCTestCase {
                 environment: [:],
                 defaults: defaults
             ),
-            .fullDestroy
+            .warmStop
         )
     }
 
@@ -13011,7 +13011,106 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(result.headers["User-Agent"], "Site Agent")
         XCTAssertEqual(result.headers["Referer"], "https://response.example/")
         XCTAssertEqual(result.headers["Cookie"], "session=fixture")
-        XCTAssertEqual(result.validationPolicy, .providerPreflight)
+        XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
+    }
+
+    func testNodePlayerRoutesOpaqueCloudDirectLinkFailureToConfiguration()
+        async throws {
+        let site = SiteConfiguration(
+            key: "nodejs_tgsou",
+            name: "TG 搜",
+            type: 3,
+            api: "/spider/tgsou/3",
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.path.hasSuffix("/init") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            XCTAssertTrue(request.url.path.hasSuffix("/play"))
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(
+                    #"{"parse":0,"url":[],"error":"百度网盘获取原画直链失败"}"#.utf8
+                )
+            )
+        }
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        do {
+            _ = try await provider.player(
+                flag: "百度网盘",
+                episodeURL: "opaque-episode"
+            )
+            XCTFail("缺少百度授权时不应打开 0 KB 播放器")
+        } catch let authorization as NodeWebAuthorizationRequired {
+            XCTAssertEqual(
+                authorization.websiteURL.absoluteString,
+                "http://127.0.0.1:18988/website"
+            )
+            XCTAssertTrue(authorization.message.contains("百度网盘"))
+        }
+    }
+
+    func testNodePlayerPreservesImmediateHostConfigurationMessage() async throws {
+        let site = SiteConfiguration(
+            key: "nodejs_cloud_fixture",
+            name: "Cloud Fixture",
+            type: 3,
+            api: "/spider/cloud/3",
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let hostMessage = Data(
+            #"{"action":"openInternalWebview","opt":{"url":"http://127.0.0.1:18988/website"}}"#.utf8
+        ).base64EncodedString()
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.path.hasSuffix("/init") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: [
+                    "Content-Type": "application/json",
+                    "X-OKVideo-Host-Message": hostMessage
+                ],
+                body: Data(#"{"parse":0,"url":[]}"#.utf8)
+            )
+        }
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        do {
+            _ = try await provider.player(
+                flag: "云盘",
+                episodeURL: "opaque-episode"
+            )
+            XCTFail("播放接口的宿主配置消息不应被丢弃")
+        } catch let authorization as NodeWebAuthorizationRequired {
+            XCTAssertEqual(
+                authorization.websiteURL.absoluteString,
+                "http://127.0.0.1:18988/website"
+            )
+        }
     }
 
     func testNodeHomeDoesNotInferActionFromCategoryIdentifier() async throws {
@@ -13099,10 +13198,12 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             result.mediaSession?.resourceReference.providerKind,
             "node-http-spider-runtime"
         )
+        XCTAssertEqual(result.validationPolicy, .providerPreflight)
+        XCTAssertEqual(result.mediaSession?.rangePolicy, .providerDefined)
         XCTAssertNil(replayStore.replay(for: "episode"))
     }
 
-    func testNodePlayerRespectsProviderOrderForRuntimeOwnedTransports()
+    func testNodePlayerKeepsDecoderSelectedOriginalWithoutTransportProbe()
         async throws {
         let configurationIdentity = UUID().uuidString.lowercased()
         let replayStore = NodePlaybackReplayMemoryStore()
@@ -13136,7 +13237,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
 
         XCTAssertEqual(
             result.url,
-            "http://127.0.0.1:18988/spider/fixture/4/proxy/stream?id=1"
+            "https://media.example.invalid/original?id=1"
         )
         XCTAssertEqual(
             result.qualities.map(\.url),
@@ -13151,10 +13252,11 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             configurationIdentity
         )
         XCTAssertNil(replayStore.replay(for: "episode"))
-        XCTAssertEqual(result.mediaSession?.rangePolicy, .unsupported)
+        XCTAssertEqual(result.mediaSession?.rangePolicy, .providerDefined)
+        XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
     }
 
-    func testNodePlayerKeepsDirectOriginalWhenRangeProbeSucceeds()
+    func testNodePlayerKeepsDirectOriginalWithoutDuplicateRangeProbe()
         async throws {
         let directURL = "https://media.example.invalid/original?id=1"
         let site = SiteConfiguration(
@@ -13199,10 +13301,11 @@ final class NodeBundleCompatibilityTests: XCTestCase {
 
         XCTAssertEqual(result.url, directURL)
         XCTAssertEqual(result.mediaSession?.transport, .compatibilityDirect)
-        XCTAssertEqual(result.mediaSession?.rangePolicy, .forward)
+        XCTAssertEqual(result.mediaSession?.rangePolicy, .providerDefined)
+        XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
     }
 
-    func testNodePlayerMarksHLSSeekableOnlyAfterRandomSegmentProbe() async throws {
+    func testNodePlayerLeavesHLSSeekabilityToProviderAndPlayer() async throws {
         let hlsURL = "https://media.example.invalid/master.m3u8?token=fixture"
         let site = SiteConfiguration(
             key: "nodejs_fixture",
@@ -13260,10 +13363,11 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         let result = try await provider.player(flag: "hls", episodeURL: "episode")
 
         XCTAssertEqual(result.url, hlsURL)
-        XCTAssertEqual(result.mediaSession?.rangePolicy, .forward)
+        XCTAssertEqual(result.mediaSession?.rangePolicy, .providerDefined)
+        XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
     }
 
-    func testNodePlayerMarksSequentialOnlyHLSAsUnsupportedForSeek() async throws {
+    func testNodePlayerDoesNotProbeSequentialHLSBeforePlayback() async throws {
         let hlsURL = "https://media.example.invalid/linear.m3u8"
         let site = SiteConfiguration(
             key: "nodejs_fixture",
@@ -13316,7 +13420,8 @@ final class NodeBundleCompatibilityTests: XCTestCase {
 
         let result = try await provider.player(flag: "hls", episodeURL: "episode")
 
-        XCTAssertEqual(result.mediaSession?.rangePolicy, .unsupported)
+        XCTAssertEqual(result.mediaSession?.rangePolicy, .providerDefined)
+        XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
     }
 
     func testNodePlayerKeepsSharedQualitySelectionForRemoteTransports()
