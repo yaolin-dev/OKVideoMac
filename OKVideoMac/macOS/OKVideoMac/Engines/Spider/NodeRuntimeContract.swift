@@ -63,15 +63,20 @@ enum ContractBConfigBuilder {
     }
 
     static func validate(_ data: Data) throws {
-        guard data.count <= 1_024 * 1_024,
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let sites = root["sites"] as? [String: Any],
-              sites["list"] is [Any],
-              let pans = root["pans"] as? [String: Any],
-              pans["list"] is [Any],
-              root["danmu"] is [String: Any],
-              root["color"] is [Any]
-        else {
+        guard data.count <= 1_024 * 1_024 else {
+            throw NodeBundleRuntimeError.configurationContractInvalid
+        }
+        let value: Any
+        do {
+            value = try JSONSerialization.jsonObject(
+                with: data,
+                options: [.fragmentsAllowed]
+            )
+        } catch {
+            throw NodeBundleRuntimeError.configurationContractInvalid
+        }
+        guard let root = value as? [String: Any],
+              isJSONCompatible(root, depth: 0) else {
             throw NodeBundleRuntimeError.configurationContractInvalid
         }
     }
@@ -85,7 +90,7 @@ enum ContractBConfigBuilder {
               let userObject = try JSONSerialization.jsonObject(with: userValues)
                 as? [String: Any]
         else {
-            throw NodeBundleRuntimeError.configurationContractInvalid
+            throw NodeBundleRuntimeError.companionConfigurationSyntaxUnsupported
         }
         let merged = merge(defaults: defaultObject, userValues: userObject)
         let data = try JSONSerialization.data(
@@ -116,6 +121,30 @@ enum ContractBConfigBuilder {
         }
         return result
     }
+
+    /// CatPaw's companion configuration is a publisher-owned data object, not
+    /// a fixed FongMi schema. Safety validation therefore stops at a bounded
+    /// plain JSON tree and deliberately does not require `sites`, `pans`,
+    /// `danmu`, `color`, or any other business field.
+    private static func isJSONCompatible(_ value: Any, depth: Int) -> Bool {
+        guard depth <= 64 else { return false }
+        switch value {
+        case is NSNull, is String, is Bool:
+            return true
+        case let number as NSNumber:
+            return number.doubleValue.isFinite
+        case let values as [Any]:
+            return values.allSatisfy {
+                isJSONCompatible($0, depth: depth + 1)
+            }
+        case let values as [String: Any]:
+            return values.values.allSatisfy {
+                isJSONCompatible($0, depth: depth + 1)
+            }
+        default:
+            return false
+        }
+    }
 }
 
 /// Extracts the static object exported by CatPaw's `index.config.js` without
@@ -127,7 +156,9 @@ enum ContractBCompanionConfigParser {
         "var index_config_default =",
         "let index_config_default =",
         "const index_config_default =",
-        "export default"
+        "export default",
+        "module.exports =",
+        "exports.default ="
     ]
 
     static func normalizedConfiguration(from data: Data) throws -> Data {
@@ -173,7 +204,7 @@ private struct StaticJavaScriptValueParser {
     }
 
     private var invalid: NodeBundleRuntimeError {
-        .configurationContractInvalid
+        .companionConfigurationSyntaxUnsupported
     }
 
     private mutating func parseValue(depth: Int) throws -> Any {
@@ -522,7 +553,8 @@ enum NodeRuntimeContractFactory {
     const originalNetListen = net.Server.prototype.listen;
     const invocationStorage = new AsyncLocalStorage();
     const invocations = new Map();
-    const invocationTTLMilliseconds = 5000;
+    const pendingHostReplies = new Map();
+    const invocationTTLMilliseconds = 65000;
     const originalFetch = globalThis.fetch;
     const originalHTTPRequest = http.request;
     const originalHTTPSRequest = https.request;
@@ -534,14 +566,35 @@ enum NodeRuntimeContractFactory {
     }
 
     function validateConfig(config) {
-      const list = (value) => value && Array.isArray(value.list);
-      if (!config || typeof config !== 'object' || Array.isArray(config) ||
-          !list(config.sites) || !list(config.pans) ||
-          !config.danmu || typeof config.danmu !== 'object' ||
-          !Array.isArray(config.color)) {
+      const validValue = (value, depth) => {
+        if (depth > 64) return false;
+        if (value === null || typeof value === 'string' ||
+            typeof value === 'boolean') return true;
+        if (typeof value === 'number') return Number.isFinite(value);
+        if (Array.isArray(value)) {
+          return value.every((item) => validValue(item, depth + 1));
+        }
+        if (!isPlainObject(value)) return false;
+        return Object.values(value).every((item) =>
+          validValue(item, depth + 1)
+        );
+      };
+      if (!isPlainObject(config) || !validValue(config, 0)) {
         throw new Error('contract-b configuration rejected');
       }
       return config;
+    }
+
+    function mergeConfig(defaults, overrides) {
+      const result = Object.assign({}, defaults);
+      for (const [key, value] of Object.entries(overrides)) {
+        if (isPlainObject(result[key]) && isPlainObject(value)) {
+          result[key] = mergeConfig(result[key], value);
+        } else {
+          result[key] = value;
+        }
+      }
+      return result;
     }
 
     function loopbackListen(server, args) {
@@ -630,14 +683,92 @@ enum NodeRuntimeContractFactory {
     }
 
     function acceptHostMessage(value) {
-      if (!value || value.action !== 'openInternalWebview' ||
-          !value.opt || typeof value.opt !== 'object') {
+      if (!value || !value.opt || typeof value.opt !== 'object') {
         return null;
       }
-      const url = normalizeOwnedLoopbackURL(value.opt.url);
-      if (!url) return null;
-      const message = { action: 'openInternalWebview', opt: { url } };
-      return message;
+      if (value.action === 'openInternalWebview') {
+        const url = normalizeOwnedLoopbackURL(value.opt.url);
+        if (!url) return null;
+        return { action: 'openInternalWebview', opt: { url } };
+      }
+      if (value.action !== 'sniff') return null;
+      if (typeof value.opt.url !== 'string' || value.opt.url.length === 0 ||
+          value.opt.url.length > 8192) return null;
+      let parsed;
+      try { parsed = new URL(value.opt.url); }
+      catch (_) { return null; }
+      const hostname = parsed.hostname.toLowerCase();
+      if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+          isPrivateOrLoopbackIPv4(hostname) || hostname.endsWith('.local') ||
+          hostname.includes(':')) return null;
+      const headers = {};
+      if (value.opt.headers && typeof value.opt.headers === 'object' &&
+          !Array.isArray(value.opt.headers)) {
+        for (const [name, headerValue] of Object.entries(value.opt.headers).slice(0, 64)) {
+          if (typeof name === 'string' && name.length <= 128 &&
+              typeof headerValue === 'string' && headerValue.length <= 8192) {
+            headers[name] = headerValue;
+          }
+        }
+      }
+      let rule = value.opt.rule;
+      if (typeof rule !== 'string' && !Array.isArray(rule)) rule = [];
+      if (typeof rule === 'string') rule = rule.slice(0, 4096);
+      else rule = rule.filter((item) => typeof item === 'string')
+        .slice(0, 32).map((item) => item.slice(0, 4096));
+      const timeout = Math.max(1000, Math.min(Number(value.opt.timeout) || 15000, 60000));
+      return {
+        action: 'sniff',
+        requestID: crypto.randomUUID(),
+        opt: { url: parsed.toString(), timeout, rule, headers }
+      };
+    }
+
+    function pendingHostReplyKey(invocationID, requestID) {
+      return invocationID + ':' + requestID;
+    }
+
+    function completePendingHostReply(entry, result) {
+      if (!entry || entry.completed) return;
+      entry.completed = true;
+      clearTimeout(entry.timer);
+      pendingHostReplies.delete(entry.key);
+      if (entry.response.destroyed || entry.response.writableEnded) return;
+      entry.response.statusCode = 200;
+      entry.response.setHeader('Content-Type', 'application/json; charset=utf-8');
+      entry.response.end(JSON.stringify(result === undefined ? null : result));
+    }
+
+    function receiveHostMessageReply(request, response, invocationID, requestID) {
+      const key = pendingHostReplyKey(invocationID, requestID);
+      const entry = pendingHostReplies.get(key);
+      if (!entry) {
+        response.statusCode = 404;
+        response.end();
+        return;
+      }
+      let body = '';
+      let exceededLimit = false;
+      request.setEncoding('utf8');
+      request.on('data', (chunk) => {
+        if (exceededLimit) return;
+        body += chunk;
+        if (Buffer.byteLength(body, 'utf8') > 64 * 1024) {
+          exceededLimit = true;
+          body = '';
+        }
+      });
+      request.on('end', () => {
+        let result = null;
+        if (!exceededLimit) {
+          try { result = JSON.parse(body); }
+          catch (_) {}
+        }
+        completePendingHostReply(entry, result);
+        response.statusCode = exceededLimit ? 413 : 200;
+        response.setHeader('Content-Type', 'application/json; charset=utf-8');
+        response.end(exceededLimit ? '{"ok":false}' : '{"ok":true}');
+      });
     }
 
     function normalizedInvocationID(value) {
@@ -857,6 +988,33 @@ enum NodeRuntimeContractFactory {
         const invocationID = invocationIDFromRequest(request);
         const context = invocationID ? invocations.get(invocationID) : null;
         if (!accepted || !publishHostMessage(context, accepted)) accepted = null;
+        if (accepted && accepted.action === 'sniff') {
+          const key = pendingHostReplyKey(invocationID, accepted.requestID);
+          const entry = {
+            key,
+            response,
+            completed: false,
+            timer: null
+          };
+          const timeout = Math.max(1000, Math.min(
+            Number(accepted.opt.timeout) || 15000,
+            60000
+          ));
+          entry.timer = setTimeout(
+            () => completePendingHostReply(entry, null),
+            timeout + 1000
+          );
+          if (typeof entry.timer.unref === 'function') entry.timer.unref();
+          pendingHostReplies.set(key, entry);
+          response.once('close', () => {
+            if (!entry.completed && response.destroyed) {
+              entry.completed = true;
+              clearTimeout(entry.timer);
+              pendingHostReplies.delete(key);
+            }
+          });
+          return;
+        }
         response.statusCode = accepted ? 200 : 400;
         response.end(accepted ? '{"ok":true}' : '{"ok":false}');
       });
@@ -883,6 +1041,28 @@ enum NodeRuntimeContractFactory {
           return;
         }
         const requestURL = new URL(request.url || '/', 'http://127.0.0.1');
+        const replyPrefix = '/__okvideo/host-message-reply/';
+        if (request.method === 'POST' && requestURL.pathname.startsWith(replyPrefix)) {
+          const parts = requestURL.pathname.slice(replyPrefix.length).split('/');
+          const invocationID = normalizedInvocationID(
+            decodeURIComponent(parts[0] || '')
+          );
+          const requestID = normalizedInvocationID(
+            decodeURIComponent(parts[1] || '')
+          );
+          if (!invocationID || !requestID || parts.length !== 2) {
+            response.statusCode = 400;
+            response.end();
+            return;
+          }
+          receiveHostMessageReply(
+            request,
+            response,
+            invocationID,
+            requestID
+          );
+          return;
+        }
         const pollPrefix = '/__okvideo/host-message/';
         if (request.method === 'GET' && requestURL.pathname.startsWith(pollPrefix)) {
           const invocationID = normalizedInvocationID(
@@ -962,13 +1142,16 @@ enum NodeRuntimeContractFactory {
     }, 1000);
 
     try {
-      const minimumConfig = validateConfig(
+      const publisherConfig = validateConfig(
         JSON.parse(fs.readFileSync(configPath, 'utf8'))
       );
-      let config = minimumConfig;
+      let config = publisherConfig;
       const profile = readProfile();
-      try { config = validateConfig(profile); }
-      catch (_) { config = minimumConfig; }
+      try {
+        config = validateConfig(mergeConfig(publisherConfig, profile));
+      } catch (_) {
+        config = publisherConfig;
+      }
       runtime = require(bundlePath);
       if (!runtime || typeof runtime.start !== 'function' || typeof runtime.stop !== 'function') {
         throw new Error('contract-b lifecycle exports rejected');

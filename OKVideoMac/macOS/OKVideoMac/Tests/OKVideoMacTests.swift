@@ -9849,6 +9849,53 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(configuration.danmaku, "/danmu")
     }
 
+    func testNodeConfigurationNormalizationAcceptsSitesListShape() throws {
+        let source = Data(
+            #"{"sites":{"list":[{"key":"wrapped","name":"Wrapped","type":3,"api":"/spider/wrapped/3"}]}}"#.utf8
+        )
+
+        let normalized = try NodeBundleRuntimeService.normalizeConfiguration(source)
+        let configuration = try ConfigurationParser().parse(normalized)
+
+        XCTAssertEqual(configuration.sites.map(\.key), ["wrapped"])
+        XCTAssertEqual(
+            configuration.sites.first?.extra["okNodeModuleKind"],
+            .string("video")
+        )
+    }
+
+    func testNodeConfigurationRetainsOfficialNonVideoModulesWithoutVideoUIRouting()
+        throws {
+        let source = Data(
+            #"{"read":{"sites":[{"key":"book","name":"Book","type":13,"api":"/spider/book/13"}]},"comic":{"sites":[{"key":"comic","name":"Comic","type":20,"api":"/spider/comic/20"}]},"music":{"sites":[{"key":"music","name":"Music","type":30,"api":"/spider/music/30"}]},"pan":{"sites":[{"key":"alist","name":"AList","type":40,"api":"/spider/alist/40"}]}}"#.utf8
+        )
+
+        let normalized = try NodeBundleRuntimeService.normalizeConfiguration(
+            source,
+            bundleIdentity: "official-bundle",
+            profileRevision: "profile-1"
+        )
+        let configuration = try ConfigurationParser().parse(normalized)
+
+        XCTAssertEqual(configuration.sites.count, 4)
+        XCTAssertTrue(configuration.sites.allSatisfy { $0.hide == 1 })
+        XCTAssertTrue(configuration.sites.allSatisfy {
+            $0.extra["okNodeUnsupportedModule"] == .bool(true)
+        })
+        XCTAssertEqual(
+            Set(configuration.sites.compactMap {
+                $0.extra["okNodeModuleKind"]?.stringValue
+            }),
+            Set(["read", "comic", "music", "pan"])
+        )
+        XCTAssertTrue(configuration.sites.allSatisfy {
+            !NodeHTTPSpiderSiteProvider.canHandle(
+                site: $0,
+                baseURL: URL(string: "http://127.0.0.1:18080/")
+            )
+        })
+    }
+
     func testNodeConfigurationNormalizationPreservesDeclaredCapabilities() throws {
         let source = Data(
             #"{"video":{"sites":[{"key":"utility-fixture","name":"Renamed Utility","type":3,"api":"/spider/utility/3","enable":true,"searchable":0,"quickSearch":0,"filterable":0,"indexs":0},{"key":"home-fixture","name":"Renamed Home","type":3,"api":"/spider/home/3","enable":true,"searchable":1,"quickSearch":1,"filterable":1,"indexs":1},{"key":"disabled-fixture","name":"Disabled","type":3,"api":"/spider/disabled/3","enable":false}]}}"#
@@ -10172,6 +10219,26 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
     }
 
+    func testContractBCompanionConfigurationAcceptsOfficialPublisherOnlyShape()
+        throws {
+        let source = Data(
+            #"export default { kunyu77: { testcfg: { bbbb: 'aaaaa' } }, ffm3u8: { url: 'https://fixture.invalid/api' }, alist: [{ name: 'AList', server: 'https://alist.invalid' }], color: [] };"#.utf8
+        )
+
+        let normalized = try ContractBCompanionConfigParser
+            .normalizedConfiguration(from: source)
+        try ContractBConfigBuilder.validate(normalized)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: normalized) as? [String: Any]
+        )
+
+        XCTAssertNotNil(object["kunyu77"] as? [String: Any])
+        XCTAssertNotNil(object["ffm3u8"] as? [String: Any])
+        XCTAssertEqual((object["alist"] as? [Any])?.count, 1)
+        XCTAssertNil(object["sites"])
+        XCTAssertNil(object["pans"])
+    }
+
     func testContractBCompanionConfigurationRejectsExecutableValues() {
         let source = Data(
             #"""
@@ -10190,7 +10257,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         ) { error in
             XCTAssertEqual(
                 error as? NodeBundleRuntimeError,
-                .configurationContractInvalid
+                .companionConfigurationSyntaxUnsupported
             )
         }
     }
@@ -10244,15 +10311,12 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
     }
 
-    func testContractBConfigurationRejectsMissingRequiredCommonShape() {
-        XCTAssertThrowsError(
-            try ContractBConfigBuilder.validate(Data(#"{"sites":{"list":[]}}"#.utf8))
-        ) { error in
-            XCTAssertEqual(
-                error as? NodeBundleRuntimeError,
-                .configurationContractInvalid
-            )
-        }
+    func testContractBConfigurationAcceptsPublisherSpecificShape() throws {
+        let source = Data(
+            #"{"kunyu77":{"device":"publisher-value"},"ffm3u8":{"timeout":10}}"#.utf8
+        )
+
+        try ContractBConfigBuilder.validate(source)
     }
 
     func testContractBEnvironmentIsBoundedAndDoesNotPolluteContractA() throws {
@@ -11415,6 +11479,70 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         await service.stop()
     }
 
+    func testContractBBridgesSniffResultBackToOriginalNodeRequest() async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(
+                nodeContractBFixtureScript(startDelayMilliseconds: 0).utf8
+            )
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+        let endpoint = try await service.ensureReady(from: fixture.sourceURL)
+        let invocationID = UUID().uuidString.lowercased()
+        var request = URLRequest(url: endpoint.appendingPathComponent("host-sniff"))
+        request.httpMethod = "POST"
+        request.setValue(invocationID, forHTTPHeaderField: "X-OKVideo-Invocation-ID")
+        let businessTask = Task {
+            try await URLSession.shared.data(for: request)
+        }
+
+        var pollComponents = URLComponents(
+            url: endpoint.appendingPathComponent(
+                "__okvideo/host-message/\(invocationID)"
+            ),
+            resolvingAgainstBaseURL: false
+        )
+        pollComponents?.queryItems = [URLQueryItem(name: "wait", value: "2000")]
+        let (messageData, pollResponse) = try await URLSession.shared.data(
+            from: try XCTUnwrap(pollComponents?.url)
+        )
+        XCTAssertEqual((pollResponse as? HTTPURLResponse)?.statusCode, 200)
+        let message = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: messageData) as? [String: Any]
+        )
+        XCTAssertEqual(message["action"] as? String, "sniff")
+        let requestID = try XCTUnwrap(message["requestID"] as? String)
+        let options = try XCTUnwrap(message["opt"] as? [String: Any])
+        XCTAssertEqual(options["timeout"] as? Int, 10_000)
+
+        let replyURL = endpoint
+            .appendingPathComponent("__okvideo")
+            .appendingPathComponent("host-message-reply")
+            .appendingPathComponent(invocationID)
+            .appendingPathComponent(requestID)
+        var reply = URLRequest(url: replyURL)
+        reply.httpMethod = "POST"
+        reply.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        reply.httpBody = Data(
+            #"{"url":"https://media.example/video.m3u8","headers":{"referer":"https://page.example/"}}"#.utf8
+        )
+        let (_, replyResponse) = try await URLSession.shared.data(for: reply)
+        XCTAssertEqual((replyResponse as? HTTPURLResponse)?.statusCode, 200)
+
+        let (businessData, businessResponse) = try await businessTask.value
+        XCTAssertEqual((businessResponse as? HTTPURLResponse)?.statusCode, 200)
+        let result = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: businessData) as? [String: Any]
+        )
+        XCTAssertEqual(result["url"] as? String, "https://media.example/video.m3u8")
+        await service.stop()
+    }
+
     func testContractBQueuesLateHostActionByInvocationID() async throws {
         let fixture = try makeLegacyCacheFixture(
             script: Data(
@@ -12329,6 +12457,26 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                       response.statusCode = 500;
                       response.end(JSON.stringify({ok:false}));
                     });
+                } else if (request.url === '/host-sniff') {
+                  fetch(`http://127.0.0.1:${catDartServerPort()}/msg`, {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({
+                      action: 'sniff',
+                      opt: {
+                        url: 'https://page.example/player',
+                        timeout: 10000,
+                        rule: '\\.m3u8',
+                        headers: {'User-Agent':'fixture'}
+                      }
+                    })
+                  }).then(async (hostResponse) => {
+                    response.statusCode = hostResponse.status;
+                    response.end(await hostResponse.text());
+                  }).catch(() => {
+                    response.statusCode = 500;
+                    response.end(JSON.stringify({ok:false}));
+                  });
                 } else if (request.url.startsWith('/late-host-action-concurrent?')) {
                   const hostPort = catDartServerPort();
                   const marker = new URL(
@@ -13309,6 +13457,32 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
         XCTAssertEqual(result.mediaSession?.rangePolicy, .providerDefined)
         XCTAssertNil(replayStore.replay(for: "episode"))
+    }
+
+    func testNodePlaybackMapsOfficialJS2PWebProxyToCurrentRuntime() throws {
+        let baseURL = try XCTUnwrap(URL(string: "http://127.0.0.1:18988/"))
+
+        XCTAssertEqual(
+            NodeHTTPSpiderSiteProvider.normalizePlaybackURL(
+                "js2p://_WEB_/proxy/hls/ffm3u8/segment.m3u8?token=abc#part",
+                baseURL: baseURL
+            ),
+            "http://127.0.0.1:18988/proxy/hls/ffm3u8/segment.m3u8?token=abc#part"
+        )
+        XCTAssertEqual(
+            NodeHTTPSpiderSiteProvider.normalizePlaybackURL(
+                "js2p://external.example/proxy/hls/media.m3u8",
+                baseURL: baseURL
+            ),
+            "js2p://external.example/proxy/hls/media.m3u8"
+        )
+        XCTAssertEqual(
+            NodeHTTPSpiderSiteProvider.normalizePlaybackURL(
+                "js2p://_WEB_/website",
+                baseURL: baseURL
+            ),
+            "js2p://_WEB_/website"
+        )
     }
 
     func testNodePlayerKeepsProviderOrderedRelayWithoutTransportProbe()

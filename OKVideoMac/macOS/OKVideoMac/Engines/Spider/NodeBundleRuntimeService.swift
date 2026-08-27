@@ -541,6 +541,7 @@ enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
     case endpointUnavailable(String)
     case unsupportedHostContract
     case configurationContractInvalid
+    case companionConfigurationSyntaxUnsupported
     case hostCapabilityUnavailable
     case portAllocationFailed
     case loopbackEnforcementFailed
@@ -577,7 +578,9 @@ enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
         case .unsupportedHostContract:
             return "Node 运行协议不受支持"
         case .configurationContractInvalid:
-            return "Node 源配置不完整或格式不受支持"
+            return "Node 配置不是安全的 JSON 对象，或超出大小/深度限制"
+        case .companionConfigurationSyntaxUnsupported:
+            return "Node 配套 index.config.js 包含不受支持的语法；仅允许静态 JSON 兼容对象"
         case .hostCapabilityUnavailable:
             return "Node 宿主能力初始化失败"
         case .portAllocationFailed:
@@ -621,6 +624,7 @@ enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
             return .init(category: .cache, code: .cacheInvalidMetadata)
         case .bundledNodeMissing, .invalidNodeEnvironment, .nodeLaunchFailed,
              .unsupportedHostContract, .configurationContractInvalid,
+             .companionConfigurationSyntaxUnsupported,
              .hostCapabilityUnavailable, .portAllocationFailed,
              .loopbackEnforcementFailed, .contractBReadinessFailed:
             return .init(category: .runtime, code: .runtimeLaunchFailed)
@@ -877,6 +881,141 @@ struct NodeProfileRevisionSnapshot: Equatable, Sendable {
     let revision: String
 }
 
+enum CatPawModuleKind: String, CaseIterable, Codable, Sendable {
+    case video
+    case read
+    case comic
+    case music
+    case pan
+
+    var localizedName: String {
+        switch self {
+        case .video: return "影视"
+        case .read: return "小说"
+        case .comic: return "漫画"
+        case .music: return "音乐"
+        case .pan: return "网盘"
+        }
+    }
+}
+
+struct CatPawModuleDescriptor: Equatable, Sendable {
+    let moduleKind: CatPawModuleKind
+    let siteKey: String
+    let displayName: String
+    let spiderType: Int
+    let apiPath: String
+    let enabled: Bool
+    let searchable: Int?
+    let capabilities: Set<String>
+    let metadata: JSONValue
+}
+
+enum CatPawModuleCatalog {
+    static func descriptors(in root: [String: Any]) -> [CatPawModuleDescriptor] {
+        CatPawModuleKind.allCases.flatMap { kind in
+            rawSites(in: root, kind: kind).compactMap { raw in
+                descriptor(from: raw, kind: kind)
+            }
+        }
+    }
+
+    private static func rawSites(
+        in root: [String: Any],
+        kind: CatPawModuleKind
+    ) -> [[String: Any]] {
+        if kind == .video, let sites = siteArray(root["sites"]) {
+            return sites
+        }
+        guard let module = root[kind.rawValue] as? [String: Any] else {
+            return []
+        }
+        return siteArray(module["sites"]) ?? []
+    }
+
+    private static func siteArray(_ value: Any?) -> [[String: Any]]? {
+        if let sites = value as? [[String: Any]] { return sites }
+        if let container = value as? [String: Any] {
+            if let sites = container["list"] as? [[String: Any]] {
+                return sites
+            }
+            if let sites = container["sites"] as? [[String: Any]] {
+                return sites
+            }
+        }
+        return nil
+    }
+
+    private static func descriptor(
+        from raw: [String: Any],
+        kind: CatPawModuleKind
+    ) -> CatPawModuleDescriptor? {
+        let key = string(raw["key"] ?? raw["id"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return nil }
+        let displayName = string(raw["name"] ?? raw["title"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let capabilities = stringArray(
+            raw["capabilities"] ?? raw["okNodeCapabilities"]
+        )
+        let metadata = (try? JSONSerialization.data(
+            withJSONObject: raw,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )).flatMap { try? JSONDecoder().decode(JSONValue.self, from: $0) }
+            ?? .object([:])
+        return CatPawModuleDescriptor(
+            moduleKind: kind,
+            siteKey: key,
+            displayName: displayName.isEmpty ? key : displayName,
+            spiderType: integer(raw["type"]) ?? defaultType(for: kind),
+            apiPath: string(raw["api"]),
+            enabled: boolean(raw["enable"] ?? raw["enabled"]) ?? true,
+            searchable: integer(raw["searchable"]),
+            capabilities: Set(capabilities),
+            metadata: metadata
+        )
+    }
+
+    private static func defaultType(for kind: CatPawModuleKind) -> Int {
+        switch kind {
+        case .video: return 3
+        case .read: return 10
+        case .comic: return 20
+        case .music: return 30
+        case .pan: return 40
+        }
+    }
+
+    private static func string(_ value: Any?) -> String {
+        value as? String ?? ""
+    }
+
+    private static func integer(_ value: Any?) -> Int? {
+        if let value = value as? NSNumber { return value.intValue }
+        if let value = value as? String { return Int(value) }
+        return nil
+    }
+
+    private static func boolean(_ value: Any?) -> Bool? {
+        if let value = value as? Bool { return value }
+        if let value = value as? NSNumber { return value.boolValue }
+        if let value = value as? String {
+            switch value.lowercased() {
+            case "true", "1": return true
+            case "false", "0": return false
+            default: return nil
+            }
+        }
+        return nil
+    }
+
+    private static func stringArray(_ value: Any?) -> [String] {
+        if let values = value as? [String] { return values }
+        if let value = value as? String { return [value] }
+        return []
+    }
+}
+
 actor NodeBundleRuntimeService {
     private struct CompanionConfiguration: Sendable {
         let data: Data
@@ -979,6 +1118,7 @@ actor NodeBundleRuntimeService {
     private var activeBundleCacheKey: String?
     private var activeProfileStorageKey: String?
     private var activeProfileURL: URL?
+    private var activeRuntimeContract: NodeRuntimeContractKind?
     private var activeContractCleanupURLs: [URL] = []
     private var serviceBaseURL: URL?
     private var status: NodeRuntimeStatus = .stopped
@@ -1118,7 +1258,8 @@ actor NodeBundleRuntimeService {
             response.body,
             catalogData: catalogData,
             bundleIdentity: activeBundleCacheKey,
-            profileRevision: Self.profileRevision(at: activeProfileURL)
+            profileRevision: Self.profileRevision(at: activeProfileURL),
+            supportsHostMessageBridge: activeRuntimeContract == .hostIntegrated
         )
         try Task.checkCancellation()
         let parsed = try ConfigurationParser().parse(normalized)
@@ -1268,60 +1409,91 @@ actor NodeBundleRuntimeService {
         _ data: Data,
         catalogData: Data? = nil,
         bundleIdentity: String? = nil,
-        profileRevision: String? = nil
+        profileRevision: String? = nil,
+        supportsHostMessageBridge: Bool = false
     ) throws -> Data {
         guard var root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw AppError.configuration("Node 服务的 /config 未返回 JSON 对象")
         }
+        let activeDescriptors = CatPawModuleCatalog.descriptors(in: root)
+        guard !activeDescriptors.isEmpty else {
+            throw AppError.configuration(
+                "Node 服务的 /config 没有可识别的 video/read/comic/music/pan 模块"
+            )
+        }
+        let catalogRoot = catalogData.flatMap {
+            try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+        }
+        let catalogDescriptors = catalogRoot.map {
+            CatPawModuleCatalog.descriptors(in: $0)
+        } ?? []
 
-        func rawSites(in object: [String: Any]) -> [[String: Any]]? {
-            if let directSites = object["sites"] as? [[String: Any]] {
-                return directSites
-            }
-            if let video = object["video"] as? [String: Any],
-               let videoSites = video["sites"] as? [[String: Any]] {
-                return videoSites
-            }
-            return nil
+        if let video = root["video"] as? [String: Any],
+           root["danmaku"] == nil,
+           let danmaku = video["danmuSearchUrl"] as? String,
+           !danmaku.isEmpty {
+            root["danmaku"] = danmaku
         }
 
-        func siteKey(in site: [String: Any]) -> String? {
-            guard let value = site["key"] as? String else { return nil }
-            let key = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            return key.isEmpty ? nil : key
-        }
-
-        var sites: [[String: Any]]
-        if let configuredSites = rawSites(in: root) {
-            sites = configuredSites
-            if let video = root["video"] as? [String: Any],
-               root["danmaku"] == nil,
-               let danmaku = video["danmuSearchUrl"] as? String,
-               !danmaku.isEmpty {
-                root["danmaku"] = danmaku
+        func rawMetadata(
+            _ descriptor: CatPawModuleDescriptor
+        ) -> [String: Any] {
+            guard let data = try? JSONEncoder().encode(descriptor.metadata),
+                  let object = try? JSONSerialization.jsonObject(with: data)
+                    as? [String: Any] else {
+                return [:]
             }
-        } else {
-            throw AppError.configuration("Node 服务的 /config 缺少 video.sites")
+            return object
         }
 
-        func decoratedSite(_ rawSite: [String: Any]) -> [String: Any] {
-            var site = rawSite
+        func scopedIdentity(
+            kind: CatPawModuleKind,
+            key: String
+        ) -> String {
+            let value = [
+                bundleIdentity ?? "unknown-bundle",
+                profileRevision ?? "unconfigured",
+                kind.rawValue,
+                key
+            ].joined(separator: "\u{0}")
+            return SHA256.hash(data: Data(value.utf8))
+                .map { String(format: "%02x", $0) }
+                .joined()
+        }
+
+        func decoratedVideoSite(
+            _ descriptor: CatPawModuleDescriptor,
+            catalogDisabled: Bool
+        ) -> [String: Any] {
+            var site = rawMetadata(descriptor)
+            site["key"] = descriptor.siteKey
+            site["name"] = descriptor.displayName
+            site["type"] = descriptor.spiderType
+            site["api"] = descriptor.apiPath
             site["okNodeRuntime"] = true
-            let searchable = (site["searchable"] as? NSNumber)?.intValue
-            let publishedCapabilities = (site["okNodeCapabilities"] as? [Any])?
-                .compactMap { $0 as? String }
-            if let publishedCapabilities {
-                let supportsSearch = publishedCapabilities.contains("search")
+            site["okNodeModuleKind"] = CatPawModuleKind.video.rawValue
+            site["okNodeSpiderType"] = descriptor.spiderType
+            site["okNodeHostMessageBridge"] = supportsHostMessageBridge
+            site["okNodeSiteIdentity"] = scopedIdentity(
+                kind: .video,
+                key: descriptor.siteKey
+            )
+            let publishedCapabilities = (
+                (site["okNodeCapabilities"] as? [Any])?
+                    .compactMap { $0 as? String }
+                ?? (site["capabilities"] as? [Any])?
+                    .compactMap { $0 as? String }
+                ?? descriptor.capabilities.sorted()
+            )
+            if !publishedCapabilities.isEmpty {
+                let supportsSearch = descriptor.capabilities.contains("search")
                 site["okNodeCapabilities"] = publishedCapabilities
                 site["okNodeSearchCapabilityState"] = supportsSearch
                     ? "supported"
                     : "unsupported"
-                site["searchable"] = searchable ?? (supportsSearch ? 1 : 0)
-            } else if let searchable {
-                // FongMi's declared tri-state remains authoritative when the
-                // Spider publishes it: 0 is unsupported, 1 is enabled and 2
-                // is user-disabled. It describes search selection, not the
-                // rest of the Spider's routes.
+                site["searchable"] = descriptor.searchable
+                    ?? (supportsSearch ? 1 : 0)
+            } else if let searchable = descriptor.searchable {
                 site["searchable"] = searchable
                 site["okNodeSearchCapabilityState"] = searchable == 0
                     ? "unsupported"
@@ -1330,12 +1502,6 @@ actor NodeBundleRuntimeService {
                     ? []
                     : ["search"]
             } else {
-                // CatPawOpen copies Spider metadata into `/config` separately
-                // from registering `spider.api`. Many real search providers
-                // therefore omit `searchable` even though POST `/search`
-                // exists. Preserve that distinction as `unknown` and keep the
-                // provider eligible until an exact route-not-found response
-                // proves otherwise.
                 site["searchable"] = 1
                 site["okNodeSearchCapabilityState"] = "unknown"
                 site.removeValue(forKey: "okNodeCapabilities")
@@ -1346,38 +1512,82 @@ actor NodeBundleRuntimeService {
             if let profileRevision {
                 site["okNodeProfileRevision"] = profileRevision
             }
-            if site["hide"] == nil, let enabled = site["enable"] as? Bool, !enabled {
+            if !descriptor.enabled || catalogDisabled {
                 site["hide"] = 1
+            }
+            if catalogDisabled {
+                site["okNodeCatalogDisabled"] = true
+                let searchable = (site["searchable"] as? NSNumber)?.intValue ?? 0
+                if searchable != 0 { site["searchable"] = 2 }
             }
             return site
         }
-        sites = sites.map(decoratedSite)
 
-        if let catalogData,
-           let catalogRoot = try? JSONSerialization.jsonObject(with: catalogData)
-                as? [String: Any],
-           let catalogueSites = rawSites(in: catalogRoot) {
-            var knownKeys = Set(
-                sites.compactMap(siteKey)
-            )
-            for rawSite in catalogueSites {
-                guard let key = siteKey(in: rawSite),
-                      knownKeys.insert(key).inserted else { continue }
-                var site = decoratedSite(rawSite)
-                site["okNodeCatalogDisabled"] = true
-                // Keep catalogue-only providers out of the Home source menu,
-                // while retaining them for the search scope editor/provider
-                // registry. A non-zero searchable value is the FongMi
-                // user-disabled state and can be explicitly re-enabled.
-                site["hide"] = 1
-                let searchable = (site["searchable"] as? NSNumber)?.intValue ?? 0
-                if searchable != 0 {
-                    site["searchable"] = 2
-                }
-                sites.append(site)
+        var sites: [[String: Any]] = activeDescriptors
+            .filter { $0.moduleKind == .video }
+            .map { decoratedVideoSite($0, catalogDisabled: false) }
+        var knownVideoKeys = Set(
+            activeDescriptors.lazy
+                .filter { $0.moduleKind == .video }
+                .map(\.siteKey)
+        )
+        for descriptor in catalogDescriptors where descriptor.moduleKind == .video {
+            guard knownVideoKeys.insert(descriptor.siteKey).inserted else {
+                continue
             }
+            sites.append(decoratedVideoSite(descriptor, catalogDisabled: true))
         }
 
+        // Keep non-video modules visible to diagnostics/import status without
+        // forcing their routes through the video provider model. The hidden
+        // placeholder is intentionally unsupported until its dedicated UI is
+        // enabled, but the complete publisher metadata remains in `extra`.
+        var knownModuleIdentities = Set<String>()
+        let allDescriptors = activeDescriptors.map { ($0, false) }
+            + catalogDescriptors.map { ($0, true) }
+        for (descriptor, catalogDisabled) in allDescriptors
+        where descriptor.moduleKind != .video {
+            let moduleIdentity = "\(descriptor.moduleKind.rawValue)::\(descriptor.siteKey)"
+            guard knownModuleIdentities.insert(moduleIdentity).inserted else {
+                continue
+            }
+            var site = rawMetadata(descriptor)
+            site["key"] = "node-module:\(descriptor.moduleKind.rawValue):\(descriptor.siteKey)"
+            site["name"] = "[\(descriptor.moduleKind.localizedName)] \(descriptor.displayName)"
+            site["type"] = 3
+            site["api"] = descriptor.apiPath.isEmpty
+                ? "catpaw-module:\(descriptor.moduleKind.rawValue):\(descriptor.siteKey)"
+                : descriptor.apiPath
+            site["hide"] = 1
+            site["searchable"] = 0
+            site["quickSearch"] = 0
+            site["indexs"] = 0
+            site["okNodeRuntime"] = true
+            site["okNodeModuleKind"] = descriptor.moduleKind.rawValue
+            site["okNodeModuleOriginalKey"] = descriptor.siteKey
+            site["okNodeSpiderType"] = descriptor.spiderType
+            site["okNodeHostMessageBridge"] = supportsHostMessageBridge
+            site["okNodeModuleEnabled"] = descriptor.enabled && !catalogDisabled
+            site["okNodeUnsupportedModule"] = true
+            site["okNodeCapabilities"] = descriptor.capabilities.sorted()
+            site["okNodeSiteIdentity"] = scopedIdentity(
+                kind: descriptor.moduleKind,
+                key: descriptor.siteKey
+            )
+            if catalogDisabled { site["okNodeCatalogDisabled"] = true }
+            if let bundleIdentity { site["okNodeBundleIdentity"] = bundleIdentity }
+            if let profileRevision { site["okNodeProfileRevision"] = profileRevision }
+            sites.append(site)
+        }
+
+        root["okCatPawModuleCounts"] = Dictionary(
+            uniqueKeysWithValues: CatPawModuleKind.allCases.map { kind in
+                (
+                    kind.rawValue,
+                    activeDescriptors.filter { $0.moduleKind == kind }.count
+                )
+            }
+        )
         root["sites"] = sites
 
         do {
@@ -2723,6 +2933,7 @@ actor NodeBundleRuntimeService {
         let contract = try NodeRuntimeContractDetector.detect(
             validatedBundleData: validatedBundleData
         )
+        activeRuntimeContract = contract
         let nodeExecutable = try nodeExecutableURL()
         let launcherURL = bundle.runtimeDirectory.appendingPathComponent("launcher.js")
         let writer = diagnosticWriters[bundle.cacheKey] ?? NodeDiagnosticLogWriter(
@@ -3061,6 +3272,7 @@ actor NodeBundleRuntimeService {
         activeBundleCacheKey = nil
         activeProfileStorageKey = nil
         activeProfileURL = nil
+        activeRuntimeContract = nil
         removeActiveContractArtifacts()
         serviceBaseURL = nil
         if let newStatus {
@@ -3091,6 +3303,7 @@ actor NodeBundleRuntimeService {
         activeBundleCacheKey = nil
         activeProfileStorageKey = nil
         activeProfileURL = nil
+        activeRuntimeContract = nil
         removeActiveContractArtifacts()
         serviceBaseURL = nil
         healthMonitorTask?.cancel()

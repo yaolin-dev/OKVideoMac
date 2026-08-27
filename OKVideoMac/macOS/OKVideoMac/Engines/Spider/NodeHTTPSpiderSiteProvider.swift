@@ -55,6 +55,20 @@ private actor NodeSiteInitializationGate {
     }
 }
 
+private actor NodeRouteCapabilityCache {
+    static let shared = NodeRouteCapabilityCache()
+
+    private var unsupportedRoutes: Set<String> = []
+
+    func isUnsupported(_ route: String, siteIdentity: String) -> Bool {
+        unsupportedRoutes.contains("\(siteIdentity)|\(route)")
+    }
+
+    func markUnsupported(_ route: String, siteIdentity: String) {
+        unsupportedRoutes.insert("\(siteIdentity)|\(route)")
+    }
+}
+
 struct NodeRuntimeUnavailableSiteProvider: SiteProvider {
     let site: SiteConfiguration
     let capability: SiteCapability = .javaScriptSpider
@@ -86,6 +100,28 @@ struct NodeWebAuthorizationRequired: Error, LocalizedError, Equatable {
     let message: String
 
     var errorDescription: String? { message }
+}
+
+@MainActor
+private enum NodeHostSniffBridge {
+    private static var activeSniffer: WKWebSniffer?
+
+    static func sniff(_ request: WebSniffRequest) async throws -> SniffedMedia {
+        activeSniffer?.cancel()
+        let sniffer = WKWebSniffer()
+        activeSniffer = sniffer
+        defer {
+            if activeSniffer === sniffer {
+                activeSniffer = nil
+            }
+        }
+        return try await sniffer.sniff(request)
+    }
+
+    static func cancel() {
+        activeSniffer?.cancel()
+        activeSniffer = nil
+    }
 }
 
 protocol QuarkPasscodeStoring {
@@ -481,12 +517,9 @@ enum QuarkEpisodeReference {
 
 final class NodeHTTPSpiderSiteProvider: SiteProvider {
     private struct HostMessage: Decodable {
-        struct Options: Decodable {
-            let url: String
-        }
-
         let action: String
-        let opt: Options
+        let requestID: String?
+        let opt: JSONValue
     }
 
     private struct InvocationResult {
@@ -512,6 +545,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     static func canHandle(site: SiteConfiguration, baseURL: URL?) -> Bool {
         guard (site.type == 3 || site.type == 4),
               site.extra["okNodeRuntime"] == .bool(true),
+              (site.extra["okNodeModuleKind"]?.stringValue ?? "video") == "video",
+              site.extra["okNodeUnsupportedModule"] != .bool(true),
               site.api.contains("/spider/"),
               let baseURL,
               baseURL.scheme?.lowercased() == "http",
@@ -722,20 +757,42 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 pagination: Pagination(page: page, pageCount: 0)
             )
         }
-        let invocation = try await invoke(
-            method: "search",
-            body: [
-                "wd": .string(keyword),
-                "key": .string(keyword),
-                "quick": .bool(quick),
-                "page": .string(String(page)),
-                "pg": .string(String(page))
-            ],
-            // A first-pass aggregate search must invoke each CatPawOpen route
-            // exactly once. Retrying here occupies another Node worker and
-            // delays sites that have not received their first request yet.
-            maximumAttempts: 1
-        )
+        let siteIdentity = capabilitySiteIdentity
+        if let siteIdentity,
+           await NodeRouteCapabilityCache.shared.isUnsupported(
+            "search",
+            siteIdentity: siteIdentity
+           ) {
+            throw SiteSearchError(
+                "\(site.name) search 失败：该 Bundle 与 Profile 已确认未注册搜索路由",
+                category: .unsupportedRoute
+            )
+        }
+        let invocation: InvocationResult
+        do {
+            invocation = try await invoke(
+                method: "search",
+                body: [
+                    "wd": .string(keyword),
+                    "key": .string(keyword),
+                    "quick": .bool(quick),
+                    "page": .string(String(page)),
+                    "pg": .string(String(page))
+                ],
+                // A first-pass aggregate search must invoke each CatPawOpen route
+                // exactly once. Retrying here occupies another Node worker and
+                // delays sites that have not received their first request yet.
+                maximumAttempts: 1
+            )
+        } catch let error as SiteSearchError {
+            if error.category == .unsupportedRoute, let siteIdentity {
+                await NodeRouteCapabilityCache.shared.markUnsupported(
+                    "search",
+                    siteIdentity: siteIdentity
+                )
+            }
+            throw error
+        }
         let result = try SpiderResponseMapper.page(
             invocation.value,
             site: site,
@@ -751,6 +808,23 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             )
         }
         return result
+    }
+
+    private var capabilitySiteIdentity: String? {
+        if let identity = site.extra["okNodeSiteIdentity"]?.stringValue,
+           !identity.isEmpty {
+            return identity
+        }
+        guard let bundleIdentity = site.extra["okNodeBundleIdentity"]?.stringValue,
+              let profileRevision = site.extra["okNodeProfileRevision"]?.stringValue else {
+            return nil
+        }
+        return [
+            bundleIdentity,
+            profileRevision,
+            site.extra["okNodeModuleKind"]?.stringValue ?? "video",
+            site.key
+        ].joined(separator: "|")
     }
 
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
@@ -795,7 +869,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             if MediaURLClassifier.isDirectMediaURL(episodeURL) {
                 let readyBaseURL = try await runtimeBaseURL()
                 return SitePlaybackResult(
-                    url: normalizePlaybackURL(
+                    url: Self.normalizePlaybackURL(
                         episodeURL,
                         baseURL: readyBaseURL
                     ),
@@ -967,14 +1041,14 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             providerDescriptor: SpiderResponseMapper
                 .providerPlaybackResourceDescriptor(invocation.value)
         )
-        result.url = normalizePlaybackURL(
+        result.url = Self.normalizePlaybackURL(
             result.url,
             baseURL: invocation.baseURL
         )
         result.qualities = result.qualities.map {
             PlaybackQuality(
                 name: $0.name,
-                url: normalizePlaybackURL(
+                url: Self.normalizePlaybackURL(
                     $0.url,
                     baseURL: invocation.baseURL
                 )
@@ -1005,7 +1079,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         // media request for both loopback and remote provider transports.
         result.validationPolicy = .playerAuthoritative
         result.subtitles = result.subtitles.map { subtitle in
-            URL(string: normalizePlaybackURL(
+            URL(string: Self.normalizePlaybackURL(
                 subtitle.absoluteString,
                 baseURL: invocation.baseURL
             ))
@@ -1267,18 +1341,52 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 lastEndpoint = endpoint
                 let invocationID = UUID().uuidString.lowercased()
                 headers["X-OKVideo-Invocation-ID"] = invocationID
-                let response = try await httpClient.send(
-                    HTTPRequest(
-                        url: endpoint,
-                        method: .post,
-                        headers: headers,
-                        body: requestBody,
-                        timeout: TimeInterval(site.timeout ?? 60),
-                        maximumResponseBytes: 16 * 1_024 * 1_024,
-                        retryPolicy: .none,
-                        allowsNonSuccessfulStatus: true
-                    )
+                let routeRequest = HTTPRequest(
+                    url: endpoint,
+                    method: .post,
+                    headers: headers,
+                    body: requestBody,
+                    timeout: TimeInterval(site.timeout ?? 60),
+                    maximumResponseBytes: 16 * 1_024 * 1_024,
+                    retryPolicy: .none,
+                    allowsNonSuccessfulStatus: true
                 )
+                let response: HTTPResponse
+                var concurrentHostMessage: HostMessage?
+                if method == "play",
+                   site.extra["okNodeHostMessageBridge"] == .bool(true) {
+                    let routeTask = Task {
+                        try await httpClient.send(routeRequest)
+                    }
+                    let hostTask = Task {
+                        try await monitorPlaybackHostMessages(
+                            invocationID: invocationID,
+                            baseURL: readyBaseURL
+                        )
+                    }
+                    do {
+                        response = try await withTaskCancellationHandler {
+                            try await routeTask.value
+                        } onCancel: {
+                            routeTask.cancel()
+                            hostTask.cancel()
+                            Task { @MainActor in
+                                NodeHostSniffBridge.cancel()
+                            }
+                        }
+                        hostTask.cancel()
+                        concurrentHostMessage = try? await hostTask.value
+                    } catch {
+                        routeTask.cancel()
+                        hostTask.cancel()
+                        Task { @MainActor in
+                            NodeHostSniffBridge.cancel()
+                        }
+                        throw error
+                    }
+                } else {
+                    response = try await httpClient.send(routeRequest)
+                }
                 let value: JSONValue
                 if response.body.isEmpty {
                     value = .null
@@ -1299,7 +1407,9 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                         response.headers["X-OKVideo-Host-Message"]
                     )
                     let hostMessage: HostMessage?
-                    if let immediateHostMessage {
+                    if let concurrentHostMessage {
+                        hostMessage = concurrentHostMessage
+                    } else if let immediateHostMessage {
                         hostMessage = immediateHostMessage
                     } else if hostMessageWaitMilliseconds > 0 {
                         hostMessage = try await awaitHostMessage(
@@ -1523,6 +1633,169 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         }
     }
 
+    private func monitorPlaybackHostMessages(
+        invocationID: String,
+        baseURL: URL
+    ) async throws -> HostMessage? {
+        while !Task.isCancelled {
+            if let message = try await awaitHostMessage(
+                invocationID: invocationID,
+                baseURL: baseURL,
+                waitMilliseconds: 1_000
+            ) {
+                if message.action == "sniff" {
+                    await performHostSniff(
+                        message,
+                        invocationID: invocationID,
+                        baseURL: baseURL
+                    )
+                    return nil
+                }
+                return message
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        throw CancellationError()
+    }
+
+    private func performHostSniff(
+        _ message: HostMessage,
+        invocationID: String,
+        baseURL: URL
+    ) async {
+        guard let requestID = message.requestID,
+              Self.isValidHostMessageIdentifier(requestID),
+              let options = message.opt.objectValue,
+              let rawURL = options["url"]?.stringValue,
+              let pageURL = URL(string: rawURL),
+              Self.isSafeExternalSniffURL(pageURL) else {
+            try? await sendHostMessageReply(
+                .null,
+                invocationID: invocationID,
+                requestID: message.requestID ?? "invalid",
+                baseURL: baseURL
+            )
+            return
+        }
+        var headers: [String: String] = [:]
+        if let publishedHeaders = options["headers"]?.objectValue {
+            for (name, value) in publishedHeaders.prefix(64) {
+                guard name.utf8.count <= 128,
+                      let headerValue = value.stringValue,
+                      headerValue.utf8.count <= 8 * 1_024 else { continue }
+                headers[name] = headerValue
+            }
+        }
+        let patterns: [String]
+        switch options["rule"] {
+        case .string(let value):
+            patterns = [value]
+        case .array(let values):
+            patterns = values.compactMap(\.stringValue)
+        default:
+            patterns = []
+        }
+        let timeoutMilliseconds: Double
+        switch options["timeout"] {
+        case .integer(let value): timeoutMilliseconds = Double(value)
+        case .number(let value): timeoutMilliseconds = value
+        default: timeoutMilliseconds = 15_000
+        }
+        let request = WebSniffRequest(
+            siteKey: "node:\(site.key)",
+            url: pageURL,
+            headers: HTTPHeaders(headers),
+            mediaPatterns: Array(patterns.prefix(32)),
+            timeout: min(max(timeoutMilliseconds / 1_000, 1), 60),
+            allowsPrivateNetworkAccess: false
+        )
+        let reply: JSONValue
+        do {
+            let media = try await NodeHostSniffBridge.sniff(request)
+            var responseHeaders: [String: JSONValue] = [:]
+            for (name, value) in media.headers.dictionary {
+                responseHeaders[name.lowercased()] = .string(value)
+            }
+            reply = .object([
+                "url": .string(media.url.absoluteString),
+                "headers": .object(responseHeaders)
+            ])
+        } catch {
+            reply = .null
+        }
+        try? await sendHostMessageReply(
+            reply,
+            invocationID: invocationID,
+            requestID: requestID,
+            baseURL: baseURL
+        )
+    }
+
+    private func sendHostMessageReply(
+        _ value: JSONValue,
+        invocationID: String,
+        requestID: String,
+        baseURL: URL
+    ) async throws {
+        guard Self.isValidHostMessageIdentifier(invocationID),
+              Self.isValidHostMessageIdentifier(requestID) else {
+            throw AppError.spider("Node 宿主操作关联标识无效")
+        }
+        let endpoint = baseURL
+            .appendingPathComponent("__okvideo")
+            .appendingPathComponent("host-message-reply")
+            .appendingPathComponent(invocationID)
+            .appendingPathComponent(requestID)
+        let response = try await httpClient.send(
+            HTTPRequest(
+                url: endpoint,
+                method: .post,
+                headers: ["Content-Type": "application/json; charset=utf-8"],
+                body: try JSONEncoder().encode(value),
+                timeout: 5,
+                maximumResponseBytes: 8 * 1_024,
+                retryPolicy: .none,
+                allowsNonSuccessfulStatus: true
+            )
+        )
+        guard (200...299).contains(response.statusCode) else {
+            throw AppError.spider(
+                "Node 宿主操作回传失败：HTTP 状态码 \(response.statusCode)"
+            )
+        }
+    }
+
+    private static func isValidHostMessageIdentifier(_ value: String) -> Bool {
+        guard (8...128).contains(value.count) else { return false }
+        return value.unicodeScalars.allSatisfy {
+            CharacterSet.alphanumerics.contains($0)
+                || ".-_".unicodeScalars.contains($0)
+        }
+    }
+
+    private static func isSafeExternalSniffURL(_ url: URL) -> Bool {
+        guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              let host = url.host?.lowercased(),
+              !host.isEmpty,
+              host != "localhost",
+              !host.hasSuffix(".localhost"),
+              !host.hasSuffix(".local"),
+              !host.contains(":") else {
+            return false
+        }
+        let parts = host.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4 else { return true }
+        guard parts.allSatisfy({ (0...255).contains($0) }) else { return false }
+        return !(parts[0] == 0
+            || parts[0] == 10
+            || parts[0] == 127
+            || (parts[0] == 100 && (64...127).contains(parts[1]))
+            || (parts[0] == 169 && parts[1] == 254)
+            || (parts[0] == 172 && (16...31).contains(parts[1]))
+            || (parts[0] == 192 && parts[1] == 168)
+            || parts[0] >= 224)
+    }
+
     private func awaitHostMessage(
         invocationID: String,
         baseURL: URL,
@@ -1621,7 +1894,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         hostMessage: HostMessage
     ) throws -> NodeWebAuthorizationRequired {
         guard hostMessage.action == "openInternalWebview",
-              let url = URL(string: hostMessage.opt.url),
+              let rawURL = hostMessage.opt.objectValue?["url"]?.stringValue,
+              let url = URL(string: rawURL),
               url.scheme?.lowercased() == "http",
               ["127.0.0.1", "localhost", "::1"].contains(
                 url.host?.lowercased() ?? ""
@@ -1658,7 +1932,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         return baseURL
     }
 
-    private func normalizePlaybackURL(
+    static func normalizePlaybackURL(
         _ rawValue: String,
         baseURL: URL
     ) -> String {
@@ -1669,7 +1943,27 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 .appendingPathComponent(String(value.dropFirst()))
                 .absoluteString
         }
-        guard var components = URLComponents(string: value),
+        guard var components = URLComponents(string: value) else {
+            return value
+        }
+        if components.scheme?.lowercased() == "js2p" {
+            guard components.host?.lowercased() == "_web_",
+                  components.path.hasPrefix("/spider/")
+                    || components.path.hasPrefix("/proxy/"),
+                  baseURL.scheme?.lowercased() == "http",
+                  ["127.0.0.1", "localhost", "::1"].contains(
+                    baseURL.host?.lowercased() ?? ""
+                  ) else {
+                return value
+            }
+            components.scheme = baseURL.scheme
+            components.host = baseURL.host
+            components.port = baseURL.port
+            components.user = nil
+            components.password = nil
+            return components.url?.absoluteString ?? value
+        }
+        guard
               let port = components.port,
               port == baseURL.port,
               components.path.hasPrefix("/spider/")

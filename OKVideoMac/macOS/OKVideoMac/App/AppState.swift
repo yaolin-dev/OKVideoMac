@@ -1237,6 +1237,10 @@ enum SearchScopeSiteAvailabilityPolicy {
         for site: SiteConfiguration,
         providerCapability: SiteCapability?
     ) -> SearchScopeSiteAvailability {
+        if site.extra["okNodeUnsupportedModule"] == .bool(true) {
+            let kind = site.extra["okNodeModuleKind"]?.stringValue ?? "其他"
+            return .unavailable("已识别 \(kind) 模块，当前版本尚未启用对应界面")
+        }
         let isCatalogueDisabled = site.extra["okNodeCatalogDisabled"]
             == .bool(true)
         if site.extra["okNodeConfigurationRequired"] == .bool(true) {

@@ -8,6 +8,7 @@ public struct WebSniffRequest: Equatable, Sendable {
     public var clickScript: String?
     public var timeout: TimeInterval
     public var debugVisible: Bool
+    public var allowsPrivateNetworkAccess: Bool
 
     public init(
         siteKey: String,
@@ -16,7 +17,8 @@ public struct WebSniffRequest: Equatable, Sendable {
         mediaPatterns: [String] = [],
         clickScript: String? = nil,
         timeout: TimeInterval = 15,
-        debugVisible: Bool = false
+        debugVisible: Bool = false,
+        allowsPrivateNetworkAccess: Bool = true
     ) {
         self.siteKey = siteKey
         self.url = url
@@ -25,6 +27,7 @@ public struct WebSniffRequest: Equatable, Sendable {
         self.clickScript = clickScript
         self.timeout = max(1, timeout)
         self.debugVisible = debugVisible
+        self.allowsPrivateNetworkAccess = allowsPrivateNetworkAccess
     }
 }
 
