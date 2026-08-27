@@ -204,6 +204,7 @@ final class OKVideoMacTests: XCTestCase {
             BrowserEscapeRoutePolicy.action(
                 isHomeSearchPresented: true,
                 isSearching: true,
+                hasDetailPresentation: false,
                 hasBlockingPresentation: false
             ),
             .stopSearch
@@ -212,6 +213,7 @@ final class OKVideoMacTests: XCTestCase {
             BrowserEscapeRoutePolicy.action(
                 isHomeSearchPresented: true,
                 isSearching: false,
+                hasDetailPresentation: false,
                 hasBlockingPresentation: false
             ),
             .returnHome
@@ -223,6 +225,7 @@ final class OKVideoMacTests: XCTestCase {
             BrowserEscapeRoutePolicy.action(
                 isHomeSearchPresented: true,
                 isSearching: true,
+                hasDetailPresentation: false,
                 hasBlockingPresentation: true
             ),
             .none
@@ -231,9 +234,44 @@ final class OKVideoMacTests: XCTestCase {
             BrowserEscapeRoutePolicy.action(
                 isHomeSearchPresented: false,
                 isSearching: false,
+                hasDetailPresentation: false,
                 hasBlockingPresentation: false
             ),
             .none
+        )
+    }
+
+    func testBrowserEscapeDismissesDetailBeforeSearch() {
+        XCTAssertEqual(
+            BrowserEscapeRoutePolicy.action(
+                isHomeSearchPresented: true,
+                isSearching: false,
+                hasDetailPresentation: true,
+                hasBlockingPresentation: false
+            ),
+            .dismissDetail
+        )
+    }
+
+    func testDetailReturnSnapshotOnlyCapturesHomeSearch() {
+        XCTAssertNil(
+            DetailHomeSearchReturnPolicy.capture(
+                isHomeSearchPresented: false,
+                selectedSiteKey: "site-a",
+                folderPath: []
+            )
+        )
+
+        XCTAssertEqual(
+            DetailHomeSearchReturnPolicy.capture(
+                isHomeSearchPresented: true,
+                selectedSiteKey: "site-a",
+                folderPath: []
+            ),
+            DetailHomeSearchReturnSnapshot(
+                selectedSiteKey: "site-a",
+                folderPath: []
+            )
         )
     }
 

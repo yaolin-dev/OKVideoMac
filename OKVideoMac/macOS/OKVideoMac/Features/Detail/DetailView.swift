@@ -521,7 +521,6 @@ private struct DetailCloseButton: View {
         .scaleEffect(isHovering ? 1.06 : 1)
         .animation(.easeOut(duration: 0.12), value: isHovering)
         .onHover { isHovering = $0 }
-        .keyboardShortcut(.cancelAction)
         .help("关闭详情")
         .accessibilityLabel("关闭详情")
     }

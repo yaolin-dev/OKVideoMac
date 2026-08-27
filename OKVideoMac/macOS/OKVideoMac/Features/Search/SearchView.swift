@@ -48,9 +48,6 @@ struct SearchView: View {
                 searchToolbar
             }
         }
-        .onDisappear {
-            state.cancelSearch()
-        }
         .overlay {
             if let cluster = sourceSelectionCluster {
                 SearchSourcePicker(

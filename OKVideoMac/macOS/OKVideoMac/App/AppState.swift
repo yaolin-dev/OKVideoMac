@@ -63,6 +63,7 @@ enum ShortcutRoutePolicy {
 
 enum BrowserEscapeAction: Equatable {
     case none
+    case dismissDetail
     case stopSearch
     case returnHome
 }
@@ -71,11 +72,16 @@ enum BrowserEscapeRoutePolicy {
     static func action(
         isHomeSearchPresented: Bool,
         isSearching: Bool,
+        hasDetailPresentation: Bool,
         hasBlockingPresentation: Bool
     ) -> BrowserEscapeAction {
-        guard isHomeSearchPresented, !hasBlockingPresentation else {
+        guard !hasBlockingPresentation else {
             return .none
         }
+        if hasDetailPresentation {
+            return .dismissDetail
+        }
+        guard isHomeSearchPresented else { return .none }
         return isSearching ? .stopSearch : .returnHome
     }
 }
@@ -2221,6 +2227,25 @@ struct SearchFolderPage: Identifiable, Equatable {
     }
 }
 
+struct DetailHomeSearchReturnSnapshot: Equatable {
+    let selectedSiteKey: String?
+    let folderPath: [SearchFolderPage]
+}
+
+enum DetailHomeSearchReturnPolicy {
+    static func capture(
+        isHomeSearchPresented: Bool,
+        selectedSiteKey: String?,
+        folderPath: [SearchFolderPage]
+    ) -> DetailHomeSearchReturnSnapshot? {
+        guard isHomeSearchPresented else { return nil }
+        return DetailHomeSearchReturnSnapshot(
+            selectedSiteKey: selectedSiteKey,
+            folderPath: folderPath
+        )
+    }
+}
+
 enum VideoPageMerger {
     static func merge(
         current: VideoPage?,
@@ -3421,6 +3446,8 @@ final class AppState: ObservableObject {
     private var searchTask: Task<Void, Never>?
     private var searchSessionGate = SearchSessionGate()
     private var detailLoadSessionID = UUID()
+    private var detailHomeSearchReturnSnapshot:
+        DetailHomeSearchReturnSnapshot?
     private var homeLoadSessionID = UUID()
     private var homeContentIdentity: HomeContentIdentity?
     private var categoryLoadSessionID = UUID()
@@ -4732,6 +4759,12 @@ final class AppState: ObservableObject {
             await performHomeAction(SiteActionItem(summary: summary))
             return
         }
+        detailHomeSearchReturnSnapshot =
+            DetailHomeSearchReturnPolicy.capture(
+                isHomeSearchPresented: isHomeSearchPresented,
+                selectedSiteKey: selectedSearchSiteKey,
+                folderPath: searchFolderPath
+            )
         let sessionID = UUID()
         detailLoadSessionID = sessionID
         selectedDetail = nil
@@ -4746,10 +4779,12 @@ final class AppState: ObservableObject {
             case .detail(let detail):
                 selectedDetail = detail
             case .search(let query):
+                detailHomeSearchReturnSnapshot = nil
                 selectedDetail = nil
                 presentHomeSearch()
                 search(query, context: .discoveryFallback)
             case .action(let result):
+                detailHomeSearchReturnSnapshot = nil
                 // Action-backed summaries are routed through
                 // performHomeAction before detail loading. Reaching this
                 // branch means the provider changed an ordinary detail into
@@ -4767,6 +4802,7 @@ final class AppState: ObservableObject {
             guard let identity = activeSourceIdentity(
                 for: summary.siteKey
             ) else {
+                detailHomeSearchReturnSnapshot = nil
                 show(
                     AppError.site("该详情所属配置已经发生变化"),
                     title: "详情加载失败"
@@ -4793,9 +4829,11 @@ final class AppState: ObservableObject {
         } catch is CancellationError {
             guard detailLoadSessionID == sessionID else { return }
             pendingDetailSummary = nil
+            detailHomeSearchReturnSnapshot = nil
         } catch {
             guard detailLoadSessionID == sessionID else { return }
             pendingDetailSummary = nil
+            detailHomeSearchReturnSnapshot = nil
             show(error, title: "详情加载失败")
         }
     }
@@ -8028,9 +8066,17 @@ final class AppState: ObservableObject {
     }
 
     func dismissDetail() {
+        let searchReturnSnapshot = detailHomeSearchReturnSnapshot
+        detailHomeSearchReturnSnapshot = nil
         detailLoadSessionID = UUID()
         selectedDetail = nil
         pendingDetailSummary = nil
+        if let searchReturnSnapshot {
+            selectedSection = .home
+            selectedSearchSiteKey = searchReturnSnapshot.selectedSiteKey
+            searchFolderPath = searchReturnSnapshot.folderPath
+            isHomeSearchPresented = true
+        }
     }
 
     func search(_ keyword: String) {
@@ -8317,16 +8363,18 @@ final class AppState: ObservableObject {
         let action = BrowserEscapeRoutePolicy.action(
             isHomeSearchPresented: isHomeSearchPresented,
             isSearching: isSearching,
+            hasDetailPresentation: selectedDetail != nil
+                || pendingDetailSummary != nil,
             hasBlockingPresentation: mainWindowCloudAuthorizationPrompt != nil
                 || nodeWebPresentation != nil
-                || selectedDetail != nil
-                || pendingDetailSummary != nil
                 || isQuickSwitcherPresented
                 || isShortcutHelpPresented
         )
         switch action {
         case .none:
             return false
+        case .dismissDetail:
+            dismissDetail()
         case .stopSearch:
             cancelSearch()
         case .returnHome:
@@ -12600,6 +12648,7 @@ final class AppState: ObservableObject {
     }
 
     private func resetSearchForConfigurationChange() {
+        detailHomeSearchReturnSnapshot = nil
         pendingNodeOperation = nil
         nodeWebPresentation = nil
         cancelSearch()

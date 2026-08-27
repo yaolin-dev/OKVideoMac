@@ -240,6 +240,9 @@ struct RootView: View {
                     guard modifiers.isEmpty, event.keyCode == 53 else {
                         return false
                     }
+                    // Do not let a held Escape key close the detail and then
+                    // route a repeated key-down to the search page beneath it.
+                    guard !event.isARepeat else { return true }
                     return state.performBrowserEscapeShortcut()
                 }
                 .frame(width: 0, height: 0)
