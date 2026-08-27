@@ -712,7 +712,11 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     }
 
     func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
-        guard site.searchable != 0, !quick || site.quickSearch == 1 else {
+        // CatPawOpen's `searchable` field describes catalogue/UI state, not a
+        // trustworthy route capability. Aggregate searches deliberately try
+        // every enabled Node route once; an exact route 404 is cheap and is
+        // reported as unsupported without hiding the site from future runs.
+        guard !quick || site.quickSearch == 1 else {
             return VideoPage(
                 items: [],
                 pagination: Pagination(page: page, pageCount: 0)

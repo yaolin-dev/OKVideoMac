@@ -1226,6 +1226,33 @@ enum SearchScopeSiteAvailability: Equatable, Sendable {
     case unavailable(String)
 }
 
+enum SearchScopeSiteAvailabilityPolicy {
+    static func availability(
+        for site: SiteConfiguration,
+        providerCapability: SiteCapability?
+    ) -> SearchScopeSiteAvailability {
+        let isCatalogueDisabled = site.extra["okNodeCatalogDisabled"]
+            == .bool(true)
+        if site.extra["okNodeConfigurationRequired"] == .bool(true) {
+            return .unavailable("未配置账号或挂载")
+        }
+        if site.hide != 0, !isCatalogueDisabled {
+            return .unavailable("配置中已隐藏")
+        }
+        if providerCapability == nil || providerCapability == .unsupportedSpider {
+            return .unavailable("当前运行环境不支持")
+        }
+        if site.searchable == 2 || isCatalogueDisabled {
+            return .userDisabled
+        }
+        // `searchable == 0` and a missing/negative Node capability declaration
+        // are intentionally not blockers. CatPawOpen bundles in the wild do
+        // not publish those fields consistently, so the exact route response
+        // is the only reliable capability probe.
+        return .enabled
+    }
+}
+
 enum NodeSearchCapabilityState: Equatable, Sendable {
     case supported
     case unsupported
@@ -3379,7 +3406,6 @@ final class AppState: ObservableObject {
     private var providers: [String: SiteProvider] = [:]
     private var searchTask: Task<Void, Never>?
     private var searchSessionGate = SearchSessionGate()
-    private var unsupportedNodeSearchRouteIdentities = Set<String>()
     private var detailLoadSessionID = UUID()
     private var homeLoadSessionID = UUID()
     private var homeContentIdentity: HomeContentIdentity?
@@ -8069,9 +8095,13 @@ final class AppState: ObservableObject {
             searchTask = nil
             return
         }
+        // CatPawOpen metadata is not reliable enough to decide whether a
+        // registered route can search. In particular, utility-looking sites
+        // and older bundles may report `searchable == 0` even though their
+        // route accepts a normal search request. Schedule every selected,
+        // runnable provider and let the request's exact outcome decide.
         let searchableProviders: [SiteProvider] = searchCatalogSites.compactMap { site in
-            guard selectedKeys.contains(site.key),
-                  site.searchable != 0 else { return nil }
+            guard selectedKeys.contains(site.key) else { return nil }
             return providers[site.key]
         }
         activeSearchSiteKeys = Set(searchableProviders.map { $0.site.key })
@@ -8133,13 +8163,6 @@ final class AppState: ObservableObject {
                 }
             case .failure(let failure):
                 searchFailures.append(failure)
-                if failure.category == .unsupportedRoute,
-                   let site = searchCatalogSites.first(where: {
-                    $0.key == failure.siteKey
-                   }),
-                   let identity = nodeSearchCapabilityIdentity(for: site) {
-                    unsupportedNodeSearchRouteIdentities.insert(identity)
-                }
             case .siteOutcome(let outcome):
                 searchSiteOutcomes[outcome.siteKey] = outcome
             case .siteFirstPageCompleted(let siteKey):
@@ -8444,47 +8467,15 @@ final class AppState: ObservableObject {
 
     var searchScopeSiteOptions: [SearchScopeSiteOption] {
         searchCatalogSites.map { site in
-            let isCatalogueDisabled = site.extra["okNodeCatalogDisabled"]
-                == .bool(true)
-            let availability: SearchScopeSiteAvailability
-            if site.extra["okNodeConfigurationRequired"] == .bool(true) {
-                availability = .unavailable("未配置账号或挂载")
-            } else if let identity = nodeSearchCapabilityIdentity(for: site),
-                      unsupportedNodeSearchRouteIdentities.contains(identity) {
-                availability = .unavailable("Spider 未提供搜索接口")
-            } else if site.extra["okNodeRuntime"] == .bool(true),
-                      NodeSearchCapabilityPolicy.declaredState(for: site)
-                        == .unsupported {
-                availability = .unavailable("Spider 未提供搜索接口")
-            } else if site.searchable == 0 {
-                availability = .unavailable("站点未提供搜索能力")
-            } else if site.hide != 0, !isCatalogueDisabled {
-                availability = .unavailable("配置中已隐藏")
-            } else if providers[site.key]?.capability == .unsupportedSpider
-                        || providers[site.key] == nil {
-                availability = .unavailable("当前运行环境不支持")
-            } else if site.searchable == 2 || isCatalogueDisabled {
-                availability = .userDisabled
-            } else {
-                availability = .enabled
-            }
             return SearchScopeSiteOption(
                 key: site.key,
                 name: site.name,
-                availability: availability
+                availability: SearchScopeSiteAvailabilityPolicy.availability(
+                    for: site,
+                    providerCapability: providers[site.key]?.capability
+                )
             )
         }
-    }
-
-    private func nodeSearchCapabilityIdentity(
-        for site: SiteConfiguration
-    ) -> String? {
-        guard site.extra["okNodeRuntime"] == .bool(true),
-              let bundle = site.extra["okNodeBundleIdentity"]?.stringValue,
-              let revision = site.extra["okNodeProfileRevision"]?.stringValue else {
-            return nil
-        }
-        return [bundle, revision, site.key].joined(separator: "\u{1f}")
     }
 
     var effectiveSearchSiteKeys: Set<String> {

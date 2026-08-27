@@ -1330,6 +1330,48 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testSearchScopeDoesNotPreExcludeSearchableZeroNodeSite() {
+        let site = SiteConfiguration(
+            key: "node-utility",
+            name: "Renamed Utility",
+            type: 3,
+            api: "/spider/utility/3",
+            searchable: 0,
+            extra: [
+                "okNodeRuntime": .bool(true),
+                "okNodeSearchCapabilityState": .string("unsupported"),
+                "okNodeCapabilities": .array([])
+            ]
+        )
+
+        XCTAssertEqual(
+            SearchScopeSiteAvailabilityPolicy.availability(
+                for: site,
+                providerCapability: .javaScriptSpider
+            ),
+            .enabled
+        )
+    }
+
+    func testSearchScopeKeepsFullCatalogueDisabledSiteOptIn() {
+        let site = SiteConfiguration(
+            key: "catalogue-disabled",
+            name: "Disabled in Source",
+            type: 3,
+            api: "/spider/disabled/3",
+            searchable: 2,
+            extra: ["okNodeCatalogDisabled": .bool(true)]
+        )
+
+        XCTAssertEqual(
+            SearchScopeSiteAvailabilityPolicy.availability(
+                for: site,
+                providerCapability: .javaScriptSpider
+            ),
+            .userDisabled
+        )
+    }
+
     func testDiscoveryFallbackSearchesEveryStructurallySearchableSite() {
         let options = [
             SearchScopeSiteOption(
@@ -12396,6 +12438,28 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         }
         let searchCount = await client.searchCount
         XCTAssertEqual(searchCount, 1)
+    }
+
+    func testNodeSearchAttemptsRouteWhenSearchableMetadataIsZero() async throws {
+        let client = NodeLifecycleRecordingHTTPClient(initStatusCode: 404)
+        let site = SiteConfiguration(
+            key: "nodejs_searchable_zero",
+            name: "Utility-Looking Node Site",
+            type: 3,
+            api: "/spider/utility/3",
+            searchable: 0,
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        _ = try await provider.search(keyword: "fixture", page: 1, quick: false)
+
+        let paths = await client.requestPaths()
+        XCTAssertEqual(paths.filter { $0.hasSuffix("/search") }.count, 1)
     }
 
     func testNodeSearchPublishesTransient503ForAggregateRetry() async throws {

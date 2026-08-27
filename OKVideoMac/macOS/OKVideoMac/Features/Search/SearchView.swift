@@ -413,7 +413,7 @@ struct SearchScopeEditorContent: View {
                 }
                 .controlSize(.small)
             } else {
-                Text("源中已启用的站点会自动加入；标记为停用的站点可在下方单独开启。")
+                Text("当前配置中已启用的站点都会发起搜索；标记为停用的站点可在下方单独开启。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
