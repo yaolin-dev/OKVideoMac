@@ -3317,6 +3317,21 @@ struct AndroidSystemImage: Equatable, Sendable {
     }
 }
 
+struct AndroidManagedDisplayProfile: Equatable, Sendable {
+    static let pixelWidth = 720
+    static let pixelHeight = 1_600
+    static let densityDPI = 280
+    static let fontScale = 1.0
+
+    static var logicalWidth: Double {
+        Double(pixelWidth) * 160 / Double(densityDPI)
+    }
+
+    static var logicalHeight: Double {
+        Double(pixelHeight) * 160 / Double(densityDPI)
+    }
+}
+
 struct AndroidManagedAVDConfiguration {
     static func value(for key: String, in contents: String) -> String? {
         contents.split(whereSeparator: \.isNewline)
@@ -3363,6 +3378,10 @@ struct AndroidManagedAVDConfiguration {
         let updates = [
             "hw.gpu.enabled": "yes",
             "hw.gpu.mode": "host",
+            "hw.initialOrientation": "portrait",
+            "hw.lcd.density": "\(AndroidManagedDisplayProfile.densityDPI)",
+            "hw.lcd.height": "\(AndroidManagedDisplayProfile.pixelHeight)",
+            "hw.lcd.width": "\(AndroidManagedDisplayProfile.pixelWidth)",
             "image.sysdir.1": image.avdSystemImageDirectory,
             "tag.display": image.avdTagDisplayName,
             "tag.displaynames": image.avdTagDisplayName,
@@ -3839,6 +3858,7 @@ actor AndroidDexBridgeRuntime {
     private var emulatorLogHandle: FileHandle?
     private var ready = false
     private var acceptsNewerBridge = false
+    private var managedDisplayConfigured = false
     private var lastNetworkCheck: Date?
     private var readinessTask: Task<Void, Error>?
     private var operationStatus: AndroidRuntimeStatus?
@@ -5177,6 +5197,7 @@ actor AndroidDexBridgeRuntime {
 
     func stop() async {
         actionSurfaceLease = nil
+        managedDisplayConfigured = false
         transition(to: .stopping, event: "stop_requested")
         let task = readinessTask
         task?.cancel()
@@ -5313,6 +5334,12 @@ actor AndroidDexBridgeRuntime {
                 )
             case .reuseOwnedRuntime:
                 if observation.deviceOwned {
+                    if !managedDisplayConfigured {
+                        try configureManagedDisplay(
+                            identity,
+                            toolchain: toolchain
+                        )
+                    }
                     if let lastNetworkCheck,
                        Date().timeIntervalSince(lastNetworkCheck)
                             < Self.networkCheckInterval {
@@ -5509,6 +5536,10 @@ actor AndroidDexBridgeRuntime {
             transition(to: .waitingForAndroidBoot)
             try await waitForBoot(identity, toolchain: toolchain)
             try Task.checkCancellation()
+            try configureManagedDisplay(
+                identity,
+                toolchain: toolchain
+            )
 
             if forceInstall {
                 identity.generation = UUID().uuidString
@@ -6021,6 +6052,151 @@ actor AndroidDexBridgeRuntime {
         lastBootCompleted = false
         lastBootWaitDuration = Date().timeIntervalSince(startedAt)
         throw AppError.spider("Java/Dex Android 运行时启动超过 240 秒")
+    }
+
+    private func configureManagedDisplay(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) throws {
+        let currentSize = try runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            ["shell", "wm", "size"],
+            category: "adb.display.size.verify",
+            timeout: 10
+        )
+        let currentDensity = try runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            ["shell", "wm", "density"],
+            category: "adb.display.density.verify",
+            timeout: 10
+        )
+        let currentFontScale = try runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            ["shell", "settings", "get", "system", "font_scale"],
+            category: "adb.display.font_scale.verify",
+            timeout: 10
+        )
+        if Self.managedDisplayProfileMatches(
+            sizeOutput: currentSize,
+            densityOutput: currentDensity,
+            fontScaleOutput: currentFontScale
+        ) {
+            managedDisplayConfigured = true
+            return
+        }
+
+        _ = try runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            [
+                "shell", "wm", "size",
+                "\(AndroidManagedDisplayProfile.pixelWidth)x"
+                    + "\(AndroidManagedDisplayProfile.pixelHeight)"
+            ],
+            category: "adb.display.size.configure",
+            timeout: 10
+        )
+        _ = try runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            [
+                "shell", "wm", "density",
+                "\(AndroidManagedDisplayProfile.densityDPI)"
+            ],
+            category: "adb.display.density.configure",
+            timeout: 10
+        )
+        _ = try runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            [
+                "shell", "settings", "put", "system", "font_scale",
+                "\(AndroidManagedDisplayProfile.fontScale)"
+            ],
+            category: "adb.display.font_scale.configure",
+            timeout: 10
+        )
+        let size = try runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            ["shell", "wm", "size"],
+            category: "adb.display.size.verify",
+            timeout: 10
+        )
+        let density = try runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            ["shell", "wm", "density"],
+            category: "adb.display.density.verify",
+            timeout: 10
+        )
+        let fontScale = try runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            ["shell", "settings", "get", "system", "font_scale"],
+            category: "adb.display.font_scale.verify",
+            timeout: 10
+        )
+        guard Self.managedDisplayProfileMatches(
+            sizeOutput: size,
+            densityOutput: density,
+            fontScaleOutput: fontScale
+        ) else {
+            throw AppError.spider("Android 原生界面显示尺寸配置失败")
+        }
+        managedDisplayConfigured = true
+    }
+
+    static func managedDisplayProfileMatches(
+        sizeOutput: String,
+        densityOutput: String,
+        fontScaleOutput: String
+    ) -> Bool {
+        let expectedSize =
+            "\(AndroidManagedDisplayProfile.pixelWidth)x"
+                + "\(AndroidManagedDisplayProfile.pixelHeight)"
+        guard effectiveADBDisplayValue(in: sizeOutput) == expectedSize,
+              effectiveADBDisplayValue(in: densityOutput)
+                == "\(AndroidManagedDisplayProfile.densityDPI)",
+              let scale = Double(
+                fontScaleOutput.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+              ) else {
+            return false
+        }
+        return abs(scale - AndroidManagedDisplayProfile.fontScale) < 0.001
+    }
+
+    private static func effectiveADBDisplayValue(in output: String) -> String? {
+        var physicalValue: String?
+        var overrideValue: String?
+        for line in output.split(whereSeparator: \.isNewline) {
+            let components = line.split(
+                separator: ":",
+                maxSplits: 1,
+                omittingEmptySubsequences: true
+            )
+            guard components.count == 2 else { continue }
+            let label = components[0].trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            let value = components[1].trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            switch label {
+            case "Override size", "Override density":
+                overrideValue = value
+            case "Physical size", "Physical density":
+                physicalValue = value
+            default:
+                continue
+            }
+        }
+        return overrideValue ?? physicalValue
     }
 
     private func bridgeAPK() throws -> URL {
@@ -6782,6 +6958,17 @@ actor AndroidDexBridgeRuntime {
         guard fileManager.fileExists(atPath: configuration.path) else {
             throw AppError.spider("专用 Android 环境创建失败")
         }
+        let contents = try String(contentsOf: configuration, encoding: .utf8)
+        let updated = AndroidManagedAVDConfiguration.updating(
+            contents,
+            for: image
+        )
+        if updated != contents {
+            try Data(updated.utf8).write(
+                to: configuration,
+                options: [.atomic]
+            )
+        }
         let listing = try run(
             toolchain.emulator,
             ["-list-avds"],
@@ -7328,6 +7515,7 @@ actor AndroidDexBridgeRuntime {
 
     private func clearRuntimeRecord() {
         actionSurfaceLease = nil
+        managedDisplayConfigured = false
         try? emulatorLogHandle?.close()
         emulatorLogHandle = nil
         emulatorProcess = nil

@@ -3868,6 +3868,32 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(landscape.height, 270, accuracy: 0.000_1)
     }
 
+    func testAndroidActionSurfacePresentationUsesNativeAspectWithoutBars() {
+        let portrait = AndroidActionSurfacePresentationPolicy.preferredSize(
+            pixelWidth: 720,
+            pixelHeight: 1_600
+        )
+        XCTAssertEqual(portrait.width, 234, accuracy: 0.000_1)
+        XCTAssertEqual(portrait.height, 520, accuracy: 0.000_1)
+        XCTAssertEqual(
+            portrait.width / portrait.height,
+            720.0 / 1_600.0,
+            accuracy: 0.000_1
+        )
+
+        let landscape = AndroidActionSurfacePresentationPolicy.preferredSize(
+            pixelWidth: 2_400,
+            pixelHeight: 1_080
+        )
+        XCTAssertEqual(landscape.width, 700, accuracy: 0.000_1)
+        XCTAssertEqual(landscape.height, 315, accuracy: 0.000_1)
+        XCTAssertEqual(
+            landscape.width / landscape.height,
+            2_400.0 / 1_080.0,
+            accuracy: 0.000_1
+        )
+    }
+
     func testAndroidActionSurfaceLeaseRejectsStaleFrameBeforePublish() {
         let current = UUID()
         let frame = AndroidActionSurfaceFrame(
@@ -7354,6 +7380,69 @@ final class OKVideoMacTests: XCTestCase {
                 in: updated
             ),
             "host"
+        )
+        XCTAssertEqual(
+            AndroidManagedAVDConfiguration.value(
+                for: "hw.lcd.width",
+                in: updated
+            ),
+            "720"
+        )
+        XCTAssertEqual(
+            AndroidManagedAVDConfiguration.value(
+                for: "hw.lcd.height",
+                in: updated
+            ),
+            "1600"
+        )
+        XCTAssertEqual(
+            AndroidManagedAVDConfiguration.value(
+                for: "hw.lcd.density",
+                in: updated
+            ),
+            "280"
+        )
+        XCTAssertEqual(
+            AndroidManagedDisplayProfile.logicalWidth,
+            411.428_571,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            AndroidManagedDisplayProfile.logicalHeight,
+            914.285_714,
+            accuracy: 0.000_001
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.managedDisplayProfileMatches(
+                sizeOutput: "Physical size: 720x1600\n",
+                densityOutput: "Physical density: 280\n",
+                fontScaleOutput: "1.0\n"
+            )
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.managedDisplayProfileMatches(
+                sizeOutput:
+                    "Physical size: 320x640\nOverride size: 720x1600\n",
+                densityOutput:
+                    "Physical density: 160\nOverride density: 280\n",
+                fontScaleOutput: "1.0\n"
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.managedDisplayProfileMatches(
+                sizeOutput: "Physical size: 320x640\n",
+                densityOutput: "Physical density: 160\n",
+                fontScaleOutput: "1.0\n"
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.managedDisplayProfileMatches(
+                sizeOutput:
+                    "Physical size: 720x1600\nOverride size: 320x640\n",
+                densityOutput:
+                    "Physical density: 280\nOverride density: 160\n",
+                fontScaleOutput: "1.0\n"
+            )
         )
     }
 

@@ -1843,7 +1843,11 @@ struct CloudAuthorizationView: View {
                 }
             }
             .padding(22)
-            .frame(minWidth: 560, idealWidth: 700, maxWidth: 780)
+            .frame(
+                minWidth: usesCompactSurfaceLayout ? 440 : 560,
+                idealWidth: usesCompactSurfaceLayout ? 500 : 700,
+                maxWidth: usesCompactSurfaceLayout ? 580 : 780
+            )
             .background(.regularMaterial)
             .clipShape(RoundedRectangle(cornerRadius: 14))
             .shadow(radius: 24)
@@ -1877,6 +1881,11 @@ struct CloudAuthorizationView: View {
         return frame
     }
 
+    private var usesCompactSurfaceLayout: Bool {
+        guard let surfaceFrame else { return false }
+        return surfaceFrame.pixelHeight > surfaceFrame.pixelWidth
+    }
+
     private var lifecycleStatus: String {
         switch prompt.lifecyclePhase {
         case .invoking:
@@ -1892,6 +1901,21 @@ struct CloudAuthorizationView: View {
         }
     }
 
+}
+
+enum AndroidActionSurfacePresentationPolicy {
+    static func preferredSize(
+        pixelWidth: Int,
+        pixelHeight: Int
+    ) -> CGSize {
+        guard pixelWidth > 0, pixelHeight > 0 else {
+            return CGSize(width: 260, height: 260)
+        }
+        let ratio = CGFloat(pixelWidth) / CGFloat(pixelHeight)
+        let targetHeight = min(520, max(260, 700 / max(0.2, ratio)))
+        let width = min(700, targetHeight * ratio)
+        return CGSize(width: width, height: width / ratio)
+    }
 }
 
 enum AndroidActionSurfaceGeometryPolicy {
@@ -1961,6 +1985,11 @@ private struct AndroidActionSurfaceView: View {
     var body: some View {
         Group {
             if let image = NSImage(data: frame.pngData) {
+                let preferredSize =
+                    AndroidActionSurfacePresentationPolicy.preferredSize(
+                        pixelWidth: frame.pixelWidth,
+                        pixelHeight: frame.pixelHeight
+                    )
                 GeometryReader { geometry in
                     let fitted = AndroidActionSurfaceGeometryPolicy.fittedRect(
                         container: geometry.size,
@@ -1990,7 +2019,10 @@ private struct AndroidActionSurfaceView: View {
                     )
                     .allowsHitTesting(!disabled)
                 }
-                .frame(height: preferredHeight)
+                .frame(
+                    width: preferredSize.width,
+                    height: preferredSize.height
+                )
                 .clipShape(RoundedRectangle(cornerRadius: 11))
                 .overlay {
                     RoundedRectangle(cornerRadius: 11)
@@ -2007,11 +2039,6 @@ private struct AndroidActionSurfaceView: View {
                 .frame(maxWidth: .infinity, minHeight: 220)
             }
         }
-    }
-
-    private var preferredHeight: CGFloat {
-        let ratio = max(0.2, CGFloat(frame.aspectRatio))
-        return min(520, max(260, 700 / ratio))
     }
 
     private func submitGesture(
