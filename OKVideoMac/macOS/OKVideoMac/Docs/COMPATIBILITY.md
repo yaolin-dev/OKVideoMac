@@ -1,6 +1,6 @@
 # Compatibility
 
-- 对照版本：0.3.62（Build 87）
+- 对照版本：0.3.66（Build 92）
 - 最近更新：2026-08-26
 - 当前交付目标：Apple Silicon / arm64 / macOS 12.0+
 
@@ -81,9 +81,9 @@ type 3 站点在解析到 HTTP(S) `.js` 脚本时进入 QuickJS。当前 Provide
 共享 runtime readiness。
 
 `indexs == 1` 的首页卡片按协议直接进入搜索，不先请求详情。Node 聚合搜索共享
-4 个 runtime 执行槽且每站只请求第一页；Jar/Dex Provider 保持独立策略。播放优先
-保留 HLS 或通过 `206 + Content-Range` 验证的原画直连，只有直连不可用时才回退
-Node relay；relay 不支持 Range 时播放器会明确禁用进度跳转。
+runtime 执行槽且每站只请求第一页；Jar/Dex Provider 保持独立策略。播放尊重
+Spider 返回的清晰度顺序或显式位置，不按“原画”名称擅自绕过 Provider relay；
+远程跳转统一使用 mpv 的绝对关键帧命令，并以 mpv 的 seek 完成事件确认结果。
 
 这是受支持 CatVod/CatPaw 风格 Node 视频接口的一个兼容子集，不表示支持任意 Node
 Spider、完整 CatPawOpen 应用协议或其他内容模块。远程 bundle 具有 Node 完整能力，

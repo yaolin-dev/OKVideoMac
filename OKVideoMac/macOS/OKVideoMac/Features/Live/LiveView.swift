@@ -19,6 +19,8 @@ struct LiveView: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var navigation: AppNavigationState
     @ObservedObject var session: LiveBrowserSession
+    @StateObject private var logoURLCache = LiveChannelLogoURLCache()
+    private let channelScrollCoordinateSpace = "live-channel-scroll"
 
     var body: some View {
         Group {
@@ -29,7 +31,6 @@ struct LiveView: View {
                     .frame(minWidth: 520)
             }
         }
-        .background(AppSurfacePalette.background.ignoresSafeArea())
         .onAppear {
             updateActivation(for: navigation.selectedSection)
         }
@@ -79,7 +80,7 @@ struct LiveView: View {
             )
             Button {
                 state.selectedSettingsPane = .liveSources
-                state.selectedSection = .settings
+                state.selectSection(.settings)
             } label: {
                 Label("打开直播源设置", systemImage: "gearshape")
             }
@@ -120,61 +121,80 @@ struct LiveView: View {
             sourceName: sourceName
         )
         let programmeDate = Date()
-        return VStack(spacing: 0) {
-            liveSourceBackgroundStatus(sourceID: sourceID)
-
-            if channels.isEmpty {
-                EmptyStateView(
-                    systemImage: session.showsFavoritesOnly ? "star" : "magnifyingglass",
-                    title: session.showsFavoritesOnly ? "还没有收藏频道" : "没有匹配的频道",
-                    message: session.showsFavoritesOnly
-                        ? "点击频道卡片右上角的星标即可收藏。"
-                        : "请更换分组或搜索关键词。"
+        return GeometryReader { viewport in
+            ScrollView {
+                BrowserToolbarScrollMarker(
+                    coordinateSpaceName: channelScrollCoordinateSpace
                 )
-            } else {
-                ScrollView {
-                    LazyVGrid(
-                        columns: [
-                            GridItem(
-                                .adaptive(minimum: 238, maximum: 340),
-                                spacing: 18,
-                                alignment: .top
+                VStack(spacing: 0) {
+                    liveSourceBackgroundStatus(sourceID: sourceID)
+
+                    if channels.isEmpty {
+                        EmptyStateView(
+                            systemImage: session.showsFavoritesOnly
+                                ? "star"
+                                : "magnifyingglass",
+                            title: session.showsFavoritesOnly
+                                ? "还没有收藏频道"
+                                : "没有匹配的频道",
+                            message: session.showsFavoritesOnly
+                                ? "点击频道卡片右上角的星标即可收藏。"
+                                : "请更换分组或搜索关键词。"
+                        )
+                        .frame(
+                            maxWidth: .infinity,
+                            minHeight: max(0, viewport.size.height - 72)
+                        )
+                    } else {
+                        LazyVGrid(
+                            columns: [
+                                GridItem(
+                                    .adaptive(minimum: 238, maximum: 340),
+                                    spacing: 18,
+                                    alignment: .top
+                                )
+                            ],
+                            alignment: .leading,
+                            spacing: 20
+                        ) {
+                            ForEach(channels) { channel in
+                                let programmes = state.liveProgrammes(
+                                    for: channel,
+                                    sourceID: sourceID,
+                                    at: programmeDate
+                                )
+                                LiveChannelCard(
+                                    channel: channel,
+                                    artworkURLs: logoURLCache.urls(for: channel),
+                                    navigationChannels: channels,
+                                    sourceID: sourceID,
+                                    sourceName: sourceName,
+                                    currentEPGProgramme: programmes.current,
+                                    nextEPGProgramme: programmes.next
+                                )
+                                .environmentObject(state)
+                            }
+                        }
+                        .padding(20)
+
+                        if hiddenCount > 0 {
+                            Label(
+                                "\(hiddenCount) 个受保护分组已隐藏",
+                                systemImage: "lock"
                             )
-                        ],
-                        alignment: .leading,
-                        spacing: 20
-                    ) {
-                        ForEach(channels) { channel in
-                            let programmes = state.liveProgrammes(
-                                for: channel,
-                                sourceID: sourceID,
-                                at: programmeDate
-                            )
-                            LiveChannelCard(
-                                channel: channel,
-                                navigationChannels: channels,
-                                sourceID: sourceID,
-                                sourceName: sourceName,
-                                currentEPGProgramme: programmes.current,
-                                nextEPGProgramme: programmes.next
-                            )
-                            .environmentObject(state)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .padding(.bottom, 20)
                         }
                     }
-                    .padding(20)
-
-                    if hiddenCount > 0 {
-                        Label(
-                            "\(hiddenCount) 个受保护分组已隐藏",
-                            systemImage: "lock"
-                        )
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .padding(.bottom, 20)
-                    }
                 }
-                .background(AppSurfacePalette.background)
+                .frame(maxWidth: .infinity)
+                .padding(.top, BrowserToolbarMetrics.height)
             }
+            .ignoresSafeArea(.container, edges: .top)
+            .browserToolbarScrollSurface(
+                named: channelScrollCoordinateSpace
+            )
         }
     }
 
@@ -347,9 +367,6 @@ struct LiveToolbarView: View {
                         )
                     }
                     refreshControl(sourceID: source.id)
-                    TextField("搜索频道", text: $session.searchText)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 220)
                 }
             } else if state.isLoading {
                 AppActivityIndicator(size: .small)
@@ -520,6 +537,7 @@ private struct LiveChannelCard: View {
     @EnvironmentObject private var state: AppState
     @Environment(\.colorScheme) private var colorScheme
     let channel: LiveChannel
+    let artworkURLs: [URL]
     let navigationChannels: [LiveChannel]
     let sourceID: UUID
     let sourceName: String
@@ -679,7 +697,7 @@ private struct LiveChannelCard: View {
             )
 
             RemoteImageCandidates(
-                urls: LiveChannelLogoResolver.urls(for: channel)
+                urls: artworkURLs
             ) { image in
                 image
                     .resizable()
@@ -879,6 +897,34 @@ enum LiveChannelLogoResolver {
             )
         )
         return name.isEmpty ? nil : name
+    }
+}
+
+final class LiveChannelLogoURLCache: ObservableObject {
+    private struct Key: Hashable {
+        let logoURL: URL?
+        let tvgID: String?
+        let tvgName: String?
+        let name: String
+    }
+
+    private var values: [Key: [URL]] = [:]
+    private(set) var computationCount = 0
+
+    func urls(for channel: LiveChannel) -> [URL] {
+        let key = Key(
+            logoURL: channel.logoURL,
+            tvgID: channel.tvgID,
+            tvgName: channel.tvgName,
+            name: channel.name
+        )
+        if let cached = values[key] {
+            return cached
+        }
+        let urls = LiveChannelLogoResolver.urls(for: channel)
+        values[key] = urls
+        computationCount += 1
+        return urls
     }
 }
 

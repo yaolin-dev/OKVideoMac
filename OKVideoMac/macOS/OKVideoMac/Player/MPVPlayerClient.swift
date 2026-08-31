@@ -5,9 +5,9 @@ enum PlayerTeardownMode: String, CaseIterable, Sendable {
     case warmStop
     case fullDestroy
 
-    /// Internal rollback switch. Reusing the initialized libmpv client avoids
-    /// rebuilding the native player on every episode; fullDestroy remains an
-    /// explicit rollback for deployments that expose a lifecycle regression.
+    /// Internal rollback switch. Full teardown is the safe default after the
+    /// player window closes because libmpv otherwise retains decoder and cache
+    /// allocations. `warmStop` remains available for controlled comparisons.
     static let defaultsKey = "player.teardownMode"
     static let environmentKey = "OKVIDEOMAC_PLAYER_TEARDOWN_MODE"
 
@@ -23,13 +23,166 @@ enum PlayerTeardownMode: String, CaseIterable, Sendable {
            let mode = PlayerTeardownMode(rawValue: raw) {
             return mode
         }
-        return .warmStop
+        return .fullDestroy
     }
+}
+
+/// Keeps the player cache bounded on long remote streams. `legacy` is an
+/// operational rollback for servers whose buffering behavior depends on the
+/// previous unbounded defaults.
+enum MPVPlaybackPerformanceProfile: String, CaseIterable, Sendable {
+    case legacy
+    case balanced
+
+    static let defaultsKey = "player.performanceProfile"
+    static let environmentKey = "OKVIDEOMAC_MPV_PERFORMANCE_PROFILE"
+
+    static func configured(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        defaults: UserDefaults = .standard
+    ) -> MPVPlaybackPerformanceProfile {
+        if let raw = environment[environmentKey],
+           let profile = MPVPlaybackPerformanceProfile(rawValue: raw) {
+            return profile
+        }
+        if let raw = defaults.string(forKey: defaultsKey),
+           let profile = MPVPlaybackPerformanceProfile(rawValue: raw) {
+            return profile
+        }
+        return .balanced
+    }
+
+    var mpvOptions: [(name: String, value: String)] {
+        switch self {
+        case .legacy:
+            return [("cache", "yes")]
+        case .balanced:
+            return [
+                ("cache", "auto"),
+                ("cache-secs", "60"),
+                ("demuxer-max-bytes", "128MiB"),
+                ("demuxer-max-back-bytes", "32MiB"),
+                ("demuxer-hysteresis-secs", "10")
+            ]
+        }
+    }
+}
+
+/// libmpv advanced render control allows supported decoders to render directly
+/// into caller-owned textures and can remove one full-frame copy. Keep the old
+/// render contract available as a runtime rollback while this ships broadly.
+enum MPVRenderControlMode: String, CaseIterable, Sendable {
+    case legacy
+    case advanced
+
+    static let defaultsKey = "player.renderControlMode"
+    static let environmentKey = "OKVIDEOMAC_MPV_RENDER_CONTROL"
+
+    static func configured(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        defaults: UserDefaults = .standard
+    ) -> MPVRenderControlMode {
+        if let raw = environment[environmentKey],
+           let mode = MPVRenderControlMode(rawValue: raw) {
+            return mode
+        }
+        if let raw = defaults.string(forKey: defaultsKey),
+           let mode = MPVRenderControlMode(rawValue: raw) {
+            return mode
+        }
+        return .advanced
+    }
+
+    var usesAdvancedControl: Bool { self == .advanced }
 }
 
 enum PlayerLoadTimeoutPolicy {
     static func seconds(for media: ResolvedMedia) -> Int {
         media.siteKey == "live" ? 8 : 30
+    }
+}
+
+enum MPVTVBoxPlaybackPolicy {
+    static func loadCommand(
+        for media: ResolvedMedia,
+        omitFormatHint: Bool = false
+    ) -> [String] {
+        var command = ["loadfile", media.url.absoluteString, "replace"]
+        guard media.transportProfile == .tvBox else { return command }
+        let options = fileOptions(
+            for: media,
+            omitFormatHint: omitFormatHint
+        )
+        guard !options.isEmpty else { return command }
+        command.append("-1")
+        command.append(options.joined(separator: ","))
+        return command
+    }
+
+    static func formatHint(for media: ResolvedMedia) -> String? {
+        let declared = media.format?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        let pathExtension = media.url.pathExtension.lowercased()
+        if declared.contains("mpegurl")
+            || declared == "m3u8"
+            || declared == "hls"
+            || pathExtension == "m3u8" {
+            return "hls"
+        }
+        if declared.contains("dash") || declared == "mpd"
+            || pathExtension == "mpd" {
+            return "dash"
+        }
+        if declared == "mpegts" || declared == "video/mp2t"
+            || declared == "ts" {
+            return "mpegts"
+        }
+        return nil
+    }
+
+    static func isBridgeSession(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "http",
+              ["127.0.0.1", "localhost", "::1"].contains(
+                url.host?.lowercased() ?? ""
+              ),
+              url.port == 19_978 else {
+            return false
+        }
+        return url.path.hasPrefix("/proxy/media/")
+            || url.path.hasPrefix("/v1/media-sessions/")
+    }
+
+    private static func fileOptions(
+        for media: ResolvedMedia,
+        omitFormatHint: Bool
+    ) -> [String] {
+        var options: [String]
+        if isBridgeSession(media.url) {
+            // The bridge already owns the remote connection and byte ranges.
+            // A smaller forward/back window avoids retaining tens or hundreds
+            // of megabytes from an abandoned seek while keeping enough data
+            // for short backward jumps.
+            options = [
+                "cache=yes",
+                "cache-secs=24",
+                "demuxer-max-bytes=48MiB",
+                "demuxer-max-back-bytes=12MiB",
+                "demuxer-hysteresis-secs=3"
+            ]
+        } else {
+            options = [
+                "cache=auto",
+                "cache-secs=36",
+                "demuxer-max-bytes=64MiB",
+                "demuxer-max-back-bytes=16MiB",
+                "demuxer-hysteresis-secs=4"
+            ]
+        }
+        if !omitFormatHint, let hint = formatHint(for: media) {
+            options.append("demuxer-lavf-format=\(hint)")
+        }
+        return options
     }
 }
 
@@ -311,6 +464,12 @@ final class PlayerPlaybackStartSignal {
         return requestID
     }
 
+    func hasStartedPlayback() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return wasClaimed
+    }
+
     func cancel() {
         lock.lock()
         requestID = nil
@@ -335,10 +494,26 @@ enum MPVPlaybackEndPolicy {
     static func isNaturalEnd(
         endFileReason: Int32? = nil,
         eofReached: Bool = false,
-        isReplacingMedia: Bool
+        isReplacingMedia: Bool,
+        hasStartedPlayback: Bool,
+        isSeeking: Bool,
+        isPausedForCache: Bool,
+        position: TimeInterval,
+        duration: TimeInterval,
+        completionTolerance: TimeInterval = 3
     ) -> Bool {
-        guard !isReplacingMedia else { return false }
-        return eofReached || endFileReason == 0
+        guard eofReached || endFileReason == 0,
+              !isReplacingMedia,
+              hasStartedPlayback,
+              !isSeeking,
+              !isPausedForCache,
+              position.isFinite,
+              duration.isFinite else {
+            return false
+        }
+        guard duration > 0 else { return true }
+        let tolerance = max(0, completionTolerance)
+        return position >= max(0, duration - tolerance)
     }
 }
 
@@ -346,6 +521,8 @@ final class MPVPlayerClient: PlayerClient {
     let events: AsyncStream<PlayerEvent>
     let renderOwnerID = UUID()
     let teardownMode: PlayerTeardownMode
+    let performanceProfile: MPVPlaybackPerformanceProfile
+    let renderControlMode: MPVRenderControlMode
 
     private enum LifecycleState {
         case running
@@ -393,6 +570,12 @@ final class MPVPlayerClient: PlayerClient {
     private var pendingSubtitles: [URL] = []
     private var didEmitFileLoadedForCurrentMedia = false
     private var startupTimelinePosition: Double?
+    private var diagnosticsGeneration = UUID()
+    private var currentMediaTransportProfile: MediaTransportProfile = .standard
+    private var currentMedia: ResolvedMedia?
+    private var tvBoxFormatFallbackAvailable = false
+    private var tvBoxSeekGeneration: UInt64 = 0
+    private var completedTVBoxSeekGeneration: UInt64?
     private var renderContextCount = 0
     private var pendingLoad: (
         identifier: UUID,
@@ -405,9 +588,13 @@ final class MPVPlayerClient: PlayerClient {
 
     init(
         bundle: Bundle = .main,
-        teardownMode: PlayerTeardownMode = .warmStop
+        teardownMode: PlayerTeardownMode = .warmStop,
+        performanceProfile: MPVPlaybackPerformanceProfile = .configured(),
+        renderControlMode: MPVRenderControlMode = .configured()
     ) throws {
         self.teardownMode = teardownMode
+        self.performanceProfile = performanceProfile
+        self.renderControlMode = renderControlMode
         var captured: AsyncStream<PlayerEvent>.Continuation!
         // Keep the bridge bounded even if the main actor is briefly busy with
         // a menu, window transition, or a slow database operation.
@@ -437,7 +624,14 @@ final class MPVPlayerClient: PlayerClient {
             try setOption("sid", value: "no", client: created)
             try setOption("vo", value: "libmpv", client: created)
             try setOption("hwdec", value: "auto-safe", client: created)
-            try setOption("cache", value: "yes", client: created)
+            for option in performanceProfile.mpvOptions {
+                try setOption(option.name, value: option.value, client: created)
+            }
+            if renderControlMode.usesAdvancedControl {
+                // Required by MPV_RENDER_PARAM_ADVANCED_CONTROL for supported
+                // decoders to allocate caller-compatible frame surfaces.
+                try setOption("vd-lavc-dr", value: "yes", client: created)
+            }
             try setOption("audio-client-name", value: "OKVideoMac", client: created)
             // Prefer full Chinese subtitles over the short English "forced"
             // track that many remuxes mark as the container default.
@@ -448,7 +642,8 @@ final class MPVPlayerClient: PlayerClient {
                 operation: "初始化 libmpv"
             )
             PlayerExperimentLogger.lifecycle(
-                "initialize",
+                "initialize performance_profile=\(performanceProfile.rawValue)"
+                    + " render_control=\(renderControlMode.rawValue)",
                 playerID: renderOwnerID,
                 mode: teardownMode
             )
@@ -543,10 +738,17 @@ final class MPVPlayerClient: PlayerClient {
                         $0.isFinite && $0 > 0 ? $0 : nil
                     }
                     self.pendingSubtitles = media.subtitles
+                    self.currentMediaTransportProfile = media.transportProfile
+                    self.currentMedia = media
+                    self.tvBoxFormatFallbackAvailable = media.transportProfile == .tvBox
+                        && MPVTVBoxPlaybackPolicy.formatHint(for: media) != nil
+                    self.tvBoxSeekGeneration = 0
+                    self.completedTVBoxSeekGeneration = nil
                     self.isReplacingMedia = true
                     self.didEmitEndedForCurrentMedia = false
                     self.didEmitFileLoadedForCurrentMedia = false
                     self.startupTimelinePosition = nil
+                    self.diagnosticsGeneration = UUID()
                     self.playbackStartSignal.reset(requestID: requestID)
                     self.snapshot.position = 0
                     self.snapshot.duration = 0
@@ -564,7 +766,7 @@ final class MPVPlayerClient: PlayerClient {
                         playerID: self.renderOwnerID
                     )
                     try self.command(
-                        ["loadfile", media.url.absoluteString, "replace"],
+                        MPVTVBoxPlaybackPolicy.loadCommand(for: media),
                         client: client
                     )
                 } catch {
@@ -624,6 +826,7 @@ final class MPVPlayerClient: PlayerClient {
         )
         try? await perform { client in
             self.completeLoad(.failure(CancellationError()))
+            self.diagnosticsGeneration = UUID()
             try self.command(["stop"], client: client)
             self.clearTransientPlaybackActivity()
             self.snapshot.status = .stopped
@@ -647,17 +850,33 @@ final class MPVPlayerClient: PlayerClient {
             }
             self.snapshot.isSeeking = true
             self.snapshot.seekTarget = target
+            let tvBoxGeneration: UInt64?
+            if self.currentMediaTransportProfile == .tvBox {
+                self.tvBoxSeekGeneration &+= 1
+                self.completedTVBoxSeekGeneration = nil
+                tvBoxGeneration = self.tvBoxSeekGeneration
+            } else {
+                tvBoxGeneration = nil
+            }
             self.emitSnapshot()
             do {
-                let targetValue = String(
-                    format: "%.3f",
-                    locale: Locale(identifier: "en_US_POSIX"),
-                    target
-                )
-                try self.command(
-                    ["seek", targetValue, "absolute+keyframes"],
-                    client: client
-                )
+                try self.command(Self.seekCommand(to: target), client: client)
+                if let tvBoxGeneration {
+                    self.queue.asyncAfter(deadline: .now() + .seconds(15)) {
+                        guard self.currentMediaTransportProfile == .tvBox,
+                              self.tvBoxSeekGeneration == tvBoxGeneration,
+                              self.completedTVBoxSeekGeneration
+                                != tvBoxGeneration,
+                              self.snapshot.isSeeking else { return }
+                        // Do not issue a compensating seek. This is only a UI
+                        // state failsafe for relays that omit one mpv property
+                        // transition while video has already restarted.
+                        self.completedTVBoxSeekGeneration = tvBoxGeneration
+                        self.snapshot.isSeeking = false
+                        self.snapshot.seekTarget = nil
+                        self.emitSnapshot()
+                    }
+                }
             } catch {
                 self.snapshot.isSeeking = false
                 self.snapshot.seekTarget = nil
@@ -665,6 +884,15 @@ final class MPVPlayerClient: PlayerClient {
                 throw error
             }
         }
+    }
+
+    static func seekCommand(to position: TimeInterval) -> [String] {
+        let targetValue = String(
+            format: "%.3f",
+            locale: Locale(identifier: "en_US_POSIX"),
+            position
+        )
+        return ["seek", targetValue, "absolute+keyframes"]
     }
 
     func setVolume(_ volume: Double) async throws {
@@ -827,6 +1055,7 @@ final class MPVPlayerClient: PlayerClient {
         await withCheckedContinuation { completion in
             queue.async {
                 self.completeLoad(.failure(CancellationError()))
+                self.diagnosticsGeneration = UUID()
                 if let client = self.client {
                     _ = try? self.command(["stop"], client: client)
                     self.library.wakeup(client)
@@ -862,6 +1091,7 @@ final class MPVPlayerClient: PlayerClient {
                 client,
                 getProcAddress,
                 context,
+                renderControlMode.usesAdvancedControl ? 1 : 0,
                 &renderContext
             ),
             operation: "创建 mpv OpenGL Render Context"
@@ -871,7 +1101,7 @@ final class MPVPlayerClient: PlayerClient {
         }
         renderContextCount += 1
         PlayerExperimentLogger.lifecycle(
-            "create render context",
+            "create render context control=\(renderControlMode.rawValue)",
             playerID: renderOwnerID,
             requestID: nil,
             mode: teardownMode
@@ -918,6 +1148,13 @@ final class MPVPlayerClient: PlayerClient {
             )
             continuation.yield(.playbackStarted(requestID: requestID))
         }
+    }
+
+    func skipRender(_ renderContext: OpaquePointer) throws {
+        try library.checked(
+            library.renderSkip(renderContext),
+            operation: "跳过隐藏视频帧"
+        )
     }
 
     func destroyRenderContext(_ renderContext: OpaquePointer) {
@@ -1033,6 +1270,79 @@ final class MPVPlayerClient: PlayerClient {
                     operation: "设置 mpv 选项 \(name)"
                 )
             }
+        }
+    }
+
+    private func schedulePlaybackDiagnostics(requestID: UUID) {
+        let generation = diagnosticsGeneration
+        for delay in [2.0, 15.0] {
+            queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self,
+                      self.isRunning,
+                      self.diagnosticsGeneration == generation,
+                      self.currentRequestID == requestID,
+                      let client = self.client else { return }
+                self.logPlaybackDiagnostics(
+                    requestID: requestID,
+                    elapsedSeconds: Int(delay),
+                    client: client
+                )
+            }
+        }
+    }
+
+    private func logPlaybackDiagnostics(
+        requestID: UUID,
+        elapsedSeconds: Int,
+        client: OpaquePointer
+    ) {
+        let names = [
+            "hwdec-current",
+            "video-codec",
+            "video-format",
+            "estimated-vf-fps",
+            "display-fps",
+            "demuxer-cache-duration",
+            "decoder-frame-drop-count",
+            "frame-drop-count"
+        ]
+        let fields = names.compactMap { name -> String? in
+            guard let value = propertyString(name, client: client),
+                  !value.isEmpty else { return nil }
+            return "\(name)=\(LogRedactor.text(value))"
+        }
+        PlayerExperimentLogger.performance(
+            "phase=playback_diagnostics elapsed_s=\(elapsedSeconds)"
+                + " performance_profile=\(performanceProfile.rawValue)"
+                + " render_control=\(renderControlMode.rawValue)"
+                + (fields.isEmpty
+                    ? " properties=unavailable"
+                    : " " + fields.joined(separator: " ")),
+            playerID: renderOwnerID,
+            requestID: requestID,
+            mode: teardownMode
+        )
+    }
+
+    private func propertyString(
+        _ name: String,
+        client: OpaquePointer
+    ) -> String? {
+        var buffer = [CChar](repeating: 0, count: 256)
+        let result = buffer.withUnsafeMutableBufferPointer { output in
+            name.withCString { namePointer in
+                library.getPropertyString(
+                    client,
+                    namePointer,
+                    output.baseAddress,
+                    Int32(output.count)
+                )
+            }
+        }
+        guard result >= 0 else { return nil }
+        return buffer.withUnsafeBufferPointer { output in
+            guard let baseAddress = output.baseAddress else { return nil }
+            return String(cString: baseAddress)
         }
     }
 
@@ -1316,12 +1626,10 @@ final class MPVPlayerClient: PlayerClient {
             }
             snapshot.status = .playing
             if let position = pendingStartPosition {
-                try? "time-pos".withCString { pointer in
-                    try library.checked(
-                        library.setPropertyDouble(client, pointer, position),
-                        operation: "恢复播放进度"
-                    )
-                }
+                // History restore and quality switching are timeline seeks too.
+                // Keep them on the remote-friendly keyframe path instead of
+                // silently reintroducing an exact `time-pos` property seek.
+                try? command(Self.seekCommand(to: position), client: client)
             }
             pendingStartPosition = nil
             for subtitle in pendingSubtitles {
@@ -1347,6 +1655,9 @@ final class MPVPlayerClient: PlayerClient {
             refreshTracks(client: client)
             emitSnapshot()
             if isFirstFileLoaded {
+                if let currentRequestID {
+                    schedulePlaybackDiagnostics(requestID: currentRequestID)
+                }
                 completeLoad(.success(()))
                 continuation.yield(.fileLoaded(requestID: currentRequestID))
             }
@@ -1356,6 +1667,43 @@ final class MPVPlayerClient: PlayerClient {
                 let nativeMessage = event.error < 0
                     ? library.errorString(for: event.error)
                     : "libmpv 在媒体载入完成前结束"
+                if currentMediaTransportProfile == .tvBox,
+                   tvBoxFormatFallbackAvailable,
+                   let currentMedia,
+                   let client {
+                    // Some TVBox spiders report a generic or stale format.
+                    // Retry the same authenticated URL once with libavformat
+                    // auto-detection before asking the provider to regenerate
+                    // the entire playback session.
+                    tvBoxFormatFallbackAvailable = false
+                    do {
+                        PlayerExperimentLogger.performance(
+                            "phase=tvbox_local_format_fallback"
+                                + " message=\(LogRedactor.text(nativeMessage))",
+                            playerID: renderOwnerID,
+                            requestID: currentRequestID,
+                            mode: teardownMode
+                        )
+                        snapshot.status = .loading
+                        emitSnapshot()
+                        try command(
+                            MPVTVBoxPlaybackPolicy.loadCommand(
+                                for: currentMedia,
+                                omitFormatHint: true
+                            ),
+                            client: client
+                        )
+                        return
+                    } catch {
+                        PlayerExperimentLogger.failure(
+                            "phase=tvbox_local_format_fallback_failed"
+                                + " message=\(LogRedactor.text(error.localizedDescription))",
+                            playerID: renderOwnerID,
+                            requestID: currentRequestID,
+                            mode: teardownMode
+                        )
+                    }
+                }
                 let message = MPVPlaybackErrorPolicy.userFacingMessage(
                     nativeMessage: nativeMessage
                 )
@@ -1378,7 +1726,12 @@ final class MPVPlayerClient: PlayerClient {
             }
             if MPVPlaybackEndPolicy.isNaturalEnd(
                 endFileReason: event.endFileReason,
-                isReplacingMedia: isReplacingMedia
+                isReplacingMedia: isReplacingMedia,
+                hasStartedPlayback: playbackStartSignal.hasStartedPlayback(),
+                isSeeking: snapshot.isSeeking,
+                isPausedForCache: snapshot.isPausedForCache,
+                position: snapshot.position,
+                duration: snapshot.duration
             ) {
                 emitEndedIfNeeded()
             } else if event.endFileReason == 2 {
@@ -1404,15 +1757,41 @@ final class MPVPlayerClient: PlayerClient {
                 continuation.yield(
                     .error(message, requestID: currentRequestID)
                 )
+            } else if event.endFileReason == 0 {
+                let message = snapshot.isSeeking
+                    ? "媒体在跳转过程中意外结束，请重试或切换线路"
+                    : "媒体在播放进度结束前提前断开，请重试或切换线路"
+                PlayerExperimentLogger.failure(
+                    "phase=premature_end_file"
+                        + " position=\(snapshot.position)"
+                        + " duration=\(snapshot.duration)"
+                        + " seeking=\(snapshot.isSeeking)",
+                    playerID: renderOwnerID,
+                    requestID: currentRequestID,
+                    mode: teardownMode
+                )
+                snapshot.status = .failed(message)
+                clearTransientPlaybackActivity()
+                emitSnapshot()
+                continuation.yield(
+                    .error(message, requestID: currentRequestID)
+                )
             }
         case NativeEvent.propertyChange:
             processProperty(event)
         case NativeEvent.seek:
+            if currentMediaTransportProfile == .tvBox,
+               completedTVBoxSeekGeneration == tvBoxSeekGeneration {
+                break
+            }
             snapshot.isSeeking = true
             emitSnapshot()
         case NativeEvent.playbackRestart:
             guard snapshot.isSeeking || snapshot.seekTarget != nil else {
                 break
+            }
+            if currentMediaTransportProfile == .tvBox {
+                completedTVBoxSeekGeneration = tvBoxSeekGeneration
             }
             snapshot.isSeeking = false
             snapshot.seekTarget = nil
@@ -1466,7 +1845,12 @@ final class MPVPlayerClient: PlayerClient {
         case "eof-reached":
             if MPVPlaybackEndPolicy.isNaturalEnd(
                 eofReached: event.flagValue != 0,
-                isReplacingMedia: isReplacingMedia
+                isReplacingMedia: isReplacingMedia,
+                hasStartedPlayback: playbackStartSignal.hasStartedPlayback(),
+                isSeeking: snapshot.isSeeking,
+                isPausedForCache: snapshot.isPausedForCache,
+                position: snapshot.position,
+                duration: snapshot.duration
             ) {
                 emitEndedIfNeeded()
                 return
@@ -1479,8 +1863,21 @@ final class MPVPlayerClient: PlayerClient {
                 snapshot.status = .playing
             }
         case "seeking":
-            snapshot.isSeeking = event.flagValue != 0
-            if !snapshot.isSeeking {
+            let isSeeking = event.flagValue != 0
+            if currentMediaTransportProfile == .tvBox,
+               isSeeking,
+               completedTVBoxSeekGeneration == tvBoxSeekGeneration {
+                // mpv can deliver the observed `seeking=yes` property after
+                // PLAYBACK_RESTART. Reopening the state here made the host's
+                // 10-second watchdog report a false timeout even though video
+                // was already running.
+                break
+            }
+            snapshot.isSeeking = isSeeking
+            if !isSeeking {
+                if currentMediaTransportProfile == .tvBox {
+                    completedTVBoxSeekGeneration = tvBoxSeekGeneration
+                }
                 snapshot.seekTarget = nil
             }
         case "cache-buffering-state":
@@ -1705,6 +2102,7 @@ final class PlayerLifecycleController {
     private var currentClient: PlayerClient?
     private var eventForwardingTask: Task<Void, Never>?
     private var teardownTask: Task<Void, Never>?
+    private var deferredDestroyTask: Task<Void, Never>?
     private var isShuttingDown = false
 
     private var rememberedVolume: Double = 100
@@ -1755,6 +2153,11 @@ final class PlayerLifecycleController {
 
     @discardableResult
     func prepareForPlayback(requestID: UUID) async throws -> MPVPlayerClient {
+        if let deferredDestroyTask {
+            deferredDestroyTask.cancel()
+            await deferredDestroyTask.value
+            self.deferredDestroyTask = nil
+        }
         if let teardownTask {
             await teardownTask.value
         }
@@ -1798,9 +2201,30 @@ final class PlayerLifecycleController {
         return player
     }
 
-    func closeAfterPlayback(requestID: UUID?) async {
+    func closeAfterPlayback(
+        requestID: UUID?,
+        warmRetentionSeconds: TimeInterval = 0
+    ) async {
         await stop()
         guard mode == .fullDestroy else { return }
+        let retention = max(0, warmRetentionSeconds)
+        if retention > 0 {
+            deferredDestroyTask?.cancel()
+            let task = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(
+                        nanoseconds: UInt64(retention * 1_000_000_000)
+                    )
+                } catch {
+                    return
+                }
+                guard let self, !self.isShuttingDown else { return }
+                self.deferredDestroyTask = nil
+                await self.fullDestroy(requestID: requestID)
+            }
+            deferredDestroyTask = task
+            return
+        }
         await fullDestroy(requestID: requestID)
     }
 
@@ -1954,6 +2378,9 @@ final class PlayerLifecycleController {
             return
         }
         isShuttingDown = true
+        deferredDestroyTask?.cancel()
+        await deferredDestroyTask?.value
+        deferredDestroyTask = nil
         if let teardownTask {
             await teardownTask.value
         }

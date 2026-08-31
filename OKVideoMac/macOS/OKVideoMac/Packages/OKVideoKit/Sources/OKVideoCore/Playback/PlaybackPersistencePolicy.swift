@@ -82,13 +82,27 @@ public enum PlaybackPersistencePolicy {
             return nil
         }
         // Node provider locators cross a third-party runtime boundary and may
-        // be JWTs or refresh tokens despite being labelled "stable". Persist
-        // only the secret-free Quark share/file identity. Legacy nhr1/npr1
-        // handles depended on host replay storage and are intentionally dead.
+        // be JWTs or refresh tokens despite being labelled "stable". Version
+        // 1 keeps only Quark's secret-free share/file identity. Version 2 is
+        // either a direct, bounded non-sensitive replay envelope (`ndr2`) or a
+        // device-local protected-store handle (`nhr2`); the opaque Provider
+        // arguments themselves never appear in SQLite for the latter.
         if reference.providerKind == "node-http-spider" {
-            guard locator.hasPrefix("qhr1.") else {
+            let isLegacyQuark = reference.providerVersion == 1
+                && locator.hasPrefix("qhr1.")
+            let isCatPawReplay = reference.providerVersion == 2
+                && (locator.hasPrefix("ndr2.")
+                    || locator.hasPrefix("nhr2."))
+            guard isLegacyQuark || isCatPawReplay else {
                 return nil
             }
+        }
+        // TVBox/Android Dex episode locators can encode a UUID owned by one
+        // live Spider instance. No current Android provider protocol attests a
+        // restart-stable locator, so even legacy records which labelled one
+        // `providerStable` must navigate through fresh detail instead.
+        if reference.providerKind == "android-dex-spider" {
+            return nil
         }
         return reference
     }

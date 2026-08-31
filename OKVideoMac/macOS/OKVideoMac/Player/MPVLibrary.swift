@@ -40,6 +40,12 @@ final class MPVLibrary {
         UnsafePointer<UnsafePointer<CChar>?>?
     ) -> Int32
     typealias SetPropertyString = SetOptionString
+    typealias GetPropertyString = @convention(c) (
+        OpaquePointer?,
+        UnsafePointer<CChar>?,
+        UnsafeMutablePointer<CChar>?,
+        Int32
+    ) -> Int32
     typealias SetPropertyDouble = @convention(c) (
         OpaquePointer?,
         UnsafePointer<CChar>?,
@@ -89,6 +95,7 @@ final class MPVLibrary {
         OpaquePointer?,
         MPVGetProcAddress?,
         UnsafeMutableRawPointer?,
+        Int32,
         UnsafeMutablePointer<OpaquePointer?>?
     ) -> Int32
     typealias RenderSetUpdateCallback = @convention(c) (
@@ -104,6 +111,7 @@ final class MPVLibrary {
         Int32,
         Int32
     ) -> Int32
+    typealias RenderSkip = @convention(c) (OpaquePointer?) -> Int32
     typealias RenderReportSwap = @convention(c) (OpaquePointer?) -> Void
     typealias RenderDestroy = @convention(c) (OpaquePointer?) -> Void
 
@@ -114,6 +122,7 @@ final class MPVLibrary {
     let setOptionString: SetOptionString
     let command: Command
     let setPropertyString: SetPropertyString
+    let getPropertyString: GetPropertyString
     let setPropertyDouble: SetPropertyDouble
     let setPropertyFlag: SetPropertyFlag
     let setPropertyStringArray: SetPropertyStringArray
@@ -128,6 +137,7 @@ final class MPVLibrary {
     let renderSetUpdateCallback: RenderSetUpdateCallback
     let renderUpdate: RenderUpdate
     let render: Render
+    let renderSkip: RenderSkip
     let renderReportSwap: RenderReportSwap
     let renderDestroy: RenderDestroy
 
@@ -160,6 +170,10 @@ final class MPVLibrary {
             command = try Self.symbol("okmpv_command", handle: handle)
             setPropertyString = try Self.symbol(
                 "okmpv_set_property_string",
+                handle: handle
+            )
+            getPropertyString = try Self.symbol(
+                "okmpv_get_property_string",
                 handle: handle
             )
             setPropertyDouble = try Self.symbol(
@@ -206,6 +220,10 @@ final class MPVLibrary {
                 handle: handle
             )
             render = try Self.symbol("okmpv_render", handle: handle)
+            renderSkip = try Self.symbol(
+                "okmpv_render_skip",
+                handle: handle
+            )
             renderReportSwap = try Self.symbol(
                 "okmpv_render_report_swap",
                 handle: handle

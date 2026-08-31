@@ -403,7 +403,7 @@ private struct StaticJavaScriptValueParser {
     }
 }
 
-enum NodeRuntimeLoopbackPortAllocator {
+enum NodeRuntimePortAllocator {
     static func allocate() throws -> Int {
         let descriptor = socket(AF_INET, SOCK_STREAM, 0)
         guard descriptor >= 0 else {
@@ -415,7 +415,10 @@ enum NodeRuntimeLoopbackPortAllocator {
         address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         address.sin_family = sa_family_t(AF_INET)
         address.sin_port = in_port_t(0)
-        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        // CatPawOpen publishes its configuration website to the LAN. Reserve
+        // the runtime port on every IPv4 interface so a loopback-only socket
+        // on another process cannot collide when the managed listener starts.
+        address.sin_addr = in_addr(s_addr: inet_addr("0.0.0.0"))
         let bindResult = withUnsafePointer(to: &address) { pointer in
             pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
@@ -468,7 +471,7 @@ enum NodeRuntimeContractFactory {
             guard let profileURL else {
                 throw NodeBundleRuntimeError.configurationContractInvalid
             }
-            let port = try NodeRuntimeLoopbackPortAllocator.allocate()
+            let port = try NodeRuntimePortAllocator.allocate()
             do {
                 try config.write(to: configURL, options: .atomic)
                 try FileManager.default.setAttributes(
@@ -485,6 +488,7 @@ enum NodeRuntimeContractFactory {
                 contract: .hostIntegrated,
                 launcherScript: contractBLauncher,
                 environmentAdditions: [
+                    "DEV_HTTP_HOST": "0.0.0.0",
                     "DEV_HTTP_PORT": String(port),
                     "OKVIDEO_CONTRACT_B_CONFIG_PATH": configURL.path,
                     "OKVIDEO_CONTRACT_B_STATE_PATH": stateURL.path,
@@ -554,8 +558,15 @@ enum NodeRuntimeContractFactory {
     const invocationStorage = new AsyncLocalStorage();
     const invocations = new Map();
     const pendingHostReplies = new Map();
+    const runtimeHostMessages = [];
+    const runtimeHostWaiters = [];
     const invocationTTLMilliseconds = 65000;
     const authorizationInvocationTTLMilliseconds = 5 * 60 * 1000;
+    const runtimeHostMessageTTLMilliseconds = 15000;
+    const runtimeHostMessageLimit = 16;
+    const proxyErrorCaptureLimitBytes = 4 * 1024;
+    let hostBridgeServer = null;
+    let hostBridgePort = 0;
     const originalFetch = globalThis.fetch;
     const originalHTTPRequest = http.request;
     const originalHTTPSRequest = https.request;
@@ -598,7 +609,7 @@ enum NodeRuntimeContractFactory {
       return result;
     }
 
-    function loopbackListen(server, args) {
+    function scopedListen(server, args) {
       let callback = null;
       if (typeof args[args.length - 1] === 'function') callback = args.pop();
       let options;
@@ -608,7 +619,7 @@ enum NodeRuntimeContractFactory {
             ? originalNetListen.apply(server, args.concat(callback))
             : originalNetListen.apply(server, args);
         }
-        options = Object.assign({}, args[0], { host: '127.0.0.1' });
+        options = Object.assign({}, args[0]);
       } else {
         if (typeof args[0] === 'string' && !/^\d+$/.test(args[0])) {
           return callback
@@ -619,15 +630,23 @@ enum NodeRuntimeContractFactory {
         if (!Number.isInteger(port) || port < 0 || port > 65535) {
           throw new Error('contract-b TCP port rejected');
         }
-        options = { port, host: '127.0.0.1' };
+        options = { port };
         if (typeof args[2] === 'number') options.backlog = args[2];
         else if (typeof args[1] === 'number') options.backlog = args[1];
       }
+      const declaredRuntimePort = Number(process.env.DEV_HTTP_PORT || 0);
+      const exposesConfigurationWebsite = Boolean(server[managedListener]) &&
+        Number(options.port) === declaredRuntimePort;
+      options.host = exposesConfigurationWebsite ? '0.0.0.0' : '127.0.0.1';
       listeners.add(server);
       server.once('close', () => listeners.delete(server));
       server.once('listening', () => {
         const address = server.address();
-        if (!address || typeof address === 'string' || address.address !== '127.0.0.1') {
+        const expectedAddress = exposesConfigurationWebsite
+          ? '0.0.0.0'
+          : '127.0.0.1';
+        if (!address || typeof address === 'string' ||
+            address.address !== expectedAddress) {
           void shutdown(1);
           return;
         }
@@ -647,7 +666,7 @@ enum NodeRuntimeContractFactory {
     }
 
     net.Server.prototype.listen = function controlledListen(...args) {
-      return loopbackListen(this, args);
+      return scopedListen(this, args);
     };
 
     function isPrivateOrLoopbackIPv4(hostname) {
@@ -683,28 +702,81 @@ enum NodeRuntimeContractFactory {
       return parsed.toString();
     }
 
-    function acceptHostMessage(value) {
+    const legacyWebAssetReplacements = new Map([
+      [
+        'https://lib.baomitu.com/react/18.2.0/umd/react.production.min.js',
+        'https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js'
+      ],
+      [
+        'https://lib.baomitu.com/react-dom/18.2.0/umd/react-dom.production.min.js',
+        'https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js'
+      ],
+      [
+        'https://lib.baomitu.com/axios/0.26.0/axios.min.js',
+        'https://cdn.jsdelivr.net/npm/axios@0.26.0/dist/axios.min.js'
+      ],
+      [
+        'https://lib.baomitu.com/dayjs/1.10.8/dayjs.min.js',
+        'https://cdn.jsdelivr.net/npm/dayjs@1.10.8/dayjs.min.js'
+      ],
+      [
+        'https://lib.baomitu.com/antd/5.25.0/antd.min.js',
+        'https://cdn.jsdelivr.net/npm/antd@5.25.0/dist/antd.min.js'
+      ],
+      [
+        'https://lib.baomitu.com/antd/5.25.0/reset.min.css',
+        'https://cdn.jsdelivr.net/npm/antd@5.25.0/dist/reset.css'
+      ]
+    ]);
+
+    function repairLegacyWebAssetURLs(value) {
+      let repaired = value;
+      for (const [legacyURL, replacementURL] of legacyWebAssetReplacements) {
+        repaired = repaired.split(legacyURL).join(replacementURL);
+      }
+      return repaired;
+    }
+
+    function acceptHostMessage(value, invocationID) {
       if (!value || !value.opt || typeof value.opt !== 'object') {
         return null;
+      }
+      if (value.action === 'toast') {
+        const opt = {};
+        for (const key of ['message', 'msg', 'text', 'title']) {
+          if (typeof value.opt[key] === 'string' &&
+              value.opt[key].length > 0 && value.opt[key].length <= 1024) {
+            opt[key] = value.opt[key];
+          }
+        }
+        if (!Object.keys(opt).length) return null;
+        if (Number.isFinite(Number(value.opt.duration))) {
+          opt.duration = Math.max(0, Math.min(Number(value.opt.duration), 60000));
+        }
+        return { action: 'toast', opt };
       }
       if (value.action === 'openInternalWebview') {
         const url = normalizeOwnedLoopbackURL(value.opt.url);
         if (!url) return null;
         const opt = { url };
-        for (const key of ['challengeID', 'provider', 'profileRevision', 'transport']) {
+        for (const key of ['challengeID', 'requestID', 'provider', 'profileRevision', 'transport']) {
           if (typeof value.opt[key] === 'string' && value.opt[key].length <= 256) {
             opt[key] = value.opt[key];
           }
         }
+        if (opt.requestID && opt.requestID !== invocationID) return null;
+        if (invocationID) opt.requestID = invocationID;
         return { action: 'openInternalWebview', opt };
       }
       if (value.action === 'authorizationCompleted') {
         const opt = {};
-        for (const key of ['challengeID', 'provider', 'profileRevision']) {
+        for (const key of ['challengeID', 'requestID', 'provider', 'profileRevision']) {
           if (typeof value.opt[key] === 'string' && value.opt[key].length <= 256) {
             opt[key] = value.opt[key];
           }
         }
+        if (opt.requestID && opt.requestID !== invocationID) return null;
+        if (invocationID) opt.requestID = invocationID;
         return { action: 'authorizationCompleted', opt };
       }
       if (value.action !== 'sniff') return null;
@@ -827,6 +899,201 @@ enum NodeRuntimeContractFactory {
       if (waiter) waiter(message);
       else context.hostMessages.push(message);
       return true;
+    }
+
+    function runtimeModulePath(pathname) {
+      if (typeof pathname !== 'string' || pathname.length > 2048) return null;
+      const parts = pathname.split('/').filter(Boolean);
+      if (parts.length < 3 || parts[0].toLowerCase() !== 'spider') return null;
+      const normalized = parts.slice(0, 3).map((part) => {
+        try { return encodeURIComponent(decodeURIComponent(part)); }
+        catch (_) { return null; }
+      });
+      if (normalized.some((part) => !part || part.length > 256)) return null;
+      return '/' + normalized.join('/');
+    }
+
+    function pruneRuntimeHostMessages(now) {
+      while (runtimeHostMessages.length > 0 &&
+             now - runtimeHostMessages[0].createdAt >
+               runtimeHostMessageTTLMilliseconds) {
+        runtimeHostMessages.shift();
+      }
+    }
+
+    function runtimeHostMessageMatches(entry, modulePath, notBefore) {
+      const sourceMatches = entry.modulePath === modulePath ||
+        (entry.modulePath === null &&
+          entry.message.action === 'proxyAuthorizationRequired');
+      return sourceMatches && entry.createdAt >= notBefore;
+    }
+
+    function takeRuntimeHostMessage(modulePath, notBefore) {
+      const now = Date.now();
+      pruneRuntimeHostMessages(now);
+      const index = runtimeHostMessages.findIndex((entry) =>
+        runtimeHostMessageMatches(entry, modulePath, notBefore)
+      );
+      if (index < 0) return null;
+      return runtimeHostMessages.splice(index, 1)[0];
+    }
+
+    function finishRuntimeHostWaiter(waiter, entry) {
+      if (!waiter || waiter.completed) return;
+      waiter.completed = true;
+      clearTimeout(waiter.timer);
+      const index = runtimeHostWaiters.indexOf(waiter);
+      if (index >= 0) runtimeHostWaiters.splice(index, 1);
+      if (waiter.response.destroyed || waiter.response.writableEnded) return;
+      if (!entry) {
+        waiter.response.statusCode = 204;
+        waiter.response.end();
+        return;
+      }
+      deliverHostMessage(waiter.response, entry.message);
+    }
+
+    function publishRuntimeHostMessage(context, message) {
+      if (!context ||
+          (message.action !== 'toast' &&
+            message.action !== 'proxyAuthorizationRequired')) return false;
+      const modulePath = runtimeModulePath(context.requestPath);
+      if (!modulePath && message.action !== 'proxyAuthorizationRequired') {
+        return false;
+      }
+      const createdAt = Date.now();
+      const event = {
+        action: message.action,
+        opt: Object.assign(
+          {},
+          message.opt,
+          modulePath ? {runtimeModulePath: modulePath} : {},
+          {runtimeEventAtMilliseconds: createdAt}
+        )
+      };
+      const entry = { message: event, modulePath, createdAt };
+      const waiterIndex = runtimeHostWaiters.findIndex((waiter) =>
+        runtimeHostMessageMatches(entry, waiter.modulePath, waiter.notBefore)
+      );
+      if (waiterIndex >= 0) {
+        const waiter = runtimeHostWaiters[waiterIndex];
+        finishRuntimeHostWaiter(waiter, entry);
+        return true;
+      }
+      pruneRuntimeHostMessages(createdAt);
+      runtimeHostMessages.push(entry);
+      while (runtimeHostMessages.length > runtimeHostMessageLimit) {
+        runtimeHostMessages.shift();
+      }
+      return true;
+    }
+
+    function pollRuntimeHostMessage(response, modulePath, notBefore, waitMilliseconds) {
+      const entry = takeRuntimeHostMessage(modulePath, notBefore);
+      if (entry) {
+        deliverHostMessage(response, entry.message);
+        return;
+      }
+      const boundedWait = Math.max(0, Math.min(waitMilliseconds, 2000));
+      if (boundedWait === 0) {
+        response.statusCode = 204;
+        response.end();
+        return;
+      }
+      if (runtimeHostWaiters.length >= runtimeHostMessageLimit) {
+        response.statusCode = 429;
+        response.end();
+        return;
+      }
+      const waiter = {
+        response,
+        modulePath,
+        notBefore,
+        completed: false,
+        timer: null
+      };
+      waiter.timer = setTimeout(
+        () => finishRuntimeHostWaiter(waiter, null),
+        boundedWait
+      );
+      runtimeHostWaiters.push(waiter);
+      response.once('close', () => finishRuntimeHostWaiter(waiter, null));
+    }
+
+    function proxyRequestDescriptor(pathname) {
+      if (typeof pathname !== 'string' || pathname.length > 2048) return null;
+      const parts = pathname.split('/').filter(Boolean);
+      const modulePath = runtimeModulePath(pathname);
+      const proxyIndex = parts[0]?.toLowerCase() === 'proxy'
+        ? 0
+        : modulePath && parts[3]?.toLowerCase() === 'proxy'
+          ? 3
+          : -1;
+      if (proxyIndex < 0) return null;
+      let provider = '';
+      try { provider = decodeURIComponent(parts[proxyIndex + 1] || ''); }
+      catch (_) { provider = ''; }
+      provider = provider.replace(/[^\p{L}\p{N}._-]/gu, '').slice(0, 64);
+      return {modulePath, provider};
+    }
+
+    function captureProxyResponseChunk(context, chunk, encoding) {
+      if (!context.proxyRequest || context.proxyResponseBytes >= proxyErrorCaptureLimitBytes ||
+          chunk === undefined || chunk === null) return;
+      let buffer;
+      try {
+        if (typeof chunk === 'string') {
+          buffer = Buffer.from(chunk, typeof encoding === 'string' ? encoding : 'utf8');
+        } else if (Buffer.isBuffer(chunk)) {
+          buffer = chunk;
+        } else if (ArrayBuffer.isView(chunk)) {
+          buffer = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+        } else {
+          return;
+        }
+      } catch (_) {
+        return;
+      }
+      const remaining = proxyErrorCaptureLimitBytes - context.proxyResponseBytes;
+      if (remaining <= 0) return;
+      const captured = buffer.subarray(0, remaining);
+      if (captured.length === 0) return;
+      context.proxyResponseChunks.push(Buffer.from(captured));
+      context.proxyResponseBytes += captured.length;
+    }
+
+    function normalizedProxyErrorMessage(context) {
+      if (context.proxyResponseChunks.length === 0) return '';
+      return Buffer.concat(context.proxyResponseChunks)
+        .toString('utf8')
+        .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 1024);
+    }
+
+    function isExplicitProxyAuthorizationFailure(statusCode, message) {
+      if (statusCode === 401 || statusCode === 403) return true;
+      return /无法获取\s*(?:下载链接|转码信息)[\s\S]{0,128}(?:请)?检查授权/.test(
+        message
+      );
+    }
+
+    function publishProxyAuthorizationFailure(context) {
+      if (!context.proxyRequest || context.proxyAuthorizationPublished) return;
+      const statusCode = Number(context.response.statusCode || 0);
+      const message = normalizedProxyErrorMessage(context);
+      if (!isExplicitProxyAuthorizationFailure(statusCode, message)) return;
+      const published = publishRuntimeHostMessage(context, {
+        action: 'proxyAuthorizationRequired',
+        opt: {
+          statusCode,
+          provider: context.proxyRequest.provider,
+          message: message || `网盘代理返回 HTTP ${statusCode}，请检查授权`,
+          transport: 'proxy'
+        }
+      });
+      if (published) context.proxyAuthorizationPublished = true;
     }
 
     function pollHostMessage(request, response, invocationID, waitMilliseconds) {
@@ -1001,24 +1268,12 @@ enum NodeRuntimeContractFactory {
         }
         if (value && value.action === 'saveProfile') {
           const saved = writeProfile(value.opt);
-          if (saved && context) {
-            let profileRevision = null;
-            try {
-              profileRevision = crypto.createHash('sha256')
-                .update(fs.readFileSync(profilePath)).digest('hex');
-            } catch (_) {}
-            publishHostMessage(context, {
-              action: 'authorizationCompleted',
-              opt: profileRevision ? { profileRevision } : {}
-            });
-          }
           response.statusCode = saved ? 200 : 400;
           response.end(saved ? '{"ok":true}' : '{"ok":false}');
           return;
         }
 
-        let accepted = acceptHostMessage(value);
-        if (!accepted || !publishHostMessage(context, accepted)) accepted = null;
+        const accepted = acceptHostMessage(value, invocationID);
         if (accepted && accepted.action === 'sniff') {
           const key = pendingHostReplyKey(invocationID, accepted.requestID);
           const entry = {
@@ -1036,7 +1291,18 @@ enum NodeRuntimeContractFactory {
             timeout + 1000
           );
           if (typeof entry.timer.unref === 'function') entry.timer.unref();
+          // Register the reply slot before the message becomes visible to the
+          // host. Otherwise a fast host can POST its result while this key is
+          // still absent and receive a false 404.
           pendingHostReplies.set(key, entry);
+          if (!publishHostMessage(context, accepted)) {
+            entry.completed = true;
+            clearTimeout(entry.timer);
+            pendingHostReplies.delete(key);
+            response.statusCode = 400;
+            response.end('{"ok":false}');
+            return;
+          }
           response.once('close', () => {
             if (!entry.completed && response.destroyed) {
               entry.completed = true;
@@ -1046,8 +1312,11 @@ enum NodeRuntimeContractFactory {
           });
           return;
         }
-        response.statusCode = accepted ? 200 : 400;
-        response.end(accepted ? '{"ok":true}' : '{"ok":false}');
+        const published = accepted && (accepted.action === 'toast'
+          ? publishRuntimeHostMessage(context, accepted)
+          : publishHostMessage(context, accepted));
+        response.statusCode = published ? 200 : 400;
+        response.end(published ? '{"ok":true}' : '{"ok":false}');
       });
     }
 
@@ -1059,24 +1328,83 @@ enum NodeRuntimeContractFactory {
       context.response.setHeader('X-OKVideo-Host-Message', encoded);
     }
 
+    function startHostBridge() {
+      if (hostBridgeServer && hostBridgePort > 0) return Promise.resolve();
+      return new Promise((resolve, reject) => {
+        const bridge = http.createServer((request, response) => {
+          if (request.method === 'POST' && request.url === '/msg') {
+            receiveHostMessage(request, response);
+            return;
+          }
+          response.statusCode = 404;
+          response.end();
+        });
+        const fail = (error) => {
+          if (hostBridgeServer === bridge) hostBridgeServer = null;
+          hostBridgePort = 0;
+          reject(error);
+        };
+        bridge.once('error', fail);
+        // CatPawOpen defines catDartServerPort() as a separate native-host
+        // endpoint. Keep this listener outside the Runtime-owned listener set
+        // so it can never attest itself as web content.
+        originalNetListen.call(
+          bridge,
+          { port: 0, host: '127.0.0.1' },
+          () => {
+            bridge.removeListener('error', fail);
+            const address = bridge.address();
+            if (!address || typeof address === 'string' ||
+                address.address !== '127.0.0.1' || address.port <= 0) {
+              bridge.close();
+              fail(new Error('contract-b host bridge listener rejected'));
+              return;
+            }
+            hostBridgeServer = bridge;
+            hostBridgePort = address.port;
+            resolve();
+          }
+        );
+      });
+    }
+
     globalThis.catDartServerPort = function catDartServerPort() {
-      return Number(process.env.DEV_HTTP_PORT || 0);
+      return hostBridgePort;
     };
+    function isLoopbackPeer(address) {
+      return address === '127.0.0.1' || address === '::1' ||
+        address === '::ffff:127.0.0.1';
+    }
+    function isConfigurationWebsitePath(pathname) {
+      return pathname === '/website' || pathname.startsWith('/website/');
+    }
     globalThis.catServerFactory = function catServerFactory(handler) {
       if (typeof handler !== 'function') {
         throw new Error('contract-b server factory arguments rejected');
       }
       const server = http.createServer((request, response) => {
+        const requestURL = new URL(request.url || '/', 'http://127.0.0.1');
+        // CatPawOpen intentionally publishes /website to the local network so
+        // its QR code can be opened by a phone. Keep Spider, bridge and host
+        // capability routes loopback-only even though the managed listener is
+        // bound to every IPv4 interface.
+        if (!isLoopbackPeer(request.socket?.remoteAddress) &&
+            !isConfigurationWebsitePath(requestURL.pathname)) {
+          response.statusCode = 403;
+          response.end();
+          return;
+        }
         if (request.method === 'POST' && request.url === '/msg') {
           receiveHostMessage(request, response);
           return;
         }
-        const requestURL = new URL(request.url || '/', 'http://127.0.0.1');
         if (request.method === 'GET' &&
             requestURL.pathname === '/__okvideo/owned-loopback') {
           const normalized = normalizeOwnedLoopbackURL(
             requestURL.searchParams.get('url') || ''
           );
+          const allowsAnyInternalPath =
+            requestURL.searchParams.get('purpose') === 'internal-webview';
           let isConfigurationWebsite = false;
           if (normalized) {
             try {
@@ -1085,7 +1413,7 @@ enum NodeRuntimeContractFactory {
                 normalizedURL.pathname === '/website/';
             } catch (_) {}
           }
-          if (!normalized || !isConfigurationWebsite) {
+          if (!normalized || (!allowsAnyInternalPath && !isConfigurationWebsite)) {
             response.statusCode = 404;
             response.end();
             return;
@@ -1118,6 +1446,31 @@ enum NodeRuntimeContractFactory {
           return;
         }
         const pollPrefix = '/__okvideo/host-message/';
+        if (request.method === 'GET' &&
+            requestURL.pathname === '/__okvideo/runtime-host-message') {
+          const requestedModulePath = requestURL.searchParams.get('source') || '';
+          const modulePath = runtimeModulePath(requestedModulePath);
+          if (!modulePath || modulePath !== requestedModulePath) {
+            response.statusCode = 400;
+            response.end();
+            return;
+          }
+          const now = Date.now();
+          const requestedNotBefore = Number(
+            requestURL.searchParams.get('notBefore') || 0
+          );
+          const notBefore = Number.isFinite(requestedNotBefore)
+            ? Math.max(now - runtimeHostMessageTTLMilliseconds,
+                Math.min(requestedNotBefore, now + 1000))
+            : now;
+          pollRuntimeHostMessage(
+            response,
+            modulePath,
+            notBefore,
+            Number(requestURL.searchParams.get('wait') || 0)
+          );
+          return;
+        }
         if (request.method === 'GET' && requestURL.pathname.startsWith(pollPrefix)) {
           const invocationID = normalizedInvocationID(
             decodeURIComponent(requestURL.pathname.slice(pollPrefix.length))
@@ -1139,6 +1492,11 @@ enum NodeRuntimeContractFactory {
         const context = {
           id: invocationID,
           response,
+          requestPath: requestURL.pathname,
+          proxyRequest: proxyRequestDescriptor(requestURL.pathname),
+          proxyResponseChunks: [],
+          proxyResponseBytes: 0,
+          proxyAuthorizationPublished: false,
           hostMessages: [],
           attached: false,
           authorizationChallenge: false,
@@ -1150,12 +1508,37 @@ enum NodeRuntimeContractFactory {
         response.once('finish', () => scheduleInvocationRemoval(context));
         response.once('close', () => scheduleInvocationRemoval(context));
         const originalWriteHead = response.writeHead;
+        const originalWrite = response.write;
         const originalEnd = response.end;
         response.writeHead = function controlledWriteHead(...args) {
           attachHostMessageHeader(context);
           return originalWriteHead.apply(response, args);
         };
+        response.write = function controlledWrite(...args) {
+          captureProxyResponseChunk(context, args[0], args[1]);
+          return originalWrite.apply(response, args);
+        };
         response.end = function controlledEnd(...args) {
+          captureProxyResponseChunk(context, args[0], args[1]);
+          if (!response.headersSent && args.length > 0 &&
+              (typeof args[0] === 'string' || Buffer.isBuffer(args[0])) &&
+              !response.hasHeader('Content-Encoding')) {
+            const contentType = String(response.getHeader('Content-Type') || '')
+              .toLowerCase();
+            const isWebsitePage = requestURL.pathname === '/website' ||
+              requestURL.pathname.startsWith('/website/');
+            if (isWebsitePage && contentType.includes('text/html')) {
+              const originalBody = Buffer.isBuffer(args[0])
+                ? args[0].toString('utf8')
+                : args[0];
+              const repairedBody = repairLegacyWebAssetURLs(originalBody);
+              if (repairedBody !== originalBody) {
+                args[0] = Buffer.from(repairedBody, 'utf8');
+                response.setHeader('Content-Length', args[0].length);
+              }
+            }
+          }
+          publishProxyAuthorizationFailure(context);
           attachHostMessageHeader(context);
           return originalEnd.apply(response, args);
         };
@@ -1172,11 +1555,17 @@ enum NodeRuntimeContractFactory {
         if (runtime && typeof runtime.stop === 'function') await runtime.stop();
       } catch (_) {}
       try {
-        await Promise.all(Array.from(listeners, (listener) =>
+        const closing = Array.from(listeners, (listener) =>
           listener.listening
             ? new Promise((resolve) => listener.close(resolve))
             : Promise.resolve()
-        ));
+        );
+        if (hostBridgeServer && hostBridgeServer.listening) {
+          closing.push(
+            new Promise((resolve) => hostBridgeServer.close(resolve))
+          );
+        }
+        await Promise.all(closing);
       } catch (_) {}
       process.exit(code);
     }
@@ -1210,7 +1599,7 @@ enum NodeRuntimeContractFactory {
       if (!runtime || typeof runtime.start !== 'function' || typeof runtime.stop !== 'function') {
         throw new Error('contract-b lifecycle exports rejected');
       }
-      Promise.resolve(runtime.start(config)).catch((error) => {
+      startHostBridge().then(() => runtime.start(config)).catch((error) => {
         console.error(error);
         void shutdown(1);
       });
@@ -1233,7 +1622,7 @@ struct ContractBListenerState: Codable, Equatable, Sendable {
               let state = try? JSONDecoder().decode(Self.self, from: data),
               state.contract == NodeRuntimeContractKind.hostIntegrated.rawValue,
               state.phase == "listener-observed",
-              state.host == "127.0.0.1",
+              state.host == "0.0.0.0",
               (1...65_535).contains(state.port)
         else { return nil }
         return state

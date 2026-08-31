@@ -7,9 +7,14 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.text.InputType;
+import android.view.KeyEvent;
+import android.view.View;
 import android.view.ViewGroup;
+import android.widget.BaseAdapter;
 import android.widget.EditText;
 import android.widget.ImageView;
+import android.widget.ListView;
+import android.widget.TextView;
 
 import androidx.test.platform.app.InstrumentationRegistry;
 
@@ -24,9 +29,11 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -52,6 +59,79 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class BridgeProtocolTest extends TestCase {
+    public void testBrowseThenPlaybackUsesSeparateTransientOwnerContracts()
+            throws Exception {
+        BridgeProviderOwnerRegistry.resetForTests();
+        String suffix = UUID.randomUUID().toString();
+        String jarKey = "https://unit.invalid/transient-" + suffix + ".jar";
+        JSONObject base = new JSONObject()
+                .put("providerOwnerID", "transient-provider-" + suffix)
+                .put("configurationID", "transient-configuration-" + suffix)
+                .put("siteKey", "transient-site-" + suffix)
+                .put("jarURL", jarKey)
+                .put("jarMD5", "");
+        JSONObject browse = new JSONObject(base.toString())
+                .put(
+                        "actionContract",
+                        new JSONObject().put("actionKind", "configuration")
+                );
+        JSONObject playback = new JSONObject(base.toString())
+                .put(
+                        "actionContract",
+                        new JSONObject().put("actionKind", "playback")
+                );
+
+        BridgeProviderOwnerRegistry.Binding browseOwner =
+                BridgeProviderOwnerRegistry.bind(browse, jarKey);
+        BridgeProviderOwnerRegistry.Binding playbackOwner =
+                BridgeProviderOwnerRegistry.bind(playback, jarKey);
+
+        assertNotSame(browseOwner, playbackOwner);
+        assertEquals(
+                "configuration",
+                browseOwner.actionContract.getString("actionKind")
+        );
+        assertEquals(
+                "playback",
+                playbackOwner.actionContract.getString("actionKind")
+        );
+        assertNull(BridgeProviderOwnerRegistry.state(""));
+    }
+
+    public void testInteractiveOwnerStillRejectsActionContractMutation()
+            throws Exception {
+        BridgeProviderOwnerRegistry.resetForTests();
+        String suffix = UUID.randomUUID().toString();
+        String jarKey = "https://unit.invalid/interactive-" + suffix + ".jar";
+        JSONObject authorization = new JSONObject()
+                .put("providerOwnerID", "interactive-provider-" + suffix)
+                .put("configurationID", "interactive-configuration-" + suffix)
+                .put("siteKey", "interactive-site-" + suffix)
+                .put("interactionID", "interactive-request-" + suffix)
+                .put("jarURL", jarKey)
+                .put("jarMD5", "")
+                .put(
+                        "actionContract",
+                        new JSONObject().put("actionKind", "authorization")
+                );
+        JSONObject mutated = new JSONObject(authorization.toString())
+                .put(
+                        "actionContract",
+                        new JSONObject().put("actionKind", "playback")
+                );
+
+        BridgeProviderOwnerRegistry.bind(authorization, jarKey);
+        try {
+            BridgeProviderOwnerRegistry.bind(mutated, jarKey);
+            fail("interactive owner contract mutation must be rejected");
+        } catch (IllegalStateException error) {
+            assertEquals(
+                    "Provider owner action contract mismatch",
+                    error.getMessage()
+            );
+        }
+    }
+
     public void testRequestScopedHTTPRouteAndLegacyHostRecovery() throws Exception {
         Context context = InstrumentationRegistry.getInstrumentation()
                 .getTargetContext();
@@ -107,6 +187,156 @@ public final class BridgeProtocolTest extends TestCase {
         );
         assertFalse(BridgeInteractionRegistry.ownsLatest(first));
         assertTrue(BridgeInteractionRegistry.ownsLatest(second));
+        assertEquals("discarded", BridgeInteractionRegistry.state(first)
+                .getString("returnState"));
+    }
+
+    public void testActionSessionSeparatesReturnSurfaceAndEventChannels()
+            throws Exception {
+        String id = "interaction-channels-" + UUID.randomUUID();
+        BridgeInteractionRegistry.begin(id, "configuration", "action");
+
+        JSONObject initial = BridgeInteractionRegistry.state(id);
+        JSONObject channels = initial.getJSONObject("channels");
+        assertEquals("pending", channels.getJSONObject("return")
+                .getString("state"));
+        assertFalse(channels.getJSONObject("surface")
+                .getBoolean("visible"));
+        assertEquals(0L, channels.getJSONObject("events")
+                .getLong("latestSequence"));
+
+        JSONObject recorded = BridgeInteractionRegistry.recordEvent(
+                id,
+                "providerMessage",
+                "清除成功"
+        );
+        assertTrue(recorded.getBoolean("eventAccepted"));
+        assertEquals(1, recorded.getJSONArray("events").length());
+        assertEquals("清除成功", recorded.getJSONArray("events")
+                .getJSONObject(0).getString("message"));
+
+        JSONObject state = BridgeInteractionRegistry.state(id);
+        assertFalse("event text must not enter surface state",
+                state.toString().contains("清除成功"));
+        assertEquals(1L, state.getJSONObject("channels")
+                .getJSONObject("events").getLong("latestSequence"));
+
+        JSONObject returned = BridgeInteractionRegistry.invocationReturned(id);
+        assertTrue(returned.getBoolean("returnAccepted"));
+        assertEquals("returned", returned.getString("returnState"));
+        assertEquals("returned", returned.getJSONObject("channels")
+                .getJSONObject("return").getString("state"));
+    }
+
+    public void testExternalSurfaceStateNeverBecomesAuthorizationSuccess()
+            throws Exception {
+        String id = "interaction-external-contract-" + UUID.randomUUID();
+        BridgeInteractionRegistry.begin(id, "authorization", "action");
+        BridgeInteractionRegistry.expectProviderUI(id);
+        JSONObject external = new JSONObject()
+                .put("visible", false)
+                .put("surfaceActive", true)
+                .put("surfaceRequestScoped", true)
+                .put("surfaceDelegated", true)
+                .put("surfaceInteractionID", id)
+                .put("surfaceMode", "externalActivity")
+                .put("surfaceHostLifecycle", "stopped");
+        JSONObject waiting = BridgeInteractionRegistry.observeUI(id, external);
+        assertEquals("awaitingExternalSurface", waiting.getString("phase"));
+        assertEquals("stay", waiting.getString("outcome"));
+        assertFalse(waiting.getBoolean("terminal"));
+        assertFalse(waiting.getBoolean("visible"));
+        assertTrue(waiting.getBoolean("surfaceActive"));
+        assertTrue(waiting.getBoolean("surfaceRequestScoped"));
+        assertTrue(waiting.getBoolean("surfaceDelegated"));
+        assertEquals(id, waiting.getString("surfaceInteractionID"));
+        assertFalse(waiting.optBoolean("verificationPerformed", false));
+
+        JSONObject returned = BridgeInteractionRegistry.invocationReturned(id);
+        assertEquals("awaitingExternalSurface", returned.getString("phase"));
+        assertFalse(returned.getBoolean("terminal"));
+        assertEquals("returned", returned.getString("returnState"));
+
+        JSONObject verified = BridgeInteractionRegistry.verified(
+                id,
+                true,
+                "",
+                Boolean.TRUE
+        );
+        assertEquals("completed", verified.getString("phase"));
+        assertTrue(verified.getBoolean("verificationPerformed"));
+        assertTrue(verified.getBoolean("terminal"));
+        assertFalse(verified.getBoolean("surfaceActive"));
+        assertFalse(verified.getBoolean("surfaceRequestScoped"));
+        assertFalse(verified.getBoolean("surfaceDelegated"));
+        JSONObject surface = verified.getJSONObject("channels")
+                .getJSONObject("surface");
+        assertFalse(surface.getBoolean("active"));
+        assertFalse(surface.getBoolean("requestScoped"));
+        assertEquals("", surface.getString("interactionID"));
+    }
+
+    public void testSupersededExternalSurfaceLeaseIsImmediatelyInvalid()
+            throws Exception {
+        String oldID = "interaction-external-old-" + UUID.randomUUID();
+        String currentID = "interaction-external-new-" + UUID.randomUUID();
+        BridgeInteractionRegistry.begin(oldID, "authorization", "action");
+        BridgeInteractionRegistry.expectProviderUI(oldID);
+        BridgeInteractionRegistry.observeUI(
+                oldID,
+                new JSONObject()
+                        .put("visible", false)
+                        .put("surfaceActive", true)
+                        .put("surfaceRequestScoped", true)
+                        .put("surfaceDelegated", true)
+                        .put("surfaceInteractionID", oldID)
+                        .put("surfaceMode", "externalActivity")
+        );
+        BridgeInteractionRegistry.begin(
+                currentID,
+                "configuration",
+                "action"
+        );
+        JSONObject old = BridgeInteractionRegistry.state(oldID);
+        assertEquals("superseded", old.getString("phase"));
+        assertFalse(old.getBoolean("surfaceActive"));
+        assertFalse(old.getBoolean("surfaceRequestScoped"));
+        assertFalse(old.getJSONObject("channels")
+                .getJSONObject("surface").getBoolean("active"));
+        BridgeInteractionRegistry.cancel(currentID);
+    }
+
+    public void testEventRouteIsRequestScopedAndSequenceFiltered()
+            throws Exception {
+        ensureBridgeServer();
+        String id = "http-events-" + UUID.randomUUID();
+        request(
+                "POST",
+                "/v1/interactions",
+                new JSONObject()
+                        .put("interactionID", id)
+                        .put("kind", "configuration")
+                        .put("method", "action")
+        );
+        BridgeInteractionRegistry.recordEvent(id, "providerMessage", "第一条");
+        BridgeInteractionRegistry.recordEvent(id, "toast", "第二条");
+
+        JSONObject all = request(
+                "GET",
+                "/v1/interactions/" + id + "/events",
+                null
+        );
+        assertEquals(2L, all.getLong("latestSequence"));
+        assertEquals(2, all.getJSONArray("events").length());
+        JSONObject afterFirst = request(
+                "GET",
+                "/v1/interactions/" + id + "/events?after=1",
+                null
+        );
+        assertEquals(1, afterFirst.getJSONArray("events").length());
+        assertEquals("第二条", afterFirst.getJSONArray("events")
+                .getJSONObject(0).getString("message"));
+        BridgeInteractionRegistry.cancel(id);
     }
 
     public void testHTTPRetryOfSupersededRequestIsRejectedWithoutStealingLatest()
@@ -248,8 +478,7 @@ public final class BridgeProtocolTest extends TestCase {
                 "configuration",
                 "authorization",
                 "websetting",
-                "nativesetting",
-                "playback"
+                "nativesetting"
         }) {
             payload.put("interactionKind", kind);
             assertTrue(
@@ -260,6 +489,9 @@ public final class BridgeProtocolTest extends TestCase {
                     )
             );
         }
+
+        payload.put("interactionKind", "playback");
+        assertTrue(DexSpiderRegistry.requiresDialogHandoff(payload, "play"));
 
         payload.put("interactionKind", "authorization");
         payload.put("monitorsAuthorization", false);
@@ -327,7 +559,7 @@ public final class BridgeProtocolTest extends TestCase {
         assertFalse(visible.getBoolean("terminal"));
     }
 
-    public void testValidPlaybackResultWaitsForDelayedAuthorizationUI()
+    public void testValidPlaybackResultNeverPromotesDelayedQRCodeToAuthorization()
             throws Exception {
         String id = BridgeInteractionRegistry.begin(
                 "interaction-playback",
@@ -342,9 +574,9 @@ public final class BridgeProtocolTest extends TestCase {
                 id,
                 DexSpiderRegistry.isPlayableResult(playable)
         );
-        assertEquals("awaitingProviderUI", state.getString("phase"));
-        assertEquals("stay", state.getString("outcome"));
-        assertFalse(state.getBoolean("terminal"));
+        assertEquals("completed", state.getString("phase"));
+        assertEquals("completed", state.getString("outcome"));
+        assertTrue(state.getBoolean("terminal"));
 
         JSONObject visible = BridgeInteractionRegistry.observeUI(
                 id,
@@ -354,12 +586,13 @@ public final class BridgeProtocolTest extends TestCase {
                         .put("qrImageCount", 1)
                         .put("authorizationCandidate", true)
         );
-        assertEquals("authorization", visible.getString("kind"));
-        assertEquals("awaitingUser", visible.getString("phase"));
-        assertFalse(visible.getBoolean("terminal"));
+        assertEquals("playback", visible.getString("kind"));
+        assertFalse(visible.optBoolean("authorizationPromoted", false));
+        assertEquals("completed", visible.getString("phase"));
+        assertTrue(visible.getBoolean("terminal"));
     }
 
-    public void testValidPlaybackResultCompletesAfterUIGrace() throws Exception {
+    public void testValidPlaybackResultCompletesWithoutUIGrace() throws Exception {
         String id = BridgeInteractionRegistry.begin(
                 "interaction-playback-complete",
                 "playback",
@@ -369,20 +602,13 @@ public final class BridgeProtocolTest extends TestCase {
                 .put("parse", 0)
                 .put("url", "http://127.0.0.1:9978/proxy/media/session");
         BridgeInteractionRegistry.expectProviderUI(id);
-        JSONObject pending = BridgeInteractionRegistry.invocationReturned(
+        JSONObject completed = BridgeInteractionRegistry.invocationReturned(
                 id,
                 DexSpiderRegistry.isPlayableResult(playable)
         );
-        assertFalse(pending.getBoolean("terminal"));
-
-        Thread.sleep(1_550L);
-        JSONObject state = BridgeInteractionRegistry.observeUI(
-                id,
-                new JSONObject().put("visible", false)
-        );
-        assertEquals("completed", state.getString("phase"));
-        assertEquals("completed", state.getString("outcome"));
-        assertTrue(state.getBoolean("terminal"));
+        assertEquals("completed", completed.getString("phase"));
+        assertEquals("completed", completed.getString("outcome"));
+        assertTrue(completed.getBoolean("terminal"));
     }
 
     public void testPlayableShapeOnlyTerminatesPlaybackInteractions()
@@ -683,6 +909,32 @@ public final class BridgeProtocolTest extends TestCase {
         assertEquals("cancelled", late.getString("phase"));
         assertEquals("cancelled", late.getString("outcome"));
         assertTrue(late.getBoolean("terminal"));
+        assertFalse(late.getBoolean("returnAccepted"));
+        assertEquals("discarded", late.getString("returnState"));
+    }
+
+    public void testSupersededSessionRejectsLateReturnAndOldEvent()
+            throws Exception {
+        String oldID = "interaction-late-old-" + UUID.randomUUID();
+        String currentID = "interaction-late-current-" + UUID.randomUUID();
+        BridgeInteractionRegistry.begin(oldID, "configuration", "action");
+        BridgeInteractionRegistry.begin(currentID, "configuration", "action");
+
+        JSONObject lateReturn = BridgeInteractionRegistry.invocationReturned(
+                oldID
+        );
+        assertFalse(lateReturn.getBoolean("returnAccepted"));
+        assertEquals("discarded", lateReturn.getString("returnState"));
+        JSONObject lateEvent = BridgeInteractionRegistry.recordEvent(
+                oldID,
+                "toast",
+                "上一条操作的迟到消息"
+        );
+        assertFalse(lateEvent.getBoolean("eventAccepted"));
+        assertEquals(0, lateEvent.getJSONArray("events").length());
+        assertEquals(0, BridgeInteractionRegistry.events(currentID, 0L)
+                .getJSONArray("events").length());
+        BridgeInteractionRegistry.cancel(currentID);
     }
 
     public void testSupersededInteractionCannotReclaimLatestRequest()
@@ -800,7 +1052,7 @@ public final class BridgeProtocolTest extends TestCase {
         assertFalse(BridgeServer.hasTrackedInteractionWorker(id));
     }
 
-    public void testProviderFinishHandsDialogsBackToPersistentHost()
+    public void testProviderFinishKeepsSuccessorDialogInSameActionSession()
             throws Exception {
         Context context = InstrumentationRegistry.getInstrumentation()
                 .getTargetContext();
@@ -827,12 +1079,25 @@ public final class BridgeProtocolTest extends TestCase {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync();
 
         assertFalse(isShowing(dialog));
+        assertTrue(BridgeActionActivity.isReadyFor(id));
+        assertTrue(com.github.catvod.Init.context() == disposableOwner);
+        assertTrue(BridgeActionActivity.ownsInitContext(id));
+
+        // The common FongMi provider pattern immediately posts the login/QR
+        // successor through Init.context() after finish(). It must retain the
+        // original request identity instead of falling onto the unowned host.
+        AlertDialog successor = showOwnedDialog(id, "同一会话的二维码", null);
+        JSONObject visible = awaitCapturedUI(context, id, 2_000L);
+        assertTrue(visible.getBoolean("visible"));
+        assertEquals(id, visible.getString("windowOwnerInteractionID"));
+        assertEquals("authorization", visible.getString("kind"));
+
+        BridgeActivity.dismissUI(context, id);
+        assertFalse(isShowing(successor));
         assertTrue(BridgeActionActivity.awaitReleased(id, 2_000L));
-        assertFalse(com.github.catvod.Init.context() == disposableOwner);
-        BridgeInteractionRegistry.cancel(id);
     }
 
-    public void testLegacyUntaggedLoginQRCodePromotesAndVerifies()
+    public void testLegacyUntaggedQRCodeRemainsConfiguration()
             throws Exception {
         ensureBridgeServer();
         Context context = InstrumentationRegistry.getInstrumentation()
@@ -851,9 +1116,9 @@ public final class BridgeProtocolTest extends TestCase {
 
         JSONObject visible = awaitCapturedUI(context, id, 2_000L);
         assertTrue(visible.getBoolean("visible"));
-        assertEquals("authorization", visible.getString("kind"));
+        assertEquals("configuration", visible.getString("kind"));
         assertEquals("configuration", visible.getString("declaredKind"));
-        assertTrue(visible.getBoolean("authorizationPromoted"));
+        assertFalse(visible.optBoolean("authorizationPromoted", false));
         assertEquals("qrCode", visible.getString("uiRole"));
         assertEquals(1, visible.getInt("qrImageCount"));
         assertTrue(visible.getBoolean("authorizationCandidate"));
@@ -865,14 +1130,8 @@ public final class BridgeProtocolTest extends TestCase {
         assertTrue(snapshot.length > 100);
         assertFalse(visible.toString().contains("okvideomac-legacy-login"));
 
-        JSONObject verified = request(
-                "POST",
-                "/v1/interactions/" + id + "/verify",
-                new JSONObject()
-                        .put("succeeded", true)
-                        .put("refreshPerformed", true)
-        );
-        assertEquals("completed", verified.getString("phase"));
+        BridgeInteractionRegistry.cancel(id);
+        BridgeActivity.dismissUI(context, id);
         assertFalse(isShowing(dialog));
         assertTrue(BridgeActionActivity.awaitReleased(id, 2_000L));
     }
@@ -898,7 +1157,7 @@ public final class BridgeProtocolTest extends TestCase {
 
         JSONObject visible = awaitCapturedUI(context, id, 2_000L);
         assertTrue(visible.getBoolean("visible"));
-        assertEquals(3, visible.getInt("uiSchemaVersion"));
+        assertEquals(4, visible.getInt("uiSchemaVersion"));
         assertEquals("ready", visible.getString("qrStatus"));
         assertEquals(1, visible.getInt("qrImageCount"));
         assertTrue(visible.getInt("imageCount") >= 1);
@@ -910,7 +1169,141 @@ public final class BridgeProtocolTest extends TestCase {
         assertFalse(isShowing(textDialog));
     }
 
-    public void testPlaybackQRCodePromotesBlockedRequestToAuthorization()
+    public void testUnownedHostDialogCannotEnterCurrentActionSurface()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        String id = "interaction-ignore-unowned-" + UUID.randomUUID();
+        BridgeServer.beginAndActivateInteraction(
+                context,
+                id,
+                "configuration",
+                "action"
+        );
+        BridgeActivity.prepareDialogHandoff(context, id);
+        Context persistentContext = BridgeActivity.hostContext();
+        assertTrue(persistentContext instanceof Activity);
+        AlertDialog foreign = showDialogOnActivity(
+                (Activity) persistentContext,
+                "上一条操作遗留的提示"
+        );
+
+        JSONObject withoutOwnedSurface = BridgeActivity.uiState(context, id);
+        assertFalse(withoutOwnedSurface.getBoolean("visible"));
+        assertFalse(withoutOwnedSurface.toString()
+                .contains("上一条操作遗留的提示"));
+
+        AlertDialog owned = showOwnedDialog(id, "当前请求窗口", null);
+        JSONObject current = awaitCapturedUI(context, id, 2_000L);
+        assertTrue(current.getBoolean("visible"));
+        assertEquals(id, current.getString("windowOwnerInteractionID"));
+        assertFalse(current.toString().contains("上一条操作遗留的提示"));
+
+        BridgeActivity.dismissUI(context, id);
+        assertFalse(isShowing(owned));
+        // Request cleanup is exact and must not mutate an unowned host
+        // window. The test owns this artificial legacy window and closes it.
+        assertTrue(isShowing(foreign));
+        dismissDialog(foreign);
+        assertFalse(isShowing(foreign));
+    }
+
+    public void testForegroundExternalActivityKeepsExactSurfaceLease()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        String id = "interaction-external-activity-" + UUID.randomUUID();
+        boolean externalStarted = false;
+        try {
+            BridgeServer.beginAndActivateInteraction(
+                    context,
+                    id,
+                    "authorization",
+                    "action"
+            );
+            BridgeActivity.prepareDialogHandoff(context, id);
+            assertTrue(BridgeActionActivity.isReadyFor(id));
+
+            JSONObject anchor = BridgeActivity.uiState(context, id);
+            assertFalse(anchor.getBoolean("visible"));
+            assertTrue(anchor.getBoolean("surfaceActive"));
+            assertTrue(anchor.getBoolean("surfaceRequestScoped"));
+            assertFalse(anchor.getBoolean("surfaceDelegated"));
+            assertEquals("actionActivity", anchor.getString("surfaceMode"));
+
+            Intent external = launchableExternalActivity(context);
+            external.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            context.startActivity(external);
+            externalStarted = true;
+
+            long deadline = System.currentTimeMillis() + 3_000L;
+            BridgeActionActivity.SurfaceStatus lifecycle = null;
+            while (System.currentTimeMillis() < deadline) {
+                lifecycle = BridgeActionActivity.surfaceStatusFor(id);
+                if (lifecycle.delegatedSurfaceActive) break;
+                Thread.sleep(25L);
+            }
+            assertNotNull(lifecycle);
+            assertTrue(lifecycle.requestScoped);
+            assertTrue(lifecycle.delegatedSurfaceActive);
+
+            JSONObject delegated = BridgeActivity.uiState(context, id);
+            assertFalse(delegated.getBoolean("visible"));
+            assertTrue(delegated.getBoolean("surfaceActive"));
+            assertTrue(delegated.getBoolean("surfaceRequestScoped"));
+            assertTrue(delegated.getBoolean("surfaceDelegated"));
+            assertEquals(id, delegated.getString("surfaceInteractionID"));
+            assertEquals(
+                    "externalActivity",
+                    delegated.getString("surfaceMode")
+            );
+            assertTrue(
+                    "paused".equals(delegated.getString(
+                            "surfaceHostLifecycle"
+                    ))
+                            || "stopped".equals(delegated.getString(
+                            "surfaceHostLifecycle"
+                    ))
+            );
+            assertEquals(
+                    "awaitingExternalSurface",
+                    delegated.getString("phase")
+            );
+            assertEquals("stay", delegated.getString("outcome"));
+            assertFalse(delegated.getBoolean("terminal"));
+            assertFalse(delegated.optBoolean("verificationPerformed", false));
+            assertFalse(delegated.optBoolean("authenticated", false));
+            JSONObject surface = delegated.getJSONObject("channels")
+                    .getJSONObject("surface");
+            assertTrue(surface.getBoolean("active"));
+            assertTrue(surface.getBoolean("requestScoped"));
+            assertTrue(surface.getBoolean("delegated"));
+            assertFalse(surface.getBoolean("visible"));
+
+            JSONObject cancelled = BridgeActivity.dismissUI(context, id);
+            assertEquals("cancelled", cancelled.getString("phase"));
+            assertFalse(cancelled.getBoolean("surfaceActive"));
+            assertFalse(cancelled.getBoolean("surfaceRequestScoped"));
+            assertFalse(cancelled.getBoolean("surfaceDelegated"));
+            assertTrue(BridgeActionActivity.awaitReleased(id, 2_000L));
+        } finally {
+            if (!BridgeInteractionRegistry.terminal(id)) {
+                BridgeActivity.dismissUI(context, id);
+            }
+            if (externalStarted) {
+                InstrumentationRegistry.getInstrumentation()
+                        .sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            }
+        }
+        JSONObject latePoll = BridgeActivity.uiState(context, id);
+        assertTrue(latePoll.getBoolean("terminal"));
+        assertFalse(latePoll.getBoolean("surfaceActive"));
+        assertFalse(latePoll.getBoolean("surfaceRequestScoped"));
+        assertEquals("none", latePoll.getString("surfaceMode"));
+    }
+
+    public void testPlaybackQRCodeRemainsPlaybackContent()
             throws Exception {
         Context context = InstrumentationRegistry.getInstrumentation()
                 .getTargetContext();
@@ -925,9 +1318,9 @@ public final class BridgeProtocolTest extends TestCase {
         AlertDialog dialog = showOwnedImageDialog(id, true);
 
         JSONObject visible = awaitCapturedUI(context, id, 2_000L);
-        assertEquals("authorization", visible.getString("kind"));
+        assertEquals("playback", visible.getString("kind"));
         assertEquals("playback", visible.getString("declaredKind"));
-        assertTrue(visible.getBoolean("authorizationPromoted"));
+        assertFalse(visible.optBoolean("authorizationPromoted", false));
         assertEquals("ready", visible.getString("qrStatus"));
         assertTrue(BridgeActivity.snapshotUI(context, id).length > 100);
 
@@ -1034,7 +1427,54 @@ public final class BridgeProtocolTest extends TestCase {
         assertFalse(isShowing(dialog));
     }
 
-    public void testSecureCredentialFormPromotesButPlainInputDoesNot()
+    public void testOrderingProjectsAndSubmitsRowsBeyondVisibleViewport()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        String id = "interaction-ordering-virtual-list-" + UUID.randomUUID();
+        BridgeServer.beginAndActivateInteraction(
+                context,
+                id,
+                "ordering",
+                "action"
+        );
+        BridgeActivity.prepareDialogHandoff(context, id);
+        AtomicInteger clickedPosition = new AtomicInteger(-1);
+        AlertDialog dialog = showOwnedVirtualListDialog(
+                id,
+                40,
+                clickedPosition
+        );
+
+        JSONObject visible = awaitCapturedUI(context, id, 2_000L);
+        JSONArray controls = visible.getJSONArray("controls");
+        String targetControlID = null;
+        for (int index = 0; index < controls.length(); index++) {
+            JSONObject control = controls.getJSONObject(index);
+            if ("线路 40".equals(control.optString("title"))) {
+                targetControlID = control.optString("id");
+                break;
+            }
+        }
+        assertNotNull("off-screen adapter row must be projected", targetControlID);
+        assertTrue(targetControlID.startsWith("virtual-v1:A:"));
+
+        JSONObject submitted = BridgeActivity.submitUI(
+                context,
+                id,
+                null,
+                null,
+                targetControlID,
+                visible.getInt("generation")
+        );
+        assertTrue(submitted.getBoolean("clicked"));
+        assertEquals(39, clickedPosition.get());
+
+        BridgeActivity.dismissUI(context, id);
+        assertFalse(isShowing(dialog));
+    }
+
+    public void testCredentialFormCannotRewriteDeclaredInteractionKind()
             throws Exception {
         Context context = InstrumentationRegistry.getInstrumentation()
                 .getTargetContext();
@@ -1048,7 +1488,7 @@ public final class BridgeProtocolTest extends TestCase {
         BridgeActivity.prepareDialogHandoff(context, secureID);
         AlertDialog secureDialog = showOwnedInputDialog(secureID, true);
         JSONObject secure = awaitCapturedUI(context, secureID, 2_000L);
-        assertEquals("authorization", secure.getString("kind"));
+        assertEquals("configuration", secure.getString("kind"));
         assertEquals("credentialForm", secure.getString("uiRole"));
         assertEquals(1, secure.getInt("credentialInputCount"));
         BridgeActivity.dismissUI(context, secureID);
@@ -1296,7 +1736,7 @@ public final class BridgeProtocolTest extends TestCase {
         BridgeServer.beginAndActivateInteraction(
                 context,
                 id,
-                "authorization",
+                "playback",
                 "play"
         );
         BridgeActivity.prepareDialogHandoff(context, id);
@@ -1314,6 +1754,80 @@ public final class BridgeProtocolTest extends TestCase {
         assertTrue(completed.getBoolean("terminal"));
         BridgeServer.releaseTerminalInteraction(context, id);
         assertFalse(isShowing(dialog));
+        assertTrue(BridgeActionActivity.awaitReleased(id, 2_000L));
+        assertFalse(BridgeServer.hasTrackedInteractionWorker(id));
+    }
+
+    public void testPlaybackInvocationSurvivesAuthorizationSurfaceAndCompletes()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        String id = "interaction-playback-auth-resume-" + UUID.randomUUID();
+        BridgeServer.beginAndActivateInteraction(
+                context,
+                id,
+                "playback",
+                "play"
+        );
+        BridgeActivity.prepareDialogHandoff(context, id);
+
+        CountDownLatch workerEntered = new CountDownLatch(1);
+        AtomicInteger authorizationAccepted = new AtomicInteger();
+        Future<Object> worker = BridgeServer.claimInteractionWorker(id, () -> {
+            workerEntered.countDown();
+            long deadline = System.currentTimeMillis() + 5_000L;
+            while (authorizationAccepted.get() == 0
+                    && System.currentTimeMillis() < deadline) {
+                Thread.sleep(20L);
+            }
+            if (authorizationAccepted.get() == 0) {
+                throw new IllegalStateException("authorization was not submitted");
+            }
+            return new JSONObject()
+                    .put("parse", 0)
+                    .put("url", "https://media.example/authorized.mp4");
+        });
+        assertNotNull(worker);
+        assertTrue(workerEntered.await(2, TimeUnit.SECONDS));
+
+        AlertDialog authorization = showOwnedDialog(
+                id,
+                "播放前登录网盘",
+                authorizationAccepted
+        );
+        JSONObject waiting = awaitCapturedUI(context, id, 2_000L);
+        assertEquals(id, waiting.getString("interactionID"));
+        assertEquals("playback", waiting.getString("kind"));
+        assertEquals("playback", waiting.getString("declaredKind"));
+        assertEquals("pending", waiting.getString("returnState"));
+        assertTrue(waiting.getJSONObject("channels")
+                .getJSONObject("surface").getBoolean("visible"));
+        assertFalse(worker.isDone());
+
+        JSONObject submitted = BridgeActivity.submitUI(
+                context,
+                id,
+                null,
+                "应用",
+                null,
+                waiting.getInt("generation")
+        );
+        assertTrue(submitted.getBoolean("clicked"));
+        Object result = worker.get(2, TimeUnit.SECONDS);
+        assertTrue(DexSpiderRegistry.isPlayableResult(result));
+
+        JSONObject completed = BridgeInteractionRegistry.invocationReturned(
+                id,
+                true
+        );
+        assertTrue(completed.getBoolean("returnAccepted"));
+        assertEquals("returned", completed.getString("returnState"));
+        assertEquals("playback", completed.getString("kind"));
+        assertEquals("completed", completed.getString("phase"));
+        assertTrue(completed.getBoolean("terminal"));
+
+        BridgeServer.releaseTerminalInteraction(context, id);
+        assertFalse(isShowing(authorization));
         assertTrue(BridgeActionActivity.awaitReleased(id, 2_000L));
         assertFalse(BridgeServer.hasTrackedInteractionWorker(id));
     }
@@ -1947,6 +2461,227 @@ public final class BridgeProtocolTest extends TestCase {
         );
     }
 
+    public void testFongMiCompatibilityProxyUsesSeparateLoopbackPortAndLease()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        ensureBridgeServer();
+        int compatPort = FongMiCompatProxyServer.ensureStarted(context);
+        assertTrue(compatPort >= FongMiCompatProxyServer.FIRST_PORT);
+        assertTrue(compatPort <= FongMiCompatProxyServer.LAST_PORT);
+        assertFalse(compatPort == BridgeServer.PORT);
+        assertEquals(compatPort, com.github.catvod.Proxy.getPort());
+        assertEquals(
+                410,
+                loopbackStatus(compatPort, "GET", "/proxy?do=idle", null, null)
+        );
+
+        String jarKey = "https://unit.invalid/compat-a-"
+                + UUID.randomUUID() + ".jar";
+        BridgeProviderOwnerRegistry.Binding owner = playbackOwner(
+                "compat-a",
+                jarKey
+        );
+        installProxyMethod(jarKey, CompatibilityProxyA.class);
+        CompatibilityProxyA.lastParameters.set(null);
+        try (FongMiCompatProxyServer.Lease ignored =
+                     FongMiCompatProxyServer.acquire(context, owner)) {
+            byte[] body = "token=form-value".getBytes(StandardCharsets.UTF_8);
+            Map<String, String> requestHeaders = new LinkedHashMap<>();
+            requestHeaders.put(
+                    "Content-Type",
+                    "application/x-www-form-urlencoded; charset=utf-8"
+            );
+            requestHeaders.put("Range", "bytes=100-199");
+            assertEquals(
+                    206,
+                    loopbackStatus(
+                            compatPort,
+                            "POST",
+                            "/proxy?do=play",
+                            requestHeaders,
+                            body
+                    )
+            );
+        }
+        Map<String, String> parameters = CompatibilityProxyA.lastParameters.get();
+        assertNotNull(parameters);
+        assertEquals("play", parameters.get("do"));
+        assertEquals("form-value", parameters.get("token"));
+        assertEquals("bytes=100-199", parameters.get("range"));
+        assertEquals(
+                410,
+                loopbackStatus(compatPort, "GET", "/proxy?do=closed", null, null)
+        );
+    }
+
+    public void testCompatibilityProxySessionRetainsExactOwnerAfterLeaseEnds()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        ensureBridgeServer();
+        int compatPort = FongMiCompatProxyServer.ensureStarted(context);
+        String suffix = UUID.randomUUID().toString();
+        String jarA = "https://unit.invalid/owner-a-" + suffix + ".jar";
+        String jarB = "https://unit.invalid/owner-b-" + suffix + ".jar";
+        BridgeProviderOwnerRegistry.Binding ownerA = playbackOwner("owner-a", jarA);
+        BridgeProviderOwnerRegistry.Binding ownerB = playbackOwner("owner-b", jarB);
+        installProxyMethod(jarA, CompatibilityProxyA.class);
+        installProxyMethod(jarB, CompatibilityProxyB.class);
+        CompatibilityProxyA.invocations.set(0);
+        CompatibilityProxyB.invocations.set(0);
+
+        JSONObject secured;
+        try (FongMiCompatProxyServer.Lease ignored =
+                     FongMiCompatProxyServer.acquire(context, ownerA)) {
+            secured = (JSONObject) BridgeMediaSessionRegistry
+                    .securePlaybackResult(
+                            new JSONObject()
+                                    .put("parse", 0)
+                                    .put(
+                                            "url",
+                                            "http://127.0.0.1:" + compatPort
+                                                    + "/proxy?do=media"
+                                    ),
+                            false,
+                            null,
+                            ownerA
+                    );
+        }
+
+        HttpURLConnection media = (HttpURLConnection) new URL(
+                secured.getString("url")
+        ).openConnection();
+        media.setConnectTimeout(2_000);
+        media.setReadTimeout(5_000);
+        media.setRequestProperty("Range", "bytes=200-299");
+        assertEquals(206, media.getResponseCode());
+        try (InputStream input = media.getInputStream()) {
+            assertEquals('A', input.read());
+            assertEquals(-1, input.read());
+        } finally {
+            media.disconnect();
+        }
+        assertEquals(1, CompatibilityProxyA.invocations.get());
+        assertEquals(0, CompatibilityProxyB.invocations.get());
+        assertEquals(
+                "bytes=200-299",
+                CompatibilityProxyA.lastParameters.get().get("range")
+        );
+
+        try (FongMiCompatProxyServer.Lease ignored =
+                     FongMiCompatProxyServer.acquire(context, ownerB)) {
+            assertEquals(
+                    206,
+                    loopbackStatus(
+                            compatPort,
+                            "GET",
+                            "/proxy?do=other-owner",
+                            null,
+                            null
+                    )
+            );
+        }
+        assertEquals(1, CompatibilityProxyA.invocations.get());
+        assertEquals(1, CompatibilityProxyB.invocations.get());
+    }
+
+    public void testPlayerContentRestartsBrokenCompatibilityProxyOnlyOnce()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        ensureBridgeServer();
+        DexSpiderRegistry registry = DexSpiderRegistry.get(context);
+        Method invokePlayer = DexSpiderRegistry.class.getDeclaredMethod(
+                "invokePlayer",
+                JSONObject.class,
+                Spider.class,
+                JSONArray.class,
+                BridgeProviderOwnerRegistry.Binding.class
+        );
+        invokePlayer.setAccessible(true);
+        String suffix = UUID.randomUUID().toString();
+        String jarKey = "https://unit.invalid/recovery-" + suffix + ".jar";
+        JSONObject payload = new JSONObject()
+                .put("siteKey", "recovery-site-" + suffix)
+                .put("configurationID", "recovery-config-" + suffix)
+                .put("providerOwnerID", "recovery-owner-" + suffix)
+                .put("jarURL", jarKey)
+                .put("jarMD5", "");
+        BridgeProviderOwnerRegistry.Binding owner =
+                BridgeProviderOwnerRegistry.bind(payload, jarKey);
+        installProxyMethod(jarKey, CompatibilityProxyFlaky.class);
+        CompatibilityProxyFlaky.invocations.set(0);
+        AtomicInteger playerInvocations = new AtomicInteger();
+        Spider spider = proxyResolvingSpider(playerInvocations, suffix);
+
+        JSONObject result = (JSONObject) invokePlayer.invoke(
+                registry,
+                payload,
+                spider,
+                new JSONArray()
+                        .put("line")
+                        .put("episode")
+                        .put(new JSONArray()),
+                owner
+        );
+
+        assertEquals(2, playerInvocations.get());
+        assertEquals(2, CompatibilityProxyFlaky.invocations.get());
+        assertEquals(
+                "https://media.example/" + suffix + ".mp4",
+                result.getString("url")
+        );
+    }
+
+    public void testTrueUpstreamProxyStatusDoesNotRestartPlayerContent()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        ensureBridgeServer();
+        DexSpiderRegistry registry = DexSpiderRegistry.get(context);
+        Method invokePlayer = DexSpiderRegistry.class.getDeclaredMethod(
+                "invokePlayer",
+                JSONObject.class,
+                Spider.class,
+                JSONArray.class,
+                BridgeProviderOwnerRegistry.Binding.class
+        );
+        invokePlayer.setAccessible(true);
+        String suffix = UUID.randomUUID().toString();
+        String jarKey = "https://unit.invalid/upstream-" + suffix + ".jar";
+        JSONObject payload = new JSONObject()
+                .put("siteKey", "upstream-site-" + suffix)
+                .put("configurationID", "upstream-config-" + suffix)
+                .put("providerOwnerID", "upstream-owner-" + suffix)
+                .put("jarURL", jarKey)
+                .put("jarMD5", "");
+        BridgeProviderOwnerRegistry.Binding owner =
+                BridgeProviderOwnerRegistry.bind(payload, jarKey);
+        installProxyMethod(jarKey, CompatibilityProxyUpstreamFailure.class);
+        CompatibilityProxyUpstreamFailure.invocations.set(0);
+        AtomicInteger playerInvocations = new AtomicInteger();
+        Spider spider = proxyResolvingSpider(playerInvocations, suffix);
+
+        try {
+            invokePlayer.invoke(
+                    registry,
+                    payload,
+                    spider,
+                    new JSONArray()
+                            .put("line")
+                            .put("episode")
+                            .put(new JSONArray()),
+                    owner
+            );
+            fail("real upstream HTTP failure must remain authoritative");
+        } catch (java.lang.reflect.InvocationTargetException error) {
+            assertTrue(error.getCause() instanceof IOException);
+        }
+        assertEquals(1, playerInvocations.get());
+        assertEquals(1, CompatibilityProxyUpstreamFailure.invocations.get());
+    }
+
     public void testOrdinaryLoopbackWithHeadersBecomesOwnedSession()
             throws Exception {
         JSONObject result = new JSONObject()
@@ -2312,6 +3047,33 @@ public final class BridgeProtocolTest extends TestCase {
         return result.get();
     }
 
+    private static AlertDialog showDialogOnActivity(
+            Activity owner,
+            String title
+    ) {
+        AtomicReference<AlertDialog> result = new AtomicReference<>();
+        InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
+            AlertDialog dialog = new AlertDialog.Builder(owner)
+                    .setTitle(title)
+                    .setMessage("未归属当前 ActionSession")
+                    .setPositiveButton("好", null)
+                    .create();
+            dialog.show();
+            result.set(dialog);
+        });
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        assertNotNull(result.get());
+        assertTrue(isShowing(result.get()));
+        return result.get();
+    }
+
+    private static void dismissDialog(AlertDialog dialog) {
+        InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
+            if (dialog != null && dialog.isShowing()) dialog.dismiss();
+        });
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+    }
+
     private static AlertDialog showOwnedImageDialog(
             String interactionID,
             boolean qrCode
@@ -2375,6 +3137,68 @@ public final class BridgeProtocolTest extends TestCase {
                     .setView(input)
                     .setPositiveButton("提交", null)
                     .setNegativeButton("取消", null)
+                    .create();
+            dialog.show();
+            result.set(dialog);
+        });
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        assertNotNull(result.get());
+        assertTrue(isShowing(result.get()));
+        return result.get();
+    }
+
+    private static AlertDialog showOwnedVirtualListDialog(
+            String interactionID,
+            int itemCount,
+            AtomicInteger clickedPosition
+    ) throws Exception {
+        assertTrue(BridgeActionActivity.isReadyFor(interactionID));
+        Context owner = com.github.catvod.Init.context();
+        assertTrue(owner instanceof Activity);
+        AtomicReference<AlertDialog> result = new AtomicReference<>();
+        InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
+            ListView list = new ListView((Activity) owner);
+            list.setLayoutParams(new ViewGroup.LayoutParams(520, 260));
+            list.setAdapter(new BaseAdapter() {
+                @Override
+                public int getCount() {
+                    return itemCount;
+                }
+
+                @Override
+                public Object getItem(int position) {
+                    return "线路 " + (position + 1);
+                }
+
+                @Override
+                public long getItemId(int position) {
+                    return 10_000L + position;
+                }
+
+                @Override
+                public View getView(
+                        int position,
+                        View convertView,
+                        ViewGroup parent
+                ) {
+                    TextView row = convertView instanceof TextView
+                            ? (TextView) convertView
+                            : new TextView((Activity) owner);
+                    row.setText("线路 " + (position + 1));
+                    row.setMinHeight(72);
+                    row.setPadding(20, 8, 20, 8);
+                    row.setEnabled(true);
+                    row.setClickable(true);
+                    row.setOnClickListener(
+                            ignored -> clickedPosition.set(position)
+                    );
+                    return row;
+                }
+            });
+            AlertDialog dialog = new AlertDialog.Builder((Activity) owner)
+                    .setTitle("网盘线路前后排序")
+                    .setView(list)
+                    .setNegativeButton("关闭", null)
                     .create();
             dialog.show();
             result.set(dialog);
@@ -2553,6 +3377,189 @@ public final class BridgeProtocolTest extends TestCase {
         }
     }
 
+    private static BridgeProviderOwnerRegistry.Binding playbackOwner(
+            String prefix,
+            String jarKey
+    ) throws Exception {
+        String suffix = UUID.randomUUID().toString();
+        JSONObject payload = new JSONObject()
+                .put("providerOwnerID", prefix + "-provider-" + suffix)
+                .put("configurationID", prefix + "-configuration-" + suffix)
+                .put("siteKey", prefix + "-site-" + suffix)
+                .put("jarURL", jarKey)
+                .put("jarMD5", "");
+        return BridgeProviderOwnerRegistry.bind(payload, jarKey);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void installProxyMethod(
+            String jarKey,
+            Class<?> proxyType
+    ) throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        DexSpiderRegistry registry = DexSpiderRegistry.get(context);
+        Field methodsField = DexSpiderRegistry.class.getDeclaredField(
+                "proxyMethods"
+        );
+        methodsField.setAccessible(true);
+        Map<String, Method> methods = (Map<String, Method>) methodsField.get(
+                registry
+        );
+        methods.put(jarKey, proxyType.getMethod("proxy", Map.class));
+    }
+
+    private static int loopbackStatus(
+            int port,
+            String method,
+            String path,
+            Map<String, String> headers,
+            byte[] body
+    ) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) new URL(
+                "http://127.0.0.1:" + port + path
+        ).openConnection();
+        connection.setRequestMethod(method);
+        connection.setConnectTimeout(2_000);
+        connection.setReadTimeout(5_000);
+        if (headers != null) {
+            for (Map.Entry<String, String> entry : headers.entrySet()) {
+                connection.setRequestProperty(entry.getKey(), entry.getValue());
+            }
+        }
+        if (body != null) {
+            connection.setDoOutput(true);
+            connection.setFixedLengthStreamingMode(body.length);
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(body);
+            }
+        }
+        try {
+            int status = connection.getResponseCode();
+            InputStream response = status >= 400
+                    ? connection.getErrorStream()
+                    : connection.getInputStream();
+            if (response != null) {
+                try (InputStream ignored = response) {
+                    byte[] buffer = new byte[1_024];
+                    while (ignored.read(buffer) != -1) {
+                        // Drain the loopback response before disconnecting.
+                    }
+                }
+            }
+            return status;
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    public static final class CompatibilityProxyA {
+        static final AtomicInteger invocations = new AtomicInteger();
+        static final AtomicReference<Map<String, String>> lastParameters =
+                new AtomicReference<>();
+
+        public static Object[] proxy(Map<String, String> params) {
+            invocations.incrementAndGet();
+            lastParameters.set(new LinkedHashMap<>(params));
+            Map<String, String> headers = new LinkedHashMap<>();
+            headers.put("Accept-Ranges", "bytes");
+            headers.put("Content-Range", "bytes 100-100/1000");
+            return new Object[] {
+                    206,
+                    "video/mp4",
+                    new ByteArrayInputStream(new byte[] {'A'}),
+                    headers
+            };
+        }
+    }
+
+    public static final class CompatibilityProxyB {
+        static final AtomicInteger invocations = new AtomicInteger();
+
+        public static Object[] proxy(Map<String, String> params) {
+            invocations.incrementAndGet();
+            return new Object[] {
+                    206,
+                    "video/mp4",
+                    new ByteArrayInputStream(new byte[] {'B'})
+            };
+        }
+    }
+
+    public static final class CompatibilityProxyFlaky {
+        static final AtomicInteger invocations = new AtomicInteger();
+
+        public static Object[] proxy(Map<String, String> params) {
+            if (invocations.incrementAndGet() == 1) return null;
+            return new Object[] {
+                    206,
+                    "video/mp4",
+                    new ByteArrayInputStream(new byte[] {'O', 'K'})
+            };
+        }
+    }
+
+    public static final class CompatibilityProxyUpstreamFailure {
+        static final AtomicInteger invocations = new AtomicInteger();
+
+        public static Object[] proxy(Map<String, String> params) {
+            invocations.incrementAndGet();
+            return new Object[] {
+                    502,
+                    "text/plain",
+                    new ByteArrayInputStream("upstream".getBytes(
+                            StandardCharsets.UTF_8
+                    ))
+            };
+        }
+    }
+
+    private static Spider proxyResolvingSpider(
+            AtomicInteger invocations,
+            String mediaSuffix
+    ) {
+        return new Spider() {
+            @Override
+            public String playerContent(
+                    String flag,
+                    String id,
+                    java.util.List<String> vipFlags
+            ) throws Exception {
+                invocations.incrementAndGet();
+                HttpURLConnection connection = (HttpURLConnection) new URL(
+                        com.github.catvod.Proxy.getUrl(true) + "?do=resolve"
+                ).openConnection();
+                connection.setConnectTimeout(2_000);
+                connection.setReadTimeout(5_000);
+                try {
+                    int status = connection.getResponseCode();
+                    InputStream response = status >= 400
+                            ? connection.getErrorStream()
+                            : connection.getInputStream();
+                    if (response != null) {
+                        try (InputStream input = response) {
+                            while (input.read() != -1) {
+                                // Drain the provider response.
+                            }
+                        }
+                    }
+                    if (status != 206) {
+                        throw new IOException("provider proxy HTTP " + status);
+                    }
+                } finally {
+                    connection.disconnect();
+                }
+                return new JSONObject()
+                        .put("parse", 0)
+                        .put(
+                                "url",
+                                "https://media.example/" + mediaSuffix + ".mp4"
+                        )
+                        .toString();
+            }
+        };
+    }
+
     private static void ensureBridgeServer() throws Exception {
         Context context = InstrumentationRegistry.getInstrumentation()
                 .getTargetContext();
@@ -2580,6 +3587,22 @@ public final class BridgeProtocolTest extends TestCase {
         );
         if (lastError != null) failure.initCause(lastError);
         throw failure;
+    }
+
+    private static Intent launchableExternalActivity(Context context) {
+        for (String packageName : new String[] {
+                "com.android.calendar",
+                "com.android.contacts",
+                "com.android.gallery3d",
+                "com.android.music"
+        }) {
+            Intent intent = context.getPackageManager()
+                    .getLaunchIntentForPackage(packageName);
+            if (intent != null) return intent;
+        }
+        throw new AssertionError(
+                "Test AVD has no launchable external Activity"
+        );
     }
 
     private static int requestStatus(

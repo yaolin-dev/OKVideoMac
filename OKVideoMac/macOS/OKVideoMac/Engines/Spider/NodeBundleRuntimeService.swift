@@ -870,6 +870,55 @@ enum NodeRuntimeStatus: Equatable, Sendable {
     case failed(String)
 }
 
+struct NodeRuntimePlaybackLease: Equatable, Sendable {
+    fileprivate let id: UUID
+    fileprivate let processGeneration: UUID
+}
+
+enum NodeRuntimePlaybackLeasePolicy {
+    static func owns(
+        _ mediaSession: PlaybackMediaSession,
+        serviceBaseURL: URL
+    ) -> Bool {
+        guard mediaSession.transport == .providerLoopback,
+              mediaSession.resourceReference.providerKind
+                .hasPrefix("node-http-spider"),
+              let mediaURL = URL(string: mediaSession.mediaURL),
+              mediaURL.scheme?.lowercased() == serviceBaseURL.scheme?.lowercased(),
+              mediaURL.port == serviceBaseURL.port,
+              ["127.0.0.1", "localhost", "::1"].contains(
+                  mediaURL.host?.lowercased() ?? ""
+              ),
+              ["127.0.0.1", "localhost", "::1"].contains(
+                  serviceBaseURL.host?.lowercased() ?? ""
+              ) else {
+            return false
+        }
+        return mediaURL.path.hasPrefix("/spider/")
+            || mediaURL.path.hasPrefix("/proxy/")
+    }
+}
+
+enum NodeBundleStartupStrategy: Equatable, Sendable {
+    /// Preserve the update-oriented behavior used by explicit imports: try the
+    /// publisher first, then fall back to the validated on-disk bundle.
+    case remoteFirst
+
+    /// Never wait for publisher I/O. This is used when restoring a previously
+    /// imported configuration so its validated cache can become useful
+    /// immediately; a separate background refresh revalidates the publisher.
+    case cacheOnly
+}
+
+enum NodeRuntimeStartupPreemptionPolicy {
+    static func shouldPreempt(
+        current: NodeBundleStartupStrategy?,
+        incoming: NodeBundleStartupStrategy
+    ) -> Bool {
+        incoming == .cacheOnly && current == .remoteFirst
+    }
+}
+
 struct NodeBundleCacheSnapshot: Equatable, Sendable {
     let cacheKey: String
     let sha256: String
@@ -1136,6 +1185,9 @@ actor NodeBundleRuntimeService {
     private var startupCacheKey: String?
     private var startupProfileStorageKey: String?
     private var startupGeneration: UUID?
+    private var startupStrategy: NodeBundleStartupStrategy?
+    private var playbackLeases: [UUID: NodeRuntimePlaybackLease] = [:]
+    private var stopRequestedAfterPlayback = false
 
     static let restartDelays: [TimeInterval] = [1, 2, 5]
 
@@ -1220,12 +1272,50 @@ actor NodeBundleRuntimeService {
 
     func loadConfiguration(
         from sourceURL: URL,
-        configurationID: UUID? = nil
+        configurationID: UUID? = nil,
+        startupStrategy: NodeBundleStartupStrategy = .remoteFirst
     ) async throws -> LoadedConfiguration {
         let baseURL = try await ensureReady(
             from: sourceURL,
-            configurationID: configurationID
+            configurationID: configurationID,
+            startupStrategy: startupStrategy
         )
+        return try await loadConfiguration(
+            from: sourceURL,
+            baseURL: baseURL
+        )
+    }
+
+    /// Revalidates the publisher without delaying cache restoration. A changed
+    /// bundle is restarted from the newly validated cache; an unchanged bundle
+    /// keeps its current loopback endpoint.
+    func refreshConfiguration(
+        from sourceURL: URL,
+        configurationID: UUID? = nil
+    ) async throws -> LoadedConfiguration {
+        let descriptor = try NodeBundleSourceDescriptor(url: sourceURL)
+        let namespace = NodeRuntimeProfileNamespace(
+            configurationID: configurationID,
+            descriptor: descriptor
+        )
+        let refreshedBundle = try await downloadBundle(descriptor)
+        try Task.checkCancellation()
+        try validateBundleForExecution(refreshedBundle)
+        let baseURL = try await ensureReady(
+            source: .cached(refreshedBundle, namespace),
+            automaticRestart: false
+        )
+        try Task.checkCancellation()
+        return try await loadConfiguration(
+            from: sourceURL,
+            baseURL: baseURL
+        )
+    }
+
+    private func loadConfiguration(
+        from sourceURL: URL,
+        baseURL: URL
+    ) async throws -> LoadedConfiguration {
         try Task.checkCancellation()
         let configURL = baseURL.appendingPathComponent("config")
         let response = try await localHTTPClient.send(
@@ -1258,6 +1348,7 @@ actor NodeBundleRuntimeService {
             response.body,
             catalogData: catalogData,
             bundleIdentity: activeBundleCacheKey,
+            profileIdentity: activeProfileStorageKey,
             profileRevision: Self.profileRevision(at: activeProfileURL),
             supportsHostMessageBridge: activeRuntimeContract == .hostIntegrated
         )
@@ -1275,10 +1366,11 @@ actor NodeBundleRuntimeService {
 
     /// Returns only after the selected contract's readiness policy succeeds.
     /// Contract A retains its `/health` identity check; Contract B requires an
-    /// observed loopback listener plus a validated `/config` capability.
+    /// observed managed listener plus a validated loopback `/config` capability.
     func ensureReady(
         from sourceURL: URL,
-        configurationID: UUID? = nil
+        configurationID: UUID? = nil,
+        startupStrategy: NodeBundleStartupStrategy = .remoteFirst
     ) async throws -> URL {
         let descriptor = try NodeBundleSourceDescriptor(url: sourceURL)
         let profileNamespace = NodeRuntimeProfileNamespace(
@@ -1287,11 +1379,21 @@ actor NodeBundleRuntimeService {
         )
         return try await ensureReady(
             source: .descriptor(descriptor, profileNamespace),
-            automaticRestart: false
+            automaticRestart: false,
+            startupStrategy: startupStrategy
         )
     }
 
-    func stop() async {
+    func stop(force: Bool = false) async {
+        if !force, !playbackLeases.isEmpty {
+            // CatPaw HLS manifests, segments and keys continue to call the
+            // provider-owned runtime after `/play` returns. Defer ordinary
+            // configuration teardown until the player releases its lease.
+            stopRequestedAfterPlayback = true
+            return
+        }
+        stopRequestedAfterPlayback = false
+        playbackLeases.removeAll()
         restartTask?.cancel()
         restartTask = nil
         healthMonitorTask?.cancel()
@@ -1301,11 +1403,42 @@ actor NodeBundleRuntimeService {
         startupGeneration = nil
         startupCacheKey = nil
         startupProfileStorageKey = nil
+        startupStrategy = nil
         await sharedStartup.cancel()
         desiredBundle = nil
         desiredProfileNamespace = nil
         restartAttempt = 0
         stopProcess(publishing: .stopped)
+    }
+
+    func acquirePlaybackLease(
+        for mediaSession: PlaybackMediaSession
+    ) -> NodeRuntimePlaybackLease? {
+        guard process?.isRunning == true,
+              let serviceBaseURL,
+              NodeRuntimePlaybackLeasePolicy.owns(
+                  mediaSession,
+                  serviceBaseURL: serviceBaseURL
+              ) else {
+            return nil
+        }
+        let lease = NodeRuntimePlaybackLease(
+            id: UUID(),
+            processGeneration: processGeneration
+        )
+        playbackLeases[lease.id] = lease
+        return lease
+    }
+
+    func releasePlaybackLease(_ lease: NodeRuntimePlaybackLease) async {
+        guard playbackLeases[lease.id] == lease else { return }
+        playbackLeases[lease.id] = nil
+        guard playbackLeases.isEmpty, stopRequestedAfterPlayback else { return }
+        await stop(force: true)
+    }
+
+    func activePlaybackLeaseCountForTesting() -> Int {
+        playbackLeases.count
     }
 
     func recordDiagnosticEvent(_ event: NodeDiagnosticEvent) {
@@ -1352,6 +1485,11 @@ actor NodeBundleRuntimeService {
             source: .descriptor(descriptor, namespace),
             automaticRestart: false
         )
+        guard playbackLeases.isEmpty else {
+            throw NodeBundleRuntimeError.endpointUnavailable(
+                "CatPaw 播放仍在使用当前 Runtime，请关闭播放器后再导入 profile"
+            )
+        }
         guard let bundle = desiredBundle else {
             throw NodeBundleRuntimeError.endpointUnavailable(
                 "Node Runtime 尚未准备好"
@@ -1395,9 +1533,15 @@ actor NodeBundleRuntimeService {
         status
     }
 
-    func prepareBundleForTesting(from sourceURL: URL) async throws -> NodeBundleCacheSnapshot {
+    func prepareBundleForTesting(
+        from sourceURL: URL,
+        startupStrategy: NodeBundleStartupStrategy = .remoteFirst
+    ) async throws -> NodeBundleCacheSnapshot {
         let descriptor = try NodeBundleSourceDescriptor(url: sourceURL)
-        let bundle = try await obtainBundle(descriptor)
+        let bundle = try await obtainBundle(
+            descriptor,
+            startupStrategy: startupStrategy
+        )
         return NodeBundleCacheSnapshot(
             cacheKey: descriptor.cacheKey,
             sha256: bundle.sha256,
@@ -1409,6 +1553,7 @@ actor NodeBundleRuntimeService {
         _ data: Data,
         catalogData: Data? = nil,
         bundleIdentity: String? = nil,
+        profileIdentity: String? = nil,
         profileRevision: String? = nil,
         supportsHostMessageBridge: Bool = false
     ) throws -> Data {
@@ -1509,6 +1654,9 @@ actor NodeBundleRuntimeService {
             if let bundleIdentity {
                 site["okNodeBundleIdentity"] = bundleIdentity
             }
+            if let profileIdentity {
+                site["okNodeProfileIdentity"] = profileIdentity
+            }
             if let profileRevision {
                 site["okNodeProfileRevision"] = profileRevision
             }
@@ -1538,47 +1686,13 @@ actor NodeBundleRuntimeService {
             sites.append(decoratedVideoSite(descriptor, catalogDisabled: true))
         }
 
-        // Keep non-video modules visible to diagnostics/import status without
-        // forcing their routes through the video provider model. The hidden
-        // placeholder is intentionally unsupported until its dedicated UI is
-        // enabled, but the complete publisher metadata remains in `extra`.
-        var knownModuleIdentities = Set<String>()
-        let allDescriptors = activeDescriptors.map { ($0, false) }
-            + catalogDescriptors.map { ($0, true) }
-        for (descriptor, catalogDisabled) in allDescriptors
-        where descriptor.moduleKind != .video {
-            let moduleIdentity = "\(descriptor.moduleKind.rawValue)::\(descriptor.siteKey)"
-            guard knownModuleIdentities.insert(moduleIdentity).inserted else {
-                continue
-            }
-            var site = rawMetadata(descriptor)
-            site["key"] = "node-module:\(descriptor.moduleKind.rawValue):\(descriptor.siteKey)"
-            site["name"] = "[\(descriptor.moduleKind.localizedName)] \(descriptor.displayName)"
-            site["type"] = 3
-            site["api"] = descriptor.apiPath.isEmpty
-                ? "catpaw-module:\(descriptor.moduleKind.rawValue):\(descriptor.siteKey)"
-                : descriptor.apiPath
-            site["hide"] = 1
-            site["searchable"] = 0
-            site["quickSearch"] = 0
-            site["indexs"] = 0
-            site["okNodeRuntime"] = true
-            site["okNodeModuleKind"] = descriptor.moduleKind.rawValue
-            site["okNodeModuleOriginalKey"] = descriptor.siteKey
-            site["okNodeSpiderType"] = descriptor.spiderType
-            site["okNodeHostMessageBridge"] = supportsHostMessageBridge
-            site["okNodeModuleEnabled"] = descriptor.enabled && !catalogDisabled
-            site["okNodeUnsupportedModule"] = true
-            site["okNodeCapabilities"] = descriptor.capabilities.sorted()
-            site["okNodeSiteIdentity"] = scopedIdentity(
-                kind: descriptor.moduleKind,
-                key: descriptor.siteKey
-            )
-            if catalogDisabled { site["okNodeCatalogDisabled"] = true }
-            if let bundleIdentity { site["okNodeBundleIdentity"] = bundleIdentity }
-            if let profileRevision { site["okNodeProfileRevision"] = profileRevision }
-            sites.append(site)
-        }
+        // The macOS product intentionally exposes only video modules. Keep
+        // parsing every descriptor so runtime diagnostics remain accurate,
+        // but do not turn read/comic/music/pan modules into host sites or
+        // construct providers for content surfaces the app does not offer.
+        // Cloud-drive credentials, `/website` configuration and `/proxy/*`
+        // playback remain runtime-owned video dependencies and are not part
+        // of this catalogue filter.
 
         root["okCatPawModuleCounts"] = Dictionary(
             uniqueKeysWithValues: CatPawModuleKind.allCases.map { kind in
@@ -1681,6 +1795,7 @@ actor NodeBundleRuntimeService {
             "OKVIDEO_PARENT_PID": String(parentPID)
         ]
         let allowedContractBNames = Set([
+            "DEV_HTTP_HOST",
             "DEV_HTTP_PORT",
             "OKVIDEO_CONTRACT_B_CONFIG_PATH",
             "OKVIDEO_CONTRACT_B_STATE_PATH",
@@ -1743,9 +1858,21 @@ actor NodeBundleRuntimeService {
     }
 
     private func obtainBundle(
-        _ descriptor: NodeBundleSourceDescriptor
+        _ descriptor: NodeBundleSourceDescriptor,
+        startupStrategy: NodeBundleStartupStrategy = .remoteFirst
     ) async throws -> CachedBundle {
         let writer = diagnosticWriter(for: descriptor)
+        if startupStrategy == .cacheOnly {
+            if let cached = try cachedBundleIfAvailable(
+                descriptor,
+                writer: writer
+            ) {
+                return cached
+            }
+            throw NodeBundleRuntimeError.legacyCacheUnavailable(
+                "当前配置没有经过校验的本地 Node bundle 缓存"
+            )
+        }
         do {
             return try await downloadBundle(descriptor)
         } catch let downloadError {
@@ -1759,61 +1886,80 @@ actor NodeBundleRuntimeService {
                 .allowsCachedFallback == true
             guard allowsFallback else { throw downloadError }
 
-            let currentCache = cacheURL(for: descriptor.cacheKey)
-            if FileManager.default.fileExists(atPath: currentCache.path) {
-                do {
-                    let cached = try loadCachedBundle(descriptor, cacheURL: currentCache)
-                    writer.write(
-                        diagnosticEvent(
-                            category: .cache,
-                            severity: .info,
-                            code: .trustAccepted,
-                            message: "Validated current Node bundle cache",
-                            descriptor: descriptor,
-                            trustState: cached.trustState.diagnosticState
-                        )
-                    )
-                    return cached
-                } catch {
-                    record(
-                        error: error,
-                        context: .bundleTransport,
-                        descriptor: descriptor,
-                        writer: writer
-                    )
-                    // The first hardened build created the destination directory
-                    // before it knew whether metadata existed. Treat only a
-                    // completely empty directory as an interrupted cache write;
-                    // any executable/cache material must fail closed.
-                    let contents = try? FileManager.default.contentsOfDirectory(
-                        at: currentCache,
-                        includingPropertiesForKeys: nil
-                    )
-                    guard contents?.isEmpty == true else { throw error }
-                }
+            if let cached = try cachedBundleIfAvailable(
+                descriptor,
+                writer: writer
+            ) {
+                return cached
             }
+            throw NodeBundleRuntimeError.legacyCacheUnavailable(
+                "\(downloadError.localizedDescription)；当前与旧缓存均不可用"
+            )
+        }
+    }
+
+    /// Returns a fully revalidated current cache (or a safely migrated legacy
+    /// cache) without touching the network. A non-empty invalid cache fails
+    /// closed instead of being mistaken for a cache miss.
+    private func cachedBundleIfAvailable(
+        _ descriptor: NodeBundleSourceDescriptor,
+        writer: NodeDiagnosticLogWriter
+    ) throws -> CachedBundle? {
+        let currentCache = cacheURL(for: descriptor.cacheKey)
+        if FileManager.default.fileExists(atPath: currentCache.path) {
             do {
+                let cached = try loadCachedBundle(
+                    descriptor,
+                    cacheURL: currentCache
+                )
                 writer.write(
                     diagnosticEvent(
                         category: .cache,
                         severity: .info,
-                        code: .cacheLegacyDetected,
-                        message: "Legacy Node bundle cache migration requested",
-                        descriptor: descriptor
+                        code: .trustAccepted,
+                        message: "Validated current Node bundle cache",
+                        descriptor: descriptor,
+                        trustState: cached.trustState.diagnosticState
                     )
                 )
-                return try migrateLegacyCache(descriptor)
-            } catch NodeBundleRuntimeError.legacyCacheUnavailable(let detail) {
-                throw NodeBundleRuntimeError.legacyCacheUnavailable(
-                    "\(downloadError.localizedDescription)；\(detail)"
-                )
-            } catch let migrationError as NodeBundleRuntimeError {
-                throw migrationError
+                return cached
             } catch {
-                throw NodeBundleRuntimeError.legacyMigrationFailed(
-                    error.localizedDescription
+                record(
+                    error: error,
+                    context: .bundleTransport,
+                    descriptor: descriptor,
+                    writer: writer
                 )
+                // An empty destination can be left by an interrupted legacy
+                // migration. Any executable or metadata material must fail
+                // closed and must never be treated as an ordinary cache miss.
+                let contents = try? FileManager.default.contentsOfDirectory(
+                    at: currentCache,
+                    includingPropertiesForKeys: nil
+                )
+                guard contents?.isEmpty == true else { throw error }
             }
+        }
+
+        do {
+            writer.write(
+                diagnosticEvent(
+                    category: .cache,
+                    severity: .info,
+                    code: .cacheLegacyDetected,
+                    message: "Legacy Node bundle cache migration requested",
+                    descriptor: descriptor
+                )
+            )
+            return try migrateLegacyCache(descriptor)
+        } catch NodeBundleRuntimeError.legacyCacheUnavailable {
+            return nil
+        } catch let migrationError as NodeBundleRuntimeError {
+            throw migrationError
+        } catch {
+            throw NodeBundleRuntimeError.legacyMigrationFailed(
+                error.localizedDescription
+            )
         }
     }
 
@@ -2731,7 +2877,8 @@ actor NodeBundleRuntimeService {
 
     private func ensureReady(
         source: StartupSource,
-        automaticRestart: Bool
+        automaticRestart: Bool,
+        startupStrategy: NodeBundleStartupStrategy = .remoteFirst
     ) async throws -> URL {
         try Task.checkCancellation()
         let cacheKey = source.cacheKey
@@ -2741,13 +2888,39 @@ actor NodeBundleRuntimeService {
            process?.isRunning == true,
            let serviceBaseURL,
            case .running(let publishedURL) = status,
-           publishedURL == serviceBaseURL {
+           publishedURL == serviceBaseURL,
+           activeRuntimeMatches(source) {
             return serviceBaseURL
+        }
+
+        if process?.isRunning == true, !playbackLeases.isEmpty {
+            throw NodeBundleRuntimeError.endpointUnavailable(
+                "CatPaw 播放仍在使用当前 Runtime，请关闭播放器后再切换配置"
+            )
         }
 
         if let startupCacheKey,
            let startupProfileStorageKey,
            let generation = startupGeneration {
+            if NodeRuntimeStartupPreemptionPolicy.shouldPreempt(
+                current: self.startupStrategy,
+                incoming: startupStrategy
+            ) {
+                // A user-visible restoration must not join an update-oriented
+                // publisher request. Cancel the shared remote startup and let
+                // this request immediately validate and launch the cache.
+                startupGeneration = nil
+                self.startupCacheKey = nil
+                self.startupProfileStorageKey = nil
+                self.startupStrategy = nil
+                await sharedStartup.cancel()
+                try Task.checkCancellation()
+                return try await ensureReady(
+                    source: source,
+                    automaticRestart: automaticRestart,
+                    startupStrategy: startupStrategy
+                )
+            }
             let joinsCurrentStartup = startupCacheKey == cacheKey
                 && startupProfileStorageKey == profileStorageKey
             recordStartupLifecycle(
@@ -2787,7 +2960,8 @@ actor NodeBundleRuntimeService {
             try Task.checkCancellation()
             return try await ensureReady(
                 source: source,
-                automaticRestart: automaticRestart
+                automaticRestart: automaticRestart,
+                startupStrategy: startupStrategy
             )
         }
 
@@ -2800,6 +2974,7 @@ actor NodeBundleRuntimeService {
         startupGeneration = generation
         startupCacheKey = cacheKey
         startupProfileStorageKey = profileStorageKey
+        self.startupStrategy = startupStrategy
         recordStartupLifecycle(
             code: .runtimeStartRequested,
             message: automaticRestart
@@ -2821,7 +2996,8 @@ actor NodeBundleRuntimeService {
                 guard let self else { throw CancellationError() }
                 return try await self.performStartup(
                     source: source,
-                    generation: generation
+                    generation: generation,
+                    startupStrategy: startupStrategy
                 )
             }
             finishStartup(generation: generation)
@@ -2840,17 +3016,36 @@ actor NodeBundleRuntimeService {
         startupGeneration = nil
         startupCacheKey = nil
         startupProfileStorageKey = nil
+        startupStrategy = nil
+    }
+
+    private func activeRuntimeMatches(_ source: StartupSource) -> Bool {
+        switch source {
+        case .descriptor:
+            // A descriptor-based ordinary call is allowed to reuse the active
+            // process. Explicit publisher revalidation enters with `.cached`
+            // after downloading, where content equality is known.
+            return true
+        case .cached(let candidate, _):
+            guard let desiredBundle else { return false }
+            return desiredBundle.sha256 == candidate.sha256
+                && desiredBundle.configurationData == candidate.configurationData
+        }
     }
 
     private func performStartup(
         source: StartupSource,
-        generation: UUID
+        generation: UUID,
+        startupStrategy: NodeBundleStartupStrategy = .remoteFirst
     ) async throws -> URL {
         do {
             let bundle: CachedBundle
             switch source {
             case .descriptor(let descriptor, _):
-                bundle = try await obtainBundle(descriptor)
+                bundle = try await obtainBundle(
+                    descriptor,
+                    startupStrategy: startupStrategy
+                )
             case .cached(let cached, _):
                 bundle = cached
             }
@@ -2858,6 +3053,11 @@ actor NodeBundleRuntimeService {
             try validateBundleForExecution(bundle)
             guard startupGeneration == generation else {
                 throw CancellationError()
+            }
+            guard playbackLeases.isEmpty else {
+                throw NodeBundleRuntimeError.endpointUnavailable(
+                    "CatPaw 播放仍在使用当前 Runtime，请关闭播放器后再更新"
+                )
             }
             desiredBundle = bundle
             desiredProfileNamespace = source.profileNamespace
@@ -3146,7 +3346,7 @@ actor NodeBundleRuntimeService {
                             category: .runtime,
                             severity: .info,
                             code: .runtimeListenerObserved,
-                            message: "Contract B loopback listener observed",
+                            message: "Contract B managed configuration listener observed",
                             sourceID: bundle.sourceID,
                             cacheKey: bundle.cacheKey,
                             nodePID: process.processIdentifier,
@@ -3262,6 +3462,8 @@ actor NodeBundleRuntimeService {
         profileMonitorTask?.cancel()
         profileMonitorTask = nil
         process?.terminationHandler = nil
+        playbackLeases.removeAll()
+        stopRequestedAfterPlayback = false
         if let process, process.isRunning {
             process.terminate()
         }
@@ -3300,6 +3502,8 @@ actor NodeBundleRuntimeService {
         )
         outputPipe = nil
         process = nil
+        playbackLeases.removeAll()
+        stopRequestedAfterPlayback = false
         activeBundleCacheKey = nil
         activeProfileStorageKey = nil
         activeProfileURL = nil
@@ -3338,7 +3542,7 @@ actor NodeBundleRuntimeService {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 guard !Task.isCancelled, let self else { return }
-                let healthy = await self.isReady(
+                let healthy = await self.isHealthy(
                     baseURL,
                     policy: readinessPolicy
                 )
@@ -3352,6 +3556,49 @@ actor NodeBundleRuntimeService {
                     }
                 }
             }
+        }
+    }
+
+    /// Startup validates the complete `/config` catalogue once. Runtime
+    /// liveness must use CatPawOpen's lightweight `/check`; reparsing a full
+    /// catalogue every five seconds is both wasteful and can trigger profile
+    /// work in third-party bundles. A precise 404 keeps compatibility with
+    /// legacy host-integrated bundles that predate `/check`.
+    private func isHealthy(
+        _ baseURL: URL,
+        policy: NodeRuntimeReadinessPolicy
+    ) async -> Bool {
+        guard policy == .hostIntegratedConfiguration else {
+            return await isReady(baseURL, policy: policy)
+        }
+        do {
+            let response = try await localHTTPClient.send(
+                HTTPRequest(
+                    url: baseURL.appendingPathComponent("check"),
+                    timeout: 2,
+                    maximumResponseBytes: 1_024,
+                    maximumRedirects: 0,
+                    retryPolicy: .none,
+                    allowsNonSuccessfulStatus: true
+                )
+            )
+            if response.statusCode == 404 {
+                return await isReady(
+                    baseURL,
+                    policy: .hostIntegratedConfiguration
+                )
+            }
+            guard (200...299).contains(response.statusCode),
+                  let object = try JSONSerialization.jsonObject(
+                    with: response.body
+                  ) as? [String: Any] else {
+                return false
+            }
+            if let running = object["run"] as? Bool { return running }
+            if let okay = object["ok"] as? Bool { return okay }
+            return false
+        } catch {
+            return false
         }
     }
 

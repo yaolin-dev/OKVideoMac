@@ -240,6 +240,52 @@ final class PlaybackResolverTests: XCTestCase {
         }
     }
 
+    func testAndroidBridgeMediaSessionSurfacesClassifiedProxyFailure()
+        async throws {
+        let url = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:19978/proxy/media/session-proxy-failure")
+        )
+        let client = ScriptedProbeHTTPClient(responses: [
+            HTTPResponse(
+                url: url,
+                statusCode: 502,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"ok":false,"error":"Spider internal proxy failed"}"#.utf8)
+            )
+        ])
+
+        do {
+            _ = try await DefaultMediaProbe(httpClient: client)
+                .validate(url: url, headers: [:])
+            XCTFail("classified bridge failure must stop playback")
+        } catch let error as AppError {
+            XCTAssertEqual(error, .playback("Spider 内部代理处理失败"))
+        }
+    }
+
+    func testAndroidBridgeMediaSessionDistinguishesExpiredCapability()
+        async throws {
+        let url = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:19978/proxy/media/session-expired")
+        )
+        let client = ScriptedProbeHTTPClient(responses: [
+            HTTPResponse(
+                url: url,
+                statusCode: 410,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"ok":false,"error":"Media session expired or missing"}"#.utf8)
+            )
+        ])
+
+        do {
+            _ = try await DefaultMediaProbe(httpClient: client)
+                .validate(url: url, headers: [:])
+            XCTFail("expired bridge capability must stop playback")
+        } catch let error as AppError {
+            XCTAssertEqual(error, .playback("播放会话已过期，请重新解析"))
+        }
+    }
+
     func testAndroidCloudOriginalProxyBypassIsRestrictedToExpectedEndpoint() throws {
         let matchingURL = try XCTUnwrap(
             URL(string: "http://127.0.0.1:16677/proxy/play/%E5%98%9F%E5%98%9F/movie/1.mp4")

@@ -324,7 +324,17 @@ enum UpstreamResponseDecoder {
             headers: headers,
             format: string(object["format"]),
             subtitles: subtitles,
-            qualities: qualities
+            qualities: qualities,
+            key: string(object["key"]),
+            click: string(object["click"]),
+            code: string(object["code"]),
+            jxFrom: string(object["jxFrom"] ?? object["jxfrom"]),
+            danmaku: object["danmaku"] ?? object["danmu"],
+            drm: object["drm"],
+            artwork: string(object["artwork"] ?? object["pic"]),
+            description: string(object["desc"] ?? object["description"]),
+            position: number(object["position"]),
+            lyrics: string(object["lrc"] ?? object["lyrics"])
         )
     }
 
@@ -460,6 +470,15 @@ enum UpstreamResponseDecoder {
         case .integer(let value): return Int(exactly: value)
         case .number(let value) where value.rounded() == value: return Int(exactly: value)
         case .string(let value): return Int(value)
+        default: return nil
+        }
+    }
+
+    private static func number(_ value: JSONValue?) -> Double? {
+        switch value {
+        case .integer(let value): return Double(value)
+        case .number(let value): return value
+        case .string(let value): return Double(value)
         default: return nil
         }
     }

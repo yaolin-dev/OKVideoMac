@@ -144,6 +144,57 @@ struct VideoGrid: View {
     }
 }
 
+/// Shared lightweight navigation treatment for browse categories and search
+/// result sources. Keeping one implementation prevents the two content grids
+/// from drifting in font weight, hover feedback, and underline geometry.
+struct BrowseNavigationButtonStyle: ButtonStyle {
+    let isSelected: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        BrowseNavigationButtonBody(
+            configuration: configuration,
+            isSelected: isSelected
+        )
+    }
+}
+
+private struct BrowseNavigationButtonBody: View {
+    let configuration: ButtonStyle.Configuration
+    let isSelected: Bool
+    @State private var isHovering = false
+
+    var body: some View {
+        let highlighted = isHovering && !configuration.isPressed
+        configuration.label
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundColor(isSelected ? .blue : .primary)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .frame(height: 32, alignment: .center)
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(
+                        highlighted
+                            ? Color.primary.opacity(0.055)
+                            : Color.clear
+                    )
+            )
+            .overlay(alignment: .bottom) {
+                Capsule()
+                    .fill(Color.blue.opacity(isSelected ? 1 : 0))
+                    .frame(height: 2)
+            }
+            .opacity(configuration.isPressed ? 0.72 : 1)
+            .animation(
+                .easeOut(duration: 0.12),
+                value: configuration.isPressed
+            )
+            .animation(.easeOut(duration: 0.13), value: isHovering)
+            .onHover { isHovering = $0 }
+    }
+}
+
 private struct VideoCard: View {
     let item: VideoSummary
     let onSelect: () -> Void

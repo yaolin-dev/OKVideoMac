@@ -204,6 +204,7 @@ final class OKVideoMacTests: XCTestCase {
             BrowserEscapeRoutePolicy.action(
                 isHomeSearchPresented: true,
                 isSearching: true,
+                hasSearchFolder: false,
                 hasDetailPresentation: false,
                 hasBlockingPresentation: false
             ),
@@ -213,6 +214,7 @@ final class OKVideoMacTests: XCTestCase {
             BrowserEscapeRoutePolicy.action(
                 isHomeSearchPresented: true,
                 isSearching: false,
+                hasSearchFolder: false,
                 hasDetailPresentation: false,
                 hasBlockingPresentation: false
             ),
@@ -225,6 +227,7 @@ final class OKVideoMacTests: XCTestCase {
             BrowserEscapeRoutePolicy.action(
                 isHomeSearchPresented: true,
                 isSearching: true,
+                hasSearchFolder: false,
                 hasDetailPresentation: false,
                 hasBlockingPresentation: true
             ),
@@ -234,6 +237,7 @@ final class OKVideoMacTests: XCTestCase {
             BrowserEscapeRoutePolicy.action(
                 isHomeSearchPresented: false,
                 isSearching: false,
+                hasSearchFolder: false,
                 hasDetailPresentation: false,
                 hasBlockingPresentation: false
             ),
@@ -246,10 +250,64 @@ final class OKVideoMacTests: XCTestCase {
             BrowserEscapeRoutePolicy.action(
                 isHomeSearchPresented: true,
                 isSearching: false,
+                hasSearchFolder: false,
                 hasDetailPresentation: true,
                 hasBlockingPresentation: false
             ),
             .dismissDetail
+        )
+    }
+
+    func testBrowserEscapeNavigatesFolderBeforeStoppingSearch() {
+        XCTAssertEqual(
+            BrowserEscapeRoutePolicy.action(
+                isHomeSearchPresented: true,
+                isSearching: true,
+                hasSearchFolder: true,
+                hasDetailPresentation: false,
+                hasBlockingPresentation: false
+            ),
+            .navigateBackFolder
+        )
+    }
+
+    func testSearchFolderBackDestinationPreservesEntryOrigin() {
+        XCTAssertEqual(
+            SearchFolderNavigationPolicy.backDestination(
+                pathCount: 2,
+                origin: .home
+            ),
+            .parentFolder
+        )
+        XCTAssertEqual(
+            SearchFolderNavigationPolicy.backDestination(
+                pathCount: 1,
+                origin: .home
+            ),
+            .home
+        )
+        XCTAssertEqual(
+            SearchFolderNavigationPolicy.backDestination(
+                pathCount: 1,
+                origin: .searchResults
+            ),
+            .searchResults
+        )
+    }
+
+    func testSearchFolderBackDestinationUsesSafeLegacyFallback() {
+        XCTAssertEqual(
+            SearchFolderNavigationPolicy.backDestination(
+                pathCount: 1,
+                origin: nil
+            ),
+            .searchResults
+        )
+        XCTAssertNil(
+            SearchFolderNavigationPolicy.backDestination(
+                pathCount: 0,
+                origin: .home
+            )
         )
     }
 
@@ -258,7 +316,8 @@ final class OKVideoMacTests: XCTestCase {
             DetailHomeSearchReturnPolicy.capture(
                 isHomeSearchPresented: false,
                 selectedSiteKey: "site-a",
-                folderPath: []
+                folderPath: [],
+                folderOrigin: .home
             )
         )
 
@@ -266,11 +325,13 @@ final class OKVideoMacTests: XCTestCase {
             DetailHomeSearchReturnPolicy.capture(
                 isHomeSearchPresented: true,
                 selectedSiteKey: "site-a",
-                folderPath: []
+                folderPath: [],
+                folderOrigin: .searchResults
             ),
             DetailHomeSearchReturnSnapshot(
                 selectedSiteKey: "site-a",
-                folderPath: []
+                folderPath: [],
+                folderOrigin: .searchResults
             )
         )
     }
@@ -392,6 +453,30 @@ final class OKVideoMacTests: XCTestCase {
                 title: "配置刷新失败",
                 isPlayerPresented: true
             )
+        )
+    }
+
+    func testConfigurationPresentationFallsBackWhenDetailHostWasDismissed() {
+        XCTAssertEqual(
+            ConfigurationPresentationTargetPolicy.resolvedTarget(
+                requested: .detail,
+                hasDetailPresentation: false
+            ),
+            .mainWindow
+        )
+        XCTAssertEqual(
+            ConfigurationPresentationTargetPolicy.resolvedTarget(
+                requested: .detail,
+                hasDetailPresentation: true
+            ),
+            .detail
+        )
+        XCTAssertEqual(
+            ConfigurationPresentationTargetPolicy.resolvedTarget(
+                requested: .mainWindow,
+                hasDetailPresentation: false
+            ),
+            .mainWindow
         )
     }
 
@@ -632,20 +717,64 @@ final class OKVideoMacTests: XCTestCase {
     func testConfigurationActivationRuntimeCleanupIsOwnedByLatestNonNodeTarget() {
         XCTAssertTrue(
             ConfigurationActivationRuntimePolicy.shouldStopNodeRuntime(
-                targetEndpoint: nil,
+                targetUsesNodeRuntime: false,
                 ownsCurrentRequest: true
             )
         )
         XCTAssertFalse(
             ConfigurationActivationRuntimePolicy.shouldStopNodeRuntime(
-                targetEndpoint: nil,
+                targetUsesNodeRuntime: false,
                 ownsCurrentRequest: false
             )
         )
         XCTAssertFalse(
             ConfigurationActivationRuntimePolicy.shouldStopNodeRuntime(
-                targetEndpoint: URL(string: "http://127.0.0.1:12345"),
+                targetUsesNodeRuntime: true,
                 ownsCurrentRequest: true
+            )
+        )
+    }
+
+    func testConfigurationPostActivationPolicyRejectsStaleABASession() {
+        let configurationA = UUID()
+        let firstASession = UUID()
+        let finalASession = UUID()
+
+        XCTAssertFalse(
+            ConfigurationPostActivationPolicy.isCurrent(
+                expectedSessionID: firstASession,
+                currentSessionID: finalASession,
+                expectedConfigurationID: configurationA,
+                activeConfigurationID: configurationA
+            )
+        )
+        XCTAssertTrue(
+            ConfigurationPostActivationPolicy.isCurrent(
+                expectedSessionID: finalASession,
+                currentSessionID: finalASession,
+                expectedConfigurationID: configurationA,
+                activeConfigurationID: configurationA
+            )
+        )
+    }
+
+    func testCacheOnlyStartupPreemptsRemoteFirstStartup() {
+        XCTAssertTrue(
+            NodeRuntimeStartupPreemptionPolicy.shouldPreempt(
+                current: .remoteFirst,
+                incoming: .cacheOnly
+            )
+        )
+        XCTAssertFalse(
+            NodeRuntimeStartupPreemptionPolicy.shouldPreempt(
+                current: .cacheOnly,
+                incoming: .remoteFirst
+            )
+        )
+        XCTAssertFalse(
+            NodeRuntimeStartupPreemptionPolicy.shouldPreempt(
+                current: .cacheOnly,
+                incoming: .cacheOnly
             )
         )
     }
@@ -787,6 +916,33 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(valid?.height, 1_080)
     }
 
+    func testMPVRenderVisibilitySuppressesHiddenAndMiniaturizedSurfaces() {
+        XCTAssertTrue(
+            MPVRenderVisibilityPolicy.shouldRequestDisplay(
+                isAttachedToWindow: true,
+                isWindowVisible: true,
+                isMiniaturized: false,
+                isOcclusionVisible: true
+            )
+        )
+        XCTAssertFalse(
+            MPVRenderVisibilityPolicy.shouldRequestDisplay(
+                isAttachedToWindow: true,
+                isWindowVisible: true,
+                isMiniaturized: true,
+                isOcclusionVisible: true
+            )
+        )
+        XCTAssertFalse(
+            MPVRenderVisibilityPolicy.shouldRequestDisplay(
+                isAttachedToWindow: true,
+                isWindowVisible: true,
+                isMiniaturized: false,
+                isOcclusionVisible: false
+            )
+        )
+    }
+
     func testRenderSurfaceReadinessRequiresAttachedUsableDrawable() {
         XCTAssertTrue(
             MPVRenderSurfaceReadinessPolicy.isReady(
@@ -918,7 +1074,7 @@ final class OKVideoMacTests: XCTestCase {
                 environment: [:],
                 defaults: defaults
             ),
-            .warmStop
+            .fullDestroy
         )
 
         defaults.set(
@@ -950,7 +1106,118 @@ final class OKVideoMacTests: XCTestCase {
                 environment: [:],
                 defaults: defaults
             ),
-            .warmStop
+            .fullDestroy
+        )
+    }
+
+    func testMPVPerformanceProfileDefaultsToBoundedBalancedCache() {
+        let suiteName = "OKVideoMacTests.MPVPerformanceProfile.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertEqual(
+            MPVPlaybackPerformanceProfile.configured(
+                environment: [:],
+                defaults: defaults
+            ),
+            .balanced
+        )
+        let options = Dictionary(
+            uniqueKeysWithValues:
+                MPVPlaybackPerformanceProfile.balanced.mpvOptions.map {
+                    ($0.name, $0.value)
+                }
+        )
+        XCTAssertEqual(options["cache"], "auto")
+        XCTAssertEqual(options["cache-secs"], "60")
+        XCTAssertEqual(options["demuxer-max-bytes"], "128MiB")
+        XCTAssertEqual(options["demuxer-max-back-bytes"], "32MiB")
+
+        defaults.set(
+            MPVPlaybackPerformanceProfile.legacy.rawValue,
+            forKey: MPVPlaybackPerformanceProfile.defaultsKey
+        )
+        XCTAssertEqual(
+            MPVPlaybackPerformanceProfile.configured(
+                environment: [:],
+                defaults: defaults
+            ),
+            .legacy
+        )
+        XCTAssertEqual(
+            MPVPlaybackPerformanceProfile.configured(
+                environment: [
+                    MPVPlaybackPerformanceProfile.environmentKey:
+                        MPVPlaybackPerformanceProfile.balanced.rawValue
+                ],
+                defaults: defaults
+            ),
+            .balanced
+        )
+    }
+
+    func testTVBoxPlaybackUsesScopedCacheAndFormatWithoutChangingStandardLoad() throws {
+        let bridgeURL = try XCTUnwrap(URL(
+            string: "http://127.0.0.1:19978/proxy/media/session-id"
+        ))
+        let standard = ResolvedMedia(
+            url: bridgeURL,
+            headers: [:],
+            format: "application/vnd.apple.mpegurl",
+            siteKey: "site",
+            sourceName: "线路",
+            episodeName: "第 1 集"
+        )
+        XCTAssertEqual(
+            MPVTVBoxPlaybackPolicy.loadCommand(for: standard),
+            ["loadfile", bridgeURL.absoluteString, "replace"]
+        )
+
+        var tvBox = standard
+        tvBox.transportProfile = .tvBox
+        let command = MPVTVBoxPlaybackPolicy.loadCommand(for: tvBox)
+        XCTAssertEqual(Array(command.prefix(4)), [
+            "loadfile", bridgeURL.absoluteString, "replace", "-1"
+        ])
+        let options = try XCTUnwrap(command.last)
+        XCTAssertTrue(options.contains("cache-secs=24"))
+        XCTAssertTrue(options.contains("demuxer-max-bytes=48MiB"))
+        XCTAssertTrue(options.contains("demuxer-max-back-bytes=12MiB"))
+        XCTAssertTrue(options.contains("demuxer-lavf-format=hls"))
+
+        let fallback = MPVTVBoxPlaybackPolicy.loadCommand(
+            for: tvBox,
+            omitFormatHint: true
+        )
+        XCTAssertFalse(try XCTUnwrap(fallback.last).contains(
+            "demuxer-lavf-format"
+        ))
+    }
+
+    func testMPVRenderControlDefaultsToAdvancedWithLegacyRollback() {
+        let suiteName = "OKVideoMacTests.MPVRenderControl.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertEqual(
+            MPVRenderControlMode.configured(
+                environment: [:],
+                defaults: defaults
+            ),
+            .advanced
+        )
+        XCTAssertTrue(MPVRenderControlMode.advanced.usesAdvancedControl)
+        XCTAssertFalse(MPVRenderControlMode.legacy.usesAdvancedControl)
+
+        XCTAssertEqual(
+            MPVRenderControlMode.configured(
+                environment: [
+                    MPVRenderControlMode.environmentKey:
+                        MPVRenderControlMode.legacy.rawValue
+                ],
+                defaults: defaults
+            ),
+            .legacy
         )
     }
 
@@ -979,6 +1246,24 @@ final class OKVideoMacTests: XCTestCase {
         )
         XCTAssertNotEqual(replacement.renderOwnerID, originalID)
         await full.shutdown()
+    }
+
+    @MainActor
+    func testTVBoxWarmRetentionIsCancelledByImmediateReplay() async throws {
+        let controller = PlayerLifecycleController(mode: .fullDestroy)
+        guard let original = controller.renderPlayer else {
+            throw XCTSkip("libmpv is unavailable in this test environment")
+        }
+        let originalID = original.renderOwnerID
+        await controller.closeAfterPlayback(
+            requestID: UUID(),
+            warmRetentionSeconds: 1
+        )
+        XCTAssertEqual(controller.renderPlayer?.renderOwnerID, originalID)
+
+        let replay = try await controller.prepareForPlayback(requestID: UUID())
+        XCTAssertEqual(replay.renderOwnerID, originalID)
+        await controller.shutdown()
     }
 
     func testLiveSwitchKeepsPreviousFrameFreeOfLoadingOverlays() {
@@ -1687,6 +1972,28 @@ final class OKVideoMacTests: XCTestCase {
         withExtendedLifetime((appStateObservation, navigationObservation)) {}
     }
 
+    @MainActor
+    func testPlayerTimelineDoesNotInvalidateWholeAppState() {
+        let state = AppState.bootstrap()
+        var appStateUpdateCount = 0
+        var snapshotUpdateCount = 0
+        let appStateObservation = state.objectWillChange.sink {
+            appStateUpdateCount += 1
+        }
+        let snapshotObservation = state.playerSnapshotState.objectWillChange.sink {
+            snapshotUpdateCount += 1
+        }
+        var snapshot = state.playerSnapshot
+        snapshot.position = 12
+
+        state.playerSnapshotState.update(snapshot)
+
+        XCTAssertEqual(state.playerSnapshot.position, 12)
+        XCTAssertEqual(appStateUpdateCount, 0)
+        XCTAssertEqual(snapshotUpdateCount, 1)
+        withExtendedLifetime((appStateObservation, snapshotObservation)) {}
+    }
+
     func testHomeContentPolicyPreservesSameConfigurationAndSite() {
         let identity = HomeContentIdentity(
             configurationID: UUID(),
@@ -1846,6 +2153,270 @@ final class OKVideoMacTests: XCTestCase {
             ),
             .recommendation
         )
+    }
+
+    func testHomeResumeKeepsCompleteCategoryState() {
+        let home = SiteHome(
+            categories: [VideoCategory(id: "movie", name: "电影")],
+            recommendations: []
+        )
+
+        XCTAssertEqual(
+            HomeResumePolicy.action(
+                home: home,
+                selection: .category("movie"),
+                selectedCategoryID: "movie",
+                hasCategoryPage: true,
+                lastCategoryID: nil
+            ),
+            .keep
+        )
+    }
+
+    func testHomeResumeReloadsSelectedCategoryWhenItsPageIsMissing() {
+        let home = SiteHome(
+            categories: [VideoCategory(id: "movie", name: "电影")],
+            recommendations: []
+        )
+
+        XCTAssertEqual(
+            HomeResumePolicy.action(
+                home: home,
+                selection: .category("movie"),
+                selectedCategoryID: "movie",
+                hasCategoryPage: false,
+                lastCategoryID: nil
+            ),
+            .loadCategory("movie")
+        )
+    }
+
+    func testHomeResumeRepairsMissingPresentationWithRecommendationFirst() {
+        let home = SiteHome(
+            categories: [VideoCategory(id: "movie", name: "电影")],
+            recommendations: [
+                VideoSummary(
+                    siteKey: "site",
+                    siteName: "站点",
+                    videoID: "featured",
+                    title: "推荐"
+                )
+            ]
+        )
+
+        XCTAssertEqual(
+            HomeResumePolicy.action(
+                home: home,
+                selection: .empty,
+                selectedCategoryID: nil,
+                hasCategoryPage: false,
+                lastCategoryID: "movie"
+            ),
+            .showRecommendation
+        )
+    }
+
+    func testHomeResumeUsesLastCategoryBeforeFirstCategoryWithoutRecommendations() {
+        let home = SiteHome(
+            categories: [
+                VideoCategory(id: "movie", name: "电影"),
+                VideoCategory(id: "series", name: "剧集")
+            ],
+            recommendations: []
+        )
+
+        XCTAssertEqual(
+            HomeResumePolicy.action(
+                home: home,
+                selection: .empty,
+                selectedCategoryID: nil,
+                hasCategoryPage: false,
+                lastCategoryID: "series"
+            ),
+            .loadCategory("series")
+        )
+    }
+
+    func testHomePresentationDetectsTheBlankPartialState() {
+        let home = SiteHome(
+            categories: [VideoCategory(id: "movie", name: "电影")],
+            recommendations: []
+        )
+
+        XCTAssertFalse(
+            HomeResumePolicy.isStructurallyValid(
+                home: home,
+                selection: .empty,
+                selectedCategoryID: nil
+            )
+        )
+    }
+
+    func testSelectingTheCurrentLoadedSiteIsIdempotent() {
+        XCTAssertFalse(
+            HomeSiteSelectionPolicy.requiresTransition(
+                requestedKey: "site-a",
+                currentKey: "site-a",
+                hasCurrentHome: true,
+                isCurrentContent: true,
+                isHomeLoading: false
+            )
+        )
+        XCTAssertTrue(
+            HomeSiteSelectionPolicy.requiresTransition(
+                requestedKey: "site-b",
+                currentKey: "site-a",
+                hasCurrentHome: true,
+                isCurrentContent: true,
+                isHomeLoading: false
+            )
+        )
+    }
+
+    func testLeavingSearchClearsToolbarKeyword() async {
+        await MainActor.run {
+            let state = AppState(environment: nil)
+            state.searchDraftKeyword = "寒战 1994"
+            state.presentHomeSearch()
+
+            state.selectSection(.history)
+
+            XCTAssertFalse(state.isHomeSearchPresented)
+            XCTAssertEqual(state.searchDraftKeyword, "")
+            XCTAssertEqual(state.activeSearchKeyword, "")
+            XCTAssertEqual(state.selectedSection, .history)
+        }
+    }
+
+    func testSidebarSearchUsesSectionSpecificLanguage() {
+        let video = SidebarSearchPresentationPolicy.presentation(for: .home)
+        XCTAssertEqual(video.kind, .video)
+        XCTAssertEqual(video.placeholder, "搜索点播内容…")
+        XCTAssertEqual(video.accessibilityLabel, "搜索点播内容")
+
+        let live = SidebarSearchPresentationPolicy.presentation(for: .live)
+        XCTAssertEqual(live.kind, .liveChannels)
+        XCTAssertEqual(live.placeholder, "搜索频道…")
+        XCTAssertEqual(live.accessibilityLabel, "搜索直播频道")
+
+        for section in [AppSection.favorites, .history, .settings] {
+            XCTAssertEqual(
+                SidebarSearchPresentationPolicy.presentation(for: section).kind,
+                .video
+            )
+        }
+    }
+
+    func testSidebarRowHoverOnlyAddsACompactEnabledOverlay() {
+        XCTAssertEqual(
+            SidebarRowHoverPolicy.hoverOverlayOpacity(
+                isSelected: false,
+                isHovering: false,
+                isEnabled: true
+            ),
+            0
+        )
+        XCTAssertEqual(
+            SidebarRowHoverPolicy.hoverOverlayOpacity(
+                isSelected: false,
+                isHovering: true,
+                isEnabled: true
+            ),
+            0.06
+        )
+        XCTAssertEqual(
+            SidebarRowHoverPolicy.hoverOverlayOpacity(
+                isSelected: true,
+                isHovering: true,
+                isEnabled: true
+            ),
+            0.04
+        )
+        XCTAssertEqual(
+            SidebarRowHoverPolicy.hoverOverlayOpacity(
+                isSelected: false,
+                isHovering: true,
+                isEnabled: false
+            ),
+            0
+        )
+        XCTAssertEqual(SidebarRowHoverPolicy.cornerRadius, 6)
+        XCTAssertEqual(SidebarRowHoverPolicy.animationDuration, 0.11)
+        XCTAssertEqual(
+            SidebarRowHoverPolicy.selectionBackgroundOpacity,
+            0.10
+        )
+    }
+
+    func testSidebarVideoSearchReturnsToItsOriginSection() async {
+        await MainActor.run {
+            let state = AppState(environment: nil)
+            state.selectSection(.history)
+
+            state.searchFromSidebar("寒战 1994")
+
+            XCTAssertTrue(state.isHomeSearchPresented)
+            XCTAssertEqual(state.selectedSection, .home)
+            XCTAssertEqual(state.homeSearchReturnSection, .history)
+            XCTAssertEqual(state.homeSearchBackTitle, "返回历史")
+
+            state.returnFromSearchToOrigin()
+
+            XCTAssertFalse(state.isHomeSearchPresented)
+            XCTAssertEqual(state.selectedSection, .history)
+            XCTAssertEqual(state.searchDraftKeyword, "")
+            XCTAssertEqual(state.activeSearchKeyword, "")
+            XCTAssertNil(state.homeSearchReturnSection)
+        }
+    }
+
+    func testClearingSidebarSearchRestoresTheOriginSection() async {
+        await MainActor.run {
+            let state = AppState(environment: nil)
+            state.selectSection(.favorites)
+            state.searchFromSidebar("电影")
+
+            state.clearGlobalVideoSearch()
+
+            XCTAssertFalse(state.isHomeSearchPresented)
+            XCTAssertEqual(state.selectedSection, .favorites)
+            XCTAssertEqual(state.searchDraftKeyword, "")
+            XCTAssertEqual(state.activeSearchKeyword, "")
+        }
+    }
+
+    func testEditingSearchDraftDoesNotRenameTheActiveResultSet() async {
+        await MainActor.run {
+            let state = AppState(environment: nil)
+            state.selectSection(.history)
+            state.searchFromSidebar("你好旧时光")
+
+            XCTAssertEqual(state.searchDraftKeyword, "你好旧时光")
+            XCTAssertEqual(state.activeSearchKeyword, "你好旧时光")
+
+            state.searchDraftKeyword = "尚未提交的新关键词"
+
+            XCTAssertEqual(state.searchDraftKeyword, "尚未提交的新关键词")
+            XCTAssertEqual(state.activeSearchKeyword, "你好旧时光")
+            XCTAssertTrue(state.isHomeSearchPresented)
+            XCTAssertEqual(state.homeSearchReturnSection, .history)
+        }
+    }
+
+    func testGlobalSearchFocusDoesNotChangeTheCurrentSection() async {
+        await MainActor.run {
+            let state = AppState(environment: nil)
+            state.selectSection(.live)
+            let previousRequest = state.globalSearchFocusRequest
+
+            state.focusGlobalSearch()
+
+            XCTAssertEqual(state.selectedSection, .live)
+            XCTAssertEqual(
+                state.globalSearchFocusRequest,
+                previousRequest &+ 1
+            )
+        }
     }
 
     func testHomePresentationUsesActionsWithoutPretendingTheyAreMovies() {
@@ -2251,6 +2822,190 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testCategoryFilterReloadPreservesTheVisibleFirstPage() {
+        XCTAssertTrue(
+            CategoryReloadPresentationPolicy.shouldPreserveCurrentPage(
+                requestedPage: 1,
+                requestedCategoryID: "movie",
+                currentCategoryID: "movie",
+                hasCurrentPage: true
+            )
+        )
+        XCTAssertFalse(
+            CategoryReloadPresentationPolicy.shouldPreserveCurrentPage(
+                requestedPage: 1,
+                requestedCategoryID: "series",
+                currentCategoryID: "movie",
+                hasCurrentPage: true
+            )
+        )
+        XCTAssertFalse(
+            CategoryReloadPresentationPolicy.shouldPreserveCurrentPage(
+                requestedPage: 2,
+                requestedCategoryID: "movie",
+                currentCategoryID: "movie",
+                hasCurrentPage: true
+            )
+        )
+    }
+
+    func testFilterOverflowShowsEveryOptionWhenTheyFit() {
+        let options = [
+            VideoFilterOption(name: "全部", value: "all"),
+            VideoFilterOption(name: "电影", value: "movie"),
+            VideoFilterOption(name: "电视剧", value: "series")
+        ]
+
+        let visibility = FilterOverflowLayoutPolicy.visibility(
+            options: options,
+            selectedValue: "movie",
+            availableWidth: 10_000
+        )
+
+        XCTAssertEqual(visibility.visibleValues, ["all", "movie", "series"])
+        XCTAssertTrue(visibility.hiddenValues.isEmpty)
+    }
+
+    func testFilterChipsUseOneWidthForTextAndYears() {
+        XCTAssertEqual(
+            FilterOverflowLayoutPolicy.chipWidth(title: "喜剧"),
+            FilterOverflowLayoutPolicy.chipWidth(title: "2026")
+        )
+        XCTAssertEqual(
+            FilterOverflowLayoutPolicy.chipWidth(title: "中国香港"),
+            FilterOverflowLayoutPolicy.uniformChipWidth
+        )
+    }
+
+    func testFilterOverflowKeepsAnOverflowSelectionVisible() {
+        let options = [
+            VideoFilterOption(name: "全部", value: "all"),
+            VideoFilterOption(name: "中国大陆", value: "china"),
+            VideoFilterOption(name: "中国香港", value: "hong-kong"),
+            VideoFilterOption(name: "美国", value: "usa"),
+            VideoFilterOption(name: "日本", value: "japan"),
+            VideoFilterOption(name: "法国", value: "france")
+        ]
+
+        let visibility = FilterOverflowLayoutPolicy.visibility(
+            options: options,
+            selectedValue: "france",
+            availableWidth: 180
+        )
+
+        XCTAssertTrue(visibility.visibleValues.contains("france"))
+        XCTAssertFalse(visibility.hiddenValues.contains("france"))
+        XCTAssertFalse(visibility.hiddenValues.isEmpty)
+        XCTAssertEqual(
+            Set(visibility.visibleValues + visibility.hiddenValues),
+            Set(options.map(\.value))
+        )
+    }
+
+    func testFilterOverflowUsesLastAvailableColumnForAdjacentMoreButton() {
+        let options = (0..<8).map {
+            VideoFilterOption(name: "选项\($0)", value: "value-\($0)")
+        }
+        let fourColumnWidth =
+            HomeBrowseGridMetrics.chipWidth * 4
+            + HomeBrowseGridMetrics.columnSpacing * 3
+
+        let visibility = FilterOverflowLayoutPolicy.visibility(
+            options: options,
+            selectedValue: "value-1",
+            availableWidth: fourColumnWidth
+        )
+
+        XCTAssertEqual(
+            FilterOverflowLayoutPolicy.columnCapacity(
+                availableWidth: fourColumnWidth
+            ),
+            4
+        )
+        XCTAssertEqual(visibility.visibleValues.count, 3)
+        XCTAssertEqual(visibility.hiddenValues.count, 5)
+        XCTAssertTrue(visibility.visibleValues.contains("value-0"))
+        XCTAssertTrue(visibility.visibleValues.contains("value-1"))
+    }
+
+    func testHomeBrowseGridUsesOneColumnRhythm() {
+        XCTAssertEqual(
+            HomeBrowseGridMetrics.optionLeadingInset,
+            HomeBrowseGridMetrics.labelWidth
+                + HomeBrowseGridMetrics.labelContentSpacing
+        )
+        XCTAssertEqual(
+            FilterOverflowLayoutPolicy.uniformChipWidth,
+            HomeBrowseGridMetrics.chipWidth
+        )
+        XCTAssertEqual(
+            FilterOverflowLayoutPolicy.chipSpacing,
+            HomeBrowseGridMetrics.columnSpacing
+        )
+        XCTAssertEqual(
+            HomeBrowseGridMetrics.categoryLeadingInset,
+            8
+        )
+    }
+
+    func testHomeFilterDefaultsDoNotProduceActiveTokens() {
+        let filters = homeFilterFixtures()
+        let defaults = HomeFilterPresentationPolicy.defaultSelection(
+            filters: filters
+        )
+
+        XCTAssertEqual(defaults, ["type": "all", "year": "all-years"])
+        XCTAssertTrue(
+            HomeFilterPresentationPolicy.activeTokens(
+                filters: filters,
+                selection: defaults
+            ).isEmpty
+        )
+    }
+
+    func testHomeFilterTokensUseDynamicFilterAndOptionNames() {
+        let filters = homeFilterFixtures()
+        let tokens = HomeFilterPresentationPolicy.activeTokens(
+            filters: filters,
+            selection: ["type": "comedy", "year": "2026"]
+        )
+
+        XCTAssertEqual(tokens.map(\.filterName), ["类型", "年代"])
+        XCTAssertEqual(tokens.map(\.optionName), ["喜剧", "2026"])
+    }
+
+    func testResettingOneHomeFilterPreservesOtherSelections() {
+        let filters = homeFilterFixtures()
+        let reset = HomeFilterPresentationPolicy.resetting(
+            filterID: "type",
+            filters: filters,
+            selection: ["type": "comedy", "year": "2026"]
+        )
+
+        XCTAssertEqual(reset, ["type": "all", "year": "2026"])
+    }
+
+    private func homeFilterFixtures() -> [VideoFilter] {
+        [
+            VideoFilter(
+                id: "type",
+                name: "类型",
+                options: [
+                    VideoFilterOption(name: "全部类型", value: "all"),
+                    VideoFilterOption(name: "喜剧", value: "comedy")
+                ]
+            ),
+            VideoFilter(
+                id: "year",
+                name: "年代",
+                options: [
+                    VideoFilterOption(name: "全部年代", value: "all-years"),
+                    VideoFilterOption(name: "2026", value: "2026")
+                ]
+            )
+        ]
+    }
+
     func testAutomaticHomeRefreshWaitsForStartupCompletion() {
         XCTAssertFalse(
             HomeAutomaticRefreshPolicy.allowsRefresh(
@@ -2331,6 +3086,114 @@ final class OKVideoMacTests: XCTestCase {
                 selectedSiteKey: original.siteKey,
                 requiresSelectedHomeSource: false,
                 availableSiteKeys: [original.siteKey]
+            )
+        )
+    }
+
+    func testNodeAuthorizationCompletionRequiresCurrentChallengeAndRequest() {
+        let challengeID = UUID()
+        let matching = NodeAuthorizationCompletionSignal(
+            challengeID: challengeID,
+            requestID: "request-current",
+            provider: "fixture",
+            profileRevision: "revision-2"
+        )
+        let staleRequest = NodeAuthorizationCompletionSignal(
+            challengeID: challengeID,
+            requestID: "request-stale",
+            provider: "fixture",
+            profileRevision: "revision-2"
+        )
+        let anotherChallenge = NodeAuthorizationCompletionSignal(
+            challengeID: UUID(),
+            requestID: "request-current",
+            provider: "fixture",
+            profileRevision: "revision-2"
+        )
+
+        XCTAssertTrue(
+            NodeAuthorizationCompletionMatchingPolicy.matches(
+                expectedChallengeID: challengeID,
+                expectedRequestID: "request-current",
+                signal: matching
+            )
+        )
+        XCTAssertFalse(
+            NodeAuthorizationCompletionMatchingPolicy.matches(
+                expectedChallengeID: challengeID,
+                expectedRequestID: "request-current",
+                signal: staleRequest
+            )
+        )
+        XCTAssertFalse(
+            NodeAuthorizationCompletionMatchingPolicy.matches(
+                expectedChallengeID: challengeID,
+                expectedRequestID: "request-current",
+                signal: anotherChallenge
+            )
+        )
+        XCTAssertFalse(
+            NodeAuthorizationCompletionMatchingPolicy.matches(
+                expectedChallengeID: challengeID,
+                expectedRequestID: nil,
+                signal: matching
+            )
+        )
+    }
+
+    func testLegacyProfileRevisionTriggersOnlyOnePlaybackVerification() {
+        XCTAssertTrue(
+            NodeProfileRevisionVerificationPolicy.shouldVerifyAutomatically(
+                isPlayback: true,
+                requestID: nil,
+                allowsAutomaticRetry: true,
+                hasAttemptedVerification: false
+            )
+        )
+        XCTAssertFalse(
+            NodeProfileRevisionVerificationPolicy.shouldVerifyAutomatically(
+                isPlayback: true,
+                requestID: nil,
+                allowsAutomaticRetry: true,
+                hasAttemptedVerification: true
+            )
+        )
+        XCTAssertFalse(
+            NodeProfileRevisionVerificationPolicy.shouldVerifyAutomatically(
+                isPlayback: true,
+                requestID: "explicit-request",
+                allowsAutomaticRetry: true,
+                hasAttemptedVerification: false
+            )
+        )
+        XCTAssertFalse(
+            NodeProfileRevisionVerificationPolicy.shouldVerifyAutomatically(
+                isPlayback: false,
+                requestID: nil,
+                allowsAutomaticRetry: true,
+                hasAttemptedVerification: false
+            )
+        )
+    }
+
+    func testNodeRuntimeWebsiteLocationRebindsAfterRuntimeRestart() throws {
+        let original = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:55485/website/account?tab=cloud#qr")
+        )
+        let location = try XCTUnwrap(NodeRuntimeWebsiteLocation(url: original))
+        let restartedEndpoint = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:60241/")
+        )
+
+        XCTAssertEqual(
+            location.resolved(against: restartedEndpoint)?.absoluteString,
+            "http://127.0.0.1:60241/website/account?tab=cloud#qr"
+        )
+        XCTAssertNil(
+            NodeRuntimeWebsiteLocation(
+                url: try XCTUnwrap(
+                    URL(string: "http://127.0.0.1:55485/ordinary-page")
+                )
             )
         )
     }
@@ -2457,6 +3320,44 @@ final class OKVideoMacTests: XCTestCase {
             coordinator.transition(second.interactionID, to: .completed)
         )
         XCTAssertFalse(coordinator.hasActiveRequest)
+    }
+
+    func testConfigurationCoordinatorGenerationRejectsLateCallbackWhenIDIsReused() {
+        let identity = HomeContentIdentity(
+            configurationID: UUID(),
+            siteKey: "site"
+        )
+        let reusedInteractionID = UUID()
+        var coordinator = ConfigurationInteractionCoordinator()
+        let first = coordinator.begin(
+            sourceIdentity: identity,
+            semantic: .qrAuthorization,
+            transport: .native,
+            title: "First playback",
+            interactionID: reusedInteractionID
+        )
+        let replacement = coordinator.begin(
+            sourceIdentity: identity,
+            semantic: .qrAuthorization,
+            transport: .native,
+            title: "Replacement playback",
+            interactionID: reusedInteractionID
+        )
+
+        XCTAssertEqual(first.interactionID, replacement.interactionID)
+        XCTAssertGreaterThan(replacement.generation, first.generation)
+        XCTAssertFalse(
+            coordinator.owns(
+                reusedInteractionID,
+                generation: first.generation
+            )
+        )
+        XCTAssertTrue(
+            coordinator.owns(
+                reusedInteractionID,
+                generation: replacement.generation
+            )
+        )
     }
 
     func testOnlyExplicitLoginQRCodeUsesAuthorizationSemantics() {
@@ -2910,6 +3811,7 @@ final class OKVideoMacTests: XCTestCase {
             AndroidBridgeUIState.self,
             from: Data(#"""
             {
+              "kind": "authorization",
               "visible": true,
               "title": "配置操作",
               "inputCount": 0,
@@ -2963,7 +3865,7 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testCloudAccountStatusSharesAcrossConfigurationsForSameProvider() {
+    func testCloudAccountStatusIsScopedToExactProviderOwner() {
         let providerID = CloudAccountProviderIdentity.identifier(
             capability: .javaDexSpider,
             api: "csp_MyDriveGuard"
@@ -2973,13 +3875,13 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(
             store.observe(
                 title: "我的夸父 - 已登录",
-                providerID: providerID
+                scopeID: providerID
             )
         )
         XCTAssertEqual(
             store.reconciledTitle(
                 "我的夸父 - 未登录",
-                providerID: providerID
+                scopeID: providerID
             ),
             "我的夸父 - 已登录"
         )
@@ -3040,7 +3942,7 @@ final class OKVideoMacTests: XCTestCase {
         var store = CloudAccountStatusStore()
         _ = store.observe(
             title: "我的哪哪 - 已登录",
-            providerID: providerID
+            scopeID: providerID
         )
         let items = [
             SiteActionItem(
@@ -3063,7 +3965,7 @@ final class OKVideoMacTests: XCTestCase {
         let reconciled = CloudAccountStatusPresentationPolicy.applying(
             to: items,
             accountLabel: "百度网盘",
-            providerID: providerID,
+            scopeID: providerID,
             store: store
         )
         XCTAssertEqual(reconciled[0].remarks, "已登录")
@@ -3072,7 +3974,7 @@ final class OKVideoMacTests: XCTestCase {
         let unrelated = CloudAccountStatusPresentationPolicy.applying(
             to: items,
             accountLabel: "夸克网盘",
-            providerID: providerID,
+            scopeID: providerID,
             store: store
         )
         XCTAssertEqual(unrelated[0].remarks, "未登录")
@@ -3088,12 +3990,12 @@ final class OKVideoMacTests: XCTestCase {
             api: "csp_OtherDrive"
         )!
         var store = CloudAccountStatusStore()
-        _ = store.observe(title: "我的优汐 - 已登录", providerID: first)
+        _ = store.observe(title: "我的优汐 - 已登录", scopeID: first)
 
         XCTAssertEqual(
             store.reconciledTitle(
                 "我的优汐 - 未登录",
-                providerID: second
+                scopeID: second
             ),
             "我的优汐 - 未登录"
         )
@@ -3105,45 +4007,45 @@ final class OKVideoMacTests: XCTestCase {
             api: "csp_MyDriveGuard"
         )!
         var store = CloudAccountStatusStore()
-        _ = store.observe(title: "我的阿狸 - 已登录", providerID: providerID)
+        _ = store.observe(title: "我的阿狸 - 已登录", scopeID: providerID)
 
         XCTAssertFalse(
             store.observe(
                 title: "我的阿狸 - 未登录",
-                providerID: providerID
+                scopeID: providerID
             )
         )
         XCTAssertEqual(
             store.reconciledTitle(
                 "我的阿狸 - 未登录",
-                providerID: providerID
+                scopeID: providerID
             ),
             "我的阿狸 - 已登录"
         )
         XCTAssertFalse(
             store.observe(
                 title: "我的阿狸 - 正在确认",
-                providerID: providerID
+                scopeID: providerID
             )
         )
         XCTAssertEqual(
             store.reconciledTitle(
                 "我的阿狸 - 正在确认",
-                providerID: providerID
+                scopeID: providerID
             ),
             "我的阿狸 - 已登录"
         )
         XCTAssertTrue(
             store.observe(
                 title: "我的阿狸 - 未登录",
-                providerID: providerID,
+                scopeID: providerID,
                 explicitlyUnauthenticated: true
             )
         )
         XCTAssertEqual(
             store.reconciledTitle(
                 "我的阿狸 - 已登录",
-                providerID: providerID
+                scopeID: providerID
             ),
             "我的阿狸 - 未登录"
         )
@@ -3179,23 +4081,23 @@ final class OKVideoMacTests: XCTestCase {
             api: "csp_MyDriveGuard"
         )!
         var store = CloudAccountStatusStore()
-        _ = store.observe(title: "我的夸父 - 已登录", providerID: providerID)
-        _ = store.observe(title: "我的优汐 - 已登录", providerID: providerID)
+        _ = store.observe(title: "我的夸父 - 已登录", scopeID: providerID)
+        _ = store.observe(title: "我的优汐 - 已登录", scopeID: providerID)
 
         XCTAssertTrue(
-            store.invalidate(providerID: providerID, command: "ucClean")
+            store.invalidate(scopeID: providerID, command: "ucClean")
         )
         XCTAssertEqual(
             store.reconciledTitle(
                 "我的夸父 - 未登录",
-                providerID: providerID
+                scopeID: providerID
             ),
             "我的夸父 - 已登录"
         )
         XCTAssertEqual(
             store.reconciledTitle(
                 "我的优汐 - 已登录",
-                providerID: providerID
+                scopeID: providerID
             ),
             "我的优汐 - 未登录"
         )
@@ -3207,12 +4109,22 @@ final class OKVideoMacTests: XCTestCase {
             api: "csp_MyDriveGuard"
         )!
         var store = CloudAccountStatusStore()
-        _ = store.observe(title: "我的哪哪 - 已登录", providerID: providerID)
+        _ = store.observe(title: "我的哪哪 - 已登录", scopeID: providerID)
 
         let restored = try XCTUnwrap(
             store.setting.flatMap(CloudAccountStatusStore.init(setting:))
         )
-        XCTAssertEqual(restored, store)
+        XCTAssertEqual(
+            restored.status(scopeID: providerID, accountKey: "我的哪哪"),
+            .pending
+        )
+        XCTAssertEqual(
+            restored.reconciledTitle(
+                "我的哪哪 - 未登录",
+                scopeID: providerID
+            ),
+            "我的哪哪 - 上次已授权"
+        )
         XCTAssertFalse(String(describing: restored).contains("Cookie"))
         XCTAssertFalse(String(describing: restored).contains("Token"))
     }
@@ -3707,6 +4619,301 @@ final class OKVideoMacTests: XCTestCase {
                 playbackSessionID: current,
                 isPlayerPresented: false
             )
+        )
+        XCTAssertFalse(
+            CloudAuthorizationPlaybackOwnershipPolicy.isCurrent(
+                requestID: current,
+                activeRequestID: current,
+                playbackSessionID: UUID(),
+                isPlayerPresented: true
+            )
+        )
+    }
+
+    func testPlaybackAuthorizationFastTerminalResumesSameRequestExactlyOnce() {
+        let requestID = UUID()
+        var resolvingRequestIDs: Set<UUID> = [requestID]
+        var gate = PlaybackAuthorizationResumeGate()
+        var resumedRequestIDs: [UUID] = []
+
+        func consumeAuthoritativeResult() {
+            guard gate.claim(
+                requestID: requestID,
+                activeRequestID: requestID,
+                playbackSessionID: requestID,
+                isPlayerPresented: true,
+                hasAuthoritativeResult: true,
+                requiresAuthoritativeResult: true,
+                originalRequestIsResolving: resolvingRequestIDs.contains(
+                    requestID
+                )
+            ) else {
+                return
+            }
+            resumedRequestIDs.append(requestID)
+        }
+
+        // A second ordinary click may reuse the existing in-flight player,
+        // but an authorization continuation or an authoritative result must
+        // always pass through to resolution.
+        XCTAssertTrue(
+            PlaybackAuthorizationResumeGate.allowsInFlightDuplicateFastPath(
+                authorizationRetry: false,
+                hasAuthoritativeResult: false
+            )
+        )
+        XCTAssertFalse(
+            PlaybackAuthorizationResumeGate.allowsInFlightDuplicateFastPath(
+                authorizationRetry: true,
+                hasAuthoritativeResult: false
+            )
+        )
+        XCTAssertFalse(
+            PlaybackAuthorizationResumeGate.allowsInFlightDuplicateFastPath(
+                authorizationRetry: false,
+                hasAuthoritativeResult: true
+            )
+        )
+
+        // Even a terminal value available immediately at presentation cannot
+        // resume until the original resolver hands off its lease.
+        consumeAuthoritativeResult()
+        XCTAssertTrue(resumedRequestIDs.isEmpty)
+
+        // This is the zero-delay handoff performed before awaiting Android UI
+        // presentation. The same request consumes its provider result once.
+        resolvingRequestIDs.remove(requestID)
+        consumeAuthoritativeResult()
+        XCTAssertEqual(gate.claimedRequestID, requestID)
+        XCTAssertEqual(resumedRequestIDs, [requestID])
+
+        // A duplicate terminal callback cannot consume the authoritative
+        // result or trigger the same playback continuation a second time.
+        consumeAuthoritativeResult()
+        XCTAssertEqual(resumedRequestIDs, [requestID])
+    }
+
+    func testAndroidActionSurfacePNGHeaderDimensions() {
+        let valid = Data([
+            137, 80, 78, 71, 13, 10, 26, 10,
+            0, 0, 0, 13, 73, 72, 68, 82,
+            0, 0, 4, 56, 0, 0, 9, 96
+        ])
+
+        let size = AndroidActionSurfaceFrame.pngPixelSize(valid)
+        XCTAssertEqual(size?.width, 1_080)
+        XCTAssertEqual(size?.height, 2_400)
+
+        var invalidSignature = valid
+        invalidSignature[0] = 0
+        XCTAssertNil(AndroidActionSurfaceFrame.pngPixelSize(invalidSignature))
+        XCTAssertNil(AndroidActionSurfaceFrame.pngPixelSize(valid.prefix(23)))
+
+        var zeroWidth = valid
+        zeroWidth.replaceSubrange(16..<20, with: [0, 0, 0, 0])
+        XCTAssertNil(AndroidActionSurfaceFrame.pngPixelSize(zeroWidth))
+    }
+
+    func testAndroidActionSurfaceGeometryAspectFitAndPixelMapping() throws {
+        let portrait = AndroidActionSurfaceGeometryPolicy.fittedRect(
+            container: CGSize(width: 600, height: 600),
+            pixels: CGSize(width: 1_080, height: 2_400)
+        )
+        XCTAssertEqual(portrait.minX, 165, accuracy: 0.000_1)
+        XCTAssertEqual(portrait.minY, 0, accuracy: 0.000_1)
+        XCTAssertEqual(portrait.width, 270, accuracy: 0.000_1)
+        XCTAssertEqual(portrait.height, 600, accuracy: 0.000_1)
+
+        let center = try XCTUnwrap(
+            AndroidActionSurfaceGeometryPolicy.pixelPoint(
+                location: CGPoint(x: 300, y: 300),
+                fittedRect: portrait,
+                pixelWidth: 1_080,
+                pixelHeight: 2_400
+            )
+        )
+        XCTAssertEqual(center.x, 540)
+        XCTAssertEqual(center.y, 1_200)
+
+        let lowerRight = try XCTUnwrap(
+            AndroidActionSurfaceGeometryPolicy.pixelPoint(
+                location: CGPoint(x: 434.999, y: 599.999),
+                fittedRect: portrait,
+                pixelWidth: 1_080,
+                pixelHeight: 2_400
+            )
+        )
+        XCTAssertEqual(lowerRight.x, 1_079)
+        XCTAssertEqual(lowerRight.y, 2_399)
+        XCTAssertNil(
+            AndroidActionSurfaceGeometryPolicy.pixelPoint(
+                location: CGPoint(x: 164.999, y: 300),
+                fittedRect: portrait,
+                pixelWidth: 1_080,
+                pixelHeight: 2_400
+            )
+        )
+
+        let landscape = AndroidActionSurfaceGeometryPolicy.fittedRect(
+            container: CGSize(width: 600, height: 500),
+            pixels: CGSize(width: 2_400, height: 1_080)
+        )
+        XCTAssertEqual(landscape.minX, 0, accuracy: 0.000_1)
+        XCTAssertEqual(landscape.minY, 115, accuracy: 0.000_1)
+        XCTAssertEqual(landscape.width, 600, accuracy: 0.000_1)
+        XCTAssertEqual(landscape.height, 270, accuracy: 0.000_1)
+    }
+
+    func testAndroidActionSurfaceLeaseRejectsStaleFrameBeforePublish() {
+        let current = UUID()
+        let frame = AndroidActionSurfaceFrame(
+            interactionID: current,
+            providerOwnerID: "owner-a",
+            runtimeGeneration: "runtime-a",
+            surfaceMode: "externalactivity",
+            generation: 8,
+            frameSequence: 2,
+            pngData: Data(),
+            pixelWidth: 1_080,
+            pixelHeight: 2_400
+        )
+
+        XCTAssertTrue(
+            AndroidActionSurfaceLeasePolicy.accepts(
+                frame: frame,
+                replacing: nil,
+                expectedInteractionID: current,
+                expectedProviderOwnerID: "owner-a",
+                expectedGeneration: 8
+            )
+        )
+        XCTAssertFalse(
+            AndroidActionSurfaceLeasePolicy.accepts(
+                frame: frame,
+                replacing: nil,
+                expectedInteractionID: UUID(),
+                expectedProviderOwnerID: "owner-a",
+                expectedGeneration: 8
+            )
+        )
+        XCTAssertFalse(
+            AndroidActionSurfaceLeasePolicy.accepts(
+                frame: frame,
+                replacing: nil,
+                expectedInteractionID: current,
+                expectedProviderOwnerID: "owner-b",
+                expectedGeneration: 8
+            )
+        )
+        XCTAssertFalse(
+            AndroidActionSurfaceLeasePolicy.accepts(
+                frame: frame,
+                replacing: nil,
+                expectedInteractionID: current,
+                expectedProviderOwnerID: "owner-a",
+                expectedGeneration: 7
+            )
+        )
+        let newerFrame = AndroidActionSurfaceFrame(
+            interactionID: current,
+            providerOwnerID: "owner-a",
+            runtimeGeneration: "runtime-a",
+            surfaceMode: "externalactivity",
+            generation: 8,
+            frameSequence: 3,
+            pngData: Data(),
+            pixelWidth: 1_080,
+            pixelHeight: 2_400
+        )
+        XCTAssertTrue(
+            AndroidActionSurfaceLeasePolicy.accepts(
+                frame: newerFrame,
+                replacing: frame,
+                expectedInteractionID: current,
+                expectedProviderOwnerID: "owner-a",
+                expectedGeneration: 8
+            )
+        )
+        XCTAssertFalse(
+            AndroidActionSurfaceLeasePolicy.accepts(
+                frame: frame,
+                replacing: newerFrame,
+                expectedInteractionID: current,
+                expectedProviderOwnerID: "owner-a",
+                expectedGeneration: 8
+            )
+        )
+        let restartedRuntimeFrame = AndroidActionSurfaceFrame(
+            interactionID: current,
+            providerOwnerID: "owner-a",
+            runtimeGeneration: "runtime-b",
+            surfaceMode: "externalactivity",
+            generation: 8,
+            frameSequence: 4,
+            pngData: Data(),
+            pixelWidth: 1_080,
+            pixelHeight: 2_400
+        )
+        XCTAssertFalse(
+            AndroidActionSurfaceLeasePolicy.accepts(
+                frame: restartedRuntimeFrame,
+                replacing: newerFrame,
+                expectedInteractionID: current,
+                expectedProviderOwnerID: "owner-a",
+                expectedGeneration: 8
+            )
+        )
+        XCTAssertTrue(AndroidActionSurfaceLeasePolicy.isExactLease(frame, frame))
+        XCTAssertFalse(
+            AndroidActionSurfaceLeasePolicy.isExactLease(frame, newerFrame)
+        )
+    }
+
+    func testAndroidExternalSurfaceRequiresExactNonterminalRequestLease()
+        throws {
+        let requestID = UUID()
+        func decode(
+            surfaceID: UUID,
+            active: Bool = true,
+            terminal: Bool = false,
+            mode: String = "externalActivity"
+        ) throws -> AndroidBridgeUIState {
+            let object: [String: Any] = [
+                "interactionID": requestID.uuidString,
+                "visible": false,
+                "title": "",
+                "inputCount": 0,
+                "imageCount": 0,
+                "buttons": [],
+                "terminal": terminal,
+                "surfaceActive": active,
+                "surfaceRequestScoped": true,
+                "surfaceInteractionID": surfaceID.uuidString,
+                "surfaceMode": mode
+            ]
+            return try JSONDecoder().decode(
+                AndroidBridgeUIState.self,
+                from: JSONSerialization.data(withJSONObject: object)
+            )
+        }
+
+        XCTAssertTrue(
+            try decode(surfaceID: requestID).hasRequestScopedActionSurface
+        )
+        XCTAssertFalse(
+            try decode(surfaceID: UUID()).hasRequestScopedActionSurface
+        )
+        XCTAssertFalse(
+            try decode(surfaceID: requestID, active: false)
+                .hasRequestScopedActionSurface
+        )
+        XCTAssertFalse(
+            try decode(surfaceID: requestID, terminal: true)
+                .hasRequestScopedActionSurface
+        )
+        XCTAssertFalse(
+            try decode(surfaceID: requestID, mode: "actionActivity")
+                .hasRequestScopedActionSurface
         )
     }
 
@@ -4862,6 +6069,36 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testMPVSeekUsesRemoteFriendlyAbsoluteKeyframeCommand() {
+        XCTAssertEqual(
+            MPVPlayerClient.seekCommand(to: 1_008),
+            ["seek", "1008.000", "absolute+keyframes"]
+        )
+    }
+
+    func testSeekConfirmationTrustsNativeCompletionForImpreciseKeyframe() {
+        XCTAssertFalse(
+            PlayerSeekConfirmationPolicy.hasCompleted(
+                snapshot: PlayerSnapshot(
+                    position: 900,
+                    duration: 5_400,
+                    isSeeking: true,
+                    seekTarget: 1_008
+                )
+            )
+        )
+        XCTAssertTrue(
+            PlayerSeekConfirmationPolicy.hasCompleted(
+                snapshot: PlayerSnapshot(
+                    position: 960,
+                    duration: 5_400,
+                    isSeeking: false
+                )
+            ),
+            "absolute+keyframes may complete well before the requested time"
+        )
+    }
+
     func testNothingToPlayErrorUsesActionableLocalizedMessage() {
         XCTAssertEqual(
             MPVPlaybackErrorPolicy.userFacingMessage(
@@ -4919,13 +6156,92 @@ final class OKVideoMacTests: XCTestCase {
         let fallbackRequestID = UUID()
 
         signal.reset(requestID: failedCandidateRequestID)
+        XCTAssertFalse(signal.hasStartedPlayback())
         XCTAssertNil(signal.claimPlaybackStarted())
         signal.cancel()
 
         signal.reset(requestID: fallbackRequestID)
         signal.markFileLoaded()
         XCTAssertEqual(signal.claimPlaybackStarted(), fallbackRequestID)
+        XCTAssertTrue(signal.hasStartedPlayback())
         XCTAssertNil(signal.claimPlaybackStarted())
+    }
+
+    @MainActor
+    func testPlaybackStartupTimeoutBeginsOnlyAfterFileLoadedArmsGate() async throws {
+        let controller = PlaybackStartupGateController()
+        let requestID = UUID()
+        let token = controller.begin(
+            requestID: requestID,
+            timeoutNanoseconds: 30_000_000
+        )
+
+        try await Task.sleep(nanoseconds: 60_000_000)
+        XCTAssertTrue(
+            controller.arm(
+                requestID: requestID,
+                expectedIdentity: token.identity
+            )
+        )
+        XCTAssertTrue(controller.complete(requestID: requestID))
+
+        var iterator = token.stream.makeAsyncIterator()
+        let completion = try await iterator.next()
+        XCTAssertNotNil(completion)
+    }
+
+    @MainActor
+    func testPlaybackStartupGateTimesOutAfterItIsArmed() async {
+        let controller = PlaybackStartupGateController()
+        let requestID = UUID()
+        let token = controller.begin(
+            requestID: requestID,
+            timeoutNanoseconds: 20_000_000
+        )
+        XCTAssertTrue(controller.arm(requestID: requestID))
+
+        var iterator = token.stream.makeAsyncIterator()
+        do {
+            _ = try await iterator.next()
+            XCTFail("Armed startup gate unexpectedly completed")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("没有产生音视频"))
+        }
+    }
+
+    func testAndroidBridgeInteractionPollingBacksOffWithinFixedDeadline() {
+        XCTAssertEqual(
+            AndroidBridgeInteractionPollingPolicy.delayNanoseconds(
+                afterAttempt: 0
+            ),
+            250_000_000
+        )
+        XCTAssertEqual(
+            AndroidBridgeInteractionPollingPolicy.delayNanoseconds(
+                afterAttempt: 8
+            ),
+            500_000_000
+        )
+        XCTAssertEqual(
+            AndroidBridgeInteractionPollingPolicy.delayNanoseconds(
+                afterAttempt: 24
+            ),
+            1_000_000_000
+        )
+
+        let startedAt = Date(timeIntervalSince1970: 100)
+        XCTAssertTrue(
+            AndroidBridgeInteractionPollingPolicy.shouldContinue(
+                startedAt: startedAt,
+                now: startedAt.addingTimeInterval(599.9)
+            )
+        )
+        XCTAssertFalse(
+            AndroidBridgeInteractionPollingPolicy.shouldContinue(
+                startedAt: startedAt,
+                now: startedAt.addingTimeInterval(600)
+            )
+        )
     }
 
     func testMPVTimelinePropertiesAreTheOnlyRateLimitedSnapshots() {
@@ -5097,7 +6413,7 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertFalse(AppSection.allCases.contains { $0.systemImage.isEmpty })
         XCTAssertEqual(
             AppSection.allCases.map(\.rawValue),
-            ["首页", "直播", "收藏", "历史", "设置"]
+            ["点播", "直播", "收藏", "历史", "设置"]
         )
     }
 
@@ -5124,6 +6440,22 @@ final class OKVideoMacTests: XCTestCase {
         let urls = LiveChannelLogoResolver.urls(for: channel)
         XCTAssertEqual(urls.first, explicit)
         XCTAssertTrue(urls.contains { $0.lastPathComponent == "CCTV1.png" })
+    }
+
+    func testLiveChannelLogoURLCacheAvoidsRepeatedNormalization() throws {
+        let streamURL = try XCTUnwrap(URL(string: "https://example.com/live.m3u8"))
+        let channel = LiveChannel(
+            groupName: "央视频道",
+            name: "030 CCTV4K超高清",
+            streams: [LiveStream(name: "线路 1", url: streamURL)]
+        )
+        let cache = LiveChannelLogoURLCache()
+
+        let first = cache.urls(for: channel)
+        let second = cache.urls(for: channel)
+
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(cache.computationCount, 1)
     }
 
     func testHTTPConfigurationSourcesAreAllowedByAppTransportSecurity() {
@@ -5202,25 +6534,89 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(
             MPVPlaybackEndPolicy.isNaturalEnd(
                 endFileReason: 0,
-                isReplacingMedia: false
+                isReplacingMedia: false,
+                hasStartedPlayback: true,
+                isSeeking: false,
+                isPausedForCache: false,
+                position: 99,
+                duration: 100
             )
         )
         XCTAssertTrue(
             MPVPlaybackEndPolicy.isNaturalEnd(
                 eofReached: true,
-                isReplacingMedia: false
+                isReplacingMedia: false,
+                hasStartedPlayback: true,
+                isSeeking: false,
+                isPausedForCache: false,
+                position: 0,
+                duration: 0
             )
         )
         XCTAssertFalse(
             MPVPlaybackEndPolicy.isNaturalEnd(
                 endFileReason: 2,
-                isReplacingMedia: false
+                isReplacingMedia: false,
+                hasStartedPlayback: true,
+                isSeeking: false,
+                isPausedForCache: false,
+                position: 100,
+                duration: 100
             )
         )
         XCTAssertFalse(
             MPVPlaybackEndPolicy.isNaturalEnd(
                 eofReached: true,
-                isReplacingMedia: true
+                isReplacingMedia: true,
+                hasStartedPlayback: true,
+                isSeeking: false,
+                isPausedForCache: false,
+                position: 100,
+                duration: 100
+            )
+        )
+        XCTAssertFalse(
+            MPVPlaybackEndPolicy.isNaturalEnd(
+                eofReached: true,
+                isReplacingMedia: false,
+                hasStartedPlayback: true,
+                isSeeking: true,
+                isPausedForCache: false,
+                position: 40,
+                duration: 100
+            )
+        )
+        XCTAssertFalse(
+            MPVPlaybackEndPolicy.isNaturalEnd(
+                endFileReason: 0,
+                isReplacingMedia: false,
+                hasStartedPlayback: true,
+                isSeeking: false,
+                isPausedForCache: true,
+                position: 40,
+                duration: 100
+            )
+        )
+        XCTAssertFalse(
+            MPVPlaybackEndPolicy.isNaturalEnd(
+                endFileReason: 0,
+                isReplacingMedia: false,
+                hasStartedPlayback: false,
+                isSeeking: false,
+                isPausedForCache: false,
+                position: 100,
+                duration: 100
+            )
+        )
+        XCTAssertFalse(
+            MPVPlaybackEndPolicy.isNaturalEnd(
+                endFileReason: 0,
+                isReplacingMedia: false,
+                hasStartedPlayback: true,
+                isSeeking: false,
+                isPausedForCache: false,
+                position: 40,
+                duration: 100
             )
         )
     }
@@ -5359,6 +6755,7 @@ final class OKVideoMacTests: XCTestCase {
         let data = try XCTUnwrap(
             """
             {
+              "kind": "authorization",
               "visible": true,
               "title": "请选择网盘",
               "inputCount": 0,
@@ -5408,7 +6805,8 @@ final class OKVideoMacTests: XCTestCase {
         )
 
         XCTAssertFalse(state.isQRCode)
-        XCTAssertTrue(state.isAuthorizationPrompt)
+        XCTAssertTrue(state.isProviderUIPrompt)
+        XCTAssertFalse(state.isAuthorizationPrompt)
         XCTAssertTrue(state.actionableControls.isEmpty)
     }
 
@@ -5416,6 +6814,7 @@ final class OKVideoMacTests: XCTestCase {
         let data = try XCTUnwrap(
             """
             {
+              "kind": "authorization",
               "visible": true,
               "title": "Untrusted presentation text",
               "inputCount": 0,
@@ -5452,6 +6851,7 @@ final class OKVideoMacTests: XCTestCase {
         let data = try XCTUnwrap(
             """
             {
+              "kind": "authorization",
               "visible": true,
               "title": "Untrusted presentation text",
               "inputCount": 1,
@@ -5559,6 +6959,7 @@ final class OKVideoMacTests: XCTestCase {
         let data = try XCTUnwrap(
             """
             {
+              "kind": "authorization",
               "visible": true,
               "title": "请输入百度网盘Cookie：",
               "inputCount": 1,
@@ -5579,6 +6980,7 @@ final class OKVideoMacTests: XCTestCase {
 
         XCTAssertTrue(state.isRemoteInputQRCode)
         XCTAssertFalse(state.isQRCode)
+        XCTAssertTrue(state.isProviderUIPrompt)
         XCTAssertTrue(state.isAuthorizationPrompt)
     }
 
@@ -5605,6 +7007,7 @@ final class OKVideoMacTests: XCTestCase {
         )
 
         XCTAssertFalse(state.hasVisibleAuthorizationContent)
+        XCTAssertFalse(state.isProviderUIPrompt)
         XCTAssertFalse(state.isAuthorizationPrompt)
     }
 
@@ -5631,6 +7034,7 @@ final class OKVideoMacTests: XCTestCase {
         )
 
         XCTAssertTrue(state.hasVisibleAuthorizationContent)
+        XCTAssertFalse(state.isProviderUIPrompt)
         XCTAssertFalse(state.isAuthorizationPrompt)
     }
 
@@ -6068,6 +7472,34 @@ final class OKVideoMacTests: XCTestCase {
         await handle.cancelAndWait()
         let events = await recorder.events
 
+        XCTAssertEqual(events, ["start:\(requestID)", "ack:\(requestID)"])
+    }
+
+    func testInteractionHandleRetiresSurfaceBeforePublishingTerminalResponse()
+        async throws {
+        let requestID = UUID()
+        let recorder = ConfigurationCancellationTestRecorder()
+        let handle = InteractionHandle(
+            id: requestID,
+            actionKind: .authorization,
+            terminalCleanup: { receivedID in
+                await recorder.recordStarted(receivedID)
+            }
+        ) {
+            ConfigurationInteractionTerminalResponse(
+                requestID: requestID,
+                outcome: .succeeded,
+                providerResult: .string("authorized"),
+                error: nil,
+                httpStatusCode: 200,
+                refreshPerformed: nil
+            )
+        }
+
+        let terminal = try await handle.finalResponse()
+        await recorder.recordAcknowledged(terminal.requestID)
+
+        let events = await recorder.events
         XCTAssertEqual(events, ["start:\(requestID)", "ack:\(requestID)"])
     }
 
@@ -6642,6 +8074,109 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(first.siteIdentity, site.key)
         XCTAssertEqual(first.stableResourceLocator, episodeReference)
         XCTAssertEqual(first.stability, .providerReplay)
+        XCTAssertNil(
+            PlaybackPersistencePolicy.sanitizedProviderResourceReference(
+                first
+            ),
+            "Android provider-instance replay locators must remain memory-only"
+        )
+    }
+
+    func testAndroidProviderContextInvalidRecognitionIsProviderNeutral() {
+        XCTAssertTrue(
+            AndroidProviderContextRecoveryPolicy.recognizes(
+                "Spider 错误：providerUUIDUnavailable"
+            )
+        )
+        XCTAssertTrue(
+            AndroidProviderContextRecoveryPolicy.recognizes(
+                "provider_uuid_unavailable"
+            )
+        )
+        XCTAssertFalse(
+            AndroidProviderContextRecoveryPolicy.recognizes(
+                "network unavailable"
+            )
+        )
+    }
+
+    func testAndroidProviderContextRecoveryResetsExactlyOnce() async throws {
+        actor Counts {
+            var operations = 0
+            var resets = 0
+
+            func beginOperation() -> Int {
+                operations += 1
+                return operations
+            }
+
+            func recordReset() {
+                resets += 1
+            }
+
+            func values() -> (Int, Int) {
+                (operations, resets)
+            }
+        }
+
+        let counts = Counts()
+        let value: String = try await AndroidProviderContextRecoveryPolicy
+            .recover {
+                let attempt = await counts.beginOperation()
+                if attempt == 1 {
+                    throw AndroidProviderContextInvalid(
+                        providerMessage: "providerUUIDUnavailable"
+                    )
+                }
+                return "recovered"
+            } reset: {
+                await counts.recordReset()
+            }
+
+        XCTAssertEqual(value, "recovered")
+        let values = await counts.values()
+        XCTAssertEqual(values.0, 2)
+        XCTAssertEqual(values.1, 1)
+    }
+
+    func testAndroidProviderContextRecoveryDoesNotLoopAfterSecondFailure()
+        async {
+        actor Counts {
+            var operations = 0
+            var resets = 0
+
+            func beginOperation() {
+                operations += 1
+            }
+
+            func recordReset() {
+                resets += 1
+            }
+
+            func values() -> (Int, Int) {
+                (operations, resets)
+            }
+        }
+
+        let counts = Counts()
+        do {
+            let _: String = try await AndroidProviderContextRecoveryPolicy
+                .recover {
+                    await counts.beginOperation()
+                    throw AndroidProviderContextInvalid(
+                        providerMessage: "providerUUIDUnavailable"
+                    )
+                } reset: {
+                    await counts.recordReset()
+                }
+            XCTFail("a second invalid provider context must be surfaced")
+        } catch {
+            XCTAssertTrue(error is AndroidProviderContextInvalid)
+        }
+
+        let values = await counts.values()
+        XCTAssertEqual(values.0, 2)
+        XCTAssertEqual(values.1, 1)
     }
 
     func testAndroidPlaybackReferenceIsBoundToCurrentProviderAndConfiguration()
@@ -7505,6 +9040,36 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testAndroidBridgeTreatsGhostPackageAsMissingInstallation() {
+        let ghostPackageDump = """
+        Packages:
+          Package [com.okvideomac.dexbridge] (f592963):
+            pkg=null
+            codePath=/data/app/~~stale/com.okvideomac.dexbridge-stale
+            versionCode=999 targetSdk=27
+            User 0: installed=true
+        """
+        XCTAssertNil(
+            AndroidDexBridgeRuntime.installedVersionCode(
+                from: ghostPackageDump
+            )
+        )
+
+        let healthyPackageDump = """
+        Packages:
+          Package [com.okvideomac.dexbridge] (44ce1f4):
+            pkg=Package{44ce1f4 com.okvideomac.dexbridge}
+            codePath=/data/app/~~valid/com.okvideomac.dexbridge-valid
+            versionCode=51 minSdk=24 targetSdk=27
+        """
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.installedVersionCode(
+                from: healthyPackageDump
+            ),
+            51
+        )
+    }
+
     func testAndroidBridgeEqualVersionRequiresExactBundledAPKIdentity() {
         let bundled = String(repeating: "a", count: 64)
         let installed = String(repeating: "b", count: 64)
@@ -8023,12 +9588,12 @@ final class OKVideoMacTests: XCTestCase {
                 explicitAuthorizationAction: true
             )
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             AndroidDexBridgeClient.shouldMonitorAuthorization(
                 for: "action"
             )
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             AndroidDexBridgeClient.shouldMonitorAuthorization(
                 for: "play"
             )
@@ -8229,24 +9794,22 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     @MainActor
-    func testBlankSiteActionResultDoesNotClaimOperationCompleted() {
+    func testFongMiBlankSiteActionResultIsSilentCompletion() {
         let placeholder = JSONValue.object([
             "list": .array([.object([:])]),
             "parse": .integer(0),
             "jx": .integer(0)
         ])
 
+        XCTAssertNil(AppState.siteActionMessage(.null))
+        XCTAssertNil(AppState.siteActionMessage(.string("")))
+        XCTAssertNil(AppState.siteActionMessage(.object([:])))
         XCTAssertNil(AppState.siteActionMessage(placeholder))
-        XCTAssertNotEqual(
-            AppState.unconfirmedSiteActionMessage,
-            "操作已完成。"
-        )
-        XCTAssertNotEqual(
-            AppState.unsupportedSiteActionMessage,
-            "操作已完成。"
-        )
-        XCTAssertTrue(
-            AppState.unsupportedSiteActionMessage.contains("尚未完成")
+        XCTAssertEqual(
+            AppState.siteActionMessage(
+                .object(["msg": .string("清除成功")])
+            ),
+            "清除成功"
         )
     }
 
@@ -8418,11 +9981,64 @@ final class OKVideoMacTests: XCTestCase {
             visibleFrame: visibleFrame
         )
 
-        XCTAssertEqual(size.width, 1_180.8, accuracy: 0.001)
-        XCTAssertEqual(size.height, 664.2, accuracy: 0.001)
+        XCTAssertEqual(size.width, 1_152, accuracy: 0.001)
+        XCTAssertEqual(size.height, 648, accuracy: 0.001)
         XCTAssertEqual(size.width / size.height, 16.0 / 9.0, accuracy: 0.0001)
-        XCTAssertLessThanOrEqual(size.width, visibleFrame.width * 0.82)
-        XCTAssertLessThanOrEqual(size.height, visibleFrame.height * 0.86)
+        XCTAssertLessThanOrEqual(size.width, visibleFrame.width - 80)
+        XCTAssertLessThanOrEqual(size.height, visibleFrame.height - 80)
+    }
+
+    @MainActor
+    func testWindowLayoutResetIssuesFreshTargetedCommands() throws {
+        let state = AppState(environment: nil)
+
+        state.restoreDefaultWindowLayout(.mainWindow)
+        let mainCommand = try XCTUnwrap(state.appWindowLayoutCommand)
+        XCTAssertEqual(mainCommand.target, .mainWindow)
+
+        state.restoreDefaultWindowLayout(.playerWindow)
+        let playerCommand = try XCTUnwrap(state.appWindowLayoutCommand)
+        XCTAssertEqual(playerCommand.target, .playerWindow)
+        XCTAssertNotEqual(playerCommand.id, mainCommand.id)
+    }
+
+    func testMainWindowUsesComfortableDefaultAndFitsSmallScreens() {
+        let desktopSize = AppWindowLayoutPolicy.defaultContentSize(
+            for: .mainWindow,
+            visibleFrame: NSRect(x: 0, y: 0, width: 1_440, height: 900)
+        )
+        XCTAssertEqual(desktopSize, NSSize(width: 1_240, height: 780))
+
+        let compactVisibleFrame = NSRect(
+            x: 0,
+            y: 0,
+            width: 1_000,
+            height: 700
+        )
+        let compactSize = AppWindowLayoutPolicy.defaultContentSize(
+            for: .mainWindow,
+            visibleFrame: compactVisibleFrame
+        )
+        XCTAssertLessThanOrEqual(
+            compactSize.width,
+            compactVisibleFrame.width - 80
+        )
+        XCTAssertLessThanOrEqual(
+            compactSize.height,
+            compactVisibleFrame.height - 80
+        )
+    }
+
+    func testPlayerDefaultWindowShrinksWithoutLosingAspectRatio() {
+        let visibleFrame = NSRect(x: 0, y: 0, width: 1_000, height: 650)
+        let size = AppWindowLayoutPolicy.defaultContentSize(
+            for: .playerWindow,
+            visibleFrame: visibleFrame
+        )
+
+        XCTAssertEqual(size.width / size.height, 16.0 / 9.0, accuracy: 0.0001)
+        XCTAssertLessThanOrEqual(size.width, visibleFrame.width - 80)
+        XCTAssertLessThanOrEqual(size.height, visibleFrame.height - 80)
     }
 
     func testPlayerWindowFrameReturnsFromDisconnectedDisplay() {
@@ -9021,7 +10637,7 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     @MainActor
-    func testHistoryReferencePersistsProviderIdentityAndUsesItForRefresh()
+    func testHistoryReferenceRejectsAndroidProviderInstanceIdentity()
         throws {
         let source = PlaySource(
             name: "Display",
@@ -9055,10 +10671,7 @@ final class OKVideoMacTests: XCTestCase {
             playbackReference: playbackReference
         )
 
-        XCTAssertEqual(
-            playbackReference.providerResourceReference,
-            providerReference
-        )
+        XCTAssertNil(playbackReference.providerResourceReference)
         XCTAssertTrue(playbackReference.replayHeaders.isEmpty)
         let site = SiteConfiguration(
             key: "site-a",
@@ -9073,12 +10686,26 @@ final class OKVideoMacTests: XCTestCase {
             baseURL: nil,
             bridge: AndroidDexBridgeClient()
         )
-        XCTAssertEqual(
+        XCTAssertTrue(androidProvider.acceptsPlaybackResourceReference(providerReference))
+
+        let legacyReference = HistoryPlaybackReference(
+            sourceIdentity: source.stableIdentity,
+            resourceIdentity: source.episodes[0].stableIdentity,
+            providerResourceReference: providerReference
+        )
+        let legacyRecordWithProviderLocator = HistoryRecord(
+            siteKey: "site-a",
+            videoID: "video-a",
+            title: "Title",
+            episodeReference: "expired-resource",
+            playbackReference: legacyReference
+        )
+        XCTAssertNil(
             AppState.acceptedHistoryProviderReference(
-                from: record,
+                from: legacyRecordWithProviderLocator,
                 provider: androidProvider
             ),
-            providerReference
+            "History must rebuild Android playback through current detail"
         )
         XCTAssertNil(
             AppState.acceptedHistoryProviderReference(
@@ -9095,6 +10722,12 @@ final class OKVideoMacTests: XCTestCase {
                 provider: androidProvider
             ),
             "Legacy records must rebuild through their current local provider"
+        )
+        XCTAssertNil(
+            AppState.persistentHistoryEpisodeReference(
+                "provider-uuid/item-42",
+                providerCapability: .javaDexSpider
+            )
         )
     }
 
@@ -9246,11 +10879,11 @@ final class OKVideoMacTests: XCTestCase {
         )
         var durableProviderReference = providerReference
         durableProviderReference.stability = .providerStable
-        XCTAssertEqual(
+        XCTAssertNil(
             AppState.persistentProviderResourceReference(
                 durableProviderReference
             ),
-            durableProviderReference
+            "Android Dex locators are tied to one live Spider instance"
         )
 
         let unsafeEncodedLocator = try JSONSerialization.data(
@@ -9575,9 +11208,164 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(HomeToolbarLayout.expanded.sitePickerWidth, 210)
         XCTAssertEqual(HomeToolbarLayout.compact.sitePickerWidth, 150)
         XCTAssertEqual(HomeToolbarLayout.minimal.sitePickerWidth, 0)
-        XCTAssertEqual(HomeToolbarLayout.expanded.searchFieldWidth, 280)
-        XCTAssertEqual(HomeToolbarLayout.compact.searchFieldWidth, 190)
-        XCTAssertEqual(HomeToolbarLayout.minimal.searchFieldWidth, 0)
+    }
+
+    func testBrowserToolbarChromeKeepsNativeUnifiedFillAcrossScroll() {
+        XCTAssertEqual(
+            BrowserToolbarChromePolicy.appearance(
+                isScrolled: false,
+                isWindowActive: true,
+                reduceTransparency: false
+            ),
+            BrowserToolbarChromeAppearance(
+                fill: .referenceTone,
+                separatorOpacity: 0.30
+            )
+        )
+        XCTAssertEqual(
+            BrowserToolbarChromePolicy.appearance(
+                isScrolled: true,
+                isWindowActive: true,
+                reduceTransparency: false
+            ),
+            BrowserToolbarChromeAppearance(
+                fill: .referenceTone,
+                separatorOpacity: 0.34
+            )
+        )
+    }
+
+    func testBrowserChromeAndSidebarMatchModernMacMetrics() {
+        XCTAssertEqual(AppSidebarMetrics.minimumWidth, 224)
+        XCTAssertEqual(AppSidebarMetrics.idealWidth, 224)
+        XCTAssertEqual(AppSidebarMetrics.maximumWidth, 280)
+        XCTAssertEqual(AppSidebarMetrics.horizontalInset, 16)
+        XCTAssertEqual(AppSidebarMetrics.searchHeight, 32)
+        XCTAssertEqual(AppSidebarMetrics.rowHeight, 26)
+        XCTAssertEqual(AppSidebarMetrics.labelFontSize, 14)
+        XCTAssertEqual(AppSidebarMetrics.iconWidth, 18)
+        XCTAssertEqual(AppSidebarMetrics.iconTextSpacing, 8)
+        XCTAssertEqual(AppSidebarMetrics.rowContentMinimumWidth, 168)
+    }
+
+    @MainActor
+    func testBrowserWindowChromeUsesNativeFullSizeTitlebar() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_240, height: 780),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+
+        BrowserWindowChromeController.configure(window)
+
+        XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))
+        XCTAssertTrue(window.titlebarAppearsTransparent)
+        XCTAssertEqual(window.titleVisibility, .hidden)
+        XCTAssertEqual(window.toolbarStyle, .unified)
+        XCTAssertEqual(window.titlebarSeparatorStyle, .none)
+        XCTAssertFalse(window.isOpaque)
+        XCTAssertEqual(window.backgroundColor, .clear)
+    }
+
+    func testBrowserToolbarChromeAdaptsAccessibilityAndInactiveWindows() {
+        XCTAssertEqual(
+            BrowserToolbarChromePolicy.appearance(
+                isScrolled: true,
+                isWindowActive: false,
+                reduceTransparency: false
+            ).separatorOpacity,
+            0.22
+        )
+        XCTAssertEqual(
+            BrowserToolbarChromePolicy.appearance(
+                isScrolled: false,
+                isWindowActive: true,
+                reduceTransparency: true
+            ).fill,
+            .referenceTone
+        )
+        XCTAssertEqual(
+            BrowserToolbarChromePolicy.appearance(
+                isScrolled: true,
+                isWindowActive: true,
+                reduceTransparency: true
+            ).fill,
+            .referenceTone
+        )
+    }
+
+    func testSearchToolbarLayoutKeepsControlsUsableAtEveryWidth() {
+        XCTAssertEqual(
+            SearchToolbarLayoutPolicy.layout(contentWidth: 1_200),
+            .expanded
+        )
+        XCTAssertEqual(
+            SearchToolbarLayoutPolicy.layout(contentWidth: 900),
+            .compact
+        )
+        XCTAssertEqual(
+            SearchToolbarLayoutPolicy.layout(contentWidth: 640),
+            .minimal
+        )
+        XCTAssertGreaterThan(SearchToolbarLayout.expanded.statusWidth, 200)
+        XCTAssertEqual(SearchToolbarLayout.minimal.scopeWidth, 42)
+        XCTAssertEqual(SearchToolbarLayout.minimal.sortWidth, 42)
+    }
+
+    func testSearchSourceNavigationShowsAllSourcesWhenTheyFit() {
+        let candidates = ["all", "a", "b"].map {
+            SearchSourceNavigationCandidate(id: $0, width: 40)
+        }
+
+        let partition = SearchSourceNavigationLayoutPolicy.partition(
+            candidates: candidates,
+            selectedID: "all",
+            availableWidth: 200
+        )
+
+        XCTAssertEqual(partition.visibleIDs, ["all", "a", "b"])
+        XCTAssertTrue(partition.hiddenIDs.isEmpty)
+    }
+
+    func testSearchSourceNavigationPromotesSelectedOverflowSource() {
+        let candidates = ["all", "a", "b", "c"].map {
+            SearchSourceNavigationCandidate(id: $0, width: 40)
+        }
+
+        let partition = SearchSourceNavigationLayoutPolicy.partition(
+            candidates: candidates,
+            selectedID: "c",
+            availableWidth: 180
+        )
+
+        XCTAssertEqual(partition.visibleIDs, ["c"])
+        XCTAssertEqual(partition.hiddenIDs, ["all", "a", "b"])
+    }
+
+    func testSearchToolbarStatusUsesStableCompletionCopy() {
+        let running = SearchToolbarStatusPolicy.presentation(
+            layout: .expanded,
+            isSearching: true,
+            firstPageCompleted: 35,
+            completed: 27,
+            total: 49,
+            termination: nil
+        )
+        let completed = SearchToolbarStatusPolicy.presentation(
+            layout: .expanded,
+            isSearching: false,
+            firstPageCompleted: 49,
+            completed: 49,
+            total: 49,
+            termination: .completedWithProviderFailures
+        )
+
+        XCTAssertEqual(running.phase, .searching)
+        XCTAssertEqual(running.text, "首批 35/49 · 已结束 27/49")
+        XCTAssertEqual(completed.phase, .completed)
+        XCTAssertEqual(completed.text, "✓ 已完成 49/49")
+        XCTAssertFalse(completed.text.contains("失败"))
     }
 
     func testSearchResultPresentationCanMergeAndSeparateDuplicateTitles() {
@@ -9615,6 +11403,42 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(merged.first?.sources.count, 2)
         XCTAssertEqual(separated.count, 2)
         XCTAssertTrue(separated.allSatisfy { $0.sources.count == 1 })
+    }
+
+    func testSearchResultPresentationCacheReusesUnchangedInput() {
+        let values = [
+            VideoSummary(
+                siteKey: "a",
+                siteName: "A",
+                videoID: "1",
+                title: "缓存测试",
+                year: "2026"
+            )
+        ]
+        let cache = SearchResultPresentationCache()
+
+        let first = cache.clusters(
+            from: values,
+            keyword: "缓存测试",
+            mergesDuplicates: true,
+            sortOrder: .relevance
+        )
+        let second = cache.clusters(
+            from: values,
+            keyword: "缓存测试",
+            mergesDuplicates: true,
+            sortOrder: .relevance
+        )
+
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(cache.computationCount, 1)
+        _ = cache.clusters(
+            from: values,
+            keyword: "缓存",
+            mergesDuplicates: true,
+            sortOrder: .relevance
+        )
+        XCTAssertEqual(cache.computationCount, 2)
     }
 
     func testMergedSearchClusterRequiresExplicitSourceSelection() {
@@ -9864,8 +11688,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
     }
 
-    func testNodeConfigurationRetainsOfficialNonVideoModulesWithoutVideoUIRouting()
-        throws {
+    func testNonVideoModulesStayOutOfHostCatalog() throws {
         let source = Data(
             #"{"read":{"sites":[{"key":"book","name":"Book","type":13,"api":"/spider/book/13"}]},"comic":{"sites":[{"key":"comic","name":"Comic","type":20,"api":"/spider/comic/20"}]},"music":{"sites":[{"key":"music","name":"Music","type":30,"api":"/spider/music/30"}]},"pan":{"sites":[{"key":"alist","name":"AList","type":40,"api":"/spider/alist/40"}]}}"#.utf8
         )
@@ -9877,22 +11700,62 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
         let configuration = try ConfigurationParser().parse(normalized)
 
-        XCTAssertEqual(configuration.sites.count, 4)
-        XCTAssertTrue(configuration.sites.allSatisfy { $0.hide == 1 })
-        XCTAssertTrue(configuration.sites.allSatisfy {
-            $0.extra["okNodeUnsupportedModule"] == .bool(true)
-        })
+        XCTAssertTrue(configuration.sites.isEmpty)
+    }
+
+    func testCatPawCapabilityRegistryIsScopedByModuleIdentity() async throws {
+        let source = Data(
+            #"{"video":{"sites":[{"key":"fixture","name":"Fixture","type":3,"api":"/spider/fixture/3"}]}}"#.utf8
+        )
+        let firstData = try NodeBundleRuntimeService.normalizeConfiguration(
+            source,
+            bundleIdentity: "bundle",
+            profileRevision: "revision-1"
+        )
+        let secondData = try NodeBundleRuntimeService.normalizeConfiguration(
+            source,
+            bundleIdentity: "bundle",
+            profileRevision: "revision-2"
+        )
+        let first = try XCTUnwrap(ConfigurationParser().parse(firstData).sites.first)
+        let second = try XCTUnwrap(ConfigurationParser().parse(secondData).sites.first)
+        let registry = CatPawCapabilityRegistry()
+        let firstIdentity = CatPawModuleIdentity(site: first)
+        let secondIdentity = CatPawModuleIdentity(site: second)
+
+        await registry.recordUnsupported(.search, for: firstIdentity)
+
+        let firstSearch = await registry.state(of: .search, for: firstIdentity)
+        let secondSearch = await registry.state(of: .search, for: secondIdentity)
+        let firstPlay = await registry.state(of: .play, for: firstIdentity)
+        XCTAssertEqual(firstSearch, .unsupported)
+        XCTAssertEqual(secondSearch, .unknown)
+        XCTAssertEqual(firstPlay, .unknown)
+    }
+
+    func testMixedCatPawCatalogPublishesOnlyVideoModules() throws {
+        let source = Data(
+            #"{"video":{"sites":[{"key":"nodejs_kunyu77","name":"Kunyu77","type":3,"api":"/spider/kunyu77/3"},{"key":"nodejs_kkys","name":"KKYS","type":3,"api":"/spider/kkys/3"},{"key":"nodejs_ffm3u8","name":"FFM3U8","type":3,"api":"/spider/ffm3u8/3"},{"key":"nodejs_push","name":"Push","type":3,"api":"/spider/push/3"}]},"read":{"sites":[{"key":"nodejs_13bqg","name":"笔趣阁","type":10,"api":"/spider/13bqg/10"}]},"comic":{"sites":[{"key":"nodejs_copymanga","name":"拷贝漫画","type":20,"api":"/spider/copymanga/20"}]},"music":{"sites":[]},"pan":{"sites":[{"key":"nodejs_alist","name":"AList","type":40,"api":"/spider/alist/40"}]}}"#.utf8
+        )
+        let normalized = try NodeBundleRuntimeService.normalizeConfiguration(
+            source,
+            bundleIdentity: "catpaw-open-b956aed",
+            profileRevision: "fixture-profile"
+        )
+        let configuration = try ConfigurationParser().parse(normalized)
+
         XCTAssertEqual(
-            Set(configuration.sites.compactMap {
-                $0.extra["okNodeModuleKind"]?.stringValue
-            }),
-            Set(["read", "comic", "music", "pan"])
+            configuration.sites.map(\.key),
+            [
+                "nodejs_kunyu77",
+                "nodejs_kkys",
+                "nodejs_ffm3u8",
+                "nodejs_push"
+            ]
         )
         XCTAssertTrue(configuration.sites.allSatisfy {
-            !NodeHTTPSpiderSiteProvider.canHandle(
-                site: $0,
-                baseURL: URL(string: "http://127.0.0.1:18080/")
-            )
+            $0.extra["okNodeModuleKind"] == .string("video")
+                && $0.extra["okNodeSiteIdentity"]?.stringValue?.isEmpty == false
         })
     }
 
@@ -9997,6 +11860,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             enabled,
             catalogData: catalogue,
             bundleIdentity: "bundle-v1",
+            profileIdentity: "profile-stable",
             profileRevision: "profile-v2"
         )
         let configuration = try ConfigurationParser().parse(normalized)
@@ -10015,6 +11879,10 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             .string("supported")
         )
         XCTAssertEqual(short.extra["okNodeBundleIdentity"], .string("bundle-v1"))
+        XCTAssertEqual(
+            short.extra["okNodeProfileIdentity"],
+            .string("profile-stable")
+        )
         XCTAssertEqual(short.extra["okNodeProfileRevision"], .string("profile-v2"))
         XCTAssertEqual(settings.searchable, 2)
         XCTAssertEqual(
@@ -10332,6 +12200,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             runtimeDirectory: runtime,
             temporaryDirectory: runtime.appendingPathComponent("tmp"),
             contractAdditions: [
+                "DEV_HTTP_HOST": "0.0.0.0",
                 "DEV_HTTP_PORT": "12345",
                 "OKVIDEO_CONTRACT_B_CONFIG_PATH": runtime
                     .appendingPathComponent("config.json").path,
@@ -10341,6 +12210,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
 
         XCTAssertNil(contractA["DEV_HTTP_PORT"])
+        XCTAssertEqual(contractB["DEV_HTTP_HOST"], "0.0.0.0")
         XCTAssertEqual(contractB["DEV_HTTP_PORT"], "12345")
         XCTAssertNil(contractB["NODE_PATH"])
         XCTAssertThrowsError(try NodeBundleRuntimeService.sanitizedNodeEnvironment(
@@ -10352,8 +12222,8 @@ final class NodeBundleCompatibilityTests: XCTestCase {
     }
 
     func testContractBPortAllocationIsDynamicAndNonFixed() throws {
-        let first = try NodeRuntimeLoopbackPortAllocator.allocate()
-        let second = try NodeRuntimeLoopbackPortAllocator.allocate()
+        let first = try NodeRuntimePortAllocator.allocate()
+        let second = try NodeRuntimePortAllocator.allocate()
 
         XCTAssertNotEqual(first, 9_988)
         XCTAssertNotEqual(second, 9_988)
@@ -10361,7 +12231,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertTrue((1...65_535).contains(second))
     }
 
-    func testContractBListenerStateRejectsNonLoopbackHost() throws {
+    func testContractBListenerStateAcceptsManagedLANHostOnly() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("okvideo-contract-state-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -10371,6 +12241,14 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             #"{"contract":"contract-b-host-integrated","phase":"listener-observed","host":"0.0.0.0","family":"IPv4","port":19000}"#.utf8
         ).write(to: stateURL)
 
+        XCTAssertEqual(
+            ContractBListenerState.readValidated(from: stateURL)?.host,
+            "0.0.0.0"
+        )
+
+        try Data(
+            #"{"contract":"contract-b-host-integrated","phase":"listener-observed","host":"192.168.1.114","family":"IPv4","port":19000}"#.utf8
+        ).write(to: stateURL)
         XCTAssertNil(ContractBListenerState.readValidated(from: stateURL))
     }
 
@@ -10832,6 +12710,28 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(second.trustState, .legacyTOFU)
     }
 
+    func testCacheOnlyNodeStartupNeverWaitsForPublisherIO() async throws {
+        let fixture = try makeLegacyCacheFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let migrated = try await makeOfflineRuntime(fixture: fixture)
+            .prepareBundleForTesting(from: fixture.sourceURL)
+        let cacheOnlyService = NodeBundleRuntimeService(
+            applicationSupportDirectory: fixture.applicationSupportDirectory,
+            cacheDirectory: fixture.cacheDirectory,
+            remoteHTTPClient: NodeProviderStubHTTPClient { _ in
+                XCTFail("cache-only restoration must not contact the publisher")
+                throw HTTPClientError.transport("unexpected publisher request")
+            }
+        )
+
+        let restored = try await cacheOnlyService.prepareBundleForTesting(
+            from: fixture.sourceURL,
+            startupStrategy: .cacheOnly
+        )
+
+        XCTAssertEqual(restored, migrated)
+    }
+
     func testEmptyNewCacheDirectoryDoesNotBlockLegacyMigration() async throws {
         let fixture = try makeLegacyCacheFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -11250,6 +13150,60 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         await service.stop()
     }
 
+    func testCatPawPlaybackLeaseDefersOrdinaryRuntimeStopUntilRelease()
+        async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(
+                nodeReadinessFixtureScript(startDelayMilliseconds: 0).utf8
+            )
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+        let endpoint = try await service.ensureReady(from: fixture.sourceURL)
+        let mediaURL = endpoint
+            .appendingPathComponent("proxy")
+            .appendingPathComponent("hls")
+            .appendingPathComponent("fixture.m3u8")
+        let reference = PlaybackResourceReference(
+            configurationIdentity: "configuration",
+            siteIdentity: "site",
+            providerKind: "node-http-spider-runtime",
+            providerVersion: 1,
+            stableResourceLocator: "runtime-locator",
+            sourceIdentity: "source",
+            episodeIdentity: "episode",
+            stability: .providerReplay
+        )
+        let acquiredLease = await service.acquirePlaybackLease(
+            for: PlaybackMediaSession(
+                sessionID: UUID().uuidString,
+                transport: .providerLoopback,
+                mediaURL: mediaURL.absoluteString,
+                resourceReference: reference
+            )
+        )
+        let lease = try XCTUnwrap(acquiredLease)
+
+        await service.stop()
+        let retainedStatus = await service.currentStatus()
+        let retainedLeaseCount = await service
+            .activePlaybackLeaseCountForTesting()
+        XCTAssertEqual(retainedStatus, .running(endpoint))
+        XCTAssertEqual(retainedLeaseCount, 1)
+
+        await service.releasePlaybackLease(lease)
+        let stoppedStatus = await service.currentStatus()
+        let stoppedLeaseCount = await service
+            .activePlaybackLeaseCountForTesting()
+        XCTAssertEqual(stoppedStatus, .stopped)
+        XCTAssertEqual(stoppedLeaseCount, 0)
+    }
+
     func testReadinessTimeoutExitsStartingAndSubsequentRequestRetries() async throws {
         let fixture = try makeLegacyCacheFixture(
             script: Data(nodeReadinessFixtureScript(startDelayMilliseconds: 2_000).utf8)
@@ -11367,7 +13321,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         await service.stop()
     }
 
-    func testContractBStartPromiseDoesNotPublishReadyBeforeLoopbackListener() async throws {
+    func testContractBStartPromiseDoesNotPublishReadyBeforeManagedListener() async throws {
         let fixture = try makeLegacyCacheFixture(
             script: Data(
                 nodeContractBFixtureScript(
@@ -11404,8 +13358,12 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             .appendingPathComponent(descriptor.cacheKey)
             .appendingPathComponent("contract-b-state.json")
         let state = try XCTUnwrap(ContractBListenerState.readValidated(from: stateURL))
-        XCTAssertEqual(state.host, "127.0.0.1")
+        XCTAssertEqual(state.host, "0.0.0.0")
         XCTAssertEqual(state.port, endpoint.port)
+        let endpointPort = try XCTUnwrap(endpoint.port)
+        let listeners = try systemListeners(on: endpointPort)
+        XCTAssertTrue(listeners.contains("*:\(endpointPort)"), listeners)
+        XCTAssertFalse(listeners.contains("127.0.0.1:"), listeners)
 
         let (configurationData, _) = try await URLSession.shared.data(
             from: endpoint.appendingPathComponent("config")
@@ -11479,7 +13437,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         await service.stop()
     }
 
-    func testContractBOwnershipEndpointNormalizesOnlyCurrentRuntimeWebsite()
+    func testContractBOwnershipEndpointScopesRuntimeOwnedInternalPages()
         async throws {
         let fixture = try makeLegacyCacheFixture(
             script: Data(
@@ -11505,17 +13463,33 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                 as? [String: Any]
         )
         let port = try XCTUnwrap(address["port"] as? Int)
+        let (bridgeData, _) = try await URLSession.shared.data(
+            from: endpoint.appendingPathComponent("bridge-port")
+        )
+        let bridgeAddress = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: bridgeData)
+                as? [String: Any]
+        )
+        let bridgePort = try XCTUnwrap(bridgeAddress["port"] as? Int)
+        XCTAssertNotEqual(bridgePort, endpoint.port)
+        XCTAssertNotEqual(bridgePort, port)
 
-        func ownershipURL(_ rawURL: String) throws -> URL {
+        func ownershipURL(
+            _ rawURL: String,
+            purpose: String? = nil
+        ) throws -> URL {
             var components = URLComponents(
                 url: endpoint.appendingPathComponent(
                     "__okvideo/owned-loopback"
                 ),
                 resolvingAgainstBaseURL: false
             )
-            components?.queryItems = [
-                URLQueryItem(name: "url", value: rawURL)
-            ]
+            components?.queryItems = [URLQueryItem(name: "url", value: rawURL)]
+            if let purpose {
+                components?.queryItems?.append(
+                    URLQueryItem(name: "purpose", value: purpose)
+                )
+            }
             return try XCTUnwrap(components?.url)
         }
 
@@ -11545,14 +13519,60 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             (wrongPathResponse as? HTTPURLResponse)?.statusCode,
             404
         )
+        let (internalPageData, internalPageResponse) = try await URLSession.shared
+            .data(
+                from: ownershipURL(
+                    "http://192.168.1.114:\(port)/douer",
+                    purpose: "internal-webview"
+                )
+            )
+        XCTAssertEqual(
+            (internalPageResponse as? HTTPURLResponse)?.statusCode,
+            200
+        )
+        let internalPageObject = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: internalPageData)
+                as? [String: Any]
+        )
+        let internalPageURL = try XCTUnwrap(
+            URL(string: internalPageObject["url"] as? String ?? "")
+        )
+        XCTAssertEqual(internalPageURL.host, "127.0.0.1")
+        XCTAssertEqual(internalPageURL.port, port)
+        XCTAssertEqual(internalPageURL.path, "/douer")
         let (_, unownedResponse) = try await URLSession.shared.data(
-            from: ownershipURL("http://192.168.1.114:1/website")
+            from: ownershipURL(
+                "http://192.168.1.114:1/douer",
+                purpose: "internal-webview"
+            )
         )
         XCTAssertEqual((unownedResponse as? HTTPURLResponse)?.statusCode, 404)
+        let (_, bridgeResponse) = try await URLSession.shared.data(
+            from: ownershipURL(
+                "http://127.0.0.1:\(bridgePort)/website",
+                purpose: "internal-webview"
+            )
+        )
+        XCTAssertEqual((bridgeResponse as? HTTPURLResponse)?.statusCode, 404)
+
+        let (websiteData, websiteResponse) = try await URLSession.shared.data(
+            from: endpoint.appendingPathComponent("website")
+        )
+        let websiteHTML = try XCTUnwrap(String(data: websiteData, encoding: .utf8))
+        XCTAssertEqual(
+            (websiteResponse as? HTTPURLResponse)?.expectedContentLength,
+            Int64(websiteData.count)
+        )
+        XCTAssertFalse(websiteHTML.contains("lib.baomitu.com"))
+        XCTAssertTrue(
+            websiteHTML.contains(
+                "https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"
+            )
+        )
         await service.stop()
     }
 
-    func testContractBQueuesAuthorizationCompletionAfterWebChallenge() async throws {
+    func testContractBInitializationSaveDoesNotCompleteAuthorization() async throws {
         let fixture = try makeLegacyCacheFixture(
             script: Data(
                 nodeContractBFixtureScript(startDelayMilliseconds: 0).utf8
@@ -11591,6 +13611,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(challenge["action"] as? String, "openInternalWebview")
         XCTAssertEqual(challengeOptions["provider"] as? String, "fixture-cloud")
         XCTAssertEqual(challengeOptions["transport"] as? String, "qr")
+        XCTAssertEqual(challengeOptions["requestID"] as? String, invocationID)
 
         var pollComponents = URLComponents(
             url: endpoint.appendingPathComponent(
@@ -11604,17 +13625,108 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
         XCTAssertEqual(
             (completionResponse as? HTTPURLResponse)?.statusCode,
-            200
+            204
         )
+        XCTAssertTrue(completionData.isEmpty)
+        await service.stop()
+    }
+
+    func testContractBRepeatedIdenticalSaveDoesNotCompleteAuthorization()
+        async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(
+                nodeContractBFixtureScript(startDelayMilliseconds: 0).utf8
+            )
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+        let endpoint = try await service.ensureReady(from: fixture.sourceURL)
+
+        for _ in 0..<2 {
+            let invocationID = UUID().uuidString.lowercased()
+            var request = URLRequest(
+                url: endpoint.appendingPathComponent("authorization-sequence")
+            )
+            request.httpMethod = "POST"
+            request.setValue(
+                invocationID,
+                forHTTPHeaderField: "X-OKVideo-Invocation-ID"
+            )
+            _ = try await URLSession.shared.data(for: request)
+            var pollComponents = URLComponents(
+                url: endpoint.appendingPathComponent(
+                    "__okvideo/host-message/\(invocationID)"
+                ),
+                resolvingAgainstBaseURL: false
+            )
+            pollComponents?.queryItems = [
+                URLQueryItem(name: "wait", value: "100")
+            ]
+            let (data, response) = try await URLSession.shared.data(
+                from: try XCTUnwrap(pollComponents?.url)
+            )
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 204)
+            XCTAssertTrue(data.isEmpty)
+        }
+        await service.stop()
+    }
+
+    func testContractBQueuesOnlyExplicitMatchingAuthorizationCompletion()
+        async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(
+                nodeContractBFixtureScript(startDelayMilliseconds: 0).utf8
+            )
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+        let endpoint = try await service.ensureReady(from: fixture.sourceURL)
+        let invocationID = UUID().uuidString.lowercased()
+        var request = URLRequest(
+            url: endpoint.appendingPathComponent("authorization-explicit")
+        )
+        request.httpMethod = "POST"
+        request.setValue(
+            invocationID,
+            forHTTPHeaderField: "X-OKVideo-Invocation-ID"
+        )
+        let (_, businessResponse) = try await URLSession.shared.data(for: request)
+        XCTAssertNotNil(
+            (businessResponse as? HTTPURLResponse)?
+                .value(forHTTPHeaderField: "X-OKVideo-Host-Message")
+        )
+
+        var pollComponents = URLComponents(
+            url: endpoint.appendingPathComponent(
+                "__okvideo/host-message/\(invocationID)"
+            ),
+            resolvingAgainstBaseURL: false
+        )
+        pollComponents?.queryItems = [URLQueryItem(name: "wait", value: "1000")]
+        let (completionData, completionResponse) = try await URLSession.shared.data(
+            from: try XCTUnwrap(pollComponents?.url)
+        )
+        XCTAssertEqual((completionResponse as? HTTPURLResponse)?.statusCode, 200)
         let completion = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: completionData)
-                as? [String: Any]
+            JSONSerialization.jsonObject(with: completionData) as? [String: Any]
         )
-        let completionOptions = try XCTUnwrap(
-            completion["opt"] as? [String: Any]
-        )
+        let options = try XCTUnwrap(completion["opt"] as? [String: Any])
         XCTAssertEqual(completion["action"] as? String, "authorizationCompleted")
-        XCTAssertEqual((completionOptions["profileRevision"] as? String)?.count, 64)
+        XCTAssertEqual(
+            options["challengeID"] as? String,
+            "00000000-0000-0000-0000-000000000001"
+        )
+        XCTAssertEqual(options["requestID"] as? String, invocationID)
         await service.stop()
     }
 
@@ -11647,10 +13759,26 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             resolvingAgainstBaseURL: false
         )
         pollComponents?.queryItems = [URLQueryItem(name: "wait", value: "2000")]
-        let (messageData, pollResponse) = try await URLSession.shared.data(
-            from: try XCTUnwrap(pollComponents?.url)
-        )
-        XCTAssertEqual((pollResponse as? HTTPURLResponse)?.statusCode, 200)
+        let pollURL = try XCTUnwrap(pollComponents?.url)
+        let pollDeadline = Date().addingTimeInterval(3)
+        var messageData = Data()
+        var pollStatus = 0
+        repeat {
+            let (data, response) = try await URLSession.shared.data(
+                from: pollURL
+            )
+            pollStatus = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if pollStatus == 200 {
+                messageData = data
+                break
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        } while Date() < pollDeadline
+        guard pollStatus == 200 else {
+            businessTask.cancel()
+            await service.stop()
+            return XCTFail("Contract B sniff message was not published in time")
+        }
         let message = try XCTUnwrap(
             JSONSerialization.jsonObject(with: messageData) as? [String: Any]
         )
@@ -11784,6 +13912,231 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             let url = try XCTUnwrap(URL(string: options["url"] as? String ?? ""))
             XCTAssertEqual(url.path, "/website/\(marker)")
         }
+        await service.stop()
+    }
+
+    func testContractBLateCloudToastIsScopedAndBecomesConfigurationChallenge()
+        async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(
+                nodeContractBFixtureScript(startDelayMilliseconds: 0).utf8
+            )
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+        let endpoint = try await service.ensureReady(from: fixture.sourceURL)
+        let clientConfiguration = URLSessionConfiguration.ephemeral
+        clientConfiguration.connectionProxyDictionary = [:]
+        let client = URLSessionHTTPClient(configuration: clientConfiguration)
+        let firstSite = SiteConfiguration(
+            key: "first_catpaw_cloud",
+            name: "First CatPaw Cloud",
+            type: 3,
+            api: "/spider/contract_b/3",
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let secondSite = SiteConfiguration(
+            key: "second_catpaw_cloud",
+            name: "Second CatPaw Cloud",
+            type: 4,
+            api: "/spider/renamed/73",
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let firstProvider = try NodeHTTPSpiderSiteProvider(
+            site: firstSite,
+            baseURL: endpoint,
+            httpClient: client
+        )
+        let secondProvider = try NodeHTTPSpiderSiteProvider(
+            site: secondSite,
+            baseURL: endpoint,
+            httpClient: client
+        )
+
+        let firstStartedAt = Date()
+        let (_, firstResponse) = try await URLSession.shared.data(
+            from: endpoint.appendingPathComponent(
+                "spider/contract_b/3/proxy/auth-toast"
+            )
+        )
+        XCTAssertEqual((firstResponse as? HTTPURLResponse)?.statusCode, 200)
+        let firstAuthorization = await firstProvider
+            .consumeLatePlaybackAuthorization(
+                flag: "夸克/直链",
+                notBefore: firstStartedAt,
+                waitMilliseconds: 0
+            )
+        XCTAssertEqual(
+            firstAuthorization?.websiteURL.absoluteString,
+            endpoint.appendingPathComponent("website").absoluteString
+        )
+        XCTAssertTrue(firstAuthorization?.message.contains("夸克") == true)
+
+        let ordinaryStartedAt = Date()
+        _ = try await URLSession.shared.data(
+            from: endpoint.appendingPathComponent(
+                "spider/contract_b/3/proxy/info-toast"
+            )
+        )
+        let ordinaryAuthorization = await firstProvider
+            .consumeLatePlaybackAuthorization(
+                flag: "夸克/直链",
+                notBefore: ordinaryStartedAt,
+                waitMilliseconds: 0
+            )
+        XCTAssertNil(ordinaryAuthorization)
+
+        let shareTokenStartedAt = Date()
+        _ = try await URLSession.shared.data(
+            from: endpoint.appendingPathComponent(
+                "spider/contract_b/3/proxy/stoken-toast"
+            )
+        )
+        let shareTokenAuthorization = await firstProvider
+            .consumeLatePlaybackAuthorization(
+                flag: "夸克/直链",
+                notBefore: shareTokenStartedAt,
+                waitMilliseconds: 0
+            )
+        XCTAssertNil(shareTokenAuthorization)
+
+        let staleStartedAt = Date()
+        _ = try await URLSession.shared.data(
+            from: endpoint.appendingPathComponent(
+                "spider/contract_b/3/proxy/auth-toast"
+            )
+        )
+        try await Task.sleep(nanoseconds: 2_000_000)
+        let staleAuthorization = await firstProvider
+            .consumeLatePlaybackAuthorization(
+                flag: "夸克/直链",
+                notBefore: max(Date(), staleStartedAt),
+                waitMilliseconds: 0
+            )
+        XCTAssertNil(staleAuthorization)
+
+        let secondStartedAt = Date()
+        _ = try await URLSession.shared.data(
+            from: endpoint.appendingPathComponent(
+                "spider/renamed/73/proxy/guest-toast"
+            )
+        )
+        let crossWired = await firstProvider.consumeLatePlaybackAuthorization(
+            flag: "夸克/直链",
+            notBefore: secondStartedAt,
+            waitMilliseconds: 0
+        )
+        XCTAssertNil(crossWired)
+        let secondAuthorization = await secondProvider
+            .consumeLatePlaybackAuthorization(
+                flag: "夸克/直链",
+                notBefore: secondStartedAt,
+                waitMilliseconds: 0
+            )
+        XCTAssertEqual(
+            secondAuthorization?.websiteURL.absoluteString,
+            endpoint.appendingPathComponent("website").absoluteString
+        )
+
+        let aliToastStartedAt = Date()
+        _ = try await URLSession.shared.data(
+            from: endpoint.appendingPathComponent(
+                "spider/contract_b/3/proxy/ali-toast"
+            )
+        )
+        let aliToastAuthorization = await firstProvider
+            .consumeLatePlaybackAuthorization(
+                flag: "阿里/直链",
+                notBefore: aliToastStartedAt,
+                waitMilliseconds: 0
+            )
+        XCTAssertTrue(
+            aliToastAuthorization?.message.contains("阿里云盘") == true
+        )
+        await service.stop()
+    }
+
+    func testContractBProxyAuthorizationResponseBecomesConfigurationChallenge()
+        async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(
+                nodeContractBFixtureScript(startDelayMilliseconds: 0).utf8
+            )
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+        let endpoint = try await service.ensureReady(from: fixture.sourceURL)
+        let clientConfiguration = URLSessionConfiguration.ephemeral
+        clientConfiguration.connectionProxyDictionary = [:]
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: SiteConfiguration(
+                key: "ali_proxy_authorization",
+                name: "Ali Proxy Authorization",
+                type: 3,
+                api: "/spider/contract_b/3",
+                extra: ["okNodeRuntime": .bool(true)]
+            ),
+            baseURL: endpoint,
+            httpClient: URLSessionHTTPClient(configuration: clientConfiguration)
+        )
+
+        let bodyFailureStartedAt = Date()
+        let (_, bodyFailureResponse) = try await URLSession.shared.data(
+            from: endpoint.appendingPathComponent(
+                "proxy/ali/missing-download-authorization"
+            )
+        )
+        XCTAssertEqual(
+            (bodyFailureResponse as? HTTPURLResponse)?.statusCode,
+            500
+        )
+        let bodyAuthorization = await provider.consumeLatePlaybackAuthorization(
+            flag: "阿里/直链",
+            notBefore: bodyFailureStartedAt,
+            waitMilliseconds: 0
+        )
+        XCTAssertEqual(
+            bodyAuthorization?.websiteURL.absoluteString,
+            endpoint.appendingPathComponent("website").absoluteString
+        )
+        XCTAssertTrue(bodyAuthorization?.message.contains("无法获取下载链接") == true)
+
+        let ordinaryFailureStartedAt = Date()
+        let (_, ordinaryFailureResponse) = try await URLSession.shared.data(
+            from: endpoint.appendingPathComponent("proxy/ali/format-error")
+        )
+        XCTAssertEqual(
+            (ordinaryFailureResponse as? HTTPURLResponse)?.statusCode,
+            500
+        )
+        let ordinaryAuthorization = await provider.consumeLatePlaybackAuthorization(
+            flag: "阿里/直链",
+            notBefore: ordinaryFailureStartedAt,
+            waitMilliseconds: 0
+        )
+        XCTAssertNil(ordinaryAuthorization)
+
+        let forbiddenStartedAt = Date()
+        let (_, forbiddenResponse) = try await URLSession.shared.data(
+            from: endpoint.appendingPathComponent("proxy/ali/forbidden")
+        )
+        XCTAssertEqual((forbiddenResponse as? HTTPURLResponse)?.statusCode, 403)
+        let forbiddenAuthorization = await provider.consumeLatePlaybackAuthorization(
+            flag: "阿里/直链",
+            notBefore: forbiddenStartedAt,
+            waitMilliseconds: 0
+        )
+        XCTAssertTrue(forbiddenAuthorization?.message.contains("HTTP 403") == true)
         await service.stop()
     }
 
@@ -12298,8 +14651,8 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                 let endpointPort = try XCTUnwrap(endpoint.port)
                 observedEndpointPort = endpointPort
                 let listeners = try systemListeners(on: endpointPort)
-                XCTAssertTrue(listeners.contains("127.0.0.1:"), "\(name): \(listeners)")
-                XCTAssertFalse(listeners.contains("*:\(endpointPort)"), "\(name): \(listeners)")
+                XCTAssertTrue(listeners.contains("*:\(endpointPort)"), "\(name): \(listeners)")
+                XCTAssertFalse(listeners.contains("127.0.0.1:"), "\(name): \(listeners)")
                 print(
                     "REAL_SAMPLE_DISCOVERY name=\(name) "
                         + "runtime_ready_ms=\(runtimeReadyMilliseconds) "
@@ -12556,8 +14909,9 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                 !config.pans || !Array.isArray(config.pans.list)) {
               throw new Error('invalid fixture config');
             }
-            if (catDartServerPort() !== Number(process.env.DEV_HTTP_PORT)) {
-              throw new Error('unexpected Dart bridge port');
+            const runtimePort = Number(process.env.DEV_HTTP_PORT);
+            if (!catDartServerPort() || catDartServerPort() === runtimePort) {
+              throw new Error('Dart bridge must use a distinct loopback port');
             }
             if (\#(startsAuxiliaryListener ? "true" : "false")) {
               auxiliary = require('http').createServer((request, response) => {
@@ -12582,6 +14936,54 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                   response.end(JSON.stringify({class:[],list:[]}));
                 } else if (request.url === '/auxiliary') {
                   response.end(JSON.stringify(auxiliary && auxiliary.address()));
+                } else if (request.url === '/bridge-port') {
+                  response.end(JSON.stringify({port: catDartServerPort()}));
+                } else if (request.url === '/website') {
+                  const html = '<!doctype html><script src="https://lib.baomitu.com/react/18.2.0/umd/react.production.min.js"></script>';
+                  response.setHeader('Content-Type', 'text/html; charset=utf-8');
+                  response.setHeader('Content-Length', Buffer.byteLength(html));
+                  response.end(html);
+                } else if (request.url === '/proxy/ali/missing-download-authorization') {
+                  response.statusCode = 500;
+                  response.setHeader('Content-Type', 'text/plain; charset=utf-8');
+                  response.write('无法获取下载');
+                  response.end('链接，请检查授权');
+                } else if (request.url === '/proxy/ali/format-error') {
+                  response.statusCode = 500;
+                  response.setHeader('Content-Type', 'text/plain; charset=utf-8');
+                  response.end('unrecognized file format');
+                } else if (request.url === '/proxy/ali/forbidden') {
+                  response.statusCode = 403;
+                  response.setHeader('Content-Type', 'text/plain; charset=utf-8');
+                  response.end();
+                } else if (/^\/spider\/[^/]+\/[^/]+\/proxy\/(auth|guest|info|stoken|ali)-toast$/.test(request.url)) {
+                  const toastKind = request.url.split('/').pop();
+                  const message = toastKind === 'auth-toast'
+                    ? '夸克token已过期，请前往【配置】站源进行配置'
+                    : toastKind === 'guest-toast'
+                      ? 'require login [guest]'
+                      : toastKind === 'stoken-toast'
+                        ? '夸克 stoken 41016 expired'
+                        : toastKind === 'ali-toast'
+                          ? '阿里云盘 token 已失效，请重新授权'
+                          : '普通播放提示';
+                  fetch(`http://127.0.0.1:${catDartServerPort()}/msg`, {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({
+                      action: 'toast',
+                      opt: {
+                        message,
+                        duration: 5
+                      }
+                    })
+                  }).then(async (hostResponse) => {
+                    response.statusCode = hostResponse.status;
+                    response.end(JSON.stringify({ok: hostResponse.ok}));
+                  }).catch(() => {
+                    response.statusCode = 500;
+                    response.end(JSON.stringify({ok:false}));
+                  });
                 } else if (request.url === '/host-action') {
                   const hostPort = catDartServerPort();
                   fetch(`http://127.0.0.1:${hostPort}/msg`, {
@@ -12589,7 +14991,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                     headers: {'Content-Type':'application/json'},
                     body: JSON.stringify({
                       action: 'openInternalWebview',
-                      opt: {url: `http://192.168.1.88:${hostPort}/website`}
+                      opt: {url: `http://192.168.1.88:${runtimePort}/website`}
                     })
                   }).then(() => response.end(JSON.stringify({ok:true})))
                     .catch(() => {
@@ -12626,7 +15028,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                   setTimeout(() => {
                     const payload = JSON.stringify({
                       action: 'openInternalWebview',
-                      opt: {url: `http://127.0.0.1:${hostPort}/website/${marker}`}
+                      opt: {url: `http://127.0.0.1:${runtimePort}/website/${marker}`}
                     });
                     const messageRequest = require('http').request({
                       hostname: '127.0.0.1',
@@ -12647,7 +15049,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                   setTimeout(() => {
                     const payload = JSON.stringify({
                       action: 'openInternalWebview',
-                      opt: {url: `http://127.0.0.1:${hostPort}/website`}
+                      opt: {url: `http://127.0.0.1:${runtimePort}/website`}
                     });
                     const messageRequest = require('http').request({
                       hostname: '127.0.0.1',
@@ -12677,16 +15079,18 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                     response.statusCode = 500;
                     response.end(JSON.stringify({ok:false}));
                   });
-                } else if (request.url === '/authorization-sequence') {
+                } else if (request.url === '/authorization-sequence' ||
+                           request.url === '/authorization-explicit') {
                   const hostURL = `http://127.0.0.1:${catDartServerPort()}/msg`;
                   const challengeID = '00000000-0000-0000-0000-000000000001';
+                  const explicitCompletion = request.url === '/authorization-explicit';
                   fetch(hostURL, {
                     method: 'POST',
                     headers: {'Content-Type':'application/json'},
                     body: JSON.stringify({
                       action: 'openInternalWebview',
                       opt: {
-                        url: `http://127.0.0.1:${catDartServerPort()}/website`,
+                        url: `http://127.0.0.1:${runtimePort}/website`,
                         challengeID,
                         provider: 'fixture-cloud',
                         transport: 'qr'
@@ -12700,6 +15104,16 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                       opt: {authorized: true}
                     })
                   })).then(() => {
+                    if (!explicitCompletion) return null;
+                    return fetch(hostURL, {
+                      method: 'POST',
+                      headers: {'Content-Type':'application/json'},
+                      body: JSON.stringify({
+                        action: 'authorizationCompleted',
+                        opt: {challengeID, provider: 'fixture-cloud'}
+                      })
+                    });
+                  }).then(() => {
                     response.end(JSON.stringify({ok:true}));
                   }).catch(() => {
                     response.statusCode = 500;
@@ -13149,6 +15563,54 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         }
     }
 
+    func testCatPawAuthorizationAcceptsAttestedAuxiliaryRuntimePage() async throws {
+        let baseURL = try XCTUnwrap(URL(string: "http://127.0.0.1:18988/"))
+        let auxiliaryURL = "http://127.0.0.1:19321/douer"
+        let client = NodeProviderStubHTTPClient { request in
+            XCTAssertEqual(request.url.path, "/__okvideo/owned-loopback")
+            let queryItems = URLComponents(
+                url: request.url,
+                resolvingAgainstBaseURL: false
+            )?.queryItems
+            XCTAssertEqual(
+                queryItems?.first(where: { $0.name == "url" })?.value,
+                auxiliaryURL
+            )
+            XCTAssertEqual(
+                queryItems?.first(where: { $0.name == "purpose" })?.value,
+                "internal-webview"
+            )
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"url":"http://127.0.0.1:19321/douer"}"#.utf8)
+            )
+        }
+        let bridge = CatPawHostMessageBridge(httpClient: client)
+        let coordinator = CatPawAuthorizationCoordinator(
+            site: SiteConfiguration(
+                key: "nodejs_auxiliary",
+                name: "弹幕|服务",
+                type: 4,
+                api: "/spider/auxiliary/4"
+            ),
+            hostMessageBridge: bridge
+        )
+        let authorization = try await coordinator.authorizationRequired(
+            hostMessage: CatPawHostMessage(
+                action: "openInternalWebview",
+                requestID: nil,
+                opt: .object(["url": .string(auxiliaryURL)])
+            ),
+            invocationID: "12345678-auxiliary",
+            baseURL: baseURL
+        )
+
+        XCTAssertEqual(authorization.websiteURL.absoluteString, auxiliaryURL)
+        XCTAssertTrue(authorization.message.contains("内部页面"))
+    }
+
     func testNodeProviderPresentsValidatedContractBInternalWebviewAction() async throws {
         let site = SiteConfiguration(
             key: "nodejs_generic_action",
@@ -13451,6 +15913,14 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                 return HTTPResponse(
                     url: request.url,
                     statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            if request.url.path.contains("/__okvideo/host-message/") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 204,
                     headers: [:],
                     body: Data()
                 )
@@ -13914,6 +16384,127 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             ),
             "js2p://_WEB_/website"
         )
+        XCTAssertEqual(
+            NodeHTTPSpiderSiteProvider.normalizePlaybackURL(
+                "/proxy/hls/a?token=x&url=https%3A%2F%2Fmedia.example%2Fa.m3u8#part",
+                baseURL: baseURL
+            ),
+            "http://127.0.0.1:18988/proxy/hls/a?token=x&url=https%3A%2F%2Fmedia.example%2Fa.m3u8#part"
+        )
+        XCTAssertEqual(
+            NodeHTTPSpiderSiteProvider.normalizePlaybackURL(
+                "/spider/key/3/proxy?header=hello+world&token=a%2Bb&token=c%252Fd",
+                baseURL: baseURL
+            ),
+            "http://127.0.0.1:18988/spider/key/3/proxy?header=hello+world&token=a%2Bb&token=c%252Fd"
+        )
+        // Non-CatPaw direct media and other loopback bridges are deliberately
+        // outside this resolver so TVBox and cloud transports retain their
+        // existing ownership and request semantics.
+        XCTAssertEqual(
+            NodeHTTPSpiderSiteProvider.normalizePlaybackURL(
+                "https://media.example/video.m3u8?token=a%2Bb",
+                baseURL: baseURL
+            ),
+            "https://media.example/video.m3u8?token=a%2Bb"
+        )
+        XCTAssertEqual(
+            NodeHTTPSpiderSiteProvider.normalizePlaybackURL(
+                "http://127.0.0.1:9978/proxy/media/session-id",
+                baseURL: baseURL
+            ),
+            "http://127.0.0.1:9978/proxy/media/session-id"
+        )
+    }
+
+    func testNodePlaybackLeaseIsStrictlyScopedToCatPawRuntimeProxy() throws {
+        let baseURL = try XCTUnwrap(URL(string: "http://127.0.0.1:18988/"))
+        func session(
+            url: String,
+            transport: PlaybackMediaSession.Transport = .providerLoopback,
+            providerKind: String = "node-http-spider-runtime"
+        ) -> PlaybackMediaSession {
+            PlaybackMediaSession(
+                sessionID: UUID().uuidString,
+                transport: transport,
+                mediaURL: url,
+                resourceReference: PlaybackResourceReference(
+                    configurationIdentity: "configuration",
+                    siteIdentity: "site",
+                    providerKind: providerKind,
+                    providerVersion: 1,
+                    stableResourceLocator: "runtime-locator",
+                    sourceIdentity: "source",
+                    episodeIdentity: "episode",
+                    stability: .providerReplay
+                )
+            )
+        }
+
+        XCTAssertTrue(
+            NodeRuntimePlaybackLeasePolicy.owns(
+                session(
+                    url: "http://127.0.0.1:18988/spider/key/3/proxy/media"
+                ),
+                serviceBaseURL: baseURL
+            )
+        )
+        XCTAssertTrue(
+            NodeRuntimePlaybackLeasePolicy.owns(
+                session(url: "http://127.0.0.1:18988/proxy/hls/item.m3u8"),
+                serviceBaseURL: baseURL
+            )
+        )
+        XCTAssertFalse(
+            NodeRuntimePlaybackLeasePolicy.owns(
+                session(
+                    url: "http://127.0.0.1:9978/proxy/media/tvbox",
+                    providerKind: "android-dex-spider"
+                ),
+                serviceBaseURL: baseURL
+            )
+        )
+        XCTAssertFalse(
+            NodeRuntimePlaybackLeasePolicy.owns(
+                session(url: "https://media.example/video.m3u8"),
+                serviceBaseURL: baseURL
+            )
+        )
+        XCTAssertFalse(
+            NodeRuntimePlaybackLeasePolicy.owns(
+                session(
+                    url: "http://127.0.0.1:18988/proxy/hls/item.m3u8",
+                    transport: .compatibilityDirect
+                ),
+                serviceBaseURL: baseURL
+            )
+        )
+    }
+
+    func testNodePosterRebindsCatPawLANProxyToCurrentRuntime() throws {
+        let baseURL = try XCTUnwrap(URL(string: "http://127.0.0.1:55709/"))
+        let posterURL = try XCTUnwrap(
+            URL(
+                string: "http://192.168.1.114:55709/spider/baseset/3/proxy/"
+                    + "aHR0cDovLzE5Mi4xNjguMS4xMTQ6NTU3MDkvd2Vic2l0ZQ=="
+            )
+        )
+
+        XCTAssertEqual(
+            NodeHTTPSpiderSiteProvider.normalizeRuntimePosterURL(
+                posterURL,
+                baseURL: baseURL
+            )?.absoluteString,
+            "http://127.0.0.1:55709/spider/baseset/3/proxy/"
+                + "aHR0cDovLzE5Mi4xNjguMS4xMTQ6NTU3MDkvd2Vic2l0ZQ=="
+        )
+        XCTAssertEqual(
+            NodeHTTPSpiderSiteProvider.normalizeRuntimePosterURL(
+                URL(string: "https://images.example.invalid/poster.jpg"),
+                baseURL: baseURL
+            )?.absoluteString,
+            "https://images.example.invalid/poster.jpg"
+        )
     }
 
     func testNodePlayerKeepsProviderOrderedRelayWithoutTransportProbe()
@@ -13965,6 +16556,48 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             configurationIdentity
         )
         XCTAssertNil(replayStore.replay(for: "episode"))
+        XCTAssertEqual(result.mediaSession?.rangePolicy, .providerDefined)
+        XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
+    }
+
+    func testNodePlayerKeepsProviderOrderedQuarkRelayAheadOfOriginal()
+        async throws {
+        let site = SiteConfiguration(
+            key: "nodejs_fixture",
+            name: "Fixture",
+            type: 4,
+            api: "/spider/fixture/4",
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let relayURL =
+            "http://127.0.0.1:18988/spider/fixture/4/proxy/stream?id=1"
+        let originalURL = "https://media.example.invalid/original?id=1"
+        let client = NodeProviderStubHTTPClient { request in
+            HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(
+                    """
+                    {"parse":0,"url":["Provider relay","\(relayURL)","原画","\(originalURL)"]}
+                    """.utf8
+                )
+            )
+        }
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        let result = try await provider.player(
+            flag: "夸克网盘",
+            episodeURL: "episode"
+        )
+
+        XCTAssertEqual(result.url, relayURL)
+        XCTAssertEqual(result.qualities.map(\.url), [relayURL, originalURL])
+        XCTAssertEqual(result.mediaSession?.transport, .providerLoopback)
         XCTAssertEqual(result.mediaSession?.rangePolicy, .providerDefined)
         XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
     }
@@ -15045,11 +17678,9 @@ final class NodeBundleCompatibilityTests: XCTestCase {
 
     func testNodeGenericPlaybackKeepsHistorySecretFreeWithoutReplayStore()
         async throws {
-        let replayStore = NodePlaybackReplayMemoryStore()
         let provider = try makeGenericNodeProvider(
             httpClient: NodeStableReferenceHTTPClient(stableLocator: nil),
-            configurationIdentity: UUID().uuidString.lowercased(),
-            playbackReplayStore: replayStore
+            configurationIdentity: UUID().uuidString.lowercased()
         )
 
         let result = try await provider.player(
@@ -15072,6 +17703,65 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                 result.mediaSession?.resourceReference
             )
         )
+        XCTAssertNil(
+            provider.captureHistoryPlaybackResourceReference(
+                videoID: "detail?id=42&session=runtime-only",
+                flag: "cloud-original",
+                episode: PlayEpisode(
+                    name: "第 1 集",
+                    url: "opaque-file-42?authorization=runtime-only"
+                ),
+                episodeIndex: 0
+            ),
+            "production-default providers must not persist credential-shaped replay data"
+        )
+    }
+
+    func testNodeDefaultReplayStoreKeepsOnlyCredentialFreeHistoryIdentity()
+        throws {
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let provider = try makeGenericNodeProvider(
+            httpClient: NodeStableReferenceHTTPClient(stableLocator: nil),
+            configurationIdentity: configurationIdentity
+        )
+        let reference = try XCTUnwrap(
+            provider.captureHistoryPlaybackResourceReference(
+                videoID: "stable-video-42",
+                flag: "cloud-original",
+                episode: PlayEpisode(name: "第 1 集", url: "stable-file-42"),
+                episodeIndex: 0
+            )
+        )
+        let encoded = String(
+            decoding: try JSONEncoder().encode(reference),
+            as: UTF8.self
+        )
+
+        XCTAssertTrue(reference.stableResourceLocator.hasPrefix("ndr2."))
+        XCTAssertTrue(provider.acceptsPlaybackResourceReference(reference))
+        XCTAssertFalse(encoded.contains("authorization"))
+        XCTAssertFalse(encoded.contains("runtime-only"))
+    }
+
+    func testNodeDefaultReplayStoreIgnoresExistingProtectedHistoryHandle()
+        throws {
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let provider = try makeGenericNodeProvider(
+            httpClient: NodeStableReferenceHTTPClient(stableLocator: nil),
+            configurationIdentity: configurationIdentity
+        )
+        let reference = PlaybackResourceReference(
+            configurationIdentity: configurationIdentity,
+            siteIdentity: "nodejs_stable_fixture",
+            providerKind: "node-http-spider",
+            providerVersion: 2,
+            stableResourceLocator: "nhr2." + String(repeating: "a", count: 64),
+            sourceIdentity: "source",
+            episodeIdentity: "episode",
+            stability: .providerStable
+        )
+
+        XCTAssertFalse(provider.acceptsPlaybackResourceReference(reference))
     }
 
     func testNodeExpiredCloudTokenRefreshesShareTokenAndRetriesOnce()
@@ -15199,6 +17889,184 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             requests.firstIndex { $0.url.path.hasSuffix("/play") }
         )
         XCTAssertLessThan(detailIndex, playIndex)
+    }
+
+    func testCatPawVideoHistoryReplaysExactProviderIdentityBeforePlay()
+        async throws {
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let replayStore = NodePlaybackReplayMemoryStore()
+        let episodeID = "https://provider.invalid/share/file-42?token=runtime-only"
+        let credentialShapedVideoID =
+            "https://provider.invalid/detail?id=42&session=runtime-only"
+        func site(profileRevision: String) -> SiteConfiguration {
+            SiteConfiguration(
+                key: "nodejs_stable_fixture",
+                name: "Stable Node Fixture",
+                type: 4,
+                api: "/spider/stable-fixture/4",
+                extra: [
+                    "okNodeRuntime": .bool(true),
+                    "okNodeBundleIdentity": .string("bundle-stable"),
+                    "okNodeProfileIdentity": .string("profile-stable"),
+                    "okNodeProfileRevision": .string(profileRevision)
+                ]
+            )
+        }
+        let baseURL = try XCTUnwrap(URL(string: "http://127.0.0.1:18988/"))
+        let initialProvider = try NodeHTTPSpiderSiteProvider(
+            site: site(profileRevision: "revision-a"),
+            baseURL: baseURL,
+            httpClient: NodeStableReferenceHTTPClient(stableLocator: nil),
+            playbackReplayStore: replayStore,
+            configurationIdentity: configurationIdentity
+        )
+        let reference = try XCTUnwrap(
+            initialProvider.captureHistoryPlaybackResourceReference(
+                videoID: credentialShapedVideoID,
+                flag: "cloud-original",
+                episode: PlayEpisode(name: "第 1 集", url: episodeID),
+                episodeIndex: 0
+            )
+        )
+        let persisted = String(
+            decoding: try JSONEncoder().encode(reference),
+            as: UTF8.self
+        )
+
+        XCTAssertTrue(reference.stableResourceLocator.hasPrefix("nhr2."))
+        XCTAssertFalse(persisted.contains(episodeID))
+        XCTAssertFalse(persisted.contains("runtime-only"))
+        XCTAssertEqual(
+            PlaybackPersistencePolicy.sanitizedProviderResourceReference(
+                reference
+            ),
+            reference
+        )
+        XCTAssertEqual(
+            replayStore.replay(for: reference.stableResourceLocator)?.videoID,
+            credentialShapedVideoID
+        )
+        let persistedVideoID = NodePlaybackReplayReference
+            .persistedOpaqueIdentity(
+                credentialShapedVideoID,
+                namespace: "catpaw-video-vod-id"
+            )
+        XCTAssertTrue(persistedVideoID.hasPrefix("cph2."))
+        XCTAssertFalse(persistedVideoID.contains("runtime-only"))
+        XCTAssertEqual(
+            NodePlaybackReplayReference.persistedOpaqueIdentity(
+                "中文普通影片标识",
+                namespace: "catpaw-video-vod-id"
+            ),
+            "中文普通影片标识"
+        )
+
+        let client = NodeStableReferenceHTTPClient(
+            stableLocator: nil,
+            detailEpisode: episodeID,
+            detailSourceName: "cloud-original"
+        )
+        let restartedProvider = try NodeHTTPSpiderSiteProvider(
+            site: site(profileRevision: "revision-b"),
+            baseURL: baseURL,
+            httpClient: client,
+            playbackReplayStore: replayStore,
+            configurationIdentity: configurationIdentity
+        )
+        XCTAssertTrue(
+            restartedProvider.acceptsPlaybackResourceReference(reference),
+            "a profile content revision is refresh state, not history identity"
+        )
+
+        let refreshed = try await restartedProvider.refreshPlayback(
+            PlaybackRefreshRequest(
+                videoID: "wrong-title-search-id",
+                title: "重复标题",
+                sourceIdentity: reference.sourceIdentity,
+                resourceIdentity: reference.episodeIdentity,
+                providerResourceReference: reference
+            )
+        )
+        let requests = await client.capturedRequests()
+        let detailIndex = try XCTUnwrap(
+            requests.firstIndex { $0.url.path.hasSuffix("/detail") }
+        )
+        let playIndex = try XCTUnwrap(
+            requests.firstIndex { $0.url.path.hasSuffix("/play") }
+        )
+        XCTAssertLessThan(detailIndex, playIndex)
+        XCTAssertFalse(requests.contains { $0.url.path.hasSuffix("/search") })
+        let detailBody = try XCTUnwrap(requests[detailIndex].body)
+        let detailPayload = try JSONDecoder().decode(
+            JSONValue.self,
+            from: detailBody
+        )
+        XCTAssertEqual(
+            detailPayload.objectValue?["id"]?.stringValue,
+            credentialShapedVideoID
+        )
+        XCTAssertEqual(
+            try nodeEpisodeID(from: requests[playIndex]),
+            episodeID
+        )
+        XCTAssertEqual(refreshed.detail.summary.videoID, "history-video")
+        XCTAssertEqual(refreshed.playbackResult.resourceReference, reference)
+    }
+
+    func testCatPawVideoHistoryUsesFreshEpisodeTokenForSameProviderResource()
+        async throws {
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let replayStore = NodePlaybackReplayMemoryStore()
+        let oldEpisodeID =
+            "https://provider.invalid/share/file-42?quality=original&token=old"
+        let freshEpisodeID =
+            "https://provider.invalid/share/file-42?quality=original&token=fresh"
+        let initialProvider = try makeGenericNodeProvider(
+            httpClient: NodeStableReferenceHTTPClient(stableLocator: nil),
+            configurationIdentity: configurationIdentity,
+            playbackReplayStore: replayStore
+        )
+        let reference = try XCTUnwrap(
+            initialProvider.captureHistoryPlaybackResourceReference(
+                videoID: "stable-video-42",
+                flag: "cloud-original",
+                episode: PlayEpisode(name: "第 1 集", url: oldEpisodeID),
+                episodeIndex: 0
+            )
+        )
+        let client = NodeStableReferenceHTTPClient(
+            stableLocator: nil,
+            detailEpisode: freshEpisodeID,
+            detailSourceName: "cloud-original"
+        )
+        let restartedProvider = try makeGenericNodeProvider(
+            httpClient: client,
+            configurationIdentity: configurationIdentity,
+            playbackReplayStore: replayStore
+        )
+
+        let refreshed = try await restartedProvider.refreshPlayback(
+            PlaybackRefreshRequest(
+                videoID: "obsolete-history-row-id",
+                title: "重复标题",
+                sourceIdentity: reference.sourceIdentity,
+                resourceIdentity: reference.episodeIdentity,
+                providerResourceReference: reference
+            )
+        )
+        let requests = await client.capturedRequests()
+        let detailIndex = try XCTUnwrap(
+            requests.firstIndex { $0.url.path.hasSuffix("/detail") }
+        )
+        let playIndex = try XCTUnwrap(
+            requests.firstIndex { $0.url.path.hasSuffix("/play") }
+        )
+
+        XCTAssertLessThan(detailIndex, playIndex)
+        XCTAssertFalse(requests.contains { $0.url.path.hasSuffix("/search") })
+        XCTAssertEqual(try nodeEpisodeID(from: requests[playIndex]), freshEpisodeID)
+        XCTAssertEqual(refreshed.episode.url, freshEpisodeID)
+        XCTAssertEqual(refreshed.playbackResult.resourceReference, reference)
     }
 
     func testLegacyNodeReplayReferencesAreNotAccepted() throws {

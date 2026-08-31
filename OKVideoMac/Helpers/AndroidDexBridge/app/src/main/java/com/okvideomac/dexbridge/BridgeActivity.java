@@ -19,6 +19,8 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
 import android.view.Window;
+import android.widget.Adapter;
+import android.widget.AdapterView;
 import android.widget.Button;
 import android.widget.CompoundButton;
 import android.widget.EditText;
@@ -55,7 +57,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 public final class BridgeActivity extends Activity {
     private static final String LOG_TAG = "OKVideoQR";
-    private static final int UI_SCHEMA_VERSION = 3;
+    private static final int UI_SCHEMA_VERSION = 4;
     private static volatile WeakReference<BridgeActivity> current =
             new WeakReference<>(null);
     private static volatile Context applicationContext;
@@ -303,14 +305,71 @@ public final class BridgeActivity extends Activity {
             String interactionID,
             JSONObject ui
     ) {
-        JSONObject state = BridgeInteractionRegistry.observeUI(
+        JSONObject scopedSurface = requestScopedSurfaceUI(
                 interactionID,
                 ui
+        );
+        JSONObject state = BridgeInteractionRegistry.observeUI(
+                interactionID,
+                scopedSurface
         );
         if (state.optBoolean("terminal", false)) {
             BridgeServer.releaseTerminalInteraction(context, interactionID);
         }
         return state;
+    }
+
+    /**
+     * Adds lifecycle-only surface ownership. A provider may launch a browser
+     * or full-screen Activity, which hides every WindowManager root owned by
+     * this process while the translucent ActionActivity remains paused below
+     * it. That paused host is a request lease, not evidence of authorization.
+     */
+    private static JSONObject requestScopedSurfaceUI(
+            String interactionID,
+            JSONObject ui
+    ) {
+        JSONObject value = ui == null ? new JSONObject() : ui;
+        String id = cleanInteractionID(interactionID);
+        boolean currentBefore = BridgeInteractionRegistry.ownsLatest(id)
+                && !BridgeInteractionRegistry.terminal(id);
+        BridgeActionActivity.SurfaceStatus status =
+                BridgeActionActivity.surfaceStatusFor(id);
+        boolean currentAfter = BridgeInteractionRegistry.ownsLatest(id)
+                && !BridgeInteractionRegistry.terminal(id);
+        boolean requestScoped = currentBefore
+                && currentAfter
+                && status.requestScoped;
+        boolean providerWindowVisible = value.optBoolean("visible", false)
+                && requestScoped;
+        boolean delegatedSurfaceActive = requestScoped
+                && status.delegatedSurfaceActive;
+        // surfaceActive is the lifetime of the exact request-owned Android
+        // presentation lease, not merely the visibility of structured roots.
+        // A blank resumed anchor remains active, but only the delegated flag
+        // is allowed to suspend the provider-UI timeout below.
+        boolean active = requestScoped;
+        String mode = providerWindowVisible
+                ? "providerWindow"
+                : delegatedSurfaceActive
+                ? "externalActivity"
+                : requestScoped ? "actionActivity" : "none";
+        try {
+            value.put("surfaceActive", active);
+            value.put("surfaceRequestScoped", requestScoped);
+            value.put("surfaceDelegated", delegatedSurfaceActive);
+            value.put(
+                    "surfaceInteractionID",
+                    requestScoped ? id : ""
+            );
+            value.put("surfaceMode", mode);
+            value.put(
+                    "surfaceHostLifecycle",
+                    requestScoped ? status.hostLifecycle : "none"
+            );
+        } catch (Throwable ignored) {
+        }
+        return value;
     }
 
     private static JSONObject hostUnavailableUI() throws Exception {
@@ -375,8 +434,13 @@ public final class BridgeActivity extends Activity {
                     BridgeActionActivity.interactionIDFor(windowOwner);
             if (root != null) {
                 int elementOrder = 0;
+                List<View> virtualizedCollections =
+                        virtualizedCollections(root);
                 for (View view : flattened(root)) {
                     if (!view.isShown()) continue;
+                    if (isDescendantOfAny(view, virtualizedCollections)) {
+                        continue;
+                    }
                     if (view instanceof EditText) {
                         inputCount++;
                         boolean credential = isCredentialInput((EditText) view);
@@ -525,6 +589,14 @@ public final class BridgeActivity extends Activity {
                         if (isAlertTitle(view)) title = label;
                     }
                 }
+                elementOrder = appendVirtualizedCollectionState(
+                        virtualizedCollections,
+                        buttons,
+                        controls,
+                        texts,
+                        elements,
+                        elementOrder
+                );
             }
             boolean hasContent = inputCount > 0
                     || imageCount > 0
@@ -715,7 +787,7 @@ public final class BridgeActivity extends Activity {
                 result.put("generation", uiGeneration);
                 return result;
             }
-            View root = activeRoot(rootViews());
+            View root = activeRoot(eligibleRoots(rootViews(), id));
             if (root == null) {
                 JSONObject result = new JSONObject();
                 result.put("clicked", false);
@@ -726,6 +798,29 @@ public final class BridgeActivity extends Activity {
                 if (view.isShown() && view instanceof EditText && text != null) {
                     ((EditText) view).setText(text);
                 }
+            }
+            if (controlId != null && controlId.startsWith("virtual-v1:")) {
+                boolean clicked = submitVirtualizedControl(
+                        root,
+                        controlId
+                );
+                JSONObject result = new JSONObject();
+                result.put("clicked", clicked);
+                result.put("stale", !clicked);
+                result.put("generation", uiGeneration);
+                if (clicked) BridgeInteractionRegistry.submitted(id);
+                JSONObject interaction = BridgeInteractionRegistry.state(id);
+                result.put("interactionID", id);
+                result.put("revision", interaction.optLong("revision", 0));
+                result.put(
+                        "phase",
+                        interaction.optString("phase", "processing")
+                );
+                result.put(
+                        "outcome",
+                        interaction.optString("outcome", "stay")
+                );
+                return result;
             }
             boolean clicked = false;
             boolean matched = false;
@@ -865,11 +960,11 @@ public final class BridgeActivity extends Activity {
                 // UI-thread check is intentionally repeated immediately
                 // before dispatching BACK.
                 if (!ownsReleaseScope(id)) return false;
-                View root = activeRoot(rootViews());
+                View root = activeRoot(eligibleRoots(rootViews(), id));
                 if (root == null || !hasMeaningfulContent(root)) return false;
                 Activity owner = activityFrom(root.getContext());
                 String ownerID = BridgeActionActivity.interactionIDFor(owner);
-                if (!ownerID.isEmpty() && !id.equals(ownerID)) return false;
+                if (!id.equals(ownerID)) return false;
                 // Do not send a generic BACK event to whichever root happens
                 // to be topmost: if the provider never created its dialog,
                 // that root is the persistent BridgeActivity and BACK would
@@ -1111,10 +1206,11 @@ public final class BridgeActivity extends Activity {
     }
 
     /**
-     * Returns every visible root owned by the requested interaction. Legacy
-     * provider dialogs can be hosted by the persistent BridgeActivity and do
-     * not expose an owner ID, so untagged roots remain eligible; roots tagged
-     * to a different request are always excluded.
+     * Returns only Window roots attached to this request's disposable
+     * ActionActivity. Untagged roots (the persistent host, Toast windows, and
+     * provider UI left behind by old bridge builds) are intentionally not a
+     * fallback: admitting them would let an unrelated message or Dialog
+     * become the surface of a newly started action session.
      */
     private static List<View> eligibleRoots(
             List<View> roots,
@@ -1131,10 +1227,28 @@ public final class BridgeActivity extends Activity {
             }
             Activity owner = activityFrom(root.getContext());
             String ownerID = BridgeActionActivity.interactionIDFor(owner);
-            if (!ownerID.isEmpty() && !ownerID.equals(id)) continue;
+            if (!id.equals(ownerID) || !isOwnedWindowRoot(root, owner)) {
+                continue;
+            }
             eligible.add(root);
         }
         return eligible;
+    }
+
+    private static boolean isOwnedWindowRoot(View root, Activity owner) {
+        if (!(owner instanceof BridgeActionActivity) || root == null) {
+            return false;
+        }
+        Window ownerWindow = owner.getWindow();
+        if (ownerWindow != null && ownerWindow.getDecorView() == root) {
+            return true;
+        }
+        Dialog dialog = dialogFrom(root);
+        if (dialog != null && dialog.isShowing()) return true;
+        // Hidden-API restrictions can make dialogFrom unavailable on some
+        // Android releases. Both Activity and Dialog windows still expose a
+        // framework DecorView; a custom Toast root does not.
+        return root.getClass().getName().endsWith("DecorView");
     }
 
     /**
@@ -1646,6 +1760,408 @@ public final class BridgeActivity extends Activity {
         canvas.drawBitmap(scaled, quietZone, quietZone, null);
         if (scaled != source) scaled.recycle();
         return output;
+    }
+
+    /**
+     * Returns Android collection controls whose adapter contains rows that are
+     * not currently attached to the Window. Flattening only attached children
+     * loses most entries in a ListView/RecyclerView ordering dialog.
+     */
+    private static List<View> virtualizedCollections(View root) {
+        ArrayList<View> result = new ArrayList<>();
+        for (View view : flattened(root)) {
+            if (view instanceof Spinner) continue;
+            int count = virtualizedItemCount(view);
+            if (count > viewChildCount(view) && count > 0) {
+                result.add(view);
+            }
+        }
+        return result;
+    }
+
+    private static boolean isDescendantOfAny(
+            View view,
+            List<View> ancestors
+    ) {
+        ViewParent parent = view.getParent();
+        while (parent instanceof View) {
+            if (ancestors.contains(parent)) return true;
+            parent = parent.getParent();
+        }
+        return false;
+    }
+
+    private static int viewChildCount(View view) {
+        return view instanceof ViewGroup
+                ? ((ViewGroup) view).getChildCount()
+                : 0;
+    }
+
+    private static int virtualizedItemCount(View collection) {
+        try {
+            if (collection instanceof AdapterView) {
+                Adapter adapter = ((AdapterView<?>) collection).getAdapter();
+                return adapter == null ? 0 : adapter.getCount();
+            }
+            if (!isRecyclerView(collection)) return 0;
+            Object adapter = invokeNoArgument(collection, "getAdapter");
+            if (adapter == null) return 0;
+            Object value = invokeNamed(adapter, "getItemCount");
+            return value instanceof Number ? ((Number) value).intValue() : 0;
+        } catch (Throwable error) {
+            Log.w(LOG_TAG, "Unable to inspect virtualized list", error);
+            return 0;
+        }
+    }
+
+    private static boolean isRecyclerView(View view) {
+        Class<?> type = view == null ? null : view.getClass();
+        while (type != null) {
+            if ("androidx.recyclerview.widget.RecyclerView".equals(
+                    type.getName()
+            )) return true;
+            type = type.getSuperclass();
+        }
+        return false;
+    }
+
+    private static int appendVirtualizedCollectionState(
+            List<View> collections,
+            JSONArray buttons,
+            JSONArray controls,
+            JSONArray texts,
+            JSONArray elements,
+            int initialOrder
+    ) throws Exception {
+        int order = initialOrder;
+        for (View collection : collections) {
+            int count = Math.min(virtualizedItemCount(collection), 512);
+            for (int position = 0; position < count; position++) {
+                VirtualRow row = virtualRow(collection, position);
+                if (row == null || row.view == null) continue;
+                List<View> rowViews = flattened(row.view);
+                ArrayList<String> labels = new ArrayList<>();
+                boolean exposedAction = false;
+                for (int childIndex = 0;
+                     childIndex < rowViews.size();
+                     childIndex++) {
+                    View child = rowViews.get(childIndex);
+                    String title = child instanceof TextView
+                            ? textOf((TextView) child)
+                            : actionableLabelOf(child);
+                    boolean actionable = child.isEnabled()
+                            && child.isClickable()
+                            && !title.isEmpty();
+                    if (actionable) {
+                        String controlID = virtualControlID(
+                                row,
+                                childIndex
+                        );
+                        JSONObject control = new JSONObject();
+                        control.put("id", controlID);
+                        control.put("title", title);
+                        control.put("enabled", true);
+                        control.put("clickable", true);
+                        control.put(
+                                "role",
+                                child instanceof CompoundButton
+                                        ? "toggle"
+                                        : orderingRole(title)
+                        );
+                        controls.put(control);
+                        buttons.put(title);
+                        elements.put(virtualElement(
+                                row,
+                                child,
+                                childIndex,
+                                controlID,
+                                child instanceof CompoundButton
+                                        ? "toggle"
+                                        : child instanceof ImageView
+                                        ? "imageButton"
+                                        : "actionRow",
+                                title,
+                                "action",
+                                order++
+                        ));
+                        exposedAction = true;
+                    } else if (child instanceof TextView && !title.isEmpty()) {
+                        labels.add(title);
+                        texts.put(title);
+                        elements.put(virtualElement(
+                                row,
+                                child,
+                                childIndex,
+                                virtualElementID(row, childIndex),
+                                "label",
+                                title,
+                                "label",
+                                order++
+                        ));
+                    }
+                }
+                if (!exposedAction && !labels.isEmpty()) {
+                    String title = labels.get(0);
+                    String controlID = virtualControlID(row, -1);
+                    JSONObject control = new JSONObject();
+                    control.put("id", controlID);
+                    control.put("title", title);
+                    control.put("enabled", true);
+                    control.put("clickable", true);
+                    control.put("role", "clickable");
+                    controls.put(control);
+                    buttons.put(title);
+                    elements.put(virtualElement(
+                            row,
+                            row.view,
+                            -1,
+                            controlID,
+                            "actionRow",
+                            title,
+                            "action",
+                            order++
+                    ));
+                }
+            }
+        }
+        return order;
+    }
+
+    private static String orderingRole(String title) {
+        String normalized = title == null
+                ? ""
+                : title.trim().toLowerCase(Locale.ROOT);
+        return normalized.contains("上移")
+                || normalized.contains("下移")
+                || normalized.contains("排序")
+                ? "order"
+                : "clickable";
+    }
+
+    private static JSONObject virtualElement(
+            VirtualRow row,
+            View child,
+            int childIndex,
+            String id,
+            String type,
+            String title,
+            String role,
+            int order
+    ) throws Exception {
+        JSONObject element = new JSONObject();
+        element.put("id", id);
+        element.put("type", type);
+        element.put("title", title == null ? "" : title);
+        element.put("role", role);
+        element.put("enabled", child.isEnabled());
+        element.put("clickable", "action".equals(role));
+        element.put("selected", child.isSelected());
+        element.put("order", order);
+        element.put("depth", Math.max(1, viewDepth(child)));
+        element.put("resourceName", resourceName(child));
+        element.put("className", child.getClass().getName());
+        element.put("parentID", "");
+        element.put("x", "action".equals(role) ? 420 + childIndex * 8 : 12);
+        element.put("y", row.position * 52);
+        element.put("width", "action".equals(role) ? 72 : 380);
+        element.put("height", 44);
+        element.put("collectionPosition", row.position);
+        element.put("stableItemID", row.itemID);
+        return element;
+    }
+
+    private static String virtualElementID(VirtualRow row, int childIndex) {
+        return "virtual-element-v1:"
+                + row.kind + ":"
+                + Integer.toUnsignedString(
+                        System.identityHashCode(row.collection)
+                ) + ":" + row.position + ":" + childIndex;
+    }
+
+    private static String virtualControlID(VirtualRow row, int childIndex) {
+        return "virtual-v1:"
+                + row.kind + ":"
+                + Integer.toUnsignedString(
+                        System.identityHashCode(row.collection)
+                ) + ":" + row.position + ":" + childIndex;
+    }
+
+    private static VirtualRow virtualRow(View collection, int position) {
+        try {
+            if (collection instanceof AdapterView) {
+                AdapterView<?> adapterView = (AdapterView<?>) collection;
+                Adapter adapter = adapterView.getAdapter();
+                if (adapter == null || position < 0
+                        || position >= adapter.getCount()) return null;
+                View row = adapter.getView(position, null, adapterView);
+                return new VirtualRow(
+                        "A",
+                        collection,
+                        position,
+                        adapter.getItemId(position),
+                        row
+                );
+            }
+            if (!isRecyclerView(collection)) return null;
+            Object adapter = invokeNoArgument(collection, "getAdapter");
+            if (adapter == null) return null;
+            Object rawType = invokeNamed(adapter, "getItemViewType", position);
+            int viewType = rawType instanceof Number
+                    ? ((Number) rawType).intValue()
+                    : 0;
+            Object holder = invokeNamed(
+                    adapter,
+                    "createViewHolder",
+                    collection,
+                    viewType
+            );
+            invokeNamed(adapter, "bindViewHolder", holder, position);
+            Field itemView = holder.getClass().getField("itemView");
+            View row = (View) itemView.get(holder);
+            Object rawID = invokeNamed(adapter, "getItemId", position);
+            long itemID = rawID instanceof Number
+                    ? ((Number) rawID).longValue()
+                    : position;
+            return new VirtualRow(
+                    "R",
+                    collection,
+                    position,
+                    itemID,
+                    row
+            );
+        } catch (Throwable error) {
+            Log.w(
+                    LOG_TAG,
+                    "Unable to bind virtual row " + position,
+                    error
+            );
+            return null;
+        }
+    }
+
+    private static boolean submitVirtualizedControl(
+            View root,
+            String controlID
+    ) {
+        try {
+            String[] parts = controlID.split(":", -1);
+            if (parts.length != 5 || !"virtual-v1".equals(parts[0])) {
+                return false;
+            }
+            String kind = parts[1];
+            long identity = Long.parseUnsignedLong(parts[2]);
+            int position = Integer.parseInt(parts[3]);
+            int childIndex = Integer.parseInt(parts[4]);
+            for (View collection : virtualizedCollections(root)) {
+                if (!kind.equals(isRecyclerView(collection) ? "R" : "A")
+                        || Integer.toUnsignedLong(
+                                System.identityHashCode(collection)
+                        ) != identity) continue;
+                VirtualRow row = virtualRow(collection, position);
+                if (row == null) return false;
+                if (childIndex >= 0) {
+                    List<View> children = flattened(row.view);
+                    if (childIndex >= children.size()) return false;
+                    View child = children.get(childIndex);
+                    if (child.isEnabled() && child.isClickable()
+                            && child.performClick()) return true;
+                }
+                if (collection instanceof AdapterView) {
+                    AdapterView<?> adapterView = (AdapterView<?>) collection;
+                    return adapterView.performItemClick(
+                            row.view,
+                            position,
+                            row.itemID
+                    );
+                }
+                return row.view.isEnabled()
+                        && row.view.isClickable()
+                        && row.view.performClick();
+            }
+        } catch (Throwable error) {
+            Log.w(LOG_TAG, "Unable to submit virtualized control", error);
+        }
+        return false;
+    }
+
+    private static Object invokeNoArgument(Object target, String name)
+            throws Exception {
+        return invokeNamed(target, name);
+    }
+
+    private static Object invokeNamed(
+            Object target,
+            String name,
+            Object... arguments
+    ) throws Exception {
+        Method selected = null;
+        for (Method method : target.getClass().getMethods()) {
+            if (method.getName().equals(name)
+                    && parametersAccept(
+                            method.getParameterTypes(),
+                            arguments
+                    )) {
+                selected = method;
+                break;
+            }
+        }
+        if (selected == null) {
+            throw new NoSuchMethodException(name);
+        }
+        selected.setAccessible(true);
+        return selected.invoke(target, arguments);
+    }
+
+    private static boolean parametersAccept(
+            Class<?>[] parameterTypes,
+            Object[] arguments
+    ) {
+        if (parameterTypes.length != arguments.length) return false;
+        for (int index = 0; index < parameterTypes.length; index++) {
+            Object argument = arguments[index];
+            Class<?> parameter = boxedType(parameterTypes[index]);
+            if (argument == null) {
+                if (parameterTypes[index].isPrimitive()) return false;
+            } else if (!parameter.isAssignableFrom(argument.getClass())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static Class<?> boxedType(Class<?> type) {
+        if (!type.isPrimitive()) return type;
+        if (type == boolean.class) return Boolean.class;
+        if (type == byte.class) return Byte.class;
+        if (type == char.class) return Character.class;
+        if (type == short.class) return Short.class;
+        if (type == int.class) return Integer.class;
+        if (type == long.class) return Long.class;
+        if (type == float.class) return Float.class;
+        if (type == double.class) return Double.class;
+        return Void.class;
+    }
+
+    private static final class VirtualRow {
+        final String kind;
+        final View collection;
+        final int position;
+        final long itemID;
+        final View view;
+
+        VirtualRow(
+                String kind,
+                View collection,
+                int position,
+                long itemID,
+                View view
+        ) {
+            this.kind = kind;
+            this.collection = collection;
+            this.position = position;
+            this.itemID = itemID;
+            this.view = view;
+        }
     }
 
     private static List<View> flattened(View root) {

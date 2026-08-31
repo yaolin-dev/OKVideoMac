@@ -8,73 +8,6 @@ private func nodeNonEmpty(_ value: String?) -> String? {
     return trimmed.isEmpty ? nil : trimmed
 }
 
-private actor NodeSiteInitializationGate {
-    private enum State {
-        case initializing([CheckedContinuation<Void, Error>])
-        case initialized
-    }
-
-    private var states: [String: State] = [:]
-
-    func ensureInitialized(
-        at baseURL: URL,
-        using operation: () async throws -> Void
-    ) async throws {
-        let endpointKey = baseURL.absoluteString
-        switch states[endpointKey] {
-        case .initialized:
-            return
-        case .initializing:
-            try await withCheckedThrowingContinuation { continuation in
-                guard case .initializing(var waiters) = states[endpointKey] else {
-                    continuation.resume()
-                    return
-                }
-                waiters.append(continuation)
-                states[endpointKey] = .initializing(waiters)
-            }
-            return
-        case nil:
-            states[endpointKey] = .initializing([])
-        }
-
-        do {
-            try await operation()
-            let waiters = waiters(for: endpointKey)
-            states[endpointKey] = .initialized
-            waiters.forEach { $0.resume() }
-        } catch {
-            let waiters = waiters(for: endpointKey)
-            states.removeValue(forKey: endpointKey)
-            waiters.forEach { $0.resume(throwing: error) }
-            throw error
-        }
-    }
-
-    private func waiters(
-        for endpointKey: String
-    ) -> [CheckedContinuation<Void, Error>] {
-        guard case .initializing(let waiters) = states[endpointKey] else {
-            return []
-        }
-        return waiters
-    }
-}
-
-private actor NodeRouteCapabilityCache {
-    static let shared = NodeRouteCapabilityCache()
-
-    private var unsupportedRoutes: Set<String> = []
-
-    func isUnsupported(_ route: String, siteIdentity: String) -> Bool {
-        unsupportedRoutes.contains("\(siteIdentity)|\(route)")
-    }
-
-    func markUnsupported(_ route: String, siteIdentity: String) {
-        unsupportedRoutes.insert("\(siteIdentity)|\(route)")
-    }
-}
-
 struct NodeRuntimeUnavailableSiteProvider: SiteProvider {
     let site: SiteConfiguration
     let capability: SiteCapability = .javaScriptSpider
@@ -102,6 +35,9 @@ struct NodeRuntimeUnavailableSiteProvider: SiteProvider {
 
 struct NodeWebAuthorizationRequired: Error, LocalizedError, Equatable {
     let challengeID: UUID
+    /// Host-side invocation that owns this challenge. Explicit completion
+    /// signals are accepted only from this request-scoped mailbox.
+    let requestID: String?
     let websiteURL: URL
     let title: String
     let message: String
@@ -110,46 +46,97 @@ struct NodeWebAuthorizationRequired: Error, LocalizedError, Equatable {
     let transport: String
 
     var errorDescription: String? { message }
+
+    init(
+        challengeID: UUID,
+        requestID: String? = nil,
+        websiteURL: URL,
+        title: String,
+        message: String,
+        provider: String?,
+        profileRevision: String?,
+        transport: String
+    ) {
+        self.challengeID = challengeID
+        self.requestID = requestID
+        self.websiteURL = websiteURL
+        self.title = title
+        self.message = message
+        self.provider = provider
+        self.profileRevision = profileRevision
+        self.transport = transport
+    }
 }
 
 struct NodeAuthorizationCompletionSignal: Equatable, Sendable {
     let challengeID: UUID
+    let requestID: String?
     let provider: String?
     let profileRevision: String?
+
+    init(
+        challengeID: UUID,
+        requestID: String? = nil,
+        provider: String?,
+        profileRevision: String?
+    ) {
+        self.challengeID = challengeID
+        self.requestID = requestID
+        self.provider = provider
+        self.profileRevision = profileRevision
+    }
 }
 
 actor NodeAuthorizationSignalCenter {
     static let shared = NodeAuthorizationSignalCenter()
 
-    private var completed: [UUID: NodeAuthorizationCompletionSignal] = [:]
-    private var continuations:
-        [UUID: [UUID: AsyncStream<NodeAuthorizationCompletionSignal>.Continuation]] = [:]
-    private var monitors: [UUID: Task<Void, Never>] = [:]
+    private struct SignalKey: Hashable {
+        let challengeID: UUID
+        let requestID: String?
+    }
 
-    func register(challengeID: UUID, monitor: Task<Void, Never>) {
-        guard completed[challengeID] == nil else {
+    private var completed: [SignalKey: NodeAuthorizationCompletionSignal] = [:]
+    private var continuations:
+        [SignalKey: [UUID: AsyncStream<NodeAuthorizationCompletionSignal>.Continuation]] = [:]
+    private var monitors: [SignalKey: Task<Void, Never>] = [:]
+
+    func register(
+        challengeID: UUID,
+        requestID: String?,
+        monitor: Task<Void, Never>
+    ) {
+        let key = SignalKey(
+            challengeID: challengeID,
+            requestID: Self.normalized(requestID)
+        )
+        guard completed[key] == nil else {
             monitor.cancel()
             return
         }
-        monitors[challengeID]?.cancel()
-        monitors[challengeID] = monitor
+        monitors[key]?.cancel()
+        monitors[key] = monitor
     }
 
     func signals(
-        for challengeID: UUID
+        for challengeID: UUID,
+        requestID: String?
     ) -> AsyncStream<NodeAuthorizationCompletionSignal> {
+        let key = SignalKey(
+            challengeID: challengeID,
+            requestID: Self.normalized(requestID)
+        )
         let continuationID = UUID()
         return AsyncStream { continuation in
-            if let signal = completed[challengeID] {
+            if let signal = completed[key] {
                 continuation.yield(signal)
                 continuation.finish()
             } else {
-                continuations[challengeID, default: [:]][continuationID] = continuation
+                continuations[key, default: [:]][continuationID] = continuation
             }
             continuation.onTermination = { _ in
                 Task {
                     await NodeAuthorizationSignalCenter.shared.removeContinuation(
-                        challengeID: challengeID,
+                        key: key,
                         continuationID: continuationID
                     )
                 }
@@ -158,10 +145,14 @@ actor NodeAuthorizationSignalCenter {
     }
 
     func publish(_ signal: NodeAuthorizationCompletionSignal) {
-        guard completed[signal.challengeID] == nil else { return }
-        completed[signal.challengeID] = signal
-        monitors[signal.challengeID] = nil
-        let listeners = continuations.removeValue(forKey: signal.challengeID) ?? [:]
+        let key = SignalKey(
+            challengeID: signal.challengeID,
+            requestID: Self.normalized(signal.requestID)
+        )
+        guard completed[key] == nil else { return }
+        completed[key] = signal
+        monitors[key] = nil
+        let listeners = continuations.removeValue(forKey: key) ?? [:]
         for continuation in listeners.values {
             continuation.yield(signal)
             continuation.finish()
@@ -169,22 +160,34 @@ actor NodeAuthorizationSignalCenter {
     }
 
     func cancel(_ challengeID: UUID) {
-        monitors.removeValue(forKey: challengeID)?.cancel()
-        completed[challengeID] = nil
-        let listeners = continuations.removeValue(forKey: challengeID) ?? [:]
-        for continuation in listeners.values {
-            continuation.finish()
+        let monitorKeys = monitors.keys.filter { $0.challengeID == challengeID }
+        for key in monitorKeys {
+            monitors.removeValue(forKey: key)?.cancel()
+        }
+        completed = completed.filter { $0.key.challengeID != challengeID }
+        let continuationKeys = continuations.keys.filter {
+            $0.challengeID == challengeID
+        }
+        for key in continuationKeys {
+            let listeners = continuations.removeValue(forKey: key) ?? [:]
+            for continuation in listeners.values {
+                continuation.finish()
+            }
         }
     }
 
     private func removeContinuation(
-        challengeID: UUID,
+        key: SignalKey,
         continuationID: UUID
     ) {
-        continuations[challengeID]?[continuationID] = nil
-        if continuations[challengeID]?.isEmpty == true {
-            continuations[challengeID] = nil
+        continuations[key]?[continuationID] = nil
+        if continuations[key]?.isEmpty == true {
+            continuations[key] = nil
         }
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        nodeNonEmpty(value)
     }
 }
 
@@ -222,14 +225,47 @@ struct QuarkPasscodeDisabledStore: QuarkPasscodeStoring {
     func store(_: String, for _: String) -> Bool { false }
 }
 
-/// The downloaded Node bundle owns the meaning of an episode value, but many
-/// Contract-B bundles do not yet publish an explicit durable resource
-/// descriptor. Keep that opaque input in Keychain and expose only a versioned
-/// digest to history. This lets the same Node provider recreate a fresh media
-/// URL/proxy session without persisting signed URLs, cookies or play tokens.
+enum CatPawPlaybackReplayKind: String, Codable, Equatable {
+    case video
+    case pan
+}
+
+/// Provider-call identity captured before a temporary playback URL exists.
+/// `profileIdentity` is the stable profile namespace, never the mutable
+/// profile revision. The final media URL, headers and runtime session are not
+/// representable here.
 struct NodePlaybackReplay: Codable, Equatable {
+    let version: Int
+    let kind: CatPawPlaybackReplayKind
+    let bundleIdentity: String?
+    let profileIdentity: String?
+    let videoID: String?
     let flag: String
     let episodeURL: String
+    let episodeName: String?
+    let episodeIndex: Int?
+
+    init(
+        version: Int = 2,
+        kind: CatPawPlaybackReplayKind = .video,
+        bundleIdentity: String? = nil,
+        profileIdentity: String? = nil,
+        videoID: String? = nil,
+        flag: String,
+        episodeURL: String,
+        episodeName: String? = nil,
+        episodeIndex: Int? = nil
+    ) {
+        self.version = version
+        self.kind = kind
+        self.bundleIdentity = bundleIdentity
+        self.profileIdentity = profileIdentity
+        self.videoID = videoID
+        self.flag = flag
+        self.episodeURL = episodeURL
+        self.episodeName = episodeName
+        self.episodeIndex = episodeIndex
+    }
 }
 
 protocol NodePlaybackReplayStoring {
@@ -249,27 +285,75 @@ struct NodePlaybackDisabledReplayStore: NodePlaybackReplayStoring {
 }
 
 enum NodePlaybackReplayReference {
-    static let prefix = "nhr1"
+    static let protectedPrefix = "nhr2"
+    static let directPrefix = "ndr2"
+    private static let legacyProtectedPrefix = "nhr1"
     private static let maximumFlagByteCount = 4_096
+    private static let maximumVideoByteCount = 65_536
     private static let maximumEpisodeByteCount = 65_536
+    private static let maximumDirectLocatorByteCount = 3_500
 
     static func locator(
         configurationIdentity: String,
         siteIdentity: String,
-        replay: NodePlaybackReplay
+        replay: NodePlaybackReplay,
+        store: NodePlaybackReplayStoring,
+        persistsProtectedReplay: Bool = true
     ) -> String? {
         guard !replay.flag.isEmpty,
               !replay.episodeURL.isEmpty,
               replay.flag.utf8.count <= maximumFlagByteCount,
+              (replay.videoID?.utf8.count ?? 0) <= maximumVideoByteCount,
               replay.episodeURL.utf8.count <= maximumEpisodeByteCount else {
             return nil
         }
+        if !requiresProtectedStorage(replay),
+           let encoded = encodedDirectReplay(replay),
+           encoded.utf8.count <= maximumDirectLocatorByteCount {
+            return encoded
+        }
+        let locator = protectedLocator(
+            configurationIdentity: configurationIdentity,
+            siteIdentity: siteIdentity,
+            replay: replay
+        )
+        guard persistsProtectedReplay else { return nil }
+        guard store.store(replay, for: locator) else { return nil }
+        return locator
+    }
+
+    static func replay(
+        for locator: String,
+        store: NodePlaybackReplayStoring
+    ) -> NodePlaybackReplay? {
+        if locator.hasPrefix("\(directPrefix).") {
+            let encoded = locator.dropFirst(directPrefix.count + 1)
+            guard let data = base64URLDecoded(String(encoded)) else {
+                return nil
+            }
+            return try? JSONDecoder().decode(NodePlaybackReplay.self, from: data)
+        }
+        guard isProtectedLocator(locator) else { return nil }
+        return store.replay(for: locator)
+    }
+
+    private static func protectedLocator(
+        configurationIdentity: String,
+        siteIdentity: String,
+        replay: NodePlaybackReplay
+    ) -> String {
         var data = Data()
         for value in [
             configurationIdentity,
             siteIdentity,
+            replay.bundleIdentity ?? "",
+            replay.profileIdentity ?? "",
+            replay.videoID ?? "",
+            replay.kind.rawValue,
             replay.flag,
-            replay.episodeURL
+            replay.episodeURL,
+            replay.episodeName ?? "",
+            replay.episodeIndex.map(String.init) ?? ""
         ] {
             let bytes = Data(value.utf8)
             var count = UInt64(bytes.count).bigEndian
@@ -279,19 +363,126 @@ enum NodePlaybackReplayReference {
         let digest = SHA256.hash(data: data)
             .map { String(format: "%02x", $0) }
             .joined()
-        return "\(prefix).\(digest)"
+        return "\(protectedPrefix).\(digest)"
     }
 
     static func isLocator(_ value: String) -> Bool {
-        guard value.hasPrefix("\(prefix).") else { return false }
+        isProtectedLocator(value)
+            || (value.hasPrefix("\(directPrefix).")
+                && replay(
+                    for: value,
+                    store: NodePlaybackDisabledReplayStore()
+                ) != nil)
+    }
+
+    static func isCurrentLocator(_ value: String) -> Bool {
+        value.hasPrefix("\(protectedPrefix).")
+            || value.hasPrefix("\(directPrefix).")
+    }
+
+    /// Keeps ordinary provider IDs verbatim, while replacing a URL, JSON,
+    /// encoded object or credential-shaped value with a non-reversible row
+    /// identity. History can use that identity for display/deduplication and
+    /// reopen the current provider detail (or search by title) on replay; the
+    /// original value is never copied into host persistence.
+    static func persistedOpaqueIdentity(
+        _ rawValue: String,
+        namespace: String
+    ) -> String {
+        guard opaqueValueRequiresProtection(rawValue) else { return rawValue }
+        let digest = SHA256.hash(
+            data: Data("\(namespace)\u{0}\(rawValue)".utf8)
+        ).map { String(format: "%02x", $0) }.joined()
+        return "cph2.\(digest)"
+    }
+
+    private static func isProtectedLocator(_ value: String) -> Bool {
+        let prefix: String
+        if value.hasPrefix("\(protectedPrefix).") {
+            prefix = protectedPrefix
+        } else if value.hasPrefix("\(legacyProtectedPrefix).") {
+            prefix = legacyProtectedPrefix
+        } else {
+            return false
+        }
         let digest = value.dropFirst(prefix.count + 1)
         return digest.count == 64 && digest.allSatisfy { $0.isHexDigit }
+    }
+
+    private static func encodedDirectReplay(
+        _ replay: NodePlaybackReplay
+    ) -> String? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(replay) else { return nil }
+        return "\(directPrefix).\(base64URLEncoded(data))"
+    }
+
+    private static func requiresProtectedStorage(
+        _ replay: NodePlaybackReplay
+    ) -> Bool {
+        [replay.videoID, replay.episodeURL].compactMap { $0 }.contains {
+            opaqueValueRequiresProtection($0)
+        }
+    }
+
+    private static func opaqueValueRequiresProtection(_ rawValue: String) -> Bool {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if URLComponents(string: value)?.scheme != nil
+            || value.first == "{" || value.first == "["
+            || value.contains("?") || value.contains("&")
+            || value.contains("=") {
+            return true
+        }
+        let lowercased = value.lowercased()
+        let sensitiveFragments = [
+            "access_token", "accesstoken", "authorization", "bearer",
+            "cookie", "credential", "password", "passcode", "secret",
+            "session", "signature", "signed", "stoken", "ticket", "token"
+        ]
+        if sensitiveFragments.contains(where: lowercased.contains) {
+            return true
+        }
+        var base64 = value
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.count % 4
+        if remainder != 0 {
+            base64.append(String(repeating: "=", count: 4 - remainder))
+        }
+        if let data = Data(base64Encoded: base64),
+           let decoded = String(data: data, encoding: .utf8) {
+            let trimmed = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.first == "{" || trimmed.first == "[" {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func base64URLEncoded(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private static func base64URLDecoded(_ value: String) -> Data? {
+        var base64 = value
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.count % 4
+        if remainder != 0 {
+            base64.append(String(repeating: "=", count: 4 - remainder))
+        }
+        return Data(base64Encoded: base64)
     }
 }
 
 /// Provider-published stable locators may still be credentials (for example a
-/// refresh token or JWT). Persist only this configuration/site/provider-bound
-/// digest; the original value remains in the ThisDeviceOnly replay store.
+/// refresh token or JWT). Legacy histories may contain only this bound digest;
+/// without the original value they are intentionally re-resolved through the
+/// current provider detail/search path instead of being replayed directly.
 enum NodeProviderLocatorReference {
     static let prefix = "npr1"
     private static let providerKind = "node-http-spider"
@@ -602,11 +793,7 @@ enum QuarkEpisodeReference {
 }
 
 final class NodeHTTPSpiderSiteProvider: SiteProvider {
-    private struct HostMessage: Decodable {
-        let action: String
-        let requestID: String?
-        let opt: JSONValue
-    }
+    private typealias HostMessage = CatPawHostMessage
 
     private struct InvocationResult {
         let value: JSONValue
@@ -628,10 +815,87 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     private let diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)?
     private let ensureRuntimeReady: (@Sendable () async throws -> URL)?
     private let configurationIdentity: String?
-    private let initializationGate = NodeSiteInitializationGate()
+    private let playbackReplayStore: NodePlaybackReplayStoring
+    private let capturedPlaybackReferenceLock = NSLock()
+    private var capturedPlaybackReferences: [String: PlaybackResourceReference] = [:]
+    private let routeClient: CatPawRouteClient
+    private let hostMessageBridge: CatPawHostMessageBridge
+    private let authorizationCoordinator: CatPawAuthorizationCoordinator
 
     var configurationWebsiteURL: URL {
         baseURL.appendingPathComponent("website")
+    }
+
+    /// Consumes a credential failure emitted while libmpv was reading a
+    /// CatPaw-owned proxy URL. Contract-B keeps the event short-lived and
+    /// source-scoped when the proxy path carries a module identity. Root
+    /// `/proxy/...` routes are runtime-scoped and can only be consumed by the
+    /// active playback's bounded post-failure poll.
+    func consumeLatePlaybackAuthorization(
+        flag: String,
+        notBefore: Date,
+        waitMilliseconds: Int = 750
+    ) async -> NodeWebAuthorizationRequired? {
+        guard let modulePath = Self.runtimeModulePath(from: site.api),
+              let readyBaseURL = try? await runtimeBaseURL() else {
+            return nil
+        }
+        let deadline = Date().addingTimeInterval(
+            TimeInterval(min(max(waitMilliseconds, 0), 2_000)) / 1_000
+        )
+        repeat {
+            let remaining = max(0, Int(deadline.timeIntervalSinceNow * 1_000))
+            let hostMessage: HostMessage?
+            do {
+                hostMessage = try await hostMessageBridge.pollRuntimeEvent(
+                    modulePath: modulePath,
+                    notBefore: notBefore,
+                    baseURL: readyBaseURL,
+                    waitMilliseconds: remaining
+                )
+            } catch {
+                return nil
+            }
+            guard let hostMessage else { return nil }
+            guard let options = hostMessage.opt.objectValue else {
+                continue
+            }
+            if let declaredModulePath = options["runtimeModulePath"]?.stringValue,
+               declaredModulePath != modulePath {
+                continue
+            }
+            let message: String
+            switch hostMessage.action {
+            case "proxyAuthorizationRequired":
+                guard let eventMessage = Self.toastMessage(from: options),
+                      Self.isStructuredProxyAuthorizationEvent(
+                          options: options,
+                          message: eventMessage
+                      ) else {
+                    continue
+                }
+                message = Self.proxyAuthorizationMessage(
+                    eventMessage,
+                    provider: options["provider"]?.stringValue
+                )
+            case "toast":
+                guard let toastMessage = Self.toastMessage(from: options),
+                      Self.isPlaybackAuthorizationMessage(
+                          toastMessage,
+                          flag: flag
+                      ) else {
+                    continue
+                }
+                message = toastMessage
+            default:
+                continue
+            }
+            return webAuthorizationRequired(
+                message: LogRedactor.text(message),
+                baseURL: readyBaseURL
+            )
+        } while deadline.timeIntervalSinceNow > 0
+        return nil
     }
 
     static func canHandle(site: SiteConfiguration, baseURL: URL?) -> Bool {
@@ -669,8 +933,19 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         self.httpClient = httpClient
         self.diagnosticReporter = diagnosticReporter
         self.ensureRuntimeReady = ensureRuntimeReady
+        routeClient = CatPawRouteClient(
+            site: site,
+            baseURL: baseURL,
+            httpClient: httpClient,
+            ensureRuntimeReady: ensureRuntimeReady
+        )
+        hostMessageBridge = CatPawHostMessageBridge(httpClient: httpClient)
+        authorizationCoordinator = CatPawAuthorizationCoordinator(
+            site: site,
+            hostMessageBridge: hostMessageBridge
+        )
         _ = quarkPasscodeStore
-        _ = playbackReplayStore
+        self.playbackReplayStore = playbackReplayStore
         let normalizedConfigurationIdentity = configurationIdentity?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
@@ -705,6 +980,10 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 result.categories[index].contentKind = .action
             }
         }
+        result.recommendations = Self.normalizingRuntimePosterURLs(
+            result.recommendations,
+            baseURL: home.baseURL
+        )
         guard !site.categories.isEmpty else { return result }
         let allowed = Set(site.categories)
         return SiteHome(
@@ -771,28 +1050,36 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         )
         if let hostMessage = invocation.hostMessage,
            hostMessage.action == "openInternalWebview" {
-            throw try webAuthorizationRequired(
+            throw try await webAuthorizationRequired(
                 hostMessage: hostMessage,
                 invocationID: invocation.invocationID,
                 baseURL: invocation.baseURL
             )
         }
         if mapsEntirePageAsActions {
-            return try SpiderResponseMapper.actionPage(
+            let page = try SpiderResponseMapper.actionPage(
                 invocation.value,
                 site: site,
                 baseURL: invocation.baseURL,
                 page: page
             )
+            return Self.normalizingRuntimePosterURLs(
+                page,
+                baseURL: invocation.baseURL
+            )
         }
         // A regular FongMi category may mix media, folder and explicit action
         // cards. Preserve that protocol metadata so the host can dispatch an
         // action before considering folder/detail navigation.
-        return try SpiderResponseMapper.javaDexCategoryPage(
+        let mappedPage = try SpiderResponseMapper.javaDexCategoryPage(
             invocation.value,
             site: site,
             baseURL: invocation.baseURL,
             page: page
+        )
+        return Self.normalizingRuntimePosterURLs(
+            mappedPage,
+            baseURL: invocation.baseURL
         )
     }
 
@@ -849,7 +1136,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         )
         if let hostMessage = invocation.hostMessage,
            hostMessage.action == "openInternalWebview" {
-            throw try webAuthorizationRequired(
+            throw try await webAuthorizationRequired(
                 hostMessage: hostMessage,
                 invocationID: invocation.invocationID,
                 baseURL: invocation.baseURL
@@ -872,7 +1159,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 baseURL: invocation.baseURL,
                 waitMilliseconds: 1_250
                ), hostMessage.action == "openInternalWebview" {
-                throw try webAuthorizationRequired(
+                throw try await webAuthorizationRequired(
                     hostMessage: hostMessage,
                     invocationID: invocation.invocationID,
                     baseURL: invocation.baseURL
@@ -889,7 +1176,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 baseURL: invocation.baseURL,
                 waitMilliseconds: 1_250
                ), hostMessage.action == "openInternalWebview" {
-                throw try webAuthorizationRequired(
+                throw try await webAuthorizationRequired(
                     hostMessage: hostMessage,
                     invocationID: invocation.invocationID,
                     baseURL: invocation.baseURL
@@ -910,12 +1197,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 pagination: Pagination(page: page, pageCount: 0)
             )
         }
-        let siteIdentity = capabilitySiteIdentity
-        if let siteIdentity,
-           await NodeRouteCapabilityCache.shared.isUnsupported(
-            "search",
-            siteIdentity: siteIdentity
-           ) {
+        if await routeClient.capabilityState(for: .search) == .unsupported {
             throw SiteSearchError(
                 "\(site.name) search 失败：该 Bundle 与 Profile 已确认未注册搜索路由",
                 category: .unsupportedRoute
@@ -938,19 +1220,19 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 maximumAttempts: 1
             )
         } catch let error as SiteSearchError {
-            if error.category == .unsupportedRoute, let siteIdentity {
-                await NodeRouteCapabilityCache.shared.markUnsupported(
-                    "search",
-                    siteIdentity: siteIdentity
-                )
+            if error.category == .unsupportedRoute {
+                await routeClient.recordUnsupported(.search)
             }
             throw error
         }
-        let result = try SpiderResponseMapper.page(
-            invocation.value,
-            site: site,
-            baseURL: invocation.baseURL,
-            page: page
+        let result = Self.normalizingRuntimePosterURLs(
+            try SpiderResponseMapper.page(
+                invocation.value,
+                site: site,
+                baseURL: invocation.baseURL,
+                page: page
+            ),
+            baseURL: invocation.baseURL
         )
         if result.items.isEmpty,
            let message = Self.serverMessage(from: invocation.value),
@@ -963,21 +1245,21 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         return result
     }
 
-    private var capabilitySiteIdentity: String? {
-        if let identity = site.extra["okNodeSiteIdentity"]?.stringValue,
-           !identity.isEmpty {
-            return identity
+    func supportsContent(_ value: String) async throws -> Bool {
+        do {
+            let invocation = try await invoke(
+                method: CatPawRoute.support.rawValue,
+                body: [
+                    "url": .string(value),
+                    "id": .string(value)
+                ],
+                maximumAttempts: 1
+            )
+            return Self.supportBoolean(from: invocation.value)
+        } catch let error as CatPawRouteError {
+            if case .unsupportedRoute = error { return false }
+            throw error
         }
-        guard let bundleIdentity = site.extra["okNodeBundleIdentity"]?.stringValue,
-              let profileRevision = site.extra["okNodeProfileRevision"]?.stringValue else {
-            return nil
-        }
-        return [
-            bundleIdentity,
-            profileRevision,
-            site.extra["okNodeModuleKind"]?.stringValue ?? "video",
-            site.key
-        ].joined(separator: "|")
     }
 
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
@@ -1042,9 +1324,18 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         let requestedSourceName = request.sourceName?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if let reference = request.providerResourceReference,
-           acceptsPlaybackResourceReference(reference),
-           let sourceName = requestedSourceName,
-           !sourceName.isEmpty {
+           acceptsPlaybackResourceReference(reference) {
+            if NodePlaybackReplayReference.isCurrentLocator(
+                reference.stableResourceLocator
+            ) {
+                return try await refreshCatPawVideoPlayback(
+                    reference: reference
+                )
+            }
+            guard let sourceName = requestedSourceName,
+                  !sourceName.isEmpty else {
+                throw ProviderPlaybackError("历史记录缺少原播放线路标识")
+            }
             let directResult: SitePlaybackResult
             do {
                 directResult = try await player(
@@ -1101,6 +1392,88 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         return try await refreshPlaybackBySelection(request)
     }
 
+    private func refreshCatPawVideoPlayback(
+        reference: PlaybackResourceReference
+    ) async throws -> RefreshedSitePlayback {
+        guard let replay = NodePlaybackReplayReference.replay(
+            for: reference.stableResourceLocator,
+            store: playbackReplayStore
+        ), replay.kind == .video,
+           let videoID = nodeNonEmpty(replay.videoID),
+           replayBelongsToCurrentProvider(replay) else {
+            throw ProviderPlaybackError("原 CatPaw 播放身份已丢失或不属于当前 Bundle/Profile")
+        }
+
+        let detail = try await self.detail(id: videoID)
+        let sourceEpisodes: [(PlaySource, PlayEpisode)] = detail.playSources
+            .flatMap { source -> [(PlaySource, PlayEpisode)] in
+                guard source.name == replay.flag else { return [] }
+                return source.episodes.map { (source, $0) }
+            }
+        let exactMatches = sourceEpisodes.filter {
+            $0.1.url == replay.episodeURL
+        }
+        let selected: (PlaySource, PlayEpisode)?
+        if exactMatches.count == 1 {
+            selected = exactMatches.first
+        } else if exactMatches.isEmpty {
+            // Some cloud details rotate a token embedded in episodeID while
+            // preserving the same provider resource. Match the credential-
+            // free structural identity only inside the exact original flag;
+            // this is still provider replay and never a title search.
+            let replayIdentity = PlaybackReferenceIdentity.episode(
+                name: replay.episodeName ?? "",
+                reference: replay.episodeURL
+            )
+            let semanticMatches = sourceEpisodes.filter {
+                PlaybackReferenceIdentity.episode(
+                    name: $0.1.name,
+                    reference: $0.1.url
+                ) == replayIdentity
+            }
+            selected = semanticMatches.count == 1
+                ? semanticMatches.first
+                : nil
+        } else {
+            selected = nil
+        }
+        guard let selected else {
+            throw ProviderPlaybackError(
+                "最新详情中已无法唯一定位原 flag + episodeID"
+            )
+        }
+
+        var result = try await player(
+            flag: replay.flag,
+            episodeURL: selected.1.url
+        )
+        result.resourceReference = reference
+        result.mediaSession?.resourceReference = reference
+        result.mediaSession?.refreshPerformed = true
+        return RefreshedSitePlayback(
+            detail: detail,
+            source: selected.0,
+            episode: selected.1,
+            playbackResult: result
+        )
+    }
+
+    private func replayBelongsToCurrentProvider(
+        _ replay: NodePlaybackReplay
+    ) -> Bool {
+        if let expectedBundle = nodeNonEmpty(replay.bundleIdentity),
+           nodeNonEmpty(site.extra["okNodeBundleIdentity"]?.stringValue)
+            != expectedBundle {
+            return false
+        }
+        if let expectedProfile = nodeNonEmpty(replay.profileIdentity),
+           nodeNonEmpty(site.extra["okNodeProfileIdentity"]?.stringValue)
+            != expectedProfile {
+            return false
+        }
+        return true
+    }
+
     private func refreshPlaybackBySelection(
         _ request: PlaybackRefreshRequest
     ) async throws -> RefreshedSitePlayback {
@@ -1134,7 +1507,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             && reference.configurationIdentity == configurationIdentity
             && reference.siteIdentity == site.key
             && reference.providerKind == "node-http-spider"
-            && reference.providerVersion == 1
+            && [1, 2].contains(reference.providerVersion)
             && reference.stability == .providerStable
             && !reference.sourceIdentity.isEmpty
             && !reference.episodeIdentity.isEmpty,
@@ -1144,7 +1517,18 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
               ) == reference else {
             return false
         }
-        return QuarkEpisodeReference.identity(from: locator) != nil
+        if reference.providerVersion == 2,
+           NodePlaybackReplayReference.isCurrentLocator(locator),
+           let replay = NodePlaybackReplayReference.replay(
+            for: locator,
+            store: playbackReplayStore
+           ) {
+            return replay.kind == .video
+                && nodeNonEmpty(replay.videoID) != nil
+                && replayBelongsToCurrentProvider(replay)
+        }
+        return reference.providerVersion == 1
+            && QuarkEpisodeReference.identity(from: locator) != nil
     }
 
     private func resolvePlayer(
@@ -1165,7 +1549,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         )
         if let hostMessage = invocation.hostMessage,
            hostMessage.action == "openInternalWebview" {
-            throw try webAuthorizationRequired(
+            throw try await webAuthorizationRequired(
                 hostMessage: hostMessage,
                 invocationID: invocation.invocationID,
                 baseURL: invocation.baseURL
@@ -1186,7 +1570,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 baseURL: invocation.baseURL,
                 waitMilliseconds: 1_250
             ), hostMessage.action == "openInternalWebview" {
-                throw try webAuthorizationRequired(
+                throw try await webAuthorizationRequired(
                     hostMessage: hostMessage,
                     invocationID: invocation.invocationID,
                     baseURL: invocation.baseURL
@@ -1300,6 +1684,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         episodeURL: String,
         providerDescriptor: ProviderPlaybackResourceDescriptor?
     ) -> PlaybackResourceReference? {
+        if let captured = capturedPlaybackReference(
+            flag: flag,
+            episodeURL: episodeURL
+        ) {
+            return captured
+        }
         guard let configurationIdentity else {
             return nil
         }
@@ -1345,11 +1735,14 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         guard case .detail(var detail) = selection else { return selection }
         detail.playSources = detail.playSources.map { source in
             var source = source
-            source.episodes = source.episodes.map { episode in
-                guard let reference = playbackResourceReference(
+            source.episodes = source.episodes.enumerated().map {
+                episodeIndex, episode in
+                guard let reference = historyPlaybackResourceReference(
+                    videoID: detail.summary.videoID,
                     flag: source.name,
-                    episodeURL: episode.url,
-                    providerDescriptor: nil
+                    episode: episode,
+                    episodeIndex: episodeIndex,
+                    persistsProtectedReplay: false
                 ) else {
                     return episode
                 }
@@ -1366,6 +1759,116 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             return source
         }
         return .detail(detail)
+    }
+
+    private func historyPlaybackResourceReference(
+        videoID: String,
+        flag: String,
+        episode: PlayEpisode,
+        episodeIndex: Int,
+        persistsProtectedReplay: Bool
+    ) -> PlaybackResourceReference? {
+        guard let configurationIdentity else { return nil }
+        let replay = NodePlaybackReplay(
+            kind: .video,
+            bundleIdentity: nodeNonEmpty(
+                site.extra["okNodeBundleIdentity"]?.stringValue
+            ),
+            profileIdentity: nodeNonEmpty(
+                site.extra["okNodeProfileIdentity"]?.stringValue
+            ),
+            videoID: videoID,
+            flag: flag,
+            episodeURL: episode.url,
+            episodeName: episode.name,
+            episodeIndex: episodeIndex
+        )
+        if let locator = NodePlaybackReplayReference.locator(
+            configurationIdentity: configurationIdentity,
+            siteIdentity: site.key,
+            replay: replay,
+            store: playbackReplayStore,
+            persistsProtectedReplay: persistsProtectedReplay
+        ) {
+            return PlaybackResourceReference(
+                configurationIdentity: configurationIdentity,
+                siteIdentity: site.key,
+                providerKind: "node-http-spider",
+                providerVersion: 2,
+                stableResourceLocator: locator,
+                sourceIdentity: PlaybackReferenceIdentity.source(
+                    explicitIdentity: "catpaw-video:\(site.key):\(flag)",
+                    episodes: []
+                ),
+                episodeIdentity: PlaybackReferenceIdentity.episode(
+                    explicitIdentity: "catpaw-video:\(locator)",
+                    name: episode.name,
+                    reference: ""
+                ),
+                stability: .providerStable,
+                expiresAt: nil
+            )
+        }
+
+        // Production deliberately has no protected replay store. Quark's
+        // share/file tuple is credential-free and refreshable; every other
+        // unsafe provider value falls back to the saved navigation recipe so
+        // history reopens current detail (or searches by title) before play.
+        return playbackResourceReference(
+            flag: flag,
+            episodeURL: episode.url,
+            providerDescriptor: nil
+        )
+    }
+
+    /// Called at the user-selection boundary. Only credential-free replay
+    /// values can become durable references; unsafe values remain in memory
+    /// for the current playback session and history re-resolves them later.
+    func captureHistoryPlaybackResourceReference(
+        videoID: String,
+        flag: String,
+        episode: PlayEpisode,
+        episodeIndex: Int
+    ) -> PlaybackResourceReference? {
+        guard let reference = historyPlaybackResourceReference(
+            videoID: videoID,
+            flag: flag,
+            episode: episode,
+            episodeIndex: episodeIndex,
+            persistsProtectedReplay: true
+        ) else { return nil }
+        capturedPlaybackReferenceLock.lock()
+        capturedPlaybackReferences[
+            capturedPlaybackReferenceKey(flag: flag, episodeURL: episode.url)
+        ] = reference
+        if capturedPlaybackReferences.count > 64,
+           let firstKey = capturedPlaybackReferences.keys.first {
+            capturedPlaybackReferences.removeValue(forKey: firstKey)
+        }
+        capturedPlaybackReferenceLock.unlock()
+        return reference
+    }
+
+    private func capturedPlaybackReference(
+        flag: String,
+        episodeURL: String
+    ) -> PlaybackResourceReference? {
+        let key = capturedPlaybackReferenceKey(
+            flag: flag,
+            episodeURL: episodeURL
+        )
+        capturedPlaybackReferenceLock.lock()
+        defer { capturedPlaybackReferenceLock.unlock() }
+        return capturedPlaybackReferences[key]
+    }
+
+    private func capturedPlaybackReferenceKey(
+        flag: String,
+        episodeURL: String
+    ) -> String {
+        SHA256.hash(data: Data("\(flag)\u{0}\(episodeURL)".utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     private func refreshQuarkShareToken(
@@ -1480,7 +1983,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         )
         if let hostMessage = invocation.hostMessage,
            hostMessage.action == "openInternalWebview" {
-            throw try webAuthorizationRequired(
+            throw try await webAuthorizationRequired(
                 hostMessage: hostMessage,
                 invocationID: invocation.invocationID,
                 baseURL: invocation.baseURL
@@ -1495,39 +1998,23 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         maximumAttempts: Int = 1,
         hostMessageWaitMilliseconds: Int = 0
     ) async throws -> InvocationResult {
-        let requestBody = try JSONEncoder().encode(JSONValue.object(body))
-        var headers = HTTPHeaders(site.header)
-        headers["Content-Type"] = "application/json; charset=utf-8"
+        guard let route = CatPawRoute(rawValue: method) else {
+            throw AppError.spider("未知 CatPaw 路由：\(method)")
+        }
         let attempts = max(1, maximumAttempts)
         var lastEndpoint = baseURL
         for attempt in 0..<attempts {
             do {
-                let readyBaseURL = try await runtimeBaseURL()
-                try await initializationGate.ensureInitialized(
-                    at: readyBaseURL
-                ) {
-                    try await initializeSite(at: readyBaseURL, headers: headers)
-                }
-                let apiURL = try ResourceResolver.resolve(
-                    site.api,
-                    relativeTo: readyBaseURL
+                let prepared = try await routeClient.prepare(
+                    route: route,
+                    payload: body
                 )
-                let endpoint = apiURL.appendingPathComponent(method)
-                lastEndpoint = endpoint
-                let invocationID = UUID().uuidString.lowercased()
-                headers["X-OKVideo-Invocation-ID"] = invocationID
-                let routeRequest = HTTPRequest(
-                    url: endpoint,
-                    method: .post,
-                    headers: headers,
-                    body: requestBody,
-                    timeout: TimeInterval(site.timeout ?? 60),
-                    maximumResponseBytes: 16 * 1_024 * 1_024,
-                    retryPolicy: .none,
-                    allowsNonSuccessfulStatus: true
-                )
+                let readyBaseURL = prepared.baseURL
+                let invocationID = prepared.invocationID
+                let routeRequest = prepared.request
+                lastEndpoint = routeRequest.url
                 let response: HTTPResponse
-                if method == "play",
+                if route == .play,
                    site.extra["okNodeHostMessageBridge"] == .bool(true) {
                     let event = try await withThrowingTaskGroup(
                         of: PlaybackInvocationEvent.self
@@ -1556,7 +2043,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                         Task { @MainActor in
                             NodeHostSniffBridge.cancel()
                         }
-                        throw try webAuthorizationRequired(
+                        throw try await webAuthorizationRequired(
                             hostMessage: hostMessage,
                             invocationID: invocationID,
                             baseURL: readyBaseURL
@@ -1581,7 +2068,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                     }
                 }
                 guard !(200...299).contains(response.statusCode) else {
-                    let immediateHostMessage = Self.decodeHostMessage(
+                    await routeClient.recordSupported(route)
+                    let immediateHostMessage = hostMessageBridge.decodeHeader(
                         response.headers["X-OKVideo-Host-Message"]
                     )
                     let effectiveInvocationID = response.headers[
@@ -1609,7 +2097,14 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 }
                 let message = Self.serverMessage(from: value)
                     ?? "HTTP 状态码 \(response.statusCode)"
-                if method == "play",
+                if CatPawRouteClient.isExactRouteNotFound(
+                    statusCode: response.statusCode,
+                    message: message,
+                    route: route
+                ) {
+                    await routeClient.recordUnsupported(route)
+                }
+                if route == .play,
                    Self.shouldAwaitLateAuthorizationMessage(
                        message,
                        flag: body["flag"]?.stringValue ?? ""
@@ -1620,7 +2115,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                        baseURL: readyBaseURL,
                        waitMilliseconds: 1_250
                    ), hostMessage.action == "openInternalWebview" {
-                    throw try webAuthorizationRequired(
+                    throw try await webAuthorizationRequired(
                         hostMessage: hostMessage,
                         invocationID: response.headers[
                             "X-OKVideo-Invocation-ID"
@@ -1634,7 +2129,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                         baseURL: readyBaseURL
                     )
                 }
-                if method == "search" {
+                if route == .search {
                     throw Self.searchError(
                         siteName: site.name,
                         statusCode: response.statusCode,
@@ -1652,6 +2147,15 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             } catch let authorization as NodeWebAuthorizationRequired {
                 throw authorization
             } catch let error as SiteSearchError {
+                throw error
+            } catch let error as CatPawRouteError {
+                if route == .search,
+                   case .unsupportedRoute = error {
+                    throw SiteSearchError(
+                        "\(site.name) search 失败：\(error.localizedDescription)",
+                        category: .unsupportedRoute
+                    )
+                }
                 throw error
             } catch {
                 if attempt + 1 < attempts,
@@ -1674,7 +2178,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                         originalURL: lastEndpoint
                     )
                 )
-                if method == "search" {
+                if route == .search {
                     throw Self.searchTransportError(
                         siteName: site.name,
                         error: error
@@ -1688,6 +2192,28 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
 
     private static func isTransientHTTPStatus(_ statusCode: Int) -> Bool {
         statusCode == 502 || statusCode == 503 || statusCode == 504
+    }
+
+    private static func supportBoolean(from value: JSONValue) -> Bool {
+        switch value {
+        case .bool(let value): return value
+        case .integer(let value): return value != 0
+        case .number(let value): return value != 0
+        case .string(let value):
+            return ["1", "true", "yes", "supported"].contains(
+                value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+            )
+        case .object(let object):
+            for key in ["support", "supported", "result", "value"] {
+                if let nested = object[key] {
+                    return supportBoolean(from: nested)
+                }
+            }
+            return false
+        case .array, .null:
+            return false
+        }
     }
 
     private static func searchError(
@@ -1937,32 +2463,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         requestID: String,
         baseURL: URL
     ) async throws {
-        guard Self.isValidHostMessageIdentifier(invocationID),
-              Self.isValidHostMessageIdentifier(requestID) else {
-            throw AppError.spider("Node 宿主操作关联标识无效")
-        }
-        let endpoint = baseURL
-            .appendingPathComponent("__okvideo")
-            .appendingPathComponent("host-message-reply")
-            .appendingPathComponent(invocationID)
-            .appendingPathComponent(requestID)
-        let response = try await httpClient.send(
-            HTTPRequest(
-                url: endpoint,
-                method: .post,
-                headers: ["Content-Type": "application/json; charset=utf-8"],
-                body: try JSONEncoder().encode(value),
-                timeout: 5,
-                maximumResponseBytes: 8 * 1_024,
-                retryPolicy: .none,
-                allowsNonSuccessfulStatus: true
-            )
+        try await hostMessageBridge.reply(
+            value,
+            invocationID: invocationID,
+            requestID: requestID,
+            baseURL: baseURL
         )
-        guard (200...299).contains(response.statusCode) else {
-            throw AppError.spider(
-                "Node 宿主操作回传失败：HTTP 状态码 \(response.statusCode)"
-            )
-        }
     }
 
     /// Consumes only messages owned by one invocation. Sniff requests are
@@ -2111,96 +2617,20 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         baseURL: URL,
         waitMilliseconds: Int
     ) async throws -> HostMessage? {
-        let allowed = CharacterSet.alphanumerics.union(
-            CharacterSet(charactersIn: "._-")
+        try await hostMessageBridge.poll(
+            invocationID: invocationID,
+            baseURL: baseURL,
+            waitMilliseconds: waitMilliseconds
         )
-        guard invocationID.rangeOfCharacter(from: allowed.inverted) == nil,
-              (8...128).contains(invocationID.count) else {
-            throw AppError.spider("Node 宿主操作关联标识无效")
-        }
-        var components = URLComponents(
-            url: baseURL.appendingPathComponent(
-                "__okvideo/host-message/\(invocationID)"
-            ),
-            resolvingAgainstBaseURL: false
-        )
-        components?.queryItems = [
-            URLQueryItem(
-                name: "wait",
-                value: String(min(max(waitMilliseconds, 0), 2_000))
-            )
-        ]
-        guard let endpoint = components?.url else {
-            throw AppError.spider("Node 宿主操作轮询地址无效")
-        }
-        let response = try await httpClient.send(
-            HTTPRequest(
-                url: endpoint,
-                method: .get,
-                timeout: TimeInterval(waitMilliseconds) / 1_000 + 2,
-                maximumResponseBytes: 8 * 1_024,
-                retryPolicy: .none,
-                allowsNonSuccessfulStatus: true
-            )
-        )
-        guard response.statusCode == 200 else {
-            if response.statusCode == 204 || response.statusCode == 404 {
-                return nil
-            }
-            throw AppError.spider(
-                "Node 宿主操作轮询失败：HTTP 状态码 \(response.statusCode)"
-            )
-        }
-        guard response.body.count <= 4 * 1_024 else {
-            throw AppError.spider("Node 宿主操作响应过大")
-        }
-        return try? JSONDecoder().decode(HostMessage.self, from: response.body)
-    }
-
-    private func initializeSite(
-        at readyBaseURL: URL,
-        headers: HTTPHeaders
-    ) async throws {
-        let apiURL = try ResourceResolver.resolve(
-            site.api,
-            relativeTo: readyBaseURL
-        )
-        let endpoint = apiURL.appendingPathComponent("init")
-        let response = try await httpClient.send(
-            HTTPRequest(
-                url: endpoint,
-                method: .post,
-                headers: headers,
-                body: Data("{}".utf8),
-                timeout: min(TimeInterval(site.timeout ?? 60), 15),
-                maximumResponseBytes: 1 * 1_024 * 1_024,
-                retryPolicy: .none,
-                allowsNonSuccessfulStatus: true
-            )
-        )
-        if (200...299).contains(response.statusCode)
-            || response.statusCode == 404
-            || response.statusCode == 405 {
-            return
-        }
-        let value = try? JSONDecoder().decode(JSONValue.self, from: response.body)
-        let message = value.flatMap { Self.serverMessage(from: $0) }
-            ?? "HTTP 状态码 \(response.statusCode)"
-        throw AppError.spider("\(site.name) init 失败：\(message)")
     }
 
     private func webAuthorizationRequired(
         message: String,
         baseURL: URL
     ) -> NodeWebAuthorizationRequired {
-        NodeWebAuthorizationRequired(
-            challengeID: UUID(),
-            websiteURL: baseURL.appendingPathComponent("website"),
-            title: site.name.replacingOccurrences(of: "|", with: " "),
+        authorizationCoordinator.legacyAuthorizationRequired(
             message: message,
-            provider: site.name.replacingOccurrences(of: "|", with: " "),
-            profileRevision: site.extra["okNodeProfileRevision"]?.stringValue,
-            transport: "web"
+            baseURL: baseURL
         )
     }
 
@@ -2208,110 +2638,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         hostMessage: HostMessage,
         invocationID: String,
         baseURL: URL
-    ) throws -> NodeWebAuthorizationRequired {
-        guard hostMessage.action == "openInternalWebview",
-              let options = hostMessage.opt.objectValue,
-              let rawURL = options["url"]?.stringValue,
-              let url = URL(string: rawURL),
-              url.scheme?.lowercased() == "http",
-              ["127.0.0.1", "localhost", "::1"].contains(
-                url.host?.lowercased() ?? ""
-              ),
-              url.port != nil else {
-            throw AppError.spider("Node 站点请求了不受支持的宿主操作")
-        }
-        let providerChallengeID = options["challengeID"]?.stringValue
-        let challengeID = providerChallengeID.flatMap(UUID.init(uuidString:))
-            ?? UUID()
-        let provider = nodeNonEmpty(options["provider"]?.stringValue)
-            ?? site.name.replacingOccurrences(of: "|", with: " ")
-        let profileRevision = nodeNonEmpty(
-            options["profileRevision"]?.stringValue
+    ) async throws -> NodeWebAuthorizationRequired {
+        try await authorizationCoordinator.authorizationRequired(
+            hostMessage: hostMessage,
+            invocationID: invocationID,
+            baseURL: baseURL
         )
-            ?? site.extra["okNodeProfileRevision"]?.stringValue
-        let transport = nodeNonEmpty(options["transport"]?.stringValue) ?? "web"
-        let monitor = Task { [weak self] in
-            guard let self else { return }
-            await self.monitorAuthorizationCompletion(
-                challengeID: challengeID,
-                providerChallengeID: providerChallengeID,
-                provider: provider,
-                invocationID: invocationID,
-                baseURL: baseURL
-            )
-        }
-        Task {
-            await NodeAuthorizationSignalCenter.shared.register(
-                challengeID: challengeID,
-                monitor: monitor
-            )
-        }
-        return NodeWebAuthorizationRequired(
-            challengeID: challengeID,
-            websiteURL: url,
-            title: site.name.replacingOccurrences(of: "|", with: " "),
-            message: "等待网盘授权，请使用对应网盘 App 扫码。",
-            provider: provider,
-            profileRevision: profileRevision,
-            transport: transport
-        )
-    }
-
-    private func monitorAuthorizationCompletion(
-        challengeID: UUID,
-        providerChallengeID: String?,
-        provider: String?,
-        invocationID: String,
-        baseURL: URL
-    ) async {
-        while !Task.isCancelled {
-            do {
-                guard let message = try await awaitHostMessage(
-                    invocationID: invocationID,
-                    baseURL: baseURL,
-                    waitMilliseconds: 2_000
-                ) else {
-                    try await Task.sleep(nanoseconds: 100_000_000)
-                    continue
-                }
-                if message.action == "sniff" {
-                    await performHostSniff(
-                        message,
-                        invocationID: invocationID,
-                        baseURL: baseURL
-                    )
-                    continue
-                }
-                guard message.action == "authorizationCompleted" else {
-                    continue
-                }
-                let options = message.opt.objectValue ?? [:]
-                if let expected = nodeNonEmpty(providerChallengeID),
-                   let actual = nodeNonEmpty(
-                    options["challengeID"]?.stringValue
-                   ),
-                   expected != actual {
-                    continue
-                }
-                await NodeAuthorizationSignalCenter.shared.publish(
-                    NodeAuthorizationCompletionSignal(
-                        challengeID: challengeID,
-                        provider: nodeNonEmpty(
-                            options["provider"]?.stringValue
-                        )
-                            ?? provider,
-                        profileRevision: nodeNonEmpty(
-                            options["profileRevision"]?.stringValue
-                        )
-                    )
-                )
-                return
-            } catch is CancellationError {
-                return
-            } catch {
-                try? await Task.sleep(nanoseconds: 250_000_000)
-            }
-        }
     }
 
     private static func decodeHostMessage(_ encoded: String?) -> HostMessage? {
@@ -2342,10 +2674,10 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     ) -> String {
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return value }
-        if value.hasPrefix("/") {
-            return baseURL
-                .appendingPathComponent(String(value.dropFirst()))
-                .absoluteString
+        if value.hasPrefix("/spider/")
+            || value.hasPrefix("/proxy/")
+            || value.hasPrefix("/__okvideo/") {
+            return CatPawRuntimeURLResolver.normalize(value, baseURL: baseURL)
         }
         guard var components = URLComponents(string: value) else {
             return value
@@ -2360,12 +2692,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                   ) else {
                 return value
             }
-            components.scheme = baseURL.scheme
-            components.host = baseURL.host
-            components.port = baseURL.port
-            components.user = nil
-            components.password = nil
-            return components.url?.absoluteString ?? value
+            return CatPawRuntimeURLResolver.normalize(value, baseURL: baseURL)
         }
         guard
               let port = components.port,
@@ -2378,6 +2705,46 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         components.host = baseURL.host
         components.port = baseURL.port
         return components.url?.absoluteString ?? value
+    }
+
+    static func normalizeRuntimePosterURL(
+        _ posterURL: URL?,
+        baseURL: URL
+    ) -> URL? {
+        guard let posterURL else { return nil }
+        return URL(
+            string: normalizePlaybackURL(
+                posterURL.absoluteString,
+                baseURL: baseURL
+            )
+        ) ?? posterURL
+    }
+
+    private static func normalizingRuntimePosterURLs(
+        _ items: [VideoSummary],
+        baseURL: URL
+    ) -> [VideoSummary] {
+        items.map { item in
+            var item = item
+            item.posterURL = normalizeRuntimePosterURL(
+                item.posterURL,
+                baseURL: baseURL
+            )
+            return item
+        }
+    }
+
+    private static func normalizingRuntimePosterURLs(
+        _ page: VideoPage,
+        baseURL: URL
+    ) -> VideoPage {
+        VideoPage(
+            items: normalizingRuntimePosterURLs(
+                page.items,
+                baseURL: baseURL
+            ),
+            pagination: page.pagination
+        )
     }
 
     private struct PlaybackTransportSelection {
@@ -2463,6 +2830,34 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             // new playback failure.
             return nil
         }
+    }
+
+    private static func runtimeModulePath(from api: String) -> String? {
+        let encodedPath = URLComponents(string: api)?.percentEncodedPath
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard let encodedPath, !encodedPath.isEmpty else { return nil }
+        let parts = encodedPath.split(
+            separator: "/",
+            omittingEmptySubsequences: true
+        )
+        guard parts.count >= 3,
+              parts[0].lowercased() == "spider" else {
+            return nil
+        }
+        return "/" + parts.prefix(3).joined(separator: "/")
+    }
+
+    private static func toastMessage(
+        from options: [String: JSONValue]
+    ) -> String? {
+        for key in ["message", "msg", "text", "title"] {
+            if let value = options[key]?.stringValue?.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ), !value.isEmpty {
+                return value
+            }
+        }
+        return nil
     }
 
     private func isOwnedByRuntime(
@@ -2560,7 +2955,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         ]
         let providerHints = [
             "网盘", "夸克", "uc", "百度", "115", "123",
-            "天翼", "移动", "光鸭", "迅雷", "bili"
+            "天翼", "移动", "光鸭", "迅雷", "bili",
+            "阿里", "阿里云盘"
         ]
         return configurationHints.contains(where: normalized.contains)
             && providerHints.contains(where: normalized.contains)
@@ -2570,15 +2966,19 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         _ message: String,
         flag: String
     ) -> Bool {
+        if isExpiredQuarkShareTokenMessage(message) { return false }
         if isAuthorizationMessage(message) { return true }
         let normalized = "\(flag) \(message)".lowercased()
         let providerHints = [
             "网盘", "夸克", "uc", "百度", "115", "123",
-            "天翼", "移动", "光鸭", "迅雷", "ali", "alipan"
+            "天翼", "移动", "光鸭", "迅雷",
+            "阿里", "阿里云盘", "ali", "alipan"
         ]
         let credentialHints = [
-            "cookie", "bduss", "未登录", "请先登录", "需要登录",
-            "未授权", "授权失效", "登录失效", "登录过期", "扫码登录"
+            "cookie", "token", "bduss", "未登录", "请先登录", "需要登录",
+            "未授权", "授权失效", "登录失效", "登录过期", "扫码登录",
+            "require login", "login required", "not logged in",
+            "please login", "unauthorized", "credential"
         ]
         if credentialHints.contains(where: normalized.contains) {
             return true
@@ -2592,6 +2992,45 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         ]
         return providerHints.contains(where: normalized.contains)
             && opaqueCloudFailureHints.contains(where: normalized.contains)
+    }
+
+    private static func isStructuredProxyAuthorizationEvent(
+        options: [String: JSONValue],
+        message: String
+    ) -> Bool {
+        let statusCode: Int?
+        switch options["statusCode"] {
+        case .integer(let value):
+            statusCode = Int(exactly: value)
+        case .number(let value) where value.rounded() == value:
+            statusCode = Int(value)
+        case .string(let value):
+            statusCode = Int(value)
+        default:
+            statusCode = nil
+        }
+        if statusCode == 401 || statusCode == 403 {
+            return true
+        }
+        let normalized = message
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "\n", with: "")
+        let describesMissingMediaAuthorization =
+            normalized.contains("无法获取下载链接")
+                || normalized.contains("无法获取转码信息")
+        return describesMissingMediaAuthorization
+            && normalized.contains("检查授权")
+    }
+
+    private static func proxyAuthorizationMessage(
+        _ message: String,
+        provider: String?
+    ) -> String {
+        let provider = provider?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard let provider, !provider.isEmpty else { return message }
+        return "网盘代理（\(provider)）：\(message)"
     }
 
     private static func shouldAwaitLateAuthorizationMessage(

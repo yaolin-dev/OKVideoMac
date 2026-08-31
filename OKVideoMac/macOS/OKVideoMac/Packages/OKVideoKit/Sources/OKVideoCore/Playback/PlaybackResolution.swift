@@ -50,6 +50,16 @@ public struct PlaybackResolutionRequest: Equatable, Sendable {
     }
 }
 
+public enum MediaTransportProfile: Equatable, Sendable {
+    /// Ordinary native/direct playback. Existing buffering and startup
+    /// behavior remains unchanged for this profile.
+    case standard
+    /// Media produced by a TVBox/CatVod Java spider. These URLs often sit
+    /// behind a provider-owned loopback relay and need bounded per-file cache
+    /// and event-driven startup/seek handling.
+    case tvBox
+}
+
 public struct ResolvedMedia: Equatable, Sendable {
     public var url: URL
     public var headers: HTTPHeaders
@@ -59,6 +69,7 @@ public struct ResolvedMedia: Equatable, Sendable {
     public var sourceName: String
     public var episodeName: String
     public var parserName: String?
+    public var transportProfile: MediaTransportProfile
 
     public init(
         url: URL,
@@ -68,7 +79,8 @@ public struct ResolvedMedia: Equatable, Sendable {
         siteKey: String,
         sourceName: String,
         episodeName: String,
-        parserName: String? = nil
+        parserName: String? = nil,
+        transportProfile: MediaTransportProfile = .standard
     ) {
         self.url = url
         self.headers = headers
@@ -78,6 +90,7 @@ public struct ResolvedMedia: Equatable, Sendable {
         self.sourceName = sourceName
         self.episodeName = episodeName
         self.parserName = parserName
+        self.transportProfile = transportProfile
     }
 }
 
@@ -190,6 +203,11 @@ public struct DefaultMediaProbe: MediaProbe {
                     allowsNonSuccessfulStatus: true
                 )
             )
+            if !(200...299).contains(response.statusCode),
+               isAndroidBridgeSession,
+               let bridgeFailure = Self.androidBridgeFailure(response) {
+                throw AppError.playback(bridgeFailure)
+            }
             switch response.statusCode {
             case 200...299:
                 break
@@ -217,6 +235,32 @@ public struct DefaultMediaProbe: MediaProbe {
             // media playlist. Receiving more than the probe limit still proves
             // that the direct media endpoint is reachable.
             return true
+        }
+    }
+
+    private static func androidBridgeFailure(
+        _ response: HTTPResponse
+    ) -> String? {
+        guard response.body.count <= 64 * 1_024,
+              let object = try? JSONSerialization.jsonObject(with: response.body)
+                as? [String: Any],
+              let error = object["error"] as? String else {
+            return nil
+        }
+        let message = error.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else { return nil }
+        switch message {
+        case "TVBox local proxy is not ready",
+             "TVBox local proxy port is unavailable":
+            return "TVBox 本地代理未就绪"
+        case "Spider internal proxy failed",
+             "Invalid Spider proxy response",
+             "Provider media proxy failed":
+            return "Spider 内部代理处理失败"
+        case "Media session expired or missing":
+            return "播放会话已过期，请重新解析"
+        default:
+            return message
         }
     }
 

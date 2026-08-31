@@ -706,6 +706,19 @@ public struct SitePlaybackResult: Equatable, Sendable {
     public var format: String?
     public var subtitles: [URL]
     public var qualities: [PlaybackQuality]
+    /// Provider fields retained for CatPaw/FongMi protocol completeness. The
+    /// player may ignore an unsupported field, but the transport layer must
+    /// not silently discard it before a capable consumer can inspect it.
+    public var key: String?
+    public var click: String?
+    public var code: String?
+    public var jxFrom: String?
+    public var danmaku: JSONValue?
+    public var drm: JSONValue?
+    public var artwork: String?
+    public var description: String?
+    public var position: Double?
+    public var lyrics: String?
     public var validationPolicy: ValidationPolicy
     public var resourceReference: PlaybackResourceReference?
     public var mediaSession: PlaybackMediaSession?
@@ -719,6 +732,16 @@ public struct SitePlaybackResult: Equatable, Sendable {
         format: String? = nil,
         subtitles: [URL] = [],
         qualities: [PlaybackQuality] = [],
+        key: String? = nil,
+        click: String? = nil,
+        code: String? = nil,
+        jxFrom: String? = nil,
+        danmaku: JSONValue? = nil,
+        drm: JSONValue? = nil,
+        artwork: String? = nil,
+        description: String? = nil,
+        position: Double? = nil,
+        lyrics: String? = nil,
         validationPolicy: ValidationPolicy = .preflight,
         resourceReference: PlaybackResourceReference? = nil,
         mediaSession: PlaybackMediaSession? = nil
@@ -731,6 +754,16 @@ public struct SitePlaybackResult: Equatable, Sendable {
         self.format = format
         self.subtitles = subtitles
         self.qualities = qualities
+        self.key = key
+        self.click = click
+        self.code = code
+        self.jxFrom = jxFrom
+        self.danmaku = danmaku
+        self.drm = drm
+        self.artwork = artwork
+        self.description = description
+        self.position = position
+        self.lyrics = lyrics
         self.validationPolicy = validationPolicy
         self.resourceReference = resourceReference
         self.mediaSession = mediaSession
@@ -825,6 +858,9 @@ public protocol SiteProvider {
     func select(action item: SiteActionItem) async throws -> SiteSelectionResult
     func detail(id: String) async throws -> VideoDetail
     func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage
+    /// Tests whether a push-style provider accepts one exact input. Missing
+    /// support metadata is not treated as a negative capability observation.
+    func supportsContent(_ value: String) async throws -> Bool
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult
     /// Rebuilds the current URL and transient request context for the same
     /// stable resource. The default implementation never falls through to a
@@ -842,6 +878,10 @@ public protocol SiteProvider {
 }
 
 public extension SiteProvider {
+    func supportsContent(_ value: String) async throws -> Bool {
+        false
+    }
+
     func acceptsPlaybackResourceReference(
         _ reference: PlaybackResourceReference
     ) -> Bool {

@@ -19,6 +19,10 @@ public final class BridgeActionActivity extends Activity {
             new WeakReference<>(null);
     private static String pendingLaunchInteractionID = "";
     private String interactionID = "";
+    private volatile boolean terminalReleaseAuthorized;
+    private volatile boolean everResumed;
+    private volatile boolean resumed;
+    private volatile boolean stopped;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -68,8 +72,17 @@ public final class BridgeActionActivity extends Activity {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        stopped = false;
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
+        everResumed = true;
+        resumed = true;
+        stopped = false;
         if (!isCurrentRequest(interactionID)) {
             finish();
             return;
@@ -81,14 +94,35 @@ public final class BridgeActionActivity extends Activity {
     }
 
     @Override
+    protected void onPause() {
+        resumed = false;
+        super.onPause();
+    }
+
+    @Override
+    protected void onStop() {
+        stopped = true;
+        super.onStop();
+    }
+
+    @Override
     public void finish() {
-        // Several cloud-drive Spiders use the FongMi handoff pattern:
-        // Init.context().finish(); then post/show the next Dialog through
-        // Init.context(). If Init still points at this disposable Activity,
-        // that second Dialog is attached to a window which is already being
-        // destroyed (WindowLeaked) and UC/Quark can appear to produce no QR.
-        // Dismiss the outgoing owned Dialog and synchronously hand Init back
-        // to the persistent host before Activity.finish() changes lifecycle.
+        // Some legacy providers implement a multi-step action by calling
+        // Init.context().finish() and posting the next Dialog immediately
+        // afterwards. Letting that finish escape the request-owned Activity
+        // moves the child Dialog onto the persistent BridgeActivity, where it
+        // has no reliable session identity and can be mistaken for the next
+        // action. Keep the disposable Activity alive until the owning action
+        // session reaches a terminal state; only Bridge cleanup may authorize
+        // the real Activity finish.
+        if (!terminalReleaseAuthorized && isCurrentRequest(interactionID)) {
+            BridgeActivity.dismissVisibleDialogsOwnedBy(this);
+            com.github.catvod.Init.set(this);
+            return;
+        }
+        // Terminal cleanup dismisses request-owned Dialogs and synchronously
+        // hands Init back to a usable host before the Activity window is
+        // destroyed. Provider-requested finishes never reach this branch.
         BridgeActivity.dismissVisibleDialogsOwnedBy(this);
         handoffInitContextBeforeFinish();
         super.finish();
@@ -96,6 +130,8 @@ public final class BridgeActionActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        resumed = false;
+        stopped = true;
         BridgeActionActivity replacement;
         synchronized (lifecycleLock) {
             BridgeActionActivity activity = current.get();
@@ -165,6 +201,39 @@ public final class BridgeActionActivity extends Activity {
         }
     }
 
+    /**
+     * Returns a point-in-time lifecycle lease without consulting interaction
+     * state. The caller must additionally prove that the ID is the current,
+     * nonterminal request before exposing it as request-scoped.
+     */
+    static SurfaceStatus surfaceStatusFor(String requestedInteractionID) {
+        String id = requestedInteractionID == null
+                ? ""
+                : requestedInteractionID.trim();
+        synchronized (lifecycleLock) {
+            BridgeActionActivity activity = current.get();
+            boolean owned = usable(activity)
+                    && !id.isEmpty()
+                    && id.equals(activity.interactionID);
+            if (!owned) return SurfaceStatus.none();
+            String lifecycle = activity.resumed
+                    ? "resumed"
+                    : activity.stopped
+                    ? "stopped"
+                    : activity.everResumed ? "paused" : "created";
+            // A request-owned ActionActivity is intentionally translucent and
+            // remains alive underneath provider-launched full-screen/browser
+            // Activities. Once it has resumed at least once, losing resumed
+            // state is the conservative lifecycle signal for that external
+            // surface. Android lifecycle cannot distinguish that delegation
+            // from HOME/lock/background, so this is presentation state only,
+            // never provider ownership or login success.
+            boolean delegatedSurfaceActive = activity.everResumed
+                    && !activity.resumed;
+            return new SurfaceStatus(true, delegatedSurfaceActive, lifecycle);
+        }
+    }
+
     static void finishIfOwnedByOther(String requestedInteractionID) {
         String id = requestedInteractionID == null
                 ? ""
@@ -176,7 +245,7 @@ public final class BridgeActionActivity extends Activity {
         if (activity == null || id.equals(activity.interactionID)) return;
         activity.runOnUiThread(() -> {
             if (!activity.isFinishing() && !activity.isDestroyed()) {
-                activity.finish();
+                activity.releaseAndFinish();
             }
         });
     }
@@ -194,10 +263,15 @@ public final class BridgeActionActivity extends Activity {
         }
         activity.runOnUiThread(() -> {
             if (!activity.isFinishing() && !activity.isDestroyed()) {
-                activity.finish();
+                activity.releaseAndFinish();
             }
         });
         return true;
+    }
+
+    private void releaseAndFinish() {
+        terminalReleaseAuthorized = true;
+        finish();
     }
 
     /** Restores CatVod Init to the newest valid owner, never to stale UI. */
@@ -354,5 +428,25 @@ public final class BridgeActionActivity extends Activity {
         return activity != null
                 && !activity.isFinishing()
                 && !activity.isDestroyed();
+    }
+
+    static final class SurfaceStatus {
+        final boolean requestScoped;
+        final boolean delegatedSurfaceActive;
+        final String hostLifecycle;
+
+        SurfaceStatus(
+                boolean requestScoped,
+                boolean delegatedSurfaceActive,
+                String hostLifecycle
+        ) {
+            this.requestScoped = requestScoped;
+            this.delegatedSurfaceActive = delegatedSurfaceActive;
+            this.hostLifecycle = hostLifecycle;
+        }
+
+        private static SurfaceStatus none() {
+            return new SurfaceStatus(false, false, "none");
+        }
     }
 }

@@ -18,6 +18,7 @@ import java.net.InetAddress;
 import java.net.URI;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -37,6 +38,7 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 
 import okhttp3.OkHttpClient;
+import okhttp3.Call;
 import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.ResponseBody;
@@ -97,7 +99,9 @@ final class BridgeServer {
                     .writeTimeout(15, TimeUnit.SECONDS)
                     .build();
     private static final int MAX_MEDIA_REDIRECTS = 10;
-    private static final int MEDIA_COPY_BUFFER_BYTES = 128 * 1024;
+    // A smaller relay buffer notices an abandoned mpv Range request sooner
+    // and bounds the bytes copied after a large seek supersedes the request.
+    private static final int MEDIA_COPY_BUFFER_BYTES = 64 * 1024;
     private static final String[] FORWARDED_MEDIA_REQUEST_HEADERS = {
             "range",
             "if-range",
@@ -144,7 +148,17 @@ final class BridgeServer {
             starting = true;
             generation = ++listenerGeneration;
         }
-        com.github.catvod.Proxy.set(PORT);
+        // CatVod/FongMi Spider code calls Proxy.getUrl() while playerContent
+        // is still resolving. Its process-local endpoint must therefore be
+        // available before any secure Mac media session can exist.
+        try {
+            FongMiCompatProxyServer.ensureStarted(application);
+        } catch (IOException error) {
+            // playerContent performs one bounded, synchronous recovery. Keep
+            // the RPC listener available so the Mac receives that classified
+            // failure instead of treating the entire Android runtime as dead.
+            Log.e(TAG, "TVBox compatibility proxy unavailable", error);
+        }
         Thread thread = new Thread(
                 () -> serve(application, generation),
                 "okvideo-dex-rpc"
@@ -225,6 +239,7 @@ final class BridgeServer {
             SERVER_LIFECYCLE_LOCK.notifyAll();
         }
         closeQuietly(active);
+        FongMiCompatProxyServer.stopForTests();
     }
 
     private static void closeQuietly(ServerSocket socket) {
@@ -270,6 +285,19 @@ final class BridgeServer {
                     );
                     health.put("generation", runtimeGeneration);
                     health.put("uiSchemaVersion", 3);
+                    health.put("interactionSchemaVersion", 2);
+                    health.put(
+                            "interactionCapabilities",
+                            new JSONArray()
+                                    .put("scopedActionSession")
+                                    .put("separateReturnSurfaceEvents")
+                                    .put("playbackUIHandoff")
+                                    .put("requestScopedSurfaceLease")
+                    );
+                    health.put(
+                            "tvboxProxyReady",
+                            FongMiCompatProxyServer.ready()
+                    );
                     health.put(
                             "uiCapabilities",
                             new JSONArray()
@@ -368,6 +396,18 @@ final class BridgeServer {
                                             stateInteraction
                                     ),
                                     stateInteraction
+                            )
+                    );
+                    return;
+                }
+                String eventsInteraction = interactionID(path, "/events");
+                if ("GET".equals(method) && eventsInteraction != null) {
+                    writeJSON(
+                            output,
+                            200,
+                            BridgeInteractionRegistry.events(
+                                    eventsInteraction,
+                                    eventSequenceAfter(target)
                             )
                     );
                     return;
@@ -568,6 +608,14 @@ final class BridgeServer {
                                     + " authorization="
                                     + headers.containsKey("authorization")
                     );
+                    if (!validProxyResponse(response)) {
+                        writeJSON(
+                                output,
+                                502,
+                                failure("Spider internal proxy failed")
+                        );
+                        return;
+                    }
                     writeProxy(output, response, "HEAD".equals(method));
                     return;
                 }
@@ -699,11 +747,20 @@ final class BridgeServer {
                     }
                     result = await(invocation);
                     if (interactive) {
-                        String providerMessage = "play".equals(
+                        boolean playback = "play".equals(
                                 payload.optString("method", "")
-                        ) ? DexSpiderRegistry.providerPlaybackMessage(result)
-                                : "";
-                        JSONObject returned = providerMessage.isEmpty()
+                        );
+                        String providerMessage =
+                                DexSpiderRegistry.providerMessage(result);
+                        if (!providerMessage.isEmpty()) {
+                            BridgeInteractionRegistry.recordEvent(
+                                    interactionID,
+                                    "providerMessage",
+                                    providerMessage
+                            );
+                        }
+                        JSONObject returned = !playback
+                                || providerMessage.isEmpty()
                                 ? BridgeInteractionRegistry.invocationReturned(
                                         interactionID,
                                         isTerminalPlaybackResult(payload, result)
@@ -712,6 +769,18 @@ final class BridgeServer {
                                         interactionID,
                                         providerMessage
                                 );
+                        // A newer ActionSession may supersede this provider
+                        // after the worker has produced a value but before the
+                        // RPC thread publishes it. Never leak that late return
+                        // into the new session (or back to a retrying client).
+                        if (!returned.optBoolean("returnAccepted", false)) {
+                            writeJSON(
+                                    output,
+                                    409,
+                                    staleInteraction(interactionID)
+                            );
+                            return;
+                        }
                         if (returned.optBoolean("terminal", false)) {
                             releaseTerminalInteraction(context, interactionID);
                         }
@@ -766,8 +835,37 @@ final class BridgeServer {
                 writeJSON(output, 500, failure(safeMessage(error)));
             }
         } catch (Throwable error) {
-            Log.e(TAG, "RPC connection failed", error);
+            if (isClientDisconnect(error)) {
+                Log.d(
+                        TAG,
+                        "RPC client disconnected: "
+                                + error.getClass().getSimpleName()
+                );
+            } else {
+                Log.e(TAG, "RPC connection failed", error);
+            }
         }
+    }
+
+    private static boolean isClientDisconnect(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            if (current instanceof EOFException
+                    || current instanceof SocketException) {
+                return true;
+            }
+            String message = current.getMessage();
+            if (message != null) {
+                String normalized = message.toLowerCase(Locale.ROOT);
+                if (normalized.contains("broken pipe")
+                        || normalized.contains("connection reset")
+                        || normalized.contains("socket closed")) {
+                    return true;
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private static String sha256(String value) {
@@ -1001,7 +1099,7 @@ final class BridgeServer {
         }
     }
 
-    private static String requestPath(String target) {
+    static String requestPath(String target) {
         int marker = target.indexOf('?');
         return marker < 0 ? target : target.substring(0, marker);
     }
@@ -1018,8 +1116,8 @@ final class BridgeServer {
         }
     }
 
-    private static Map<String, String> parseQuery(String target) {
-        Map<String, String> values = new HashMap<>();
+    static Map<String, String> parseQuery(String target) {
+        Map<String, String> values = new LinkedHashMap<>();
         int marker = target.indexOf('?');
         if (marker < 0 || marker + 1 >= target.length()) return values;
         String query = target.substring(marker + 1);
@@ -1040,7 +1138,17 @@ final class BridgeServer {
         return values;
     }
 
-    private static Map<String, String> readHeaders(BufferedInputStream input)
+    private static long eventSequenceAfter(String target) {
+        String raw = parseQuery(target).get("after");
+        if (raw == null || raw.trim().isEmpty()) return 0L;
+        try {
+            return Math.max(0L, Long.parseLong(raw.trim()));
+        } catch (NumberFormatException ignored) {
+            return 0L;
+        }
+    }
+
+    static Map<String, String> readHeaders(BufferedInputStream input)
             throws IOException {
         Map<String, String> headers = new HashMap<>();
         while (true) {
@@ -1055,7 +1163,7 @@ final class BridgeServer {
         }
     }
 
-    private static String readLine(BufferedInputStream input) throws IOException {
+    static String readLine(BufferedInputStream input) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         int previous = -1;
         while (bytes.size() < 8_192) {
@@ -1072,7 +1180,7 @@ final class BridgeServer {
         throw new IOException("Header line is too long");
     }
 
-    private static byte[] readExactly(BufferedInputStream input, int count)
+    static byte[] readExactly(BufferedInputStream input, int count)
             throws IOException {
         byte[] value = new byte[count];
         int offset = 0;
@@ -1084,7 +1192,7 @@ final class BridgeServer {
         return value;
     }
 
-    private static int parseLength(String value) {
+    static int parseLength(String value) {
         try {
             return value == null ? 0 : Integer.parseInt(value);
         } catch (NumberFormatException error) {
@@ -1092,7 +1200,7 @@ final class BridgeServer {
         }
     }
 
-    private static JSONObject failure(String message) {
+    static JSONObject failure(String message) {
         JSONObject value = new JSONObject();
         try {
             value.put("ok", false);
@@ -1181,7 +1289,15 @@ final class BridgeServer {
                             ? ""
                             : "?" + providerProxy.getRawQuery())
             );
-            params.putAll(forwarded);
+            // NanoHTTPD exposes request-header keys in lower case. Preserve
+            // that CatVod contract when a secure 9978 session calls the exact
+            // Spider proxy directly after its short playerContent lease ends.
+            for (Map.Entry<String, String> entry : forwarded.entrySet()) {
+                params.put(
+                        entry.getKey().toLowerCase(Locale.ROOT),
+                        entry.getValue()
+                );
+            }
             Object[] response;
             try {
                 response = runProvider(
@@ -1189,7 +1305,20 @@ final class BridgeServer {
                                 .proxy(session.owner, params)
                 );
             } catch (Exception error) {
-                throw new IOException("Provider media proxy failed");
+                writeJSON(
+                        output,
+                        502,
+                        failure("Spider internal proxy failed")
+                );
+                return;
+            }
+            if (!validProxyResponse(response)) {
+                writeJSON(
+                        output,
+                        502,
+                        failure("Spider internal proxy failed")
+                );
+                return;
             }
             writeProxy(output, response, headersOnly);
             return;
@@ -1240,7 +1369,15 @@ final class BridgeServer {
             // a range early, libmpv must observe that EOF and issue its own
             // next Range request. Reassembling ranges inside the bridge can
             // deadlock playback when a signed CDN rejects a continuation.
-            writeMediaResponse(output, response, headersOnly);
+            try {
+                writeMediaResponse(output, response, headersOnly);
+            } catch (IOException error) {
+                // Closing the response eventually releases the body, but an
+                // explicit cancel stops the upstream transfer immediately
+                // when mpv abandons an old Range request during seeking.
+                mediaResponse.call.cancel();
+                throw error;
+            }
         }
     }
 
@@ -1253,7 +1390,8 @@ final class BridgeServer {
                     || "::1".equals(host);
             String path = value.getPath() == null ? "" : value.getPath();
             return loopback
-                    && value.getPort() == BridgeServer.PORT
+                    && (value.getPort() == BridgeServer.PORT
+                    || FongMiCompatProxyServer.owns(value))
                     && ("/proxy".equals(path) || path.startsWith("/proxy/"))
                     && !path.startsWith("/proxy/media/")
                     ? value
@@ -1284,15 +1422,15 @@ final class BridgeServer {
             request.header("Accept-Encoding", "identity");
             if (headersOnly) request.head(); else request.get();
 
-            Response response = SESSION_MEDIA_CLIENT.newCall(
-                    request.build()
-            ).execute();
+            Call call = SESSION_MEDIA_CLIENT.newCall(request.build());
+            Response response = call.execute();
             String location = response.header("Location");
             if (!isRedirect(response.code())
                     || location == null
                     || location.trim().isEmpty()) {
                 return new SessionMediaResponse(
                         response,
+                        call,
                         upstream,
                         headers,
                         redirects
@@ -1365,17 +1503,20 @@ final class BridgeServer {
 
     private static final class SessionMediaResponse {
         final Response response;
+        final Call call;
         final URI upstream;
         final Map<String, String> headers;
         final int redirects;
 
         SessionMediaResponse(
                 Response response,
+                Call call,
                 URI upstream,
                 Map<String, String> headers,
                 int redirects
         ) {
             this.response = response;
+            this.call = call;
             this.upstream = upstream;
             this.headers = new LinkedHashMap<>(headers);
             this.redirects = redirects;
@@ -1421,8 +1562,9 @@ final class BridgeServer {
         }
 
         final Response mediaResponse;
+        final Call mediaCall = MEDIA_CLIENT.newCall(request.build());
         try {
-            mediaResponse = MEDIA_CLIENT.newCall(request.build()).execute();
+            mediaResponse = mediaCall.execute();
         } catch (IOException error) {
             Log.w(
                     TAG,
@@ -1449,7 +1591,12 @@ final class BridgeServer {
                             + " method=" + (headersOnly ? "HEAD" : "GET")
                             + " headers=" + forwardedNames
             );
-            writeMediaResponse(output, response, headersOnly);
+            try {
+                writeMediaResponse(output, response, headersOnly);
+            } catch (IOException error) {
+                mediaCall.cancel();
+                throw error;
+            }
         }
     }
 
@@ -1597,7 +1744,7 @@ final class BridgeServer {
         }
     }
 
-    private static void writeProxy(
+    static void writeProxy(
             BufferedOutputStream output,
             Object[] response,
             boolean headersOnly
@@ -1688,6 +1835,14 @@ final class BridgeServer {
         }
     }
 
+    private static boolean validProxyResponse(Object[] response) {
+        return response != null
+                && response.length >= 3
+                && response[0] instanceof Integer
+                && response[1] instanceof String
+                && response[2] instanceof InputStream;
+    }
+
     private static final class MediaResponseCommittedException
             extends IOException {
         final long bytesWritten;
@@ -1704,7 +1859,7 @@ final class BridgeServer {
         }
     }
 
-    private static void writeJSON(
+    static void writeJSON(
             BufferedOutputStream output,
             int status,
             JSONObject object

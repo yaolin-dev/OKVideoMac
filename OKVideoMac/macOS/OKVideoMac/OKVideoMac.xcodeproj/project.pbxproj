@@ -32,6 +32,7 @@
 		A04BBDA44750879BBFAFB666 /* NOTICE.md in Resources */ = {isa = PBXBuildFile; fileRef = F39511E40E3FE20271196154 /* NOTICE.md */; };
 		A079B159324210117BB52A09 /* QuickJSSpiderRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78A48458B942371BAE2A85FD /* QuickJSSpiderRuntime.swift */; };
 		A0BF2B3C33EFE592A9DF59F9 /* MPVPlayerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6326E81195BB34CCB3CEC61 /* MPVPlayerClient.swift */; };
+		A2F41ABF02AE0A13544CDF2A /* CatPawProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8754CA1D367DB8EB69DB9D9 /* CatPawProtocol.swift */; };
 		A3B0AE14D90BC82289D17D61 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 115FFC7F2FD723B0F12E0D2D /* RootView.swift */; };
 		A460B1043453667657698834 /* VideoGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5707873F641B0221D67B9CBC /* VideoGrid.swift */; };
 		A55E769996EE245CA586B3C6 /* JavaScriptSpiderSiteProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E25C74DFB53809A9F2672CE /* JavaScriptSpiderSiteProvider.swift */; };
@@ -84,6 +85,7 @@
 		D3D2A8AF3D0689F343F646E4 /* OKVideoMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OKVideoMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D6CD897F3EA6681258B14A99 /* AppParseExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppParseExecutor.swift; sourceTree = "<group>"; };
 		D7765776920879CB4CD0A540 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
+		D8754CA1D367DB8EB69DB9D9 /* CatPawProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatPawProtocol.swift; sourceTree = "<group>"; };
 		E497EB47C4C1AD4047675EFC /* NodeRuntimeContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeRuntimeContract.swift; sourceTree = "<group>"; };
 		ED0F982CA57DBEA3A9CBF1FE /* LICENSE */ = {isa = PBXFileReference; path = LICENSE; sourceTree = "<group>"; };
 		EEE09C76DBAB9FF2328487B7 /* FavoritesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesView.swift; sourceTree = "<group>"; };
@@ -109,6 +111,7 @@
 		1D25F8E589BD6D2058986914 /* Spider */ = {
 			isa = PBXGroup;
 			children = (
+				D8754CA1D367DB8EB69DB9D9 /* CatPawProtocol.swift */,
 				4E25C74DFB53809A9F2672CE /* JavaScriptSpiderSiteProvider.swift */,
 				A406AD3C9358F59A462C9AB8 /* NodeBundleRuntimeService.swift */,
 				617A00084B74B412C7C3ACB9 /* NodeHTTPSpiderSiteProvider.swift */,
@@ -523,6 +526,7 @@
 				5728CE6395E44C04B4A0C12A /* AppEnvironment.swift in Sources */,
 				F9FF431B06B6D4B13A435C8A /* AppParseExecutor.swift in Sources */,
 				0DC49DC6E8989EB3C7FFADD2 /* AppState.swift in Sources */,
+				A2F41ABF02AE0A13544CDF2A /* CatPawProtocol.swift in Sources */,
 				547E70EE1CB6395E47E23C62 /* ConfigurationView.swift in Sources */,
 				FB2A4C23694D2553091FEDF2 /* DetailView.swift in Sources */,
 				6CDA157B1D9D80E812D81034 /* FavoritesView.swift in Sources */,
@@ -606,7 +610,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 87;
+				CURRENT_PROJECT_VERSION = 92;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -625,7 +629,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				MARKETING_VERSION = 0.3.62;
+				MARKETING_VERSION = 0.3.66;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -750,7 +754,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 87;
+				CURRENT_PROJECT_VERSION = 92;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -763,7 +767,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				MARKETING_VERSION = 0.3.62;
+				MARKETING_VERSION = 0.3.66;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

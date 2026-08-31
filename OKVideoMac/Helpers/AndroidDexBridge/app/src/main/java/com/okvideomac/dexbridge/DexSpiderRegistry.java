@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 import dalvik.system.DexClassLoader;
 import okhttp3.OkHttpClient;
@@ -29,6 +30,11 @@ import okhttp3.Response;
 
 final class DexSpiderRegistry {
     private static final long PLAYBACK_HANDOFF_CACHE_MS = 30_000L;
+    // com.github.catvod.Proxy stores one process-global port. Serialize only
+    // TVBox playerContent resolution so two sites can never steal the active
+    // compatibility-proxy owner from each other.
+    private static final ReentrantLock PLAYER_CONTENT_PROXY_LOCK =
+            new ReentrantLock(true);
     private static volatile DexSpiderRegistry instance;
 
     private final Context context;
@@ -66,12 +72,7 @@ final class DexSpiderRegistry {
         if (arguments == null) arguments = new JSONArray();
         if ("destroy".equals(method)) {
             String siteKey = requireString(payload, "siteKey");
-            String key = spiderKey(payload, siteKey);
-            Spider removed = spiders.remove(key);
-            if (removed != null) removed.destroy();
-            completedPlaybacks.keySet().removeIf(
-                    item -> item.startsWith(key + "\u0000")
-            );
+            destroySpider(payload, siteKey);
             return JSONObject.NULL;
         }
         BridgeProviderOwnerRegistry.Binding providerOwner =
@@ -133,6 +134,18 @@ final class DexSpiderRegistry {
         return decodeRawResult(raw);
     }
 
+    private void destroySpider(JSONObject payload, String siteKey) {
+        String key = spiderKey(payload, siteKey);
+        Object lock = spiderLocks.computeIfAbsent(key, ignored -> new Object());
+        synchronized (lock) {
+            Spider removed = spiders.remove(key);
+            if (removed != null) removed.destroy();
+            completedPlaybacks.keySet().removeIf(
+                    item -> item.startsWith(key + "\u0000")
+            );
+        }
+    }
+
     static boolean requiresDialogHandoff(
             JSONObject payload,
             String method
@@ -154,6 +167,13 @@ final class DexSpiderRegistry {
                 .optString("interactionKind", "")
                 .trim()
                 .toLowerCase(Locale.ROOT);
+        // A monitored playerContent call owns the same disposable Activity as
+        // any other interactive provider request. Several cloud providers
+        // synchronously wait inside playerContent while their native login UI
+        // is visible; excluding playback here splits that one invocation into
+        // unrelated action/UI requests and loses the eventual media result.
+        // The declared kind remains "playback" throughout -- UI visibility is
+        // presentation state and never rewrites action semantics.
         return !"command".equals(interactionKind)
                 && !"immediate".equals(interactionKind);
     }
@@ -206,27 +226,111 @@ final class DexSpiderRegistry {
                             providerOwner
                     );
                 }
+                PLAYER_CONTENT_PROXY_LOCK.lockInterruptibly();
+                try {
+                    return invokePlayerWithCompatibilityProxy(
+                            spider,
+                            arguments,
+                            providerOwner,
+                            playbackKey,
+                            refreshRequested,
+                            siteHeaders
+                    );
+                } finally {
+                    PLAYER_CONTENT_PROXY_LOCK.unlock();
+                }
+            }
+        } finally {
+            releasePlaybackLock(playbackKey, lock);
+        }
+    }
+
+    private Object invokePlayerWithCompatibilityProxy(
+            Spider spider,
+            JSONArray arguments,
+            BridgeProviderOwnerRegistry.Binding providerOwner,
+            String playbackKey,
+            boolean refreshRequested,
+            JSONObject siteHeaders
+    ) throws Exception {
+        Throwable firstError = null;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            FongMiCompatProxyServer.Lease lease = null;
+            try {
+                if (attempt > 0) {
+                    FongMiCompatProxyServer.restart(context);
+                    // Any cached raw localhost URL was issued against the old
+                    // process-global port. Never wrap it into a fresh session.
+                    completedPlaybacks.clear();
+                }
+                lease = FongMiCompatProxyServer.acquire(
+                        context,
+                        providerOwner
+                );
                 String raw = spider.playerContent(
                         arguments.getString(0),
                         arguments.getString(1),
                         stringList(arguments, 2)
                 );
+                FongMiCompatProxyServer.Failure proxyFailure = lease.failure();
+                if (proxyFailure != FongMiCompatProxyServer.Failure.NONE
+                        && !isPlayableResponse(raw)) {
+                    if (attempt == 0) {
+                        firstError = playbackProxyFailure(proxyFailure, null);
+                        continue;
+                    }
+                    throw playbackProxyFailure(proxyFailure, firstError);
+                }
                 if (!refreshRequested && isPlayableResponse(raw)) {
                     completedPlaybacks.put(
                             playbackKey,
                             new CachedPlayback(raw == null ? "" : raw)
                     );
                 }
+                // Secure a returned compatibility URL while its exact owner
+                // lease is still active. The resulting 9978 media capability
+                // permanently retains that owner after this lease closes.
                 return decodePlaybackResult(
                         raw,
                         refreshRequested,
                         siteHeaders,
                         providerOwner
                 );
+            } catch (Throwable error) {
+                FongMiCompatProxyServer.Failure proxyFailure = lease == null
+                        ? FongMiCompatProxyServer.Failure.NOT_READY
+                        : lease.failure();
+                if (attempt == 0
+                        && proxyFailure != FongMiCompatProxyServer.Failure.NONE) {
+                    firstError = playbackProxyFailure(proxyFailure, error);
+                    continue;
+                }
+                if (proxyFailure != FongMiCompatProxyServer.Failure.NONE) {
+                    throw playbackProxyFailure(proxyFailure, error);
+                }
+                if (error instanceof Exception) throw (Exception) error;
+                if (error instanceof Error) throw (Error) error;
+                throw new IllegalStateException("playerContent failed", error);
+            } finally {
+                if (lease != null) lease.close();
             }
-        } finally {
-            releasePlaybackLock(playbackKey, lock);
         }
+        throw new IllegalStateException(
+                "TVBox local proxy recovery failed",
+                firstError
+        );
+    }
+
+    private static IllegalStateException playbackProxyFailure(
+            FongMiCompatProxyServer.Failure failure,
+            Throwable cause
+    ) {
+        String message = failure == FongMiCompatProxyServer.Failure.NOT_READY
+                ? "TVBox 本地代理未就绪"
+                : "Spider 内部代理处理失败";
+        return cause == null
+                ? new IllegalStateException(message)
+                : new IllegalStateException(message, cause);
     }
 
     /**
@@ -326,6 +430,16 @@ final class DexSpiderRegistry {
      * interpreting its language or attempting to infer an account provider.
      */
     static String providerPlaybackMessage(Object value) {
+        return providerMessage(value);
+    }
+
+    /**
+     * Returns a provider-authored event message without assigning it UI or
+     * outcome semantics. Playback callers may still treat a message-only
+     * result as their terminal error; configuration actions expose the same
+     * value on the request-owned event channel.
+     */
+    static String providerMessage(Object value) {
         if (!(value instanceof JSONObject)) return "";
         JSONObject object = (JSONObject) value;
         for (String key : new String[] {"msg", "errMsg", "error"}) {

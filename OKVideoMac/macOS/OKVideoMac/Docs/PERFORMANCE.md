@@ -1,8 +1,8 @@
 # Performance
 
 - 文档类型：当前性能基线与待验证项
-- 对照版本：0.3.62（Build 87）
-- 最近更新：2026-08-26
+- 对照版本：0.3.66（Build 92）
+- 最近更新：2026-08-29
 
 ## 已设置的资源边界
 
@@ -32,6 +32,30 @@
 该实验样本量较小，且首帧时间受网络、媒体和历史恢复影响，因此不用它
 宣称 `fullDestroy` 必然提升起播速度。当前结论只是：它明显降低退出播放后的
 内存高水位，未观察到可复现的二次起播退化。
+
+## 播放期间的界面更新边界
+
+- mpv 时间线仍以最多 10 Hz 更新播放器控件，但通过独立的
+  `PlayerSnapshotState` 发布，不再触发浏览窗口的全局 `AppState` 更新；
+- 首页和直播只挂载当前可见的界面树，直播会话状态由父级保留，不再使用
+  `opacity(0)` 常驻不可见频道网格；
+- 搜索结果聚合和直播台标解析按完整输入缓存，避免无关状态刷新时重复排序或
+  执行正则归一化；
+- 回归测试明确要求播放器时间线更新不会发送 `AppState.objectWillChange`。
+
+## 播放渲染与缓存边界
+
+- libmpv 的 VideoToolbox–OpenGL IOSurface 互操作已启用，允许支持的编码直接把
+  VideoToolbox 输出交给 OpenGL，而不必固定走 `videotoolbox-copy`；
+- libmpv render context 默认启用 advanced control，并在窗口遮挡、最小化或
+  render surface 不可见时消费更新但跳过实际绘制；
+- 远程播放默认使用 60 秒前向缓存、128 MiB demuxer 上限和 32 MiB 回看上限，
+  避免长时间播放让缓存无界增长；
+- 播放开始后会在 2 秒和 15 秒记录硬解模式、视频格式、估算帧率、缓存时长和
+  丢帧计数，便于区分网络、解码和渲染问题；
+- `OKVIDEOMAC_MPV_PERFORMANCE_PROFILE=legacy` 可恢复旧缓存行为，
+  `OKVIDEOMAC_MPV_RENDER_CONTROL=legacy` 可关闭 advanced render control，
+  两个回滚开关相互独立。
 
 ## 当前构建与测试基线
 

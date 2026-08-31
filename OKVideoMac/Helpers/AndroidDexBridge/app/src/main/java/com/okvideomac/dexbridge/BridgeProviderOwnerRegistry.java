@@ -26,10 +26,29 @@ final class BridgeProviderOwnerRegistry {
         String siteKey = required(payload, "siteKey");
         String interactionID = clean(payload.optString("interactionID", ""));
         JSONObject actionContract = copy(payload.optJSONObject("actionContract"));
+        String normalizedJarKey = clean(jarKey);
+
+        // Browse, detail and playback calls do not own an Android UI
+        // interaction. Their bindings are request-scoped capabilities handed
+        // directly to the compatibility proxy/media session and must not be
+        // persisted under the shared empty interaction ID. Persisting them
+        // made a normal browse (`configuration`) followed by playback
+        // (`playback`) look like one interaction changing its contract, which
+        // rejected every direct play before playerContent could run.
+        if (interactionID.isEmpty()) {
+            return new Binding(
+                    ownerID,
+                    configurationID,
+                    siteKey,
+                    interactionID,
+                    normalizedJarKey,
+                    actionContract
+            );
+        }
         String key = key(ownerID, configurationID, siteKey, interactionID);
         Binding existing = BINDINGS.get(key);
         if (existing != null) {
-            if (!existing.jarKey.equals(clean(jarKey))) {
+            if (!existing.jarKey.equals(normalizedJarKey)) {
                 throw new IllegalStateException("Provider owner jar mismatch");
             }
             // The host may omit the contract on later non-action calls. It
@@ -49,7 +68,7 @@ final class BridgeProviderOwnerRegistry {
                 configurationID,
                 siteKey,
                 interactionID,
-                clean(jarKey),
+                normalizedJarKey,
                 actionContract
         );
         BINDINGS.put(key, binding);

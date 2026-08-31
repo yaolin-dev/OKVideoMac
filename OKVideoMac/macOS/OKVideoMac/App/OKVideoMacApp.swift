@@ -82,6 +82,9 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
     private var playerWindowController: PlayerPlaybackWindowController?
     private var playerPresentationCancellable: AnyCancellable?
     private var playerWindowCommandCancellable: AnyCancellable?
+    private var appWindowLayoutCommandCancellable: AnyCancellable?
+    private var windowDidExitFullScreenCancellable: AnyCancellable?
+    private var pendingMainWindowLayoutReset = false
     private var terminationState = TerminationState.idle
     private var terminationTask: Task<Void, Never>?
     private var terminationTimeoutTask: Task<Void, Never>?
@@ -89,7 +92,8 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
     func install(appState: AppState) {
         guard self.appState !== appState
                 || playerPresentationCancellable == nil
-                || playerWindowCommandCancellable == nil else { return }
+                || playerWindowCommandCancellable == nil
+                || appWindowLayoutCommandCancellable == nil else { return }
         self.appState = appState
         let playerWindowController = PlayerPlaybackWindowController(
             appState: appState
@@ -107,9 +111,19 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak playerWindowController] command in
                 playerWindowController?.execute(command)
             }
-        // Build the hidden AppKit/SwiftUI shell after the browser has mounted.
-        // PlayerSurfaceMountPolicy keeps MPV/OpenGL detached until a concrete
-        // playback request has prepared the engine.
+        appWindowLayoutCommandCancellable = appState.$appWindowLayoutCommand
+            .compactMap { $0 }
+            .sink { [weak self] command in
+                self?.executeWindowLayoutCommand(command)
+            }
+        windowDidExitFullScreenCancellable = NotificationCenter.default
+            .publisher(for: NSWindow.didExitFullScreenNotification)
+            .sink { [weak self] notification in
+                self?.completeDeferredMainWindowReset(notification)
+            }
+        // Prebuild only the lightweight AppKit window shell. Mounting the
+        // SwiftUI player tree here would make its loading animations keep the
+        // whole application committing frames while the window is hidden.
         DispatchQueue.main.async { [weak playerWindowController] in
             playerWindowController?.prewarm()
         }
@@ -127,6 +141,53 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
         _ sender: NSApplication
     ) -> Bool {
         false
+    }
+
+    private func executeWindowLayoutCommand(
+        _ command: AppWindowLayoutCommand
+    ) {
+        switch command.target {
+        case .mainWindow:
+            resetMainWindowLayout()
+        case .playerWindow:
+            playerWindowController?.resetLayout()
+        }
+    }
+
+    private func resetMainWindowLayout() {
+        guard let window = AppWindowLayoutPolicy.window(for: .mainWindow) else {
+            AppWindowLayoutPolicy.clearSavedFrame(for: .mainWindow)
+            pendingMainWindowLayoutReset = false
+            return
+        }
+        if window.styleMask.contains(.fullScreen) {
+            AppWindowLayoutPolicy.prepareForDeferredReset(
+                window,
+                target: .mainWindow
+            )
+            pendingMainWindowLayoutReset = true
+            return
+        }
+        pendingMainWindowLayoutReset = false
+        AppWindowLayoutPolicy.restoreDefaultLayout(
+            window,
+            target: .mainWindow
+        )
+    }
+
+    private func completeDeferredMainWindowReset(
+        _ notification: Notification
+    ) {
+        guard pendingMainWindowLayoutReset,
+              let window = notification.object as? NSWindow,
+              window.identifier
+                == AppWindowLayoutPolicy.descriptor(for: .mainWindow).identifier
+        else { return }
+        pendingMainWindowLayoutReset = false
+        AppWindowLayoutPolicy.restoreDefaultLayout(
+            window,
+            target: .mainWindow
+        )
     }
 
     func applicationShouldTerminate(
@@ -180,12 +241,12 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
 /// full-screen, resize, or render-context lifecycle changes.
 @MainActor
 final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
-    private static let frameAutosaveName = "OKVideoMac.PlayerWindow.v2"
     private weak var appState: AppState?
     private var window: NSWindow?
     private var hostingController: NSHostingController<AnyView>?
     private var isDismissingFromState = false
     private var pendingFocusCommandID: UUID?
+    private var hasDeferredLayoutReset = false
 
     init(appState: AppState) {
         self.appState = appState
@@ -193,7 +254,28 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
 
     func prewarm() {
         guard window == nil else { return }
-        _ = ensureWindow()
+        _ = ensureWindowShell()
+    }
+
+    func resetLayout() {
+        guard let window else {
+            AppWindowLayoutPolicy.clearSavedFrame(for: .playerWindow)
+            hasDeferredLayoutReset = false
+            return
+        }
+        if window.styleMask.contains(.fullScreen) {
+            AppWindowLayoutPolicy.prepareForDeferredReset(
+                window,
+                target: .playerWindow
+            )
+            hasDeferredLayoutReset = true
+            return
+        }
+        hasDeferredLayoutReset = false
+        AppWindowLayoutPolicy.restoreDefaultLayout(
+            window,
+            target: .playerWindow
+        )
     }
 
     func execute(_ command: PlayerWindowCommand) {
@@ -240,8 +322,24 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     }
 
     private func ensureWindow() -> NSWindow? {
-        if let window { return window }
         guard let appState else { return nil }
+        guard let window = ensureWindowShell() else { return nil }
+
+        if hostingController == nil {
+            let rootView = AnyView(
+                PlayerPlaybackWindowRoot(appState: appState)
+                    .environmentObject(appState)
+            )
+            let hostingController = NSHostingController(rootView: rootView)
+            window.contentViewController = hostingController
+            self.hostingController = hostingController
+        }
+        return window
+    }
+
+    private func ensureWindowShell() -> NSWindow? {
+        if let window { return window }
+        guard appState != nil else { return nil }
 
         let contentSize = initialContentSize()
         let window = NSWindow(
@@ -268,21 +366,9 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         window.acceptsMouseMovedEvents = true
         window.contentMinSize = NSSize(width: 800, height: 450)
         window.contentAspectRatio = NSSize(width: 16, height: 9)
-
-        let rootView = AnyView(
-            PlayerPlaybackWindowRoot(appState: appState)
-                .environmentObject(appState)
-        )
-        let hostingController = NSHostingController(rootView: rootView)
-        window.contentViewController = hostingController
-        self.hostingController = hostingController
         self.window = window
 
-        if !window.setFrameUsingName(Self.frameAutosaveName) {
-            window.center()
-        }
-        window.setFrameAutosaveName(Self.frameAutosaveName)
-        restoreVisibleFrameIfNeeded(window)
+        AppWindowLayoutPolicy.configure(window, target: .playerWindow)
         return window
     }
 
@@ -320,18 +406,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     }
 
     private func restoreVisibleFrameIfNeeded(_ window: NSWindow) {
-        let visibleFrames = NSScreen.screens.map(\.visibleFrame)
-        let fallback = window.screen?.visibleFrame
-            ?? NSScreen.main?.visibleFrame
-            ?? NSRect(x: 0, y: 0, width: 1_440, height: 900)
-        let adjustedFrame = PlayerWindowFrameVisibilityPolicy.adjustedFrame(
-            window.frame,
-            visibleFrames: visibleFrames,
-            fallbackVisibleFrame: fallback
-        )
-        if adjustedFrame != window.frame {
-            window.setFrame(adjustedFrame, display: false)
-        }
+        AppWindowLayoutPolicy.restoreVisibleFrameIfNeeded(window)
     }
 
     func dismiss() {
@@ -369,8 +444,20 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         appState?.setPlayerWindowKey(false)
     }
 
+    func windowDidExitFullScreen(_ notification: Notification) {
+        guard hasDeferredLayoutReset,
+              let exitedWindow = notification.object as? NSWindow,
+              exitedWindow === window else { return }
+        hasDeferredLayoutReset = false
+        AppWindowLayoutPolicy.restoreDefaultLayout(
+            exitedWindow,
+            target: .playerWindow
+        )
+    }
+
     private func clearWindowReferences() {
         pendingFocusCommandID = nil
+        hasDeferredLayoutReset = false
         appState?.setPlayerWindowKey(false)
         window?.delegate = nil
         window = nil
@@ -380,9 +467,271 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     private func initialContentSize() -> NSSize {
         let visibleFrame = NSScreen.main?.visibleFrame
             ?? NSRect(x: 0, y: 0, width: 1_440, height: 900)
-        return PlayerWindowSizingPolicy.initialContentSize(
+        return AppWindowLayoutPolicy.defaultContentSize(
+            for: .playerWindow,
             visibleFrame: visibleFrame
         )
+    }
+}
+
+@MainActor
+enum BrowserWindowChromeController {
+    static func configure(_ window: NSWindow) {
+        window.styleMask.insert(.fullSizeContentView)
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.toolbarStyle = .unified
+        window.titlebarSeparatorStyle = .none
+        window.isOpaque = false
+        window.backgroundColor = .clear
+    }
+}
+
+struct AppWindowLayoutDescriptor {
+    let identifier: NSUserInterfaceItemIdentifier
+    let frameAutosaveName: String
+    let preferredContentSize: NSSize
+    let minimumContentSize: NSSize
+    let preservesSixteenByNine: Bool
+}
+
+enum AppWindowLayoutPolicy {
+    private static let fallbackVisibleFrame = NSRect(
+        x: 0,
+        y: 0,
+        width: 1_440,
+        height: 900
+    )
+    private static let minimumVisibleLength: CGFloat = 80
+    private static let screenMargin: CGFloat = 40
+
+    static func descriptor(
+        for target: AppWindowLayoutTarget
+    ) -> AppWindowLayoutDescriptor {
+        switch target {
+        case .mainWindow:
+            return AppWindowLayoutDescriptor(
+                identifier: NSUserInterfaceItemIdentifier(
+                    "OKVideoMac.MainWindow"
+                ),
+                frameAutosaveName: "OKVideoMac.MainWindow.v1",
+                preferredContentSize: NSSize(width: 1_240, height: 780),
+                minimumContentSize: NSSize(width: 900, height: 600),
+                preservesSixteenByNine: false
+            )
+        case .playerWindow:
+            return AppWindowLayoutDescriptor(
+                identifier: NSUserInterfaceItemIdentifier(
+                    "OKVideoMac.PlayerWindow"
+                ),
+                frameAutosaveName: "OKVideoMac.PlayerWindow.v2",
+                preferredContentSize: NSSize(width: 1_152, height: 648),
+                minimumContentSize: NSSize(width: 800, height: 450),
+                preservesSixteenByNine: true
+            )
+        }
+    }
+
+    static func defaultContentSize(
+        for target: AppWindowLayoutTarget,
+        visibleFrame: NSRect
+    ) -> NSSize {
+        let descriptor = descriptor(for: target)
+        let availableWidth = max(1, visibleFrame.width - screenMargin * 2)
+        let availableHeight = max(1, visibleFrame.height - screenMargin * 2)
+
+        if descriptor.preservesSixteenByNine {
+            let aspectRatio: CGFloat = 16 / 9
+            let minimumWidth = min(
+                descriptor.minimumContentSize.width,
+                availableWidth
+            )
+            let minimumHeight = min(
+                descriptor.minimumContentSize.height,
+                availableHeight
+            )
+            let maximumWidth = min(
+                descriptor.preferredContentSize.width,
+                availableWidth,
+                availableHeight * aspectRatio
+            )
+            let width = max(
+                min(maximumWidth, availableHeight * aspectRatio),
+                min(minimumWidth, minimumHeight * aspectRatio)
+            )
+            return NSSize(width: width, height: width / aspectRatio)
+        }
+
+        return NSSize(
+            width: fittedDimension(
+                preferred: descriptor.preferredContentSize.width,
+                minimum: descriptor.minimumContentSize.width,
+                available: availableWidth
+            ),
+            height: fittedDimension(
+                preferred: descriptor.preferredContentSize.height,
+                minimum: descriptor.minimumContentSize.height,
+                available: availableHeight
+            )
+        )
+    }
+
+    @MainActor
+    static func configure(
+        _ window: NSWindow,
+        target: AppWindowLayoutTarget
+    ) {
+        let descriptor = descriptor(for: target)
+        let isAlreadyConfigured = window.identifier == descriptor.identifier
+        window.identifier = descriptor.identifier
+        window.contentMinSize = descriptor.minimumContentSize
+
+        guard !isAlreadyConfigured else {
+            restoreVisibleFrameIfNeeded(window)
+            return
+        }
+
+        if !window.setFrameUsingName(descriptor.frameAutosaveName) {
+            applyDefaultFrame(window, target: target, animate: false)
+        }
+        window.setFrameAutosaveName(descriptor.frameAutosaveName)
+        restoreVisibleFrameIfNeeded(window)
+    }
+
+    @MainActor
+    static func restoreDefaultLayout(
+        _ window: NSWindow,
+        target: AppWindowLayoutTarget
+    ) {
+        prepareForDeferredReset(window, target: target)
+        let descriptor = descriptor(for: target)
+        window.identifier = descriptor.identifier
+        window.contentMinSize = descriptor.minimumContentSize
+        applyDefaultFrame(window, target: target, animate: window.isVisible)
+        window.setFrameAutosaveName(descriptor.frameAutosaveName)
+    }
+
+    @MainActor
+    static func prepareForDeferredReset(
+        _ window: NSWindow,
+        target: AppWindowLayoutTarget
+    ) {
+        window.setFrameAutosaveName("")
+        clearSavedFrame(for: target)
+    }
+
+    static func clearSavedFrame(for target: AppWindowLayoutTarget) {
+        let autosaveName = descriptor(for: target).frameAutosaveName
+        UserDefaults.standard.removeObject(
+            forKey: "NSWindow Frame \(autosaveName)"
+        )
+    }
+
+    @MainActor
+    static func window(for target: AppWindowLayoutTarget) -> NSWindow? {
+        let identifier = descriptor(for: target).identifier
+        return NSApp.windows.first { $0.identifier == identifier }
+    }
+
+    @MainActor
+    static func restoreVisibleFrameIfNeeded(_ window: NSWindow) {
+        let visibleFrames = NSScreen.screens.map(\.visibleFrame)
+        let fallback = window.screen?.visibleFrame
+            ?? NSScreen.main?.visibleFrame
+            ?? fallbackVisibleFrame
+        let adjusted = adjustedFrame(
+            window.frame,
+            visibleFrames: visibleFrames,
+            fallbackVisibleFrame: fallback
+        )
+        guard adjusted != window.frame else { return }
+        window.setFrame(adjusted, display: false)
+    }
+
+    static func adjustedFrame(
+        _ frame: NSRect,
+        visibleFrames: [NSRect],
+        fallbackVisibleFrame: NSRect
+    ) -> NSRect {
+        let bestVisibleFrame = visibleFrames.max { lhs, rhs in
+            intersectionArea(lhs.intersection(frame))
+                < intersectionArea(rhs.intersection(frame))
+        }
+        let bestIntersection = bestVisibleFrame?.intersection(frame) ?? .zero
+        let isSufficientlyVisible = bestIntersection.width
+            >= minimumVisibleLength
+            && bestIntersection.height >= minimumVisibleLength
+        let targetVisibleFrame = isSufficientlyVisible
+            ? (bestVisibleFrame ?? fallbackVisibleFrame)
+            : fallbackVisibleFrame
+
+        if isSufficientlyVisible,
+           frame.width <= targetVisibleFrame.width,
+           frame.height <= targetVisibleFrame.height {
+            return frame
+        }
+
+        var adjusted = frame
+        adjusted.size.width = min(adjusted.width, targetVisibleFrame.width)
+        adjusted.size.height = min(adjusted.height, targetVisibleFrame.height)
+        if isSufficientlyVisible {
+            adjusted.origin.x = min(
+                max(adjusted.origin.x, targetVisibleFrame.minX),
+                targetVisibleFrame.maxX - adjusted.width
+            )
+            adjusted.origin.y = min(
+                max(adjusted.origin.y, targetVisibleFrame.minY),
+                targetVisibleFrame.maxY - adjusted.height
+            )
+        } else {
+            adjusted.origin = NSPoint(
+                x: targetVisibleFrame.midX - adjusted.width / 2,
+                y: targetVisibleFrame.midY - adjusted.height / 2
+            )
+        }
+        return adjusted
+    }
+
+    @MainActor
+    private static func applyDefaultFrame(
+        _ window: NSWindow,
+        target: AppWindowLayoutTarget,
+        animate: Bool
+    ) {
+        let visibleFrame = window.screen?.visibleFrame
+            ?? NSScreen.main?.visibleFrame
+            ?? fallbackVisibleFrame
+        let contentSize = defaultContentSize(
+            for: target,
+            visibleFrame: visibleFrame
+        )
+        var frame = window.frameRect(
+            forContentRect: NSRect(origin: .zero, size: contentSize)
+        )
+        frame.origin = NSPoint(
+            x: visibleFrame.midX - frame.width / 2,
+            y: visibleFrame.midY - frame.height / 2
+        )
+        frame = adjustedFrame(
+            frame,
+            visibleFrames: [visibleFrame],
+            fallbackVisibleFrame: visibleFrame
+        )
+        window.setFrame(frame, display: true, animate: animate)
+    }
+
+    private static func fittedDimension(
+        preferred: CGFloat,
+        minimum: CGFloat,
+        available: CGFloat
+    ) -> CGFloat {
+        guard available >= minimum else { return available }
+        return min(preferred, available)
+    }
+
+    private static func intersectionArea(_ rect: NSRect) -> CGFloat {
+        guard !rect.isNull else { return 0 }
+        return max(0, rect.width) * max(0, rect.height)
     }
 }
 
@@ -390,36 +739,24 @@ enum PlayerWindowSizingPolicy {
     static let aspectRatio: CGFloat = 16 / 9
 
     static func initialContentSize(visibleFrame: NSRect) -> NSSize {
-        let maximumWidth = max(800, visibleFrame.width * 0.82)
-        let maximumHeight = max(450, visibleFrame.height * 0.86)
-        let width = min(maximumWidth, maximumHeight * aspectRatio)
-        return NSSize(width: width, height: width / aspectRatio)
+        AppWindowLayoutPolicy.defaultContentSize(
+            for: .playerWindow,
+            visibleFrame: visibleFrame
+        )
     }
 }
 
 enum PlayerWindowFrameVisibilityPolicy {
-    private static let minimumVisibleLength: CGFloat = 80
-
     static func adjustedFrame(
         _ frame: NSRect,
         visibleFrames: [NSRect],
         fallbackVisibleFrame: NSRect
     ) -> NSRect {
-        let isSufficientlyVisible = visibleFrames.contains { visibleFrame in
-            let intersection = visibleFrame.intersection(frame)
-            return intersection.width >= minimumVisibleLength
-                && intersection.height >= minimumVisibleLength
-        }
-        guard !isSufficientlyVisible else { return frame }
-
-        var adjusted = frame
-        adjusted.size.width = min(adjusted.width, fallbackVisibleFrame.width)
-        adjusted.size.height = min(adjusted.height, fallbackVisibleFrame.height)
-        adjusted.origin = NSPoint(
-            x: fallbackVisibleFrame.midX - adjusted.width / 2,
-            y: fallbackVisibleFrame.midY - adjusted.height / 2
+        AppWindowLayoutPolicy.adjustedFrame(
+            frame,
+            visibleFrames: visibleFrames,
+            fallbackVisibleFrame: fallbackVisibleFrame
         )
-        return adjusted
     }
 }
 
@@ -457,8 +794,13 @@ private struct PlayerPlaybackWindowRoot: View {
                 .allowsHitTesting(false)
             }
 
-            PlayerView(onWindowChromeRestored: {})
+            if appState.isPlayerPresented {
+                PlayerView(
+                    playerSnapshotState: appState.playerSnapshotState,
+                    onWindowChromeRestored: {}
+                )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
 
             if let prompt = appState.playerCloudAuthorizationPrompt {
                 CloudAuthorizationView(prompt: prompt)
@@ -717,7 +1059,7 @@ struct AppCommands: Commands {
             Divider()
 
             Button("搜索") {
-                state.focusHomeToolbarSearch()
+                state.focusGlobalSearch()
             }
             .keyboardShortcut("f", modifiers: .command)
             .disabled(!state.allowsBrowserShortcuts)

@@ -18,16 +18,22 @@ struct FavoritesView: View {
                     message: "在影片详情中选择收藏后会显示在这里。"
                 )
             } else {
-                List(state.favorites) { favorite in
-                    favoriteRow(favorite)
-                        .padding(.vertical, 4)
-                }
+                favoritesList
             }
         }
-        .navigationTitle("收藏")
+        .navigationTitle("")
         .toolbar {
-            ToolbarItemGroup {
-                if !state.favorites.isEmpty {
+            ToolbarItem(placement: .navigation) {
+                BrowserToolbarTitle("收藏")
+            }
+            ToolbarItem(placement: .principal) {
+                Spacer(minLength: 0)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityHidden(true)
+            }
+            ToolbarItemGroup(placement: .primaryAction) {
+                if !state.isDetailPagePresented,
+                   !state.favorites.isEmpty {
                     favoriteManagementControls
                 }
             }
@@ -58,6 +64,28 @@ struct FavoritesView: View {
         .background {
             AppKeyCommandMonitor(handler: handleKeyCommand)
                 .frame(width: 0, height: 0)
+        }
+    }
+
+    @ViewBuilder
+    private var favoritesList: some View {
+        favoriteRows
+            .ignoresSafeArea(.container, edges: .top)
+    }
+
+    private var favoriteRows: some View {
+        List {
+            ForEach(
+                Array(state.favorites.enumerated()),
+                id: \.element.id
+            ) { index, favorite in
+                favoriteRow(favorite)
+                    .padding(.vertical, 4)
+                    .padding(
+                        .top,
+                        index == 0 ? BrowserToolbarMetrics.height : 0
+                    )
+            }
         }
     }
 

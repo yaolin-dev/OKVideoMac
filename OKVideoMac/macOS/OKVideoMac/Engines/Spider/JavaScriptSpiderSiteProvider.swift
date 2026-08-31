@@ -4,6 +4,33 @@ import CryptoKit
 import Foundation
 import OKVideoCore
 
+enum AndroidBridgeInteractionPollingPolicy {
+    static let timeout: TimeInterval = 600
+
+    /// Keep the first UI transitions responsive, then back off while a user is
+    /// reading or entering data in the Android configuration surface. This
+    /// cuts the steady-state localhost traffic from four requests per second
+    /// to one without changing the ten-minute interaction deadline.
+    static func delayNanoseconds(afterAttempt attempt: Int) -> UInt64 {
+        switch max(0, attempt) {
+        case 0..<8:
+            return 250_000_000
+        case 8..<24:
+            return 500_000_000
+        default:
+            return 1_000_000_000
+        }
+    }
+
+    static func shouldContinue(
+        startedAt: Date,
+        now: Date,
+        timeout: TimeInterval = AndroidBridgeInteractionPollingPolicy.timeout
+    ) -> Bool {
+        now.timeIntervalSince(startedAt) < max(0, timeout)
+    }
+}
+
 struct AndroidBridgeUIControl: Decodable, Equatable, Identifiable, Sendable {
     let id: String
     let title: String
@@ -356,6 +383,7 @@ final class InteractionHandle: @unchecked Sendable, Identifiable {
         Bool?
     ) async throws -> ConfigurationInteractionTerminalResponse
     typealias CancelProvider = @Sendable (UUID) async throws -> Void
+    typealias TerminalCleanup = @Sendable (UUID) async -> Void
 
     private actor State {
         var latestInteraction: ConfigurationInteraction?
@@ -411,6 +439,7 @@ final class InteractionHandle: @unchecked Sendable, Identifiable {
     private let submitProvider: SubmitProvider?
     private let verifyProvider: VerifyProvider?
     private let cancelProvider: CancelProvider?
+    private let terminalCleanup: TerminalCleanup?
     private var invocationTask: Task<Void, Never>?
 
     init(
@@ -421,6 +450,7 @@ final class InteractionHandle: @unchecked Sendable, Identifiable {
         submitProvider: SubmitProvider? = nil,
         verifyProvider: VerifyProvider? = nil,
         cancelProvider: CancelProvider? = nil,
+        terminalCleanup: TerminalCleanup? = nil,
         operation: @escaping @Sendable () async throws
             -> ConfigurationInteractionTerminalResponse
     ) {
@@ -431,11 +461,20 @@ final class InteractionHandle: @unchecked Sendable, Identifiable {
         self.submitProvider = submitProvider
         self.verifyProvider = verifyProvider
         self.cancelProvider = cancelProvider
+        self.terminalCleanup = terminalCleanup
         let state = self.state
+        let cleanup = terminalCleanup
+        let requestID = id
         invocationTask = Task {
             do {
-                await state.finish(.success(try await operation()))
+                let response = try await operation()
+                // Retire the request-owned input capability before publishing
+                // its terminal value. Every waiter therefore observes the
+                // terminal state only after old taps/swipes are fenced out.
+                await cleanup?(requestID)
+                await state.finish(.success(response))
             } catch {
+                await cleanup?(requestID)
                 await state.finish(.failure(error))
             }
         }
@@ -518,6 +557,7 @@ final class InteractionHandle: @unchecked Sendable, Identifiable {
             // through the same atomic owner used by the original invocation
             // so a late provider success cannot flip a failure back to
             // success. The single terminal observer presents the error.
+            await terminalCleanup?(id)
             let installedFailure = await state.finish(.failure(error))
             if installedFailure {
                 cancel()
@@ -559,6 +599,7 @@ final class InteractionHandle: @unchecked Sendable, Identifiable {
         // authoritative. Publishing through State wakes the single AppState
         // terminal observer; the verification caller must not deliver a second
         // completion independently.
+        await terminalCleanup?(id)
         let installedVerification = await state.finish(.success(verification))
         if installedVerification {
             cancel()
@@ -636,9 +677,43 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
     /// No key or credential value leaves the Bridge. MyDrive authorization
     /// uses a stable post-QR change only as request-scoped success evidence.
     var authorizationStorageFingerprint: String? = nil
+    /// Lifecycle-only ownership for the complete Android display. This remains
+    /// true when a request-owned provider window launches a browser or another
+    /// Activity and the Bridge process itself has no visible root. It is never
+    /// authorization-success evidence.
+    var surfaceActive: Bool? = nil
+    var surfaceRequestScoped: Bool? = nil
+    var surfaceInteractionID: String? = nil
+    var surfaceMode: String? = nil
+    var surfaceHostLifecycle: String? = nil
 
     var interactionGeneration: Int? {
         generation ?? revision
+    }
+
+    var hasRequestScopedActionSurface: Bool {
+        guard terminal != true,
+              surfaceActive == true,
+              surfaceRequestScoped == true,
+              let stateID = interactionID.flatMap(UUID.init(uuidString:)),
+              let surfaceID = surfaceInteractionID.flatMap(UUID.init(uuidString:)),
+              let mode = normalizedActionSurfaceMode,
+              ["providerwindow", "externalactivity", "delegatedactivity"]
+                .contains(mode)
+        else {
+            return false
+        }
+        // A bare translucent ActionActivity owns lifecycle, but is not an
+        // actionable provider surface: exposing its full screencap could reveal
+        // and operate the launcher underneath. Only provider content or an
+        // explicitly delegated Activity may be mirrored to macOS.
+        return stateID == surfaceID
+    }
+
+    var normalizedActionSurfaceMode: String? {
+        surfaceMode?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
     }
 
     var actionableControls: [AndroidBridgeUIControl] {
@@ -708,7 +783,10 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
             || !(texts?.isEmpty ?? true)
     }
 
-    var isAuthorizationPrompt: Bool {
+    /// Any request-owned provider UI which the native configuration sheet can
+    /// render. Ordering and ordinary configuration surfaces intentionally use
+    /// this predicate without becoming authorization requests.
+    var isProviderUIPrompt: Bool {
         // Older bridge builds reported the empty host Activity as a visible
         // "chooser" after a QR dialog closed. Requiring actual captured UI
         // content prevents that ghost window from blocking playback forever.
@@ -720,6 +798,18 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
         return inputCount > 0
             || imageCount > 0
             || !actionableControls.isEmpty
+    }
+
+    /// A provider UI may enter the account lifecycle only when the request
+    /// itself was explicitly declared as authorization. A QR-shaped image in
+    /// playback, ordering or configuration content is not login evidence.
+    var isAuthorizationPrompt: Bool {
+        guard kind?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() == ConfigurationInteraction.ActionKind
+            .authorization.rawValue.lowercased() else {
+            return false
+        }
+        return isProviderUIPrompt
     }
 
     func configurationInteraction(
@@ -764,7 +854,12 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
         } else if isCredentialPush {
             qrRole = .credentialPush
         } else if validatedQRCode != nil,
-                  declaredActionKind == .authorization {
+                  declaredActionKind == .authorization
+                    || declaredActionKind == .playback {
+            // A QR surfaced by the exact request-scoped playerContent call is
+            // an authorization surface for that pending playback. It is not
+            // a global QR heuristic: the interaction ID still has to match
+            // the player request that owns the overlay and eventual result.
             qrRole = .login
         } else if validatedQRCode != nil {
             // A QR-shaped bitmap can also be an ordering preview, remote-input
@@ -953,6 +1048,53 @@ struct AndroidBridgeUIRequired: Error {
         self.state = state
         self.interaction = interaction
         self.handle = handle
+    }
+}
+
+/// A TVBox Spider can return an episode token which is valid only while the
+/// exact provider instance that created it remains alive. Treat the provider's
+/// explicit missing-UUID code as lifecycle state, not as a media or network
+/// failure, so history recovery can rebuild that one site and resolve a fresh
+/// episode before retrying playback.
+struct AndroidProviderContextInvalid: Error, Equatable, LocalizedError, Sendable {
+    let providerMessage: String
+
+    var errorDescription: String? {
+        "TVBox 来源运行上下文已失效，需要重新获取影片详情"
+    }
+}
+
+enum AndroidProviderContextRecoveryPolicy {
+    static let unavailableCode = "provideruuidunavailable"
+
+    static func recognizes(_ message: String) -> Bool {
+        let normalized = message.lowercased().filter {
+            $0.isLetter || $0.isNumber
+        }
+        return normalized.contains(unavailableCode)
+    }
+
+    static func contextError(from error: Error) -> AndroidProviderContextInvalid? {
+        if let typed = error as? AndroidProviderContextInvalid {
+            return typed
+        }
+        let message = error.localizedDescription
+        guard recognizes(message) else { return nil }
+        return AndroidProviderContextInvalid(providerMessage: message)
+    }
+
+    /// Performs one bounded site rebuild. A second provider-context failure is
+    /// returned to the host instead of entering an unbounded destroy/retry loop.
+    static func recover<Value>(
+        operation: () async throws -> Value,
+        reset: () async throws -> Void
+    ) async throws -> Value {
+        do {
+            return try await operation()
+        } catch is AndroidProviderContextInvalid {
+            try await reset()
+            return try await operation()
+        }
     }
 }
 
@@ -1231,6 +1373,11 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
     private let baseURL: URL?
     private let jarReference: String
     private let bridge: AndroidDexBridgeClient
+    /// Credential-free account-state scope for this exact configuration,
+    /// site and JAR. It intentionally matches the owner capability bound by
+    /// Android so a configuration switch or JAR replacement cannot inherit a
+    /// stale "已授权" snapshot.
+    let cloudAccountScopeID: String?
 
     init(
         site: SiteConfiguration,
@@ -1245,10 +1392,24 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
             )
         }
         self.site = site
-        configurationIdentity = configurationID.uuidString.lowercased()
+        let normalizedConfigurationID = configurationID.uuidString.lowercased()
+        configurationIdentity = normalizedConfigurationID
         self.jarReference = jarReference
         self.baseURL = baseURL
         self.bridge = bridge
+        if let jar = try? AndroidDexBridgeClient.jarParts(
+            jarReference,
+            baseURL: baseURL
+        ) {
+            cloudAccountScopeID = AndroidDexBridgeClient.providerOwnerID(
+                configurationID: normalizedConfigurationID,
+                siteKey: site.key,
+                jarURL: jar.url,
+                jarMD5: jar.md5
+            )
+        } else {
+            cloudAccountScopeID = nil
+        }
     }
 
     func home() async throws -> SiteHome {
@@ -1514,12 +1675,17 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
             guard !action.isEmpty else {
                 throw AppError.spider("配置动作内容为空")
             }
+            let interactionKind = Self.interactionActionKind(tag: item.tag)
             return .action(
                 try await invoke(
                     method: "action",
                     arguments: [.string(action)],
-                    monitorsAuthorization: true,
-                    interactionKind: Self.interactionActionKind(tag: item.tag),
+                    // FongMi invokes every action opaquely. Use a scoped
+                    // interaction whenever AppState supplied one, including
+                    // commands whose normal result is empty. A provider may
+                    // still create native UI regardless of its metadata tag.
+                    monitorsAuthorization: interactionID != nil,
+                    interactionKind: interactionKind,
                     interactionID: interactionID
                 )
             )
@@ -1631,57 +1797,66 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         try await requestPlayer(
             flag: flag,
             episodeURL: episodeURL,
-            refreshPlayback: false
+            refreshPlayback: false,
+            interactionID: nil
+        )
+    }
+
+    /// Keeps playerContent and any authorization UI inside the playback
+    /// request already owned by AppState. The eventual provider result is
+    /// cached by the same InteractionHandle and can resume that player without
+    /// issuing a second, unrelated playerContent call.
+    func player(
+        flag: String,
+        episodeURL: String,
+        interactionID: UUID
+    ) async throws -> SitePlaybackResult {
+        try await requestPlayer(
+            flag: flag,
+            episodeURL: episodeURL,
+            refreshPlayback: false,
+            interactionID: interactionID
         )
     }
 
     func refreshPlayback(
         _ request: PlaybackRefreshRequest
     ) async throws -> RefreshedSitePlayback {
-        if let reference = request.providerResourceReference,
-           acceptsPlaybackResourceReference(reference),
-           let sourceName = request.sourceName.map({
-               $0.trimmingCharacters(in: .whitespacesAndNewlines)
-           }),
-           !sourceName.isEmpty {
-            let result = try await requestPlayer(
-                flag: sourceName,
-                episodeURL: reference.stableResourceLocator,
-                refreshPlayback: true
-            )
-            let episodeName = request.episodeName.map {
-                $0.trimmingCharacters(in: .whitespacesAndNewlines)
-            }.flatMap { $0.isEmpty ? nil : $0 } ?? "历史分集"
-            let episode = PlayEpisode(
-                name: episodeName,
-                url: reference.stableResourceLocator,
-                referenceIdentity: reference.episodeIdentity
-            )
-            let source = PlaySource(
-                name: sourceName,
-                episodes: [episode],
-                referenceIdentity: reference.sourceIdentity
-            )
-            return RefreshedSitePlayback(
-                detail: VideoDetail(
-                    summary: VideoSummary(
-                        siteKey: site.key,
-                        siteName: site.name,
-                        videoID: request.videoID,
-                        title: request.title
-                    ),
-                    playSources: [source]
-                ),
-                source: source,
-                episode: episode,
-                playbackResult: result
-            )
+        // Android/Dex episode locators are provider-instance replay tokens, not
+        // durable history identities. Always rebuild from current detail before
+        // playerContent, even when an older record incorrectly marked a locator
+        // as provider-stable.
+        try await AndroidProviderContextRecoveryPolicy.recover {
+            try await resolveFreshPlayback(request, interactionID: nil)
+        } reset: {
+            try await resetSpiderForPlaybackRecovery()
         }
+    }
+
+    func refreshPlayback(
+        _ request: PlaybackRefreshRequest,
+        interactionID: UUID
+    ) async throws -> RefreshedSitePlayback {
+        try await AndroidProviderContextRecoveryPolicy.recover {
+            try await resolveFreshPlayback(
+                request,
+                interactionID: interactionID
+            )
+        } reset: {
+            try await resetSpiderForPlaybackRecovery()
+        }
+    }
+
+    private func resolveFreshPlayback(
+        _ request: PlaybackRefreshRequest,
+        interactionID: UUID?
+    ) async throws -> RefreshedSitePlayback {
         let selected = try await resolvePlaybackRefreshSelection(request)
         let result = try await requestPlayer(
             flag: selected.source.name,
             episodeURL: selected.episode.url,
-            refreshPlayback: true
+            refreshPlayback: true,
+            interactionID: interactionID
         )
         return RefreshedSitePlayback(
             detail: selected.detail,
@@ -1691,21 +1866,43 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         )
     }
 
+    private func resetSpiderForPlaybackRecovery() async throws {
+        // `destroy` is keyed by jar + site in the Bridge. Do not restart the
+        // Android runtime or invalidate unrelated providers/configurations.
+        _ = try await invoke(method: "destroy", arguments: [])
+        // Match FongMi's navigation-first lifecycle. Home warm-up is best
+        // effort because legitimate search/detail-only spiders may return no
+        // home content; the following detail call remains authoritative.
+        _ = try? await loadHomeValues()
+    }
+
     private func requestPlayer(
         flag: String,
         episodeURL: String,
-        refreshPlayback: Bool
+        refreshPlayback: Bool,
+        interactionID: UUID?
     ) async throws -> SitePlaybackResult {
-        let providerValue = try await invoke(
+        do {
+            let providerValue = try await invoke(
                 method: "play",
                 arguments: [.string(flag), .string(episodeURL), .array([])],
-                refreshPlayback: refreshPlayback
+                monitorsAuthorization: interactionID != nil,
+                interactionKind: interactionID == nil ? nil : .playback,
+                refreshPlayback: refreshPlayback,
+                interactionID: interactionID
             )
-        return try playbackResult(
-            from: providerValue,
-            flag: flag,
-            episodeURL: episodeURL
-        )
+            return try playbackResult(
+                from: providerValue,
+                flag: flag,
+                episodeURL: episodeURL
+            )
+        } catch {
+            if let contextError = AndroidProviderContextRecoveryPolicy
+                .contextError(from: error) {
+                throw contextError
+            }
+            throw error
+        }
     }
 
     /// Maps the terminal value from the exact Bridge invocation that produced
@@ -1922,13 +2119,14 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
 
     func action(
         _ action: String,
-        interactionID: UUID
+        interactionID: UUID,
+        interactionKind: ConfigurationInteraction.ActionKind
     ) async throws -> JSONValue {
         try await invoke(
             method: "action",
             arguments: [.string(action)],
             monitorsAuthorization: true,
-            interactionKind: .configuration,
+            interactionKind: interactionKind,
             interactionID: interactionID
         )
     }
@@ -1963,6 +2161,7 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         switch tag?.trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() {
         case "command": return .command
+        case "immediate": return .immediate
         case "toggle": return .toggle
         case "order", "ordering": return .ordering
         // Only the provider protocol's explicit authorization kind may enter
@@ -2765,12 +2964,20 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         if monitorsAuthorization,
            requestedInteractionID == nil,
            let staleState = try? await uiState(),
-           staleState.isAuthorizationPrompt {
+           staleState.isProviderUIPrompt {
             // A dialog belongs to the operation that created it. If it was
             // hidden on macOS without resetting Android, accepting it here
             // would attach an old cloud-login window to an unrelated detail
             // or playback click.
             try await resetAuthorizationUI()
+        }
+        if let interactionID {
+            // This actor hop is the host-side supersede fence. No request for
+            // the replacement interaction is sent to Android until every ADB
+            // input already admitted for the previous lease has completed.
+            try await runtime.beginActionSurfaceSession(
+                interactionID: interactionID
+            )
         }
         let jar = try Self.jarParts(jarReference, baseURL: baseURL)
         let providerOwnerID = Self.providerOwnerID(
@@ -2859,6 +3066,17 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                     handle: interactionHandle
                 )
             }
+            if let interactionID {
+                await runtime.endActionSurfaceSession(
+                    interactionID: interactionID
+                )
+            }
+            if let message = terminalResponse.error,
+               AndroidProviderContextRecoveryPolicy.recognizes(message) {
+                throw AndroidProviderContextInvalid(
+                    providerMessage: message
+                )
+            }
             if terminalResponse.failureKind == "providerMessage" {
                 throw ProviderPlaybackError(
                     terminalResponse.error ?? "Spider 没有返回可播放媒体"
@@ -2872,6 +3090,11 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                         }
                         ?? "Java/Dex 桥没有返回有效结果"
                 )
+            )
+        }
+        if let interactionID {
+            await runtime.endActionSurfaceSession(
+                interactionID: interactionID
             )
         }
         return terminalResponse.providerResult ?? .null
@@ -3021,8 +3244,13 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     ) async throws -> ConfigurationInteractionTerminalResponse {
         guard initial.outcome == .pending else { return initial }
         let url = interactionURL(requestID, suffix: "state")
+        let startedAt = Date()
         var lastError: Error?
-        for _ in 0..<2_400 {
+        var attempt = 0
+        while AndroidBridgeInteractionPollingPolicy.shouldContinue(
+            startedAt: startedAt,
+            now: Date()
+        ) {
             try Task.checkCancellation()
             do {
                 var request = URLRequest(url: url)
@@ -3071,7 +3299,10 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                 // same bounded interaction deadline.
                 lastError = error
             }
-            try await Task.sleep(nanoseconds: 250_000_000)
+            let delay = AndroidBridgeInteractionPollingPolicy
+                .delayNanoseconds(afterAttempt: attempt)
+            attempt += 1
+            try await Task.sleep(nanoseconds: delay)
         }
         throw lastError ?? AppError.spider("等待配置操作完成超时")
     }
@@ -3119,7 +3350,8 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     ) async -> AndroidBridgeUIState? {
         guard attempts > 0 else { return nil }
         for attempt in 0..<attempts {
-            if let state = await poll(), state.isAuthorizationPrompt {
+            if let state = await poll(),
+               state.isProviderUIPrompt || state.hasRequestScopedActionSurface {
                 return state
             }
             guard attempt + 1 < attempts else { break }
@@ -3290,6 +3522,10 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     }
 
     func resetAuthorizationUI(interactionID: UUID? = nil) async throws {
+        // Invalidate the host input lease before asking Android to dismiss the
+        // surface. A replacement invocation cannot start until this actor hop
+        // has retired every old tap/swipe admitted by the previous session.
+        await runtime.endActionSurfaceSession(interactionID: interactionID)
         try await runtime.ensureReady()
         let url = interactionID.map {
             Self.interactionURL($0, suffix: "cancel")
@@ -3455,7 +3691,10 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         for method: String,
         explicitAuthorizationAction: Bool = false
     ) -> Bool {
-        explicitAuthorizationAction || method == "play" || method == "action"
+        // UI ownership is explicit. FongMi's action() payload is opaque and a
+        // playerContent result is playback data; neither is an implicit login
+        // request merely because a legacy provider creates a window or QR.
+        explicitAuthorizationAction
     }
 
     private func sendMonitoringInteraction(
@@ -3513,6 +3752,12 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                 try await self.resetAuthorizationUI(
                     interactionID: interactionID
                 )
+            },
+            terminalCleanup: { [weak self] interactionID in
+                guard let self else { return }
+                await self.runtime.endActionSurfaceSession(
+                    interactionID: interactionID
+                )
             }
         ) { [interactionSession] in
             let (data, response) = try await interactionSession.data(
@@ -3564,7 +3809,8 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                         if let state = try? await self.fetchUIState(
                             interactionID: requestID
                         ),
-                           state.isAuthorizationPrompt {
+                           (state.isProviderUIPrompt
+                                || state.hasRequestScopedActionSurface) {
                             let snapshot = await self
                                 .validatedQRCodeSnapshot(
                                     for: state,
@@ -3599,7 +3845,7 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         }
     }
 
-    private static func jarParts(
+    fileprivate static func jarParts(
         _ reference: String,
         baseURL: URL?
     ) throws -> (url: URL, md5: String) {
@@ -3665,6 +3911,183 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
             return "站点返回空响应，上游接口可能暂时不可用"
         }
         return message
+    }
+}
+
+/// One full-display frame from the app-owned Android runtime. The frame is
+/// deliberately bound to the same request ID and UI generation used by the
+/// structured Bridge protocol; it is presentation data, never evidence that
+/// an authorization or configuration operation succeeded.
+struct AndroidActionSurfaceFrame: Equatable, Sendable {
+    let interactionID: UUID
+    let providerOwnerID: String
+    let runtimeGeneration: String
+    let surfaceMode: String
+    let generation: Int
+    let frameSequence: UInt64
+    let pngData: Data
+    let pixelWidth: Int
+    let pixelHeight: Int
+
+    static func == (
+        lhs: AndroidActionSurfaceFrame,
+        rhs: AndroidActionSurfaceFrame
+    ) -> Bool {
+        lhs.interactionID == rhs.interactionID
+            && lhs.providerOwnerID == rhs.providerOwnerID
+            && lhs.runtimeGeneration == rhs.runtimeGeneration
+            && lhs.surfaceMode == rhs.surfaceMode
+            && lhs.generation == rhs.generation
+            && lhs.frameSequence == rhs.frameSequence
+            && lhs.pixelWidth == rhs.pixelWidth
+            && lhs.pixelHeight == rhs.pixelHeight
+    }
+
+    var aspectRatio: Double {
+        guard pixelWidth > 0, pixelHeight > 0 else { return 1 }
+        return Double(pixelWidth) / Double(pixelHeight)
+    }
+
+    static func pngPixelSize(_ data: Data) -> (width: Int, height: Int)? {
+        let bytes = [UInt8](data.prefix(24))
+        guard bytes.count == 24,
+              Array(bytes[0..<8]) == [137, 80, 78, 71, 13, 10, 26, 10],
+              Array(bytes[12..<16]) == [73, 72, 68, 82] else {
+            return nil
+        }
+        let width = bytes[16..<20].reduce(UInt32(0)) {
+            ($0 << 8) | UInt32($1)
+        }
+        let height = bytes[20..<24].reduce(UInt32(0)) {
+            ($0 << 8) | UInt32($1)
+        }
+        guard width > 0, height > 0 else {
+            return nil
+        }
+        return (Int(width), Int(height))
+    }
+}
+
+extension AndroidDexBridgeClient {
+    /// Captures the complete Android display without changing the legacy
+    /// `/snapshot` endpoint, whose payload remains a normalized QR bitmap for
+    /// older hosts. State is checked both before and after ADB capture so a
+    /// frame from a superseded request can never be published under the new
+    /// request's lease.
+    func actionSurfaceFrame(
+        interactionID: UUID
+    ) async throws -> AndroidActionSurfaceFrame {
+        let before = try await activeSurfaceState(
+            interactionID: interactionID
+        )
+        guard let providerOwnerID = before.providerOwnerID?
+                .nonEmptyBridgeValue,
+              let generation = before.interactionGeneration,
+              let surfaceMode = before.normalizedActionSurfaceMode else {
+            throw CancellationError()
+        }
+        let frame = try await runtime.captureActionSurface(
+            interactionID: interactionID,
+            providerOwnerID: providerOwnerID,
+            surfaceMode: surfaceMode,
+            generation: generation
+        )
+        let after = try await activeSurfaceState(
+            interactionID: interactionID
+        )
+        guard after.providerOwnerID?.nonEmptyBridgeValue == providerOwnerID,
+              after.normalizedActionSurfaceMode == surfaceMode,
+              after.interactionGeneration == generation,
+              frame.interactionID == interactionID,
+              frame.providerOwnerID == providerOwnerID,
+              frame.surfaceMode == surfaceMode,
+              frame.generation == generation else {
+            throw CancellationError()
+        }
+        return frame
+    }
+
+    func tapActionSurface(
+        frame: AndroidActionSurfaceFrame,
+        x: Int,
+        y: Int
+    ) async throws {
+        let state = try await activeSurfaceState(
+            interactionID: frame.interactionID,
+            expectedGeneration: frame.generation
+        )
+        guard state.providerOwnerID?.nonEmptyBridgeValue
+                == frame.providerOwnerID,
+              state.normalizedActionSurfaceMode == frame.surfaceMode else {
+            throw CancellationError()
+        }
+        try await runtime.tapActionSurface(
+            frame: frame,
+            x: x,
+            y: y
+        )
+    }
+
+    func swipeActionSurface(
+        frame: AndroidActionSurfaceFrame,
+        fromX: Int,
+        fromY: Int,
+        toX: Int,
+        toY: Int,
+        durationMilliseconds: Int = 300
+    ) async throws {
+        let state = try await activeSurfaceState(
+            interactionID: frame.interactionID,
+            expectedGeneration: frame.generation
+        )
+        guard state.providerOwnerID?.nonEmptyBridgeValue
+                == frame.providerOwnerID,
+              state.normalizedActionSurfaceMode == frame.surfaceMode else {
+            throw CancellationError()
+        }
+        try await runtime.swipeActionSurface(
+            frame: frame,
+            fromX: fromX,
+            fromY: fromY,
+            toX: toX,
+            toY: toY,
+            durationMilliseconds: durationMilliseconds
+        )
+    }
+
+    func backActionSurface(
+        frame: AndroidActionSurfaceFrame
+    ) async throws {
+        let state = try await activeSurfaceState(
+            interactionID: frame.interactionID,
+            expectedGeneration: frame.generation
+        )
+        guard state.providerOwnerID?.nonEmptyBridgeValue
+                == frame.providerOwnerID,
+              state.normalizedActionSurfaceMode == frame.surfaceMode else {
+            throw CancellationError()
+        }
+        try await runtime.backActionSurface(
+            frame: frame
+        )
+    }
+
+    private func activeSurfaceState(
+        interactionID: UUID,
+        expectedGeneration: Int? = nil
+    ) async throws -> AndroidBridgeUIState {
+        let state = try await fetchUIState(interactionID: interactionID)
+        guard state.interactionID.flatMap(UUID.init(uuidString:))
+                == interactionID,
+              state.terminal != true,
+              state.hasRequestScopedActionSurface else {
+            throw CancellationError()
+        }
+        if let expectedGeneration,
+           state.interactionGeneration != expectedGeneration {
+            throw CancellationError()
+        }
+        return state
     }
 }
 
@@ -3988,6 +4411,104 @@ private struct AndroidBridgeRuntimeContinuityReport: Decodable, Sendable {
     let authorizationStorageFingerprint: String
 }
 
+private struct AndroidBinaryProcessOutput: Sendable {
+    let stdout: Data
+    let stderr: Data
+    let exitCode: Int32
+    let timedOut: Bool
+}
+
+/// `Process.terminationHandler` can fire before an async waiter is installed.
+/// Keep the exit status so both fast exits and cancellation-driven exits are
+/// observed exactly once without blocking the Android runtime actor.
+private final class AndroidProcessTerminationWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var status: Int32?
+    private var waiters: [CheckedContinuation<Int32, Never>] = []
+
+    func install(on process: Process) {
+        process.terminationHandler = { [weak self] process in
+            self?.complete(with: process.terminationStatus)
+        }
+    }
+
+    func wait() async -> Int32 {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if let status {
+                lock.unlock()
+                continuation.resume(returning: status)
+            } else {
+                waiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    private func complete(with status: Int32) {
+        lock.lock()
+        guard self.status == nil else {
+            lock.unlock()
+            return
+        }
+        self.status = status
+        let pending = waiters
+        waiters.removeAll(keepingCapacity: false)
+        lock.unlock()
+        for waiter in pending {
+            waiter.resume(returning: status)
+        }
+    }
+}
+
+/// Cancellation may race with `Process.run()`. Remember a pre-launch stop and
+/// apply it immediately after launch; escalate to SIGKILL only for the exact
+/// process object if normal termination does not finish promptly.
+private final class AndroidBinaryProcessHandle: @unchecked Sendable {
+    private let process: Process
+    private let lock = NSLock()
+    private var stopRequested = false
+    private var killScheduled = false
+
+    init(process: Process) {
+        self.process = process
+    }
+
+    func requestStop() {
+        lock.lock()
+        stopRequested = true
+        lock.unlock()
+        stopRunningProcessIfNeeded()
+    }
+
+    func processDidStart() {
+        lock.lock()
+        let shouldStop = stopRequested
+        lock.unlock()
+        if shouldStop {
+            stopRunningProcessIfNeeded()
+        }
+    }
+
+    private func stopRunningProcessIfNeeded() {
+        guard process.isRunning else { return }
+        process.terminate()
+
+        lock.lock()
+        let shouldScheduleKill = !killScheduled
+        killScheduled = true
+        lock.unlock()
+        guard shouldScheduleKill else { return }
+
+        DispatchQueue.global(qos: .utility).asyncAfter(
+            deadline: .now() + 0.75
+        ) { [process] in
+            guard process.isRunning else { return }
+            _ = Darwin.kill(process.processIdentifier, SIGKILL)
+        }
+    }
+}
+
 enum AndroidBridgeHealthValidation: String, Equatable, Sendable {
     case healthy
     case serviceNotReady = "bridge_not_ready"
@@ -4009,8 +4530,8 @@ struct AndroidInstalledPackageContinuity: Equatable, Sendable {
 }
 
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.38"
-    static let bridgeVersionCode = 50
+    static let bridgeVersion = "0.3.40"
+    static let bridgeVersionCode = 52
     static let bridgeApplicationID = "com.okvideomac.dexbridge"
     static let bridgeCertificateSHA256 =
         "33e95ef23b662f2629a23df892aaff52ae6216f7492cfb559a63d37247a059e0"
@@ -4077,6 +4598,21 @@ actor AndroidDexBridgeRuntime {
     private var probeHTTPStatus: Int?
     private var probeErrorCategory: String?
     private var probeDuration: TimeInterval?
+    private struct ActionSurfaceLease: Sendable {
+        let interactionID: UUID
+        let runtimeGeneration: String
+        var providerOwnerID: String?
+        var surfaceMode: String?
+        var surfaceGeneration: Int?
+        var pixelWidth: Int?
+        var pixelHeight: Int?
+        /// Monotonic token assigned before each async screencap. Only the most
+        /// recently admitted capture may commit after actor re-entry.
+        var latestCaptureToken: UInt64 = 0
+        /// Token of the frame currently exposed to the host input path.
+        var frameSequence: UInt64? = nil
+    }
+    private var actionSurfaceLease: ActionSurfaceLease?
 
     init(
         applicationSupportDirectory: URL? = nil,
@@ -4122,6 +4658,234 @@ actor AndroidDexBridgeRuntime {
         userSelectedSDKRoot = defaults.string(
             forKey: AndroidToolchainResolver.userSDKRootDefaultsKey
         )
+    }
+
+    /// Returns a full frame from the single emulator instance owned by this
+    /// runtime. Unlike the Bridge's QR snapshot, this includes every Android
+    /// Window (Dialog, WebView, permission sheet and external Activity).
+    func beginActionSurfaceSession(interactionID: UUID) async throws {
+        let (identity, _) = try await readyOwnedRuntime()
+        actionSurfaceLease = ActionSurfaceLease(
+            interactionID: interactionID,
+            runtimeGeneration: identity.generation,
+            providerOwnerID: nil,
+            surfaceMode: nil,
+            surfaceGeneration: nil,
+            pixelWidth: nil,
+            pixelHeight: nil
+        )
+    }
+
+    func endActionSurfaceSession(interactionID: UUID?) {
+        guard interactionID == nil
+                || actionSurfaceLease?.interactionID == interactionID else {
+            return
+        }
+        actionSurfaceLease = nil
+    }
+
+    func captureActionSurface(
+        interactionID: UUID,
+        providerOwnerID: String,
+        surfaceMode: String,
+        generation: Int
+    ) async throws -> AndroidActionSurfaceFrame {
+        guard var lease = actionSurfaceLease,
+              lease.interactionID == interactionID,
+              lease.providerOwnerID == nil
+                || lease.providerOwnerID == providerOwnerID else {
+            throw CancellationError()
+        }
+        let (identity, toolchain) = try ownedRuntime(for: lease)
+        lease.latestCaptureToken &+= 1
+        let captureToken = lease.latestCaptureToken
+        actionSurfaceLease = lease
+        let data = try await runVerifiedADBBinary(
+            identity,
+            toolchain: toolchain,
+            ["exec-out", "screencap", "-p"],
+            category: "adb.surface.capture",
+            timeout: 5
+        )
+        guard data.count >= 24,
+              data.count <= 32 * 1_024 * 1_024,
+              let size = AndroidActionSurfaceFrame.pngPixelSize(data),
+              size.width <= 8_192,
+              size.height <= 8_192,
+              var current = actionSurfaceLease,
+              current.interactionID == interactionID,
+              current.runtimeGeneration == identity.generation,
+              current.latestCaptureToken == captureToken,
+              current.providerOwnerID == nil
+                || current.providerOwnerID == providerOwnerID,
+              loadIdentity()?.generation == identity.generation else {
+            throw CancellationError()
+        }
+        current.providerOwnerID = providerOwnerID
+        current.surfaceMode = surfaceMode
+        current.surfaceGeneration = generation
+        current.pixelWidth = size.width
+        current.pixelHeight = size.height
+        current.frameSequence = captureToken
+        actionSurfaceLease = current
+        return AndroidActionSurfaceFrame(
+            interactionID: interactionID,
+            providerOwnerID: providerOwnerID,
+            runtimeGeneration: identity.generation,
+            surfaceMode: surfaceMode,
+            generation: generation,
+            frameSequence: captureToken,
+            pngData: data,
+            pixelWidth: size.width,
+            pixelHeight: size.height
+        )
+    }
+
+    func tapActionSurface(
+        frame: AndroidActionSurfaceFrame,
+        x: Int,
+        y: Int
+    ) async throws {
+        let (lease, identity, toolchain) = try activeActionSurfaceLease(
+            matching: frame
+        )
+        let point = try Self.surfacePoint(
+            x: x,
+            y: y,
+            width: lease.pixelWidth,
+            height: lease.pixelHeight
+        )
+        _ = try run(
+            toolchain.adb,
+            [
+                "-s", identity.serial,
+                "shell", "input", "tap", "\(point.x)", "\(point.y)"
+            ],
+            category: "adb.surface.tap",
+            timeout: 5
+        )
+    }
+
+    func swipeActionSurface(
+        frame: AndroidActionSurfaceFrame,
+        fromX: Int,
+        fromY: Int,
+        toX: Int,
+        toY: Int,
+        durationMilliseconds: Int
+    ) async throws {
+        let (lease, identity, toolchain) = try activeActionSurfaceLease(
+            matching: frame
+        )
+        let start = try Self.surfacePoint(
+            x: fromX,
+            y: fromY,
+            width: lease.pixelWidth,
+            height: lease.pixelHeight
+        )
+        let end = try Self.surfacePoint(
+            x: toX,
+            y: toY,
+            width: lease.pixelWidth,
+            height: lease.pixelHeight
+        )
+        let duration = min(2_000, max(50, durationMilliseconds))
+        _ = try run(
+            toolchain.adb,
+            [
+                "-s", identity.serial,
+                "shell", "input", "swipe",
+                "\(start.x)", "\(start.y)",
+                "\(end.x)", "\(end.y)",
+                "\(duration)"
+            ],
+            category: "adb.surface.swipe",
+            timeout: 5
+        )
+    }
+
+    func backActionSurface(
+        frame: AndroidActionSurfaceFrame
+    ) async throws {
+        let (_, identity, toolchain) = try activeActionSurfaceLease(
+            matching: frame
+        )
+        _ = try run(
+            toolchain.adb,
+            [
+                "-s", identity.serial,
+                "shell", "input", "keyevent", "KEYCODE_BACK"
+            ],
+            category: "adb.surface.back",
+            timeout: 5
+        )
+    }
+
+    private func readyOwnedRuntime() async throws
+        -> (AndroidRuntimeIdentity, AndroidToolchain) {
+        try await ensureReady()
+        guard let identity = loadIdentity(),
+              let toolchain = resolver().toolchain(at: identity.sdkRoot),
+              verifyOwnership(identity, toolchain: toolchain) else {
+            throw AppError.spider(
+                "Android 运行实例所有权校验失败，已拒绝操作配置画面"
+            )
+        }
+        return (identity, toolchain)
+    }
+
+    private func ownedRuntime(
+        for lease: ActionSurfaceLease
+    ) throws -> (AndroidRuntimeIdentity, AndroidToolchain) {
+        guard let identity = loadIdentity(),
+              identity.generation == lease.runtimeGeneration,
+              let toolchain = resolver().toolchain(at: identity.sdkRoot),
+              verifyOwnership(identity, toolchain: toolchain) else {
+            actionSurfaceLease = nil
+            throw CancellationError()
+        }
+        return (identity, toolchain)
+    }
+
+    private func activeActionSurfaceLease(
+        matching frame: AndroidActionSurfaceFrame
+    ) throws -> (
+        ActionSurfaceLease,
+        AndroidRuntimeIdentity,
+        AndroidToolchain
+    ) {
+        guard let lease = actionSurfaceLease,
+              lease.interactionID == frame.interactionID,
+              lease.runtimeGeneration == frame.runtimeGeneration,
+              lease.surfaceMode == frame.surfaceMode,
+              lease.surfaceGeneration == frame.generation,
+              lease.providerOwnerID == frame.providerOwnerID,
+              lease.frameSequence == frame.frameSequence,
+              lease.pixelWidth == frame.pixelWidth,
+              lease.pixelHeight == frame.pixelHeight else {
+            throw CancellationError()
+        }
+        let (identity, toolchain) = try ownedRuntime(for: lease)
+        return (lease, identity, toolchain)
+    }
+
+    private static func surfacePoint(
+        x: Int,
+        y: Int,
+        width: Int?,
+        height: Int?
+    ) throws -> (x: Int, y: Int) {
+        guard let width,
+              let height,
+              width > 0,
+              height > 0,
+              x >= 0,
+              y >= 0,
+              x < width,
+              y < height else {
+            throw AppError.spider("Android 配置画面坐标已失效")
+        }
+        return (x, y)
     }
 
     private func transition(
@@ -5078,6 +5842,7 @@ actor AndroidDexBridgeRuntime {
             forKey: AndroidToolchainResolver.userSDKRootDefaultsKey
         )
         userSelectedSDKRoot = normalized
+        actionSurfaceLease = nil
         ready = false
         acceptsNewerBridge = false
         lastNetworkCheck = nil
@@ -5088,6 +5853,7 @@ actor AndroidDexBridgeRuntime {
     }
 
     func repair() async throws {
+        actionSurfaceLease = nil
         let retryKnownFailedNetworkCommand = AndroidRuntimeRecoveryPolicy
             .shouldRetryKnownFailedNetworkCommand(
                 lastFailureStage: lastFailure?.stage,
@@ -5107,6 +5873,7 @@ actor AndroidDexBridgeRuntime {
     }
 
     func stop() async {
+        actionSurfaceLease = nil
         transition(to: .stopping, event: "stop_requested")
         let task = readinessTask
         task?.cancel()
@@ -6021,6 +6788,16 @@ actor AndroidDexBridgeRuntime {
     }
 
     static func installedVersionCode(from packageDump: String) -> Int? {
+        // Android can retain the package's settings and data directory after
+        // its code path has disappeared. dumpsys still exposes versionCode in
+        // that state, but marks the parsed package as `pkg=null`; treating it
+        // as a newer usable Bridge skips the data-preserving `adb install -r`
+        // repair and makes am start fail with Error type 3.
+        let hasMissingParsedPackage = packageDump
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .contains("pkg=null")
+        guard !hasMissingParsedPackage else { return nil }
         guard let marker = packageDump.range(of: "versionCode=") else {
             return nil
         }
@@ -6889,6 +7666,68 @@ actor AndroidDexBridgeRuntime {
         )
     }
 
+    private func runVerifiedADBBinary(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain,
+        _ arguments: [String],
+        category: String,
+        timeout: TimeInterval
+    ) async throws -> Data {
+        // The caller has just resolved this exact identity with
+        // `ownedRuntime(for:)`. Avoid repeating the expensive ps/adb ownership
+        // probes for every frame; the surface lease is checked again after the
+        // await before a frame can be published.
+        let startedAt = Date()
+        do {
+            let result = try await Self.executeBinaryProcess(
+                toolchain.adb,
+                ["-s", identity.serial] + arguments,
+                timeout: timeout
+            )
+            let stderr = String(data: result.stderr, encoding: .utf8) ?? ""
+            let duration = Date().timeIntervalSince(startedAt)
+            let exitCode: Int32 = result.timedOut ? -1 : result.exitCode
+            recordCommand(
+                timestamp: startedAt,
+                category: category,
+                exitCode: exitCode,
+                stdout: "<binary \(result.stdout.count) bytes>",
+                stderr: stderr,
+                duration: duration,
+                timedOut: result.timedOut
+            )
+            guard !result.timedOut, exitCode == 0 else {
+                throw AndroidToolCommandError(
+                    category: category,
+                    exitCode: exitCode,
+                    stdout: "<binary output omitted>",
+                    stderr: sanitizedCommandOutput(
+                        stderr,
+                        category: category
+                    ),
+                    duration: duration,
+                    timedOut: result.timedOut
+                )
+            }
+            return result.stdout
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as AndroidToolCommandError {
+            throw error
+        } catch {
+            recordCommand(
+                timestamp: startedAt,
+                category: category,
+                exitCode: -1,
+                stdout: "",
+                stderr: error.localizedDescription,
+                duration: Date().timeIntervalSince(startedAt),
+                timedOut: false
+            )
+            throw error
+        }
+    }
+
     private func deviceIsReachable(
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain?
@@ -7079,6 +7918,7 @@ actor AndroidDexBridgeRuntime {
     }
 
     private func clearRuntimeRecord() {
+        actionSurfaceLease = nil
         try? emulatorLogHandle?.close()
         emulatorLogHandle = nil
         emulatorProcess = nil
@@ -7189,6 +8029,83 @@ actor AndroidDexBridgeRuntime {
             )
         }
         return stdout
+    }
+
+    /// Runs an Android tool whose stdout is arbitrary bytes. Both pipes are
+    /// drained concurrently into memory so a verbose stderr cannot deadlock a
+    /// screen capture. Cancellation and timeout terminate the child process;
+    /// no frame bytes are ever written to a temporary file.
+    private nonisolated static func executeBinaryProcess(
+        _ executable: URL,
+        _ arguments: [String],
+        timeout: TimeInterval
+    ) async throws -> AndroidBinaryProcessOutput {
+        let standardOutput = Pipe()
+        let standardError = Pipe()
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        process.standardOutput = standardOutput
+        process.standardError = standardError
+        let termination = AndroidProcessTerminationWaiter()
+        let handle = AndroidBinaryProcessHandle(process: process)
+        termination.install(on: process)
+
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            do {
+                try process.run()
+            } catch {
+                try? standardOutput.fileHandleForReading.close()
+                try? standardOutput.fileHandleForWriting.close()
+                try? standardError.fileHandleForReading.close()
+                try? standardError.fileHandleForWriting.close()
+                throw error
+            }
+            handle.processDidStart()
+
+            // Detached readers prevent either pipe from applying backpressure
+            // to adb while the actor remains available to supersede the lease.
+            let stdoutTask = Task.detached(priority: .utility) {
+                standardOutput.fileHandleForReading.readDataToEndOfFile()
+            }
+            let stderrTask = Task.detached(priority: .utility) {
+                standardError.fileHandleForReading.readDataToEndOfFile()
+            }
+            let nanoseconds = UInt64(
+                min(max(timeout, 0.001), 3_600) * 1_000_000_000
+            )
+            let timedOut = await withTaskGroup(of: Bool.self) { group in
+                group.addTask {
+                    _ = await termination.wait()
+                    return false
+                }
+                group.addTask {
+                    do {
+                        try await Task.sleep(nanoseconds: nanoseconds)
+                    } catch {
+                        return false
+                    }
+                    handle.requestStop()
+                    return true
+                }
+                let first = await group.next() ?? false
+                group.cancelAll()
+                return first
+            }
+            let status = await termination.wait()
+            let stdout = await stdoutTask.value
+            let stderr = await stderrTask.value
+            try Task.checkCancellation()
+            return AndroidBinaryProcessOutput(
+                stdout: stdout,
+                stderr: stderr,
+                exitCode: status,
+                timedOut: timedOut
+            )
+        } onCancel: {
+            handle.requestStop()
+        }
     }
 
     private func recordCommand(

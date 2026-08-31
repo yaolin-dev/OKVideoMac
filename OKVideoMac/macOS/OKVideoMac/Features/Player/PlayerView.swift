@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 
 struct PlayerView: View {
     @EnvironmentObject private var state: AppState
+    @ObservedObject private var playerSnapshotState: PlayerSnapshotState
     @State private var scrubPosition: Double?
     @State private var controlsVisible = true
     @State private var controlsHovering = false
@@ -28,6 +29,14 @@ struct PlayerView: View {
     @State private var playbackActivityOverlayShownAt: Date?
     @State private var playbackActivityOverlayTask: Task<Void, Never>?
     let onWindowChromeRestored: () -> Void
+
+    init(
+        playerSnapshotState: PlayerSnapshotState,
+        onWindowChromeRestored: @escaping () -> Void
+    ) {
+        self.playerSnapshotState = playerSnapshotState
+        self.onWindowChromeRestored = onWindowChromeRestored
+    }
 
     private let speeds: [Double] = [0.5, 0.75, 1, 1.25, 1.5, 2]
     private let utilityIconSize: CGFloat = 19

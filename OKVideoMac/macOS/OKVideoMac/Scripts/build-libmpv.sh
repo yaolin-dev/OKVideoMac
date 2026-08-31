@@ -14,6 +14,7 @@ ARCHIVE="$DOWNLOAD_ROOT/mpv-v0.41.0.tar.gz"
 SOURCE_DIR="$SOURCE_ROOT/mpv-0.41.0"
 MESON_BUILD_DIR="$SOURCE_ROOT/mpv-0.41.0-build"
 PATCH_FILE="$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-without-cocoa.patch"
+VIDEOTOOLBOX_GL_PATCH_FILE="$PROJECT_DIR/Patches/mpv-0.41.0-libmpv-videotoolbox-gl.patch"
 URL="https://github.com/mpv-player/mpv/archive/refs/tags/v0.41.0.tar.gz"
 EXPECTED_SHA256="ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209"
 
@@ -29,6 +30,10 @@ for tool in curl shasum tar otool lipo; do
 done
 if [[ ! -f "$PATCH_FILE" ]]; then
   echo "Required mpv patch missing: $PATCH_FILE" >&2
+  exit 1
+fi
+if [[ ! -f "$VIDEOTOOLBOX_GL_PATCH_FILE" ]]; then
+  echo "Required mpv patch missing: $VIDEOTOOLBOX_GL_PATCH_FILE" >&2
   exit 1
 fi
 for macports_tool in meson ninja pkg-config; do
@@ -70,6 +75,9 @@ fi
 if ! grep -q "sources += files('osdep/utils-mac.c')" "$SOURCE_DIR/meson.build"; then
   /usr/bin/patch -d "$SOURCE_DIR" -p1 -i "$PATCH_FILE"
 fi
+if ! grep -q '#if HAVE_COCOA && HAVE_SWIFT' "$SOURCE_DIR/player/clipboard/clipboard.c"; then
+  /usr/bin/patch -d "$SOURCE_DIR" -p1 -i "$VIDEOTOOLBOX_GL_PATCH_FILE"
+fi
 
 rm -rf "$MESON_BUILD_DIR" "$INSTALL_STAGE"
 MACOSX_DEPLOYMENT_TARGET=12.0 /opt/local/bin/meson setup "$MESON_BUILD_DIR" "$SOURCE_DIR" \
@@ -91,8 +99,9 @@ MACOSX_DEPLOYMENT_TARGET=12.0 /opt/local/bin/meson setup "$MESON_BUILD_DIR" "$SO
   -Dlibavdevice=disabled \
   -Dplain-gl=enabled \
   -Dgl=enabled \
-  -Dcocoa=disabled \
-  -Dvideotoolbox-gl=disabled \
+  -Dcocoa=enabled \
+  -Dgl-cocoa=enabled \
+  -Dvideotoolbox-gl=enabled \
   -Dcoreaudio=enabled
 
 MACOSX_DEPLOYMENT_TARGET=12.0 /opt/local/bin/meson compile -C "$MESON_BUILD_DIR"

@@ -8,6 +8,7 @@ struct HistoryView: View {
     @State private var selectedIDs: Set<HistoryRecord.ID> = []
     @State private var pendingDeletion: HistoryDeletion?
     @State private var focusedID: HistoryRecord.ID?
+    private let scrollCoordinateSpace = "history-scroll"
 
     var body: some View {
         Group {
@@ -19,6 +20,9 @@ struct HistoryView: View {
                 )
             } else {
                 ScrollView {
+                    BrowserToolbarScrollMarker(
+                        coordinateSpaceName: scrollCoordinateSpace
+                    )
                     LazyVStack(spacing: 0) {
                         ForEach(state.history) { item in
                             historyRow(item)
@@ -26,13 +30,25 @@ struct HistoryView: View {
                                 .padding(.leading, isSelecting ? 56 : 20)
                         }
                     }
+                    .padding(.top, BrowserToolbarMetrics.height)
                 }
+                .ignoresSafeArea(.container, edges: .top)
+                .browserToolbarScrollSurface(named: scrollCoordinateSpace)
             }
         }
-        .navigationTitle(navigationTitle)
+        .navigationTitle("")
         .toolbar {
-            ToolbarItemGroup {
-                if !state.history.isEmpty {
+            ToolbarItem(placement: .navigation) {
+                BrowserToolbarTitle(navigationTitle)
+            }
+            ToolbarItem(placement: .principal) {
+                Spacer(minLength: 0)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityHidden(true)
+            }
+            ToolbarItemGroup(placement: .primaryAction) {
+                if !state.isDetailPagePresented,
+                   !state.history.isEmpty {
                     historyManagementControls
                 }
             }

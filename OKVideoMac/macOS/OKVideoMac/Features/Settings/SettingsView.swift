@@ -32,7 +32,17 @@ struct SettingsView: View {
                     .frame(minWidth: 590)
             }
         }
-        .navigationTitle("设置")
+        .navigationTitle("")
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                BrowserToolbarTitle("设置")
+            }
+            ToolbarItem(placement: .principal) {
+                Spacer(minLength: 0)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityHidden(true)
+            }
+        }
         .task {
             await refreshCacheSize()
         }
@@ -75,9 +85,10 @@ struct SettingsView: View {
                     }
                 }
                 .padding(.horizontal, 10)
-                .padding(.top, 10)
+                .padding(.top, BrowserToolbarMetrics.height + 10)
                 .padding(.bottom, 16)
             }
+            .ignoresSafeArea(.container, edges: .top)
         }
         .background(.ultraThinMaterial)
     }
@@ -193,6 +204,35 @@ struct SettingsView: View {
                     .labelsHidden()
                     .pickerStyle(.segmented)
                     .frame(width: 270)
+                }
+            }
+
+            SettingsSectionTitle("窗口布局")
+            SettingsCard {
+                SettingsControlRow(
+                    icon: "macwindow",
+                    color: .teal,
+                    title: "主窗口",
+                    subtitle: "自动记住大小和位置；默认约为 1240 × 780"
+                ) {
+                    Button("恢复默认") {
+                        state.restoreDefaultWindowLayout(.mainWindow)
+                    }
+                    .help("将主窗口恢复到适合当前屏幕的默认大小并居中")
+                }
+
+                SettingsDivider()
+
+                SettingsControlRow(
+                    icon: "play.rectangle.on.rectangle.fill",
+                    color: .purple,
+                    title: "播放器窗口",
+                    subtitle: "自动记住大小和位置；默认约为 1152 × 648"
+                ) {
+                    Button("恢复默认") {
+                        state.restoreDefaultWindowLayout(.playerWindow)
+                    }
+                    .help("将播放器恢复到 16:9 的默认大小并在当前屏幕居中")
                 }
             }
 
@@ -1291,6 +1331,7 @@ private struct SettingsPage<Content: View>: View {
     let title: String
     let subtitle: String
     let content: Content
+    private let scrollCoordinateSpace = "settings-page-scroll"
 
     init(
         title: String,
@@ -1304,6 +1345,9 @@ private struct SettingsPage<Content: View>: View {
 
     var body: some View {
         ScrollView {
+            BrowserToolbarScrollMarker(
+                coordinateSpaceName: scrollCoordinateSpace
+            )
             VStack(alignment: .leading, spacing: 14) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title)
@@ -1316,9 +1360,12 @@ private struct SettingsPage<Content: View>: View {
                 content
             }
             .padding(24)
+            .padding(.top, BrowserToolbarMetrics.height)
             .frame(maxWidth: 840, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .top)
         }
+        .ignoresSafeArea(.container, edges: .top)
+        .browserToolbarScrollSurface(named: scrollCoordinateSpace)
         .background(.thinMaterial)
     }
 }

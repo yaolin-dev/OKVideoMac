@@ -6,7 +6,348 @@ import WebKit
 
 enum AppSurfacePalette {
     static var background: Color {
+        // Keep the browse surface in the native window palette. Using the
+        // control background here turns the entire detail column paper-white
+        // and visually disconnects the category strip from the titlebar.
         Color(nsColor: .windowBackgroundColor)
+    }
+}
+
+enum BrowserToolbarMetrics {
+    static let height: CGFloat = 52
+}
+
+enum BrowserToolbarChromeFill: Equatable {
+    case referenceTone
+}
+
+struct BrowserToolbarChromeAppearance: Equatable {
+    let fill: BrowserToolbarChromeFill
+    let separatorOpacity: Double
+}
+
+enum BrowserToolbarChromePolicy {
+    static func appearance(
+        isScrolled: Bool,
+        isWindowActive: Bool,
+        reduceTransparency: Bool
+    ) -> BrowserToolbarChromeAppearance {
+        return BrowserToolbarChromeAppearance(
+            fill: .referenceTone,
+            separatorOpacity: isScrolled
+                ? (isWindowActive ? 0.34 : 0.22)
+                : (isWindowActive ? 0.30 : 0.18)
+        )
+    }
+}
+
+enum AppSidebarMetrics {
+    static let minimumWidth: CGFloat = 224
+    static let idealWidth: CGFloat = 224
+    static let maximumWidth: CGFloat = 280
+    static let horizontalInset: CGFloat = 16
+    static let searchHeight: CGFloat = 32
+    static let rowHeight: CGFloat = 26
+    static let labelFontSize: CGFloat = 14
+    static let iconWidth: CGFloat = 18
+    static let iconTextSpacing: CGFloat = 8
+    static let rowContentMinimumWidth: CGFloat = 168
+}
+
+private struct BrowserToolbarScrollReporterKey: EnvironmentKey {
+    static let defaultValue: (Bool) -> Void = { _ in }
+}
+
+extension EnvironmentValues {
+    var browserToolbarScrollReporter: (Bool) -> Void {
+        get { self[BrowserToolbarScrollReporterKey.self] }
+        set { self[BrowserToolbarScrollReporterKey.self] = newValue }
+    }
+}
+
+private struct BrowserToolbarScrollOffsetPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+/// Place this as the first child of a browser ScrollView. The marker and the
+/// scroll-surface modifier below let the shared parent own toolbar chrome,
+/// without coupling HomeView or LiveView to the window toolbar implementation.
+struct BrowserToolbarScrollMarker: View {
+    let coordinateSpaceName: String
+
+    var body: some View {
+        GeometryReader { proxy in
+            Color.clear.preference(
+                key: BrowserToolbarScrollOffsetPreferenceKey.self,
+                value: proxy.frame(in: .named(coordinateSpaceName)).minY
+            )
+        }
+        .frame(height: 0)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct BrowserToolbarScrollSurfaceModifier: ViewModifier {
+    @Environment(\.browserToolbarScrollReporter) private var reportScroll
+    @State private var lastReportedScrollState = false
+
+    let coordinateSpaceName: String
+
+    func body(content: Content) -> some View {
+        content
+            .coordinateSpace(name: coordinateSpaceName)
+            .onAppear {
+                reportScrollStateIfChanged(false)
+            }
+            .onPreferenceChange(BrowserToolbarScrollOffsetPreferenceKey.self) {
+                reportScrollStateIfChanged($0 < -0.5)
+            }
+    }
+
+    private func reportScrollStateIfChanged(_ isScrolled: Bool) {
+        guard isScrolled != lastReportedScrollState else { return }
+        // Preference delivery can happen inside SwiftUI's layout update.
+        // Defer the state mutation so it cannot recursively invalidate the
+        // AppKit hosting view's constraints in the same display cycle.
+        DispatchQueue.main.async {
+            guard isScrolled != lastReportedScrollState else { return }
+            lastReportedScrollState = isScrolled
+            reportScroll(isScrolled)
+        }
+    }
+}
+
+extension View {
+    func browserToolbarScrollSurface(named coordinateSpaceName: String) -> some View {
+        modifier(
+            BrowserToolbarScrollSurfaceModifier(
+                coordinateSpaceName: coordinateSpaceName
+            )
+        )
+    }
+}
+
+struct BrowserToolbarChromeModifier: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    let isScrolled: Bool
+    let isWindowActive: Bool
+
+    private var appearance: BrowserToolbarChromeAppearance {
+        BrowserToolbarChromePolicy.appearance(
+            isScrolled: isScrolled,
+            isWindowActive: isWindowActive,
+            reduceTransparency: reduceTransparency
+        )
+    }
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 13.0, *) {
+            chrome(content)
+                // Keep the unified AppKit toolbar transparent so the Sidebar
+                // retains its own independent macOS material. The AppKit
+                // installer places a native titlebar material above the
+                // scrolling detail content, but below the real toolbar
+                // controls.
+                .toolbarBackground(.hidden, for: .windowToolbar)
+                .background {
+                    BrowserDetailToolbarBackdrop()
+                }
+        } else {
+            chrome(content)
+        }
+    }
+
+    private func chrome<ChromeContent: View>(_ content: ChromeContent) -> some View {
+        content.overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor))
+                .frame(height: 0.5)
+                .opacity(appearance.separatorOpacity)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+    }
+}
+
+private struct BrowserDetailToolbarBackdrop: NSViewRepresentable {
+    func makeNSView(context: Context) -> BrowserDetailToolbarProbeView {
+        BrowserDetailToolbarProbeView()
+    }
+
+    func updateNSView(
+        _ nsView: BrowserDetailToolbarProbeView,
+        context: Context
+    ) {
+        nsView.scheduleOverlayUpdate()
+    }
+}
+
+/// Tracks the detail column in window coordinates and owns a titlebar-only
+/// sibling view. Keeping this layer outside the SwiftUI scroll hierarchy means
+/// category rows remain visible and posters can never scroll over toolbar
+/// controls. The probe's converted leading edge preserves the Sidebar's own
+/// material and follows divider/window resizing.
+private final class BrowserDetailToolbarProbeView: NSView {
+    private let overlayView = BrowserToolbarMaterialView()
+    private var windowResizeObserver: NSObjectProtocol?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        postsFrameChangedNotifications = true
+        postsBoundsChangedNotifications = true
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        removeWindowObserver()
+        guard let window else {
+            overlayView.removeFromSuperview()
+            return
+        }
+        windowResizeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResizeNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            self?.scheduleOverlayUpdate()
+        }
+        scheduleOverlayUpdate()
+    }
+
+    override func setFrameOrigin(_ newOrigin: NSPoint) {
+        super.setFrameOrigin(newOrigin)
+        scheduleOverlayUpdate()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        scheduleOverlayUpdate()
+    }
+
+    func scheduleOverlayUpdate() {
+        DispatchQueue.main.async { [weak self] in
+            self?.updateOverlay()
+        }
+    }
+
+    deinit {
+        removeWindowObserver()
+        overlayView.removeFromSuperview()
+    }
+
+    private func updateOverlay() {
+        guard let window,
+              let contentView = window.contentView,
+              bounds.width > 0 else {
+            overlayView.removeFromSuperview()
+            return
+        }
+
+        var contentBranch = contentView
+        while let parent = contentBranch.superview,
+              parent.superview != nil {
+            contentBranch = parent
+        }
+        guard let frameView = contentBranch.superview else {
+            overlayView.removeFromSuperview()
+            return
+        }
+
+        if overlayView.superview !== frameView {
+            overlayView.removeFromSuperview()
+            frameView.addSubview(
+                overlayView,
+                positioned: .above,
+                relativeTo: contentBranch
+            )
+        }
+
+        let detailRect = convert(bounds, to: frameView)
+        let frameBounds = frameView.bounds
+        let leading = max(frameBounds.minX, detailRect.minX)
+        let width = max(0, frameBounds.maxX - leading)
+        let originY = frameView.isFlipped
+            ? frameBounds.minY
+            : frameBounds.maxY - BrowserToolbarMetrics.height
+        overlayView.frame = NSRect(
+            x: leading,
+            y: originY,
+            width: width,
+            height: BrowserToolbarMetrics.height
+        )
+    }
+
+    private func removeWindowObserver() {
+        if let windowResizeObserver {
+            NotificationCenter.default.removeObserver(windowResizeObserver)
+            self.windowResizeObserver = nil
+        }
+    }
+}
+
+private final class BrowserToolbarMaterialView: NSVisualEffectView {
+    private let referenceToneView = NSView()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        material = .titlebar
+        blendingMode = .withinWindow
+        // Keep the effect active so scrolling content continues to contribute
+        // native titlebar blur. A very light neutral tint below locks the
+        // reference tone across key-window changes without flattening the
+        // material into an opaque fill.
+        state = .active
+        isEmphasized = false
+
+        referenceToneView.wantsLayer = true
+        referenceToneView.layer?.backgroundColor = NSColor(
+            calibratedWhite: 0,
+            alpha: 0.035
+        ).cgColor
+        referenceToneView.frame = bounds
+        referenceToneView.autoresizingMask = [.width, .height]
+        addSubview(referenceToneView)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+}
+
+private struct BrowserWindowVibrancyBackground: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .underWindowBackground
+        view.blendingMode = .behindWindow
+        view.state = .followsWindowActiveState
+        view.isEmphasized = false
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        if view.material != .underWindowBackground {
+            view.material = .underWindowBackground
+        }
+        if view.blendingMode != .behindWindow {
+            view.blendingMode = .behindWindow
+        }
+        if view.state != .followsWindowActiveState {
+            view.state = .followsWindowActiveState
+        }
     }
 }
 
@@ -62,6 +403,78 @@ extension View {
                 cornerRadius: cornerRadius,
                 selected: selected,
                 destructive: destructive
+            )
+        )
+    }
+}
+
+enum SidebarRowHoverPolicy {
+    static let cornerRadius: CGFloat = 6
+    static let animationDuration: TimeInterval = 0.11
+    static let selectionBackgroundOpacity = 0.10
+
+    static func hoverOverlayOpacity(
+        isSelected: Bool,
+        isHovering: Bool,
+        isEnabled: Bool
+    ) -> Double {
+        guard isEnabled, isHovering else { return 0 }
+        return isSelected ? 0.04 : 0.06
+    }
+}
+
+/// A compact hover treatment for sidebar navigation rows. Selection remains
+/// owned by the native List whenever possible; this modifier only supplies a
+/// stable, layout-neutral hover overlay. Selection stays native so every row
+/// receives exactly the same width, height, and neutral sidebar appearance.
+struct SidebarRowHoverModifier: ViewModifier {
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovering = false
+
+    let isSelected: Bool
+
+    func body(content: Content) -> some View {
+        let hoverOpacity = SidebarRowHoverPolicy.hoverOverlayOpacity(
+            isSelected: isSelected,
+            isHovering: isHovering,
+            isEnabled: isEnabled
+        )
+
+        content
+            .background {
+                ZStack {
+                    if isSelected {
+                        RoundedRectangle(
+                            cornerRadius: SidebarRowHoverPolicy.cornerRadius,
+                            style: .continuous
+                        )
+                        .fill(
+                            Color.primary.opacity(
+                                SidebarRowHoverPolicy.selectionBackgroundOpacity
+                            )
+                        )
+                    }
+
+                    RoundedRectangle(
+                        cornerRadius: SidebarRowHoverPolicy.cornerRadius,
+                        style: .continuous
+                    )
+                    .fill(Color.primary.opacity(hoverOpacity))
+                }
+            }
+            .animation(
+                .easeOut(duration: SidebarRowHoverPolicy.animationDuration),
+                value: hoverOpacity
+            )
+            .onHover { isHovering = isEnabled && $0 }
+    }
+}
+
+extension View {
+    func sidebarRowHover(isSelected: Bool) -> some View {
+        modifier(
+            SidebarRowHoverModifier(
+                isSelected: isSelected
             )
         )
     }
@@ -149,10 +562,11 @@ extension View {
 
 struct RootView: View {
     @EnvironmentObject private var state: AppState
+    @StateObject private var liveSession = LiveBrowserSession()
 
     var body: some View {
         ZStack {
-            AppSurfacePalette.background
+            BrowserWindowVibrancyBackground()
                 .ignoresSafeArea()
 
             browsingContent
@@ -164,25 +578,6 @@ struct RootView: View {
                 dismissButton: .default(Text("好"))
             )
         }
-        .sheet(
-            isPresented: Binding(
-                get: {
-                    state.selectedDetail != nil
-                        || state.pendingDetailSummary != nil
-                },
-                set: { if !$0 { state.dismissDetail() } }
-            )
-        ) {
-            if let detail = state.selectedDetail {
-                DetailView(detail: detail)
-                    .environmentObject(state)
-                    .frame(minWidth: 820, minHeight: 600)
-            } else if let summary = state.pendingDetailSummary {
-                DetailLoadingView(summary: summary)
-                    .environmentObject(state)
-                    .frame(minWidth: 820, minHeight: 600)
-            }
-        }
         .overlay {
             if let presentation = state.configurationCategoryPresentation {
                 ConfigurationCategoryView(presentation: presentation)
@@ -193,6 +588,14 @@ struct RootView: View {
             if let prompt = state.mainWindowCloudAuthorizationPrompt {
                 CloudAuthorizationView(prompt: prompt)
                     .environmentObject(state)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if let status = state.siteActionStatus {
+                TransientSiteActionStatusView(status: status)
+                    .padding(.bottom, 22)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .allowsHitTesting(false)
             }
         }
         .overlay {
@@ -225,6 +628,10 @@ struct RootView: View {
             .easeOut(duration: 0.14),
             value: state.isShortcutHelpPresented
         )
+        .animation(
+            .easeOut(duration: 0.18),
+            value: state.siteActionStatus?.id
+        )
         .background {
             ZStack {
                 WindowCloseObserver(
@@ -253,17 +660,33 @@ struct RootView: View {
     @ViewBuilder
     private var browsingContent: some View {
         if #available(macOS 13.0, *) {
-            NavigationSplitView {
-                SidebarView()
-            } detail: {
-                SectionContentView()
-            }
+            ModernRootSplitView(liveSession: liveSession)
         } else {
             NavigationView {
-                SidebarView()
-                SectionContentView()
+                SidebarView(liveSession: liveSession)
+                SectionContentView(
+                    liveSession: liveSession,
+                    showsCollapsedSearch: false
+                )
             }
             .navigationViewStyle(.columns)
+        }
+    }
+}
+
+@available(macOS 13.0, *)
+private struct ModernRootSplitView: View {
+    @ObservedObject var liveSession: LiveBrowserSession
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
+    var body: some View {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            SidebarView(liveSession: liveSession)
+        } detail: {
+            SectionContentView(
+                liveSession: liveSession,
+                showsCollapsedSearch: columnVisibility == .detailOnly
+            )
         }
     }
 }
@@ -478,14 +901,14 @@ private struct ShortcutHelpView: View {
 
     private let sections: [(String, [(String, String)])] = [
         ("导航", [
-            ("⌘1…⌘5", "首页、直播、收藏、历史、设置"),
+            ("⌘1…⌘5", "点播、直播、收藏、历史、设置"),
             ("⌘F", "搜索"),
             ("⌘K", "快速切换配置、站点或直播源"),
             ("⌘L", "打开点播配置"),
             ("⌘R", "刷新当前页面"),
             ("⌘[", "返回"),
             ("⌘.", "停止当前搜索"),
-            ("Esc", "停止搜索；再按返回首页")
+            ("Esc", "停止搜索；再按返回进入前的页面")
         ]),
         ("播放器", [
             ("Space", "播放或暂停"),
@@ -687,7 +1110,7 @@ private struct ConfigurationCategoryView: View {
 
     private var footer: some View {
         HStack {
-            Text("关闭后会回到原来的网盘目录和浏览位置。")
+            Text("关闭后会回到原来的内容页和浏览位置。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
@@ -887,7 +1310,12 @@ struct NodeConfigurationView: View {
                     Button {
                         Task { await state.completeNodeConfigurationAndRetry() }
                     } label: {
-                        Label("我已授权，立即验证", systemImage: "arrow.right.circle.fill")
+                        Label(
+                            isPlayerAuthorization
+                                ? "我已授权，立即验证"
+                                : "应用配置并重试",
+                            systemImage: "arrow.right.circle.fill"
+                        )
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(isVerifying)
@@ -921,6 +1349,10 @@ struct NodeConfigurationView: View {
             return presentation.allowsAutomaticRetry
                 ? "正在等待授权完成信号"
                 : "请确认授权状态后手动验证"
+        case .saved:
+            return isPlayerAuthorization
+                ? "配置已保存，等待授权验证"
+                : "配置已保存"
         case .verifying:
             return "正在验证授权并恢复原请求"
         case .needsManualRetry:
@@ -931,13 +1363,18 @@ struct NodeConfigurationView: View {
     private var footerSystemImage: String {
         switch presentation.lifecycleState {
         case .waiting: return "qrcode.viewfinder"
+        case .saved: return "checkmark.circle.fill"
         case .verifying: return "arrow.triangle.2.circlepath"
         case .needsManualRetry: return "exclamationmark.triangle.fill"
         }
     }
 
     private var footerColor: Color {
-        presentation.lifecycleState == .needsManualRetry ? .orange : .accentColor
+        switch presentation.lifecycleState {
+        case .saved: return .green
+        case .needsManualRetry: return .orange
+        case .waiting, .verifying: return .accentColor
+        }
     }
 }
 
@@ -1128,6 +1565,14 @@ private final class WindowCloseObserverView: NSView {
         super.viewDidMoveToWindow()
         removeObservers()
         guard let window else { return }
+        // Resizing while SwiftUI is mounting this representable can re-enter
+        // AppKit layout. Configure on the next run-loop turn, after the
+        // browser hierarchy has completed its current layout transaction.
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window, self.window === window else { return }
+            AppWindowLayoutPolicy.configure(window, target: .mainWindow)
+            BrowserWindowChromeController.configure(window)
+        }
         onKeyChange?(window.isKeyWindow)
         observers = [
             NotificationCenter.default.addObserver(
@@ -1226,6 +1671,32 @@ final class AppKeyCommandMonitorView: NSView {
     }
 }
 
+private struct TransientSiteActionStatusView: View {
+    let status: TransientSiteActionStatus
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundColor(.green)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(status.title)
+                    .font(.caption.weight(.semibold))
+                Text(status.message)
+                    .font(.callout)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
+        .background(.regularMaterial, in: Capsule())
+        .overlay {
+            Capsule()
+                .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.18), radius: 12, y: 5)
+        .accessibilityElement(children: .combine)
+    }
+}
+
 struct CloudAuthorizationView: View {
     @EnvironmentObject private var state: AppState
     let prompt: CloudAuthorizationPrompt
@@ -1284,6 +1755,49 @@ struct CloudAuthorizationView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 18)
+                } else if let surfaceFrame {
+                    VStack(spacing: 9) {
+                        AndroidActionSurfaceView(
+                            frame: surfaceFrame,
+                            disabled: isTerminal,
+                            onTap: { x, y in
+                                Task {
+                                    await state.tapCloudAuthorizationSurface(
+                                        x: x,
+                                        y: y,
+                                        frame: surfaceFrame
+                                    )
+                                }
+                            },
+                            onSwipe: { fromX, fromY, toX, toY in
+                                Task {
+                                    await state.swipeCloudAuthorizationSurface(
+                                        fromX: fromX,
+                                        fromY: fromY,
+                                        toX: toX,
+                                        toY: toY,
+                                        frame: surfaceFrame
+                                    )
+                                }
+                            }
+                        )
+                        HStack(spacing: 10) {
+                            Text("这是站点原生 Android 界面，可直接点击或拖动。")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button {
+                                Task {
+                                    await state.backCloudAuthorizationSurface(
+                                        frame: surfaceFrame
+                                    )
+                                }
+                            } label: {
+                                Label("返回上一层", systemImage: "arrow.uturn.backward")
+                            }
+                            .disabled(isTerminal)
+                        }
+                    }
                 } else if prompt.credentialPush {
                     HStack(spacing: 12) {
                         Image(systemName: "lock.shield.fill")
@@ -1397,7 +1911,8 @@ struct CloudAuthorizationView: View {
                             .trimmingCharacters(in: .whitespacesAndNewlines)
                             .isEmpty || isBusy || isTerminal
                     )
-                } else if prompt.uiSchemaVersion ?? 0 >= 2,
+                } else if surfaceFrame == nil,
+                          prompt.uiSchemaVersion ?? 0 >= 2,
                           !prompt.structuredRows.isEmpty {
                     AndroidConfigurationSurfaceView(
                         rows: prompt.structuredRows,
@@ -1408,7 +1923,7 @@ struct CloudAuthorizationView: View {
                             await state.submitCloudAuthorization(action: action)
                         }
                     }
-                } else {
+                } else if surfaceFrame == nil || prompt.hasTextInput {
                     LazyVGrid(
                         columns: [
                             GridItem(.adaptive(minimum: 130), spacing: 8)
@@ -1472,6 +1987,14 @@ struct CloudAuthorizationView: View {
         prompt.lifecyclePhase.isTerminal
     }
 
+    private var surfaceFrame: AndroidActionSurfaceFrame? {
+        guard let frame = state.cloudAuthorizationSurfaceFrame,
+              frame.interactionID == prompt.interactionID else {
+            return nil
+        }
+        return frame
+    }
+
     private var lifecycleStatus: String {
         switch prompt.lifecyclePhase {
         case .invoking:
@@ -1489,6 +2012,155 @@ struct CloudAuthorizationView: View {
 
     private var inputPlaceholder: String {
         prompt.usesSecureInput ? "粘贴凭据" : "输入配置内容"
+    }
+}
+
+enum AndroidActionSurfaceGeometryPolicy {
+    static func fittedRect(
+        container: CGSize,
+        pixels: CGSize
+    ) -> CGRect {
+        guard container.width > 0,
+              container.height > 0,
+              pixels.width > 0,
+              pixels.height > 0 else {
+            return .zero
+        }
+        let scale = min(
+            container.width / pixels.width,
+            container.height / pixels.height
+        )
+        let size = CGSize(
+            width: pixels.width * scale,
+            height: pixels.height * scale
+        )
+        return CGRect(
+            x: (container.width - size.width) / 2,
+            y: (container.height - size.height) / 2,
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    static func pixelPoint(
+        location: CGPoint,
+        fittedRect: CGRect,
+        pixelWidth: Int,
+        pixelHeight: Int
+    ) -> (x: Int, y: Int)? {
+        guard fittedRect.width > 0,
+              fittedRect.height > 0,
+              pixelWidth > 0,
+              pixelHeight > 0,
+              fittedRect.contains(location) else {
+            return nil
+        }
+        let normalizedX = (location.x - fittedRect.minX) / fittedRect.width
+        let normalizedY = (location.y - fittedRect.minY) / fittedRect.height
+        return (
+            x: min(
+                pixelWidth - 1,
+                max(0, Int(normalizedX * CGFloat(pixelWidth)))
+            ),
+            y: min(
+                pixelHeight - 1,
+                max(0, Int(normalizedY * CGFloat(pixelHeight)))
+            )
+        )
+    }
+}
+
+/// Full-surface compatibility view for opaque FongMi/TVBox provider UI. It
+/// forwards geometry only; button names, QR images and window text remain
+/// provider-owned presentation and never select host behavior.
+private struct AndroidActionSurfaceView: View {
+    let frame: AndroidActionSurfaceFrame
+    let disabled: Bool
+    let onTap: (Int, Int) -> Void
+    let onSwipe: (Int, Int, Int, Int) -> Void
+
+    var body: some View {
+        Group {
+            if let image = NSImage(data: frame.pngData) {
+                GeometryReader { geometry in
+                    let fitted = AndroidActionSurfaceGeometryPolicy.fittedRect(
+                        container: geometry.size,
+                        pixels: CGSize(
+                            width: frame.pixelWidth,
+                            height: frame.pixelHeight
+                        )
+                    )
+                    ZStack(alignment: .topLeading) {
+                        Color.black.opacity(0.82)
+                        Image(nsImage: image)
+                            .resizable()
+                            .interpolation(.high)
+                            .frame(width: fitted.width, height: fitted.height)
+                            .offset(x: fitted.minX, y: fitted.minY)
+                    }
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                            .onEnded { value in
+                                submitGesture(
+                                    from: value.startLocation,
+                                    to: value.location,
+                                    fittedRect: fitted
+                                )
+                            }
+                    )
+                    .allowsHitTesting(!disabled)
+                }
+                .frame(height: preferredHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 11))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 11)
+                        .stroke(Color.secondary.opacity(0.28), lineWidth: 1)
+                }
+                .accessibilityLabel("站点 Android 配置界面")
+                .accessibilityHint("点击或拖动以操作；下方按钮可返回上一层")
+            } else {
+                Label(
+                    "Android 配置画面暂时不可用",
+                    systemImage: "rectangle.slash"
+                )
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 220)
+            }
+        }
+    }
+
+    private var preferredHeight: CGFloat {
+        let ratio = max(0.2, CGFloat(frame.aspectRatio))
+        return min(520, max(260, 700 / ratio))
+    }
+
+    private func submitGesture(
+        from startLocation: CGPoint,
+        to endLocation: CGPoint,
+        fittedRect: CGRect
+    ) {
+        guard let start = AndroidActionSurfaceGeometryPolicy.pixelPoint(
+                location: startLocation,
+                fittedRect: fittedRect,
+                pixelWidth: frame.pixelWidth,
+                pixelHeight: frame.pixelHeight
+              ),
+              let end = AndroidActionSurfaceGeometryPolicy.pixelPoint(
+                location: endLocation,
+                fittedRect: fittedRect,
+                pixelWidth: frame.pixelWidth,
+                pixelHeight: frame.pixelHeight
+              ) else {
+            return
+        }
+        let dx = endLocation.x - startLocation.x
+        let dy = endLocation.y - startLocation.y
+        if sqrt(dx * dx + dy * dy) < 7 {
+            onTap(end.x, end.y)
+        } else {
+            onSwipe(start.x, start.y, end.x, end.y)
+        }
     }
 }
 
@@ -1687,58 +2359,278 @@ private struct AndroidConfigurationSurfaceRowView: View {
 private struct SidebarView: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var navigation: AppNavigationState
-    @Environment(\.colorScheme) private var colorScheme
+    @ObservedObject var liveSession: LiveBrowserSession
 
-    private var selectionColor: Color {
-        if colorScheme == .dark {
-            return Color(red: 0.38, green: 0.40, blue: 0.72)
-        }
-        return Color(red: 0.29, green: 0.31, blue: 0.58)
-    }
+    private let primarySections: [AppSection] = [.home, .live]
+    private let personalSections: [AppSection] = [
+        .favorites,
+        .history,
+        .settings
+    ]
 
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 6) {
-                ForEach(AppSection.allCases) { section in
-                    sidebarButton(section)
+        VStack(spacing: 0) {
+            SidebarSearchControl(
+                text: searchText,
+                presentation: searchPresentation,
+                isEnabled: searchIsEnabled,
+                focusRequest: state.globalSearchFocusRequest,
+                onTextChange: handleSearchTextChange,
+                onSubmit: submitSearch
+            )
+            .frame(height: AppSidebarMetrics.searchHeight)
+            .padding(.horizontal, AppSidebarMetrics.horizontalInset)
+            .padding(.top, 10)
+            .padding(.bottom, 8)
+
+            List {
+                Section("浏览") {
+                    ForEach(primarySections) { section in
+                        sidebarNavigationRow(section)
+                    }
+                }
+
+                Section("资料库") {
+                    ForEach(personalSections) { section in
+                        sidebarNavigationRow(section)
+                    }
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.top, 14)
+            .listStyle(.sidebar)
+            .environment(\.defaultMinListRowHeight, AppSidebarMetrics.rowHeight)
         }
-        .frame(minWidth: 160)
-        .background(AppSurfacePalette.background.ignoresSafeArea())
         .modifier(SidebarColumnWidthModifier())
     }
 
-    private func sidebarButton(_ section: AppSection) -> some View {
+    private var searchPresentation: SidebarSearchPresentation {
+        SidebarSearchPresentationPolicy.presentation(
+            for: navigation.selectedSection
+        )
+    }
+
+    private var searchText: Binding<String> {
+        switch searchPresentation.kind {
+        case .video:
+            return $state.searchDraftKeyword
+        case .liveChannels:
+            return $liveSession.searchText
+        }
+    }
+
+    private var searchIsEnabled: Bool {
+        switch searchPresentation.kind {
+        case .video:
+            return !state.visibleSites.isEmpty
+        case .liveChannels:
+            return !state.liveSources.isEmpty
+        }
+    }
+
+    private func sidebarNavigationRow(_ section: AppSection) -> some View {
         let isSelected = navigation.selectedSection == section
         return Button {
             state.selectSection(section)
         } label: {
-            HStack(spacing: 11) {
-                Image(systemName: section.systemImage)
-                    .font(.system(size: 17, weight: .medium))
-                    .frame(width: 23)
-                    .foregroundColor(isSelected ? .white : .secondary)
-                Text(section.rawValue)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(isSelected ? .white : .primary)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 12)
-            .frame(maxWidth: .infinity)
-            .frame(height: 42)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isSelected ? selectionColor : Color.clear)
+            SidebarRowContent(
+                section: section,
+                isSelected: isSelected
             )
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
-        .appInteractiveHover(cornerRadius: 8, selected: isSelected)
         .accessibilityLabel(section.rawValue)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private func handleSearchTextChange(_ value: String) {
+        guard searchPresentation.kind == .video,
+              value.isEmpty else { return }
+        state.clearGlobalVideoSearch()
+    }
+
+    private func submitSearch() {
+        guard searchPresentation.kind == .video else { return }
+        let keyword = state.searchDraftKeyword
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !keyword.isEmpty else { return }
+        state.searchFromSidebar(keyword)
+    }
+}
+
+private struct SidebarRowContent: View {
+    let section: AppSection
+    let isSelected: Bool
+
+    var body: some View {
+        HStack(spacing: AppSidebarMetrics.iconTextSpacing) {
+            Image(systemName: section.systemImage)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundColor(Color(nsColor: .systemBlue))
+                .frame(width: AppSidebarMetrics.iconWidth, alignment: .center)
+
+            Text(section.rawValue)
+                .foregroundColor(.primary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+
+            Spacer(minLength: 0)
+        }
+            .font(.system(size: AppSidebarMetrics.labelFontSize, weight: .regular))
+            // A finite proposal avoids SwiftUI's sidebar table collapsing the
+            // text column to its truncation glyph when the split view restores
+            // a saved width. The row can still expand naturally with the list.
+            .frame(
+                minWidth: AppSidebarMetrics.rowContentMinimumWidth,
+                maxWidth: .infinity,
+                alignment: .leading
+            )
+            .frame(height: AppSidebarMetrics.rowHeight - 2)
+            .contentShape(Rectangle())
+            .sidebarRowHover(isSelected: isSelected)
+    }
+}
+
+private struct CollapsedSidebarSearchButton: View {
+    @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var navigation: AppNavigationState
+    @ObservedObject var liveSession: LiveBrowserSession
+    @State private var isPresented = false
+    @State private var popoverFocusRequest: UInt64 = 0
+
+    var body: some View {
+        Button {
+            popoverFocusRequest &+= 1
+            isPresented = true
+        } label: {
+            Label(searchPresentation.accessibilityLabel, systemImage: "magnifyingglass")
+                .labelStyle(.iconOnly)
+        }
+        .help("\(searchPresentation.help)（⌘F）")
+        .accessibilityLabel(searchPresentation.accessibilityLabel)
+        .disabled(!searchIsEnabled)
+        .popover(isPresented: $isPresented, arrowEdge: .top) {
+            SidebarSearchControl(
+                text: searchText,
+                presentation: searchPresentation,
+                isEnabled: searchIsEnabled,
+                focusRequest: state.globalSearchFocusRequest
+                    &+ popoverFocusRequest,
+                onTextChange: handleSearchTextChange,
+                onSubmit: submitSearch
+            )
+            .frame(width: 300, height: 28)
+            .padding(14)
+        }
+        .onChange(of: state.globalSearchFocusRequest) { _ in
+            popoverFocusRequest &+= 1
+            isPresented = true
+        }
+    }
+
+    private var searchPresentation: SidebarSearchPresentation {
+        SidebarSearchPresentationPolicy.presentation(
+            for: navigation.selectedSection
+        )
+    }
+
+    private var searchText: Binding<String> {
+        switch searchPresentation.kind {
+        case .video:
+            return $state.searchDraftKeyword
+        case .liveChannels:
+            return $liveSession.searchText
+        }
+    }
+
+    private var searchIsEnabled: Bool {
+        switch searchPresentation.kind {
+        case .video:
+            return !state.visibleSites.isEmpty
+        case .liveChannels:
+            return !state.liveSources.isEmpty
+        }
+    }
+
+    private func handleSearchTextChange(_ value: String) {
+        guard searchPresentation.kind == .video,
+              value.isEmpty else { return }
+        state.clearGlobalVideoSearch()
+    }
+
+    private func submitSearch() {
+        defer { isPresented = false }
+        guard searchPresentation.kind == .video else { return }
+        let keyword = state.searchDraftKeyword
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !keyword.isEmpty else { return }
+        state.searchFromSidebar(keyword)
+    }
+}
+
+private struct SidebarSearchControl: NSViewRepresentable {
+    @Binding var text: String
+    let presentation: SidebarSearchPresentation
+    let isEnabled: Bool
+    let focusRequest: UInt64
+    let onTextChange: (String) -> Void
+    let onSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NSSearchField {
+        let field = NSSearchField()
+        field.controlSize = .regular
+        field.font = NSFont.systemFont(ofSize: 14)
+        field.sendsSearchStringImmediately = false
+        field.sendsWholeSearchString = true
+        field.delegate = context.coordinator
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.submit(_:))
+        return field
+    }
+
+    func updateNSView(_ field: NSSearchField, context: Context) {
+        context.coordinator.parent = self
+        field.placeholderString = presentation.placeholder
+        field.setAccessibilityLabel(presentation.accessibilityLabel)
+        field.toolTip = presentation.help
+        field.isEnabled = isEnabled
+        if field.stringValue != text {
+            field.stringValue = text
+        }
+        guard focusRequest > 0,
+              context.coordinator.lastFocusRequest != focusRequest else {
+            return
+        }
+        context.coordinator.lastFocusRequest = focusRequest
+        DispatchQueue.main.async {
+            guard let window = field.window,
+                  field.isEnabled else { return }
+            window.makeFirstResponder(field)
+            field.selectText(nil)
+        }
+    }
+
+    final class Coordinator: NSObject, NSSearchFieldDelegate {
+        var parent: SidebarSearchControl
+        var lastFocusRequest: UInt64 = 0
+
+        init(_ parent: SidebarSearchControl) {
+            self.parent = parent
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSSearchField else { return }
+            parent.text = field.stringValue
+            parent.onTextChange(field.stringValue)
+        }
+
+        @objc func submit(_ sender: NSSearchField) {
+            parent.text = sender.stringValue
+            parent.onTextChange(sender.stringValue)
+            parent.onSubmit()
+        }
     }
 }
 
@@ -1746,43 +2638,135 @@ private struct SidebarColumnWidthModifier: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
         if #available(macOS 13.0, *) {
-            content.navigationSplitViewColumnWidth(min: 160, ideal: 190, max: 230)
+            content.navigationSplitViewColumnWidth(
+                min: AppSidebarMetrics.minimumWidth,
+                ideal: AppSidebarMetrics.idealWidth,
+                max: AppSidebarMetrics.maximumWidth
+            )
         } else {
-            content.frame(idealWidth: 190, maxWidth: 230)
+            content.frame(
+                minWidth: AppSidebarMetrics.minimumWidth,
+                idealWidth: AppSidebarMetrics.idealWidth,
+                maxWidth: AppSidebarMetrics.maximumWidth
+            )
         }
     }
 }
 
 private struct SectionContentView: View {
+    @EnvironmentObject private var state: AppState
     @EnvironmentObject private var navigation: AppNavigationState
-    @StateObject private var liveSession = LiveBrowserSession()
+    @ObservedObject var liveSession: LiveBrowserSession
+    let showsCollapsedSearch: Bool
 
     var body: some View {
+        Group {
+            if state.isDetailPagePresented {
+                BrowserDetailRouteContainer()
+            } else {
+                baseSectionContent
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AppSurfacePalette.background)
+        .transaction { transaction in
+            // AppKit hosts SwiftUI toolbar items in constraint-based views.
+            // A structural detail-route animation can invalidate those
+            // constraints again while the display cycle is already updating.
+            transaction.disablesAnimations = true
+        }
+    }
+
+    @ViewBuilder
+    private var baseSectionContent: some View {
         Group {
             switch navigation.selectedSection {
             case .home, .live:
                 HomeLiveSectionContainer(liveSession: liveSession)
             case .favorites:
-                FavoritesView()
+                StandardBrowserSectionContainer {
+                    FavoritesView()
+                }
             case .history:
-                HistoryView()
+                StandardBrowserSectionContainer {
+                    HistoryView()
+                }
             case .settings:
-                SettingsView()
+                StandardBrowserSectionContainer {
+                    SettingsView()
+                }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(AppSurfacePalette.background.ignoresSafeArea())
     }
 }
 
-/// Home and live are the two largest browsing trees. Keeping them mounted
-/// avoids tearing down dozens of live cards while simultaneously constructing
-/// the poster grid. The navigation store is intentionally observed only here,
-/// so changing sections does not invalidate either content subtree.
+/// Applies the same right-column titlebar material used by the home browser to
+/// the remaining primary sections without changing the independent Sidebar.
+private struct StandardBrowserSectionContainer<Content: View>: View {
+    @EnvironmentObject private var state: AppState
+    @State private var isContentScrolled = false
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .environment(\.browserToolbarScrollReporter) { isScrolled in
+                if isContentScrolled != isScrolled {
+                    isContentScrolled = isScrolled
+                }
+            }
+            .modifier(
+                BrowserToolbarChromeModifier(
+                    isScrolled: isContentScrolled,
+                    isWindowActive: state.isBrowserWindowKey
+                )
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Presents details as a page inside the split view's detail column. Browser
+/// state lives in AppState/LiveBrowserSession, so the expensive originating
+/// grid can be unmounted instead of continuing to lay out invisibly.
+private struct BrowserDetailRouteContainer: View {
+    @EnvironmentObject private var state: AppState
+    @State private var isContentScrolled = false
+
+    var body: some View {
+        Group {
+            if let detail = state.selectedDetail {
+                DetailView(detail: detail)
+            } else if let summary = state.pendingDetailSummary {
+                DetailLoadingView(summary: summary)
+            }
+        }
+        .environment(\.browserToolbarScrollReporter) { isScrolled in
+            if isContentScrolled != isScrolled {
+                isContentScrolled = isScrolled
+            }
+        }
+        .modifier(
+            BrowserToolbarChromeModifier(
+                isScrolled: isContentScrolled,
+                isWindowActive: state.isBrowserWindowKey
+            )
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AppSurfacePalette.background)
+    }
+}
+
+/// Home and live are the two largest browsing trees. Keep their lightweight
+/// session state here, but mount only the visible tree: an opacity-hidden live
+/// grid still participates in SwiftUI updates and can contend with playback.
 private struct HomeLiveSectionContainer: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var navigation: AppNavigationState
     @ObservedObject var liveSession: LiveBrowserSession
+    @State private var isBrowserContentScrolled = false
 
     private var showsHome: Bool {
         navigation.selectedSection == .home
@@ -1791,6 +2775,7 @@ private struct HomeLiveSectionContainer: View {
     private var showsHomeToolbar: Bool {
         showsHome
             && !state.isHomeSearchPresented
+            && !state.isDetailPagePresented
             && state.activeConfiguration != nil
     }
 
@@ -1799,53 +2784,126 @@ private struct HomeLiveSectionContainer: View {
             let toolbarLayout = HomeToolbarLayoutPolicy.layout(
                 contentWidth: proxy.size.width
             )
-            ZStack {
-                HomeView()
-                    .opacity(showsHome ? 1 : 0)
-                    .allowsHitTesting(showsHome)
-                    .accessibilityHidden(!showsHome)
-                    .zIndex(showsHome ? 1 : 0)
-
-                LiveView(session: liveSession)
-                    .opacity(showsHome ? 0 : 1)
-                    .allowsHitTesting(!showsHome)
-                    .accessibilityHidden(showsHome)
-                    .zIndex(showsHome ? 0 : 1)
+            Group {
+                if showsHome {
+                    HomeView()
+                } else {
+                    LiveView(session: liveSession)
+                }
             }
-            .navigationTitle(navigation.selectedSection.rawValue)
-            .toolbar {
-                // Separate ToolbarItems are intentional: a narrow window can
-                // overflow low-priority actions without hiding the essential
-                // site and search entries as one indivisible group.
-                ToolbarItem {
-                    if showsHomeToolbar {
-                        HomeSiteToolbarItem(layout: toolbarLayout)
-                    }
+            .environment(\.browserToolbarScrollReporter) { isScrolled in
+                if isBrowserContentScrolled != isScrolled {
+                    isBrowserContentScrolled = isScrolled
                 }
-                ToolbarItem {
-                    if showsHomeToolbar {
-                        HomeSearchToolbarItem(layout: toolbarLayout)
-                    }
-                }
-                ToolbarItem {
-                    if showsHomeToolbar {
-                        HomeConfigurationToolbarItem()
-                    }
-                }
-                ToolbarItem {
-                    if showsHomeToolbar {
-                        HomeRefreshToolbarItem(layout: toolbarLayout)
-                    }
-                }
-                ToolbarItem {
-                    if !showsHome {
-                        LiveToolbarView(session: liveSession)
-                    }
-                }
+            }
+            .navigationTitle("")
+            .modifier(
+                HomeLiveToolbarModifier(
+                    showsHomeToolbar: showsHomeToolbar,
+                    showsLiveToolbar: !showsHome,
+                    layout: toolbarLayout,
+                    liveSession: liveSession
+                )
+            )
+            .modifier(
+                BrowserToolbarChromeModifier(
+                    isScrolled: isBrowserContentScrolled,
+                    isWindowActive: state.isBrowserWindowKey
+                )
+            )
+            .onChange(of: navigation.selectedSection) { _ in
+                isBrowserContentScrolled = false
+            }
+            .onChange(of: state.isHomeSearchPresented) { _ in
+                isBrowserContentScrolled = false
             }
             .transaction { transaction in
                 transaction.disablesAnimations = true
             }
         }
+    }
+}
+
+private struct HomeLiveToolbarModifier: ViewModifier {
+    let showsHomeToolbar: Bool
+    let showsLiveToolbar: Bool
+    let layout: HomeToolbarLayout
+    @ObservedObject var liveSession: LiveBrowserSession
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if showsHomeToolbar {
+            content.toolbar {
+                HomeBrowserToolbarContent(layout: layout)
+            }
+        } else if showsLiveToolbar {
+            content.toolbar {
+                LiveBrowserToolbarContent(session: liveSession)
+            }
+        } else {
+            // Search and detail pages own their toolbars. Do not attach empty
+            // parent items: AppKit otherwise exposes a stray capsule beside
+            // the native sidebar button when it merges nested toolbars.
+            content
+        }
+    }
+}
+
+private struct HomeBrowserToolbarContent: ToolbarContent {
+    let layout: HomeToolbarLayout
+
+    var body: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            BrowserToolbarTitle("点播")
+        }
+        ToolbarItem(placement: .principal) {
+            Spacer(minLength: 0)
+                .frame(maxWidth: .infinity)
+                .accessibilityHidden(true)
+        }
+        ToolbarItemGroup(placement: .primaryAction) {
+            HomeSiteToolbarItem(layout: layout)
+                .frame(height: 40)
+            HomeFilterToolbarItem(layout: layout)
+                .frame(height: 40)
+            HomeConfigurationToolbarItem()
+                .frame(height: 40)
+            HomeRefreshToolbarItem(layout: layout)
+                .frame(height: 40)
+        }
+    }
+}
+
+private struct LiveBrowserToolbarContent: ToolbarContent {
+    @ObservedObject var session: LiveBrowserSession
+
+    var body: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            BrowserToolbarTitle("直播")
+        }
+        ToolbarItem(placement: .principal) {
+            Spacer(minLength: 0)
+                .frame(maxWidth: .infinity)
+                .accessibilityHidden(true)
+        }
+        ToolbarItemGroup(placement: .primaryAction) {
+            LiveToolbarView(session: session)
+        }
+    }
+}
+
+struct BrowserToolbarTitle: View {
+    private let title: String
+
+    init(_ title: String) {
+        self.title = title
+    }
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 19, weight: .semibold))
+            .frame(height: 40)
+            .offset(x: 10)
+            .accessibilityAddTraits(.isHeader)
     }
 }

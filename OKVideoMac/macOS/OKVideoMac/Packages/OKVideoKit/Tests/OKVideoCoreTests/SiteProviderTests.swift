@@ -2,6 +2,32 @@ import XCTest
 @testable import OKVideoCore
 
 final class SiteProviderTests: XCTestCase {
+    func testPlayerDecoderPreservesExtendedCatPawFields() throws {
+        let configuration = try ConfigurationParser().parse(
+            Data(#"{"sites":[{"key":"fixture","name":"Fixture","type":0,"api":"https://example.invalid/api.php"}]}"#.utf8)
+        )
+        let site = try XCTUnwrap(configuration.sites.first)
+        let response = try UpstreamResponseDecoder.decodeJSON(
+            Data(
+                #"{"url":"https://cdn.invalid/movie.m3u8","parse":0,"key":"secret","click":"selector","code":"script","jxFrom":"fixture-jx","danmaku":{"url":"https://cdn.invalid/danmu.xml"},"drm":{"type":"widevine"},"artwork":"https://cdn.invalid/art.jpg","desc":"说明","position":42.5,"lrc":"[00:01]歌词"}"#.utf8
+            ),
+            site: site,
+            baseURL: nil
+        )
+        let result = try XCTUnwrap(response.player)
+
+        XCTAssertEqual(result.key, "secret")
+        XCTAssertEqual(result.click, "selector")
+        XCTAssertEqual(result.code, "script")
+        XCTAssertEqual(result.jxFrom, "fixture-jx")
+        XCTAssertEqual(result.artwork, "https://cdn.invalid/art.jpg")
+        XCTAssertEqual(result.description, "说明")
+        XCTAssertEqual(result.position, 42.5)
+        XCTAssertEqual(result.lyrics, "[00:01]歌词")
+        XCTAssertNotNil(result.danmaku)
+        XCTAssertNotNil(result.drm)
+    }
+
     func testPlayListParserNeverInventsEpisodeNumbersFromArrayPosition() {
         let sources = PlayListParser.parse(
             sourceNames: "主线路",

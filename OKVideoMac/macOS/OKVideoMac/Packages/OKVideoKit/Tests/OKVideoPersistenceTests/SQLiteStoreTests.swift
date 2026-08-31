@@ -321,9 +321,9 @@ final class SQLiteStoreTests: XCTestCase {
         let providerReference = PlaybackResourceReference(
             configurationIdentity: "configuration-v1",
             siteIdentity: "site-v1",
-            providerKind: "android-dex-spider",
+            providerKind: "node-http-spider",
             providerVersion: 1,
-            stableResourceLocator: "share-42/item-9",
+            stableResourceLocator: "qhr1.fixture-share-42-item-9",
             sourceIdentity: "stable-source",
             episodeIdentity: "stable-resource",
             stability: .providerStable
@@ -396,6 +396,53 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertFalse(rawText.localizedCaseInsensitiveContains("referer"))
         XCTAssertFalse(rawText.localizedCaseInsensitiveContains("cookie"))
         XCTAssertFalse(rawText.localizedCaseInsensitiveContains("authorization"))
+    }
+
+    func testHistoryPersistenceDropsAndroidProviderInstanceLocator()
+        async throws {
+        let databaseURL = try makeDatabaseURL()
+        let store = try SQLiteStore(databaseURL: databaseURL)
+        let implicitLocator = "provider-instance-uuid-42/item-9"
+        let reference = HistoryPlaybackReference(
+            sourceIdentity: "stable-source",
+            resourceIdentity: "stable-resource",
+            providerResourceReference: PlaybackResourceReference(
+                configurationIdentity: "configuration-v1",
+                siteIdentity: "site-v1",
+                providerKind: "android-dex-spider",
+                providerVersion: 1,
+                stableResourceLocator: implicitLocator,
+                sourceIdentity: "stable-source",
+                episodeIdentity: "stable-resource",
+                stability: .providerStable
+            )
+        )
+
+        try await store.saveHistory(
+            HistoryRecord(
+                siteKey: "site-v1",
+                videoID: "video-1",
+                title: "Fixture",
+                playbackReference: reference
+            ),
+            incognito: false
+        )
+
+        let history = try await store.history()
+        let stored = try XCTUnwrap(history.first)
+        XCTAssertEqual(stored.playbackReference?.sourceIdentity, "stable-source")
+        XCTAssertEqual(stored.playbackReference?.resourceIdentity, "stable-resource")
+        XCTAssertNil(stored.playbackReference?.providerResourceReference)
+
+        let verification = try SQLiteConnection(url: databaseURL)
+        var persistedReference = ""
+        try verification.query(
+            "SELECT COALESCE(playback_reference, '') FROM history"
+        ) { statement in
+            persistedReference = verification.text(statement, 0) ?? ""
+        }
+        verification.close()
+        XCTAssertFalse(persistedReference.contains(implicitLocator))
     }
 
     func testHistoryNavigationRecipeV4SurvivesDatabaseRestart() async throws {
