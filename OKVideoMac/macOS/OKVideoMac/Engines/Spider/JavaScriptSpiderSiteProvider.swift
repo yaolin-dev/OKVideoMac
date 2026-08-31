@@ -3295,6 +3295,106 @@ struct AndroidSystemImage: Equatable, Sendable {
     let apiLevel: Int
     let variant: String
     let architecture: String
+
+    var supportsInteractiveRendering: Bool {
+        let normalized = variant.lowercased()
+        return normalized != "atd" && !normalized.hasSuffix("_atd")
+    }
+
+    var avdSystemImageDirectory: String {
+        "system-images/android-\(apiLevel)/\(variant)/\(architecture)/"
+    }
+
+    var avdTagDisplayName: String {
+        switch variant {
+        case "google_apis":
+            return "Google APIs"
+        case "default":
+            return "Default Android System Image"
+        default:
+            return variant
+        }
+    }
+}
+
+struct AndroidManagedAVDConfiguration {
+    static func value(for key: String, in contents: String) -> String? {
+        contents.split(whereSeparator: \.isNewline)
+            .first(where: { $0.hasPrefix("\(key)=") })
+            .map { String($0.dropFirst(key.count + 1)) }
+    }
+
+    static func systemImageVariant(in contents: String) -> String? {
+        guard let directory = value(for: "image.sysdir.1", in: contents) else {
+            return nil
+        }
+        let components = directory.split(separator: "/")
+        guard let systemImagesIndex = components.firstIndex(of: "system-images"),
+              components.indices.contains(systemImagesIndex + 2) else {
+            return nil
+        }
+        return String(components[systemImagesIndex + 2])
+    }
+
+    static func targetAPILevel(in contents: String) -> Int? {
+        guard let target = value(for: "target", in: contents),
+              target.hasPrefix("android-") else {
+            return nil
+        }
+        return Int(target.dropFirst("android-".count))
+    }
+
+    static func requiresInteractiveImageMigration(_ contents: String) -> Bool {
+        guard let variant = systemImageVariant(in: contents) else {
+            return false
+        }
+        return !AndroidSystemImage(
+            packageID: "",
+            apiLevel: 0,
+            variant: variant,
+            architecture: ""
+        ).supportsInteractiveRendering
+    }
+
+    static func updating(
+        _ contents: String,
+        for image: AndroidSystemImage
+    ) -> String {
+        let updates = [
+            "hw.gpu.enabled": "yes",
+            "hw.gpu.mode": "host",
+            "image.sysdir.1": image.avdSystemImageDirectory,
+            "tag.display": image.avdTagDisplayName,
+            "tag.displaynames": image.avdTagDisplayName,
+            "tag.id": image.variant,
+            "tag.ids": image.variant,
+            "target": "android-\(image.apiLevel)"
+        ]
+        var seen = Set<String>()
+        var lines = contents.components(separatedBy: .newlines)
+        let endedWithNewline = lines.last == ""
+        if endedWithNewline {
+            lines.removeLast()
+        }
+        lines = lines.map { line in
+            guard let separator = line.firstIndex(of: "=") else {
+                return line
+            }
+            let key = String(line[..<separator])
+            guard let replacement = updates[key] else {
+                return line
+            }
+            seen.insert(key)
+            return "\(key)=\(replacement)"
+        }
+        for key in updates.keys.sorted() where !seen.contains(key) {
+            if let replacement = updates[key] {
+                lines.append("\(key)=\(replacement)")
+            }
+        }
+        let result = lines.joined(separator: "\n")
+        return endedWithNewline ? result + "\n" : result
+    }
 }
 
 struct AndroidToolchainResolver {
@@ -3387,6 +3487,39 @@ struct AndroidToolchainResolver {
             }
             return rank(lhs.variant) < rank(rhs.variant)
         }
+    }
+
+    func interactiveSystemImages(
+        in toolchain: AndroidToolchain
+    ) -> [AndroidSystemImage] {
+        installedSystemImages(in: toolchain).filter(
+            \.supportsInteractiveRendering
+        )
+    }
+
+    func preferredInteractiveSystemImage(
+        in toolchain: AndroidToolchain,
+        avdConfiguration: String? = nil
+    ) -> AndroidSystemImage? {
+        let images = interactiveSystemImages(in: toolchain)
+        guard let avdConfiguration else {
+            return images.first
+        }
+        let currentAPI = AndroidManagedAVDConfiguration.targetAPILevel(
+            in: avdConfiguration
+        )
+        let currentVariant = AndroidManagedAVDConfiguration.systemImageVariant(
+            in: avdConfiguration
+        )
+        if let currentAPI, let currentVariant,
+           let exact = images.first(where: {
+               $0.apiLevel == currentAPI && $0.variant == currentVariant
+           }) {
+            return exact
+        }
+        guard let currentAPI else { return images.first }
+        return images.first(where: { $0.apiLevel == currentAPI })
+            ?? images.first
     }
 
     private func candidateSDKRoots() -> [URL] {
@@ -4435,6 +4568,11 @@ actor AndroidDexBridgeRuntime {
         guard let toolchain = resolver().resolve() else {
             return .unavailable("未找到完整 Android SDK，请选择包含 adb 和 emulator 的 SDK")
         }
+        guard !resolver().interactiveSystemImages(in: toolchain).isEmpty else {
+            return .unavailable(
+                "缺少可显示原生界面的 arm64 Android system image（ATD 不支持界面捕获）"
+            )
+        }
         if fileManager.fileExists(
             atPath: avdDirectory.appendingPathComponent("config.ini").path
         ) {
@@ -4442,9 +4580,6 @@ actor AndroidDexBridgeRuntime {
         }
         guard toolchain.avdManager != nil else {
             return .unavailable("缺少 Android SDK Command-line Tools（avdmanager）")
-        }
-        guard !resolver().installedSystemImages(in: toolchain).isEmpty else {
-            return .unavailable("缺少可用的 arm64 Android system image")
         }
         return .stopped
     }
@@ -4847,7 +4982,7 @@ actor AndroidDexBridgeRuntime {
         }
 
         let image = toolchain.flatMap {
-            resolver().installedSystemImages(in: $0).first
+            resolver().interactiveSystemImages(in: $0).first
         }
         let apk = try? bridgeAPK()
         let apkHash = apk.flatMap(Self.sha256Hex)
@@ -6490,6 +6625,76 @@ actor AndroidDexBridgeRuntime {
         return environment
     }
 
+    private func backupManagedAVDForRenderingUpgrade() throws {
+        try fileManager.createDirectory(
+            at: backupDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let allocatedBytes = try Self.allocatedDirectorySize(
+            avdDirectory,
+            fileManager: fileManager
+        )
+        let available = try runtimeDirectory.resourceValues(
+            forKeys: [
+                .volumeAvailableCapacityForImportantUsageKey,
+                .volumeAvailableCapacityKey
+            ]
+        )
+        let availableBytes = available.volumeAvailableCapacityForImportantUsage
+            ?? Int64(available.volumeAvailableCapacity ?? 0)
+        let safetyMargin: Int64 = 1_073_741_824
+        guard availableBytes > allocatedBytes + safetyMargin else {
+            throw AppError.spider(
+                "磁盘空间不足；保留 Android 登录数据备份还需要至少 1 GB 安全空间"
+            )
+        }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let suffix = UUID().uuidString.prefix(8)
+        let root = backupDirectory.appendingPathComponent(
+            "pre-rendering-upgrade-\(formatter.string(from: Date()))-\(suffix)",
+            isDirectory: true
+        )
+        do {
+            try fileManager.createDirectory(
+                at: root,
+                withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try fileManager.copyItem(
+                at: avdDirectory,
+                to: root.appendingPathComponent(
+                    "\(Self.avdName).avd",
+                    isDirectory: true
+                )
+            )
+            let companion = avdHome.appendingPathComponent(
+                "\(Self.avdName).ini"
+            )
+            if fileManager.fileExists(atPath: companion.path) {
+                try fileManager.copyItem(
+                    at: companion,
+                    to: root.appendingPathComponent(companion.lastPathComponent)
+                )
+            }
+            if fileManager.fileExists(atPath: manifestURL.path) {
+                try fileManager.copyItem(
+                    at: manifestURL,
+                    to: root.appendingPathComponent(
+                        manifestURL.lastPathComponent
+                    )
+                )
+            }
+        } catch {
+            try? fileManager.removeItem(at: root)
+            throw error
+        }
+    }
+
     private func ensureManagedAVD(_ toolchain: AndroidToolchain) throws {
         try createRuntimeDirectories()
         let configuration = avdDirectory.appendingPathComponent("config.ini")
@@ -6510,6 +6715,39 @@ actor AndroidDexBridgeRuntime {
                     "专用 Android 环境记录不完整，需要重新初始化"
                 )
             }
+            let contents = try String(
+                contentsOf: configuration,
+                encoding: .utf8
+            )
+            guard let image = resolver().preferredInteractiveSystemImage(
+                in: toolchain,
+                avdConfiguration: contents
+            ) else {
+                throw AppError.spider(
+                    "缺少可显示原生界面的 arm64 Android system image（ATD 不支持界面捕获）"
+                )
+            }
+            let updated = AndroidManagedAVDConfiguration.updating(
+                contents,
+                for: image
+            )
+            if updated != contents {
+                if AndroidManagedAVDConfiguration
+                    .requiresInteractiveImageMigration(contents) {
+                    guard !runtimeProcessReferencesAVD(
+                        named: Self.avdName
+                    ) else {
+                        throw AppError.spider(
+                            "Android 环境仍在运行；为保护登录数据，原生界面升级已中止"
+                        )
+                    }
+                    try backupManagedAVDForRenderingUpgrade()
+                }
+                try Data(updated.utf8).write(
+                    to: configuration,
+                    options: [.atomic]
+                )
+            }
             return
         }
         if fileManager.fileExists(atPath: avdDirectory.path) {
@@ -6522,9 +6760,12 @@ actor AndroidDexBridgeRuntime {
                 "缺少 Android SDK Command-line Tools（avdmanager）"
             )
         }
-        guard let image = resolver().installedSystemImages(in: toolchain).first else {
+        guard let image = resolver().interactiveSystemImages(
+            in: toolchain
+        ).first else {
             throw AppError.spider(
-                "缺少可用的 arm64 Android system image；本版本不会自动下载"
+                "缺少可显示原生界面的 arm64 Android system image；"
+                    + "ATD 不支持界面捕获，本版本不会自动下载"
             )
         }
         _ = try run(
@@ -6579,7 +6820,7 @@ actor AndroidDexBridgeRuntime {
                 "-no-boot-anim",
                 "-no-metrics",
                 "-no-snapshot",
-                "-gpu", "off",
+                "-gpu", "host",
                 "-accel", "on"
             ]
             process.environment = childEnvironment(for: toolchain)

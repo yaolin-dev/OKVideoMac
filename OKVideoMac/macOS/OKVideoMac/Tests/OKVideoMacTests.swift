@@ -7242,11 +7242,18 @@ final class OKVideoMacTests: XCTestCase {
         let valid = root.appendingPathComponent(
             "system-images/android-35/google_apis/arm64-v8a"
         )
+        let automatedTestDevice = root.appendingPathComponent(
+            "system-images/android-35/aosp_atd/arm64-v8a"
+        )
         let invalid = root.appendingPathComponent(
             "system-images/android-36/google_apis/x86_64"
         )
         try FileManager.default.createDirectory(
             at: valid,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: automatedTestDevice,
             withIntermediateDirectories: true
         )
         try FileManager.default.createDirectory(
@@ -7256,6 +7263,13 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(
             FileManager.default.createFile(
                 atPath: valid.appendingPathComponent("package.xml").path,
+                contents: Data()
+            )
+        )
+        XCTAssertTrue(
+            FileManager.default.createFile(
+                atPath: automatedTestDevice
+                    .appendingPathComponent("package.xml").path,
                 contents: Data()
             )
         )
@@ -7275,8 +7289,71 @@ final class OKVideoMacTests: XCTestCase {
         let toolchain = try XCTUnwrap(resolver.toolchain(at: root))
 
         XCTAssertEqual(
-            resolver.installedSystemImages(in: toolchain).map(\.packageID),
+            Set(
+                resolver.installedSystemImages(in: toolchain).map(\.packageID)
+            ),
+            Set([
+                "system-images;android-35;google_apis;arm64-v8a",
+                "system-images;android-35;aosp_atd;arm64-v8a"
+            ])
+        )
+        XCTAssertEqual(
+            resolver.interactiveSystemImages(in: toolchain).map(\.packageID),
             ["system-images;android-35;google_apis;arm64-v8a"]
+        )
+    }
+
+    func testAndroidManagedAVDConfigurationUpgradesATDForRendering() {
+        let current = """
+        hw.gpu.enabled=no
+        hw.gpu.mode=auto
+        image.sysdir.1=system-images/android-35/aosp_atd/arm64-v8a/
+        tag.display=AOSP ATD
+        tag.displaynames=AOSP ATD
+        tag.id=aosp_atd
+        tag.ids=aosp_atd
+        target=android-35
+
+        """
+        let image = AndroidSystemImage(
+            packageID: "system-images;android-35;default;arm64-v8a",
+            apiLevel: 35,
+            variant: "default",
+            architecture: "arm64-v8a"
+        )
+
+        XCTAssertTrue(
+            AndroidManagedAVDConfiguration
+                .requiresInteractiveImageMigration(current)
+        )
+        let updated = AndroidManagedAVDConfiguration.updating(
+            current,
+            for: image
+        )
+        XCTAssertFalse(
+            AndroidManagedAVDConfiguration
+                .requiresInteractiveImageMigration(updated)
+        )
+        XCTAssertEqual(
+            AndroidManagedAVDConfiguration.value(
+                for: "image.sysdir.1",
+                in: updated
+            ),
+            "system-images/android-35/default/arm64-v8a/"
+        )
+        XCTAssertEqual(
+            AndroidManagedAVDConfiguration.value(
+                for: "hw.gpu.enabled",
+                in: updated
+            ),
+            "yes"
+        )
+        XCTAssertEqual(
+            AndroidManagedAVDConfiguration.value(
+                for: "hw.gpu.mode",
+                in: updated
+            ),
+            "host"
         )
     }
 
