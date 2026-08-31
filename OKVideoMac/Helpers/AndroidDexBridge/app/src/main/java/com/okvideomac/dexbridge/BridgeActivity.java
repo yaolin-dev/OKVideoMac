@@ -1,82 +1,36 @@
 package com.okvideomac.dexbridge;
 
 import android.app.Activity;
-import android.app.Dialog;
 import android.content.Context;
-import android.content.ContextWrapper;
 import android.content.Intent;
-import android.graphics.Bitmap;
-import android.graphics.Canvas;
-import android.graphics.Color;
-import android.graphics.Rect;
-import android.graphics.drawable.Drawable;
 import android.os.Bundle;
-import android.os.Looper;
-import android.text.InputType;
-import android.text.method.PasswordTransformationMethod;
-import android.util.Log;
-import android.view.View;
-import android.view.ViewGroup;
-import android.view.ViewParent;
-import android.view.Window;
-import android.widget.Adapter;
-import android.widget.AdapterView;
-import android.widget.Button;
-import android.widget.CompoundButton;
-import android.widget.EditText;
-import android.widget.ImageView;
-import android.widget.SeekBar;
-import android.widget.Spinner;
-import android.widget.TextView;
-import android.webkit.WebView;
 
-import org.json.JSONArray;
 import org.json.JSONObject;
 
-import com.google.zxing.BarcodeFormat;
-import com.google.zxing.BinaryBitmap;
-import com.google.zxing.DecodeHintType;
-import com.google.zxing.LuminanceSource;
-import com.google.zxing.MultiFormatReader;
-import com.google.zxing.RGBLuminanceSource;
-import com.google.zxing.common.GlobalHistogramBinarizer;
-import com.google.zxing.common.HybridBinarizer;
-
-import java.io.ByteArrayOutputStream;
 import java.lang.ref.WeakReference;
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.EnumMap;
-import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+/**
+ * Persistent host for the local Dex bridge.
+ *
+ * <p>Interactive provider actions run in a disposable
+ * {@link BridgeActionActivity}. The bridge observes only that Activity's
+ * request-owned lifecycle and window-focus callbacks. It never traverses
+ * WindowManagerGlobal, reads provider view trees, decodes QR codes, or
+ * translates Android controls into a second host UI.</p>
+ */
 public final class BridgeActivity extends Activity {
-    private static final String LOG_TAG = "OKVideoQR";
-    private static final int UI_SCHEMA_VERSION = 4;
     private static volatile WeakReference<BridgeActivity> current =
             new WeakReference<>(null);
     private static volatile Context applicationContext;
-    private static volatile String activeInteractionID = "";
-    private static volatile String expectedUIInteractionID = "";
-    private static volatile String uiOwnerInteractionID = "";
-    private static volatile long expectedUIMinimumGeneration = Long.MAX_VALUE;
-    private static final Object uiOwnerLock = new Object();
-    private static volatile long uiGeneration = 0L;
-    private static volatile String lastUISignature = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         applicationContext = getApplicationContext();
         current = new WeakReference<>(this);
-        // Guard spiders create account-setting dialogs from their package Init
-        // context. Supplying the visible Activity (rather than only the
-        // Application) gives AlertDialog a valid themed window owner.
         com.github.catvod.Init.set(this);
         updateRuntimeGeneration(getIntent());
         BridgeServer.start(getApplicationContext());
@@ -87,9 +41,6 @@ public final class BridgeActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         updateRuntimeGeneration(intent);
-        // A retry normally targets the already-running singleTop Activity.
-        // If the listener's first bind/serve attempt failed, onCreate will not
-        // run again, so this intent must be able to restart it idempotently.
         BridgeServer.start(getApplicationContext());
     }
 
@@ -97,8 +48,9 @@ public final class BridgeActivity extends Activity {
     protected void onResume() {
         super.onResume();
         current = new WeakReference<>(this);
-        com.github.catvod.Init.set(this);
-        // Also heal a listener that stopped while the Activity was paused.
+        if (!BridgeActionActivity.isReady()) {
+            com.github.catvod.Init.set(this);
+        }
         BridgeServer.start(getApplicationContext());
     }
 
@@ -107,7 +59,9 @@ public final class BridgeActivity extends Activity {
         BridgeActivity activity = current.get();
         if (activity == this) {
             current.clear();
-            com.github.catvod.Init.set(getApplicationContext());
+            if (!BridgeActionActivity.isReady()) {
+                com.github.catvod.Init.set(getApplicationContext());
+            }
         }
         super.onDestroy();
     }
@@ -117,144 +71,95 @@ public final class BridgeActivity extends Activity {
         String generation = intent.getStringExtra(
                 "okvideomac_runtime_generation"
         );
-        // Internal handoff/reorder intents do not carry a generation. They
-        // must never erase the generation established by the Mac runtime or
-        // the next health check will incorrectly restart a healthy bridge.
         if (generation != null && !generation.isEmpty()) {
             BridgeServer.setRuntimeGeneration(generation);
         }
     }
 
     static Context hostContext() {
-        BridgeActivity activity = current.get();
-        return activity == null ? null : activity;
+        BridgeActionActivity action = BridgeActionActivity.currentActivity();
+        return action == null ? current.get() : action;
     }
 
-    /** Invalidates UI ownership before a new request-scoped worker starts. */
+    /** Called after the registry has synchronously superseded the old ID. */
     static void beginInteraction(String interactionID) {
-        String id = cleanInteractionID(interactionID);
-        BridgeActionActivity.supersedePendingLaunch(id);
-        synchronized (uiOwnerLock) {
-            activeInteractionID = id;
-            expectedUIInteractionID = "";
-            expectedUIMinimumGeneration = Long.MAX_VALUE;
-            // Keep the old owner identity until its window is explicitly
-            // dismissed. A new request must never inherit a global window
-            // merely because it became the registry's latest request.
-        }
-    }
-
-    /** Marks the precise worker that is allowed to create the next UI. */
-    private static void expectUIForInteraction(String interactionID) {
-        String id = cleanInteractionID(interactionID);
-        boolean accepted = false;
-        synchronized (uiOwnerLock) {
-            if (id.isEmpty() || !id.equals(activeInteractionID)) return;
-            expectedUIInteractionID = id;
-            expectedUIMinimumGeneration = uiGeneration + 1L;
-            accepted = true;
-        }
-        if (accepted) BridgeInteractionRegistry.expectProviderUI(id);
+        BridgeActionActivity.supersedePendingLaunch(clean(interactionID));
     }
 
     static void providerCompleted(String interactionID) {
-        String id = cleanInteractionID(interactionID);
-        // A worker may return before a provider posts its request-owned dialog
-        // (notably WexConfig's QR flow). Keep the handoff owner alive while the
-        // interaction is in its explicit delayed-UI phase.
-        if (!BridgeInteractionRegistry.terminal(id)) return;
-        BridgeServer.releaseTerminalInteraction(applicationContext, id);
+        String id = clean(interactionID);
+        if (BridgeInteractionRegistry.terminal(id)) {
+            BridgeServer.releaseTerminalInteraction(applicationContext, id);
+        }
     }
 
-    /**
-     * WexConfig closes the current Android Activity before posting its account
-     * dialog. A normal TV app has its persistent main Activity underneath; the
-     * bridge used to have only one Activity, so the delayed dialog received a
-     * null Context. Put a disposable translucent Activity above this host so
-     * the Spider can finish it and then attach the dialog to the resumed host.
-     */
     static void prepareDialogHandoff(Context context) throws Exception {
         prepareDialogHandoff(context, "");
     }
 
-    static void prepareDialogHandoff(
-            Context context,
-            String interactionID
-    ) throws Exception {
-        if (interactionID != null && !interactionID.trim().isEmpty()) {
-            expectUIForInteraction(interactionID);
+    /** Starts the one opaque, request-owned Android surface for an action. */
+    static void prepareDialogHandoff(Context context, String interactionID)
+            throws Exception {
+        String id = clean(interactionID);
+        if (id.isEmpty()
+                || !BridgeInteractionRegistry.ownsLatest(id)
+                || BridgeInteractionRegistry.terminal(id)) {
+            throw new IllegalStateException("Interaction is no longer current");
         }
+        BridgeInteractionRegistry.expectProviderUI(id);
         BridgeActivity host = ensureHost(context, 2_000L);
-        if (host == null) throw new IllegalStateException(
-                "Bridge host activity is unavailable"
-        );
-        String scopedInteractionID = cleanInteractionID(interactionID);
-        if (BridgeActionActivity.isReadyFor(scopedInteractionID)) return;
-        BridgeActionActivity.finishIfOwnedByOther(scopedInteractionID);
-        if (!BridgeActionActivity.awaitNoForeignOwner(
-                scopedInteractionID,
-                2_000L
-        )) {
+        if (host == null) {
+            throw new IllegalStateException("Bridge host activity is unavailable");
+        }
+        if (BridgeActionActivity.isReadyFor(id)) return;
+        BridgeActionActivity.finishIfOwnedByOther(id);
+        if (!BridgeActionActivity.awaitNoForeignOwner(id, 2_000L)) {
             throw new IllegalStateException(
-                    "Previous dialog handoff is still active"
+                    "Previous action session is still active"
             );
         }
-
-        boolean ownsLaunchReservation =
-                BridgeActionActivity.reserveLaunch(scopedInteractionID);
-        if (ownsLaunchReservation) {
+        boolean ownsReservation = BridgeActionActivity.reserveLaunch(id);
+        if (ownsReservation) {
             CountDownLatch started = new CountDownLatch(1);
-            AtomicReference<Throwable> launchFailure = new AtomicReference<>();
-            BridgeActivity selectedHost = host;
-            selectedHost.runOnUiThread(() -> {
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            host.runOnUiThread(() -> {
                 try {
-                    if (!BridgeInteractionRegistry.ownsLatest(scopedInteractionID)
-                            || BridgeInteractionRegistry.terminal(
-                                    scopedInteractionID
-                            )) {
-                        BridgeActionActivity.releaseLaunchReservation(
-                                scopedInteractionID
-                        );
+                    if (!BridgeInteractionRegistry.ownsLatest(id)
+                            || BridgeInteractionRegistry.terminal(id)) {
+                        BridgeActionActivity.releaseLaunchReservation(id);
                         return;
                     }
-                    Intent actionIntent = new Intent(
-                            selectedHost,
-                            BridgeActionActivity.class
-                    );
-                    actionIntent.addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION);
-                    actionIntent.putExtra(
+                    Intent intent = new Intent(host, BridgeActionActivity.class);
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                    intent.putExtra(
                             BridgeActionActivity.EXTRA_INTERACTION_ID,
-                            scopedInteractionID
+                            id
                     );
-                    selectedHost.startActivity(actionIntent);
-                    selectedHost.overridePendingTransition(0, 0);
+                    host.startActivity(intent);
+                    host.overridePendingTransition(0, 0);
                 } catch (Throwable error) {
-                    launchFailure.set(error);
+                    failure.set(error);
+                    BridgeActionActivity.releaseLaunchReservation(id);
                 } finally {
                     started.countDown();
                 }
             });
-            if (!started.await(2, TimeUnit.SECONDS)) {
-                BridgeActionActivity.releaseLaunchReservation(
-                        scopedInteractionID
-                );
+            if (!started.await(2L, TimeUnit.SECONDS)) {
+                BridgeActionActivity.releaseLaunchReservation(id);
                 throw new IllegalStateException(
-                        "Timed out starting dialog handoff"
+                        "Timed out starting action session"
                 );
             }
-            if (launchFailure.get() != null) {
-                BridgeActionActivity.releaseLaunchReservation(
-                        scopedInteractionID
-                );
+            if (failure.get() != null) {
                 throw new IllegalStateException(
-                        "Unable to start dialog handoff",
-                        launchFailure.get()
+                        "Unable to start action session",
+                        failure.get()
                 );
             }
         }
-        if (!BridgeActionActivity.awaitReadyFor(scopedInteractionID, 2_000L)) {
-            BridgeActionActivity.releaseLaunchReservation(scopedInteractionID);
-            throw new IllegalStateException("Dialog handoff activity is unavailable");
+        if (!BridgeActionActivity.awaitReadyFor(id, 2_000L)) {
+            BridgeActionActivity.releaseLaunchReservation(id);
+            throw new IllegalStateException("Action session is unavailable");
         }
     }
 
@@ -262,676 +167,29 @@ public final class BridgeActivity extends Activity {
         return uiState(applicationContext, BridgeInteractionRegistry.latestID());
     }
 
-    static JSONObject uiState(Context context, String interactionID) throws Exception {
-        boolean explicitlyScoped = interactionID != null
-                && !interactionID.trim().isEmpty();
-        if (explicitlyScoped
-                && !BridgeInteractionRegistry.exists(interactionID)) {
-            return BridgeInteractionRegistry.state(interactionID);
+    static JSONObject uiState(Context context, String interactionID)
+            throws Exception {
+        String id = clean(interactionID);
+        if (id.isEmpty() || !BridgeInteractionRegistry.exists(id)) {
+            return BridgeInteractionRegistry.state(id);
         }
-        String id = normalizedInteractionID(interactionID);
-        BridgeActivity host = ensureHost(context, 2_000L);
-        if (host == null) {
-            return observeAndFinalize(context, id, hostUnavailableUI());
-        }
-        try {
-            return observeAndFinalize(
-                    context,
-                    id,
-                    scopedUIState(id, captureUIState(host, id))
-            );
-        } catch (Throwable firstFailure) {
-            // Keep the state endpoint structured across the short Activity
-            // replacement window used by provider dialogs. A lost weak
-            // reference must not turn polling into an HTTP 500.
-            BridgeActivity recovered = ensureHost(context, 500L);
-            if (recovered != null && recovered != host) {
-                try {
-                    return observeAndFinalize(
-                            context,
-                            id,
-                            scopedUIState(id, captureUIState(recovered, id))
-                    );
-                } catch (Throwable ignored) {
-                    // Return the request-owned availability state below.
-                }
-            }
-            return observeAndFinalize(context, id, hostUnavailableUI());
-        }
-    }
-
-    private static JSONObject observeAndFinalize(
-            Context context,
-            String interactionID,
-            JSONObject ui
-    ) {
-        JSONObject scopedSurface = requestScopedSurfaceUI(
-                interactionID,
-                ui
-        );
         JSONObject state = BridgeInteractionRegistry.observeUI(
-                interactionID,
-                scopedSurface
+                id,
+                actionSurfaceState(id)
         );
         if (state.optBoolean("terminal", false)) {
-            BridgeServer.releaseTerminalInteraction(context, interactionID);
+            BridgeServer.releaseTerminalInteraction(context, id);
         }
         return state;
-    }
-
-    /**
-     * Adds lifecycle-only surface ownership. A provider may launch a browser
-     * or full-screen Activity, which hides every WindowManager root owned by
-     * this process while the translucent ActionActivity remains paused below
-     * it. That paused host is a request lease, not evidence of authorization.
-     */
-    private static JSONObject requestScopedSurfaceUI(
-            String interactionID,
-            JSONObject ui
-    ) {
-        JSONObject value = ui == null ? new JSONObject() : ui;
-        String id = cleanInteractionID(interactionID);
-        boolean currentBefore = BridgeInteractionRegistry.ownsLatest(id)
-                && !BridgeInteractionRegistry.terminal(id);
-        BridgeActionActivity.SurfaceStatus status =
-                BridgeActionActivity.surfaceStatusFor(id);
-        boolean currentAfter = BridgeInteractionRegistry.ownsLatest(id)
-                && !BridgeInteractionRegistry.terminal(id);
-        boolean requestScoped = currentBefore
-                && currentAfter
-                && status.requestScoped;
-        boolean providerWindowVisible = value.optBoolean("visible", false)
-                && requestScoped;
-        boolean delegatedSurfaceActive = requestScoped
-                && status.delegatedSurfaceActive;
-        // surfaceActive is the lifetime of the exact request-owned Android
-        // presentation lease, not merely the visibility of structured roots.
-        // A blank resumed anchor remains active, but only the delegated flag
-        // is allowed to suspend the provider-UI timeout below.
-        boolean active = requestScoped;
-        String mode = providerWindowVisible
-                ? "providerWindow"
-                : delegatedSurfaceActive
-                ? "externalActivity"
-                : requestScoped ? "actionActivity" : "none";
-        try {
-            value.put("surfaceActive", active);
-            value.put("surfaceRequestScoped", requestScoped);
-            value.put("surfaceDelegated", delegatedSurfaceActive);
-            value.put(
-                    "surfaceInteractionID",
-                    requestScoped ? id : ""
-            );
-            value.put("surfaceMode", mode);
-            value.put(
-                    "surfaceHostLifecycle",
-                    requestScoped ? status.hostLifecycle : "none"
-            );
-        } catch (Throwable ignored) {
-        }
-        return value;
-    }
-
-    private static JSONObject hostUnavailableUI() throws Exception {
-        JSONObject unavailable = new JSONObject();
-        unavailable.put("visible", false);
-        unavailable.put("title", "");
-        unavailable.put("inputCount", 0);
-        unavailable.put("imageCount", 0);
-        unavailable.put("credentialInputCount", 0);
-        unavailable.put("qrImageCount", 0);
-        unavailable.put("qrStatus", "idle");
-        unavailable.put("uiRole", "configuration");
-        unavailable.put("authorizationCandidate", false);
-        unavailable.put("buttons", new JSONArray());
-        unavailable.put("controls", new JSONArray());
-        unavailable.put("texts", new JSONArray());
-        unavailable.put("uiSchemaVersion", UI_SCHEMA_VERSION);
-        unavailable.put("elements", new JSONArray());
-        unavailable.put("generation", uiGeneration);
-        unavailable.put("hostUnavailable", true);
-        unavailable.put("phase", "reattaching");
-        unavailable.put("outcome", "stay");
-        return unavailable;
-    }
-
-    private static JSONObject captureUIState(
-            BridgeActivity host,
-            String interactionID
-    ) throws Exception {
-        // Read provider storage off the Android UI thread. Only an opaque
-        // digest is returned, never preference names or credential values.
-        String authorizationStorageFingerprint =
-                BridgeAuthorizationStorageFingerprint.capture(host);
-        return onUIThread(host, () -> {
-            JSONObject state = new JSONObject();
-            JSONArray buttons = new JSONArray();
-            JSONArray controls = new JSONArray();
-            JSONArray texts = new JSONArray();
-            JSONArray elements = new JSONArray();
-            String title = "";
-            int inputCount = 0;
-            int imageCount = 0;
-            int credentialInputCount = 0;
-            List<View> roots = eligibleRoots(rootViews(), interactionID);
-            View qrCandidate = largestQRCodeCandidate(roots);
-            int qrImageCount = qrCandidate == null ? 0 : 1;
-            for (View candidateRoot : roots) {
-                for (View view : flattened(candidateRoot)) {
-                    if (view.isShown() && view instanceof ImageView) {
-                        imageCount++;
-                    }
-                }
-            }
-            if (qrCandidate != null && !(qrCandidate instanceof ImageView)) {
-                imageCount++;
-            }
-            View root = activeRoot(roots);
-            Activity windowOwner = root == null
-                    ? null
-                    : activityFrom(root.getContext());
-            String windowOwnerInteractionID =
-                    BridgeActionActivity.interactionIDFor(windowOwner);
-            if (root != null) {
-                int elementOrder = 0;
-                List<View> virtualizedCollections =
-                        virtualizedCollections(root);
-                for (View view : flattened(root)) {
-                    if (!view.isShown()) continue;
-                    if (isDescendantOfAny(view, virtualizedCollections)) {
-                        continue;
-                    }
-                    if (view instanceof EditText) {
-                        inputCount++;
-                        boolean credential = isCredentialInput((EditText) view);
-                        if (credential) {
-                            credentialInputCount++;
-                        }
-                        elements.put(uiElement(
-                                view,
-                                root,
-                                credential ? "secureField" : "textField",
-                                inputLabel((EditText) view),
-                                "input",
-                                elementOrder++
-                        ));
-                    } else if (view instanceof ImageView) {
-                        boolean qrCode = view == qrCandidate;
-                        String label = actionableLabelOf(view);
-                        boolean imageAction = view.isClickable()
-                                && view.isEnabled()
-                                && !label.isEmpty();
-                        elements.put(uiElement(
-                                view,
-                                root,
-                                qrCode
-                                        ? "qrCode"
-                                        : imageAction ? "imageButton" : "image",
-                                label,
-                                imageAction ? "action" : "image",
-                                elementOrder++
-                        ));
-                        if (imageAction) {
-                            appendControl(
-                                    buttons,
-                                    controls,
-                                    view,
-                                    label,
-                                    "imageButton"
-                            );
-                        }
-                    } else if (view instanceof CompoundButton) {
-                        String label = textOf((TextView) view);
-                        JSONObject element = uiElement(
-                                view,
-                                root,
-                                "toggle",
-                                label,
-                                view.isClickable() ? "action" : "status",
-                                elementOrder++
-                        );
-                        element.put(
-                                "checked",
-                                ((CompoundButton) view).isChecked()
-                        );
-                        elements.put(element);
-                        appendControl(buttons, controls, view, label, "toggle");
-                    } else if (view instanceof Spinner) {
-                        String label = selectedSpinnerLabel((Spinner) view);
-                        JSONObject element = uiElement(
-                                view,
-                                root,
-                                "picker",
-                                label,
-                                view.isClickable() ? "action" : "status",
-                                elementOrder++
-                        );
-                        element.put(
-                                "selectedIndex",
-                                ((Spinner) view).getSelectedItemPosition()
-                        );
-                        elements.put(element);
-                        appendControl(buttons, controls, view, label, "picker");
-                    } else if (view instanceof SeekBar) {
-                        JSONObject element = uiElement(
-                                view,
-                                root,
-                                "slider",
-                                contentDescriptionOf(view),
-                                view.isEnabled() ? "action" : "status",
-                                elementOrder++
-                        );
-                        element.put("value", ((SeekBar) view).getProgress());
-                        element.put("maximumValue", ((SeekBar) view).getMax());
-                        elements.put(element);
-                    } else if (view instanceof Button) {
-                        String label = textOf((TextView) view);
-                        elements.put(uiElement(
-                                view,
-                                root,
-                                "button",
-                                label,
-                                view.isClickable() && view.isEnabled()
-                                        ? "action"
-                                        : "status",
-                                elementOrder++
-                        ));
-                        if (!label.isEmpty()
-                                && view.isEnabled()
-                                && view.isClickable()) {
-                            String id = stableControlID(view);
-                            JSONObject control = new JSONObject();
-                            control.put("id", id);
-                            control.put("title", label);
-                            control.put("enabled", true);
-                            control.put("role", "button");
-                            controls.put(control);
-                            buttons.put(label);
-                        } else if (!label.isEmpty()) {
-                            // Disabled buttons in legacy Spider dialogs are
-                            // status badges (for example "停用中"), not host
-                            // actions. Preserve their text without exposing a
-                            // clickable SwiftUI control.
-                            texts.put(label);
-                        }
-                    } else if (view.isClickable() && view.isEnabled()) {
-                        String label = actionableLabelOf(view);
-                        elements.put(uiElement(
-                                view,
-                                root,
-                                "actionRow",
-                                label,
-                                "action",
-                                elementOrder++
-                        ));
-                        if (!label.isEmpty()) {
-                            String id = stableControlID(view);
-                            JSONObject control = new JSONObject();
-                            control.put("id", id);
-                            control.put("title", label);
-                            control.put("enabled", true);
-                            control.put("role", "clickable");
-                            controls.put(control);
-                            buttons.put(label);
-                        }
-                    } else if (view instanceof TextView) {
-                        String label = textOf((TextView) view);
-                        if (label.isEmpty()) continue;
-                        elements.put(uiElement(
-                                view,
-                                root,
-                                "label",
-                                label,
-                                "label",
-                                elementOrder++
-                        ));
-                        texts.put(label);
-                        if (isAlertTitle(view)) title = label;
-                    }
-                }
-                elementOrder = appendVirtualizedCollectionState(
-                        virtualizedCollections,
-                        buttons,
-                        controls,
-                        texts,
-                        elements,
-                        elementOrder
-                );
-            }
-            boolean hasContent = inputCount > 0
-                    || imageCount > 0
-                    || controls.length() > 0
-                    || texts.length() > 0;
-            // Provider identity and action semantics are request-owned opaque
-            // contract fields, never inferred from localized titles/buttons.
-            String provider = "";
-            boolean remoteInput = false;
-            String uiRole = credentialInputCount > 0
-                    ? "credentialForm"
-                    : qrImageCount > 0
-                    ? "qrCode"
-                    : "configuration";
-            boolean authorizationCandidate = "credentialForm".equals(uiRole)
-                    || "qrCode".equals(uiRole);
-            String phase = !hasContent
-                    ? "hidden"
-                    : "qrCode".equals(uiRole)
-                    ? "qr"
-                    : "credentialForm".equals(uiRole)
-                    ? "credentials"
-                    : "chooser";
-            boolean credentialPush = false;
-            if (title.isEmpty() && hasContent) title = "配置操作";
-            boolean visible = root != null && hasContent;
-            String signature = uiSignature(
-                    root,
-                    controls,
-                    texts,
-                    elements,
-                    inputCount,
-                    imageCount,
-                    credentialInputCount,
-                    qrImageCount,
-                    uiRole
-            );
-            if (!signature.equals(lastUISignature)) {
-                lastUISignature = signature;
-                uiGeneration++;
-                Log.d(
-                        LOG_TAG,
-                        "ui=" + abbreviatedInteractionID(interactionID)
-                                + " roots=" + roots.size()
-                                + " images=" + imageCount
-                                + " qr=" + qrImageCount
-                                + " role=" + uiRole
-                );
-            }
-            state.put("visible", visible);
-            state.put("title", title);
-            state.put("inputCount", inputCount);
-            state.put("imageCount", imageCount);
-            state.put("credentialInputCount", credentialInputCount);
-            state.put("qrImageCount", qrImageCount);
-            state.put("qrStatus", qrImageCount > 0 ? "ready" : "idle");
-            state.put("uiRole", uiRole);
-            state.put("authorizationCandidate", authorizationCandidate);
-            state.put("buttons", buttons);
-            state.put("controls", controls);
-            state.put("texts", texts);
-            state.put("uiSchemaVersion", UI_SCHEMA_VERSION);
-            state.put("elements", elements);
-            state.put("phase", phase);
-            state.put("provider", provider);
-            state.put("credentialPush", credentialPush);
-            state.put("remoteInput", remoteInput);
-            state.put("generation", uiGeneration);
-            state.put("windowOwnerInteractionID", windowOwnerInteractionID);
-            state.put(
-                    "authorizationStorageFingerprint",
-                    authorizationStorageFingerprint
-            );
-            state.put(
-                    "authenticated",
-                    false
-            );
-            return state;
-        });
-    }
-
-    private static JSONObject scopedUIState(
-            String interactionID,
-            JSONObject captured
-    ) throws Exception {
-        String id = cleanInteractionID(interactionID);
-        boolean currentNonterminal = BridgeInteractionRegistry.ownsLatest(id)
-                && !BridgeInteractionRegistry.terminal(id);
-        boolean visible = captured.optBoolean("visible", false);
-        long generation = captured.optLong("generation", 0L);
-        String windowOwnerInteractionID = captured.optString(
-                "windowOwnerInteractionID",
-                ""
-        );
-        synchronized (uiOwnerLock) {
-            if (visible && uiOwnerInteractionID.isEmpty()
-                    && id.equals(activeInteractionID)
-                    && id.equals(expectedUIInteractionID)
-                    && generation >= expectedUIMinimumGeneration
-                    && (windowOwnerInteractionID.isEmpty()
-                    || id.equals(windowOwnerInteractionID))
-                    && currentNonterminal) {
-                uiOwnerInteractionID = id;
-            }
-            if (id.equals(uiOwnerInteractionID)) {
-                return captured;
-            }
-        }
-        return unownedUIState(generation, visible);
-    }
-
-    private static JSONObject unownedUIState(
-            long generation,
-            boolean foreignVisible
-    ) throws Exception {
-        JSONObject state = new JSONObject();
-        state.put("visible", false);
-        state.put("title", "");
-        state.put("inputCount", 0);
-        state.put("imageCount", 0);
-        state.put("credentialInputCount", 0);
-        state.put("qrImageCount", 0);
-        state.put("qrStatus", "idle");
-        state.put("uiRole", "configuration");
-        state.put("authorizationCandidate", false);
-        state.put("buttons", new JSONArray());
-        state.put("controls", new JSONArray());
-        state.put("texts", new JSONArray());
-        state.put("uiSchemaVersion", UI_SCHEMA_VERSION);
-        state.put("elements", new JSONArray());
-        state.put("generation", generation);
-        state.put("foreignUI", foreignVisible);
-        state.put("phase", "hidden");
-        return state;
-    }
-
-    static JSONObject submitUI(
-            String text,
-            String buttonText,
-            String controlId,
-            Integer expectedGeneration
-    ) throws Exception {
-        return submitUI(
-                applicationContext,
-                BridgeInteractionRegistry.latestID(),
-                text,
-                buttonText,
-                controlId,
-                expectedGeneration
-        );
-    }
-
-    static JSONObject submitUI(
-            Context context,
-            String interactionID,
-            String text,
-            String buttonText,
-            String controlId,
-            Integer expectedGeneration
-    ) throws Exception {
-        String id = normalizedInteractionID(interactionID);
-        if (!ownsCurrentCapturedUI(id)) {
-            JSONObject stale = BridgeInteractionRegistry.state(id);
-            stale.put("clicked", false);
-            stale.put("stale", true);
-            return stale;
-        }
-        BridgeActivity host = ensureHost(context, 2_000L);
-        if (host == null) {
-            JSONObject unavailable = BridgeInteractionRegistry.state(id);
-            unavailable.put("clicked", false);
-            unavailable.put("hostUnavailable", true);
-            return unavailable;
-        }
-        return onUIThread(host, () -> {
-            if (!ownsCurrentCapturedUI(id)) {
-                JSONObject result = new JSONObject();
-                result.put("clicked", false);
-                result.put("stale", true);
-                result.put("generation", uiGeneration);
-                return result;
-            }
-            if (expectedGeneration != null
-                    && expectedGeneration.intValue() != uiGeneration) {
-                JSONObject result = new JSONObject();
-                result.put("clicked", false);
-                result.put("stale", true);
-                result.put("generation", uiGeneration);
-                return result;
-            }
-            View root = activeRoot(eligibleRoots(rootViews(), id));
-            if (root == null) {
-                JSONObject result = new JSONObject();
-                result.put("clicked", false);
-                return result;
-            }
-            List<View> views = flattened(root);
-            for (View view : views) {
-                if (view.isShown() && view instanceof EditText && text != null) {
-                    ((EditText) view).setText(text);
-                }
-            }
-            if (controlId != null && controlId.startsWith("virtual-v1:")) {
-                boolean clicked = submitVirtualizedControl(
-                        root,
-                        controlId
-                );
-                JSONObject result = new JSONObject();
-                result.put("clicked", clicked);
-                result.put("stale", !clicked);
-                result.put("generation", uiGeneration);
-                if (clicked) BridgeInteractionRegistry.submitted(id);
-                JSONObject interaction = BridgeInteractionRegistry.state(id);
-                result.put("interactionID", id);
-                result.put("revision", interaction.optLong("revision", 0));
-                result.put(
-                        "phase",
-                        interaction.optString("phase", "processing")
-                );
-                result.put(
-                        "outcome",
-                        interaction.optString("outcome", "stay")
-                );
-                return result;
-            }
-            boolean clicked = false;
-            boolean matched = false;
-            for (View view : views) {
-                if (!view.isShown() || !view.isClickable() || !view.isEnabled()) continue;
-                boolean isButton = view instanceof Button;
-                String label = isButton
-                        ? textOf((Button) view)
-                        : actionableLabelOf(view);
-                if (label.isEmpty()) continue;
-                String candidateControlID = stableControlID(view);
-                if ((controlId != null && controlId.equals(candidateControlID))
-                        || (controlId == null && label.equals(buttonText))) {
-                    // The HTTP handler holds BridgeServer's lifecycle lease
-                    // while this UI block executes. This final ownership
-                    // check therefore closes the last supersede-before-click
-                    // race without permitting a stale request to act on the
-                    // replacement dialog.
-                    if (!ownsCurrentCapturedUI(id)) {
-                        JSONObject result = new JSONObject();
-                        result.put("clicked", false);
-                        result.put("stale", true);
-                        result.put("generation", uiGeneration);
-                        return result;
-                    }
-                    matched = true;
-                    clicked = view.performClick();
-                    break;
-                }
-            }
-            JSONObject result = new JSONObject();
-            result.put("clicked", clicked);
-            result.put("stale", controlId != null && !matched);
-            result.put("generation", uiGeneration);
-            if (clicked) BridgeInteractionRegistry.submitted(id);
-            JSONObject interaction = BridgeInteractionRegistry.state(id);
-            result.put("interactionID", id);
-            result.put("revision", interaction.optLong("revision", 0));
-            result.put("phase", interaction.optString("phase", "processing"));
-            result.put("outcome", interaction.optString("outcome", "stay"));
-            return result;
-        });
-    }
-
-    static byte[] snapshotUI() throws Exception {
-        return snapshotUI(applicationContext, BridgeInteractionRegistry.latestID());
-    }
-
-    static byte[] snapshotUI(Context context, String interactionID) throws Exception {
-        String id = normalizedInteractionID(interactionID);
-        if (!ownsCurrentCapturedUI(id)) {
-            throw new IllegalStateException("Interaction is no longer current");
-        }
-        BridgeActivity host = ensureHost(context, 2_000L);
-        if (host == null) {
-            throw new IllegalStateException("Bridge host activity is unavailable");
-        }
-        return onUIThread(host, () -> {
-            if (!ownsCurrentCapturedUI(id)) {
-                throw new IllegalStateException(
-                        "Interaction is no longer current"
-                );
-            }
-            List<View> roots = eligibleRoots(rootViews(), id);
-            View selected = largestQRCodeCandidate(roots);
-            if (selected == null) {
-                throw new IllegalStateException("No visible QR code");
-            }
-            // The interaction may have been superseded while the view tree
-            // was being inspected (QR detection can be comparatively
-            // expensive). Never capture pixels from an old provider window.
-            if (!ownsCurrentCapturedUI(id)) {
-                throw new IllegalStateException(
-                        "Interaction is no longer current"
-                );
-            }
-            Bitmap rendered = selected instanceof ImageView
-                    ? renderedImage((ImageView) selected)
-                    : renderedView(selected);
-            if (rendered == null) {
-                throw new IllegalStateException("Dialog has no drawable bounds");
-            }
-            Bitmap bitmap = preparedQRCodeBitmap(rendered);
-            rendered.recycle();
-            if (bitmap == null) {
-                throw new IllegalStateException(
-                        "QR candidate could not be normalized"
-                );
-            }
-            if (!ownsCurrentCapturedUI(id)) {
-                bitmap.recycle();
-                throw new IllegalStateException(
-                        "Interaction is no longer current"
-                );
-            }
-            ByteArrayOutputStream output = new ByteArrayOutputStream();
-            bitmap.compress(Bitmap.CompressFormat.PNG, 100, output);
-            bitmap.recycle();
-            return output.toByteArray();
-        });
     }
 
     static JSONObject dismissUI() throws Exception {
-        return dismissUI(
-                applicationContext,
-                BridgeInteractionRegistry.latestID()
-        );
+        return dismissUI(applicationContext, BridgeInteractionRegistry.latestID());
     }
 
-    static JSONObject dismissUI(Context context, String interactionID) throws Exception {
-        String id = normalizedInteractionID(interactionID);
+    static JSONObject dismissUI(Context context, String interactionID)
+            throws Exception {
+        String id = clean(interactionID);
         BridgeInteractionRegistry.cancel(id);
         boolean dismissed = BridgeServer.releaseTerminalInteraction(context, id);
         JSONObject result = BridgeInteractionRegistry.state(id);
@@ -939,101 +197,16 @@ public final class BridgeActivity extends Activity {
         return result;
     }
 
-    /**
-     * Releases only the Activity/Dialog owned by {@code interactionID}.
-     * BridgeServer owns the terminal state transition and calls this while
-     * holding the lifecycle lock, so cleanup cannot overtake activation of a
-     * newer request.
-     */
-    static boolean releaseTerminalUI(
-            Context context,
-            String interactionID
-    ) throws Exception {
-        String id = cleanInteractionID(interactionID);
+    /** Ends the exact disposable Activity; Android owns all child windows. */
+    static boolean releaseTerminalUI(Context context, String interactionID)
+            throws Exception {
+        String id = clean(interactionID);
         if (id.isEmpty()) return false;
-        boolean releaseScope = ownsReleaseScope(id);
-        boolean dismissedDialog = false;
-        BridgeActivity host = releaseScope ? ensureHost(context, 500L) : null;
-        if (releaseScope && host != null) {
-            dismissedDialog = onUIThread(host, () -> {
-                // Cleanup can be queued behind a newly resumed Activity. The
-                // UI-thread check is intentionally repeated immediately
-                // before dispatching BACK.
-                if (!ownsReleaseScope(id)) return false;
-                View root = activeRoot(eligibleRoots(rootViews(), id));
-                if (root == null || !hasMeaningfulContent(root)) return false;
-                Activity owner = activityFrom(root.getContext());
-                String ownerID = BridgeActionActivity.interactionIDFor(owner);
-                if (!id.equals(ownerID)) return false;
-                // Do not send a generic BACK event to whichever root happens
-                // to be topmost: if the provider never created its dialog,
-                // that root is the persistent BridgeActivity and BACK would
-                // tear down the bridge itself. Resolve the DecorView's Window
-                // callback and dismiss only the exact Dialog owned by this
-                // request. The ActionActivity itself is finished below.
-                Dialog dialog = dialogFrom(root);
-                if (dialog == null || !dialog.isShowing()) return false;
-                dialog.dismiss();
-                return true;
-            });
-        }
-
-        // The disposable Activity is request-owned before the first state
-        // poll captures a dialog, so every terminal path must finish it too.
-        boolean dismissedActionHost = BridgeActionActivity.finishIfOwnedBy(id);
-        if (dismissedActionHost) {
-            BridgeActionActivity.awaitReleased(id, 2_000L);
-        }
+        boolean finished = BridgeActionActivity.finishIfOwnedBy(id);
+        if (finished) BridgeActionActivity.awaitReleased(id, 2_000L);
         BridgeActionActivity.releaseLaunchReservation(id);
-        releaseUIOwner(id);
         BridgeActionActivity.restoreInitContext(context);
-        return dismissedDialog || dismissedActionHost || releaseScope;
-    }
-
-    /**
-     * Removes Dialog windows owned by a disposable provider Activity before
-     * it is finished. Provider handoffs intentionally close the parent
-     * chooser before opening a child QR dialog on BridgeActivity; leaving the
-     * parent Dialog attached produces WindowLeaked and can suppress the child.
-     */
-    static void dismissVisibleDialogsOwnedBy(Activity activity) {
-        if (activity == null) return;
-        if (Looper.myLooper() != Looper.getMainLooper()) {
-            CountDownLatch latch = new CountDownLatch(1);
-            activity.runOnUiThread(() -> {
-                try {
-                    dismissVisibleDialogsOwnedByOnUIThread(activity);
-                } finally {
-                    latch.countDown();
-                }
-            });
-            try {
-                latch.await(1L, TimeUnit.SECONDS);
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-            }
-            return;
-        }
-        dismissVisibleDialogsOwnedByOnUIThread(activity);
-    }
-
-    private static void dismissVisibleDialogsOwnedByOnUIThread(
-            Activity activity
-    ) {
-        try {
-            for (View root : rootViews()) {
-                if (root == null || activityFrom(root.getContext()) != activity) {
-                    continue;
-                }
-                Dialog dialog = dialogFrom(root);
-                if (dialog != null && dialog.isShowing()) {
-                    dialog.dismiss();
-                }
-            }
-        } catch (Throwable ignored) {
-            // Activity.finish() must remain available even on Android builds
-            // where WindowManagerGlobal reflection is restricted.
-        }
+        return finished;
     }
 
     static void requestHost(Context context) {
@@ -1043,59 +216,43 @@ public final class BridgeActivity extends Activity {
         }
     }
 
-    private static String normalizedInteractionID(String requested) {
-        String id = requested == null ? "" : requested.trim();
-        if (id.isEmpty()) id = BridgeInteractionRegistry.latestID();
-        if (id.isEmpty()) {
-            id = BridgeInteractionRegistry.begin("", "configuration", "legacy");
-        }
-        return id;
-    }
+    private static JSONObject actionSurfaceState(String interactionID)
+            throws Exception {
+        BridgeActionActivity.SurfaceStatus status =
+                BridgeActionActivity.surfaceStatusFor(interactionID);
+        boolean current = BridgeInteractionRegistry.ownsLatest(interactionID)
+                && !BridgeInteractionRegistry.terminal(interactionID);
+        boolean scoped = current && status.requestScoped;
+        boolean external = scoped && status.delegatedSurfaceActive;
+        boolean providerWindow = scoped && status.providerWindowActive;
 
-    private static String cleanInteractionID(String value) {
-        return value == null ? "" : value.trim();
-    }
-
-    private static boolean ownsCapturedUI(String interactionID) {
-        String id = cleanInteractionID(interactionID);
-        synchronized (uiOwnerLock) {
-            return !id.isEmpty() && id.equals(uiOwnerInteractionID);
-        }
-    }
-
-    private static boolean ownsCurrentCapturedUI(String interactionID) {
-        String id = cleanInteractionID(interactionID);
-        if (id.isEmpty()
-                || !BridgeInteractionRegistry.ownsLatest(id)
-                || BridgeInteractionRegistry.terminal(id)) {
-            return false;
-        }
-        synchronized (uiOwnerLock) {
-            return id.equals(activeInteractionID)
-                    && id.equals(uiOwnerInteractionID);
-        }
-    }
-
-    private static boolean ownsReleaseScope(String interactionID) {
-        String id = cleanInteractionID(interactionID);
-        synchronized (uiOwnerLock) {
-            return !id.isEmpty()
-                    && (id.equals(activeInteractionID)
-                    || id.equals(expectedUIInteractionID)
-                    || id.equals(uiOwnerInteractionID));
-        }
-    }
-
-    private static void releaseUIOwner(String interactionID) {
-        String id = cleanInteractionID(interactionID);
-        synchronized (uiOwnerLock) {
-            if (id.equals(uiOwnerInteractionID)) uiOwnerInteractionID = "";
-            if (id.equals(expectedUIInteractionID)) {
-                expectedUIInteractionID = "";
-                expectedUIMinimumGeneration = Long.MAX_VALUE;
-            }
-            if (id.equals(activeInteractionID)) activeInteractionID = "";
-        }
+        JSONObject state = new JSONObject();
+        state.put("visible", providerWindow);
+        state.put("generation", status.generation);
+        state.put("surfaceActive", scoped);
+        state.put("surfaceRequestScoped", scoped);
+        state.put("surfaceDelegated", external);
+        state.put("surfaceInteractionID", scoped ? interactionID : "");
+        state.put(
+                "surfaceMode",
+                external ? "externalActivity" : scoped ? "actionActivity" : "none"
+        );
+        state.put(
+                "surfaceHostLifecycle",
+                scoped ? status.hostLifecycle : "none"
+        );
+        state.put("providerWindowActive", providerWindow);
+        state.put("sawProviderWindow", scoped && status.sawProviderWindow);
+        state.put("windowFocused", scoped && status.windowFocused);
+        state.put(
+                "phase",
+                external
+                        ? "awaitingExternalSurface"
+                        : providerWindow ? "awaitingUser" : "actionSession"
+        );
+        state.put("outcome", "stay");
+        state.put("hostUnavailable", !scoped);
+        return state;
     }
 
     private static BridgeActivity ensureHost(
@@ -1103,7 +260,7 @@ public final class BridgeActivity extends Activity {
             long timeoutMilliseconds
     ) throws InterruptedException {
         BridgeActivity activity = current.get();
-        if (isUsable(activity)) return activity;
+        if (usable(activity)) return activity;
         Context context = suppliedContext == null
                 ? applicationContext
                 : suppliedContext.getApplicationContext();
@@ -1119,1161 +276,20 @@ public final class BridgeActivity extends Activity {
         long deadline = System.currentTimeMillis() + timeoutMilliseconds;
         do {
             activity = current.get();
-            if (isUsable(activity)) return activity;
+            if (usable(activity)) return activity;
             if (timeoutMilliseconds <= 0L) break;
             Thread.sleep(25L);
         } while (System.currentTimeMillis() < deadline);
-        return isUsable(activity) ? activity : null;
+        return usable(activity) ? activity : null;
     }
 
-    private static boolean isUsable(BridgeActivity activity) {
+    private static boolean usable(BridgeActivity activity) {
         return activity != null
                 && !activity.isFinishing()
                 && !activity.isDestroyed();
     }
 
-    private static Activity activityFrom(Context context) {
-        Context currentContext = context;
-        while (currentContext instanceof ContextWrapper) {
-            if (currentContext instanceof Activity) {
-                return (Activity) currentContext;
-            }
-            Context base = ((ContextWrapper) currentContext).getBaseContext();
-            if (base == currentContext) break;
-            currentContext = base;
-        }
-        return currentContext instanceof Activity ? (Activity) currentContext : null;
-    }
-
-    /** Returns the Dialog whose DecorView is {@code root}, if any. */
-    private static Dialog dialogFrom(View root) {
-        if (root == null) return null;
-        try {
-            Object current = root;
-            Class<?> type = current.getClass();
-            while (type != null) {
-                try {
-                    Field field = type.getDeclaredField("mWindow");
-                    field.setAccessible(true);
-                    Object value = field.get(current);
-                    if (value instanceof Window) {
-                        Window.Callback callback = ((Window) value).getCallback();
-                        return callback instanceof Dialog ? (Dialog) callback : null;
-                    }
-                } catch (NoSuchFieldException ignored) {
-                    // DecorView keeps mWindow on an implementation superclass
-                    // on some Android releases.
-                }
-                type = type.getSuperclass();
-            }
-        } catch (Throwable ignored) {
-            // A hidden-API restriction must degrade to finishing the precise
-            // ActionActivity, never to dismissing an unrelated window.
-        }
-        return null;
-    }
-
-    private static List<View> rootViews() throws Exception {
-        Class<?> type = Class.forName("android.view.WindowManagerGlobal");
-        Method getInstance = type.getDeclaredMethod("getInstance");
-        getInstance.setAccessible(true);
-        Object instance = getInstance.invoke(null);
-        Field views = type.getDeclaredField("mViews");
-        views.setAccessible(true);
-        Object value = views.get(instance);
-        ArrayList<View> roots = new ArrayList<>();
-        if (value instanceof List) {
-            for (Object item : (List<?>) value) {
-                if (item instanceof View) roots.add((View) item);
-            }
-        }
-        return roots;
-    }
-
-    private static View activeRoot(List<View> roots) {
-        View fallback = null;
-        for (int index = roots.size() - 1; index >= 0; index--) {
-            View root = roots.get(index);
-            if (root.getWindowVisibility() == View.VISIBLE
-                    && root.isShown()
-                    && root.getWidth() > 0
-                    && root.getHeight() > 0) {
-                if (fallback == null) fallback = root;
-                if (hasMeaningfulContent(root)) return root;
-            }
-        }
-        return fallback;
-    }
-
-    /**
-     * Returns only Window roots attached to this request's disposable
-     * ActionActivity. Untagged roots (the persistent host, Toast windows, and
-     * provider UI left behind by old bridge builds) are intentionally not a
-     * fallback: admitting them would let an unrelated message or Dialog
-     * become the surface of a newly started action session.
-     */
-    private static List<View> eligibleRoots(
-            List<View> roots,
-            String interactionID
-    ) {
-        String id = cleanInteractionID(interactionID);
-        ArrayList<View> eligible = new ArrayList<>();
-        for (View root : roots) {
-            if (root.getWindowVisibility() != View.VISIBLE
-                    || !root.isShown()
-                    || root.getWidth() <= 0
-                    || root.getHeight() <= 0) {
-                continue;
-            }
-            Activity owner = activityFrom(root.getContext());
-            String ownerID = BridgeActionActivity.interactionIDFor(owner);
-            if (!id.equals(ownerID) || !isOwnedWindowRoot(root, owner)) {
-                continue;
-            }
-            eligible.add(root);
-        }
-        return eligible;
-    }
-
-    private static boolean isOwnedWindowRoot(View root, Activity owner) {
-        if (!(owner instanceof BridgeActionActivity) || root == null) {
-            return false;
-        }
-        Window ownerWindow = owner.getWindow();
-        if (ownerWindow != null && ownerWindow.getDecorView() == root) {
-            return true;
-        }
-        Dialog dialog = dialogFrom(root);
-        if (dialog != null && dialog.isShowing()) return true;
-        // Hidden-API restrictions can make dialogFrom unavailable on some
-        // Android releases. Both Activity and Dialog windows still expose a
-        // framework DecorView; a custom Toast root does not.
-        return root.getClass().getName().endsWith("DecorView");
-    }
-
-    /**
-     * Finds a decodable QR across every request-owned Window/Dialog. ImageView
-     * is preferred, with a bounded fallback for WebView/custom-view providers
-     * that draw their QR directly into a square view.
-     */
-    private static View largestQRCodeCandidate(List<View> roots) {
-        View selected = null;
-        int selectedArea = 0;
-        for (View root : roots) {
-            for (View view : flattened(root)) {
-                if (!view.isShown() || !(view instanceof ImageView)) continue;
-                if (!isQRCodeImage((ImageView) view)) continue;
-                int area = view.getWidth() * view.getHeight();
-                if (area > selectedArea) {
-                    selected = view;
-                    selectedArea = area;
-                }
-            }
-        }
-        if (selected != null) return selected;
-
-        int inspected = 0;
-        for (int rootIndex = roots.size() - 1; rootIndex >= 0; rootIndex--) {
-            List<View> views = flattened(roots.get(rootIndex));
-            for (int index = views.size() - 1; index >= 0; index--) {
-                View view = views.get(index);
-                if (!isCustomQRCodeCandidate(view)) continue;
-                inspected++;
-                if (isQRCodeView(view)) return view;
-                if (inspected >= 64) return null;
-            }
-        }
-        return null;
-    }
-
-    private static boolean isCustomQRCodeCandidate(View view) {
-        if (view == null || !view.isShown() || view instanceof ImageView) {
-            return false;
-        }
-        int width = view.getWidth();
-        int height = view.getHeight();
-        if (width < 120 || height < 120) return false;
-        if (view instanceof WebView) return true;
-        double ratio = width / (double) height;
-        return ratio >= 0.65 && ratio <= 1.55;
-    }
-
-    private static boolean hasMeaningfulContent(View root) {
-        for (View view : flattened(root)) {
-            if (!view.isShown()) continue;
-            if (view instanceof EditText || view instanceof ImageView) return true;
-            if (view instanceof TextView && !textOf((TextView) view).isEmpty()) return true;
-            if (view.isClickable() && view.isEnabled() && !labelOf(view).isEmpty()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static String stableControlID(View view) {
-        String resource = resourceName(view);
-        String path = hierarchyPath(view);
-        if (resource.isEmpty() && path.isEmpty()) {
-            return "view:" + Integer.toUnsignedString(
-                    System.identityHashCode(view)
-            );
-        }
-        return "view-v2:" + resource + ":" + path;
-    }
-
-    private static JSONObject uiElement(
-            View view,
-            View root,
-            String type,
-            String title,
-            String role,
-            int order
-    ) throws Exception {
-        JSONObject element = new JSONObject();
-        element.put("id", stableControlID(view));
-        element.put("type", type);
-        element.put("title", title == null ? "" : title);
-        element.put("role", role);
-        element.put("enabled", view.isEnabled());
-        element.put("clickable", view.isClickable());
-        element.put("selected", view.isSelected());
-        element.put("order", order);
-        element.put("depth", viewDepth(view));
-        element.put("resourceName", resourceName(view));
-        element.put("className", view.getClass().getName());
-        element.put("parentID", parentElementID(view));
-
-        Rect frame = new Rect();
-        Rect rootFrame = new Rect();
-        if (view.getGlobalVisibleRect(frame)) {
-            root.getGlobalVisibleRect(rootFrame);
-            element.put("x", frame.left - rootFrame.left);
-            element.put("y", frame.top - rootFrame.top);
-            element.put("width", frame.width());
-            element.put("height", frame.height());
-        }
-        if (view instanceof EditText) {
-            EditText input = (EditText) view;
-            CharSequence hint = input.getHint();
-            element.put("hint", hint == null ? "" : hint.toString().trim());
-            CharSequence value = input.getText();
-            // Input content may be a Cookie, token or password. The host only
-            // needs to know whether the field is populated; the value remains
-            // inside the Android provider process.
-            element.put("hasValue", value != null && value.length() > 0);
-        }
-        return element;
-    }
-
-    private static void appendControl(
-            JSONArray buttons,
-            JSONArray controls,
-            View view,
-            String rawLabel,
-            String role
-    ) throws Exception {
-        String label = rawLabel == null || rawLabel.trim().isEmpty()
-                ? contentDescriptionOf(view)
-                : rawLabel.trim();
-        if (label.isEmpty()) return;
-        if (view.isEnabled() && view.isClickable()) {
-            JSONObject control = new JSONObject();
-            control.put("id", stableControlID(view));
-            control.put("title", label);
-            control.put("enabled", true);
-            control.put("clickable", true);
-            control.put("role", role);
-            controls.put(control);
-            buttons.put(label);
-        }
-    }
-
-    private static String inputLabel(EditText input) {
-        CharSequence hint = input.getHint();
-        if (hint != null && !hint.toString().trim().isEmpty()) {
-            return hint.toString().trim();
-        }
-        return contentDescriptionOf(input);
-    }
-
-    private static String selectedSpinnerLabel(Spinner spinner) {
-        Object selected = spinner.getSelectedItem();
-        if (selected != null && !selected.toString().trim().isEmpty()) {
-            return selected.toString().trim();
-        }
-        return contentDescriptionOf(spinner);
-    }
-
-    private static String contentDescriptionOf(View view) {
-        CharSequence value = view.getContentDescription();
-        return value == null ? "" : value.toString().trim();
-    }
-
-    private static String parentElementID(View view) {
-        ViewParent parent = view.getParent();
-        return parent instanceof View ? stableControlID((View) parent) : "";
-    }
-
-    private static int viewDepth(View view) {
-        int depth = 0;
-        ViewParent parent = view.getParent();
-        while (parent instanceof View) {
-            depth++;
-            parent = parent.getParent();
-        }
-        return depth;
-    }
-
-    private static String hierarchyPath(View view) {
-        ArrayList<Integer> indices = new ArrayList<>();
-        View current = view;
-        ViewParent parent = current.getParent();
-        while (parent instanceof ViewGroup) {
-            ViewGroup group = (ViewGroup) parent;
-            indices.add(group.indexOfChild(current));
-            current = group;
-            parent = current.getParent();
-        }
-        Collections.reverse(indices);
-        StringBuilder path = new StringBuilder();
-        for (Integer index : indices) {
-            if (path.length() > 0) path.append('.');
-            path.append(index == null ? -1 : index.intValue());
-        }
-        return path.toString();
-    }
-
-    private static String resourceName(View view) {
-        if (view == null || view.getId() == View.NO_ID) return "";
-        try {
-            return view.getResources().getResourceName(view.getId());
-        } catch (Throwable ignored) {
-            return "";
-        }
-    }
-
-    private static String uiSignature(
-            View root,
-            JSONArray controls,
-            JSONArray texts,
-            JSONArray elements,
-            int inputCount,
-            int imageCount,
-            int credentialInputCount,
-            int qrImageCount,
-            String uiRole
-    ) {
-        return (root == null ? "hidden" : Integer.toUnsignedString(
-                System.identityHashCode(root)))
-                + "|" + controls.toString()
-                + "|" + texts.toString()
-                + "|" + elements.toString()
-                + "|" + inputCount
-                + "|" + imageCount
-                + "|" + credentialInputCount
-                + "|" + qrImageCount
-                + "|" + uiRole;
-    }
-
-    private static boolean isCredentialInput(EditText input) {
-        if (input == null) return false;
-        if (input.getTransformationMethod()
-                instanceof PasswordTransformationMethod) {
-            return true;
-        }
-        int type = input.getInputType();
-        int inputClass = type & InputType.TYPE_MASK_CLASS;
-        int variation = type & InputType.TYPE_MASK_VARIATION;
-        if (inputClass == InputType.TYPE_CLASS_TEXT
-                && (variation == InputType.TYPE_TEXT_VARIATION_PASSWORD
-                || variation == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-                || variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD)) {
-            return true;
-        }
-        return inputClass == InputType.TYPE_CLASS_NUMBER
-                && variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD;
-    }
-
-    /** Returns only whether the image structurally decodes as QR data. */
-    private static boolean isQRCodeImage(ImageView image) {
-        Bitmap bitmap = null;
-        Bitmap prepared = null;
-        try {
-            bitmap = renderedImage(image);
-            prepared = preparedQRCodeBitmap(bitmap);
-            return prepared != null;
-        } catch (Throwable ignored) {
-            return false;
-        } finally {
-            if (prepared != null && !prepared.isRecycled()) prepared.recycle();
-            if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
-        }
-    }
-
-    private static boolean isQRCodeView(View view) {
-        Bitmap bitmap = null;
-        Bitmap prepared = null;
-        try {
-            bitmap = renderedView(view);
-            prepared = preparedQRCodeBitmap(bitmap);
-            return prepared != null;
-        } catch (Throwable ignored) {
-            return false;
-        } finally {
-            if (prepared != null && !prepared.isRecycled()) prepared.recycle();
-            if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
-        }
-    }
-
-    /**
-     * Returns a request-local, decodable QR image suitable for the Mac host.
-     * Real cloud-provider codes are frequently padded, scaled, tinted, inverted
-     * or drawn inside a larger ImageView/WebView. Normalize those presentation
-     * differences before deciding that the provider did not publish a code.
-     */
-    private static Bitmap preparedQRCodeBitmap(Bitmap source) {
-        if (source == null || source.getWidth() < 21 || source.getHeight() < 21) {
-            return null;
-        }
-        ArrayList<Bitmap> candidates = new ArrayList<>();
-        try {
-            Bitmap padded = bitmapWithQuietZone(source);
-            candidates.add(padded);
-            Bitmap cropped = croppedToVisibleCode(source);
-            if (cropped != null) {
-                candidates.add(bitmapWithQuietZone(cropped));
-                cropped.recycle();
-            }
-            int baseCount = candidates.size();
-            for (int index = 0; index < baseCount; index++) {
-                candidates.add(invertedBitmap(candidates.get(index)));
-            }
-            for (int index = 0; index < candidates.size(); index++) {
-                Bitmap candidate = candidates.get(index);
-                if (!decodesQRCode(candidate)) continue;
-                for (int recycleIndex = 0;
-                        recycleIndex < candidates.size();
-                        recycleIndex++) {
-                    if (recycleIndex == index) continue;
-                    Bitmap unused = candidates.get(recycleIndex);
-                    if (!unused.isRecycled()) unused.recycle();
-                }
-                return candidate;
-            }
-        } catch (Throwable ignored) {
-            // The caller treats an undecodable image as ordinary provider UI.
-        }
-        for (Bitmap candidate : candidates) {
-            if (candidate != null && !candidate.isRecycled()) candidate.recycle();
-        }
-        return null;
-    }
-
-    private static boolean decodesQRCode(Bitmap bitmap) {
-        try {
-            int width = bitmap.getWidth();
-            int height = bitmap.getHeight();
-            int[] pixels = new int[width * height];
-            bitmap.getPixels(pixels, 0, width, 0, 0, width, height);
-            LuminanceSource source = new RGBLuminanceSource(width, height, pixels);
-            EnumMap<DecodeHintType, Object> hints = new EnumMap<>(
-                    DecodeHintType.class
-            );
-            hints.put(
-                    DecodeHintType.POSSIBLE_FORMATS,
-                    Collections.singletonList(BarcodeFormat.QR_CODE)
-            );
-            hints.put(DecodeHintType.TRY_HARDER, Boolean.TRUE);
-            return decodesQRCode(source, hints, true)
-                    || decodesQRCode(source, hints, false);
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    private static boolean decodesQRCode(
-            LuminanceSource source,
-            EnumMap<DecodeHintType, Object> hints,
-            boolean hybrid
-    ) {
-        try {
-            BinaryBitmap binary = new BinaryBitmap(
-                    hybrid
-                            ? new HybridBinarizer(source)
-                            : new GlobalHistogramBinarizer(source)
-            );
-            new MultiFormatReader().decode(binary, hints);
-            return true;
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    private static Bitmap invertedBitmap(Bitmap source) {
-        int width = source.getWidth();
-        int height = source.getHeight();
-        int[] pixels = new int[width * height];
-        source.getPixels(pixels, 0, width, 0, 0, width, height);
-        for (int index = 0; index < pixels.length; index++) {
-            int color = pixels[index];
-            pixels[index] = Color.argb(
-                    Color.alpha(color),
-                    255 - Color.red(color),
-                    255 - Color.green(color),
-                    255 - Color.blue(color)
-            );
-        }
-        Bitmap output = Bitmap.createBitmap(
-                width,
-                height,
-                Bitmap.Config.ARGB_8888
-        );
-        output.setPixels(pixels, 0, width, 0, 0, width, height);
-        return output;
-    }
-
-    /** Removes provider padding before a fresh quiet zone is applied. */
-    private static Bitmap croppedToVisibleCode(Bitmap source) {
-        int width = source.getWidth();
-        int height = source.getHeight();
-        int[] pixels = new int[width * height];
-        source.getPixels(pixels, 0, width, 0, 0, width, height);
-        int left = width;
-        int top = height;
-        int right = -1;
-        int bottom = -1;
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                int color = pixels[y * width + x];
-                if (Color.alpha(color) <= 16) continue;
-                int darkest = Math.min(
-                        Color.red(color),
-                        Math.min(Color.green(color), Color.blue(color))
-                );
-                if (darkest >= 235) continue;
-                left = Math.min(left, x);
-                top = Math.min(top, y);
-                right = Math.max(right, x);
-                bottom = Math.max(bottom, y);
-            }
-        }
-        if (right < left || bottom < top) return null;
-        int contentWidth = right - left + 1;
-        int contentHeight = bottom - top + 1;
-        if (contentWidth < 21 || contentHeight < 21) return null;
-        if (contentWidth >= width * 0.96 && contentHeight >= height * 0.96) {
-            return null;
-        }
-        int margin = Math.max(2, Math.max(contentWidth, contentHeight) / 50);
-        int cropLeft = Math.max(0, left - margin);
-        int cropTop = Math.max(0, top - margin);
-        int cropRight = Math.min(width, right + margin + 1);
-        int cropBottom = Math.min(height, bottom + margin + 1);
-        return Bitmap.createBitmap(
-                source,
-                cropLeft,
-                cropTop,
-                cropRight - cropLeft,
-                cropBottom - cropTop
-        );
-    }
-
-    private static String abbreviatedInteractionID(String interactionID) {
-        if (interactionID == null || interactionID.isEmpty()) return "none";
-        return interactionID.substring(0, Math.min(8, interactionID.length()));
-    }
-
-    private static Bitmap renderedImage(ImageView image) {
-        if (image == null) return null;
-        Drawable drawable = image.getDrawable();
-        if (drawable == null) return null;
-        int width = image.getWidth();
-        int height = image.getHeight();
-        if (width <= 0) width = drawable.getIntrinsicWidth();
-        if (height <= 0) height = drawable.getIntrinsicHeight();
-        if (width <= 0 || height <= 0) return null;
-        double scale = Math.min(1.0, 1024.0 / Math.max(width, height));
-        width = Math.max(1, (int) Math.round(width * scale));
-        height = Math.max(1, (int) Math.round(height * scale));
-        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(bitmap);
-        canvas.drawColor(Color.WHITE);
-        int saveCount = canvas.save();
-        if (image.getWidth() > 0 && image.getHeight() > 0) {
-            canvas.scale(
-                    width / (float) image.getWidth(),
-                    height / (float) image.getHeight()
-            );
-            image.draw(canvas);
-        } else {
-            drawable.setBounds(0, 0, width, height);
-            drawable.draw(canvas);
-        }
-        canvas.restoreToCount(saveCount);
-        return bitmap;
-    }
-
-    private static Bitmap renderedView(View view) {
-        if (view == null) return null;
-        int sourceWidth = view.getWidth();
-        int sourceHeight = view.getHeight();
-        if (sourceWidth <= 0 || sourceHeight <= 0) return null;
-        double scale = Math.min(
-                1.0,
-                1024.0 / Math.max(sourceWidth, sourceHeight)
-        );
-        int width = Math.max(1, (int) Math.round(sourceWidth * scale));
-        int height = Math.max(1, (int) Math.round(sourceHeight * scale));
-        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(bitmap);
-        canvas.drawColor(Color.WHITE);
-        int saveCount = canvas.save();
-        canvas.scale(width / (float) sourceWidth, height / (float) sourceHeight);
-        view.draw(canvas);
-        canvas.restoreToCount(saveCount);
-        return bitmap;
-    }
-
-    /** Adds a white quiet zone and nearest-neighbour enlargement for CoreImage. */
-    private static Bitmap bitmapWithQuietZone(Bitmap source) {
-        int longest = Math.max(source.getWidth(), source.getHeight());
-        int scale = Math.max(1, Math.min(4, (int) Math.ceil(512.0 / longest)));
-        Bitmap scaled = scale == 1
-                ? source
-                : Bitmap.createScaledBitmap(
-                        source,
-                        source.getWidth() * scale,
-                        source.getHeight() * scale,
-                        false
-                );
-        int quietZone = Math.max(16, Math.max(
-                scaled.getWidth(),
-                scaled.getHeight()
-        ) / 20);
-        Bitmap output = Bitmap.createBitmap(
-                scaled.getWidth() + quietZone * 2,
-                scaled.getHeight() + quietZone * 2,
-                Bitmap.Config.ARGB_8888
-        );
-        Canvas canvas = new Canvas(output);
-        canvas.drawColor(Color.WHITE);
-        canvas.drawBitmap(scaled, quietZone, quietZone, null);
-        if (scaled != source) scaled.recycle();
-        return output;
-    }
-
-    /**
-     * Returns Android collection controls whose adapter contains rows that are
-     * not currently attached to the Window. Flattening only attached children
-     * loses most entries in a ListView/RecyclerView ordering dialog.
-     */
-    private static List<View> virtualizedCollections(View root) {
-        ArrayList<View> result = new ArrayList<>();
-        for (View view : flattened(root)) {
-            if (view instanceof Spinner) continue;
-            int count = virtualizedItemCount(view);
-            if (count > viewChildCount(view) && count > 0) {
-                result.add(view);
-            }
-        }
-        return result;
-    }
-
-    private static boolean isDescendantOfAny(
-            View view,
-            List<View> ancestors
-    ) {
-        ViewParent parent = view.getParent();
-        while (parent instanceof View) {
-            if (ancestors.contains(parent)) return true;
-            parent = parent.getParent();
-        }
-        return false;
-    }
-
-    private static int viewChildCount(View view) {
-        return view instanceof ViewGroup
-                ? ((ViewGroup) view).getChildCount()
-                : 0;
-    }
-
-    private static int virtualizedItemCount(View collection) {
-        try {
-            if (collection instanceof AdapterView) {
-                Adapter adapter = ((AdapterView<?>) collection).getAdapter();
-                return adapter == null ? 0 : adapter.getCount();
-            }
-            if (!isRecyclerView(collection)) return 0;
-            Object adapter = invokeNoArgument(collection, "getAdapter");
-            if (adapter == null) return 0;
-            Object value = invokeNamed(adapter, "getItemCount");
-            return value instanceof Number ? ((Number) value).intValue() : 0;
-        } catch (Throwable error) {
-            Log.w(LOG_TAG, "Unable to inspect virtualized list", error);
-            return 0;
-        }
-    }
-
-    private static boolean isRecyclerView(View view) {
-        Class<?> type = view == null ? null : view.getClass();
-        while (type != null) {
-            if ("androidx.recyclerview.widget.RecyclerView".equals(
-                    type.getName()
-            )) return true;
-            type = type.getSuperclass();
-        }
-        return false;
-    }
-
-    private static int appendVirtualizedCollectionState(
-            List<View> collections,
-            JSONArray buttons,
-            JSONArray controls,
-            JSONArray texts,
-            JSONArray elements,
-            int initialOrder
-    ) throws Exception {
-        int order = initialOrder;
-        for (View collection : collections) {
-            int count = Math.min(virtualizedItemCount(collection), 512);
-            for (int position = 0; position < count; position++) {
-                VirtualRow row = virtualRow(collection, position);
-                if (row == null || row.view == null) continue;
-                List<View> rowViews = flattened(row.view);
-                ArrayList<String> labels = new ArrayList<>();
-                boolean exposedAction = false;
-                for (int childIndex = 0;
-                     childIndex < rowViews.size();
-                     childIndex++) {
-                    View child = rowViews.get(childIndex);
-                    String title = child instanceof TextView
-                            ? textOf((TextView) child)
-                            : actionableLabelOf(child);
-                    boolean actionable = child.isEnabled()
-                            && child.isClickable()
-                            && !title.isEmpty();
-                    if (actionable) {
-                        String controlID = virtualControlID(
-                                row,
-                                childIndex
-                        );
-                        JSONObject control = new JSONObject();
-                        control.put("id", controlID);
-                        control.put("title", title);
-                        control.put("enabled", true);
-                        control.put("clickable", true);
-                        control.put(
-                                "role",
-                                child instanceof CompoundButton
-                                        ? "toggle"
-                                        : orderingRole(title)
-                        );
-                        controls.put(control);
-                        buttons.put(title);
-                        elements.put(virtualElement(
-                                row,
-                                child,
-                                childIndex,
-                                controlID,
-                                child instanceof CompoundButton
-                                        ? "toggle"
-                                        : child instanceof ImageView
-                                        ? "imageButton"
-                                        : "actionRow",
-                                title,
-                                "action",
-                                order++
-                        ));
-                        exposedAction = true;
-                    } else if (child instanceof TextView && !title.isEmpty()) {
-                        labels.add(title);
-                        texts.put(title);
-                        elements.put(virtualElement(
-                                row,
-                                child,
-                                childIndex,
-                                virtualElementID(row, childIndex),
-                                "label",
-                                title,
-                                "label",
-                                order++
-                        ));
-                    }
-                }
-                if (!exposedAction && !labels.isEmpty()) {
-                    String title = labels.get(0);
-                    String controlID = virtualControlID(row, -1);
-                    JSONObject control = new JSONObject();
-                    control.put("id", controlID);
-                    control.put("title", title);
-                    control.put("enabled", true);
-                    control.put("clickable", true);
-                    control.put("role", "clickable");
-                    controls.put(control);
-                    buttons.put(title);
-                    elements.put(virtualElement(
-                            row,
-                            row.view,
-                            -1,
-                            controlID,
-                            "actionRow",
-                            title,
-                            "action",
-                            order++
-                    ));
-                }
-            }
-        }
-        return order;
-    }
-
-    private static String orderingRole(String title) {
-        String normalized = title == null
-                ? ""
-                : title.trim().toLowerCase(Locale.ROOT);
-        return normalized.contains("上移")
-                || normalized.contains("下移")
-                || normalized.contains("排序")
-                ? "order"
-                : "clickable";
-    }
-
-    private static JSONObject virtualElement(
-            VirtualRow row,
-            View child,
-            int childIndex,
-            String id,
-            String type,
-            String title,
-            String role,
-            int order
-    ) throws Exception {
-        JSONObject element = new JSONObject();
-        element.put("id", id);
-        element.put("type", type);
-        element.put("title", title == null ? "" : title);
-        element.put("role", role);
-        element.put("enabled", child.isEnabled());
-        element.put("clickable", "action".equals(role));
-        element.put("selected", child.isSelected());
-        element.put("order", order);
-        element.put("depth", Math.max(1, viewDepth(child)));
-        element.put("resourceName", resourceName(child));
-        element.put("className", child.getClass().getName());
-        element.put("parentID", "");
-        element.put("x", "action".equals(role) ? 420 + childIndex * 8 : 12);
-        element.put("y", row.position * 52);
-        element.put("width", "action".equals(role) ? 72 : 380);
-        element.put("height", 44);
-        element.put("collectionPosition", row.position);
-        element.put("stableItemID", row.itemID);
-        return element;
-    }
-
-    private static String virtualElementID(VirtualRow row, int childIndex) {
-        return "virtual-element-v1:"
-                + row.kind + ":"
-                + Integer.toUnsignedString(
-                        System.identityHashCode(row.collection)
-                ) + ":" + row.position + ":" + childIndex;
-    }
-
-    private static String virtualControlID(VirtualRow row, int childIndex) {
-        return "virtual-v1:"
-                + row.kind + ":"
-                + Integer.toUnsignedString(
-                        System.identityHashCode(row.collection)
-                ) + ":" + row.position + ":" + childIndex;
-    }
-
-    private static VirtualRow virtualRow(View collection, int position) {
-        try {
-            if (collection instanceof AdapterView) {
-                AdapterView<?> adapterView = (AdapterView<?>) collection;
-                Adapter adapter = adapterView.getAdapter();
-                if (adapter == null || position < 0
-                        || position >= adapter.getCount()) return null;
-                View row = adapter.getView(position, null, adapterView);
-                return new VirtualRow(
-                        "A",
-                        collection,
-                        position,
-                        adapter.getItemId(position),
-                        row
-                );
-            }
-            if (!isRecyclerView(collection)) return null;
-            Object adapter = invokeNoArgument(collection, "getAdapter");
-            if (adapter == null) return null;
-            Object rawType = invokeNamed(adapter, "getItemViewType", position);
-            int viewType = rawType instanceof Number
-                    ? ((Number) rawType).intValue()
-                    : 0;
-            Object holder = invokeNamed(
-                    adapter,
-                    "createViewHolder",
-                    collection,
-                    viewType
-            );
-            invokeNamed(adapter, "bindViewHolder", holder, position);
-            Field itemView = holder.getClass().getField("itemView");
-            View row = (View) itemView.get(holder);
-            Object rawID = invokeNamed(adapter, "getItemId", position);
-            long itemID = rawID instanceof Number
-                    ? ((Number) rawID).longValue()
-                    : position;
-            return new VirtualRow(
-                    "R",
-                    collection,
-                    position,
-                    itemID,
-                    row
-            );
-        } catch (Throwable error) {
-            Log.w(
-                    LOG_TAG,
-                    "Unable to bind virtual row " + position,
-                    error
-            );
-            return null;
-        }
-    }
-
-    private static boolean submitVirtualizedControl(
-            View root,
-            String controlID
-    ) {
-        try {
-            String[] parts = controlID.split(":", -1);
-            if (parts.length != 5 || !"virtual-v1".equals(parts[0])) {
-                return false;
-            }
-            String kind = parts[1];
-            long identity = Long.parseUnsignedLong(parts[2]);
-            int position = Integer.parseInt(parts[3]);
-            int childIndex = Integer.parseInt(parts[4]);
-            for (View collection : virtualizedCollections(root)) {
-                if (!kind.equals(isRecyclerView(collection) ? "R" : "A")
-                        || Integer.toUnsignedLong(
-                                System.identityHashCode(collection)
-                        ) != identity) continue;
-                VirtualRow row = virtualRow(collection, position);
-                if (row == null) return false;
-                if (childIndex >= 0) {
-                    List<View> children = flattened(row.view);
-                    if (childIndex >= children.size()) return false;
-                    View child = children.get(childIndex);
-                    if (child.isEnabled() && child.isClickable()
-                            && child.performClick()) return true;
-                }
-                if (collection instanceof AdapterView) {
-                    AdapterView<?> adapterView = (AdapterView<?>) collection;
-                    return adapterView.performItemClick(
-                            row.view,
-                            position,
-                            row.itemID
-                    );
-                }
-                return row.view.isEnabled()
-                        && row.view.isClickable()
-                        && row.view.performClick();
-            }
-        } catch (Throwable error) {
-            Log.w(LOG_TAG, "Unable to submit virtualized control", error);
-        }
-        return false;
-    }
-
-    private static Object invokeNoArgument(Object target, String name)
-            throws Exception {
-        return invokeNamed(target, name);
-    }
-
-    private static Object invokeNamed(
-            Object target,
-            String name,
-            Object... arguments
-    ) throws Exception {
-        Method selected = null;
-        for (Method method : target.getClass().getMethods()) {
-            if (method.getName().equals(name)
-                    && parametersAccept(
-                            method.getParameterTypes(),
-                            arguments
-                    )) {
-                selected = method;
-                break;
-            }
-        }
-        if (selected == null) {
-            throw new NoSuchMethodException(name);
-        }
-        selected.setAccessible(true);
-        return selected.invoke(target, arguments);
-    }
-
-    private static boolean parametersAccept(
-            Class<?>[] parameterTypes,
-            Object[] arguments
-    ) {
-        if (parameterTypes.length != arguments.length) return false;
-        for (int index = 0; index < parameterTypes.length; index++) {
-            Object argument = arguments[index];
-            Class<?> parameter = boxedType(parameterTypes[index]);
-            if (argument == null) {
-                if (parameterTypes[index].isPrimitive()) return false;
-            } else if (!parameter.isAssignableFrom(argument.getClass())) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static Class<?> boxedType(Class<?> type) {
-        if (!type.isPrimitive()) return type;
-        if (type == boolean.class) return Boolean.class;
-        if (type == byte.class) return Byte.class;
-        if (type == char.class) return Character.class;
-        if (type == short.class) return Short.class;
-        if (type == int.class) return Integer.class;
-        if (type == long.class) return Long.class;
-        if (type == float.class) return Float.class;
-        if (type == double.class) return Double.class;
-        return Void.class;
-    }
-
-    private static final class VirtualRow {
-        final String kind;
-        final View collection;
-        final int position;
-        final long itemID;
-        final View view;
-
-        VirtualRow(
-                String kind,
-                View collection,
-                int position,
-                long itemID,
-                View view
-        ) {
-            this.kind = kind;
-            this.collection = collection;
-            this.position = position;
-            this.itemID = itemID;
-            this.view = view;
-        }
-    }
-
-    private static List<View> flattened(View root) {
-        ArrayList<View> output = new ArrayList<>();
-        collect(root, output);
-        return output;
-    }
-
-    private static void collect(View view, List<View> output) {
-        output.add(view);
-        if (!(view instanceof ViewGroup)) return;
-        ViewGroup group = (ViewGroup) view;
-        for (int index = 0; index < group.getChildCount(); index++) {
-            collect(group.getChildAt(index), output);
-        }
-    }
-
-    private static boolean isAlertTitle(View view) {
-        if (view.getId() == View.NO_ID) return false;
-        try {
-            return "alertTitle".equals(
-                    view.getResources().getResourceEntryName(view.getId())
-            );
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    private static String textOf(TextView view) {
-        CharSequence text = view.getText();
-        return text == null ? "" : text.toString().trim();
-    }
-
-    private static String labelOf(View view) {
-        if (view instanceof TextView) return textOf((TextView) view);
-        if (!(view instanceof ViewGroup)) return "";
-        for (View child : flattened(view)) {
-            if (child == view || !child.isShown() || !(child instanceof TextView)) {
-                continue;
-            }
-            String label = textOf((TextView) child);
-            if (!label.isEmpty()) return label;
-        }
-        return "";
-    }
-
-    /**
-     * Produces a submit-safe label for icon-only provider controls. Android
-     * spiders frequently use ImageButtons for ordering; losing these controls
-     * makes the corresponding Mac setting appear incomplete.
-     */
-    private static String actionableLabelOf(View view) {
-        String label = labelOf(view);
-        if (!label.isEmpty()) return label;
-        label = contentDescriptionOf(view);
-        if (!label.isEmpty()) return label;
-        if (view == null || view.getId() == View.NO_ID) return "";
-        try {
-            String entry = view.getResources()
-                    .getResourceEntryName(view.getId());
-            String normalized = entry.toLowerCase(Locale.ROOT);
-            if (normalized.contains("move_up")
-                    || normalized.endsWith("_up")
-                    || normalized.equals("up")) {
-                return "上移";
-            }
-            if (normalized.contains("move_down")
-                    || normalized.endsWith("_down")
-                    || normalized.equals("down")) {
-                return "下移";
-            }
-            return entry.replace('_', ' ').trim();
-        } catch (Throwable ignored) {
-            return "";
-        }
-    }
-
-
-    private static <T> T onUIThread(
-            BridgeActivity activity,
-            ValueProvider<T> provider
-    ) throws Exception {
-        if (!isUsable(activity)) {
-            throw new IllegalStateException("Bridge activity is unavailable");
-        }
-        if (Thread.currentThread() == activity.getMainLooper().getThread()) {
-            return provider.value();
-        }
-        CountDownLatch latch = new CountDownLatch(1);
-        AtomicReference<T> value = new AtomicReference<>();
-        AtomicReference<Throwable> error = new AtomicReference<>();
-        activity.runOnUiThread(() -> {
-            try {
-                value.set(provider.value());
-            } catch (Throwable throwable) {
-                error.set(throwable);
-            } finally {
-                latch.countDown();
-            }
-        });
-        if (!latch.await(5, TimeUnit.SECONDS)) {
-            throw new IllegalStateException("Timed out waiting for Android UI");
-        }
-        if (error.get() != null) {
-            Throwable throwable = error.get();
-            if (throwable instanceof Exception) throw (Exception) throwable;
-            throw new IllegalStateException(throwable);
-        }
-        return value.get();
-    }
-
-    private interface ValueProvider<T> {
-        T value() throws Exception;
+    private static String clean(String value) {
+        return value == null ? "" : value.trim();
     }
 }

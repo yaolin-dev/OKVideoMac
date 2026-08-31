@@ -496,64 +496,6 @@ final class DexSpiderRegistry {
         return invokeProxy(proxyMethods.get(owner.jarKey), params);
     }
 
-    boolean submitCloudCredential(JSONObject request) throws Exception {
-        BridgeProviderOwnerRegistry.Binding owner =
-                BridgeProviderOwnerRegistry.require(request);
-        Map<String, String> params = credentialParameters(
-                owner,
-                request.optString("credential", "")
-        );
-        Object[] response = proxy(owner, params);
-        if (response == null || response.length < 3
-                || !(response[0] instanceof Integer)
-                || !(response[2] instanceof InputStream)) {
-            throw new IllegalStateException(
-                    "No compatible cloud credential handler is active"
-            );
-        }
-        int status = (Integer) response[0];
-        try (InputStream ignored = (InputStream) response[2]) {
-            boolean accepted = status >= 200 && status < 300;
-            if (accepted) completedPlaybacks.clear();
-            return accepted;
-        }
-    }
-
-    static Map<String, String> credentialParameters(
-            BridgeProviderOwnerRegistry.Binding owner,
-            String credential
-    ) throws Exception {
-        if (credential == null || credential.trim().isEmpty()) {
-            throw new IllegalArgumentException("Cloud credential is empty");
-        }
-        if (credential.getBytes(StandardCharsets.UTF_8).length > 64 * 1024) {
-            throw new IllegalArgumentException("Cloud credential exceeds 64 KiB");
-        }
-        JSONObject submission = owner == null
-                ? null
-                : owner.credentialSubmission();
-        if (submission == null) {
-            throw new IllegalArgumentException(
-                    "Interaction does not declare credential submission"
-            );
-        }
-        String field = submission.optString("credentialField", "").trim();
-        if (field.isEmpty() || field.length() > 256
-                || field.indexOf('\r') >= 0 || field.indexOf('\n') >= 0) {
-            throw new IllegalArgumentException("Invalid credential field");
-        }
-        JSONObject declared = submission.optJSONObject("parameters");
-        if (declared != null && declared.length() > 32) {
-            throw new IllegalArgumentException("Too many credential parameters");
-        }
-        Map<String, String> params = stringMap(declared);
-        // FongMi's NanoHTTPD hands the Spider a decoded parameter map. This
-        // bridge calls the exact owning Spider proxy directly, so retain the
-        // plain request value. It is never logged or returned to the host.
-        params.put(field, credential.trim());
-        return params;
-    }
-
     private Spider spider(JSONObject payload) throws Exception {
         String siteKey = requireString(payload, "siteKey");
         String key = spiderKey(payload, siteKey);

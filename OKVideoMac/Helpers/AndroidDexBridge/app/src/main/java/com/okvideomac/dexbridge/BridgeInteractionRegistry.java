@@ -14,18 +14,16 @@ import java.util.UUID;
  * Process-owned, request-scoped interaction state.
  *
  * <p>The legacy bridge exposed whichever Android dialog happened to be on
- * screen. That allowed a late callback from one configuration action to be
- * submitted by a different action. This registry gives every interaction a
- * stable identity and a monotonic revision while retaining a "latest"
- * pointer for old Mac clients.</p>
+ * screen. This registry now exposes only a request identity, provider return,
+ * lifecycle-owned full-display surface, and event channel.</p>
  */
 final class BridgeInteractionRegistry {
     private static final int MAX_INTERACTIONS = 64;
     private static final int MAX_EVENTS_PER_INTERACTION = 32;
     private static final long RETENTION_MS = 10 * 60_000L;
     private static final long DELAYED_UI_GRACE_MS = 8_000L;
+    private static final long CLOSED_UI_GRACE_MS = 750L;
     private static final long PLAYBACK_UI_GRACE_MS = 1_500L;
-    private static final long TRANSIENT_QR_CAPTURE_GRACE_MS = 900L;
     private static final Map<String, Interaction> INTERACTIONS =
             new LinkedHashMap<>();
     private static String latestID = "";
@@ -96,20 +94,6 @@ final class BridgeInteractionRegistry {
             return interaction.jsonWithUI();
         }
         long now = System.currentTimeMillis();
-        if (isQRCodeUI(ui)) {
-            interaction.lastStableQRCodeUI = copyUI(ui);
-            interaction.stableQRCodeDeadline =
-                    now + TRANSIENT_QR_CAPTURE_GRACE_MS;
-        } else if (!interaction.terminal()
-                && interaction.lastStableQRCodeUI != null
-                && now < interaction.stableQRCodeDeadline) {
-            // Android can expose the underlying chooser for one capture while
-            // an ImageView redraws or its Dialog/Activity is reattached. Keep
-            // the request-owned QR classification stable across that one
-            // transient sample. A real close is still observable after this
-            // short grace and must be verified by the Mac host.
-            ui = copyUI(interaction.lastStableQRCodeUI);
-        }
         boolean visible = ui != null && ui.optBoolean("visible", false);
         boolean surfaceRequestScoped = visible || (ui != null
                 && ui.optBoolean("surfaceRequestScoped", false)
@@ -131,13 +115,8 @@ final class BridgeInteractionRegistry {
                 );
                 ui.put(
                         "surfaceMode",
-                        visible
-                                ? "providerWindow"
-                                : surfaceActive
-                                ? ui.optString(
-                                        "surfaceMode",
-                                        "externalActivity"
-                                )
+                        surfaceActive
+                                ? ui.optString("surfaceMode", "actionActivity")
                                 : "none"
                 );
                 if (!ui.has("surfaceHostLifecycle")) {
@@ -164,9 +143,9 @@ final class BridgeInteractionRegistry {
                 // A delegated/browser/full-screen lifecycle pauses the
                 // translucent ActionActivity and hides every request-owned
                 // WindowManager root in this process. Keep that exact request
-                // alive without treating presentation activity as successful
-                // login, submitted input, or provider verification. HOME/lock
-                // may produce the same conservative lifecycle signal.
+                // alive without inferring any provider business outcome from
+                // presentation activity. HOME/lock may produce the same
+                // conservative lifecycle signal.
                 interaction.uiVisible = false;
                 interaction.delayedUIDeadline = 0L;
                 interaction.phase = "awaitingExternalSurface";
@@ -180,69 +159,24 @@ final class BridgeInteractionRegistry {
                 interaction.outcome = "stay";
             } else if (interaction.invocationReturned
                     && interaction.expectsProviderUI) {
-                // UI can briefly disappear while BridgeActionActivity hands
-                // the request back to the persistent host. Start a fresh
-                // grace period for every visible -> hidden transition rather
-                // than treating the provider worker's earlier return as a
-                // terminal event.
+                // A normal provider return is the business result. The
+                // request-owned window lifecycle only keeps its Android
+                // surface alive long enough for a Dialog handoff/rebuild; it
+                // never classifies authorization or manufactures a result.
                 if (interaction.uiVisible
                         || interaction.delayedUIDeadline <= 0L) {
                     interaction.delayedUIDeadline =
-                            now + DELAYED_UI_GRACE_MS;
+                            now + (interaction.sawUI
+                                    ? CLOSED_UI_GRACE_MS
+                                    : DELAYED_UI_GRACE_MS);
                 }
                 interaction.uiVisible = false;
                 if (now >= interaction.delayedUIDeadline) {
-                    if (interaction.playbackResultReady
-                            && !interaction.sawUI) {
-                        // A valid player result is authoritative only after a
-                        // short request-owned handoff window. Some legacy
-                        // spiders post their login dialog just after returning
-                        // a fallback URL; completing immediately would release
-                        // the Activity and lose that authorization surface.
-                        interaction.transition("completed", "completed");
-                    } else if (interaction.sawUI) {
-                        if ("authorization".equals(interaction.kind)) {
-                            // A QR/login surface disappearing only starts
-                            // host-side verification. Refreshing a provider's
-                            // account/home state can legitimately take longer
-                            // than the delayed-dialog grace, so the Bridge must
-                            // not race that verification and publish a false
-                            // providerOutcomeUnverified failure. The scoped
-                            // host will explicitly verify or cancel this
-                            // interaction; a newer request also supersedes it.
-                            interaction.transition(
-                                    "awaitingVerification",
-                                    "stay"
-                            );
-                        } else if (interaction.submitted
-                                && !"authorization".equals(interaction.kind)) {
-                            // submitUI performs a final request-ownership check
-                            // and invokes the provider's click listener on the
-                            // Android UI thread. When that accepted callback
-                            // closes its configuration surface and no successor
-                            // appears during the handoff grace, the click is the
-                            // strongest terminal event legacy CatVod providers
-                            // expose. Authorization is deliberately excluded:
-                            // closing a QR window never proves login success.
-                            interaction.transition("completed", "completed");
-                        } else {
-                            interaction.failure = "providerOutcomeUnverified";
-                            interaction.transition("failed", "failed");
-                        }
-                    } else {
-                        // Merely returning from a worker that explicitly
-                        // requested UI is not success. Treating an absent UI as
-                        // completed caused configuration actions to report
-                        // success even though no dialog/QR was ever usable.
-                        interaction.failure = "providerUIUnavailable";
-                        interaction.transition("failed", "failed");
-                    }
+                    interaction.transition("completed", "completed");
                 } else {
                     interaction.phase = interaction.sawUI
-                            ? "awaitingVerification"
-                            : (interaction.submitted
-                                    ? "processing"
-                                    : "awaitingProviderUI");
+                            ? "closingSurface"
+                            : "awaitingProviderUI";
                     interaction.outcome = "stay";
                 }
             } else {
@@ -252,17 +186,6 @@ final class BridgeInteractionRegistry {
             }
         }
         return interaction.jsonWithUI();
-    }
-
-    static synchronized JSONObject submitted(String requestedID) {
-        String id = resolve(requestedID);
-        Interaction interaction = INTERACTIONS.get(id);
-        if (interaction == null) return missing(id);
-        if (id.equals(latestID) && !interaction.terminal()) {
-            interaction.submitted = true;
-            interaction.transition("processing", "stay");
-        }
-        return interaction.json();
     }
 
     static synchronized JSONObject invocationReturned(String requestedID) {
@@ -291,9 +214,8 @@ final class BridgeInteractionRegistry {
         if (completedWithProviderResult
                 && "playback".equals(interaction.declaredKind)) {
             // playerContent is the authoritative playback result. Once it
-            // yields a usable address, a late dialog or QR bitmap must not
-            // hold the player open, change this request into authorization,
-            // or overwrite successful playback with a timeout.
+            // yields a usable address, presentation pixels cannot delay or
+            // overwrite it.
             interaction.playbackResultReady = true;
             interaction.uiVisible = false;
             interaction.transition("completed", "completed");
@@ -319,12 +241,7 @@ final class BridgeInteractionRegistry {
                 && !interaction.uiVisible) {
             interaction.delayedUIDeadline =
                     interaction.invocationReturnedAt + DELAYED_UI_GRACE_MS;
-            interaction.transition(
-                    interaction.submitted
-                            ? "processing"
-                            : "awaitingProviderUI",
-                    "stay"
-            );
+            interaction.transition("awaitingProviderUI", "stay");
         } else if (interaction.expectsProviderUI
                 && interaction.uiVisible) {
             interaction.transition("awaitingUser", "stay");
@@ -431,28 +348,6 @@ final class BridgeInteractionRegistry {
                 : interaction.eventState(Math.max(0L, after));
     }
 
-    /** Records an explicit provider-state verification performed by the host. */
-    static synchronized JSONObject verified(
-            String requestedID,
-            boolean succeeded,
-            String reason,
-            Boolean refreshPerformed
-    ) {
-        String id = resolve(requestedID);
-        Interaction interaction = INTERACTIONS.get(id);
-        if (interaction == null) return missing(id);
-        if (id.equals(latestID) && !interaction.terminal()) {
-            interaction.verificationPerformed = true;
-            interaction.refreshPerformed = refreshPerformed;
-            interaction.failure = succeeded ? "" : clean(reason);
-            interaction.transition(
-                    succeeded ? "completed" : "failed",
-                    succeeded ? "completed" : "failed"
-            );
-        }
-        return interaction.json();
-    }
-
     static synchronized JSONObject cancel(String requestedID) {
         String id = resolve(requestedID);
         Interaction interaction = INTERACTIONS.get(id);
@@ -496,7 +391,6 @@ final class BridgeInteractionRegistry {
             value.put("terminal", true);
             value.put("returnState", "missing");
             value.put("channels", emptyChannels());
-            putUIFields(value, emptyUI());
             putSurfaceFields(value, emptyUI(), true);
         } catch (Throwable ignored) {
         }
@@ -507,19 +401,6 @@ final class BridgeInteractionRegistry {
         JSONObject value = new JSONObject();
         try {
             value.put("visible", false);
-            value.put("title", "");
-            value.put("inputCount", 0);
-            value.put("imageCount", 0);
-            value.put("credentialInputCount", 0);
-            value.put("qrImageCount", 0);
-            value.put("qrStatus", "idle");
-            value.put("uiRole", "configuration");
-            value.put("authorizationCandidate", false);
-            value.put("buttons", new JSONArray());
-            value.put("controls", new JSONArray());
-            value.put("texts", new JSONArray());
-            value.put("uiSchemaVersion", 3);
-            value.put("elements", new JSONArray());
             value.put("generation", 0L);
             value.put("hostUnavailable", false);
             value.put("surfaceActive", false);
@@ -561,72 +442,6 @@ final class BridgeInteractionRegistry {
         return channels;
     }
 
-    private static void putUIFields(JSONObject destination, JSONObject ui) {
-        try {
-            destination.put("visible", ui.optBoolean("visible", false));
-            destination.put("title", ui.optString("title", ""));
-            destination.put("inputCount", ui.optInt("inputCount", 0));
-            destination.put("imageCount", ui.optInt("imageCount", 0));
-            destination.put(
-                    "credentialInputCount",
-                    ui.optInt("credentialInputCount", 0)
-            );
-            destination.put("qrImageCount", ui.optInt("qrImageCount", 0));
-            destination.put(
-                    "qrStatus",
-                    ui.optString("qrStatus", "idle")
-            );
-            destination.put(
-                    "uiRole",
-                    ui.optString("uiRole", "configuration")
-            );
-            destination.put(
-                    "authorizationCandidate",
-                    ui.optBoolean("authorizationCandidate", false)
-            );
-            destination.put(
-                    "buttons",
-                    ui.optJSONArray("buttons") == null
-                            ? new JSONArray()
-                            : ui.optJSONArray("buttons")
-            );
-            destination.put(
-                    "controls",
-                    ui.optJSONArray("controls") == null
-                            ? new JSONArray()
-                            : ui.optJSONArray("controls")
-            );
-            destination.put(
-                    "texts",
-                    ui.optJSONArray("texts") == null
-                            ? new JSONArray()
-                            : ui.optJSONArray("texts")
-            );
-            destination.put(
-                    "uiSchemaVersion",
-                    ui.optInt("uiSchemaVersion", 1)
-            );
-            destination.put(
-                    "elements",
-                    ui.optJSONArray("elements") == null
-                            ? new JSONArray()
-                            : ui.optJSONArray("elements")
-            );
-            destination.put("generation", ui.optLong("generation", 0L));
-            if (ui.has("authorizationStorageFingerprint")) {
-                destination.put(
-                        "authorizationStorageFingerprint",
-                        ui.optString("authorizationStorageFingerprint", "")
-                );
-            }
-            destination.put(
-                    "hostUnavailable",
-                    ui.optBoolean("hostUnavailable", false)
-            );
-        } catch (Throwable ignored) {
-        }
-    }
-
     private static void putSurfaceFields(
             JSONObject destination,
             JSONObject ui,
@@ -659,6 +474,7 @@ final class BridgeInteractionRegistry {
                             ? source.optString("surfaceHostLifecycle", "none")
                             : "none"
             );
+            destination.put("generation", source.optLong("generation", 0L));
         } catch (Throwable ignored) {
         }
     }
@@ -685,22 +501,6 @@ final class BridgeInteractionRegistry {
         return value == null ? "" : value.trim();
     }
 
-    private static boolean isQRCodeUI(JSONObject ui) {
-        return ui != null
-                && ui.optBoolean("visible", false)
-                && "qrCode".equals(ui.optString("uiRole", ""))
-                && ui.optInt("qrImageCount", 0) > 0;
-    }
-
-    private static JSONObject copyUI(JSONObject ui) {
-        if (ui == null) return emptyUI();
-        try {
-            return new JSONObject(ui.toString());
-        } catch (Throwable ignored) {
-            return ui;
-        }
-    }
-
     private static final class Interaction {
         final String id;
         final String declaredKind;
@@ -715,19 +515,13 @@ final class BridgeInteractionRegistry {
         String failureKind = "";
         String uiSignature = "";
         JSONObject lastUI = emptyUI();
-        JSONObject lastStableQRCodeUI;
         boolean sawUI;
         boolean uiVisible;
-        boolean submitted;
         boolean expectsProviderUI;
         boolean invocationReturned;
         boolean playbackResultReady;
-        boolean verificationPerformed;
-        boolean authorizationPromoted;
-        Boolean refreshPerformed;
         long invocationReturnedAt;
         long delayedUIDeadline;
-        long stableQRCodeDeadline;
         String returnState = "pending";
         long eventSequence;
         final List<InteractionEvent> events = new ArrayList<>();
@@ -854,21 +648,12 @@ final class BridgeInteractionRegistry {
                 value.put("revision", revision);
                 value.put("kind", kind);
                 value.put("declaredKind", declaredKind);
-                if (authorizationPromoted) {
-                    value.put("authorizationPromoted", true);
-                }
                 value.put("method", method);
                 value.put("phase", phase);
                 value.put("outcome", outcome);
                 value.put("createdAt", createdAt);
                 value.put("updatedAt", updatedAt);
                 value.put("terminal", terminal());
-                if (verificationPerformed) {
-                    value.put("verificationPerformed", true);
-                }
-                if (refreshPerformed != null) {
-                    value.put("refreshPerformed", refreshPerformed.booleanValue());
-                }
                 value.put("workerReturned", invocationReturned);
                 value.put("returnState", returnState);
                 value.put("channels", channels());
@@ -895,31 +680,8 @@ final class BridgeInteractionRegistry {
         JSONObject jsonWithUI() {
             JSONObject value = json();
             try {
-                if (lastUI != null) {
-                    Iterator<String> keys = lastUI.keys();
-                    while (keys.hasNext()) {
-                        String key = keys.next();
-                        if (!"phase".equals(key) && !"outcome".equals(key)) {
-                            value.put(key, lastUI.opt(key));
-                        }
-                    }
-                }
                 JSONObject ui = lastUI == null ? emptyUI() : lastUI;
-                putUIFields(value, ui);
                 putSurfaceFields(value, ui, terminal());
-                if (isQRCodeUI(ui)) {
-                    value.put("qrStatus", "ready");
-                } else if ("authorization".equals(kind)
-                        && submitted
-                        && ui.optBoolean("visible", false)
-                        && ui.optInt("inputCount", 0) == 0
-                        && ui.optJSONArray("controls") != null
-                        && ui.optJSONArray("controls").length() == 0) {
-                    boolean expired = lastStableQRCodeUI != null
-                            && System.currentTimeMillis()
-                            >= stableQRCodeDeadline;
-                    value.put("qrStatus", expired ? "expired" : "generating");
-                }
                 value.put("phase", phase);
                 value.put("outcome", outcome);
                 value.put("revision", revision);

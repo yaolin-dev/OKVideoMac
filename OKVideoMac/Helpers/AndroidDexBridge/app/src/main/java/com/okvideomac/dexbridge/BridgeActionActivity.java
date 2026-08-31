@@ -4,6 +4,9 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
+import android.graphics.Color;
+import android.view.Gravity;
+import android.widget.TextView;
 
 import java.lang.ref.WeakReference;
 
@@ -23,6 +26,11 @@ public final class BridgeActionActivity extends Activity {
     private volatile boolean everResumed;
     private volatile boolean resumed;
     private volatile boolean stopped;
+    private volatile boolean windowFocused;
+    private volatile boolean everFocused;
+    private volatile boolean providerWindowActive;
+    private volatile boolean sawProviderWindow;
+    private volatile long surfaceGeneration;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -46,6 +54,13 @@ public final class BridgeActionActivity extends Activity {
         // that global at this disposable Activity so the persistent bridge
         // host underneath survives the handoff.
         com.github.catvod.Init.set(this);
+        TextView placeholder = new TextView(this);
+        placeholder.setText("OKVideo Android Action Session");
+        placeholder.setTextColor(Color.DKGRAY);
+        placeholder.setTextSize(16f);
+        placeholder.setGravity(Gravity.CENTER);
+        placeholder.setBackgroundColor(Color.rgb(245, 245, 245));
+        setContentView(placeholder);
     }
 
     @Override
@@ -91,17 +106,39 @@ public final class BridgeActionActivity extends Activity {
             current = new WeakReference<>(this);
         }
         com.github.catvod.Init.set(this);
+        surfaceGeneration++;
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        windowFocused = hasFocus;
+        if (hasFocus) {
+            everFocused = true;
+            providerWindowActive = false;
+        } else if (resumed) {
+            // A Dialog owned by this Activity takes window focus without
+            // changing the Activity lifecycle. This request-local callback is
+            // the presentation signal; no global WindowManager traversal or
+            // view-content inspection is needed.
+            providerWindowActive = true;
+            sawProviderWindow = true;
+        }
+        surfaceGeneration++;
     }
 
     @Override
     protected void onPause() {
         resumed = false;
+        windowFocused = false;
+        surfaceGeneration++;
         super.onPause();
     }
 
     @Override
     protected void onStop() {
         stopped = true;
+        surfaceGeneration++;
         super.onStop();
     }
 
@@ -116,14 +153,12 @@ public final class BridgeActionActivity extends Activity {
         // session reaches a terminal state; only Bridge cleanup may authorize
         // the real Activity finish.
         if (!terminalReleaseAuthorized && isCurrentRequest(interactionID)) {
-            BridgeActivity.dismissVisibleDialogsOwnedBy(this);
             com.github.catvod.Init.set(this);
             return;
         }
         // Terminal cleanup dismisses request-owned Dialogs and synchronously
         // hands Init back to a usable host before the Activity window is
         // destroyed. Provider-requested finishes never reach this branch.
-        BridgeActivity.dismissVisibleDialogsOwnedBy(this);
         handoffInitContextBeforeFinish();
         super.finish();
     }
@@ -179,6 +214,13 @@ public final class BridgeActionActivity extends Activity {
         }
     }
 
+    static BridgeActionActivity currentActivity() {
+        synchronized (lifecycleLock) {
+            BridgeActionActivity activity = current.get();
+            return usable(activity) ? activity : null;
+        }
+    }
+
     static boolean isReadyFor(String requestedInteractionID) {
         String id = requestedInteractionID == null
                 ? ""
@@ -230,7 +272,15 @@ public final class BridgeActionActivity extends Activity {
             // never provider ownership or login success.
             boolean delegatedSurfaceActive = activity.everResumed
                     && !activity.resumed;
-            return new SurfaceStatus(true, delegatedSurfaceActive, lifecycle);
+            return new SurfaceStatus(
+                    true,
+                    delegatedSurfaceActive,
+                    activity.providerWindowActive,
+                    activity.sawProviderWindow,
+                    activity.windowFocused,
+                    activity.surfaceGeneration,
+                    lifecycle
+            );
         }
     }
 
@@ -433,20 +483,40 @@ public final class BridgeActionActivity extends Activity {
     static final class SurfaceStatus {
         final boolean requestScoped;
         final boolean delegatedSurfaceActive;
+        final boolean providerWindowActive;
+        final boolean sawProviderWindow;
+        final boolean windowFocused;
+        final long generation;
         final String hostLifecycle;
 
         SurfaceStatus(
                 boolean requestScoped,
                 boolean delegatedSurfaceActive,
+                boolean providerWindowActive,
+                boolean sawProviderWindow,
+                boolean windowFocused,
+                long generation,
                 String hostLifecycle
         ) {
             this.requestScoped = requestScoped;
             this.delegatedSurfaceActive = delegatedSurfaceActive;
+            this.providerWindowActive = providerWindowActive;
+            this.sawProviderWindow = sawProviderWindow;
+            this.windowFocused = windowFocused;
+            this.generation = generation;
             this.hostLifecycle = hostLifecycle;
         }
 
         private static SurfaceStatus none() {
-            return new SurfaceStatus(false, false, "none");
+            return new SurfaceStatus(
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    0L,
+                    "none"
+            );
         }
     }
 }

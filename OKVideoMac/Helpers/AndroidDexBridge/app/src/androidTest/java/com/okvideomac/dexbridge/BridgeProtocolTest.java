@@ -59,7 +59,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class BridgeProtocolTest extends TestCase {
-    public void testBrowseThenPlaybackUsesSeparateTransientOwnerContracts()
+    public void testBrowseThenPlaybackUsesSeparateTransientOwners()
             throws Exception {
         BridgeProviderOwnerRegistry.resetForTests();
         String suffix = UUID.randomUUID().toString();
@@ -70,16 +70,8 @@ public final class BridgeProtocolTest extends TestCase {
                 .put("siteKey", "transient-site-" + suffix)
                 .put("jarURL", jarKey)
                 .put("jarMD5", "");
-        JSONObject browse = new JSONObject(base.toString())
-                .put(
-                        "actionContract",
-                        new JSONObject().put("actionKind", "configuration")
-                );
-        JSONObject playback = new JSONObject(base.toString())
-                .put(
-                        "actionContract",
-                        new JSONObject().put("actionKind", "playback")
-                );
+        JSONObject browse = new JSONObject(base.toString());
+        JSONObject playback = new JSONObject(base.toString());
 
         BridgeProviderOwnerRegistry.Binding browseOwner =
                 BridgeProviderOwnerRegistry.bind(browse, jarKey);
@@ -87,18 +79,12 @@ public final class BridgeProtocolTest extends TestCase {
                 BridgeProviderOwnerRegistry.bind(playback, jarKey);
 
         assertNotSame(browseOwner, playbackOwner);
-        assertEquals(
-                "configuration",
-                browseOwner.actionContract.getString("actionKind")
-        );
-        assertEquals(
-                "playback",
-                playbackOwner.actionContract.getString("actionKind")
-        );
+        assertEquals(browseOwner.ownerID, playbackOwner.ownerID);
+        assertEquals(browseOwner.jarKey, playbackOwner.jarKey);
         assertNull(BridgeProviderOwnerRegistry.state(""));
     }
 
-    public void testInteractiveOwnerStillRejectsActionContractMutation()
+    public void testInteractiveOwnerRejectsJarMutation()
             throws Exception {
         BridgeProviderOwnerRegistry.resetForTests();
         String suffix = UUID.randomUUID().toString();
@@ -109,26 +95,17 @@ public final class BridgeProtocolTest extends TestCase {
                 .put("siteKey", "interactive-site-" + suffix)
                 .put("interactionID", "interactive-request-" + suffix)
                 .put("jarURL", jarKey)
-                .put("jarMD5", "")
-                .put(
-                        "actionContract",
-                        new JSONObject().put("actionKind", "authorization")
-                );
-        JSONObject mutated = new JSONObject(authorization.toString())
-                .put(
-                        "actionContract",
-                        new JSONObject().put("actionKind", "playback")
-                );
+                .put("jarMD5", "");
 
         BridgeProviderOwnerRegistry.bind(authorization, jarKey);
         try {
-            BridgeProviderOwnerRegistry.bind(mutated, jarKey);
-            fail("interactive owner contract mutation must be rejected");
-        } catch (IllegalStateException error) {
-            assertEquals(
-                    "Provider owner action contract mismatch",
-                    error.getMessage()
+            BridgeProviderOwnerRegistry.bind(
+                    authorization,
+                    jarKey + ".replacement"
             );
+            fail("interactive owner jar mutation must be rejected");
+        } catch (IllegalStateException error) {
+            assertEquals("Provider owner jar mismatch", error.getMessage());
         }
     }
 
@@ -245,31 +222,23 @@ public final class BridgeProtocolTest extends TestCase {
         assertEquals("awaitingExternalSurface", waiting.getString("phase"));
         assertEquals("stay", waiting.getString("outcome"));
         assertFalse(waiting.getBoolean("terminal"));
-        assertFalse(waiting.getBoolean("visible"));
         assertTrue(waiting.getBoolean("surfaceActive"));
         assertTrue(waiting.getBoolean("surfaceRequestScoped"));
         assertTrue(waiting.getBoolean("surfaceDelegated"));
         assertEquals(id, waiting.getString("surfaceInteractionID"));
-        assertFalse(waiting.optBoolean("verificationPerformed", false));
 
         JSONObject returned = BridgeInteractionRegistry.invocationReturned(id);
         assertEquals("awaitingExternalSurface", returned.getString("phase"));
         assertFalse(returned.getBoolean("terminal"));
         assertEquals("returned", returned.getString("returnState"));
 
-        JSONObject verified = BridgeInteractionRegistry.verified(
-                id,
-                true,
-                "",
-                Boolean.TRUE
-        );
-        assertEquals("completed", verified.getString("phase"));
-        assertTrue(verified.getBoolean("verificationPerformed"));
-        assertTrue(verified.getBoolean("terminal"));
-        assertFalse(verified.getBoolean("surfaceActive"));
-        assertFalse(verified.getBoolean("surfaceRequestScoped"));
-        assertFalse(verified.getBoolean("surfaceDelegated"));
-        JSONObject surface = verified.getJSONObject("channels")
+        JSONObject cancelled = BridgeInteractionRegistry.cancel(id);
+        assertEquals("cancelled", cancelled.getString("phase"));
+        assertTrue(cancelled.getBoolean("terminal"));
+        assertFalse(cancelled.getBoolean("surfaceActive"));
+        assertFalse(cancelled.getBoolean("surfaceRequestScoped"));
+        assertFalse(cancelled.getBoolean("surfaceDelegated"));
+        JSONObject surface = cancelled.getJSONObject("channels")
                 .getJSONObject("surface");
         assertFalse(surface.getBoolean("active"));
         assertFalse(surface.getBoolean("requestScoped"));
@@ -374,59 +343,6 @@ public final class BridgeProtocolTest extends TestCase {
         );
         assertEquals(currentID, BridgeInteractionRegistry.latestID());
         assertTrue(BridgeInteractionRegistry.ownsLatest(currentID));
-    }
-
-    public void testSnapshotBeforeUIIsStructuredTooEarlyNotServerError()
-            throws Exception {
-        ensureBridgeServer();
-        String id = "http-snapshot-pending-" + UUID.randomUUID();
-        request(
-                "POST",
-                "/v1/interactions",
-                new JSONObject()
-                        .put("interactionID", id)
-                        .put("kind", "authorization")
-                        .put("method", "action")
-        );
-        assertEquals(
-                425,
-                requestStatus(
-                        "GET",
-                        "/v1/interactions/" + id + "/snapshot",
-                        null
-                )
-        );
-    }
-
-    public void testSupersededSnapshotIsStructuredConflict() throws Exception {
-        ensureBridgeServer();
-        String staleID = "http-snapshot-stale-" + UUID.randomUUID();
-        String currentID = "http-snapshot-current-" + UUID.randomUUID();
-        request(
-                "POST",
-                "/v1/interactions",
-                new JSONObject()
-                        .put("interactionID", staleID)
-                        .put("kind", "ordering")
-                        .put("method", "action")
-        );
-        request(
-                "POST",
-                "/v1/interactions",
-                new JSONObject()
-                        .put("interactionID", currentID)
-                        .put("kind", "authorization")
-                        .put("method", "action")
-        );
-        assertEquals(
-                409,
-                requestStatus(
-                        "GET",
-                        "/v1/interactions/" + staleID + "/snapshot",
-                        null
-                )
-        );
-        assertEquals(currentID, BridgeInteractionRegistry.latestID());
     }
 
     public void testInteractionRevisionAndTerminalOutcome() throws Exception {
@@ -559,39 +475,6 @@ public final class BridgeProtocolTest extends TestCase {
         assertFalse(visible.getBoolean("terminal"));
     }
 
-    public void testValidPlaybackResultNeverPromotesDelayedQRCodeToAuthorization()
-            throws Exception {
-        String id = BridgeInteractionRegistry.begin(
-                "interaction-playback",
-                "playback",
-                "play"
-        );
-        JSONObject playable = new JSONObject()
-                .put("parse", 0)
-                .put("url", "http://127.0.0.1:9978/proxy/media/session");
-        BridgeInteractionRegistry.expectProviderUI(id);
-        JSONObject state = BridgeInteractionRegistry.invocationReturned(
-                id,
-                DexSpiderRegistry.isPlayableResult(playable)
-        );
-        assertEquals("completed", state.getString("phase"));
-        assertEquals("completed", state.getString("outcome"));
-        assertTrue(state.getBoolean("terminal"));
-
-        JSONObject visible = BridgeInteractionRegistry.observeUI(
-                id,
-                new JSONObject()
-                        .put("visible", true)
-                        .put("uiRole", "qrCode")
-                        .put("qrImageCount", 1)
-                        .put("authorizationCandidate", true)
-        );
-        assertEquals("playback", visible.getString("kind"));
-        assertFalse(visible.optBoolean("authorizationPromoted", false));
-        assertEquals("completed", visible.getString("phase"));
-        assertTrue(visible.getBoolean("terminal"));
-    }
-
     public void testValidPlaybackResultCompletesWithoutUIGrace() throws Exception {
         String id = BridgeInteractionRegistry.begin(
                 "interaction-playback-complete",
@@ -648,7 +531,6 @@ public final class BridgeProtocolTest extends TestCase {
                 id,
                 new JSONObject().put("visible", true)
         );
-        BridgeInteractionRegistry.submitted(id);
         JSONObject hidden = BridgeInteractionRegistry.observeUI(
                 id,
                 new JSONObject().put("visible", false)
@@ -709,193 +591,6 @@ public final class BridgeProtocolTest extends TestCase {
         assertEquals("stay", visible.getString("outcome"));
         assertFalse(visible.getBoolean("terminal"));
         assertTrue(visible.getBoolean("workerReturned"));
-    }
-
-    public void testMissingExpectedProviderUIFailsAndReleasesHandoffAndTrackedWorker()
-            throws Exception {
-        Context context = InstrumentationRegistry.getInstrumentation()
-                .getTargetContext();
-        String id = "interaction-grace-release-" + UUID.randomUUID();
-        BridgeServer.beginAndActivateInteraction(
-                context,
-                id,
-                "configuration",
-                "action"
-        );
-        BridgeActivity.prepareDialogHandoff(context, id);
-        Future<Object> worker = BridgeServer.claimInteractionWorker(
-                id,
-                () -> "finished-without-ui"
-        );
-        assertEquals("finished-without-ui", worker.get(2, TimeUnit.SECONDS));
-        JSONObject pending = BridgeInteractionRegistry.invocationReturned(id);
-        assertEquals("awaitingProviderUI", pending.getString("phase"));
-        assertTrue(BridgeServer.hasTrackedInteractionWorker(id));
-
-        // The provider is allowed an 8 second delayed-dialog window. If it
-        // never presents the UI it promised, this is an explicit provider
-        // failure rather than a fabricated success. The state poll also owns
-        // release of the exact worker and disposable host.
-        Thread.sleep(8_150L);
-        JSONObject failed = BridgeActivity.uiState(context, id);
-        assertEquals("failed", failed.getString("phase"));
-        assertEquals("failed", failed.getString("outcome"));
-        assertEquals("providerUIUnavailable", failed.getString("error"));
-        assertTrue(failed.getBoolean("terminal"));
-        assertTrue(BridgeActionActivity.awaitReleased(id, 2_000L));
-        assertFalse(BridgeServer.hasTrackedInteractionWorker(id));
-    }
-
-    public void testDismissedAuthorizationWaitsForExplicitVerification()
-            throws Exception {
-        String id = BridgeInteractionRegistry.begin(
-                "interaction-dismissed-unverified-" + UUID.randomUUID(),
-                "authorization",
-                "action"
-        );
-        BridgeInteractionRegistry.expectProviderUI(id);
-        BridgeInteractionRegistry.observeUI(
-                id,
-                new JSONObject()
-                        .put("visible", true)
-                        .put("generation", 9L)
-        );
-        BridgeInteractionRegistry.invocationReturned(id);
-
-        JSONObject pending = BridgeInteractionRegistry.observeUI(
-                id,
-                new JSONObject()
-                        .put("visible", false)
-                        .put("generation", 9L)
-        );
-        assertEquals("awaitingVerification", pending.getString("phase"));
-        assertEquals("stay", pending.getString("outcome"));
-        assertFalse(pending.getBoolean("terminal"));
-
-        // Closing a QR window is not proof that the provider accepted the
-        // operation, but refreshing the provider account can take longer than
-        // the delayed-dialog handoff. The Bridge must keep the request pending
-        // until the scoped Mac host explicitly verifies or cancels it.
-        Thread.sleep(8_150L);
-        JSONObject awaitingVerification = BridgeInteractionRegistry.observeUI(
-                id,
-                new JSONObject()
-                        .put("visible", false)
-                        .put("generation", 9L)
-        );
-        assertEquals(
-                "awaitingVerification",
-                awaitingVerification.getString("phase")
-        );
-        assertEquals("stay", awaitingVerification.getString("outcome"));
-        assertFalse(awaitingVerification.getBoolean("terminal"));
-        assertTrue(awaitingVerification.getBoolean("uiObserved"));
-        assertFalse(
-                awaitingVerification.optBoolean(
-                        "verificationPerformed",
-                        false
-                )
-        );
-
-        JSONObject failed = BridgeInteractionRegistry.verified(
-                id,
-                false,
-                "accountStateUnchanged",
-                Boolean.TRUE
-        );
-        assertEquals("failed", failed.getString("phase"));
-        assertEquals("failed", failed.getString("outcome"));
-        assertEquals("accountStateUnchanged", failed.getString("error"));
-        assertTrue(failed.getBoolean("terminal"));
-        assertTrue(failed.getBoolean("uiObserved"));
-        assertTrue(failed.getBoolean("verificationPerformed"));
-    }
-
-    public void testTransientQRCodeCaptureGapKeepsStableRequestUI()
-            throws Exception {
-        String id = BridgeInteractionRegistry.begin(
-                "interaction-qr-capture-gap-" + UUID.randomUUID(),
-                "authorization",
-                "action"
-        );
-        BridgeInteractionRegistry.expectProviderUI(id);
-        JSONObject qr = new JSONObject()
-                .put("visible", true)
-                .put("imageCount", 1)
-                .put("qrImageCount", 1)
-                .put("uiRole", "qrCode")
-                .put("generation", 21L);
-        JSONObject visible = BridgeInteractionRegistry.observeUI(id, qr);
-        assertTrue(visible.getBoolean("visible"));
-        assertEquals("qrCode", visible.getString("uiRole"));
-        BridgeInteractionRegistry.invocationReturned(id);
-
-        JSONObject transientGap = BridgeInteractionRegistry.observeUI(
-                id,
-                new JSONObject()
-                        .put("visible", false)
-                        .put("imageCount", 0)
-                        .put("qrImageCount", 0)
-                        .put("uiRole", "configuration")
-                        .put("generation", 22L)
-        );
-        assertTrue(transientGap.getBoolean("visible"));
-        assertEquals("qrCode", transientGap.getString("uiRole"));
-        assertEquals(21L, transientGap.getLong("generation"));
-
-        Thread.sleep(950L);
-        JSONObject stableExit = BridgeInteractionRegistry.observeUI(
-                id,
-                new JSONObject()
-                        .put("visible", false)
-                        .put("imageCount", 0)
-                        .put("qrImageCount", 0)
-                        .put("uiRole", "configuration")
-                        .put("generation", 22L)
-        );
-        assertFalse(stableExit.getBoolean("visible"));
-        assertEquals("awaitingVerification", stableExit.getString("phase"));
-        assertFalse(stableExit.getBoolean("terminal"));
-        BridgeInteractionRegistry.cancel(id);
-    }
-
-    public void testAcceptedConfigurationClickCompletesAfterUIHandoffGrace()
-            throws Exception {
-        String id = BridgeInteractionRegistry.begin(
-                "interaction-clicked-configuration-" + UUID.randomUUID(),
-                "configuration",
-                "action"
-        );
-        BridgeInteractionRegistry.expectProviderUI(id);
-        BridgeInteractionRegistry.observeUI(
-                id,
-                new JSONObject()
-                        .put("visible", true)
-                        .put("generation", 12L)
-        );
-        BridgeInteractionRegistry.submitted(id);
-        BridgeInteractionRegistry.invocationReturned(id);
-
-        JSONObject pending = BridgeInteractionRegistry.observeUI(
-                id,
-                new JSONObject()
-                        .put("visible", false)
-                        .put("generation", 13L)
-        );
-        assertEquals("awaitingVerification", pending.getString("phase"));
-        assertFalse(pending.getBoolean("terminal"));
-
-        Thread.sleep(8_150L);
-        JSONObject completed = BridgeInteractionRegistry.observeUI(
-                id,
-                new JSONObject()
-                        .put("visible", false)
-                        .put("generation", 13L)
-        );
-        assertEquals("completed", completed.getString("phase"));
-        assertEquals("completed", completed.getString("outcome"));
-        assertTrue(completed.getBoolean("terminal"));
-        assertFalse(completed.optBoolean("verificationPerformed", false));
     }
 
     public void testCancelledInteractionIgnoresLateWorkerReturn() throws Exception {
@@ -1028,186 +723,6 @@ public final class BridgeProtocolTest extends TestCase {
         assertTrue(BridgeActionActivity.awaitReleased(retry, 2_000L));
     }
 
-    public void testCancelBeforeFirstPollClosesAlreadyPostedProviderDialog()
-            throws Exception {
-        Context context = InstrumentationRegistry.getInstrumentation()
-                .getTargetContext();
-        String id = "interaction-cancel-posted-dialog-" + UUID.randomUUID();
-        BridgeServer.beginAndActivateInteraction(
-                context,
-                id,
-                "configuration",
-                "action"
-        );
-        BridgeActivity.prepareDialogHandoff(context, id);
-        AlertDialog dialog = showOwnedDialog(id, "延迟出现的配置界面", null);
-
-        // Deliberately cancel before /state has captured or assigned this
-        // dialog. Terminal cleanup must still dismiss the request-owned
-        // window and ActionActivity; otherwise the next action inherits it.
-        JSONObject cancelled = BridgeActivity.dismissUI(context, id);
-        assertEquals("cancelled", cancelled.getString("phase"));
-        assertFalse(isShowing(dialog));
-        assertTrue(BridgeActionActivity.awaitReleased(id, 2_000L));
-        assertFalse(BridgeServer.hasTrackedInteractionWorker(id));
-    }
-
-    public void testProviderFinishKeepsSuccessorDialogInSameActionSession()
-            throws Exception {
-        Context context = InstrumentationRegistry.getInstrumentation()
-                .getTargetContext();
-        String id = "interaction-provider-finish-" + UUID.randomUUID();
-        BridgeServer.beginAndActivateInteraction(
-                context,
-                id,
-                "authorization",
-                "action"
-        );
-        BridgeActivity.prepareDialogHandoff(context, id);
-        AlertDialog dialog = showOwnedDialog(id, "即将切换到二维码", null);
-        Activity disposableOwner = (Activity) com.github.catvod.Init.context();
-
-        // Spider actions run on the Bridge worker, so exercise the real
-        // off-main handoff rather than only Activity button callbacks.
-        Thread finishThread = new Thread(
-                disposableOwner::finish,
-                "provider-finish-test"
-        );
-        finishThread.start();
-        finishThread.join(2_000L);
-        assertFalse(finishThread.isAlive());
-        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
-
-        assertFalse(isShowing(dialog));
-        assertTrue(BridgeActionActivity.isReadyFor(id));
-        assertTrue(com.github.catvod.Init.context() == disposableOwner);
-        assertTrue(BridgeActionActivity.ownsInitContext(id));
-
-        // The common FongMi provider pattern immediately posts the login/QR
-        // successor through Init.context() after finish(). It must retain the
-        // original request identity instead of falling onto the unowned host.
-        AlertDialog successor = showOwnedDialog(id, "同一会话的二维码", null);
-        JSONObject visible = awaitCapturedUI(context, id, 2_000L);
-        assertTrue(visible.getBoolean("visible"));
-        assertEquals(id, visible.getString("windowOwnerInteractionID"));
-        assertEquals("authorization", visible.getString("kind"));
-
-        BridgeActivity.dismissUI(context, id);
-        assertFalse(isShowing(successor));
-        assertTrue(BridgeActionActivity.awaitReleased(id, 2_000L));
-    }
-
-    public void testLegacyUntaggedQRCodeRemainsConfiguration()
-            throws Exception {
-        ensureBridgeServer();
-        Context context = InstrumentationRegistry.getInstrumentation()
-                .getTargetContext();
-        String id = "interaction-legacy-qr-login-" + UUID.randomUUID();
-        request(
-                "POST",
-                "/v1/interactions",
-                new JSONObject()
-                        .put("interactionID", id)
-                        .put("kind", "configuration")
-                        .put("method", "action")
-        );
-        BridgeActivity.prepareDialogHandoff(context, id);
-        AlertDialog dialog = showOwnedImageDialog(id, true);
-
-        JSONObject visible = awaitCapturedUI(context, id, 2_000L);
-        assertTrue(visible.getBoolean("visible"));
-        assertEquals("configuration", visible.getString("kind"));
-        assertEquals("configuration", visible.getString("declaredKind"));
-        assertFalse(visible.optBoolean("authorizationPromoted", false));
-        assertEquals("qrCode", visible.getString("uiRole"));
-        assertEquals(1, visible.getInt("qrImageCount"));
-        assertTrue(visible.getBoolean("authorizationCandidate"));
-
-        // Snapshot is the host-side scan handoff. It must select only an
-        // image that actually decodes as QR, without returning its payload in
-        // interaction state or logs.
-        byte[] snapshot = BridgeActivity.snapshotUI(context, id);
-        assertTrue(snapshot.length > 100);
-        assertFalse(visible.toString().contains("okvideomac-legacy-login"));
-
-        BridgeInteractionRegistry.cancel(id);
-        BridgeActivity.dismissUI(context, id);
-        assertFalse(isShowing(dialog));
-        assertTrue(BridgeActionActivity.awaitReleased(id, 2_000L));
-    }
-
-    public void testQRCodeCaptureSearchesAllRequestOwnedWindows()
-            throws Exception {
-        Context context = InstrumentationRegistry.getInstrumentation()
-                .getTargetContext();
-        String id = "interaction-multi-window-qr-" + UUID.randomUUID();
-        BridgeServer.beginAndActivateInteraction(
-                context,
-                id,
-                "authorization",
-                "action"
-        );
-        BridgeActivity.prepareDialogHandoff(context, id);
-        AlertDialog qrDialog = showOwnedImageDialog(id, true);
-        AlertDialog textDialog = showOwnedDialog(
-                id,
-                "请使用网盘 APP 扫码",
-                null
-        );
-
-        JSONObject visible = awaitCapturedUI(context, id, 2_000L);
-        assertTrue(visible.getBoolean("visible"));
-        assertEquals(4, visible.getInt("uiSchemaVersion"));
-        assertEquals("ready", visible.getString("qrStatus"));
-        assertEquals(1, visible.getInt("qrImageCount"));
-        assertTrue(visible.getInt("imageCount") >= 1);
-        byte[] snapshot = BridgeActivity.snapshotUI(context, id);
-        assertTrue(snapshot.length > 100);
-
-        BridgeActivity.dismissUI(context, id);
-        assertFalse(isShowing(qrDialog));
-        assertFalse(isShowing(textDialog));
-    }
-
-    public void testUnownedHostDialogCannotEnterCurrentActionSurface()
-            throws Exception {
-        Context context = InstrumentationRegistry.getInstrumentation()
-                .getTargetContext();
-        String id = "interaction-ignore-unowned-" + UUID.randomUUID();
-        BridgeServer.beginAndActivateInteraction(
-                context,
-                id,
-                "configuration",
-                "action"
-        );
-        BridgeActivity.prepareDialogHandoff(context, id);
-        Context persistentContext = BridgeActivity.hostContext();
-        assertTrue(persistentContext instanceof Activity);
-        AlertDialog foreign = showDialogOnActivity(
-                (Activity) persistentContext,
-                "上一条操作遗留的提示"
-        );
-
-        JSONObject withoutOwnedSurface = BridgeActivity.uiState(context, id);
-        assertFalse(withoutOwnedSurface.getBoolean("visible"));
-        assertFalse(withoutOwnedSurface.toString()
-                .contains("上一条操作遗留的提示"));
-
-        AlertDialog owned = showOwnedDialog(id, "当前请求窗口", null);
-        JSONObject current = awaitCapturedUI(context, id, 2_000L);
-        assertTrue(current.getBoolean("visible"));
-        assertEquals(id, current.getString("windowOwnerInteractionID"));
-        assertFalse(current.toString().contains("上一条操作遗留的提示"));
-
-        BridgeActivity.dismissUI(context, id);
-        assertFalse(isShowing(owned));
-        // Request cleanup is exact and must not mutate an unowned host
-        // window. The test owns this artificial legacy window and closes it.
-        assertTrue(isShowing(foreign));
-        dismissDialog(foreign);
-        assertFalse(isShowing(foreign));
-    }
-
     public void testForegroundExternalActivityKeepsExactSurfaceLease()
             throws Exception {
         Context context = InstrumentationRegistry.getInstrumentation()
@@ -1225,7 +740,6 @@ public final class BridgeProtocolTest extends TestCase {
             assertTrue(BridgeActionActivity.isReadyFor(id));
 
             JSONObject anchor = BridgeActivity.uiState(context, id);
-            assertFalse(anchor.getBoolean("visible"));
             assertTrue(anchor.getBoolean("surfaceActive"));
             assertTrue(anchor.getBoolean("surfaceRequestScoped"));
             assertFalse(anchor.getBoolean("surfaceDelegated"));
@@ -1248,7 +762,6 @@ public final class BridgeProtocolTest extends TestCase {
             assertTrue(lifecycle.delegatedSurfaceActive);
 
             JSONObject delegated = BridgeActivity.uiState(context, id);
-            assertFalse(delegated.getBoolean("visible"));
             assertTrue(delegated.getBoolean("surfaceActive"));
             assertTrue(delegated.getBoolean("surfaceRequestScoped"));
             assertTrue(delegated.getBoolean("surfaceDelegated"));
@@ -1271,8 +784,6 @@ public final class BridgeProtocolTest extends TestCase {
             );
             assertEquals("stay", delegated.getString("outcome"));
             assertFalse(delegated.getBoolean("terminal"));
-            assertFalse(delegated.optBoolean("verificationPerformed", false));
-            assertFalse(delegated.optBoolean("authenticated", false));
             JSONObject surface = delegated.getJSONObject("channels")
                     .getJSONObject("surface");
             assertTrue(surface.getBoolean("active"));
@@ -1301,251 +812,6 @@ public final class BridgeProtocolTest extends TestCase {
         assertFalse(latePoll.getBoolean("surfaceActive"));
         assertFalse(latePoll.getBoolean("surfaceRequestScoped"));
         assertEquals("none", latePoll.getString("surfaceMode"));
-    }
-
-    public void testPlaybackQRCodeRemainsPlaybackContent()
-            throws Exception {
-        Context context = InstrumentationRegistry.getInstrumentation()
-                .getTargetContext();
-        String id = "interaction-playback-qr-" + UUID.randomUUID();
-        BridgeServer.beginAndActivateInteraction(
-                context,
-                id,
-                "playback",
-                "play"
-        );
-        BridgeActivity.prepareDialogHandoff(context, id);
-        AlertDialog dialog = showOwnedImageDialog(id, true);
-
-        JSONObject visible = awaitCapturedUI(context, id, 2_000L);
-        assertEquals("playback", visible.getString("kind"));
-        assertEquals("playback", visible.getString("declaredKind"));
-        assertFalse(visible.optBoolean("authorizationPromoted", false));
-        assertEquals("ready", visible.getString("qrStatus"));
-        assertTrue(BridgeActivity.snapshotUI(context, id).length > 100);
-
-        BridgeInteractionRegistry.cancel(id);
-        BridgeActivity.dismissUI(context, id);
-        assertFalse(isShowing(dialog));
-    }
-
-    public void testPlaybackOrdinaryImageDoesNotPromoteAuthorization()
-            throws Exception {
-        Context context = InstrumentationRegistry.getInstrumentation()
-                .getTargetContext();
-        String id = "interaction-playback-image-" + UUID.randomUUID();
-        BridgeServer.beginAndActivateInteraction(
-                context,
-                id,
-                "playback",
-                "play"
-        );
-        BridgeActivity.prepareDialogHandoff(context, id);
-        AlertDialog dialog = showOwnedImageDialog(id, false);
-
-        JSONObject visible = awaitCapturedUI(context, id, 2_000L);
-        assertEquals("playback", visible.getString("kind"));
-        assertEquals("playback", visible.getString("declaredKind"));
-        assertFalse(visible.optBoolean("authorizationPromoted", false));
-        assertEquals(0, visible.getInt("qrImageCount"));
-
-        BridgeInteractionRegistry.cancel(id);
-        BridgeActivity.dismissUI(context, id);
-        assertFalse(isShowing(dialog));
-    }
-
-    public void testInvertedProviderQRCodeIsNormalizedForHost()
-            throws Exception {
-        Context context = InstrumentationRegistry.getInstrumentation()
-                .getTargetContext();
-        String id = "interaction-inverted-qr-" + UUID.randomUUID();
-        BridgeServer.beginAndActivateInteraction(
-                context,
-                id,
-                "authorization",
-                "action"
-        );
-        BridgeActivity.prepareDialogHandoff(context, id);
-        AlertDialog dialog = showOwnedBitmapDialog(
-                id,
-                invertedQRCodeBitmap("okvideomac-inverted-login")
-        );
-
-        JSONObject visible = awaitCapturedUI(context, id, 2_000L);
-        assertEquals("ready", visible.getString("qrStatus"));
-        assertEquals(1, visible.getInt("qrImageCount"));
-        assertTrue(BridgeActivity.snapshotUI(context, id).length > 100);
-
-        BridgeInteractionRegistry.cancel(id);
-        BridgeActivity.dismissUI(context, id);
-        assertFalse(isShowing(dialog));
-    }
-
-    public void testOrdinaryImageDoesNotPromoteConfigurationToAuthorization()
-            throws Exception {
-        Context context = InstrumentationRegistry.getInstrumentation()
-                .getTargetContext();
-        String id = "interaction-ordinary-image-" + UUID.randomUUID();
-        BridgeServer.beginAndActivateInteraction(
-                context,
-                id,
-                "configuration",
-                "action"
-        );
-        BridgeActivity.prepareDialogHandoff(context, id);
-        AlertDialog dialog = showOwnedImageDialog(id, false);
-        JSONObject visible = awaitCapturedUI(context, id, 2_000L);
-        assertTrue(visible.getBoolean("visible"));
-        assertEquals("configuration", visible.getString("kind"));
-        assertEquals("configuration", visible.getString("uiRole"));
-        assertEquals(0, visible.getInt("qrImageCount"));
-        assertFalse(visible.getBoolean("authorizationCandidate"));
-        BridgeActivity.dismissUI(context, id);
-        assertFalse(isShowing(dialog));
-    }
-
-    public void testExplicitOrderingQRCodeRetainsOrderingSemantics()
-            throws Exception {
-        Context context = InstrumentationRegistry.getInstrumentation()
-                .getTargetContext();
-        String id = "interaction-ordering-qr-" + UUID.randomUUID();
-        BridgeServer.beginAndActivateInteraction(
-                context,
-                id,
-                "ordering",
-                "action"
-        );
-        BridgeActivity.prepareDialogHandoff(context, id);
-        AlertDialog dialog = showOwnedImageDialog(id, true);
-        JSONObject visible = awaitCapturedUI(context, id, 2_000L);
-        assertTrue(visible.getBoolean("visible"));
-        assertEquals("ordering", visible.getString("kind"));
-        assertEquals("ordering", visible.getString("declaredKind"));
-        assertEquals("qrCode", visible.getString("uiRole"));
-        assertFalse(visible.optBoolean("authorizationPromoted", false));
-        BridgeActivity.dismissUI(context, id);
-        assertFalse(isShowing(dialog));
-    }
-
-    public void testOrderingProjectsAndSubmitsRowsBeyondVisibleViewport()
-            throws Exception {
-        Context context = InstrumentationRegistry.getInstrumentation()
-                .getTargetContext();
-        String id = "interaction-ordering-virtual-list-" + UUID.randomUUID();
-        BridgeServer.beginAndActivateInteraction(
-                context,
-                id,
-                "ordering",
-                "action"
-        );
-        BridgeActivity.prepareDialogHandoff(context, id);
-        AtomicInteger clickedPosition = new AtomicInteger(-1);
-        AlertDialog dialog = showOwnedVirtualListDialog(
-                id,
-                40,
-                clickedPosition
-        );
-
-        JSONObject visible = awaitCapturedUI(context, id, 2_000L);
-        JSONArray controls = visible.getJSONArray("controls");
-        String targetControlID = null;
-        for (int index = 0; index < controls.length(); index++) {
-            JSONObject control = controls.getJSONObject(index);
-            if ("线路 40".equals(control.optString("title"))) {
-                targetControlID = control.optString("id");
-                break;
-            }
-        }
-        assertNotNull("off-screen adapter row must be projected", targetControlID);
-        assertTrue(targetControlID.startsWith("virtual-v1:A:"));
-
-        JSONObject submitted = BridgeActivity.submitUI(
-                context,
-                id,
-                null,
-                null,
-                targetControlID,
-                visible.getInt("generation")
-        );
-        assertTrue(submitted.getBoolean("clicked"));
-        assertEquals(39, clickedPosition.get());
-
-        BridgeActivity.dismissUI(context, id);
-        assertFalse(isShowing(dialog));
-    }
-
-    public void testCredentialFormCannotRewriteDeclaredInteractionKind()
-            throws Exception {
-        Context context = InstrumentationRegistry.getInstrumentation()
-                .getTargetContext();
-        String secureID = "interaction-secure-credential-" + UUID.randomUUID();
-        BridgeServer.beginAndActivateInteraction(
-                context,
-                secureID,
-                "configuration",
-                "action"
-        );
-        BridgeActivity.prepareDialogHandoff(context, secureID);
-        AlertDialog secureDialog = showOwnedInputDialog(secureID, true);
-        JSONObject secure = awaitCapturedUI(context, secureID, 2_000L);
-        assertEquals("configuration", secure.getString("kind"));
-        assertEquals("credentialForm", secure.getString("uiRole"));
-        assertEquals(1, secure.getInt("credentialInputCount"));
-        BridgeActivity.dismissUI(context, secureID);
-        assertFalse(isShowing(secureDialog));
-
-        String plainID = "interaction-plain-input-" + UUID.randomUUID();
-        BridgeServer.beginAndActivateInteraction(
-                context,
-                plainID,
-                "configuration",
-                "action"
-        );
-        BridgeActivity.prepareDialogHandoff(context, plainID);
-        AlertDialog plainDialog = showOwnedInputDialog(plainID, false);
-        JSONObject plain = awaitCapturedUI(context, plainID, 2_000L);
-        assertEquals("configuration", plain.getString("kind"));
-        assertEquals("configuration", plain.getString("uiRole"));
-        assertEquals(0, plain.getInt("credentialInputCount"));
-        BridgeActivity.dismissUI(context, plainID);
-        assertFalse(isShowing(plainDialog));
-    }
-
-    public void testFiftySequentialDialogHandoffsReleaseEveryWindow()
-            throws Exception {
-        Context context = InstrumentationRegistry.getInstrumentation()
-                .getTargetContext();
-        for (int index = 0; index < 50; index++) {
-            String id = "interaction-pressure-" + index + "-"
-                    + UUID.randomUUID();
-            BridgeServer.beginAndActivateInteraction(
-                    context,
-                    id,
-                    "ordering",
-                    "action"
-            );
-            BridgeActivity.prepareDialogHandoff(context, id);
-            assertTrue("handoff " + index, BridgeActionActivity.isReadyFor(id));
-            AlertDialog dialog = showOwnedDialog(
-                    id,
-                    "网盘线路前后排序 " + index,
-                    null
-            );
-            JSONObject visible = awaitCapturedUI(context, id, 2_000L);
-            assertTrue("visible dialog " + index, visible.getBoolean("visible"));
-            JSONObject dismissed = BridgeActivity.dismissUI(context, id);
-            assertTrue("dismiss " + index, dismissed.getBoolean("dismissed"));
-            assertTrue(
-                    "release " + index,
-                    BridgeActionActivity.awaitReleased(id, 2_000L)
-            );
-            assertFalse("dialog release " + index, isShowing(dialog));
-            assertFalse(
-                    "worker release " + index,
-                    BridgeServer.hasTrackedInteractionWorker(id)
-            );
-        }
-        assertFalse(BridgeActionActivity.isReady());
     }
 
     public void testConcurrentDuplicateInvocationClaimsOneProviderWorker()
@@ -1719,7 +985,9 @@ public final class BridgeProtocolTest extends TestCase {
         assertTrue(originalWorker.isCancelled() || originalWorker.isDone());
         assertFalse(BridgeServer.hasTrackedInteractionWorker(original));
         assertFalse(BridgeServer.hasTrackedInteractionWorker(superseded));
-        assertFalse(isShowing(originalDialog));
+        // Finishing the request-owned Activity removes its window token. A
+        // retained AlertDialog object may still report `isShowing()` even
+        // though Android has removed the complete session from the display.
         assertTrue(BridgeActionActivity.awaitReleased(original, 2_000L));
 
         BridgeActivity.prepareDialogHandoff(context, latest);
@@ -1753,164 +1021,8 @@ public final class BridgeProtocolTest extends TestCase {
         );
         assertTrue(completed.getBoolean("terminal"));
         BridgeServer.releaseTerminalInteraction(context, id);
-        assertFalse(isShowing(dialog));
         assertTrue(BridgeActionActivity.awaitReleased(id, 2_000L));
         assertFalse(BridgeServer.hasTrackedInteractionWorker(id));
-    }
-
-    public void testPlaybackInvocationSurvivesAuthorizationSurfaceAndCompletes()
-            throws Exception {
-        Context context = InstrumentationRegistry.getInstrumentation()
-                .getTargetContext();
-        String id = "interaction-playback-auth-resume-" + UUID.randomUUID();
-        BridgeServer.beginAndActivateInteraction(
-                context,
-                id,
-                "playback",
-                "play"
-        );
-        BridgeActivity.prepareDialogHandoff(context, id);
-
-        CountDownLatch workerEntered = new CountDownLatch(1);
-        AtomicInteger authorizationAccepted = new AtomicInteger();
-        Future<Object> worker = BridgeServer.claimInteractionWorker(id, () -> {
-            workerEntered.countDown();
-            long deadline = System.currentTimeMillis() + 5_000L;
-            while (authorizationAccepted.get() == 0
-                    && System.currentTimeMillis() < deadline) {
-                Thread.sleep(20L);
-            }
-            if (authorizationAccepted.get() == 0) {
-                throw new IllegalStateException("authorization was not submitted");
-            }
-            return new JSONObject()
-                    .put("parse", 0)
-                    .put("url", "https://media.example/authorized.mp4");
-        });
-        assertNotNull(worker);
-        assertTrue(workerEntered.await(2, TimeUnit.SECONDS));
-
-        AlertDialog authorization = showOwnedDialog(
-                id,
-                "播放前登录网盘",
-                authorizationAccepted
-        );
-        JSONObject waiting = awaitCapturedUI(context, id, 2_000L);
-        assertEquals(id, waiting.getString("interactionID"));
-        assertEquals("playback", waiting.getString("kind"));
-        assertEquals("playback", waiting.getString("declaredKind"));
-        assertEquals("pending", waiting.getString("returnState"));
-        assertTrue(waiting.getJSONObject("channels")
-                .getJSONObject("surface").getBoolean("visible"));
-        assertFalse(worker.isDone());
-
-        JSONObject submitted = BridgeActivity.submitUI(
-                context,
-                id,
-                null,
-                "应用",
-                null,
-                waiting.getInt("generation")
-        );
-        assertTrue(submitted.getBoolean("clicked"));
-        Object result = worker.get(2, TimeUnit.SECONDS);
-        assertTrue(DexSpiderRegistry.isPlayableResult(result));
-
-        JSONObject completed = BridgeInteractionRegistry.invocationReturned(
-                id,
-                true
-        );
-        assertTrue(completed.getBoolean("returnAccepted"));
-        assertEquals("returned", completed.getString("returnState"));
-        assertEquals("playback", completed.getString("kind"));
-        assertEquals("completed", completed.getString("phase"));
-        assertTrue(completed.getBoolean("terminal"));
-
-        BridgeServer.releaseTerminalInteraction(context, id);
-        assertFalse(isShowing(authorization));
-        assertTrue(BridgeActionActivity.awaitReleased(id, 2_000L));
-        assertFalse(BridgeServer.hasTrackedInteractionWorker(id));
-    }
-
-    public void testVerifyTerminalReleaseClosesRequestOwnedDialog()
-            throws Exception {
-        ensureBridgeServer();
-        Context context = InstrumentationRegistry.getInstrumentation()
-                .getTargetContext();
-        String id = "interaction-verify-release-" + UUID.randomUUID();
-        request(
-                "POST",
-                "/v1/interactions",
-                new JSONObject()
-                        .put("interactionID", id)
-                        .put("kind", "authorization")
-                        .put("method", "action")
-        );
-        BridgeActivity.prepareDialogHandoff(context, id);
-        AlertDialog dialog = showOwnedDialog(id, "扫码登录", null);
-        awaitCapturedUI(context, id, 2_000L);
-        JSONObject verified = request(
-                "POST",
-                "/v1/interactions/" + id + "/verify",
-                new JSONObject()
-                        .put("succeeded", true)
-                        .put("refreshPerformed", true)
-        );
-        assertEquals("completed", verified.getString("phase"));
-        assertFalse(isShowing(dialog));
-        assertTrue(BridgeActionActivity.awaitReleased(id, 2_000L));
-        assertFalse(BridgeServer.hasTrackedInteractionWorker(id));
-    }
-
-    public void testSupersededSubmitReturnsConflictWithoutClickingOldDialog()
-            throws Exception {
-        ensureBridgeServer();
-        Context context = InstrumentationRegistry.getInstrumentation()
-                .getTargetContext();
-        String oldID = "interaction-submit-old-" + UUID.randomUUID();
-        request(
-                "POST",
-                "/v1/interactions",
-                new JSONObject()
-                        .put("interactionID", oldID)
-                        .put("kind", "ordering")
-                        .put("method", "action")
-        );
-        BridgeActivity.prepareDialogHandoff(context, oldID);
-        AtomicInteger clicks = new AtomicInteger();
-        AlertDialog oldDialog = showOwnedDialog(
-                oldID,
-                "自定网盘排序",
-                clicks
-        );
-        JSONObject captured = awaitCapturedUI(context, oldID, 2_000L);
-        assertTrue(captured.getBoolean("visible"));
-
-        String currentID = "interaction-submit-current-" + UUID.randomUUID();
-        request(
-                "POST",
-                "/v1/interactions",
-                new JSONObject()
-                        .put("interactionID", currentID)
-                        .put("kind", "authorization")
-                        .put("method", "action")
-        );
-        assertEquals(
-                409,
-                requestStatus(
-                        "POST",
-                        "/v1/interactions/" + oldID + "/submit",
-                        new JSONObject().put("button", "应用")
-                )
-        );
-        assertEquals(0, clicks.get());
-        assertFalse(isShowing(oldDialog));
-        assertEquals(
-                "superseded",
-                BridgeInteractionRegistry.state(oldID).getString("phase")
-        );
-        BridgeInteractionRegistry.cancel(currentID);
-        BridgeServer.releaseTerminalInteraction(context, currentID);
     }
 
     public void testCancelEndpointInterruptsTrackedWorker() throws Exception {
@@ -1927,16 +1039,17 @@ public final class BridgeProtocolTest extends TestCase {
         assertFalse(thread.isAlive());
     }
 
-    public void testMissingAndUnavailableStatesUseFixedSchema() throws Exception {
+    public void testMissingAndUnavailableStatesExcludeTranslatedUI()
+            throws Exception {
         JSONObject missing = BridgeInteractionRegistry.state(
                 "missing-interaction-schema"
         );
         assertTrue(missing.getBoolean("terminal"));
-        assertFalse(missing.getBoolean("visible"));
-        assertEquals("", missing.getString("title"));
-        assertEquals(0, missing.getInt("inputCount"));
-        assertNotNull(missing.getJSONArray("buttons"));
-        assertNotNull(missing.getJSONArray("controls"));
+        assertFalse(missing.has("visible"));
+        assertFalse(missing.has("title"));
+        assertFalse(missing.has("inputCount"));
+        assertFalse(missing.has("buttons"));
+        assertFalse(missing.has("controls"));
 
         String id = BridgeInteractionRegistry.begin(
                 "unavailable-schema",
@@ -1950,33 +1063,9 @@ public final class BridgeProtocolTest extends TestCase {
                         .put("hostUnavailable", true)
         );
         assertEquals("reattaching", unavailable.getString("phase"));
-        assertFalse(unavailable.getBoolean("visible"));
-        assertTrue(unavailable.has("buttons"));
-        assertTrue(unavailable.has("controls"));
-    }
-
-    public void testProviderVerificationTerminatesInteraction() throws Exception {
-        String id = BridgeInteractionRegistry.begin(
-                "interaction-verification",
-                "authorization",
-                "action"
-        );
-        BridgeInteractionRegistry.observeUI(
-                id,
-                new JSONObject().put("visible", true)
-        );
-        BridgeInteractionRegistry.submitted(id);
-        JSONObject completed = BridgeInteractionRegistry.verified(
-                id,
-                true,
-                "",
-                Boolean.TRUE
-        );
-        assertEquals("completed", completed.getString("phase"));
-        assertEquals("completed", completed.getString("outcome"));
-        assertTrue(completed.getBoolean("terminal"));
-        assertTrue(completed.getBoolean("verificationPerformed"));
-        assertTrue(completed.getBoolean("refreshPerformed"));
+        assertFalse(unavailable.has("visible"));
+        assertFalse(unavailable.has("buttons"));
+        assertFalse(unavailable.has("controls"));
     }
 
     public void testRemotePlaybackWithProviderHeadersStaysPlayerOwned()

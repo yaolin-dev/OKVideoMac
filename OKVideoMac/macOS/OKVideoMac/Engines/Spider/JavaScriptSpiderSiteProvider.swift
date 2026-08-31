@@ -1,5 +1,4 @@
 import Darwin
-import CoreImage
 import CryptoKit
 import Foundation
 import OKVideoCore
@@ -31,228 +30,6 @@ enum AndroidBridgeInteractionPollingPolicy {
     }
 }
 
-struct AndroidBridgeUIControl: Decodable, Equatable, Identifiable, Sendable {
-    let id: String
-    let title: String
-    let enabled: Bool?
-    let clickable: Bool?
-    let role: String?
-
-    init(
-        id: String,
-        title: String,
-        enabled: Bool? = true,
-        clickable: Bool? = true,
-        role: String? = nil
-    ) {
-        self.id = id
-        self.title = title
-        self.enabled = enabled
-        self.clickable = clickable
-        self.role = role
-    }
-}
-
-/// Lossless-enough description of one visible Android configuration view.
-/// Sensitive input values are deliberately excluded by the Bridge; `hasValue`
-/// only lets macOS show whether a provider field is already populated.
-struct AndroidBridgeUIElement: Decodable, Equatable, Identifiable, Sendable {
-    let id: String
-    let type: String
-    let title: String
-    let role: String?
-    let enabled: Bool?
-    let clickable: Bool?
-    let selected: Bool?
-    let checked: Bool?
-    let selectedIndex: Int?
-    let value: Int?
-    let maximumValue: Int?
-    let hint: String?
-    let hasValue: Bool?
-    let parentID: String?
-    let resourceName: String?
-    let className: String?
-    let order: Int?
-    let depth: Int?
-    let x: Int?
-    let y: Int?
-    let width: Int?
-    let height: Int?
-
-    init(
-        id: String,
-        type: String,
-        title: String = "",
-        role: String? = nil,
-        enabled: Bool? = true,
-        clickable: Bool? = false,
-        selected: Bool? = nil,
-        checked: Bool? = nil,
-        selectedIndex: Int? = nil,
-        value: Int? = nil,
-        maximumValue: Int? = nil,
-        hint: String? = nil,
-        hasValue: Bool? = nil,
-        parentID: String? = nil,
-        resourceName: String? = nil,
-        className: String? = nil,
-        order: Int? = nil,
-        depth: Int? = nil,
-        x: Int? = nil,
-        y: Int? = nil,
-        width: Int? = nil,
-        height: Int? = nil
-    ) {
-        self.id = id
-        self.type = type
-        self.title = title
-        self.role = role
-        self.enabled = enabled
-        self.clickable = clickable
-        self.selected = selected
-        self.checked = checked
-        self.selectedIndex = selectedIndex
-        self.value = value
-        self.maximumValue = maximumValue
-        self.hint = hint
-        self.hasValue = hasValue
-        self.parentID = parentID
-        self.resourceName = resourceName
-        self.className = className
-        self.order = order
-        self.depth = depth
-        self.x = x
-        self.y = y
-        self.width = width
-        self.height = height
-    }
-
-    var normalizedType: String {
-        type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    }
-
-    var isActionable: Bool {
-        enabled != false && clickable == true
-    }
-
-    var verticalCenter: Double? {
-        guard let y else { return nil }
-        return Double(y) + Double(height ?? 0) / 2
-    }
-}
-
-struct AndroidConfigurationSurfaceRow: Equatable, Identifiable, Sendable {
-    let id: String
-    let elements: [AndroidBridgeUIElement]
-
-    var labels: [AndroidBridgeUIElement] {
-        elements.filter { !$0.isActionable && $0.normalizedType != "image"
-            && $0.normalizedType != "qrcode" }
-    }
-
-    var actions: [AndroidBridgeUIElement] {
-        elements.filter(\.isActionable)
-    }
-}
-
-enum AndroidConfigurationSurfaceLayout {
-    /// Reconstructs visual rows from the Android view bounds. Nested TextViews
-    /// which merely repeat a clickable parent's label are removed, while real
-    /// adjacent labels remain available to identify arrow/toggle controls.
-    static func rows(
-        elements rawElements: [AndroidBridgeUIElement]
-    ) -> [AndroidConfigurationSurfaceRow] {
-        let actionableIDs = Set(rawElements.filter(\.isActionable).map(\.id))
-        var elements = rawElements.filter { element in
-            guard !element.title.trimmingCharacters(
-                in: .whitespacesAndNewlines
-            ).isEmpty || element.isActionable else {
-                return false
-            }
-            if element.normalizedType == "label",
-               let parentID = element.parentID,
-               actionableIDs.contains(parentID) {
-                return false
-            }
-            return true
-        }
-        elements.sort {
-            let leftY = $0.verticalCenter ?? Double.greatestFiniteMagnitude
-            let rightY = $1.verticalCenter ?? Double.greatestFiniteMagnitude
-            if abs(leftY - rightY) > 4 { return leftY < rightY }
-            if ($0.x ?? Int.max) != ($1.x ?? Int.max) {
-                return ($0.x ?? Int.max) < ($1.x ?? Int.max)
-            }
-            return ($0.order ?? Int.max) < ($1.order ?? Int.max)
-        }
-
-        var grouped: [[AndroidBridgeUIElement]] = []
-        var centers: [Double?] = []
-        for element in elements {
-            guard let center = element.verticalCenter else {
-                grouped.append([element])
-                centers.append(nil)
-                continue
-            }
-            if let index = centers.indices.last,
-               let existingCenter = centers[index],
-               abs(existingCenter - center) <= rowTolerance(
-                   grouped[index],
-                   adding: element
-               ) {
-                grouped[index].append(element)
-                let count = Double(grouped[index].count)
-                centers[index] = existingCenter + (center - existingCenter) / count
-            } else {
-                grouped.append([element])
-                centers.append(center)
-            }
-        }
-
-        return grouped.enumerated().compactMap { index, values in
-            var deduplicated: [AndroidBridgeUIElement] = []
-            for value in values {
-                let duplicateActionTitle = !value.isActionable
-                    && values.contains {
-                        $0.isActionable
-                            && $0.title == value.title
-                    }
-                guard !duplicateActionTitle else { continue }
-                if !deduplicated.contains(where: {
-                    $0.id == value.id || (!$0.isActionable
-                        && !value.isActionable
-                        && $0.title == value.title)
-                }) {
-                    deduplicated.append(value)
-                }
-            }
-            guard !deduplicated.isEmpty else { return nil }
-            deduplicated.sort {
-                if ($0.x ?? Int.max) != ($1.x ?? Int.max) {
-                    return ($0.x ?? Int.max) < ($1.x ?? Int.max)
-                }
-                return ($0.order ?? Int.max) < ($1.order ?? Int.max)
-            }
-            return AndroidConfigurationSurfaceRow(
-                id: "row:\(index):\(deduplicated.map(\.id).joined(separator: "|"))",
-                elements: deduplicated
-            )
-        }
-    }
-
-    private static func rowTolerance(
-        _ current: [AndroidBridgeUIElement],
-        adding element: AndroidBridgeUIElement
-    ) -> Double {
-        let heights = (current + [element]).compactMap(\.height)
-        let typicalHeight = heights.isEmpty
-            ? 28
-            : heights.reduce(0, +) / heights.count
-        return Double(max(10, min(24, typicalHeight / 2)))
-    }
-}
-
 /// A request-owned description of one native Android configuration surface.
 ///
 /// This is intentionally provider-neutral. A chooser, ordering form, cookie
@@ -275,7 +52,6 @@ struct ConfigurationInteraction: Equatable, Identifiable, Sendable {
         case invoking
         case choice
         case form
-        case qrCode
         case transitioning
         case reattaching
         case status
@@ -291,41 +67,11 @@ struct ConfigurationInteraction: Equatable, Identifiable, Sendable {
         case cancelled
     }
 
-    enum QRRole: String, Equatable, Sendable {
-        case none
-        /// The bridge reports a QR phase, but the image has not decoded yet.
-        case candidate
-        case login
-        case remoteInputHelper
-        case credentialPush
-    }
-
-    struct Control: Equatable, Identifiable, Sendable {
-        enum Role: String, Equatable, Sendable {
-            case action
-            case cancel
-            case link
-            case status
-            case unknown
-        }
-
-        let id: String
-        let title: String
-        let enabled: Bool
-        let clickable: Bool
-        let role: Role
-    }
-
     let id: UUID
     let actionKind: ActionKind
     let phase: Phase
     let outcome: Outcome
-    let title: String
-    let provider: String?
     let generation: Int?
-    let controls: [Control]
-    let qrRole: QRRole
-    let qrImage: Data?
 }
 
 /// The terminal provider response associated with one interaction request.
@@ -361,27 +107,13 @@ struct ConfigurationInteractionTerminalResponse: Equatable, Sendable {
     }
 }
 
-/// Request-scoped bridge handle. The HTTP invocation and every later state,
-/// snapshot, submit, verification and cancellation request use the same ID.
+/// Request-scoped bridge handle. The HTTP invocation and every later state
+/// and cancellation request use the same ID.
 /// The invocation continues after the first UI generation is presented; its
 /// final response is cached instead of being discarded by a first-wins race.
 final class InteractionHandle: @unchecked Sendable, Identifiable {
     typealias StateProvider = @Sendable (UUID) async throws
         -> AndroidBridgeUIState
-    typealias SnapshotProvider = @Sendable (UUID) async throws -> Data
-    typealias SubmitProvider = @Sendable (
-        UUID,
-        String?,
-        String,
-        String?,
-        Int?
-    ) async throws -> AndroidBridgeUISubmitResult
-    typealias VerifyProvider = @Sendable (
-        UUID,
-        Bool,
-        String?,
-        Bool?
-    ) async throws -> ConfigurationInteractionTerminalResponse
     typealias CancelProvider = @Sendable (UUID) async throws -> Void
     typealias TerminalCleanup = @Sendable (UUID) async -> Void
 
@@ -435,9 +167,6 @@ final class InteractionHandle: @unchecked Sendable, Identifiable {
 
     private let state = State()
     private let stateProvider: StateProvider?
-    private let snapshotProvider: SnapshotProvider?
-    private let submitProvider: SubmitProvider?
-    private let verifyProvider: VerifyProvider?
     private let cancelProvider: CancelProvider?
     private let terminalCleanup: TerminalCleanup?
     private var invocationTask: Task<Void, Never>?
@@ -446,9 +175,6 @@ final class InteractionHandle: @unchecked Sendable, Identifiable {
         id: UUID = UUID(),
         actionKind: ConfigurationInteraction.ActionKind,
         stateProvider: StateProvider? = nil,
-        snapshotProvider: SnapshotProvider? = nil,
-        submitProvider: SubmitProvider? = nil,
-        verifyProvider: VerifyProvider? = nil,
         cancelProvider: CancelProvider? = nil,
         terminalCleanup: TerminalCleanup? = nil,
         operation: @escaping @Sendable () async throws
@@ -457,9 +183,6 @@ final class InteractionHandle: @unchecked Sendable, Identifiable {
         self.id = id
         self.actionKind = actionKind
         self.stateProvider = stateProvider
-        self.snapshotProvider = snapshotProvider
-        self.submitProvider = submitProvider
-        self.verifyProvider = verifyProvider
         self.cancelProvider = cancelProvider
         self.terminalCleanup = terminalCleanup
         let state = self.state
@@ -501,112 +224,6 @@ final class InteractionHandle: @unchecked Sendable, Identifiable {
         return try await stateProvider(id)
     }
 
-    func snapshot() async throws -> Data {
-        guard let snapshotProvider else {
-            throw AppError.spider("当前桥不支持请求级配置快照")
-        }
-        return try await snapshotProvider(id)
-    }
-
-    @discardableResult
-    func submit(
-        text: String?,
-        button: String,
-        controlID: String?,
-        generation: Int?
-    ) async throws -> AndroidBridgeUISubmitResult {
-        guard let submitProvider else {
-            throw AppError.spider("当前桥不支持请求级配置提交")
-        }
-        return try await submitProvider(
-            id,
-            text,
-            button,
-            controlID,
-            generation
-        )
-    }
-
-    /// Completes a UI-backed operation only after the host has verified the
-    /// provider's resulting state. `actualRefreshPerformed` must be supplied
-    /// only when the host really performed and observed that refresh.
-    @discardableResult
-    func verify(
-        succeeded: Bool,
-        error: String? = nil,
-        actualRefreshPerformed: Bool? = nil,
-        providerResultGraceNanoseconds: UInt64 = 3_000_000_000
-    ) async throws -> ConfigurationInteractionTerminalResponse {
-        let verification: ConfigurationInteractionTerminalResponse
-        do {
-            guard let verifyProvider else {
-                throw AppError.spider("当前桥不支持请求级配置验证")
-            }
-            verification = try await verifyProvider(
-                id,
-                succeeded,
-                error,
-                actualRefreshPerformed
-            )
-            guard verification.requestID == id else {
-                throw AppError.spider("配置操作验证结果与当前请求不匹配")
-            }
-        } catch {
-            // Verification is one producer of this request's terminal state,
-            // not a second completion path in AppState. Publish its failure
-            // through the same atomic owner used by the original invocation
-            // so a late provider success cannot flip a failure back to
-            // success. The single terminal observer presents the error.
-            await terminalCleanup?(id)
-            let installedFailure = await state.finish(.failure(error))
-            if installedFailure {
-                cancel()
-            }
-            return try await state.terminalResponse()
-        }
-
-        // Successful verification is provider-state evidence, but it does not
-        // contain the value being produced by the still-running `/v1/invoke`.
-        // Give that exact invocation a short bounded chance to win terminal
-        // ownership. Otherwise a nil verification result could make AppState
-        // retry the operation while the original worker is about to return its
-        // authoritative detail/action/playback value.
-        if verification.outcome == .succeeded,
-           providerResultGraceNanoseconds > 0 {
-            let startedAt = DispatchTime.now().uptimeNanoseconds
-            while DispatchTime.now().uptimeNanoseconds - startedAt
-                    < providerResultGraceNanoseconds {
-                if let providerTerminal = try await state
-                    .terminalResponseIfAvailable() {
-                    return providerTerminal
-                }
-                try Task.checkCancellation()
-                let elapsed = DispatchTime.now().uptimeNanoseconds - startedAt
-                let remaining = providerResultGraceNanoseconds > elapsed
-                    ? providerResultGraceNanoseconds - elapsed
-                    : 0
-                guard remaining > 0 else { break }
-                try await Task.sleep(
-                    nanoseconds: min(50_000_000, remaining)
-                )
-            }
-        }
-
-        // The provider worker did not publish a terminal value within the
-        // grace period (or verification explicitly failed). Atomically install
-        // the verified response as the one fallback terminal. If the provider
-        // won the boundary race, `finish` returns false and its value remains
-        // authoritative. Publishing through State wakes the single AppState
-        // terminal observer; the verification caller must not deliver a second
-        // completion independently.
-        await terminalCleanup?(id)
-        let installedVerification = await state.finish(.success(verification))
-        if installedVerification {
-            cancel()
-        }
-        return try await state.terminalResponse()
-    }
-
     func cancel() {
         invocationTask?.cancel()
         guard let cancelProvider else { return }
@@ -624,59 +241,24 @@ final class InteractionHandle: @unchecked Sendable, Identifiable {
     }
 }
 
-struct AndroidBridgeUISubmitResult: Equatable, Sendable {
-    let clicked: Bool
-    let stale: Bool
-    let generation: Int?
-}
-
 struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
     let interactionID: String?
     let revision: Int?
     let kind: String?
-    let method: String?
-    let visible: Bool
-    let title: String
-    let inputCount: Int
-    let imageCount: Int
-    var qrImageCount: Int? = nil
-    let buttons: [String]
-    let controls: [AndroidBridgeUIControl]?
-    let texts: [String]?
     let phase: String?
-    let provider: String?
-    let authenticated: Bool?
-    let credentialPush: Bool?
-    let remoteInput: Bool?
     let generation: Int?
     let outcome: String?
     let terminal: Bool?
-    let hostUnavailable: Bool?
-    let verificationPerformed: Bool?
-    let refreshPerformed: Bool?
     let error: String?
     /// The request-scoped Android worker is the only authoritative signal
     /// that a legacy Spider has finished persisting credentials. UI changes
     /// can happen earlier while that worker is still active.
     var workerReturned: Bool? = nil
-    var expectsProviderUI: Bool? = nil
-    var uiSchemaVersion: Int? = nil
-    var elements: [AndroidBridgeUIElement]? = nil
-    /// Request-scoped QR capture lifecycle published by Bridge schema v3.
-    /// This never contains QR payload data.
-    var qrStatus: String? = nil
     /// Opaque request owner minted by the macOS host and bound by the Bridge
-    /// to one configuration/site/JAR tuple. These fields are optional so an
-    /// older Bridge can still render read-only state, but credential
-    /// submission is unavailable without the complete binding.
+    /// to one configuration/site/JAR tuple.
     var providerOwnerID: String? = nil
     var configurationID: String? = nil
     var siteKey: String? = nil
-    var actionContract: JSONValue? = nil
-    /// Opaque digest computed inside Android from provider-owned preferences.
-    /// No key or credential value leaves the Bridge. MyDrive authorization
-    /// uses a stable post-QR change only as request-scoped success evidence.
-    var authorizationStorageFingerprint: String? = nil
     /// Lifecycle-only ownership for the complete Android display. This remains
     /// true when a request-owned provider window launches a browser or another
     /// Activity and the Bridge process itself has no visible root. It is never
@@ -685,7 +267,6 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
     var surfaceRequestScoped: Bool? = nil
     var surfaceInteractionID: String? = nil
     var surfaceMode: String? = nil
-    var surfaceHostLifecycle: String? = nil
 
     var interactionGeneration: Int? {
         generation ?? revision
@@ -698,15 +279,18 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
               let stateID = interactionID.flatMap(UUID.init(uuidString:)),
               let surfaceID = surfaceInteractionID.flatMap(UUID.init(uuidString:)),
               let mode = normalizedActionSurfaceMode,
-              ["providerwindow", "externalactivity", "delegatedactivity"]
+              [
+                "actionactivity",
+                "providerwindow",
+                "externalactivity",
+                "delegatedactivity"
+              ]
                 .contains(mode)
         else {
             return false
         }
-        // A bare translucent ActionActivity owns lifecycle, but is not an
-        // actionable provider surface: exposing its full screencap could reveal
-        // and operate the launcher underneath. Only provider content or an
-        // explicitly delegated Activity may be mirrored to macOS.
+        // ActionActivity is opaque and request-owned. Its full display is the
+        // only unstructured provider UI exposed to macOS.
         return stateID == surfaceID
     }
 
@@ -716,88 +300,11 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
             .lowercased()
     }
 
-    var actionableControls: [AndroidBridgeUIControl] {
-        if let controls, !controls.isEmpty {
-            return controls.filter {
-                $0.enabled != false && $0.clickable != false
-            }
-        }
-        return buttons.enumerated().map {
-            AndroidBridgeUIControl(
-                id: "legacy:\($0.offset)",
-                title: $0.element,
-                enabled: true,
-                clickable: true,
-                role: "legacy"
-            )
-        }
-    }
-
-    var isQRCode: Bool {
-        // The request-scoped bridge reports its lifecycle phase
-        // (`awaitingUser`) at the top level. Accept that structural phase in
-        // addition to the legacy QR phase, but never infer QR from an image
-        // alone. The snapshot must still decode before it becomes a login QR.
-        let normalizedPhase = phase?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        return !isRemoteInputQRCode
-            && (qrImageCount ?? imageCount) > 0
-            && ["qr", "qrcode", "qr_code", "awaitinguser", "awaiting_user"]
-                .contains(normalizedPhase)
-    }
-
-    var isRemoteInputQRCode: Bool {
-        if remoteInput == true {
-            return true
-        }
-        return texts?.contains { text in
-            text.localizedCaseInsensitiveContains("/proxy?do=input")
-        } == true
-    }
-
-    var isCredentialPush: Bool {
-        // Credential handling is a security boundary. Only the bridge's
-        // structured role and a request-scoped submission contract may select
-        // this path. Provider text/images are untrusted presentation content
-        // and must never change input type or choose a JAR implicitly.
-        guard credentialPush == true,
-              providerOwnerID?.nonEmptyBridgeValue != nil,
-              configurationID?.nonEmptyBridgeValue != nil,
-              siteKey?.nonEmptyBridgeValue != nil,
-              case .object(let contract) = actionContract,
-              case .object(let submission)? = contract["credentialSubmission"],
-              case .object = submission["parameters"],
-              submission["credentialField"]?.stringValue?
-                .nonEmptyBridgeValue != nil else {
-            return false
-        }
-        return true
-    }
-
-    var hasVisibleAuthorizationContent: Bool {
-        guard visible else { return false }
-        return inputCount > 0
-            || imageCount > 0
-            || !actionableControls.isEmpty
-            || !(texts?.isEmpty ?? true)
-    }
-
     /// Any request-owned provider UI which the native configuration sheet can
     /// render. Ordering and ordinary configuration surfaces intentionally use
     /// this predicate without becoming authorization requests.
     var isProviderUIPrompt: Bool {
-        // Older bridge builds reported the empty host Activity as a visible
-        // "chooser" after a QR dialog closed. Requiring actual captured UI
-        // content prevents that ghost window from blocking playback forever.
-        guard hasVisibleAuthorizationContent else { return false }
-        // A number of cloud spiders show a disclaimer in a custom chooser
-        // whose rows are clickable TextViews rather than Android Buttons. A
-        // text-only disclaimer is not an authorization prompt and must never
-        // block an unrelated detail/play request.
-        return inputCount > 0
-            || imageCount > 0
-            || !actionableControls.isEmpty
+        hasRequestScopedActionSurface
     }
 
     /// A provider UI may enter the account lifecycle only when the request
@@ -809,13 +316,12 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
             .authorization.rawValue.lowercased() else {
             return false
         }
-        return isProviderUIPrompt
+        return hasRequestScopedActionSurface
     }
 
     func configurationInteraction(
         requestID: UUID,
-        actionKind: ConfigurationInteraction.ActionKind,
-        validatedQRCode: Data? = nil
+        actionKind: ConfigurationInteraction.ActionKind
     ) -> ConfigurationInteraction {
         let normalizedPhase = phase?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -848,52 +354,16 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
             default: return actionKind
             }
         }()
-        let qrRole: ConfigurationInteraction.QRRole
-        if isRemoteInputQRCode {
-            qrRole = .remoteInputHelper
-        } else if isCredentialPush {
-            qrRole = .credentialPush
-        } else if validatedQRCode != nil,
-                  declaredActionKind == .authorization
-                    || declaredActionKind == .playback {
-            // A QR surfaced by the exact request-scoped playerContent call is
-            // an authorization surface for that pending playback. It is not
-            // a global QR heuristic: the interaction ID still has to match
-            // the player request that owns the overlay and eventual result.
-            qrRole = .login
-        } else if validatedQRCode != nil {
-            // A QR-shaped bitmap can also be an ordering preview, remote-input
-            // helper, donation code, or other configuration content. Keep it
-            // visible without changing the provider-declared action kind.
-            qrRole = .candidate
-        } else if normalizedPhase == "qr", imageCount > 0 {
-            qrRole = .candidate
-        } else {
-            qrRole = .none
-        }
-
         let interactionPhase: ConfigurationInteraction.Phase
         switch normalizedPhase {
         case "started", "invoking":
             interactionPhase = .invoking
         case "awaitinguser", "awaiting_user":
-            if validatedQRCode != nil {
-                interactionPhase = .qrCode
-            } else if inputCount > 0 {
-                interactionPhase = .form
-            } else if !actionableControls.isEmpty {
-                interactionPhase = .choice
-            } else {
-                interactionPhase = .status
-            }
+            interactionPhase = .status
         case "chooser", "choice", "select":
             interactionPhase = .choice
         case "credentials", "credential", "form", "input":
             interactionPhase = .form
-        case "qr", "qrcode", "qr_code":
-            interactionPhase = validatedQRCode == nil
-                ? .transitioning
-                : .qrCode
         case "transitioning", "loading", "waiting", "processing":
             interactionPhase = .transitioning
         case "reattaching":
@@ -905,13 +375,7 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
         case "cancelled", "canceled", "superseded":
             interactionPhase = .cancelled
         default:
-            if inputCount > 0 {
-                interactionPhase = .form
-            } else if !actionableControls.isEmpty {
-                interactionPhase = .choice
-            } else {
-                interactionPhase = .status
-            }
+            interactionPhase = .status
         }
 
         let resolvedOutcome: ConfigurationInteraction.Outcome
@@ -942,96 +406,8 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
             actionKind: declaredActionKind,
             phase: interactionPhase,
             outcome: resolvedOutcome,
-            title: title,
-            provider: provider,
-            generation: interactionGeneration,
-            controls: actionableControls.map { control in
-                ConfigurationInteraction.Control(
-                    id: control.id,
-                    title: control.title,
-                    enabled: control.enabled != false,
-                    clickable: control.clickable != false,
-                    role: Self.interactionControlRole(control.role)
-                )
-            },
-            qrRole: qrRole,
-            qrImage: validatedQRCode
+            generation: interactionGeneration
         )
-    }
-
-    private static func interactionControlRole(
-        _ rawRole: String?
-    ) -> ConfigurationInteraction.Control.Role {
-        switch rawRole?.trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased() {
-        case "button", "action", "clickable", "legacy": return .action
-        case "cancel", "dismiss": return .cancel
-        case "link": return .link
-        case "status", "label": return .status
-        default: return .unknown
-        }
-    }
-}
-
-enum AndroidBridgeQRCodePolicy {
-    /// Android dialogs frequently contain decorative or empty ImageViews. Only
-    /// publish an image as a login QR code when Core Image can decode an
-    /// actual QR payload from it.
-    static func validatedSnapshot(_ data: Data?) -> Data? {
-        guard let data,
-              let image = CIImage(data: data),
-              let detector = CIDetector(
-                ofType: CIDetectorTypeQRCode,
-                context: nil,
-                options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]
-              ),
-              detector.features(in: image).contains(where: { feature in
-                  guard let qr = feature as? CIQRCodeFeature else { return false }
-                  return qr.messageString?.isEmpty == false
-              }) else {
-            return nil
-        }
-        return data
-    }
-
-    static func payload(_ data: Data?) -> String? {
-        guard let data,
-              let image = CIImage(data: data),
-              let detector = CIDetector(
-                ofType: CIDetectorTypeQRCode,
-                context: nil,
-                options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]
-              ) else {
-            return nil
-        }
-        return detector.features(in: image).compactMap { feature in
-            guard let value = (feature as? CIQRCodeFeature)?.messageString,
-                  !value.isEmpty else {
-                return nil
-            }
-            return value
-        }.first
-    }
-
-    static func retainedSnapshot(
-        fresh: Data?,
-        previous: Data?,
-        currentStateIsQRCode: Bool,
-        retainsPendingAuthorization: Bool = false
-    ) -> Data? {
-        if let fresh, let previous,
-           let freshPayload = payload(fresh),
-           let previousPayload = payload(previous),
-           freshPayload == previousPayload {
-            // Android redraws the same ImageView while polling. Preserve the
-            // original bytes so SwiftUI does not rebuild the QR image every
-            // half second merely because PNG encoding changed.
-            return previous
-        }
-        if let fresh { return fresh }
-        return currentStateIsQRCode || retainsPendingAuthorization
-            ? previous
-            : nil
     }
 }
 
@@ -2619,24 +1995,11 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         let monitorsAuthorization: Bool
         let interactionID: String?
         let interactionKind: String?
-        /// Host-declared semantics only. The Bridge may return a richer,
-        /// provider-authored contract after it captures the actual UI. The
-        /// host never manufactures credential parameters from labels.
         let providerOwnerID: String
-        let actionContract: JSONValue?
         /// Present only for an explicit same-resource refresh. New bridge
         /// builds bypass their short playback handoff cache when this is true;
         /// old builds safely ignore the additional JSON field.
         let refreshPlayback: Bool?
-    }
-
-    private struct CredentialPushRequest: Encodable {
-        let interactionID: String
-        let configurationID: String
-        let siteKey: String
-        let providerOwnerID: String
-        let actionContract: JSONValue
-        let credential: String
     }
 
     private struct Response: Decodable {
@@ -2657,7 +2020,6 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         let outcome: String?
         let terminal: Bool?
         let hostUnavailable: Bool?
-        let verificationPerformed: Bool?
         let error: String?
         let refreshPerformed: Bool?
         let failureKind: String?
@@ -2680,10 +2042,7 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     private let interactionSession: URLSession
     private let invokeURL = URL(string: "http://127.0.0.1:19978/v1/invoke")!
     private let uiStateURL = URL(string: "http://127.0.0.1:19978/v1/ui/state")!
-    private let uiSubmitURL = URL(string: "http://127.0.0.1:19978/v1/ui/submit")!
     private let uiDismissURL = URL(string: "http://127.0.0.1:19978/v1/ui/dismiss")!
-    private let uiSnapshotURL = URL(string: "http://127.0.0.1:19978/v1/ui/snapshot")!
-    private let authPushURL = URL(string: "http://127.0.0.1:19978/v1/auth/push")!
 
     init(runtime: AndroidDexBridgeRuntime = AndroidDexBridgeRuntime()) {
         self.runtime = runtime
@@ -3009,9 +2368,6 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                     ? nil
                     : actionKind.rawValue,
                 providerOwnerID: providerOwnerID,
-                actionContract: .object([
-                    "actionKind": .string(actionKind.rawValue)
-                ]),
                 refreshPlayback: refreshPlayback ? true : nil
             )
         )
@@ -3048,16 +2404,11 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                let state = await authorizationStateAfterFailedInvocation(
                    interactionID: terminalResponse.requestID
                ) {
-                let qrSnapshot = await validatedQRCodeSnapshot(
-                    for: state,
-                    interactionID: terminalResponse.requestID
-                )
                 let resolvedActionKind = interactionHandle?.actionKind
                     ?? actionKind
                 let interaction = state.configurationInteraction(
                     requestID: terminalResponse.requestID,
-                    actionKind: resolvedActionKind,
-                    validatedQRCode: qrSnapshot
+                    actionKind: resolvedActionKind
                 )
                 await interactionHandle?.record(interaction)
                 throw AndroidBridgeUIRequired(
@@ -3397,130 +2748,6 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         return state
     }
 
-    @discardableResult
-    func submitUI(
-        text: String?,
-        button: String,
-        controlID: String?,
-        generation: Int? = nil,
-        interactionID: UUID? = nil
-    ) async throws -> AndroidBridgeUISubmitResult {
-        try await runtime.ensureReady()
-        let url = interactionID.map {
-            Self.interactionURL($0, suffix: "submit")
-        } ?? uiSubmitURL
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 5
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(
-            withJSONObject: [
-                "text": (text as Any?) ?? NSNull(),
-                "button": button,
-                "controlID": (controlID as Any?) ?? NSNull(),
-                "generation": (generation as Any?) ?? NSNull()
-            ] as [String: Any]
-        )
-        let (data, response) = try await bridgeData(
-            for: request,
-            legacyURL: nil
-        )
-        guard (response as? HTTPURLResponse)?.statusCode == 200,
-              let object = try JSONSerialization.jsonObject(with: data)
-                as? [String: Any] else {
-            throw AppError.spider("无法提交网盘授权操作")
-        }
-        return AndroidBridgeUISubmitResult(
-            clicked: object["clicked"] as? Bool == true,
-            stale: object["stale"] as? Bool == true,
-            generation: object["generation"] as? Int
-        )
-    }
-
-    func uiSnapshot(interactionID: UUID? = nil) async throws -> Data {
-        try await runtime.ensureReady()
-        return try await fetchUISnapshot(interactionID: interactionID)
-    }
-
-    private func fetchUISnapshot(interactionID: UUID? = nil) async throws
-        -> Data {
-        let url = interactionID.map {
-            Self.interactionURL($0, suffix: "snapshot")
-        } ?? uiSnapshotURL
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 5
-        let (data, response) = try await bridgeData(
-            for: request,
-            legacyURL: nil
-        )
-        guard (response as? HTTPURLResponse)?.statusCode == 200,
-              !data.isEmpty else {
-            throw AppError.spider("无法读取网盘扫码界面")
-        }
-        return data
-    }
-
-    private func validatedQRCodeSnapshot(
-        for state: AndroidBridgeUIState,
-        interactionID: UUID? = nil
-    ) async -> Data? {
-        guard state.isQRCode,
-              let snapshot = try? await fetchUISnapshot(
-                  interactionID: interactionID
-              ) else {
-            return nil
-        }
-        return AndroidBridgeQRCodePolicy.validatedSnapshot(snapshot)
-    }
-
-    func pushCredential(
-        interactionID: UUID,
-        configurationID: UUID,
-        siteKey: String,
-        providerOwnerID: String,
-        actionContract: JSONValue,
-        credential: String
-    ) async throws {
-        guard siteKey.nonEmptyBridgeValue != nil,
-              providerOwnerID.nonEmptyBridgeValue != nil,
-              case .object(let contract) = actionContract,
-              case .object(let submission)? = contract["credentialSubmission"],
-              case .object = submission["parameters"],
-              submission["credentialField"]?.stringValue?
-                .nonEmptyBridgeValue != nil else {
-            throw AppError.spider("站点没有提供可验证的凭据提交合约")
-        }
-        guard !credential
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .isEmpty else {
-            throw AppError.spider("请先粘贴 Cookie 或 Token")
-        }
-
-        try await runtime.ensureReady()
-        var request = URLRequest(url: authPushURL)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 10
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(
-            CredentialPushRequest(
-                interactionID: interactionID.uuidString,
-                configurationID: configurationID.uuidString.lowercased(),
-                siteKey: siteKey,
-                providerOwnerID: providerOwnerID,
-                actionContract: actionContract,
-                credential: credential
-            )
-        )
-        let (data, response) = try await session.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200,
-              let object = try JSONSerialization.jsonObject(with: data)
-                as? [String: Any],
-              object["ok"] as? Bool == true,
-              object["accepted"] as? Bool == true else {
-            throw AppError.spider("本机 Android 桥未能接收网盘凭据")
-        }
-    }
-
     func resetAuthorizationUI(interactionID: UUID? = nil) async throws {
         // Invalidate the host input lease before asking Android to dismiss the
         // surface. A replacement invocation cannot start until this actor hop
@@ -3540,65 +2767,6 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw AppError.spider("无法关闭当前网盘授权界面")
         }
-    }
-
-    /// Marks a request-scoped native interaction terminal only after the host
-    /// has independently verified the resulting provider state. The bridge
-    /// never manufactures `refreshPerformed`; it is omitted unless the caller
-    /// supplies a value observed from a real same-resource refresh.
-    func verifyInteraction(
-        interactionID: UUID,
-        succeeded: Bool,
-        error: String? = nil,
-        actualRefreshPerformed: Bool? = nil
-    ) async throws -> ConfigurationInteractionTerminalResponse {
-        try await runtime.ensureReady()
-        var payload: [String: Any] = [
-            "outcome": succeeded ? "completed" : "failed",
-            "succeeded": succeeded
-        ]
-        if let error { payload["error"] = error }
-        if let actualRefreshPerformed {
-            payload["refreshPerformed"] = actualRefreshPerformed
-        }
-        var request = URLRequest(
-            url: Self.interactionURL(interactionID, suffix: "verify")
-        )
-        request.httpMethod = "POST"
-        request.timeoutInterval = 5
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-        let (data, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200..<300).contains(httpResponse.statusCode) else {
-            throw AppError.spider("无法验证当前配置操作结果")
-        }
-        let interaction = try JSONDecoder().decode(
-            InteractionResponse.self,
-            from: data
-        )
-        guard Self.interactionIdentifier(
-            interaction.interactionID,
-            matches: interactionID,
-            allowsMissing: false
-        ) else {
-            throw AppError.spider("配置操作验证结果与当前请求不匹配")
-        }
-        let outcome = Self.interactionOutcome(
-            interaction,
-            transportSucceeded: true
-        )
-        guard outcome != .pending else {
-            throw AppError.spider("配置操作验证后仍未进入终态")
-        }
-        return ConfigurationInteractionTerminalResponse(
-            requestID: interactionID,
-            outcome: outcome,
-            providerResult: nil,
-            error: outcome == .failed ? interaction.error ?? error : nil,
-            httpStatusCode: httpResponse.statusCode,
-            refreshPerformed: interaction.refreshPerformed
-        )
     }
 
     /// Request-scoped endpoints are preferred whenever the installed bridge
@@ -3714,39 +2882,6 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                 }
                 return try await self.uiState(interactionID: interactionID)
             },
-            snapshotProvider: { [weak self] interactionID in
-                guard let self else {
-                    throw CancellationError()
-                }
-                return try await self.uiSnapshot(
-                    interactionID: interactionID
-                )
-            },
-            submitProvider: {
-                [weak self] interactionID, text, button, controlID, generation in
-                guard let self else {
-                    throw CancellationError()
-                }
-                return try await self.submitUI(
-                    text: text,
-                    button: button,
-                    controlID: controlID,
-                    generation: generation,
-                    interactionID: interactionID
-                )
-            },
-            verifyProvider: {
-                [weak self] interactionID, succeeded, error, refreshPerformed in
-                guard let self else {
-                    throw CancellationError()
-                }
-                return try await self.verifyInteraction(
-                    interactionID: interactionID,
-                    succeeded: succeeded,
-                    error: error,
-                    actualRefreshPerformed: refreshPerformed
-                )
-            },
             cancelProvider: { [weak self] interactionID in
                 guard let self else { return }
                 try await self.resetAuthorizationUI(
@@ -3811,15 +2946,9 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                         ),
                            (state.isProviderUIPrompt
                                 || state.hasRequestScopedActionSurface) {
-                            let snapshot = await self
-                                .validatedQRCodeSnapshot(
-                                    for: state,
-                                    interactionID: requestID
-                                )
                             let interaction = state.configurationInteraction(
                                 requestID: requestID,
-                                actionKind: actionKind,
-                                validatedQRCode: snapshot
+                                actionKind: actionKind
                             )
                             await handle.record(interaction)
                             gate.resolve(
@@ -3969,9 +3098,8 @@ struct AndroidActionSurfaceFrame: Equatable, Sendable {
 }
 
 extension AndroidDexBridgeClient {
-    /// Captures the complete Android display without changing the legacy
-    /// `/snapshot` endpoint, whose payload remains a normalized QR bitmap for
-    /// older hosts. State is checked both before and after ADB capture so a
+    /// Captures the complete Android display. State is checked both before
+    /// and after ADB capture so a
     /// frame from a superseded request can never be published under the new
     /// request's lease.
     func actionSurfaceFrame(
@@ -4070,6 +3198,22 @@ extension AndroidDexBridgeClient {
         try await runtime.backActionSurface(
             frame: frame
         )
+    }
+
+    func typeActionSurface(
+        frame: AndroidActionSurfaceFrame,
+        text: String
+    ) async throws {
+        let state = try await activeSurfaceState(
+            interactionID: frame.interactionID,
+            expectedGeneration: frame.generation
+        )
+        guard state.providerOwnerID?.nonEmptyBridgeValue
+                == frame.providerOwnerID,
+              state.normalizedActionSurfaceMode == frame.surfaceMode else {
+            throw CancellationError()
+        }
+        try await runtime.typeActionSurface(frame: frame, text: text)
     }
 
     private func activeSurfaceState(
@@ -4818,6 +3962,30 @@ actor AndroidDexBridgeRuntime {
             ],
             category: "adb.surface.back",
             timeout: 5
+        )
+    }
+
+    func typeActionSurface(
+        frame: AndroidActionSurfaceFrame,
+        text: String
+    ) async throws {
+        let (_, identity, toolchain) = try activeActionSurfaceLease(
+            matching: frame
+        )
+        guard !text.isEmpty, text.utf8.count <= 16_384 else {
+            throw AppError.spider("发送到 Android 操作界面的文字为空或过长")
+        }
+        // `adb shell input text` receives this as one argv item; `%s` is the
+        // Android input command's portable representation for spaces.
+        let encoded = text.replacingOccurrences(of: " ", with: "%s")
+        _ = try run(
+            toolchain.adb,
+            [
+                "-s", identity.serial,
+                "shell", "input", "text", encoded
+            ],
+            category: "adb.surface.text",
+            timeout: 10
         )
     }
 

@@ -3229,63 +3229,6 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testCloudInteractionCompletionNeverInfersSuccessFromPresentationState() {
-        XCTAssertFalse(
-            CloudAuthorizationCompletionPolicy.shouldComplete(
-                authenticated: false,
-                interactionKind: .configuration,
-                hasObservedPrompt: false,
-                hasObservedQRCode: false,
-                hiddenPollCount: 600
-            )
-        )
-        XCTAssertFalse(
-            CloudAuthorizationCompletionPolicy.shouldComplete(
-                authenticated: false,
-                interactionKind: .configuration,
-                hasObservedPrompt: true,
-                hasObservedQRCode: false,
-                hiddenPollCount: 2
-            )
-        )
-        XCTAssertFalse(
-            CloudAuthorizationCompletionPolicy.shouldComplete(
-                authenticated: false,
-                interactionKind: .configuration,
-                hasObservedPrompt: true,
-                hasObservedQRCode: false,
-                hiddenPollCount: 3
-            )
-        )
-        XCTAssertFalse(
-            CloudAuthorizationCompletionPolicy.shouldComplete(
-                authenticated: true,
-                interactionKind: .authorization,
-                hasObservedPrompt: true,
-                hasObservedQRCode: false,
-                hiddenPollCount: 0
-            )
-        )
-        XCTAssertFalse(
-            CloudAuthorizationCompletionPolicy.shouldComplete(
-                authenticated: false,
-                interactionKind: .authorization,
-                hasObservedPrompt: true,
-                hasObservedQRCode: false,
-                hiddenPollCount: 600
-            )
-        )
-        XCTAssertFalse(
-            CloudAuthorizationCompletionPolicy.shouldComplete(
-                authenticated: false,
-                interactionKind: .authorization,
-                hasObservedPrompt: true,
-                hasObservedQRCode: true,
-                hiddenPollCount: 6
-            )
-        )
-    }
-
     func testConfigurationCoordinatorRejectsSupersededAndCancelledCallbacks() {
         let identity = HomeContentIdentity(
             configurationID: UUID(),
@@ -3360,229 +3303,48 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testOnlyExplicitLoginQRCodeUsesAuthorizationSemantics() {
-        let state = AndroidBridgeUIState(
-            interactionID: nil,
-            revision: nil,
-            kind: nil,
-            method: nil,
-            visible: true,
-            title: "Configure",
-            inputCount: 0,
-            imageCount: 1,
-            buttons: [],
-            controls: [],
-            texts: [],
-            phase: "qr",
-            provider: nil,
-            authenticated: false,
-            credentialPush: false,
-            remoteInput: false,
-            generation: 1,
-            outcome: nil,
-            terminal: nil,
-            hostUnavailable: nil,
-            verificationPerformed: nil,
-            refreshPerformed: nil,
-            error: nil
-        )
-        func interaction(
-            actionKind: ConfigurationInteraction.ActionKind,
-            qrRole: ConfigurationInteraction.QRRole
-        ) -> ConfigurationInteraction {
-            ConfigurationInteraction(
-                id: UUID(),
-                actionKind: actionKind,
-                phase: .qrCode,
-                outcome: .pending,
-                title: "Configure",
-                provider: nil,
-                generation: 1,
-                controls: [],
-                qrRole: qrRole,
-                qrImage: nil
-            )
-        }
-
-        XCTAssertEqual(
-            ConfigurationInteractionClassificationPolicy.nativeSemantic(
-                interaction: interaction(
-                    actionKind: .authorization,
-                    qrRole: .login
-                ),
-                hasVerifiedQRCode: true,
-                credentialPush: false,
-                state: state
-            ),
-            .qrAuthorization
-        )
-        for candidate in [
-            interaction(actionKind: .configuration, qrRole: .login),
-            interaction(actionKind: .authorization, qrRole: .remoteInputHelper),
-            interaction(actionKind: .authorization, qrRole: .candidate)
-        ] {
-            let semantic = ConfigurationInteractionClassificationPolicy
-                .nativeSemantic(
-                    interaction: candidate,
-                    hasVerifiedQRCode: true,
-                    credentialPush: false,
-                    state: state
-                )
-            XCTAssertFalse(semantic.isAuthorization)
-            XCTAssertEqual(
-                ConfigurationInteractionClassificationPolicy.interactionKind(
-                    for: semantic
-                ),
-                .configuration
-            )
-        }
-    }
-
-    func testConfigurationVerificationRequiresOwnedScopedState() {
+    func testConfigurationStateRequiresOwnedScopedIdentity() {
         let interactionID = UUID()
         func state(_ rawID: String?) -> AndroidBridgeUIState {
             AndroidBridgeUIState(
                 interactionID: rawID,
                 revision: 1,
                 kind: "configuration",
-                method: "choice",
-                visible: true,
-                title: "Configure",
-                inputCount: 0,
-                imageCount: 0,
-                buttons: ["OK"],
-                controls: [],
-                texts: [],
                 phase: "awaitingUser",
-                provider: nil,
-                authenticated: nil,
-                credentialPush: false,
-                remoteInput: false,
                 generation: 1,
                 outcome: "pending",
                 terminal: false,
-                hostUnavailable: false,
-                verificationPerformed: false,
-                refreshPerformed: nil,
                 error: nil
             )
         }
 
         XCTAssertTrue(
-            ConfigurationInteractionVerificationPolicy.accepts(
+            ConfigurationInteractionStatePolicy.accepts(
                 state(interactionID.uuidString),
                 interactionID: interactionID,
                 requiresScopedIdentity: true
             )
         )
         XCTAssertFalse(
-            ConfigurationInteractionVerificationPolicy.accepts(
+            ConfigurationInteractionStatePolicy.accepts(
                 state(UUID().uuidString),
                 interactionID: interactionID,
                 requiresScopedIdentity: true
             )
         )
         XCTAssertFalse(
-            ConfigurationInteractionVerificationPolicy.accepts(
+            ConfigurationInteractionStatePolicy.accepts(
                 state(nil),
                 interactionID: interactionID,
                 requiresScopedIdentity: true
             )
         )
         XCTAssertTrue(
-            ConfigurationInteractionVerificationPolicy.accepts(
+            ConfigurationInteractionStatePolicy.accepts(
                 state(nil),
                 interactionID: interactionID,
                 requiresScopedIdentity: false
             )
-        )
-    }
-
-    func testConfigurationVerificationUsesExplicitProviderEvidenceOnly() {
-        func state(
-            authenticated: Bool? = nil,
-            terminal: Bool? = false,
-            outcome: String? = "pending",
-            hostUnavailable: Bool? = false,
-            verificationPerformed: Bool? = false,
-            refreshPerformed: Bool? = nil,
-            error: String? = nil
-        ) -> AndroidBridgeUIState {
-            AndroidBridgeUIState(
-                interactionID: UUID().uuidString,
-                revision: 1,
-                kind: "configuration",
-                method: "choice",
-                visible: false,
-                title: "Configure",
-                inputCount: 0,
-                imageCount: 0,
-                buttons: [],
-                controls: [],
-                texts: [],
-                phase: "processing",
-                provider: nil,
-                authenticated: authenticated,
-                credentialPush: false,
-                remoteInput: false,
-                generation: 1,
-                outcome: outcome,
-                terminal: terminal,
-                hostUnavailable: hostUnavailable,
-                verificationPerformed: verificationPerformed,
-                refreshPerformed: refreshPerformed,
-                error: error
-            )
-        }
-
-        XCTAssertEqual(
-            ConfigurationInteractionVerificationPolicy.decision(
-                for: state(authenticated: true),
-                semantic: .command
-            ),
-            .pending
-        )
-        XCTAssertEqual(
-            ConfigurationInteractionVerificationPolicy.decision(
-                for: state(authenticated: true, hostUnavailable: true),
-                semantic: .qrAuthorization
-            ),
-            .pending
-        )
-        XCTAssertEqual(
-            ConfigurationInteractionVerificationPolicy.decision(
-                for: state(authenticated: true, verificationPerformed: true),
-                semantic: .qrAuthorization
-            ),
-            .pending
-        )
-        XCTAssertEqual(
-            ConfigurationInteractionVerificationPolicy.decision(
-                for: state(authenticated: true, refreshPerformed: true),
-                semantic: .qrAuthorization
-            ),
-            .verifySucceeded(refreshPerformed: true)
-        )
-        XCTAssertEqual(
-            ConfigurationInteractionVerificationPolicy.decision(
-                for: state(authenticated: false, error: "invalid token"),
-                semantic: .credentialAuthorization
-            ),
-            .verifyFailed("invalid token")
-        )
-        XCTAssertEqual(
-            ConfigurationInteractionVerificationPolicy.decision(
-                for: state(terminal: true, outcome: "cancelled"),
-                semantic: .command
-            ),
-            .terminalCancelled
-        )
-        XCTAssertEqual(
-            ConfigurationInteractionVerificationPolicy.decision(
-                for: state(terminal: true, outcome: "completed"),
-                semantic: .choice
-            ),
-            .terminalSucceeded
         )
     }
 
@@ -3613,52 +3375,6 @@ final class OKVideoMacTests: XCTestCase {
                 NSError(domain: "test", code: 1),
                 ownsSession: true
             )
-        )
-    }
-
-    func testBlankImageIsNotPublishedAsQRCode() {
-        XCTAssertNil(
-            AndroidBridgeQRCodePolicy.validatedSnapshot(
-                Data(repeating: 0xFF, count: 1_024)
-            )
-        )
-        XCTAssertNil(AndroidBridgeQRCodePolicy.validatedSnapshot(nil))
-    }
-
-    func testQRCodeSnapshotSurvivesOneTransientCaptureFailure() {
-        let previous = Data([0x51, 0x52])
-        XCTAssertEqual(
-            AndroidBridgeQRCodePolicy.retainedSnapshot(
-                fresh: nil,
-                previous: previous,
-                currentStateIsQRCode: true
-            ),
-            previous
-        )
-        XCTAssertNil(
-            AndroidBridgeQRCodePolicy.retainedSnapshot(
-                fresh: nil,
-                previous: previous,
-                currentStateIsQRCode: false
-            )
-        )
-        let replacement = Data([0x52, 0x53])
-        XCTAssertEqual(
-            AndroidBridgeQRCodePolicy.retainedSnapshot(
-                fresh: replacement,
-                previous: previous,
-                currentStateIsQRCode: true
-            ),
-            replacement
-        )
-        XCTAssertEqual(
-            AndroidBridgeQRCodePolicy.retainedSnapshot(
-                fresh: nil,
-                previous: previous,
-                currentStateIsQRCode: false,
-                retainsPendingAuthorization: true
-            ),
-            previous
         )
     }
 
@@ -3693,175 +3409,6 @@ final class OKVideoMacTests: XCTestCase {
                 hiddenPollCount: 40,
                 maximumHiddenPollCount: 40
             )
-        )
-    }
-
-    func testCloudAuthorizationSubmittedControlMustAdvanceItsUIGeneration() {
-        XCTAssertFalse(
-            CloudAuthorizationPollingPolicy.shouldFailUnchangedSubmission(
-                elapsed: 7.9,
-                submittedGeneration: 12,
-                currentGeneration: 12,
-                hasObservedTransition: false,
-                isVisible: true
-            )
-        )
-        XCTAssertTrue(
-            CloudAuthorizationPollingPolicy.shouldFailUnchangedSubmission(
-                elapsed: 8,
-                submittedGeneration: 12,
-                currentGeneration: 12,
-                hasObservedTransition: false,
-                isVisible: true
-            )
-        )
-        XCTAssertFalse(
-            CloudAuthorizationPollingPolicy.shouldFailUnchangedSubmission(
-                elapsed: 20,
-                submittedGeneration: 12,
-                currentGeneration: 13,
-                hasObservedTransition: true,
-                isVisible: true
-            )
-        )
-    }
-
-    func testQRCodeExitRequiresStableGenerationTransitionBeforeVerification() {
-        XCTAssertTrue(
-            CloudAuthorizationPollingPolicy.shouldVerifyAfterQRCodeExit(
-                hasObservedQRCode: true,
-                currentStateIsQRCode: false,
-                actionKind: .authorization,
-                consecutiveExitPollCount: 3,
-                exitInterval: 1,
-                hasGenerationTransition: true
-            )
-        )
-        XCTAssertFalse(
-            CloudAuthorizationPollingPolicy.shouldVerifyAfterQRCodeExit(
-                hasObservedQRCode: true,
-                currentStateIsQRCode: true,
-                actionKind: .authorization,
-                consecutiveExitPollCount: 3,
-                exitInterval: 1,
-                hasGenerationTransition: true
-            )
-        )
-        XCTAssertFalse(
-            CloudAuthorizationPollingPolicy.shouldVerifyAfterQRCodeExit(
-                hasObservedQRCode: true,
-                currentStateIsQRCode: false,
-                actionKind: .ordering,
-                consecutiveExitPollCount: 3,
-                exitInterval: 1,
-                hasGenerationTransition: true
-            )
-        )
-        XCTAssertFalse(
-            CloudAuthorizationPollingPolicy.shouldVerifyAfterQRCodeExit(
-                hasObservedQRCode: true,
-                currentStateIsQRCode: false,
-                actionKind: .authorization,
-                consecutiveExitPollCount: 1,
-                exitInterval: 0,
-                hasGenerationTransition: true
-            )
-        )
-        XCTAssertFalse(
-            CloudAuthorizationPollingPolicy.shouldVerifyAfterQRCodeExit(
-                hasObservedQRCode: true,
-                currentStateIsQRCode: false,
-                actionKind: .authorization,
-                consecutiveExitPollCount: 3,
-                exitInterval: 1,
-                hasGenerationTransition: false
-            )
-        )
-    }
-
-    func testQRCodeExitWaitsForOriginalProviderWorker() {
-        XCTAssertTrue(
-            CloudAuthorizationPollingPolicy.isWaitingForProviderWorker(
-                workerReturned: nil
-            )
-        )
-        XCTAssertTrue(
-            CloudAuthorizationPollingPolicy.isWaitingForProviderWorker(
-                workerReturned: false
-            )
-        )
-        XCTAssertFalse(
-            CloudAuthorizationPollingPolicy.isWaitingForProviderWorker(
-                workerReturned: true
-            )
-        )
-    }
-
-    func testMyDriveAuthorizationRequiresSelectedAccountStatusChange() throws {
-        let target = try XCTUnwrap(
-            MyDriveAuthorizationVerificationPolicy.target(
-                controlID: "account-uc",
-                title: "我的优沫-未登录"
-            )
-        )
-        XCTAssertEqual(target.accountKey, "我的优沫")
-        XCTAssertEqual(target.initialStatus, .unauthenticated)
-
-        let authenticated = try JSONDecoder().decode(
-            AndroidBridgeUIState.self,
-            from: Data(#"""
-            {
-              "kind": "authorization",
-              "visible": true,
-              "title": "配置操作",
-              "inputCount": 0,
-              "imageCount": 0,
-              "buttons": ["我的优沫-已登录"],
-              "controls": [{
-                "id": "account-uc",
-                "title": "我的优沫-已登录",
-                "enabled": true,
-                "clickable": true,
-                "role": "clickable"
-              }],
-              "workerReturned": true
-            }
-            """#.utf8)
-        )
-        XCTAssertEqual(
-            MyDriveAuthorizationVerificationPolicy.decision(
-                target: target,
-                state: authenticated
-            ),
-            .authenticated
-        )
-
-        let unauthenticated = try JSONDecoder().decode(
-            AndroidBridgeUIState.self,
-            from: Data(#"""
-            {
-              "visible": true,
-              "title": "配置操作",
-              "inputCount": 0,
-              "imageCount": 0,
-              "buttons": ["我的优沫-未登录"],
-              "controls": [{
-                "id": "rebuilt-account-uc",
-                "title": "我的优沫-未登录",
-                "enabled": true,
-                "clickable": true,
-                "role": "clickable"
-              }],
-              "workerReturned": true
-            }
-            """#.utf8)
-        )
-        XCTAssertEqual(
-            MyDriveAuthorizationVerificationPolicy.decision(
-                target: target,
-                state: unauthenticated
-            ),
-            .unauthenticated
         )
     }
 
@@ -4051,30 +3598,6 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testCloudAccountBridgeDefaultFalseIsNotExplicitLogoutEvidence() {
-        XCTAssertFalse(
-            CloudAccountBridgeEvidencePolicy.isExplicitlyUnauthenticated(
-                authenticated: false,
-                verificationPerformed: nil,
-                error: nil
-            )
-        )
-        XCTAssertFalse(
-            CloudAccountBridgeEvidencePolicy.isExplicitlyUnauthenticated(
-                authenticated: false,
-                verificationPerformed: true,
-                error: nil
-            )
-        )
-        XCTAssertTrue(
-            CloudAccountBridgeEvidencePolicy.isExplicitlyUnauthenticated(
-                authenticated: false,
-                verificationPerformed: true,
-                error: "invalid credential"
-            )
-        )
-    }
-
     func testCloudAccountClearCommandOnlyInvalidatesMatchingAccount() {
         let providerID = CloudAccountProviderIdentity.identifier(
             capability: .javaDexSpider,
@@ -4129,468 +3652,49 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertFalse(String(describing: restored).contains("Token"))
     }
 
-    func testReconciledAccountActionPreservesProviderAuthorizationTitle() {
-        let action = CloudAuthorizationAction(
-            id: "account-uc",
-            title: "我的优汐 - 已登录",
-            providerTitle: "我的优汐 - 未登录"
-        )
-
-        XCTAssertNotNil(
-            MyDriveAuthorizationVerificationPolicy.target(
-                controlID: action.id,
-                title: action.providerTitle
-            )
-        )
-        XCTAssertEqual(action.title, "我的优汐 - 已登录")
-    }
-
-    func testMyDriveAuthorizationRejectsQRCodeExitAndUnrelatedLogin() throws {
-        let target = try XCTUnwrap(
-            MyDriveAuthorizationVerificationPolicy.target(
-                controlID: "account-uc",
-                title: "我的优沫-未登录"
-            )
-        )
-        let hiddenAfterQRCodeExit = try JSONDecoder().decode(
-            AndroidBridgeUIState.self,
-            from: Data(#"""
-            {
-              "visible": false,
-              "title": "",
-              "inputCount": 0,
-              "imageCount": 0,
-              "buttons": [],
-              "phase": "processing",
-              "workerReturned": true,
-              "generation": 21
-            }
-            """#.utf8)
-        )
-        XCTAssertEqual(
-            MyDriveAuthorizationVerificationPolicy.decision(
-                target: target,
-                state: hiddenAfterQRCodeExit
-            ),
-            .pending
-        )
-
-        let anotherAccount = try JSONDecoder().decode(
-            AndroidBridgeUIState.self,
-            from: Data(#"""
-            {
-              "visible": true,
-              "title": "配置操作",
-              "inputCount": 0,
-              "imageCount": 0,
-              "buttons": ["我的夸父-已登录"],
-              "controls": [{
-                "id": "account-uc",
-                "title": "我的夸父-已登录",
-                "enabled": true,
-                "clickable": true,
-                "role": "clickable"
-              }],
-              "workerReturned": true
-            }
-            """#.utf8)
-        )
-        XCTAssertEqual(
-            MyDriveAuthorizationVerificationPolicy.decision(
-                target: target,
-                state: anotherAccount
-            ),
-            .pending
-        )
-    }
-
-    func testMyDriveAuthorizationRequiresNewMediaCategoryForHomeFallback() {
-        let baselineHome = SiteHome(
-            categories: [
-                VideoCategory(id: "quark", name: "夸克网盘"),
-                VideoCategory(
-                    id: "settings",
-                    name: "设置",
-                    contentKind: .action
-                )
-            ],
-            recommendations: []
-        )
-        let baseline = MyDriveAuthorizationVerificationPolicy
-            .authorizedCategoryIDs(in: baselineHome)
-        XCTAssertEqual(baseline, Set(["quark"]))
-
-        let unchangedHome = SiteHome(
-            categories: [
-                VideoCategory(id: "quark", name: "夸克网盘"),
-                VideoCategory(
-                    id: "login",
-                    name: "登录",
-                    contentKind: .action
-                )
-            ],
-            recommendations: []
-        )
-        XCTAssertFalse(
-            MyDriveAuthorizationVerificationPolicy
-                .confirmsNewAuthorizedCategory(
-                    baseline: baseline,
-                    home: unchangedHome
-                )
-        )
-
-        let ucAuthorizedHome = SiteHome(
-            categories: [
-                VideoCategory(id: "quark", name: "夸克网盘"),
-                VideoCategory(id: "uc", name: "UC 网盘")
-            ],
-            recommendations: []
-        )
-        XCTAssertTrue(
-            MyDriveAuthorizationVerificationPolicy
-                .confirmsNewAuthorizedCategory(
-                    baseline: baseline,
-                    home: ucAuthorizedHome
-                )
-        )
-    }
-
-    func testMyDriveAuthorizationDoesNotInferHomeDeltaWithoutBaseline() {
-        let home = SiteHome(
-            categories: [VideoCategory(id: "uc", name: "UC 网盘")],
-            recommendations: []
-        )
-        XCTAssertFalse(
-            MyDriveAuthorizationVerificationPolicy
-                .confirmsNewAuthorizedCategory(
-                    baseline: nil,
-                    home: home
-                )
-        )
-    }
-
-    func testMyDriveAuthorizationRequiresStablePostQRCodeStorageChange() {
-        XCTAssertFalse(
-            MyDriveAuthorizationStorageEvidencePolicy.confirmsStableChange(
-                baseline: "before",
-                candidate: "after",
-                stablePollCount: 1
-            )
-        )
-        XCTAssertTrue(
-            MyDriveAuthorizationStorageEvidencePolicy.confirmsStableChange(
-                baseline: "before",
-                candidate: "after",
-                stablePollCount: 2
-            )
-        )
-        XCTAssertFalse(
-            MyDriveAuthorizationStorageEvidencePolicy.confirmsStableChange(
-                baseline: "same",
-                candidate: "same",
-                stablePollCount: 10
-            )
-        )
-        XCTAssertFalse(
-            MyDriveAuthorizationStorageEvidencePolicy.confirmsStableChange(
-                baseline: nil,
-                candidate: "after",
-                stablePollCount: 10
-            )
-        )
-    }
-
-    func testMyDriveAuthorizationAccumulatesStorageChangeAfterQRCodeHides() {
-        let first = MyDriveAuthorizationStorageEvidencePolicy.updatedCandidate(
-            baseline: "qr-visible",
-            candidate: nil,
-            stablePollCount: 0,
-            observed: "authorized"
-        )
-        XCTAssertEqual(first.fingerprint, "authorized")
-        XCTAssertEqual(first.stablePollCount, 1)
-
-        let second = MyDriveAuthorizationStorageEvidencePolicy.updatedCandidate(
-            baseline: "qr-visible",
-            candidate: first.fingerprint,
-            stablePollCount: first.stablePollCount,
-            observed: "authorized"
-        )
-        XCTAssertEqual(second.fingerprint, "authorized")
-        XCTAssertEqual(second.stablePollCount, 2)
-        XCTAssertTrue(
-            MyDriveAuthorizationStorageEvidencePolicy.confirmsStableChange(
-                baseline: "qr-visible",
-                candidate: second.fingerprint,
-                stablePollCount: second.stablePollCount
-            )
-        )
-    }
-
-    func testMyDriveAuthorizationResetsUnstableHiddenStorageCandidate() {
-        let reset = MyDriveAuthorizationStorageEvidencePolicy.updatedCandidate(
-            baseline: "qr-visible",
-            candidate: "partial-write",
-            stablePollCount: 1,
-            observed: "qr-visible"
-        )
-        XCTAssertNil(reset.fingerprint)
-        XCTAssertEqual(reset.stablePollCount, 0)
-    }
-
-    func testMyDriveAuthorizationRefreshesBaselineDuringFirstQRCodeFrame() {
-        XCTAssertEqual(
-            MyDriveAuthorizationStorageEvidencePolicy
-                .baselineAfterObservingQRCode(
-                    existing: "before-click",
-                    observed: "qr-generated",
-                    hadObservedQRCode: false,
-                    workerReturned: false
-                ),
-            "qr-generated"
-        )
-    }
-
-    func testMyDriveAuthorizationPreservesPreClickBaselineWhenWorkerReturned() {
-        XCTAssertEqual(
-            MyDriveAuthorizationStorageEvidencePolicy
-                .baselineAfterObservingQRCode(
-                    existing: "before-click",
-                    observed: "authorized",
-                    hadObservedQRCode: false,
-                    workerReturned: true
-                ),
-            "before-click"
-        )
-    }
-
-    func testMyDriveAuthorizationKeepsFirstQRCodeBaselineOnLaterPolls() {
-        XCTAssertEqual(
-            MyDriveAuthorizationStorageEvidencePolicy
-                .baselineAfterObservingQRCode(
-                    existing: "qr-generated",
-                    observed: "authorized",
-                    hadObservedQRCode: true,
-                    workerReturned: true
-                ),
-            "qr-generated"
-        )
-    }
-
-    func testAndroidBridgeUIStateDecodesOpaqueAuthorizationStorageFingerprint()
-        throws {
+    func testAndroidBridgeUIStateDecodesOnlyScopedSurfaceContract() throws {
+        let interactionID = UUID()
         let state = try JSONDecoder().decode(
             AndroidBridgeUIState.self,
             from: Data(#"""
             {
+              "interactionID": "\#(interactionID.uuidString)",
+              "revision": 8,
+              "kind": "authorization",
+              "phase": "awaitingUser",
+              "generation": 9,
+              "outcome": "stay",
+              "terminal": false,
+              "workerReturned": true,
+              "providerOwnerID": "owner",
+              "configurationID": "configuration",
+              "siteKey": "site",
+              "surfaceActive": true,
+              "surfaceRequestScoped": true,
+              "surfaceInteractionID": "\#(interactionID.uuidString)",
+              "surfaceMode": "actionActivity",
               "visible": true,
-              "title": "网盘授权",
-              "inputCount": 0,
+              "title": "ignored provider title",
+              "inputCount": 1,
               "imageCount": 1,
-              "buttons": [],
-              "phase": "qr",
-              "workerReturned": true,
-              "authorizationStorageFingerprint": "opaque-digest"
+              "buttons": ["ignored"],
+              "controls": [{"id":"ignored"}],
+              "texts": ["ignored"],
+              "uiSchemaVersion": 3,
+              "qrStatus": "generating",
+              "authorizationStorageFingerprint": "ignored"
             }
             """#.utf8)
         )
-        XCTAssertEqual(
-            state.authorizationStorageFingerprint,
-            "opaque-digest"
-        )
-    }
 
-    func testAndroidBridgeUIStateDecodesProviderWorkerLifecycle() throws {
-        let data = Data(#"""
-        {
-          "visible": false,
-          "title": "",
-          "inputCount": 0,
-          "imageCount": 0,
-          "buttons": [],
-          "workerReturned": true,
-          "expectsProviderUI": true
-        }
-        """#.utf8)
-        let state = try JSONDecoder().decode(
-            AndroidBridgeUIState.self,
-            from: data
-        )
+        XCTAssertEqual(state.interactionID, interactionID.uuidString)
+        XCTAssertEqual(state.interactionGeneration, 9)
         XCTAssertEqual(state.workerReturned, true)
-        XCTAssertEqual(state.expectsProviderUI, true)
-    }
-
-    func testAcceptedStructuredControlClicksKeepOrderingDraftOpen() {
-        for semantic in [
-            ConfigurationInteractionSemantic.command,
-            .toggle
-        ] {
-            XCTAssertTrue(
-                ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
-                    semantic: semantic
-                )
-            )
-        }
-        XCTAssertFalse(
-            ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
-                semantic: .order
-            )
-        )
-        XCTAssertFalse(
-            ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
-                semantic: .order,
-                controlTitle: "▲"
-            )
-        )
-        XCTAssertTrue(
-            ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
-                semantic: .order,
-                controlTitle: "保存"
-            )
-        )
-        XCTAssertTrue(
-            ConfigurationControlSubmissionPolicy.acceptedClickCancels(
-                controlTitle: "取消",
-                controlRole: nil
-            )
-        )
-        XCTAssertFalse(
-            ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
-                semantic: .choice
-            )
-        )
-        XCTAssertFalse(
-            ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
-                semantic: .qrAuthorization
-            )
-        )
-        XCTAssertEqual(
-            ConfigurationControlSubmissionPolicy.completionStatus(
-                semantic: .order
-            ),
-            "排序已更新"
-        )
-    }
-
-    func testAndroidConfigurationSurfaceAssociatesLabelsWithArrowControls() {
-        let elements = [
-            AndroidBridgeUIElement(
-                id: "label-quark",
-                type: "label",
-                title: "夸克网盘",
-                order: 0,
-                x: 20,
-                y: 100,
-                width: 120,
-                height: 24
-            ),
-            AndroidBridgeUIElement(
-                id: "up-quark",
-                type: "button",
-                title: "▲",
-                role: "ordering",
-                clickable: true,
-                order: 1,
-                x: 320,
-                y: 98,
-                width: 30,
-                height: 28
-            ),
-            AndroidBridgeUIElement(
-                id: "down-quark",
-                type: "button",
-                title: "▼",
-                role: "ordering",
-                clickable: true,
-                order: 2,
-                x: 360,
-                y: 98,
-                width: 30,
-                height: 28
-            ),
-            AndroidBridgeUIElement(
-                id: "label-uc",
-                type: "label",
-                title: "UC 网盘",
-                order: 3,
-                x: 20,
-                y: 144,
-                width: 120,
-                height: 24
-            )
-        ]
-
-        let rows = AndroidConfigurationSurfaceLayout.rows(elements: elements)
-
-        XCTAssertEqual(rows.count, 2)
-        XCTAssertEqual(rows[0].labels.map(\.title), ["夸克网盘"])
-        XCTAssertEqual(rows[0].actions.map(\.id), ["up-quark", "down-quark"])
-        XCTAssertEqual(rows[1].labels.map(\.title), ["UC 网盘"])
-    }
-
-    func testAndroidConfigurationSurfaceDropsNestedDuplicateButtonLabel() {
-        let elements = [
-            AndroidBridgeUIElement(
-                id: "save",
-                type: "button",
-                title: "保存",
-                clickable: true,
-                x: 300,
-                y: 200,
-                width: 80,
-                height: 32
-            ),
-            AndroidBridgeUIElement(
-                id: "save-label",
-                type: "label",
-                title: "保存",
-                parentID: "save",
-                x: 315,
-                y: 204,
-                width: 50,
-                height: 22
-            )
-        ]
-
-        let rows = AndroidConfigurationSurfaceLayout.rows(elements: elements)
-
-        XCTAssertEqual(rows.count, 1)
-        XCTAssertEqual(rows[0].elements.map(\.id), ["save"])
-    }
-
-    func testAndroidBridgeDecodesStructuredUISchema() throws {
-        let json = """
-        {
-          "visible": true,
-          "title": "播放源排序",
-          "inputCount": 0,
-          "imageCount": 0,
-          "buttons": ["▲"],
-          "uiSchemaVersion": 3,
-          "qrStatus": "generating",
-          "elements": [{
-            "id": "up",
-            "type": "button",
-            "title": "▲",
-            "enabled": true,
-            "clickable": true,
-            "x": 300,
-            "y": 80,
-            "width": 30,
-            "height": 28
-          }]
-        }
-        """
-
-        let state = try JSONDecoder().decode(
-            AndroidBridgeUIState.self,
-            from: Data(json.utf8)
-        )
-
-        XCTAssertEqual(state.uiSchemaVersion, 3)
-        XCTAssertEqual(state.qrStatus, "generating")
-        XCTAssertEqual(state.elements?.first?.id, "up")
-        XCTAssertEqual(state.elements?.first?.normalizedType, "button")
+        XCTAssertEqual(state.providerOwnerID, "owner")
+        XCTAssertEqual(state.configurationID, "configuration")
+        XCTAssertEqual(state.siteKey, "site")
+        XCTAssertTrue(state.hasRequestScopedActionSurface)
+        XCTAssertTrue(state.isAuthorizationPrompt)
     }
 
     func testCloudAuthorizationPlaybackOwnershipRejectsStaleRequests() {
@@ -4911,10 +4015,59 @@ final class OKVideoMacTests: XCTestCase {
             try decode(surfaceID: requestID, terminal: true)
                 .hasRequestScopedActionSurface
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             try decode(surfaceID: requestID, mode: "actionActivity")
                 .hasRequestScopedActionSurface
         )
+    }
+
+    func testAndroidActionSessionIgnoresQRCodeLikeWindowMetadata() throws {
+        let requestID = UUID()
+        let legacy = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: Data(
+                """
+                {
+                  "interactionID":"\(requestID.uuidString)",
+                  "visible":true,
+                  "title":"扫码登录",
+                  "inputCount":1,
+                  "imageCount":1,
+                  "qrImageCount":1,
+                  "buttons":["登录"],
+                  "texts":["二维码"],
+                  "terminal":false,
+                  "surfaceActive":false,
+                  "surfaceRequestScoped":true,
+                  "surfaceInteractionID":"\(requestID.uuidString)",
+                  "surfaceMode":"actionActivity"
+                }
+                """.utf8
+            )
+        )
+        XCTAssertFalse(legacy.isProviderUIPrompt)
+
+        let actionSession = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: Data(
+                """
+                {
+                  "interactionID":"\(requestID.uuidString)",
+                  "visible":false,
+                  "title":"",
+                  "inputCount":0,
+                  "imageCount":0,
+                  "buttons":[],
+                  "terminal":false,
+                  "surfaceActive":true,
+                  "surfaceRequestScoped":true,
+                  "surfaceInteractionID":"\(requestID.uuidString)",
+                  "surfaceMode":"actionActivity"
+                }
+                """.utf8
+            )
+        )
+        XCTAssertTrue(actionSession.isProviderUIPrompt)
     }
 
     @MainActor
@@ -6751,128 +5904,6 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(request.headers["User-Agent"], "Fixture Player")
     }
 
-    func testAndroidBridgeAuthorizationStateUsesStableControlIDs() throws {
-        let data = try XCTUnwrap(
-            """
-            {
-              "kind": "authorization",
-              "visible": true,
-              "title": "请选择网盘",
-              "inputCount": 0,
-              "imageCount": 0,
-              "buttons": ["停用中", "停用中"],
-              "controls": [
-                {"id": "view:103", "title": "我的夸父-未登录", "enabled": true, "role": "button"},
-                {"id": "view:104", "title": "停用中", "enabled": false, "role": "status"}
-              ],
-              "texts": ["网盘配置"],
-              "phase": "chooser",
-              "provider": "quark",
-              "authenticated": false,
-              "generation": 7
-            }
-            """.data(using: .utf8)
-        )
-        let state = try JSONDecoder().decode(
-            AndroidBridgeUIState.self,
-            from: data
-        )
-
-        XCTAssertTrue(state.isAuthorizationPrompt)
-        XCTAssertEqual(
-            state.actionableControls.map(\.id),
-            ["view:103"]
-        )
-        XCTAssertEqual(state.actionableControls.first?.role, "button")
-        XCTAssertEqual(state.generation, 7)
-    }
-
-    func testAndroidBridgeLegacyImageDoesNotImplyQRCode() throws {
-        let data = try XCTUnwrap(
-            """
-            {
-              "visible": true,
-              "title": "请使用网盘 APP 扫码登录",
-              "inputCount": 0,
-              "imageCount": 1,
-              "buttons": []
-            }
-            """.data(using: .utf8)
-        )
-        let state = try JSONDecoder().decode(
-            AndroidBridgeUIState.self,
-            from: data
-        )
-
-        XCTAssertFalse(state.isQRCode)
-        XCTAssertTrue(state.isProviderUIPrompt)
-        XCTAssertFalse(state.isAuthorizationPrompt)
-        XCTAssertTrue(state.actionableControls.isEmpty)
-    }
-
-    func testAndroidBridgeRecognizesOnlyStructuredCredentialPushRole() throws {
-        let data = try XCTUnwrap(
-            """
-            {
-              "kind": "authorization",
-              "visible": true,
-              "title": "Untrusted presentation text",
-              "inputCount": 0,
-              "imageCount": 1,
-              "buttons": [],
-              "texts": ["Untrusted helper text"],
-              "phase": "qr",
-              "provider": "opaque-provider",
-              "credentialPush": true,
-              "providerOwnerID": "android-owner-v1:test-owner",
-              "configurationID": "configuration-a",
-              "siteKey": "site-a",
-              "actionContract": {
-                "credentialSubmission": {
-                  "parameters": {},
-                  "credentialField": "credential"
-                }
-              },
-              "authenticated": false
-            }
-            """.data(using: .utf8)
-        )
-        let state = try JSONDecoder().decode(
-            AndroidBridgeUIState.self,
-            from: data
-        )
-
-        XCTAssertTrue(state.isCredentialPush)
-        XCTAssertTrue(state.isAuthorizationPrompt)
-    }
-
-    func testAndroidBridgeRejectsCredentialPushWithoutExactActionContract()
-        throws {
-        let data = try XCTUnwrap(
-            """
-            {
-              "kind": "authorization",
-              "visible": true,
-              "title": "Untrusted presentation text",
-              "inputCount": 1,
-              "imageCount": 1,
-              "buttons": ["Continue"],
-              "credentialPush": true,
-              "providerOwnerID": "android-owner-v1:test-owner",
-              "configurationID": "configuration-a",
-              "siteKey": "site-a",
-              "authenticated": false
-            }
-            """.data(using: .utf8)
-        )
-        let state = try JSONDecoder().decode(
-            AndroidBridgeUIState.self,
-            from: data
-        )
-
-        XCTAssertFalse(state.isCredentialPush)
-    }
-
     func testAndroidProviderOwnerIdentityIsStableAndFullyScoped() throws {
         let jarURL = try XCTUnwrap(URL(string: "https://example.test/a.jar"))
         let first = AndroidDexBridgeClient.providerOwnerID(
@@ -6909,218 +5940,6 @@ final class OKVideoMacTests: XCTestCase {
                 jarMD5: "abcdef"
             )
         )
-    }
-
-    func testAndroidBridgeDoesNotInferCredentialPushFromTextOrInputCount()
-        throws {
-        let data = try XCTUnwrap(
-            """
-            {
-              "visible": true,
-              "title": "Configuration form",
-              "inputCount": 1,
-              "imageCount": 0,
-              "buttons": ["Continue"],
-              "texts": ["Enter a value"],
-              "phase": "form",
-              "provider": "opaque-provider",
-              "authenticated": false
-            }
-            """.data(using: .utf8)
-        )
-        let state = try JSONDecoder().decode(
-            AndroidBridgeUIState.self,
-            from: data
-        )
-        let interaction = state.configurationInteraction(
-            requestID: UUID(),
-            actionKind: .authorization
-        )
-
-        XCTAssertFalse(state.isCredentialPush)
-        XCTAssertEqual(interaction.actionKind, .authorization)
-        let semantic = ConfigurationInteractionClassificationPolicy
-            .nativeSemantic(
-                interaction: interaction,
-                hasVerifiedQRCode: false,
-                credentialPush: false,
-                state: state
-            )
-        XCTAssertFalse(semantic.isAuthorization)
-        XCTAssertEqual(
-            ConfigurationInteractionClassificationPolicy.interactionKind(
-                for: semantic
-            ),
-            .configuration
-        )
-    }
-
-    func testAndroidBridgeDoesNotPresentRemoteInputHelperAsLoginQRCode() throws {
-        let data = try XCTUnwrap(
-            """
-            {
-              "kind": "authorization",
-              "visible": true,
-              "title": "请输入百度网盘Cookie：",
-              "inputCount": 1,
-              "imageCount": 1,
-              "buttons": ["扫描二维码", "OK"],
-              "texts": ["请扫码或者输入\\nhttp://:9978/proxy?do=input"],
-              "phase": "credentials",
-              "provider": "baidu",
-              "authenticated": false,
-              "remoteInput": true
-            }
-            """.data(using: .utf8)
-        )
-        let state = try JSONDecoder().decode(
-            AndroidBridgeUIState.self,
-            from: data
-        )
-
-        XCTAssertTrue(state.isRemoteInputQRCode)
-        XCTAssertFalse(state.isQRCode)
-        XCTAssertTrue(state.isProviderUIPrompt)
-        XCTAssertTrue(state.isAuthorizationPrompt)
-    }
-
-    func testAndroidBridgeEmptyChooserIsNotAnAuthorizationPrompt() throws {
-        let data = try XCTUnwrap(
-            """
-            {
-              "visible": true,
-              "title": "选择网盘登录方式",
-              "inputCount": 0,
-              "imageCount": 0,
-              "buttons": [],
-              "controls": [],
-              "texts": [],
-              "phase": "chooser",
-              "provider": "",
-              "authenticated": false
-            }
-            """.data(using: .utf8)
-        )
-        let state = try JSONDecoder().decode(
-            AndroidBridgeUIState.self,
-            from: data
-        )
-
-        XCTAssertFalse(state.hasVisibleAuthorizationContent)
-        XCTAssertFalse(state.isProviderUIPrompt)
-        XCTAssertFalse(state.isAuthorizationPrompt)
-    }
-
-    func testAndroidBridgeTextOnlyDisclaimerIsNotAnAuthorizationPrompt() throws {
-        let data = try XCTUnwrap(
-            """
-            {
-              "visible": true,
-              "title": "选择网盘登录方式",
-              "inputCount": 0,
-              "imageCount": 0,
-              "buttons": [],
-              "controls": [],
-              "texts": ["本接口免费分享！切勿上当！"],
-              "phase": "chooser",
-              "provider": "",
-              "authenticated": false
-            }
-            """.data(using: .utf8)
-        )
-        let state = try JSONDecoder().decode(
-            AndroidBridgeUIState.self,
-            from: data
-        )
-
-        XCTAssertTrue(state.hasVisibleAuthorizationContent)
-        XCTAssertFalse(state.isProviderUIPrompt)
-        XCTAssertFalse(state.isAuthorizationPrompt)
-    }
-
-    func testConfigurationInteractionUsesStructuralKindAndClickableControls()
-        throws {
-        let data = try XCTUnwrap(
-            """
-            {
-              "visible": true,
-              "title": "扫码登录（只是误导性显示文本）",
-              "inputCount": 0,
-              "imageCount": 0,
-              "buttons": [],
-              "controls": [
-                {"id": "choice:1", "title": "普通配置", "enabled": true, "clickable": true, "role": "button"},
-                {"id": "status:1", "title": "不可点击状态", "enabled": true, "clickable": false, "role": "status"},
-                {"id": "disabled:1", "title": "已停用", "enabled": false, "clickable": true, "role": "button"}
-              ],
-              "texts": [],
-              "phase": "awaitingUser",
-              "provider": "opaque-provider",
-              "generation": 9
-            }
-            """.data(using: .utf8)
-        )
-        let state = try JSONDecoder().decode(
-            AndroidBridgeUIState.self,
-            from: data
-        )
-        let requestID = UUID()
-        let interaction = state.configurationInteraction(
-            requestID: requestID,
-            actionKind: .configuration
-        )
-
-        XCTAssertEqual(interaction.id, requestID)
-        XCTAssertEqual(interaction.actionKind, .configuration)
-        XCTAssertEqual(interaction.phase, .choice)
-        XCTAssertEqual(interaction.outcome, .pending)
-        XCTAssertEqual(interaction.qrRole, .none)
-        XCTAssertEqual(interaction.controls.map(\.id), ["choice:1"])
-        XCTAssertEqual(interaction.controls.first?.role, .action)
-        XCTAssertEqual(interaction.generation, 9)
-    }
-
-    func testConfigurationInteractionHonorsBridgeOrderingKindWithoutTitleInference()
-        throws {
-        let requestID = UUID()
-        let data = Data(
-            """
-            {
-              "interactionID": "\(requestID.uuidString)",
-              "revision": 12,
-              "kind": "ordering",
-              "method": "action",
-              "visible": true,
-              "title": "登录授权（误导性文本）",
-              "inputCount": 0,
-              "imageCount": 0,
-              "buttons": [],
-              "controls": [
-                {"id":"order:1","title":"第一项","enabled":true,"clickable":true,"role":"action"},
-                {"id":"order:status","title":"状态","enabled":true,"clickable":false,"role":"status"}
-              ],
-              "texts": [],
-              "phase": "awaitingUser",
-              "outcome": "stay",
-              "terminal": false
-            }
-            """.utf8
-        )
-        let state = try JSONDecoder().decode(
-            AndroidBridgeUIState.self,
-            from: data
-        )
-        let interaction = state.configurationInteraction(
-            requestID: requestID,
-            actionKind: .configuration
-        )
-
-        XCTAssertEqual(interaction.actionKind, .ordering)
-        XCTAssertEqual(interaction.phase, .choice)
-        XCTAssertEqual(interaction.outcome, .pending)
-        XCTAssertEqual(interaction.generation, 12)
-        XCTAssertEqual(interaction.controls.map(\.id), ["order:1"])
-        XCTAssertEqual(interaction.qrRole, .none)
     }
 
     func testAndroidActionKindUsesOnlyExplicitProtocolTag() {
@@ -7174,16 +5993,9 @@ final class OKVideoMacTests: XCTestCase {
               "interactionID": "\(requestID.uuidString)",
               "revision": 4,
               "kind": "authorization",
-              "method": "action",
-              "visible": false,
-              "title": "",
-              "inputCount": 0,
-              "imageCount": 0,
-              "buttons": [],
               "phase": "reattaching",
               "outcome": "stay",
-              "terminal": false,
-              "hostUnavailable": true
+              "terminal": false
             }
             """.utf8
         )
@@ -7196,253 +6008,9 @@ final class OKVideoMacTests: XCTestCase {
             actionKind: .configuration
         )
 
-        XCTAssertEqual(state.hostUnavailable, true)
         XCTAssertEqual(interaction.actionKind, .authorization)
         XCTAssertEqual(interaction.phase, .reattaching)
         XCTAssertEqual(interaction.outcome, .pending)
-    }
-
-    func testConfigurationInteractionRequiresValidatedQRCodeForAuthorization()
-        throws {
-        let data = try XCTUnwrap(
-            """
-            {
-              "visible": true,
-              "title": "Native content",
-              "inputCount": 0,
-              "imageCount": 1,
-              "buttons": [],
-              "controls": [],
-              "texts": [],
-              "phase": "awaitingUser"
-            }
-            """.data(using: .utf8)
-        )
-        let state = try JSONDecoder().decode(
-            AndroidBridgeUIState.self,
-            from: data
-        )
-        let requestID = UUID()
-        let imageOnly = state.configurationInteraction(
-            requestID: requestID,
-            actionKind: .configuration
-        )
-        let validated = state.configurationInteraction(
-            requestID: requestID,
-            actionKind: .configuration,
-            validatedQRCode: Data([0x51, 0x52])
-        )
-        let declaredAuthorization = state.configurationInteraction(
-            requestID: requestID,
-            actionKind: .authorization,
-            validatedQRCode: Data([0x51, 0x52])
-        )
-        let declaredAuthorizationWithoutQRCode = state
-            .configurationInteraction(
-                requestID: requestID,
-                actionKind: .authorization
-            )
-
-        XCTAssertEqual(imageOnly.actionKind, .configuration)
-        XCTAssertEqual(imageOnly.qrRole, .none)
-        XCTAssertEqual(imageOnly.phase, .status)
-        XCTAssertEqual(validated.actionKind, .configuration)
-        XCTAssertEqual(validated.qrRole, .candidate)
-        XCTAssertEqual(validated.phase, .qrCode)
-        XCTAssertEqual(declaredAuthorization.actionKind, .authorization)
-        XCTAssertEqual(declaredAuthorization.qrRole, .login)
-        XCTAssertEqual(declaredAuthorization.phase, .qrCode)
-        XCTAssertEqual(
-            declaredAuthorizationWithoutQRCode.actionKind,
-            .authorization
-        )
-        XCTAssertNotEqual(
-            declaredAuthorizationWithoutQRCode.qrRole,
-            .login
-        )
-        XCTAssertFalse(
-            ConfigurationInteractionClassificationPolicy.nativeSemantic(
-                interaction: declaredAuthorizationWithoutQRCode,
-                hasVerifiedQRCode: false,
-                credentialPush: false,
-                state: state
-            ).isAuthorization
-        )
-        XCTAssertEqual(
-            ConfigurationInteractionClassificationPolicy.nativeSemantic(
-                interaction: declaredAuthorization,
-                hasVerifiedQRCode: true,
-                credentialPush: false,
-                state: state
-            ),
-            .qrAuthorization
-        )
-        XCTAssertFalse(
-            ConfigurationInteractionClassificationPolicy
-                .legacySemantic(tag: "qr")
-                .isAuthorization
-        )
-    }
-
-    func testOrderingInteractionCannotBePromotedToAuthorizationByQRCode()
-        throws {
-        let data = try XCTUnwrap(
-            """
-            {
-              "visible": true,
-              "kind": "ordering",
-              "title": "网盘线路前后排序",
-              "inputCount": 0,
-              "imageCount": 1,
-              "buttons": [],
-              "controls": [],
-              "texts": [],
-              "phase": "qr"
-            }
-            """.data(using: .utf8)
-        )
-        let state = try JSONDecoder().decode(
-            AndroidBridgeUIState.self,
-            from: data
-        )
-        let interaction = state.configurationInteraction(
-            requestID: UUID(),
-            actionKind: .configuration,
-            validatedQRCode: Data([0x51, 0x52])
-        )
-
-        XCTAssertEqual(interaction.actionKind, .ordering)
-        XCTAssertEqual(interaction.qrRole, .candidate)
-        XCTAssertFalse(
-            ConfigurationInteractionClassificationPolicy.nativeSemantic(
-                interaction: interaction,
-                hasVerifiedQRCode: true,
-                credentialPush: false,
-                state: state
-            ).isAuthorization
-        )
-    }
-
-    func testInteractionHandleRetainsTerminalResponseAfterUIPresentation()
-        async throws {
-        let requestID = UUID()
-        let expected = ConfigurationInteractionTerminalResponse(
-            requestID: requestID,
-            outcome: .succeeded,
-            providerResult: .string("provider-final-result"),
-            error: nil,
-            httpStatusCode: 200,
-            refreshPerformed: nil
-        )
-        let handle = InteractionHandle(
-            id: requestID,
-            actionKind: .configuration
-        ) {
-            try await Task.sleep(nanoseconds: 10_000_000)
-            return expected
-        }
-        let presented = ConfigurationInteraction(
-            id: requestID,
-            actionKind: .configuration,
-            phase: .choice,
-            outcome: .pending,
-            title: "Choose",
-            provider: nil,
-            generation: 1,
-            controls: [],
-            qrRole: .none,
-            qrImage: nil
-        )
-
-        await handle.record(presented)
-        let firstRead = try await handle.finalResponse()
-        let secondRead = try await handle.finalResponse()
-        let latest = await handle.latestInteraction()
-
-        XCTAssertEqual(firstRead, expected)
-        XCTAssertEqual(secondRead, expected)
-        XCTAssertEqual(latest, presented)
-    }
-
-    func testInteractionHandleUsesOneRequestIDForEveryScopedOperation()
-        async throws {
-        let requestID = UUID()
-        let expected = ConfigurationInteractionTerminalResponse(
-            requestID: requestID,
-            outcome: .succeeded,
-            providerResult: .string("final"),
-            error: nil,
-            httpStatusCode: 200,
-            refreshPerformed: nil
-        )
-        let handle = InteractionHandle(
-            id: requestID,
-            actionKind: .configuration,
-            stateProvider: { receivedID in
-                guard receivedID == requestID else {
-                    throw AppError.spider("state request id mismatch")
-                }
-                return try JSONDecoder().decode(
-                    AndroidBridgeUIState.self,
-                    from: Data(
-                        """
-                        {"interactionID":"\(requestID.uuidString)","visible":false,"title":"","inputCount":0,"imageCount":0,"buttons":[],"phase":"processing","outcome":"stay","terminal":false}
-                        """.utf8
-                    )
-                )
-            },
-            snapshotProvider: { receivedID in
-                guard receivedID == requestID else {
-                    throw AppError.spider("snapshot request id mismatch")
-                }
-                return Data([0x01, 0x02])
-            },
-            submitProvider: {
-                receivedID, _, _, _, generation in
-                guard receivedID == requestID else {
-                    throw AppError.spider("submit request id mismatch")
-                }
-                return AndroidBridgeUISubmitResult(
-                    clicked: true,
-                    stale: false,
-                    generation: generation
-                )
-            },
-            verifyProvider: {
-                receivedID, succeeded, _, refreshPerformed in
-                guard receivedID == requestID, succeeded else {
-                    throw AppError.spider("verify request id mismatch")
-                }
-                return ConfigurationInteractionTerminalResponse(
-                    requestID: receivedID,
-                    outcome: .succeeded,
-                    providerResult: nil,
-                    error: nil,
-                    httpStatusCode: 200,
-                    refreshPerformed: refreshPerformed
-                )
-            }
-        ) { expected }
-
-        let state = try await handle.currentState()
-        let snapshot = try await handle.snapshot()
-        let submission = try await handle.submit(
-            text: nil,
-            button: "",
-            controlID: "control:1",
-            generation: 7
-        )
-        let verification = try await handle.verify(
-            succeeded: true,
-            actualRefreshPerformed: false
-        )
-
-        XCTAssertEqual(state.interactionID, requestID.uuidString)
-        XCTAssertEqual(snapshot, Data([0x01, 0x02]))
-        XCTAssertEqual(submission.generation, 7)
-        XCTAssertEqual(verification.requestID, requestID)
-        XCTAssertEqual(verification.providerResult, .string("final"))
-        XCTAssertNil(verification.refreshPerformed)
     }
 
     func testInteractionHandleWaitsForScopedCancellationAcknowledgement()
@@ -7501,201 +6069,6 @@ final class OKVideoMacTests: XCTestCase {
 
         let events = await recorder.events
         XCTAssertEqual(events, ["start:\(requestID)", "ack:\(requestID)"])
-    }
-
-    func testAppStateScopedVerificationPreservesDelayedProviderTerminalResult()
-        async throws {
-        let requestID = UUID()
-        let providerTerminal = ConfigurationInteractionTerminalResponse(
-            requestID: requestID,
-            outcome: .succeeded,
-            providerResult: .object([
-                "url": .string("provider-owned-result")
-            ]),
-            error: nil,
-            httpStatusCode: 200,
-            refreshPerformed: true
-        )
-        let handle = InteractionHandle(
-            id: requestID,
-            actionKind: .playback,
-            verifyProvider: {
-                receivedID, succeeded, _, refreshPerformed in
-                XCTAssertEqual(receivedID, requestID)
-                XCTAssertTrue(succeeded)
-                return ConfigurationInteractionTerminalResponse(
-                    requestID: receivedID,
-                    outcome: .succeeded,
-                    providerResult: nil,
-                    error: nil,
-                    httpStatusCode: 200,
-                    refreshPerformed: refreshPerformed
-                )
-            }
-        ) {
-            // Reproduce the real race: the state verification endpoint becomes
-            // terminal just before the original `/v1/invoke` returns its value.
-            try await Task.sleep(nanoseconds: 50_000_000)
-            return providerTerminal
-        }
-        let observer = Task {
-            try await handle.finalResponse()
-        }
-
-        await AppState.verifyScopedConfigurationInteraction(
-            handle,
-            succeeded: true,
-            actualRefreshPerformed: false,
-            providerResultGraceNanoseconds: 1_000_000_000
-        )
-        let observed = try await observer.value
-        let repeatedTerminal = try await handle.finalResponse()
-
-        XCTAssertEqual(observed, providerTerminal)
-        XCTAssertEqual(repeatedTerminal.providerResult, providerTerminal.providerResult)
-    }
-
-    func testAppStateScopedVerificationPublishesBoundedFallbackOnce()
-        async throws {
-        let requestID = UUID()
-        let verifiedFallback = ConfigurationInteractionTerminalResponse(
-            requestID: requestID,
-            outcome: .succeeded,
-            providerResult: nil,
-            error: nil,
-            httpStatusCode: 200,
-            refreshPerformed: false
-        )
-        let handle = InteractionHandle(
-            id: requestID,
-            actionKind: .authorization,
-            verifyProvider: { _, _, _, _ in verifiedFallback }
-        ) {
-            try await Task.sleep(nanoseconds: 5_000_000_000)
-            return ConfigurationInteractionTerminalResponse(
-                requestID: requestID,
-                outcome: .succeeded,
-                providerResult: .string("too-late"),
-                error: nil,
-                httpStatusCode: 200,
-                refreshPerformed: nil
-            )
-        }
-        let observer = Task {
-            try await handle.finalResponse()
-        }
-
-        await AppState.verifyScopedConfigurationInteraction(
-            handle,
-            succeeded: true,
-            actualRefreshPerformed: false,
-            providerResultGraceNanoseconds: 5_000_000
-        )
-        let first = try await observer.value
-        let repeated = try await handle.finalResponse()
-
-        XCTAssertEqual(first, verifiedFallback)
-        XCTAssertEqual(repeated, verifiedFallback)
-    }
-
-    func testScopedVerificationUsesReturnedOutcomeForProviderResultGrace()
-        async throws {
-        let requestID = UUID()
-        let providerTerminal = ConfigurationInteractionTerminalResponse(
-            requestID: requestID,
-            outcome: .succeeded,
-            providerResult: .string("delayed-provider-result"),
-            error: nil,
-            httpStatusCode: 200,
-            refreshPerformed: true
-        )
-        let handle = InteractionHandle(
-            id: requestID,
-            actionKind: .configuration,
-            verifyProvider: { receivedID, succeeded, _, _ in
-                XCTAssertEqual(receivedID, requestID)
-                XCTAssertFalse(succeeded)
-                return ConfigurationInteractionTerminalResponse(
-                    requestID: receivedID,
-                    outcome: .succeeded,
-                    providerResult: nil,
-                    error: nil,
-                    httpStatusCode: 200,
-                    refreshPerformed: false
-                )
-            }
-        ) {
-            try await Task.sleep(nanoseconds: 50_000_000)
-            return providerTerminal
-        }
-        let observer = Task {
-            try await handle.finalResponse()
-        }
-
-        await AppState.verifyScopedConfigurationInteraction(
-            handle,
-            succeeded: false,
-            error: "stale-host-input",
-            actualRefreshPerformed: false,
-            providerResultGraceNanoseconds: 1_000_000_000
-        )
-        let observed = try await observer.value
-        let repeated = try await handle.finalResponse()
-
-        XCTAssertEqual(observed, providerTerminal)
-        XCTAssertEqual(repeated, providerTerminal)
-    }
-
-    func testScopedVerificationThrowWinsOverLateProviderSuccessOnce()
-        async throws {
-        let requestID = UUID()
-        let verificationMessage = "scoped verification failed"
-        let handle = InteractionHandle(
-            id: requestID,
-            actionKind: .authorization,
-            verifyProvider: { _, _, _, _ in
-                throw AppError.spider(verificationMessage)
-            }
-        ) {
-            try await Task.sleep(nanoseconds: 100_000_000)
-            return ConfigurationInteractionTerminalResponse(
-                requestID: requestID,
-                outcome: .succeeded,
-                providerResult: .string("late-success-must-not-win"),
-                error: nil,
-                httpStatusCode: 200,
-                refreshPerformed: nil
-            )
-        }
-        let observer = Task {
-            try await handle.finalResponse()
-        }
-
-        await AppState.verifyScopedConfigurationInteraction(
-            handle,
-            succeeded: true,
-            providerResultGraceNanoseconds: 1_000_000_000
-        )
-
-        do {
-            _ = try await observer.value
-            XCTFail("Verification failure must be the only terminal result")
-        } catch {
-            XCTAssertTrue(
-                error.localizedDescription.contains(verificationMessage)
-            )
-        }
-        try await Task.sleep(nanoseconds: 150_000_000)
-        do {
-            _ = try await handle.finalResponse()
-            XCTFail(
-                "Late provider success must not replace verification failure"
-            )
-        } catch {
-            XCTAssertTrue(
-                error.localizedDescription.contains(verificationMessage)
-            )
-        }
     }
 
     func testAndroidBridgeTerminalResponseUsesActualScopedOutcomeAndRefresh()
@@ -9605,7 +7978,7 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testAndroidDexFailedInvocationAllowsLateAuthorizationUIToWin()
+    func testAndroidDexFailedInvocationIgnoresUnscopedLegacyUI()
         async throws {
         let hidden = try JSONDecoder().decode(
             AndroidBridgeUIState.self,
@@ -9645,11 +8018,11 @@ final class OKVideoMacTests: XCTestCase {
                 states.removeFirst()
             }
 
-        XCTAssertEqual(resolved, authorization)
+        XCTAssertNil(resolved)
         XCTAssertTrue(states.isEmpty)
     }
 
-    func testAndroidDexRequestKeepsObservingWhenNativeUIArrivesAfterOneSecond()
+    func testAndroidDexRequestDoesNotInferPromptFromLegacyWindowContent()
         async throws {
         let hidden = try JSONDecoder().decode(
             AndroidBridgeUIState.self,
@@ -9679,7 +8052,7 @@ final class OKVideoMacTests: XCTestCase {
                 return pollCount >= 12 ? authorization : hidden
             }
 
-        XCTAssertEqual(resolved, authorization)
+        XCTAssertNil(resolved)
         XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(startedAt), 1)
     }
 

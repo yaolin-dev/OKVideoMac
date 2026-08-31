@@ -47,7 +47,6 @@ final class BridgeServer {
     static final int PORT = 9978;
     private static final String TAG = "OKVideoDexBridge";
     private static final int MAX_BODY_BYTES = 8 * 1024 * 1024;
-    private static final int MAX_CREDENTIAL_BODY_BYTES = 72 * 1024;
     // The Mac client can issue 20 provider calls at once. Keep additional
     // workers available for health, authorization UI, and playback proxy
     // requests so a saturated search cannot make the bridge appear dead.
@@ -284,7 +283,6 @@ final class BridgeServer {
                                     .versionName
                     );
                     health.put("generation", runtimeGeneration);
-                    health.put("uiSchemaVersion", 3);
                     health.put("interactionSchemaVersion", 2);
                     health.put(
                             "interactionCapabilities",
@@ -412,71 +410,6 @@ final class BridgeServer {
                     );
                     return;
                 }
-                String snapshotInteraction = interactionID(path, "/snapshot");
-                if ("GET".equals(method) && snapshotInteraction != null) {
-                    if (!acceptsInvocation(snapshotInteraction)) {
-                        writeJSON(
-                                output,
-                                409,
-                                staleInteraction(snapshotInteraction)
-                        );
-                        return;
-                    }
-                    try {
-                        writeBytes(
-                                output,
-                                200,
-                                "image/png",
-                                BridgeActivity.snapshotUI(
-                                        context,
-                                        snapshotInteraction
-                                )
-                        );
-                    } catch (IllegalStateException unavailable) {
-                        if (!BridgeInteractionRegistry.ownsLatest(
-                                snapshotInteraction
-                        ) || BridgeInteractionRegistry.terminal(
-                                snapshotInteraction
-                        )) {
-                            writeJSON(
-                                    output,
-                                    409,
-                                    staleInteraction(snapshotInteraction)
-                            );
-                            return;
-                        }
-                        JSONObject pending = BridgeInteractionRegistry.state(
-                                snapshotInteraction
-                        );
-                        pending.put("ok", false);
-                        pending.put("error", "Interaction UI is not ready");
-                        writeJSON(output, 425, pending);
-                    }
-                    return;
-                }
-                String submitInteraction = interactionID(path, "/submit");
-                if ("POST".equals(method) && submitInteraction != null) {
-                    JSONObject payload = readJSONPayload(input, headers, MAX_BODY_BYTES);
-                    if (!acceptsInvocation(submitInteraction)) {
-                        writeJSON(
-                                output,
-                                409,
-                                staleInteraction(submitInteraction)
-                        );
-                        return;
-                    }
-                    JSONObject submitted = submitUI(
-                            context,
-                            submitInteraction,
-                            payload
-                    );
-                    writeJSON(
-                            output,
-                            submitted.optBoolean("stale", false) ? 409 : 200,
-                            submitted
-                    );
-                    return;
-                }
                 String cancelInteraction = interactionID(path, "/cancel");
                 if ("POST".equals(method) && cancelInteraction != null) {
                     BridgeInteractionRegistry.cancel(cancelInteraction);
@@ -495,39 +428,6 @@ final class BridgeServer {
                     );
                     return;
                 }
-                String verifyInteraction = interactionID(path, "/verify");
-                if ("POST".equals(method) && verifyInteraction != null) {
-                    JSONObject payload = readJSONPayload(
-                            input,
-                            headers,
-                            MAX_BODY_BYTES
-                    );
-                    String outcome = payload.optString("outcome", "")
-                            .trim()
-                            .toLowerCase(Locale.ROOT);
-                    boolean succeeded = payload.has("succeeded")
-                            ? payload.optBoolean("succeeded", false)
-                            : "completed".equals(outcome)
-                            || "success".equals(outcome)
-                            || "succeeded".equals(outcome);
-                    Boolean refreshPerformed = payload.has("refreshPerformed")
-                            && !payload.isNull("refreshPerformed")
-                            ? Boolean.valueOf(
-                                    payload.optBoolean("refreshPerformed", false)
-                            )
-                            : null;
-                    JSONObject verified = BridgeInteractionRegistry.verified(
-                            verifyInteraction,
-                            succeeded,
-                            payload.optString("error", ""),
-                            refreshPerformed
-                    );
-                    if (verified.optBoolean("terminal", false)) {
-                        releaseTerminalInteraction(context, verifyInteraction);
-                    }
-                    writeJSON(output, 200, verified);
-                    return;
-                }
                 if ("GET".equals(method) && "/v1/ui/state".equals(path)) {
                     String latest = BridgeInteractionRegistry.latestID();
                     writeJSON(
@@ -536,18 +436,6 @@ final class BridgeServer {
                             withProviderOwner(
                                     BridgeActivity.uiState(context, latest),
                                     latest
-                            )
-                    );
-                    return;
-                }
-                if ("GET".equals(method) && "/v1/ui/snapshot".equals(path)) {
-                    writeBytes(
-                            output,
-                            200,
-                            "image/png",
-                            BridgeActivity.snapshotUI(
-                                    context,
-                                    BridgeInteractionRegistry.latestID()
                             )
                     );
                     return;
@@ -617,70 +505,6 @@ final class BridgeServer {
                         return;
                     }
                     writeProxy(output, response, "HEAD".equals(method));
-                    return;
-                }
-                if ("POST".equals(method) && "/v1/ui/submit".equals(path)) {
-                    JSONObject payload = readJSONPayload(input, headers, MAX_BODY_BYTES);
-                    String latest = BridgeInteractionRegistry.latestID();
-                    if (!acceptsInvocation(latest)) {
-                        writeJSON(output, 409, staleInteraction(latest));
-                        return;
-                    }
-                    JSONObject submitted = submitUI(
-                            context,
-                            latest,
-                            payload
-                    );
-                    writeJSON(
-                            output,
-                            submitted.optBoolean("stale", false) ? 409 : 200,
-                            submitted
-                    );
-                    return;
-                }
-                if ("POST".equals(method) && "/v1/auth/push".equals(target)) {
-                    String contentType = headers.get("content-type");
-                    if (contentType == null
-                            || !contentType.toLowerCase(Locale.ROOT)
-                            .startsWith("application/json")) {
-                        writeJSON(
-                                output,
-                                415,
-                                failure("Content-Type must be application/json")
-                        );
-                        return;
-                    }
-                    int length = parseLength(headers.get("content-length"));
-                    if (length <= 0 || length > MAX_CREDENTIAL_BODY_BYTES) {
-                        writeJSON(output, 413, failure("Invalid request size"));
-                        return;
-                    }
-                    JSONObject payload = new JSONObject(
-                            new String(readExactly(input, length), StandardCharsets.UTF_8)
-                    );
-                    final boolean accepted;
-                    try {
-                        accepted = DexSpiderRegistry.get(context)
-                                .submitCloudCredential(payload);
-                    } catch (IllegalArgumentException contractError) {
-                        writeJSON(output, 422, failure(contractError.getMessage()));
-                        return;
-                    } catch (IllegalStateException staleOwner) {
-                        writeJSON(output, 409, failure(staleOwner.getMessage()));
-                        return;
-                    }
-                    if (!accepted) {
-                        writeJSON(
-                                output,
-                                502,
-                                failure("Cloud credential handler rejected the request")
-                        );
-                        return;
-                    }
-                    JSONObject response = new JSONObject();
-                    response.put("ok", true);
-                    response.put("accepted", true);
-                    writeJSON(output, 200, response);
                     return;
                 }
                 if (!"POST".equals(method) || !"/v1/invoke".equals(target)) {
@@ -1070,33 +894,6 @@ final class BridgeServer {
     @FunctionalInterface
     private interface ThrowingAction {
         void run() throws Exception;
-    }
-
-    private static JSONObject submitUI(
-            Context context,
-            String interactionID,
-            JSONObject payload
-    ) throws Exception {
-        synchronized (INTERACTION_LIFECYCLE_LOCK) {
-            if (!acceptsInvocation(interactionID)) {
-                JSONObject stale = staleInteraction(interactionID);
-                stale.put("clicked", false);
-                stale.put("stale", true);
-                return stale;
-            }
-            return BridgeActivity.submitUI(
-                    context,
-                    interactionID,
-                    payload.optString("text", null),
-                    payload.optString("button", ""),
-                    payload.has("controlID") && !payload.isNull("controlID")
-                            ? payload.optString("controlID", null)
-                            : null,
-                    payload.has("generation") && !payload.isNull("generation")
-                            ? payload.optInt("generation")
-                            : null
-            );
-        }
     }
 
     static String requestPath(String target) {

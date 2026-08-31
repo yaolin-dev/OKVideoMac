@@ -482,31 +482,6 @@ enum NodeUserFacingErrorMapper {
     }
 }
 
-struct CloudAuthorizationAction: Identifiable, Equatable {
-    let id: String
-    let title: String
-    /// Provider-owned title before the host reconciles a persisted account
-    /// status for display. Authorization verification must always inspect
-    /// this value so presentation state cannot change provider semantics.
-    let providerTitle: String
-    let role: String?
-    let generation: Int?
-
-    init(
-        id: String,
-        title: String,
-        providerTitle: String? = nil,
-        role: String? = nil,
-        generation: Int? = nil
-    ) {
-        self.id = id
-        self.title = title
-        self.providerTitle = providerTitle ?? title
-        self.role = role
-        self.generation = generation
-    }
-}
-
 enum CloudAccountSnapshotStatus: String, Codable, Equatable, Sendable {
     case authenticated
     case unauthenticated
@@ -922,18 +897,6 @@ enum CloudAccountProviderIdentity {
     }
 }
 
-enum CloudAccountBridgeEvidencePolicy {
-    static func isExplicitlyUnauthenticated(
-        authenticated: Bool?,
-        verificationPerformed: Bool?,
-        error: String?
-    ) -> Bool {
-        authenticated == false
-            && verificationPerformed == true
-            && error?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-    }
-}
-
 enum CloudPlaybackAuthorizationFailurePolicy {
     static func isExplicit(_ message: String) -> Bool {
         let normalized = message.trimmingCharacters(
@@ -945,35 +908,6 @@ enum CloudPlaybackAuthorizationFailurePolicy {
             "授权失效", "授权过期", "cookie失效", "cookie过期",
             "token失效", "token过期", "http 401", "http 403"
         ].contains(where: normalized.contains)
-    }
-}
-
-private extension AndroidBridgeUIElement {
-    func replacingTitle(_ title: String) -> AndroidBridgeUIElement {
-        AndroidBridgeUIElement(
-            id: id,
-            type: type,
-            title: title,
-            role: role,
-            enabled: enabled,
-            clickable: clickable,
-            selected: selected,
-            checked: checked,
-            selectedIndex: selectedIndex,
-            value: value,
-            maximumValue: maximumValue,
-            hint: hint,
-            hasValue: hasValue,
-            parentID: parentID,
-            resourceName: resourceName,
-            className: className,
-            order: order,
-            depth: depth,
-            x: x,
-            y: y,
-            width: width,
-            height: height
-        )
     }
 }
 
@@ -1198,14 +1132,6 @@ enum ConfigurationPresentationTargetPolicy {
     }
 }
 
-enum CloudAuthorizationQRCodeState: String, Equatable {
-    case idle
-    case generating
-    case ready
-    case expired
-    case notFound
-}
-
 enum CloudAuthorizationPlaybackOwnershipPolicy {
     static func isCurrent(
         requestID: UUID,
@@ -1281,7 +1207,10 @@ enum AndroidActionSurfaceLeasePolicy {
               let expectedGeneration,
               frame.generation == expectedGeneration,
               !frame.runtimeGeneration.isEmpty,
-              ["providerwindow", "externalactivity", "delegatedactivity"]
+              [
+                "actionactivity", "providerwindow",
+                "externalactivity", "delegatedactivity"
+              ]
                 .contains(frame.surfaceMode),
               frame.frameSequence > 0,
               frame.pixelWidth > 0,
@@ -1315,24 +1244,8 @@ struct CloudAuthorizationPrompt: Identifiable, Equatable {
     var transport: ConfigurationInteractionTransport
     var lifecyclePhase: ConfigurationInteractionPhase
     var presentationTarget: CloudAuthorizationPresentationTarget
-    var qrState: CloudAuthorizationQRCodeState
     var status: String?
-    var phase: String?
-    var provider: String?
-    var hasTextInput: Bool
-    var usesSecureInput: Bool
-    var credentialPush: Bool
-    var displaysLoginQRCode: Bool
     var allowsRetry: Bool
-    var actions: [CloudAuthorizationAction]
-    var snapshot: Data?
-    var uiSchemaVersion: Int? = nil
-    var elements: [AndroidBridgeUIElement] = []
-    var supportingTexts: [String] = []
-
-    var structuredRows: [AndroidConfigurationSurfaceRow] {
-        AndroidConfigurationSurfaceLayout.rows(elements: elements)
-    }
 }
 
 /// FongMi treats an action result message like `Notify.show`: it is optional,
@@ -1752,30 +1665,8 @@ enum CloudAuthorizationRetryPolicy {
     }
 }
 
-enum CloudAuthorizationCompletionPolicy {
-    static func shouldComplete(
-        authenticated: Bool,
-        interactionKind: CloudInteractionKind,
-        hasObservedPrompt: Bool,
-        hasObservedQRCode: Bool,
-        hiddenPollCount: Int
-    ) -> Bool {
-        // Retained only as a compatibility seam for older tests/callers. UI
-        // visibility, a decoded QR image and a bridge authentication snapshot
-        // are observations, not the terminal result of the request that
-        // created the interaction. Success is published exclusively by the
-        // request-scoped InteractionHandle terminal response (or by the
-        // immediate provider call returning normally before a UI is created).
-        // In particular, a window disappearing must never become success.
-        false
-    }
-}
-
 enum CloudAuthorizationPollingPolicy {
     static let maximumHiddenPollCount = 40
-    static let maximumUnchangedSubmissionInterval: TimeInterval = 8
-    static let minimumQRCodeExitPollCount = 3
-    static let minimumQRCodeExitInterval: TimeInterval = 1
 
     static func shouldTimeOut(
         hiddenPollCount: Int,
@@ -1784,319 +1675,19 @@ enum CloudAuthorizationPollingPolicy {
         hiddenPollCount >= max(1, maximumHiddenPollCount)
     }
 
-    static func shouldFailUnchangedSubmission(
-        elapsed: TimeInterval,
-        submittedGeneration: Int?,
-        currentGeneration: Int?,
-        hasObservedTransition: Bool,
-        isVisible: Bool,
-        maximumInterval: TimeInterval = maximumUnchangedSubmissionInterval
-    ) -> Bool {
-        guard isVisible,
-              !hasObservedTransition,
-              let submittedGeneration,
-              let currentGeneration,
-              submittedGeneration == currentGeneration else {
-            return false
-        }
-        return elapsed >= max(0, maximumInterval)
-    }
-
-    static func shouldVerifyAfterQRCodeExit(
-        hasObservedQRCode: Bool,
-        currentStateIsQRCode: Bool,
-        actionKind: ConfigurationInteraction.ActionKind?,
-        consecutiveExitPollCount: Int,
-        exitInterval: TimeInterval,
-        hasGenerationTransition: Bool
-    ) -> Bool {
-        hasObservedQRCode
-            && !currentStateIsQRCode
-            && actionKind == .authorization
-            && consecutiveExitPollCount >= minimumQRCodeExitPollCount
-            && exitInterval >= minimumQRCodeExitInterval
-            && hasGenerationTransition
-    }
-
-    static func isWaitingForProviderWorker(
-        workerReturned: Bool?
-    ) -> Bool {
-        workerReturned != true
-    }
 }
 
-enum MyDriveAuthorizationAccountStatus: Equatable, Sendable {
-    case authenticated
-    case unauthenticated
-    case unknown
-}
-
-struct MyDriveAuthorizationTarget: Equatable, Sendable {
-    let controlID: String?
-    let accountKey: String
-    let initialStatus: MyDriveAuthorizationAccountStatus
-}
-
-enum MyDriveAuthorizationVerificationDecision: Equatable, Sendable {
-    case authenticated
-    case unauthenticated
+enum ConfigurationInteractionTerminalDecision: Equatable, Sendable {
     case pending
-}
-
-/// MyDriveGuard exposes the account being authorized as a chooser row whose
-/// stable identity remains the same when its suffix changes from 未登录 to
-/// 已登录. A QR disappearing, an Android generation change, or the provider
-/// worker returning is never account evidence on its own.
-enum MyDriveAuthorizationVerificationPolicy {
-    private static let authenticatedMarkers = ["已登录", "已登入", "已授权"]
-    private static let unauthenticatedMarkers = ["未登录", "未登入", "未授权"]
-
-    static func target(
-        controlID: String?,
-        title: String
-    ) -> MyDriveAuthorizationTarget? {
-        let initialStatus = status(in: title)
-        guard initialStatus == .unauthenticated,
-              let accountKey = accountKey(in: title) else {
-            return nil
-        }
-        return MyDriveAuthorizationTarget(
-            controlID: controlID?.nonEmpty,
-            accountKey: accountKey,
-            initialStatus: initialStatus
-        )
-    }
-
-    static func decision(
-        target: MyDriveAuthorizationTarget?,
-        state: AndroidBridgeUIState
-    ) -> MyDriveAuthorizationVerificationDecision {
-        guard let target,
-              target.initialStatus == .unauthenticated else {
-            return .pending
-        }
-        let candidates = state.actionableControls.map {
-            (id: Optional($0.id), title: $0.title)
-        } + (state.texts ?? []).map {
-            (id: Optional<String>.none, title: $0)
-        } + (state.elements ?? []).map {
-            (id: Optional($0.id), title: $0.title)
-        }
-        var observedUnauthenticated = false
-        for candidate in candidates {
-            let candidateStatus = status(in: candidate.title)
-            guard candidateStatus != .unknown else { continue }
-            let candidateAccountKey = accountKey(in: candidate.title)
-            let sameAccount = candidateAccountKey == target.accountKey
-            // Android view identifiers can be positional and may be reused
-            // when the provider reconstructs its chooser. Prefer the account
-            // identity whenever the title contains one; use the control only
-            // for a generic status-only row.
-            let sameStatusOnlyControl = candidateAccountKey == nil
-                && target.controlID != nil
-                && candidate.id == target.controlID
-            guard sameAccount || sameStatusOnlyControl else { continue }
-            if candidateStatus == .authenticated {
-                return .authenticated
-            }
-            observedUnauthenticated = true
-        }
-        return observedUnauthenticated ? .unauthenticated : .pending
-    }
-
-    static func status(in title: String) -> MyDriveAuthorizationAccountStatus {
-        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        if unauthenticatedMarkers.contains(where: normalized.contains) {
-            return .unauthenticated
-        }
-        if authenticatedMarkers.contains(where: normalized.contains) {
-            return .authenticated
-        }
-        return .unknown
-    }
-
-    /// MyDriveGuard exposes every usable cloud account as a media category on
-    /// its home response. Comparing stable category identifiers before and
-    /// after an authorization attempt gives us a second authoritative signal
-    /// when the legacy Android dialog destroys both the QR child and its
-    /// chooser parent before the Mac can capture the changed account row.
-    static func authorizedCategoryIDs(in home: SiteHome?) -> Set<String>? {
-        guard let home else { return nil }
-        return Set(
-            home.categories
-                .filter { $0.resolvedContentKind == .media }
-                .map(\.id)
-        )
-    }
-
-    static func confirmsNewAuthorizedCategory(
-        baseline: Set<String>?,
-        home: SiteHome
-    ) -> Bool {
-        guard let baseline else { return false }
-        let current = authorizedCategoryIDs(in: home) ?? []
-        return !current.subtracting(baseline).isEmpty
-    }
-
-    private static func accountKey(in title: String) -> String? {
-        CloudAccountStatusTitlePolicy.accountKey(in: title)
-    }
-}
-
-/// MyDrive's legacy QR dialogs can remain visible after the provider has
-/// already persisted the account credential. The Android Bridge exposes only
-/// an opaque preference digest. Require the changed digest to remain stable
-/// across multiple polls so a transient/partial preference write cannot
-/// complete the authorization by itself.
-enum MyDriveAuthorizationStorageEvidencePolicy {
-    static let requiredStablePollCount = 2
-
-    /// Provider callbacks may not return until after the phone has completed
-    /// authorization. Seed the digest before clicking the account row, then
-    /// allow the first visible QR frame to replace it only while the provider
-    /// worker is still active. This filters QR-generation writes without
-    /// allowing a post-login digest to become the baseline.
-    static func baselineAfterObservingQRCode(
-        existing: String?,
-        observed: String?,
-        hadObservedQRCode: Bool,
-        workerReturned: Bool?
-    ) -> String? {
-        guard let observed = observed?.nonEmpty else { return existing }
-        if !hadObservedQRCode, workerReturned != true {
-            return observed
-        }
-        return existing?.nonEmpty ?? observed
-    }
-
-    static func confirmsStableChange(
-        baseline: String?,
-        candidate: String?,
-        stablePollCount: Int
-    ) -> Bool {
-        guard let baseline = baseline?.nonEmpty,
-              let candidate = candidate?.nonEmpty,
-              candidate != baseline else {
-            return false
-        }
-        return stablePollCount >= requiredStablePollCount
-    }
-
-    /// Accumulates the same opaque post-QR digest across visible and hidden
-    /// provider states. Some providers close their QR window immediately
-    /// after persisting credentials, so limiting this observation to visible
-    /// QR frames loses the only authoritative storage transition.
-    static func updatedCandidate(
-        baseline: String?,
-        candidate: String?,
-        stablePollCount: Int,
-        observed: String?
-    ) -> (fingerprint: String?, stablePollCount: Int) {
-        guard let baseline = baseline?.nonEmpty,
-              let observed = observed?.nonEmpty,
-              observed != baseline else {
-            return (nil, 0)
-        }
-        if candidate?.nonEmpty == observed {
-            return (observed, max(0, stablePollCount) + 1)
-        }
-        return (observed, 1)
-    }
-}
-
-/// Legacy CatVod commands and one-shot toggles persist inside their clicked
-/// Android callback and often publish no second terminal response. Ordering
-/// controls are different: arrow clicks mutate a draft dialog and only its
-/// own save/cancel control is terminal. Treating every arrow as completion
-/// closes the Mac surface after one move and loses the provider's draft.
-enum ConfigurationControlSubmissionPolicy {
-    static func acceptedClickCompletes(
-        semantic: ConfigurationInteractionSemantic,
-        controlTitle: String? = nil,
-        controlRole: String? = nil
-    ) -> Bool {
-        switch semantic {
-        case .command, .toggle: return true
-        case .order:
-            return isOrderingCommit(
-                title: controlTitle,
-                role: controlRole
-            )
-        default: return false
-        }
-    }
-
-    static func acceptedClickCancels(
-        controlTitle: String,
-        controlRole: String?
-    ) -> Bool {
-        let value = normalizedControlText(
-            title: controlTitle,
-            role: controlRole
-        )
-        return ["取消", "关闭", "返回", "cancel", "close", "dismiss"]
-            .contains(value)
-    }
-
-    private static func isOrderingCommit(
-        title: String?,
-        role: String?
-    ) -> Bool {
-        let value = normalizedControlText(title: title, role: role)
-        return [
-            "保存", "确定", "应用", "完成", "提交",
-            "save", "confirm", "apply", "done", "submit"
-        ].contains(value)
-    }
-
-    private static func normalizedControlText(
-        title: String?,
-        role: String?
-    ) -> String {
-        let normalizedRole = role?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased() ?? ""
-        if ["cancel", "dismiss", "close", "save", "confirm", "apply"]
-            .contains(normalizedRole) {
-            return normalizedRole
-        }
-        return title?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased() ?? ""
-    }
-
-    static func completionStatus(
-        semantic: ConfigurationInteractionSemantic
-    ) -> String {
-        switch semantic {
-        case .order:
-            return "排序已更新"
-        case .toggle:
-            return "设置已更新"
-        default:
-            return semantic.isAuthorization
-                ? "授权成功，正在刷新网盘内容…"
-                : "配置操作已完成"
-        }
-    }
-}
-
-enum ConfigurationInteractionVerificationDecision: Equatable, Sendable {
-    case pending
-    case verifySucceeded(refreshPerformed: Bool?)
-    case verifyFailed(String)
     case terminalSucceeded
     case terminalFailed(String?)
     case terminalCancelled
 }
 
-/// Converts request-scoped bridge state into an explicit host action. Neither
-/// UI visibility nor a generation change is a business result. A login flow
-/// may be verified only after the provider's refreshed status explicitly says
-/// that it is authenticated (or supplies an explicit verification error).
-/// Other configuration commands remain owned by the provider worker's
-/// terminal response.
-enum ConfigurationInteractionVerificationPolicy {
+/// Accepts only state owned by the active request and recognizes an explicit
+/// terminal marker. Surface visibility is presentation state, never a business
+/// result; a scoped provider handle still owns the authoritative final value.
+enum ConfigurationInteractionStatePolicy {
     static func accepts(
         _ state: AndroidBridgeUIState,
         interactionID: UUID,
@@ -2109,9 +1700,8 @@ enum ConfigurationInteractionVerificationPolicy {
     }
 
     static func decision(
-        for state: AndroidBridgeUIState,
-        semantic: ConfigurationInteractionSemantic
-    ) -> ConfigurationInteractionVerificationDecision {
+        for state: AndroidBridgeUIState
+    ) -> ConfigurationInteractionTerminalDecision {
         let normalizedOutcome = state.outcome?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
@@ -2141,19 +1731,6 @@ enum ConfigurationInteractionVerificationPolicy {
             }
         }
 
-        guard state.hostUnavailable != true,
-              state.verificationPerformed != true,
-              (semantic == .qrAuthorization
-                || semantic == .credentialAuthorization) else {
-            return .pending
-        }
-        if state.authenticated == true {
-            return .verifySucceeded(refreshPerformed: state.refreshPerformed)
-        }
-        if state.authenticated == false,
-           let error = state.error?.nonEmpty {
-            return .verifyFailed(error)
-        }
         return .pending
     }
 }
@@ -2171,95 +1748,14 @@ enum ConfigurationInteractionClassificationPolicy {
         case "choice": return .choice
         case "order": return .order
         // Legacy tags are presentation hints, not proof that the provider is
-        // performing authorization. The live provider interaction must first
-        // declare authorization and then expose verified login UI before the
-        // host upgrades the prompt semantics.
+        // performing authorization. Only the request's declared action kind
+        // may select authorization semantics.
         case "qr", "qr-authorization", "qrauthorization",
              "credential", "credentials":
             return .legacy
         case "web": return .web
         case "native": return .native
         default: return .legacy
-        }
-    }
-
-    private static func structuralNativeSemantic(
-        inputCount: Int,
-        controlRoles: [String?]
-    ) -> ConfigurationInteractionSemantic {
-        let roles = controlRoles.compactMap {
-            $0?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        }
-        if roles.contains(where: { $0 == "toggle" || $0 == "switch" }) {
-            return .toggle
-        }
-        if roles.contains(where: { $0 == "order" || $0 == "reorder" }) {
-            return .order
-        }
-        if !controlRoles.isEmpty { return .choice }
-        return .native
-    }
-
-    static func nativeSemantic(
-        interaction: ConfigurationInteraction?,
-        hasVerifiedQRCode: Bool,
-        credentialPush: Bool,
-        state: AndroidBridgeUIState
-    ) -> ConfigurationInteractionSemantic {
-        // A bitmap merely being decodable as a QR code is not enough to call
-        // an arbitrary configuration surface "authorization". The provider
-        // must explicitly own an authorization interaction and identify the
-        // image as its login QR code.
-        if hasVerifiedQRCode,
-           (interaction?.actionKind == .authorization
-                || interaction?.actionKind == .playback),
-           interaction?.qrRole == .login {
-            return .qrAuthorization
-        }
-        if interaction?.actionKind == .authorization,
-           credentialPush {
-            return .credentialAuthorization
-        }
-        switch interaction?.actionKind {
-        case .command, .immediate:
-            return .command
-        case .toggle:
-            return .toggle
-        case .ordering:
-            return .order
-        case .webSetting:
-            return .web
-        case .nativeSetting:
-            return .native
-        case .configuration, .authorization, .playback, nil:
-            break
-        }
-        let structuralSemantic = structuralNativeSemantic(
-            inputCount: 0,
-            controlRoles: state.actionableControls.map(\.role)
-        )
-        switch interaction?.phase {
-        case .choice:
-            switch structuralSemantic {
-            case .toggle, .order:
-                return structuralSemantic
-            default:
-                return .choice
-            }
-        case .form:
-            switch structuralSemantic {
-            case .toggle, .order, .choice:
-                return structuralSemantic
-            default:
-                return .native
-            }
-        case .qrCode:
-            // Candidate/helper/credential-push images remain generic native
-            // configuration UI. Only the explicit login case above is auth.
-            return .native
-        case .invoking, .transitioning, .reattaching, .status, .completed, .failed,
-             .cancelled, nil:
-            return structuralSemantic
         }
     }
 
@@ -3256,37 +2752,11 @@ private struct CloudAuthorizationContext {
     /// The host stores it only for the live prompt and returns it verbatim;
     /// source/provider labels never select a credential target.
     var providerOwnerID: String?
-    var actionContract: JSONValue?
     var providerHandle: InteractionHandle?
     var providerInteraction: ConfigurationInteraction?
     var operation: PendingCloudOperation
-    var submittedAt: Date?
-    /// First request-scoped observation that the provider is waiting for a
-    /// login QR. Unlike `submittedAt`, this also covers providers that open a
-    /// QR directly from `play()` without a preceding chooser click.
-    var qrExpectedAt: Date?
-    var submittedGeneration: Int?
     var hasObservedPrompt: Bool
-    var hasObservedQRCode: Bool
-    var lastObservedQRCodeGeneration: Int?
-    var hasObservedPostSubmissionTransition: Bool
     var lastObservedRevision: Int?
-    var hasRequestedVerification: Bool
-    var lastAuthorizationProbeAt: Date?
-    /// Exact chooser row selected before MyDriveGuard displayed a login QR.
-    /// A later QR/window transition is successful only when this same account
-    /// is observed as authenticated.
-    var myDriveAuthorizationTarget: MyDriveAuthorizationTarget?
-    /// Stable media-category identifiers visible before the selected account
-    /// opened its QR. A newly available category after the worker returns is
-    /// accepted as authorization evidence when the legacy chooser disappears.
-    var myDriveAuthorizedCategoryIDsAtStart: Set<String>?
-    /// Opaque Android preference digest captured once the selected account's
-    /// QR is visible. A later stable change proves provider auth storage was
-    /// updated even when the legacy QR dialog never closes.
-    var myDriveAuthorizationStorageFingerprintAtQRCode: String?
-    var myDriveAuthorizationStorageCandidateFingerprint: String?
-    var myDriveAuthorizationStorageStablePollCount: Int
 }
 
 enum PlaybackRequestOrigin: Equatable, Sendable {
@@ -6573,25 +6043,11 @@ final class AppState: ObservableObject {
             requestGeneration: request.generation,
             actionStatusGeneration: actionStatusGeneration,
             providerOwnerID: nil,
-            actionContract: nil,
             providerHandle: providerHandle,
             providerInteraction: providerInteraction,
             operation: operation,
-            submittedAt: nil,
-            qrExpectedAt: nil,
-            submittedGeneration: nil,
             hasObservedPrompt: false,
-            hasObservedQRCode: false,
-            lastObservedQRCodeGeneration: nil,
-            hasObservedPostSubmissionTransition: false,
-            lastObservedRevision: nil,
-            hasRequestedVerification: false,
-            lastAuthorizationProbeAt: nil,
-            myDriveAuthorizationTarget: nil,
-            myDriveAuthorizedCategoryIDsAtStart: nil,
-            myDriveAuthorizationStorageFingerprintAtQRCode: nil,
-            myDriveAuthorizationStorageCandidateFingerprint: nil,
-            myDriveAuthorizationStorageStablePollCount: 0
+            lastObservedRevision: nil
         )
         cloudAuthorizationPrompt = presentsPlaceholder
             ? CloudAuthorizationPrompt(
@@ -6607,19 +6063,10 @@ final class AppState: ObservableObject {
             presentationTarget: cloudAuthorizationPresentationTarget(
                 for: operation
             ),
-            qrState: .idle,
             status: phase == .invoking
                 ? "正在执行配置操作…"
                 : "正在等待站点创建下一步操作界面…",
-            phase: nil,
-            provider: nil,
-            hasTextInput: false,
-            usesSecureInput: false,
-            credentialPush: false,
-            displaysLoginQRCode: false,
-            allowsRetry: false,
-            actions: [],
-            snapshot: nil
+            allowsRetry: false
         )
             : nil
         return request.interactionID
@@ -6685,9 +6132,6 @@ final class AppState: ObservableObject {
         prompt.lifecyclePhase = phase
         if let status { prompt.status = status }
         if let allowsRetry { prompt.allowsRetry = allowsRetry }
-        if phase == .processing || phase == .completed || phase == .failed {
-            prompt.actions = []
-        }
         if phase.isTerminal {
             cloudAuthorizationSurfaceFrame = nil
             lastCloudAuthorizationSurfaceCaptureAt = nil
@@ -6843,7 +6287,7 @@ final class AppState: ObservableObject {
                 generation: context.requestGeneration
               ),
               cloudAuthorizationContext?.operationID == context.operationID,
-              ConfigurationInteractionVerificationPolicy.accepts(
+              ConfigurationInteractionStatePolicy.accepts(
                 state,
                 interactionID: context.operationID,
                 requiresScopedIdentity: context.providerHandle != nil
@@ -6889,18 +6333,13 @@ final class AppState: ObservableObject {
         return true
     }
 
-    /// Returns true when the state is terminal/being verified and therefore
-    /// must not be interpreted as a missing or hidden window by the poller.
-    private func consumeConfigurationVerificationState(
+    /// Returns true when the state is terminal and therefore must not be
+    /// interpreted as a missing or hidden window by the surface poller.
+    private func consumeConfigurationTerminalState(
         _ state: AndroidBridgeUIState,
         context: CloudAuthorizationContext
     ) async -> Bool {
-        let semantic = cloudAuthorizationPrompt?.semantic
-            ?? context.operation.initialSemantic
-        let decision = ConfigurationInteractionVerificationPolicy.decision(
-            for: state,
-            semantic: semantic
-        )
+        let decision = ConfigurationInteractionStatePolicy.decision(for: state)
         switch decision {
         case .pending:
             return false
@@ -6935,92 +6374,6 @@ final class AppState: ObservableObject {
                 break
             }
             return true
-        case .verifySucceeded, .verifyFailed:
-            guard let handle = context.providerHandle else {
-                switch decision {
-                case .verifySucceeded:
-                    await finishCloudAuthorizationAndRetry()
-                case .verifyFailed(let message):
-                    failConfigurationInteraction(
-                        context.operationID,
-                        message: message
-                    )
-                default:
-                    break
-                }
-                return true
-            }
-            if cloudAuthorizationContext?.hasRequestedVerification == true {
-                return true
-            }
-            if var current = cloudAuthorizationContext,
-               current.operationID == context.operationID {
-                current.hasRequestedVerification = true
-                cloudAuthorizationContext = current
-            }
-            transitionConfigurationInteraction(
-                context.operationID,
-                to: .processing,
-                status: "已验证站点状态，正在完成当前配置操作…"
-            )
-            switch decision {
-            case .verifySucceeded(let refreshPerformed):
-                if context.operation.pendingPlayback != nil {
-                    // The monitored playerContent worker owns the media
-                    // result. Verification proves that it may continue; it
-                    // must not install a result-less terminal and force a
-                    // second playerContent request under another session.
-                    transitionConfigurationInteraction(
-                        context.operationID,
-                        to: .processing,
-                        status: "授权已确认，正在等待原播放请求返回媒体…"
-                    )
-                    return true
-                }
-                await Self.verifyScopedConfigurationInteraction(
-                    handle,
-                    succeeded: true,
-                    actualRefreshPerformed: refreshPerformed
-                )
-            case .verifyFailed(let message):
-                await Self.verifyScopedConfigurationInteraction(
-                    handle,
-                    succeeded: false,
-                    error: message,
-                    actualRefreshPerformed: state.refreshPerformed
-                )
-            default:
-                return true
-            }
-            return true
-        }
-    }
-
-    /// A scoped verification and its still-running provider invocation share
-    /// one terminal owner inside `InteractionHandle`. The handle publishes the
-    /// provider response (or a bounded verified fallback) to the observer that
-    /// was installed when the native UI was presented. Returning that response
-    /// to this polling call and processing it here as well would create two
-    /// competing AppState continuations and could discard `providerResult`.
-    static func verifyScopedConfigurationInteraction(
-        _ handle: InteractionHandle,
-        succeeded: Bool,
-        error: String? = nil,
-        actualRefreshPerformed: Bool? = nil,
-        providerResultGraceNanoseconds: UInt64 = 3_000_000_000
-    ) async {
-        do {
-            _ = try await handle.verify(
-                succeeded: succeeded,
-                error: error,
-                actualRefreshPerformed: actualRefreshPerformed,
-                providerResultGraceNanoseconds: providerResultGraceNanoseconds
-            )
-        } catch {
-            // `InteractionHandle.verify` already atomically installed this
-            // failure in the request terminal state. Only the observer created
-            // when the interaction was presented may consume that terminal;
-            // handling it again in this polling path would publish twice.
         }
     }
 
@@ -7360,18 +6713,6 @@ final class AppState: ObservableObject {
     }
 
     private func cloudAccountScopeID(
-        for context: CloudAuthorizationContext
-    ) -> String? {
-        guard let provider = providers[context.sourceIdentity.siteKey] else {
-            return nil
-        }
-        return cloudAccountScopeID(
-            for: provider,
-            sourceIdentity: context.sourceIdentity
-        )
-    }
-
-    private func cloudAccountScopeID(
         for provider: SiteProvider,
         sourceIdentity: HomeContentIdentity?
     ) -> String? {
@@ -7390,100 +6731,6 @@ final class AppState: ObservableObject {
             sourceIdentity.siteKey,
             providerIdentity
         ].joined(separator: ":")
-    }
-
-    /// Reconciles provider UI labels with the credential-free global snapshot.
-    /// Empty/transitional legacy UI does not alter a confirmed account. A
-    /// downgrade is accepted only when the Bridge returns a completed failed
-    /// credential verification with an error, or when a clear/logout command
-    /// succeeds. The current UI capture's default `authenticated: false` is
-    /// transitional metadata and must never revoke a confirmed login.
-    private func observeCloudAccountStatuses(
-        in state: AndroidBridgeUIState,
-        context: CloudAuthorizationContext
-    ) async -> String? {
-        guard configurationInteractionCoordinator.owns(context.operationID),
-              cloudAuthorizationContext?.operationID == context.operationID,
-              let scopeID = cloudAccountScopeID(for: context) else {
-            return nil
-        }
-        let titles = state.actionableControls.map(\.title)
-            + (state.texts ?? [])
-            + (state.elements ?? []).map(\.title)
-        var changed = false
-        let explicitlyUnauthenticated = CloudAccountBridgeEvidencePolicy
-            .isExplicitlyUnauthenticated(
-                authenticated: state.authenticated,
-                verificationPerformed: state.verificationPerformed,
-                error: state.error
-            )
-        for title in Set(titles) {
-            changed = cloudAccountStatusStore.observe(
-                title: title,
-                scopeID: scopeID,
-                explicitlyUnauthenticated: explicitlyUnauthenticated
-            ) || changed
-        }
-        if state.authenticated == true,
-           let target = context.myDriveAuthorizationTarget {
-            changed = cloudAccountStatusStore.confirmAuthenticated(
-                scopeID: scopeID,
-                accountKey: target.accountKey
-            ) || changed
-        }
-        if changed {
-            await persistCloudAccountStatusStore()
-        }
-        guard configurationInteractionCoordinator.owns(context.operationID),
-              cloudAuthorizationContext?.operationID == context.operationID else {
-            return nil
-        }
-        return scopeID
-    }
-
-    private func confirmCloudAccountStatus(
-        for context: CloudAuthorizationContext
-    ) async {
-        guard configurationInteractionCoordinator.owns(context.operationID),
-              cloudAuthorizationContext?.operationID == context.operationID,
-              let target = context.myDriveAuthorizationTarget,
-              let scopeID = cloudAccountScopeID(for: context) else {
-            return
-        }
-        let changed = cloudAccountStatusStore.confirmAuthenticated(
-            scopeID: scopeID,
-            accountKey: target.accountKey
-        )
-        if changed {
-            await persistCloudAccountStatusStore()
-        }
-        await reconcileVisibleCloudAccountStatus(
-            accountLabel: target.accountKey,
-            scopeID: scopeID,
-            context: context
-        )
-    }
-
-    private func reconcileVisibleCloudAccountStatus(
-        accountLabel: String,
-        scopeID: String,
-        context: CloudAuthorizationContext
-    ) async {
-        guard configurationInteractionCoordinator.owns(context.operationID),
-              cloudAuthorizationContext?.operationID == context.operationID,
-              currentHomeContentIdentity == context.sourceIdentity,
-              homeContentIdentity == context.sourceIdentity,
-              var updatedHome = siteHome else {
-            return
-        }
-        updatedHome.actionItems = CloudAccountStatusPresentationPolicy.applying(
-            to: updatedHome.actionItems,
-            accountLabel: accountLabel,
-            scopeID: scopeID,
-            store: cloudAccountStatusStore
-        )
-        publishHomeContent(updatedHome, identity: context.sourceIdentity)
-        await cacheSiteHome(updatedHome, identity: context.sourceIdentity)
     }
 
     private func invalidatePersistedCloudAccountStatus(
@@ -7605,293 +6852,6 @@ final class AppState: ObservableObject {
         return kind == .authorization ? "网盘授权" : "配置操作"
     }
 
-    func submitCloudAuthorization(action: CloudAuthorizationAction) async {
-        guard let environment,
-              let context = cloudAuthorizationContext,
-              configurationInteractionCoordinator.owns(context.operationID),
-              cloudAuthorizationPrompt?.lifecyclePhase == .presenting,
-              isCurrentCloudAuthorizationContext(context) else {
-            cancelActiveCloudAuthorizationInteraction(nextIdentity: nil)
-            return
-        }
-        let submissionSemantic = cloudAuthorizationPrompt?.semantic
-            ?? context.operation.initialSemantic
-        let controlID = action.id.hasPrefix("legacy:")
-            ? nil
-            : action.id
-        if myDriveLoginStatusAction(for: context) != nil,
-           let target = MyDriveAuthorizationVerificationPolicy.target(
-                controlID: controlID,
-                title: action.providerTitle
-           ) {
-            // The legacy provider's submit call can remain suspended until
-            // after the phone has scanned the QR and credentials are already
-            // persisted. Stage the exact row and pre-click storage digest
-            // before entering that call; doing this after `submit` returns
-            // records the successful credential as the baseline and makes the
-            // UI wait forever despite a completed login.
-            let baselineState = try? await configurationInteractionState(
-                for: context
-            )
-            guard configurationInteractionCoordinator.owns(context.operationID),
-                  var current = cloudAuthorizationContext,
-                  current.operationID == context.operationID else {
-                return
-            }
-            current.myDriveAuthorizationTarget = target
-            current.myDriveAuthorizedCategoryIDsAtStart =
-                currentHomeContentIdentity == context.sourceIdentity
-                    ? MyDriveAuthorizationVerificationPolicy
-                        .authorizedCategoryIDs(in: siteHome)
-                    : nil
-            current.myDriveAuthorizationStorageFingerprintAtQRCode =
-                baselineState?.authorizationStorageFingerprint?.nonEmpty
-            current.myDriveAuthorizationStorageCandidateFingerprint = nil
-            current.myDriveAuthorizationStorageStablePollCount = 0
-            cloudAuthorizationContext = current
-        }
-        transitionConfigurationInteraction(
-            context.operationID,
-            to: .submitting,
-            status: "正在提交“\(action.title)”…"
-        )
-        do {
-            let text = cloudAuthorizationInput.nonEmpty
-            let result: AndroidBridgeUISubmitResult
-            if let handle = context.providerHandle {
-                result = try await handle.submit(
-                    text: text,
-                    button: action.title,
-                    controlID: controlID,
-                    generation: action.generation
-                )
-            } else {
-                result = try await environment.androidDexBridge.submitUI(
-                    text: text,
-                    button: action.title,
-                    controlID: controlID,
-                    generation: action.generation,
-                    interactionID: nil
-                )
-            }
-            guard configurationInteractionCoordinator.owns(context.operationID),
-                  cloudAuthorizationContext?.operationID == context.operationID else {
-                return
-            }
-            if result.stale {
-                if let state = try? await configurationInteractionState(
-                    for: context
-                ), acceptConfigurationInteractionState(state, context: context) {
-                    if await consumeConfigurationVerificationState(
-                        state,
-                        context: context
-                    ) {
-                        return
-                    }
-                    if state.isProviderUIPrompt
-                        || state.hasRequestScopedActionSurface {
-                        await updateCloudAuthorizationPrompt(state)
-                    }
-                }
-                throw AppError.spider("操作界面已经更新，请使用刷新后的按钮继续")
-            }
-            guard result.clicked else {
-                throw AppError.spider(
-                    "后台授权窗口中没有找到“\(action.title)”按钮"
-                )
-            }
-            if ConfigurationControlSubmissionPolicy.acceptedClickCancels(
-                controlTitle: action.title,
-                controlRole: action.role
-            ) {
-                clearCloudAuthorization(
-                    resetBridgeUI: false,
-                    markPendingPlaybackCancelled: false,
-                    cancellationReason: .user,
-                    cancelProviderHandle: false
-                )
-                return
-            }
-            if ConfigurationControlSubmissionPolicy.acceptedClickCompletes(
-                semantic: submissionSemantic,
-                controlTitle: action.title,
-                controlRole: action.role
-            ) {
-                if var current = cloudAuthorizationContext,
-                   current.operationID == context.operationID {
-                    current.hasRequestedVerification = true
-                    cloudAuthorizationContext = current
-                }
-                transitionConfigurationInteraction(
-                    context.operationID,
-                    to: .processing,
-                    semantic: submissionSemantic,
-                    status: submissionSemantic == .order
-                        ? "排序操作已提交，正在保存…"
-                        : "设置操作已提交，正在保存…"
-                )
-                if let handle = context.providerHandle {
-                    await Self.verifyScopedConfigurationInteraction(
-                        handle,
-                        succeeded: true
-                    )
-                } else {
-                    await finishCloudAuthorizationAndRetry()
-                }
-                return
-            }
-            if var current = cloudAuthorizationContext,
-               current.operationID == context.operationID {
-                current.submittedAt = Date()
-                current.submittedGeneration = action.generation
-                    ?? result.generation
-                current.hasObservedPostSubmissionTransition = false
-                cloudAuthorizationContext = current
-            }
-            transitionConfigurationInteraction(
-                context.operationID,
-                to: .processing,
-                status: "命令已提交，正在等待站点返回结果…"
-            )
-            try await Task.sleep(nanoseconds: 250_000_000)
-            guard configurationInteractionCoordinator.owns(context.operationID),
-                  cloudAuthorizationContext?.operationID == context.operationID else {
-                return
-            }
-            var consumedState = false
-            var displayedPromptState = false
-            if let state = try? await configurationInteractionState(for: context),
-               acceptConfigurationInteractionState(state, context: context) {
-                consumedState = await consumeConfigurationVerificationState(
-                    state,
-                    context: context
-                )
-                if !consumedState,
-                   state.isProviderUIPrompt
-                    || state.hasRequestScopedActionSurface {
-                    displayedPromptState = true
-                    await updateCloudAuthorizationPrompt(state)
-                }
-            }
-            if !consumedState, !displayedPromptState,
-               var prompt = cloudAuthorizationPrompt {
-                prompt.status = "正在等待下一步配置界面或最终结果…"
-                prompt.phase = "transitioning"
-                prompt.lifecyclePhase = .processing
-                cloudAuthorizationPrompt = prompt
-            }
-            if configurationInteractionCoordinator.owns(context.operationID) {
-                startCloudAuthorizationPolling()
-            }
-        } catch is CancellationError {
-            guard configurationInteractionCoordinator.owns(context.operationID) else {
-                return
-            }
-            clearCloudAuthorization(
-                resetBridgeUI: false,
-                markPendingPlaybackCancelled: false,
-                cancellationReason: .providerCancelled
-            )
-        } catch {
-            if AsyncCancellationPolicy.isCancellation(error) {
-                guard configurationInteractionCoordinator.owns(context.operationID) else {
-                    return
-                }
-                clearCloudAuthorization(
-                    resetBridgeUI: false,
-                    markPendingPlaybackCancelled: false,
-                    cancellationReason: .providerCancelled
-                )
-                return
-            }
-            failConfigurationInteraction(
-                context.operationID,
-                message: error.localizedDescription
-            )
-        }
-    }
-
-    func submitCloudCredential() async {
-        guard let context = cloudAuthorizationContext,
-              configurationInteractionCoordinator.owns(context.operationID),
-              isCurrentCloudAuthorizationContext(context) else {
-            cancelActiveCloudAuthorizationInteraction(nextIdentity: nil)
-            return
-        }
-        guard let environment,
-              let prompt = cloudAuthorizationPrompt,
-              prompt.credentialPush,
-              let providerOwnerID = context.providerOwnerID?.nonEmpty,
-              let actionContract = context.actionContract else {
-            return
-        }
-        let credential = cloudAuthorizationInput
-        guard credential.nonEmpty != nil else {
-            failConfigurationInteraction(
-                context.operationID,
-                message: "请先粘贴 Cookie 或 Token"
-            )
-            return
-        }
-
-        cloudAuthorizationPollTask?.cancel()
-        cloudAuthorizationPollTask = nil
-        transitionConfigurationInteraction(
-            context.operationID,
-            to: .submitting,
-            status: "正在安全提交凭据…"
-        )
-        do {
-            try await environment.androidDexBridge.pushCredential(
-                interactionID: context.operationID,
-                configurationID: context.sourceIdentity.configurationID,
-                siteKey: context.sourceIdentity.siteKey,
-                providerOwnerID: providerOwnerID,
-                actionContract: actionContract,
-                credential: credential
-            )
-            guard configurationInteractionCoordinator.owns(context.operationID),
-                  cloudAuthorizationContext?.operationID == context.operationID else {
-                return
-            }
-            transitionConfigurationInteraction(
-                context.operationID,
-                to: .processing,
-                status: "凭据已提交，正在等待站点确认…"
-            )
-            // A successful bridge submission only proves that the credential
-            // reached the provider. Completion still belongs to the request's
-            // terminal response. Legacy providers without a handle remain in
-            // processing and eventually surface a bounded, retryable timeout.
-            startCloudAuthorizationPolling()
-        } catch is CancellationError {
-            guard configurationInteractionCoordinator.owns(context.operationID) else {
-                return
-            }
-            clearCloudAuthorization(
-                resetBridgeUI: false,
-                markPendingPlaybackCancelled: false,
-                cancellationReason: .providerCancelled
-            )
-        } catch {
-            if AsyncCancellationPolicy.isCancellation(error) {
-                guard configurationInteractionCoordinator.owns(context.operationID) else {
-                    return
-                }
-                clearCloudAuthorization(
-                    resetBridgeUI: false,
-                    markPendingPlaybackCancelled: false,
-                    cancellationReason: .providerCancelled
-                )
-                return
-            }
-            failConfigurationInteraction(
-                context.operationID,
-                message: error.localizedDescription
-            )
-        }
-    }
-
     func cancelCloudAuthorization() async {
         // The Android dialog is a real native window. Merely hiding the
         // SwiftUI layer leaves it stacked behind the app and causes the next
@@ -7930,7 +6890,7 @@ final class AppState: ObservableObject {
                   acceptConfigurationInteractionState(state, context: context) else {
                 return
             }
-            if await consumeConfigurationVerificationState(
+            if await consumeConfigurationTerminalState(
                 state,
                 context: context
             ) {
@@ -8057,7 +7017,7 @@ final class AppState: ObservableObject {
         } else {
             await supersedeConfigurationInteractionIfNeeded()
             guard beginConfigurationInteraction(
-                title: state.title.nonEmpty ?? "配置操作",
+                title: "配置操作",
                 siteKey: siteKey,
                 operation: operation,
                 semantic: operation.initialSemantic,
@@ -8107,66 +7067,13 @@ final class AppState: ObservableObject {
               cloudAuthorizationContext?.operationID == operationID else {
             return
         }
-        let credentialPush = state.isCredentialPush
         let fallbackActionKind = providerHandle?.actionKind
             ?? latestProviderInteraction?.actionKind
             ?? initialProviderInteraction?.actionKind
             ?? .configuration
-        // First resolve the provider-declared kind without an image. A normal
-        // configuration image may be a preview, logo or helper code and must
-        // never trigger QR capture or authorization presentation by itself.
-        let declaredInteraction = state.configurationInteraction(
-            requestID: operationID,
-            actionKind: fallbackActionKind,
-            validatedQRCode: nil
-        )
-        // Some authorization providers rotate an expired QR code without
-        // replacing the Android dialog. Read the small local image on every
-        // authorization poll and only publish when its bytes actually change.
-        let rawSnapshot: Data?
-        if (declaredInteraction.actionKind == .authorization
-                || declaredInteraction.actionKind == .playback),
-           state.imageCount > 0,
-           !credentialPush {
-            if let providerHandle {
-                rawSnapshot = try? await providerHandle.snapshot()
-            } else {
-                rawSnapshot = try? await environment?.androidDexBridge.uiSnapshot()
-            }
-        } else {
-            rawSnapshot = nil
-        }
-        guard configurationInteractionCoordinator.owns(operationID),
-              cloudAuthorizationContext?.operationID == operationID else {
-            return
-        }
-        let freshSnapshot = AndroidBridgeQRCodePolicy.validatedSnapshot(
-            rawSnapshot
-        )
-        // Snapshot capture is intentionally stricter than Android view-tree
-        // classification and can miss one frame while the ImageView redraws.
-        // Within the same request, retain the last decoded login QR until the
-        // bridge reports a stable exit; the poller owns that exit decision.
-        let retainsPendingAuthorization = previous?.interactionID == operationID
-            && previous?.displaysLoginQRCode == true
-            && cloudAuthorizationContext?.hasObservedQRCode == true
-            && cloudAuthorizationContext?.hasRequestedVerification != true
-        let snapshot = AndroidBridgeQRCodePolicy.retainedSnapshot(
-            fresh: freshSnapshot,
-            previous: previous?.snapshot,
-            currentStateIsQRCode: state.isQRCode,
-            retainsPendingAuthorization: retainsPendingAuthorization
-        )
-        let hasVerifiedQRCode = snapshot != nil
-        // QR images often arrive one or more polling generations after the
-        // interaction first becomes visible. Rebuild the interaction from the
-        // current state and current validated snapshot so an explicit login
-        // operation can reliably move candidate -> login without allowing a
-        // configuration/ordering action to be promoted to authorization.
         let providerInteraction = state.configurationInteraction(
             requestID: operationID,
-            actionKind: fallbackActionKind,
-            validatedQRCode: snapshot
+            actionKind: fallbackActionKind
         )
         await providerHandle?.record(providerInteraction)
         guard configurationInteractionCoordinator.owns(operationID),
@@ -8174,164 +7081,25 @@ final class AppState: ObservableObject {
               context.operationID == operationID else {
             return
         }
-        if (providerInteraction.actionKind == .authorization
-                || providerInteraction.actionKind == .playback),
-           !credentialPush,
-           context.qrExpectedAt == nil {
-            context.qrExpectedAt = Date()
-        }
         context.providerInteraction = providerInteraction
         if let owner = state.providerOwnerID?.nonEmpty {
             context.providerOwnerID = owner
         }
-        if let contract = state.actionContract {
-            context.actionContract = contract
-        }
         cloudAuthorizationContext = context
-        let accountScopeID = await observeCloudAccountStatuses(
-            in: state,
-            context: context
-        )
-        guard configurationInteractionCoordinator.owns(operationID),
-              cloudAuthorizationContext?.operationID == operationID else {
-            return
-        }
-        let reconciledAccountTitle: (String) -> String = { [self] title in
-            guard let accountScopeID else { return title }
-            return cloudAccountStatusStore.reconciledTitle(
-                title,
-                scopeID: accountScopeID
-            )
-        }
-        let semantic = ConfigurationInteractionClassificationPolicy
-            .nativeSemantic(
-                interaction: providerInteraction,
-                hasVerifiedQRCode: hasVerifiedQRCode,
-                credentialPush: credentialPush,
-                state: state
-            )
+        let semantic = context.operation.initialSemantic
         let interactionKind = ConfigurationInteractionClassificationPolicy
             .interactionKind(for: semantic)
-        let displaysLoginQRCode = semantic == .qrAuthorization
-            && (providerInteraction.actionKind == .authorization
-                || providerInteraction.actionKind == .playback)
-            && providerInteraction.qrRole == .login
-            && snapshot != nil
-        let expectsLoginQRCode = !credentialPush
-            && snapshot == nil
-            && state.inputCount == 0
-            && state.actionableControls.isEmpty
-            && (providerInteraction.actionKind == .authorization
-                || providerInteraction.actionKind == .playback
-                || cloudAuthorizationContext?.myDriveAuthorizationTarget != nil
-                || previous?.qrState != .idle)
-        let qrState: CloudAuthorizationQRCodeState = {
-            if displaysLoginQRCode { return .ready }
-            switch state.qrStatus?.lowercased() {
-            case "expired": return .expired
-            case "notfound", "not_found": return .notFound
-            case "generating": return .generating
-            default: break
-            }
-            guard expectsLoginQRCode else { return .idle }
-            if let expectedAt = cloudAuthorizationContext?.qrExpectedAt
-                    ?? cloudAuthorizationContext?.submittedAt,
-               Date().timeIntervalSince(expectedAt) >= 12 {
-                return .notFound
-            }
-            return .generating
-        }()
-        let usesSecureInput = providerInteraction.actionKind == .authorization
-            || providerInteraction.actionKind == .playback
-            || credentialPush
-        let lifecyclePhase: ConfigurationInteractionPhase = {
-            if qrState != .idle { return .presenting }
-            guard let context = cloudAuthorizationContext,
-                  context.submittedAt != nil,
-                  !context.hasObservedPostSubmissionTransition else {
-                return .presenting
-            }
-            return .processing
-        }()
-        let phase = credentialPush
-            ? "credentials"
-            : qrState != .idle
-                ? "qr"
-                : state.inputCount > 0
-                    ? "credentials"
-                    : "chooser"
-        if semantic == .qrAuthorization,
-           var context = cloudAuthorizationContext {
-            let hadObservedQRCode = context.hasObservedQRCode
-            context.hasObservedQRCode = true
-            context.lastObservedQRCodeGeneration = state.interactionGeneration
-            if context.myDriveAuthorizationTarget != nil,
-               let fingerprint = state.authorizationStorageFingerprint?.nonEmpty {
-                let baseline = MyDriveAuthorizationStorageEvidencePolicy
-                    .baselineAfterObservingQRCode(
-                        existing: context
-                            .myDriveAuthorizationStorageFingerprintAtQRCode,
-                        observed: fingerprint,
-                        hadObservedQRCode: hadObservedQRCode,
-                        workerReturned: state.workerReturned
-                    )
-                if baseline
-                    != context.myDriveAuthorizationStorageFingerprintAtQRCode {
-                    // The first QR frame is the authoritative baseline while
-                    // the worker is active because some providers persist a
-                    // QR nonce during dialog construction.
-                    context.myDriveAuthorizationStorageFingerprintAtQRCode =
-                        baseline
-                    context.myDriveAuthorizationStorageCandidateFingerprint = nil
-                    context.myDriveAuthorizationStorageStablePollCount = 0
-                } else {
-                    let candidate = MyDriveAuthorizationStorageEvidencePolicy
-                        .updatedCandidate(
-                            baseline: baseline,
-                            candidate: context
-                                .myDriveAuthorizationStorageCandidateFingerprint,
-                            stablePollCount: context
-                                .myDriveAuthorizationStorageStablePollCount,
-                            observed: fingerprint
-                        )
-                    context.myDriveAuthorizationStorageCandidateFingerprint =
-                        candidate.fingerprint
-                    context.myDriveAuthorizationStorageStablePollCount =
-                        candidate.stablePollCount
-                }
-            }
-            cloudAuthorizationContext = context
-        }
-        let upstreamStatus = state.texts?
-            .first(where: {
-                !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    && $0 != state.title
-                    && !$0.localizedCaseInsensitiveContains(
-                        "/proxy?do=input"
-                    )
-            })
-        let freshStatus = state.isRemoteInputQRCode
-            ? "当前辅助输入码不适用于 Mac。请直接粘贴 Cookie，或点击“扫描二维码”生成网盘 App 登录码。"
-            : credentialPush
-            ? "该上游页面不是网盘 APP 登录码。请在下方粘贴 Cookie 或 Token，内容只发送到本机 Android 桥。"
-            : upstreamStatus
-        // A transient Android chooser/QR rebuild must not erase the useful
-        // verification message and then restore it on the next half-second
-        // poll. Preserve the current request's QR status until new upstream
-        // text or a terminal state replaces it.
-        let status = freshStatus
-            ?? (previous?.interactionID == operationID
-                && previous?.displaysLoginQRCode == true
-                ? previous?.status
-                : nil)
+        let lifecyclePhase: ConfigurationInteractionPhase =
+            state.hasRequestScopedActionSurface ? .presenting : .awaitingInterface
+        let status = lifecyclePhase == .presenting
+            ? "请在 Android 原生界面中完成操作"
+            : "正在等待站点创建 Android 操作界面…"
         let updated = CloudAuthorizationPrompt(
             id: previous?.id ?? UUID(),
             interactionID: operationID,
             requestGeneration: context.requestGeneration,
-            title: qrState != .idle
-                ? "网盘授权"
-                : state.title.nonEmpty
-                    ?? (interactionKind == .authorization ? "网盘授权" : "配置操作"),
+            title: configurationInteractionCoordinator.current?.request.title
+                ?? (interactionKind == .authorization ? "网盘授权" : "配置操作"),
             interactionKind: interactionKind,
             semantic: semantic,
             transport: .native,
@@ -8340,40 +7108,8 @@ final class AppState: ObservableObject {
                 ?? cloudAuthorizationPresentationTarget(
                     for: context.operation
                 ),
-            qrState: qrState,
             status: status,
-            phase: phase,
-            provider: state.provider,
-            hasTextInput: state.inputCount > 0 || credentialPush,
-            usesSecureInput: usesSecureInput,
-            credentialPush: credentialPush,
-            displaysLoginQRCode: displaysLoginQRCode,
-            allowsRetry: qrState == .expired || qrState == .notFound
-                || (qrState == .idle
-                    && previous?.interactionID == operationID
-                    && previous?.allowsRetry == true),
-            actions: lifecyclePhase == .presenting
-                && qrState == .idle
-                ? state.actionableControls.map {
-                CloudAuthorizationAction(
-                    id: $0.id,
-                    title: reconciledAccountTitle($0.title),
-                    providerTitle: $0.title,
-                    role: $0.role,
-                    generation: state.interactionGeneration
-                )
-                }
-                : [],
-            snapshot: qrState == .ready ? snapshot : nil,
-            uiSchemaVersion: state.uiSchemaVersion,
-            elements: qrState != .idle
-                ? []
-                : (state.elements ?? []).map {
-                    $0.replacingTitle(reconciledAccountTitle($0.title))
-                },
-            supportingTexts: qrState != .idle
-                ? []
-                : (state.texts ?? []).map(reconciledAccountTitle)
+            allowsRetry: previous?.allowsRetry ?? false
         )
         _ = configurationInteractionCoordinator.transition(
             operationID,
@@ -8610,6 +7346,38 @@ final class AppState: ObservableObject {
         }
     }
 
+    func typeCloudAuthorizationSurfaceText(
+        frame: AndroidActionSurfaceFrame
+    ) async {
+        let text = cloudAuthorizationInput
+        guard let context = cloudAuthorizationContext,
+              isCurrentCloudAuthorizationContext(context),
+              !text.isEmpty,
+              frame.interactionID == context.operationID,
+              let currentFrame = cloudAuthorizationSurfaceFrame,
+              AndroidActionSurfaceLeasePolicy.isExactLease(
+                currentFrame,
+                frame
+              ),
+              let bridge = environment?.androidDexBridge else {
+            return
+        }
+        do {
+            try await bridge.typeActionSurface(frame: frame, text: text)
+            guard isCurrentCloudAuthorizationContext(context) else { return }
+            cloudAuthorizationInput = ""
+            cloudAuthorizationSurfaceFrame = nil
+            lastCloudAuthorizationSurfaceCaptureAt = nil
+            await refreshCloudAuthorization()
+        } catch {
+            guard isCurrentCloudAuthorizationContext(context),
+                  !AsyncCancellationPolicy.isCancellation(error) else {
+                return
+            }
+            await refreshCloudAuthorization()
+        }
+    }
+
     private func startCloudAuthorizationPolling() {
         cloudAuthorizationSessionID = UUID()
         let sessionID = cloudAuthorizationSessionID
@@ -8617,8 +7385,6 @@ final class AppState: ObservableObject {
         cloudAuthorizationPollTask = Task { [weak self] in
             var hiddenPollCount = 0
             var bridgeFailureCount = 0
-            var qrExitPollCount = 0
-            var qrExitStartedAt: Date?
             while !Task.isCancelled {
                 do {
                     try await Task.sleep(nanoseconds: 500_000_000)
@@ -8650,12 +7416,7 @@ final class AppState: ObservableObject {
                         )
                     }
                     bridgeFailureCount = 0
-                    let hiddenStorageEvidenceConfirmed = !state.isQRCode
-                        && self.recordHiddenMyDriveAuthorizationStorageEvidence(
-                            state,
-                            operationID: context.operationID
-                        )
-                    if await self.consumeConfigurationVerificationState(
+                    if await self.consumeConfigurationTerminalState(
                         state,
                         context: context
                     ) {
@@ -8668,157 +7429,41 @@ final class AppState: ObservableObject {
                         }
                         continue
                     }
-                    if state.isQRCode {
-                        qrExitPollCount = 0
-                        qrExitStartedAt = nil
-                    }
-                    if context.hasObservedQRCode,
-                       !state.isQRCode,
-                       (context.providerInteraction?.actionKind == .authorization
-                            || context.providerInteraction?.actionKind == .playback) {
-                        let now = Date()
-                        if qrExitPollCount == 0 {
-                            qrExitStartedAt = now
-                        }
-                        qrExitPollCount += 1
-                        let exitInterval = now.timeIntervalSince(
-                            qrExitStartedAt ?? now
-                        )
-                        let hasGenerationTransition = context
-                            .lastObservedQRCodeGeneration.map {
-                                state.interactionGeneration != $0
-                            } ?? false
-                        guard CloudAuthorizationPollingPolicy
-                            .shouldVerifyAfterQRCodeExit(
-                                hasObservedQRCode: true,
-                                currentStateIsQRCode: false,
-                                actionKind: .authorization,
-                                consecutiveExitPollCount: qrExitPollCount,
-                                exitInterval: exitInterval,
-                                hasGenerationTransition: hasGenerationTransition
-                            ) else {
-                            // A single Android snapshot can lose its QR role
-                            // while the ImageView redraws or the dialog host is
-                            // reattached. Keep the last validated QR visible;
-                            // absence is presentation state, not scan proof.
-                            continue
-                        }
-                    }
-                    if CloudAuthorizationPollingPolicy
-                        .shouldVerifyAfterQRCodeExit(
-                            hasObservedQRCode: context.hasObservedQRCode,
-                            currentStateIsQRCode: state.isQRCode,
-                            actionKind: context.providerInteraction?.actionKind
-                                == .playback
-                                ? .authorization
-                                : context.providerInteraction?.actionKind,
-                            consecutiveExitPollCount: qrExitPollCount,
-                            exitInterval: Date().timeIntervalSince(
-                                qrExitStartedAt ?? Date()
-                            ),
-                            hasGenerationTransition: context
-                                .lastObservedQRCodeGeneration.map {
-                                    state.interactionGeneration != $0
-                                } ?? false
-                        ) {
-                        hiddenPollCount += 1
-                        if await self.verifyAuthorizationResultAfterQRCodeExit(
-                            state: state,
-                            context: context,
-                            storageEvidenceConfirmed:
-                                hiddenStorageEvidenceConfirmed
-                        ) {
-                            // The verifier also owns the explicitly pending
-                            // MyDrive state. Do not age that state into the
-                            // generic hidden-window timeout while the QR is
-                            // still awaiting an authenticated account delta.
-                            hiddenPollCount = 0
-                            continue
-                        }
-                        if CloudAuthorizationPollingPolicy.shouldTimeOut(
-                            hiddenPollCount: hiddenPollCount
-                        ) {
-                            context.providerHandle?.cancel()
-                            self.failConfigurationInteraction(
-                                context.operationID,
-                                message: "二维码已确认，但站点状态长时间没有更新。请刷新后重试。"
-                            )
-                            return
-                        }
-                        continue
-                    }
-                    if state.isProviderUIPrompt
-                        || state.hasRequestScopedActionSurface {
+                    // Action Session has exactly two nonterminal observations:
+                    // a request-owned Android surface, or a provider worker
+                    // which has not returned yet. Pixels and view content do
+                    // not participate in classification or completion.
+                    if state.hasRequestScopedActionSurface {
                         hiddenPollCount = 0
                         if var current = self.cloudAuthorizationContext,
                            current.operationID == context.operationID {
                             current.hasObservedPrompt = true
-                            if let submittedGeneration = current.submittedGeneration,
-                               state.interactionGeneration != submittedGeneration {
-                                current.hasObservedPostSubmissionTransition = true
-                            }
                             self.cloudAuthorizationContext = current
                         }
-                        if let current = self.cloudAuthorizationContext,
-                           current.operationID == context.operationID,
-                           let submittedAt = current.submittedAt,
-                           CloudAuthorizationPollingPolicy
-                            .shouldFailUnchangedSubmission(
-                                elapsed: Date().timeIntervalSince(submittedAt),
-                                submittedGeneration: current.submittedGeneration,
-                                currentGeneration: state.interactionGeneration,
-                                hasObservedTransition: current
-                                    .hasObservedPostSubmissionTransition,
-                                isVisible: state.visible
-                            ) {
-                            current.providerHandle?.cancel()
-                            self.failConfigurationInteraction(
-                                context.operationID,
-                                message: "站点收到点击，但操作界面没有进入下一步。请重试；若仍失败，请刷新配置后再试。"
-                            )
-                            return
-                        }
                         await self.updateCloudAuthorizationPrompt(state)
-                        if state.isQRCode,
-                           let latestContext = self.cloudAuthorizationContext,
-                           latestContext.operationID == context.operationID,
-                           MyDriveAuthorizationStorageEvidencePolicy
-                            .confirmsStableChange(
-                                baseline: latestContext
-                                    .myDriveAuthorizationStorageFingerprintAtQRCode,
-                                candidate: latestContext
-                                    .myDriveAuthorizationStorageCandidateFingerprint,
-                                stablePollCount: latestContext
-                                    .myDriveAuthorizationStorageStablePollCount
-                            ),
-                           await self.verifyMyDriveAuthorizationResult(
-                                state: state,
-                                context: latestContext,
-                                storageEvidenceConfirmed: true
-                           ) {
-                            continue
-                        }
-                    } else {
-                        hiddenPollCount += 1
-                        if CloudAuthorizationPollingPolicy.shouldTimeOut(
-                            hiddenPollCount: hiddenPollCount
-                        ) {
-                            let observed = self.cloudAuthorizationContext?
-                                .hasObservedPrompt == true
-                            context.providerHandle?.cancel()
-                            self.failConfigurationInteraction(
-                                context.operationID,
-                                message: observed
-                                    ? "操作窗口已关闭，但站点没有返回可验证的结果。请重试，或关闭后重新执行该操作。"
-                                    : "站点未能创建下一步操作界面，操作没有完成。请检查网络后重试。"
-                            )
-                            return
-                        } else if hiddenPollCount == 10,
-                                  var prompt = self.cloudAuthorizationPrompt {
-                            prompt.status = "仍在等待站点创建下一步操作界面…"
+                        continue
+                    }
+                    hiddenPollCount += 1
+                    if state.workerReturned != true {
+                        if var prompt = self.cloudAuthorizationPrompt,
+                           prompt.interactionID == context.operationID {
+                            prompt.lifecyclePhase = .processing
+                            prompt.status = "Android 操作界面暂时不可见，正在等待站点返回…"
                             self.cloudAuthorizationPrompt = prompt
                         }
+                        continue
                     }
+                    if CloudAuthorizationPollingPolicy.shouldTimeOut(
+                        hiddenPollCount: hiddenPollCount
+                    ) {
+                        context.providerHandle?.cancel()
+                        self.failConfigurationInteraction(
+                            context.operationID,
+                            message: "站点已结束 Android 界面，但没有返回最终结果，请重试。"
+                        )
+                        return
+                    }
+                    continue
                 } catch is CancellationError {
                     return
                 } catch {
@@ -8834,284 +7479,6 @@ final class AppState: ObservableObject {
                 }
             }
         }
-    }
-
-    /// Legacy CatVod providers can close or rebuild their child QR dialog both
-    /// before and after a phone scan. Treat the QR -> non-QR transition only as
-    /// a request to inspect provider state, never as evidence of a scan.
-    private func verifyAuthorizationResultAfterQRCodeExit(
-        state: AndroidBridgeUIState,
-        context: CloudAuthorizationContext,
-        storageEvidenceConfirmed: Bool
-    ) async -> Bool {
-        guard context.hasObservedQRCode,
-              !state.isQRCode,
-              (context.providerInteraction?.actionKind == .authorization
-                || context.providerInteraction?.actionKind == .playback),
-              cloudAuthorizationContext?.hasRequestedVerification != true else {
-            return false
-        }
-        // Calling the same legacy Spider while its authorization worker is
-        // active can corrupt provider-owned locks or state. QR disappearance
-        // still does not prove that the phone scanned it, so keep the last
-        // validated image visible and wait without claiming success.
-        if CloudAuthorizationPollingPolicy.isWaitingForProviderWorker(
-            workerReturned: state.workerReturned
-        ) {
-            if var prompt = cloudAuthorizationPrompt,
-               prompt.interactionID == context.operationID,
-               prompt.lifecyclePhase == .presenting {
-                prompt.status = "二维码界面发生变化，正在等待站点返回账号状态…"
-                cloudAuthorizationPrompt = prompt
-            }
-            // The Bridge owns the worker timeout and publishes an explicit
-            // failure if it never returns. Do not consume the short generic
-            // hidden-window timeout while useful provider work is active.
-            return true
-        }
-
-        // The old implementation marked MyDriveGuard successful merely because
-        // the worker returned, then reopened the chooser. UC routinely returns
-        // or rebuilds its child window before any scan, so that branch closed a
-        // valid QR after a few seconds. Accept only either (a) the exact row
-        // selected before QR presentation changing from 未登录 to 已登录, or (b)
-        // a new media category appearing relative to the pre-click home. The
-        // latter covers legacy dialogs that destroy their chooser parent after
-        // a real scan, while still rejecting a bare QR/window transition.
-        if myDriveLoginStatusAction(for: context) != nil {
-            return await verifyMyDriveAuthorizationResult(
-                state: state,
-                context: context,
-                storageEvidenceConfirmed: storageEvidenceConfirmed
-            )
-        }
-
-        guard let provider = providers[context.sourceIdentity.siteKey]
-                as? AndroidDexSpiderSiteProvider else {
-            return false
-        }
-        let now = Date()
-        if let lastProbe = cloudAuthorizationContext?.lastAuthorizationProbeAt,
-           now.timeIntervalSince(lastProbe) < 1 {
-            return false
-        }
-        guard var current = cloudAuthorizationContext,
-              current.operationID == context.operationID else {
-            return false
-        }
-        current.lastAuthorizationProbeAt = now
-        cloudAuthorizationContext = current
-        // Keep the last validated QR visible while probing. Switching the
-        // whole prompt to `.processing` on an unverified UI transition made
-        // the QR disappear and reappear whenever Android missed one capture.
-        if var prompt = cloudAuthorizationPrompt,
-           prompt.interactionID == context.operationID,
-           prompt.lifecyclePhase == .presenting {
-            prompt.status = "检测到二维码界面变化，正在确认授权结果…"
-            cloudAuthorizationPrompt = prompt
-        }
-
-        let verifiedHome = try? await provider.home()
-        let homeConfirmed = verifiedHome.map {
-            provider.homeConfirmsAuthorization($0)
-        } == true
-        // A category response may differ because of pagination, ordering,
-        // posters or network timing. It is not an authentication contract and
-        // must never close a QR prompt before the user has scanned it.
-        guard homeConfirmed,
-              configurationInteractionCoordinator.owns(context.operationID),
-              cloudAuthorizationContext?.operationID == context.operationID else {
-            return false
-        }
-        transitionConfigurationInteraction(
-            context.operationID,
-            to: .processing,
-            semantic: .qrAuthorization,
-            status: "授权已确认，正在刷新网盘内容…"
-        )
-        if homeConfirmed,
-           let verifiedHome,
-           currentHomeContentIdentity == context.sourceIdentity {
-            publishHomeContent(verifiedHome, identity: context.sourceIdentity)
-            await cacheSiteHome(verifiedHome, identity: context.sourceIdentity)
-            _ = await applyHomePresentation(
-                verifiedHome,
-                identity: context.sourceIdentity,
-                loadsCategoryContent: false
-            )
-        }
-        if var verifiedContext = cloudAuthorizationContext,
-           verifiedContext.operationID == context.operationID {
-            verifiedContext.hasRequestedVerification = true
-            cloudAuthorizationContext = verifiedContext
-        }
-        if context.operation.pendingPlayback != nil,
-           context.providerHandle != nil {
-            transitionConfigurationInteraction(
-                context.operationID,
-                to: .processing,
-                semantic: .qrAuthorization,
-                status: "授权已确认，正在等待原播放请求返回媒体…"
-            )
-            return true
-        }
-        if let handle = context.providerHandle {
-            await Self.verifyScopedConfigurationInteraction(
-                handle,
-                succeeded: true,
-                actualRefreshPerformed: true
-            )
-        } else {
-            await finishCloudAuthorizationAndRetry(refreshPerformed: true)
-        }
-        return true
-    }
-
-    /// Records an opaque credential-storage transition after the provider has
-    /// hidden its QR UI. This must run before terminal-state consumption: old
-    /// or slow bridges may report a lifecycle transition in the same snapshot
-    /// that first exposes the persisted authorization digest.
-    private func recordHiddenMyDriveAuthorizationStorageEvidence(
-        _ state: AndroidBridgeUIState,
-        operationID: UUID
-    ) -> Bool {
-        guard var context = cloudAuthorizationContext,
-              context.operationID == operationID,
-              context.hasObservedQRCode,
-              context.myDriveAuthorizationTarget != nil else {
-            return false
-        }
-        let candidate = MyDriveAuthorizationStorageEvidencePolicy
-            .updatedCandidate(
-                baseline: context
-                    .myDriveAuthorizationStorageFingerprintAtQRCode,
-                candidate: context
-                    .myDriveAuthorizationStorageCandidateFingerprint,
-                stablePollCount: context
-                    .myDriveAuthorizationStorageStablePollCount,
-                observed: state.authorizationStorageFingerprint
-            )
-        context.myDriveAuthorizationStorageCandidateFingerprint =
-            candidate.fingerprint
-        context.myDriveAuthorizationStorageStablePollCount =
-            candidate.stablePollCount
-        cloudAuthorizationContext = context
-        return MyDriveAuthorizationStorageEvidencePolicy.confirmsStableChange(
-            baseline: context.myDriveAuthorizationStorageFingerprintAtQRCode,
-            candidate: candidate.fingerprint,
-            stablePollCount: candidate.stablePollCount
-        )
-    }
-
-    /// Confirms MyDrive authorization from one of three request-scoped facts:
-    /// the exact chooser row changed to logged in, a new usable media category
-    /// appeared, or Android persisted a stable post-QR preference change.
-    /// The last signal is necessary for providers that keep their QR dialog
-    /// visible after success and leave the newly logged account disabled.
-    private func verifyMyDriveAuthorizationResult(
-        state: AndroidBridgeUIState,
-        context: CloudAuthorizationContext,
-        storageEvidenceConfirmed: Bool
-    ) async -> Bool {
-        guard myDriveLoginStatusAction(for: context) != nil,
-              configurationInteractionCoordinator.owns(context.operationID),
-              cloudAuthorizationContext?.operationID == context.operationID,
-              CloudAuthorizationPollingPolicy.isWaitingForProviderWorker(
-                workerReturned: state.workerReturned
-              ) == false,
-              let provider = providers[context.sourceIdentity.siteKey]
-                as? AndroidDexSpiderSiteProvider else {
-            return false
-        }
-        let decision = MyDriveAuthorizationVerificationPolicy.decision(
-            target: context.myDriveAuthorizationTarget,
-            state: state
-        )
-        var verifiedHome: SiteHome?
-        var categoryDeltaConfirmed = false
-        let now = Date()
-        let mayProbeHome: Bool
-        if let lastProbe = cloudAuthorizationContext?.lastAuthorizationProbeAt {
-            mayProbeHome = now.timeIntervalSince(lastProbe) >= 1
-        } else {
-            mayProbeHome = true
-        }
-        if decision != .authenticated, mayProbeHome,
-           var current = cloudAuthorizationContext,
-           current.operationID == context.operationID {
-            current.lastAuthorizationProbeAt = now
-            cloudAuthorizationContext = current
-            verifiedHome = try? await provider.home()
-            if let verifiedHome {
-                categoryDeltaConfirmed =
-                    MyDriveAuthorizationVerificationPolicy
-                        .confirmsNewAuthorizedCategory(
-                            baseline: current
-                                .myDriveAuthorizedCategoryIDsAtStart,
-                            home: verifiedHome
-                        )
-            }
-        }
-        guard decision == .authenticated
-                || categoryDeltaConfirmed
-                || storageEvidenceConfirmed else {
-            if var prompt = cloudAuthorizationPrompt,
-               prompt.interactionID == context.operationID,
-               prompt.lifecyclePhase == .presenting {
-                prompt.status = decision == .unauthenticated || mayProbeHome
-                    ? "尚未检测到登录成功；请完成扫码。二维码失效时可点“重试”重新生成。"
-                    : "正在等待所选网盘账号返回明确的登录状态…"
-                prompt.allowsRetry = true
-                cloudAuthorizationPrompt = prompt
-            }
-            return true
-        }
-        await confirmCloudAccountStatus(for: context)
-        guard configurationInteractionCoordinator.owns(context.operationID),
-              cloudAuthorizationContext?.operationID == context.operationID else {
-            return false
-        }
-        if verifiedHome == nil {
-            verifiedHome = try? await provider.home()
-        }
-        if let verifiedHome,
-           currentHomeContentIdentity == context.sourceIdentity {
-            publishHomeContent(verifiedHome, identity: context.sourceIdentity)
-            await cacheSiteHome(
-                verifiedHome,
-                identity: context.sourceIdentity
-            )
-            _ = await applyHomePresentation(
-                verifiedHome,
-                identity: context.sourceIdentity,
-                loadsCategoryContent: false
-            )
-        }
-        if var verifiedContext = cloudAuthorizationContext,
-           verifiedContext.operationID == context.operationID {
-            verifiedContext.hasRequestedVerification = true
-            cloudAuthorizationContext = verifiedContext
-        }
-        transitionConfigurationInteraction(
-            context.operationID,
-            to: .processing,
-            semantic: .qrAuthorization,
-            status: storageEvidenceConfirmed
-                ? "检测到所选网盘账号授权数据已更新，正在刷新账号状态…"
-                : "已确认所选网盘账号登录成功，正在刷新账号状态…"
-        )
-        if let handle = context.providerHandle {
-            await Self.verifyScopedConfigurationInteraction(
-                handle,
-                succeeded: true,
-                actualRefreshPerformed: verifiedHome != nil
-            )
-        } else {
-            await finishCloudAuthorizationAndRetry(
-                refreshPerformed: verifiedHome != nil
-            )
-        }
-        return true
     }
 
     private func finishCloudAuthorizationAndRetry(
@@ -9198,18 +7565,18 @@ final class AppState: ObservableObject {
             }
             return false
         }()
-        let loginStatusActionToReopen = completionSemantic.isAuthorization
-            ? myDriveLoginStatusAction(for: context)
-            : nil
         let completionStatus: String
-        if loginStatusActionToReopen != nil {
-            completionStatus = "二维码流程已结束，正在刷新账号状态…"
-        } else if isPlaybackOperation && completionSemantic.isAuthorization {
+        if isPlaybackOperation {
             completionStatus = "授权成功，正在继续播放…"
         } else {
-            completionStatus = ConfigurationControlSubmissionPolicy.completionStatus(
-                semantic: completionSemantic
-            )
+            switch completionSemantic {
+            case .order:
+                completionStatus = "排序已更新"
+            case .toggle:
+                completionStatus = "设置已更新"
+            default:
+                completionStatus = "配置操作已完成"
+            }
         }
         completeConfigurationInteraction(
             context.operationID,
@@ -9225,10 +7592,6 @@ final class AppState: ObservableObject {
             // on an arbitrary grace sleep, including when the provider result
             // was already terminal by the time the overlay appeared.
             completionDelay = 0
-        } else if loginStatusActionToReopen != nil {
-            completionDelay = 350_000_000
-        } else if completionSemantic.isAuthorization {
-            completionDelay = 1_400_000_000
         } else {
             completionDelay = 650_000_000
         }
@@ -9269,12 +7632,6 @@ final class AppState: ObservableObject {
                selectedSection == .home,
                selectedSiteKey == context.sourceIdentity.siteKey {
                 await loadSelectedSiteHome(refreshConfigurationIfNeeded: false)
-                if let loginStatusActionToReopen {
-                    let refreshedAction = siteHome?.actionItems.first(where: {
-                        $0.action == MyDriveGuardActionContract.loginAction
-                    }) ?? loginStatusActionToReopen
-                    await performHomeAction(refreshedAction)
-                }
             } else {
                 await loadDetail(summary)
             }
@@ -9282,40 +7639,12 @@ final class AppState: ObservableObject {
             if selectedSection == .home,
                selectedSiteKey == context.sourceIdentity.siteKey {
                 await loadSelectedSiteHome(refreshConfigurationIfNeeded: false)
-                if let loginStatusActionToReopen {
-                    let refreshedAction = siteHome?.actionItems.first(where: {
-                        $0.action == MyDriveGuardActionContract.loginAction
-                    }) ?? loginStatusActionToReopen
-                    await performHomeAction(refreshedAction)
-                }
             }
         case .siteAction:
             if selectedSection == .home,
                selectedSiteKey == context.sourceIdentity.siteKey {
                 await loadSelectedSiteHome(refreshConfigurationIfNeeded: false)
             }
-        }
-    }
-
-    private func myDriveLoginStatusAction(
-        for context: CloudAuthorizationContext
-    ) -> SiteActionItem? {
-        guard let provider = providers[context.sourceIdentity.siteKey]
-                as? AndroidDexSpiderSiteProvider,
-              MyDriveGuardActionContract.supportsAccountAuthorization(
-                api: provider.site.api
-              ) else {
-            return nil
-        }
-        switch context.operation {
-        case .homeAction(let item)
-            where item.action == MyDriveGuardActionContract.loginAction:
-            return item
-        case .detail(let summary)
-            where summary.action == MyDriveGuardActionContract.loginAction:
-            return SiteActionItem(summary: summary)
-        default:
-            return nil
         }
     }
 

@@ -1798,150 +1798,32 @@ struct CloudAuthorizationView: View {
                             .disabled(isTerminal)
                         }
                     }
-                } else if prompt.credentialPush {
-                    HStack(spacing: 12) {
-                        Image(systemName: "lock.shield.fill")
-                            .font(.system(size: 30))
-                            .foregroundColor(.accentColor)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("本机安全提交")
-                                .font(.headline)
-                            Text("凭据不会写入 Mac 配置，也不会通过局域网传输。")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                    HStack(spacing: 8) {
+                        TextField(
+                            "点击 Android 输入框后，可在这里发送文字",
+                            text: $state.cloudAuthorizationInput
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(isTerminal)
+                        Button("发送文字") {
+                            Task {
+                                await state.typeCloudAuthorizationSurfaceText(
+                                    frame: surfaceFrame
+                                )
+                            }
                         }
+                        .disabled(
+                            isTerminal
+                                || state.cloudAuthorizationInput.isEmpty
+                        )
                     }
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.accentColor.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                } else if prompt.qrState == .ready,
-                          prompt.displaysLoginQRCode,
-                   let data = prompt.snapshot,
-                   let image = NSImage(data: data) {
-                    Image(nsImage: image)
-                        .resizable()
-                        .interpolation(.none)
-                        .scaledToFit()
-                        .frame(width: 280, height: 280)
-                        .padding(14)
-                        .background(Color.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.secondary.opacity(0.18))
-                        }
-                        .frame(maxWidth: .infinity)
-                } else if prompt.qrState == .generating {
-                    HStack {
-                        Spacer()
-                        VStack(spacing: 10) {
-                            AppActivityIndicator(size: .regular)
-                            Text("正在生成二维码…")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        .frame(width: 280, height: 220)
-                        Spacer()
-                    }
-                } else if prompt.qrState == .expired
-                            || prompt.qrState == .notFound {
-                    VStack(spacing: 10) {
-                        Image(systemName: "qrcode.viewfinder")
-                            .font(.system(size: 42))
-                            .foregroundColor(.orange)
-                        Text(prompt.qrState == .expired
-                             ? "二维码已过期"
-                             : "暂时没有捕获到登录二维码")
-                            .font(.headline)
-                        Text("请刷新或重试，当前播放请求会保持不变。")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 24)
                 }
 
                 if let status = prompt.status,
-                   !status.isEmpty,
-                   !prompt.structuredRows.flatMap(\.labels)
-                    .contains(where: { $0.title == status }) {
+                   !status.isEmpty {
                     Text(status)
                         .font(.callout)
                         .foregroundColor(.secondary)
-                }
-
-                if prompt.hasTextInput {
-                    Group {
-                        if prompt.usesSecureInput {
-                            SecureField(
-                                inputPlaceholder,
-                                text: $state.cloudAuthorizationInput
-                            )
-                        } else {
-                            TextField(
-                                inputPlaceholder,
-                                text: $state.cloudAuthorizationInput
-                            )
-                        }
-                    }
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(isBusy || isTerminal)
-                    Text(prompt.usesSecureInput
-                         ? "内容直接提交给本机 Java/Dex 插件，Mac 端不会另行保存。"
-                         : "内容仅用于当前配置操作。")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                if prompt.credentialPush {
-                    Button {
-                        Task { await state.submitCloudCredential() }
-                    } label: {
-                        Label(
-                            isAuthorization ? "提交授权" : "提交配置",
-                            systemImage: "arrow.right.circle.fill"
-                        )
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .disabled(
-                        state.cloudAuthorizationInput
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                            .isEmpty || isBusy || isTerminal
-                    )
-                } else if surfaceFrame == nil,
-                          prompt.uiSchemaVersion ?? 0 >= 2,
-                          !prompt.structuredRows.isEmpty {
-                    AndroidConfigurationSurfaceView(
-                        rows: prompt.structuredRows,
-                        actions: prompt.actions,
-                        disabled: isBusy || isTerminal
-                    ) { action in
-                        Task {
-                            await state.submitCloudAuthorization(action: action)
-                        }
-                    }
-                } else if surfaceFrame == nil || prompt.hasTextInput {
-                    LazyVGrid(
-                        columns: [
-                            GridItem(.adaptive(minimum: 130), spacing: 8)
-                        ],
-                        alignment: .leading,
-                        spacing: 8
-                    ) {
-                        ForEach(prompt.actions) { action in
-                            Button(action.title) {
-                                Task {
-                                    await state.submitCloudAuthorization(action: action)
-                                }
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.regular)
-                            .disabled(isBusy || isTerminal)
-                        }
-                    }
                 }
 
                 HStack {
@@ -1971,7 +1853,7 @@ struct CloudAuthorizationView: View {
     }
 
     private var isAuthorization: Bool {
-        prompt.semantic.isAuthorization || prompt.qrState != .idle
+        prompt.semantic.isAuthorization || isPlayerAuthorization
     }
 
     private var isPlayerAuthorization: Bool {
@@ -2010,9 +1892,6 @@ struct CloudAuthorizationView: View {
         }
     }
 
-    private var inputPlaceholder: String {
-        prompt.usesSecureInput ? "粘贴凭据" : "输入配置内容"
-    }
 }
 
 enum AndroidActionSurfaceGeometryPolicy {
@@ -2161,198 +2040,6 @@ private struct AndroidActionSurfaceView: View {
         } else {
             onSwipe(start.x, start.y, end.x, end.y)
         }
-    }
-}
-
-/// A native macOS projection of the Android provider's configuration view.
-/// The bridge supplies geometry and hierarchy instead of a flattened button
-/// list, allowing labels, state and ordering controls to stay associated.
-private struct AndroidConfigurationSurfaceView: View {
-    let rows: [AndroidConfigurationSurfaceRow]
-    let actions: [CloudAuthorizationAction]
-    let disabled: Bool
-    let submit: (CloudAuthorizationAction) -> Void
-
-    private var actionsByID: [String: CloudAuthorizationAction] {
-        Dictionary(uniqueKeysWithValues: actions.map { ($0.id, $0) })
-    }
-
-    var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                ForEach(rows) { row in
-                    AndroidConfigurationSurfaceRowView(
-                        row: row,
-                        actionsByID: actionsByID,
-                        disabled: disabled,
-                        submit: submit
-                    )
-                    if row.id != rows.last?.id {
-                        Divider()
-                            .padding(.leading, 14)
-                    }
-                }
-            }
-            .background(
-                Color(nsColor: .controlBackgroundColor),
-                in: RoundedRectangle(cornerRadius: 11, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-            }
-        }
-        .frame(minHeight: 80, maxHeight: 440)
-    }
-}
-
-private struct AndroidConfigurationSurfaceRowView: View {
-    let row: AndroidConfigurationSurfaceRow
-    let actionsByID: [String: CloudAuthorizationAction]
-    let disabled: Bool
-    let submit: (CloudAuthorizationAction) -> Void
-
-    private var labels: [AndroidBridgeUIElement] {
-        row.labels.filter {
-            !["textfield", "securefield"].contains($0.normalizedType)
-        }
-    }
-
-    private var inputElements: [AndroidBridgeUIElement] {
-        row.elements.filter {
-            ["textfield", "securefield"].contains($0.normalizedType)
-        }
-    }
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 16) {
-            VStack(alignment: .leading, spacing: 3) {
-                if labels.isEmpty, let namedAction = namedStandaloneAction {
-                    Text(namedAction.title)
-                        .font(.body.weight(.medium))
-                } else {
-                    ForEach(Array(labels.enumerated()), id: \.element.id) { index, label in
-                        Text(label.title)
-                            .font(index == 0 ? .body.weight(.medium) : .caption)
-                            .foregroundColor(index == 0 ? .primary : .secondary)
-                            .lineLimit(index == 0 ? 2 : 3)
-                    }
-                }
-
-                ForEach(inputElements) { input in
-                    HStack(spacing: 6) {
-                        Image(systemName: input.normalizedType == "securefield"
-                            ? "lock.fill" : "text.cursor")
-                        Text(input.hint.flatMap {
-                            $0.trimmingCharacters(in: .whitespacesAndNewlines)
-                                .isEmpty ? nil : $0
-                        } ?? input.title)
-                        if input.hasValue == true {
-                            Text("已填写")
-                                .foregroundColor(.green)
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            HStack(spacing: 8) {
-                ForEach(row.actions) { element in
-                    if let action = actionsByID[element.id] {
-                        actionButton(element: element, action: action)
-                    }
-                }
-            }
-            .fixedSize(horizontal: true, vertical: false)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .frame(minHeight: 48)
-    }
-
-    private var namedStandaloneAction: AndroidBridgeUIElement? {
-        guard row.actions.count == 1,
-              let action = row.actions.first,
-              !isArrowTitle(action.title) else { return nil }
-        return action
-    }
-
-    @ViewBuilder
-    private func actionButton(
-        element: AndroidBridgeUIElement,
-        action: CloudAuthorizationAction
-    ) -> some View {
-        if element.normalizedType == "toggle" {
-            Button {
-                submit(action)
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: element.checked == true
-                        ? "checkmark.circle.fill" : "circle")
-                    Text(element.checked == true ? "已开启" : "已关闭")
-                }
-            }
-            .buttonStyle(.bordered)
-            .tint(element.checked == true ? .accentColor : .secondary)
-            .disabled(disabled || element.enabled == false)
-            .accessibilityLabel(action.title)
-        } else if let symbol = arrowSymbol(for: action.title) {
-            Button {
-                submit(action)
-            } label: {
-                Image(systemName: symbol)
-                    .frame(width: 18, height: 18)
-            }
-            .buttonStyle(.bordered)
-            .disabled(disabled || element.enabled == false)
-            .help(arrowHelp(for: action.title))
-            .accessibilityLabel(arrowHelp(for: action.title))
-        } else {
-            if isPrimary(action) {
-                Button(action.title) {
-                    submit(action)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(disabled || element.enabled == false)
-            } else {
-                Button(action.title) {
-                    submit(action)
-                }
-                .buttonStyle(.bordered)
-                .disabled(disabled || element.enabled == false)
-            }
-        }
-    }
-
-    private func isPrimary(_ action: CloudAuthorizationAction) -> Bool {
-        let value = [action.title, action.role ?? ""]
-            .joined(separator: " ")
-            .lowercased()
-        return value.contains("保存") || value.contains("确定")
-            || value.contains("登录") || value.contains("save")
-            || value.contains("confirm")
-    }
-
-    private func isArrowTitle(_ title: String) -> Bool {
-        arrowSymbol(for: title) != nil
-    }
-
-    private func arrowSymbol(for title: String) -> String? {
-        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        if ["▲", "↑", "上移", "向上", "up"].contains(normalized) {
-            return "chevron.up"
-        }
-        if ["▼", "↓", "下移", "向下", "down"].contains(normalized) {
-            return "chevron.down"
-        }
-        return nil
-    }
-
-    private func arrowHelp(for title: String) -> String {
-        arrowSymbol(for: title) == "chevron.up" ? "上移" : "下移"
     }
 }
 

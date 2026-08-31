@@ -26,6 +26,6 @@
             android:exported="false"
             android:launchMode="singleTop"
             android:noHistory="false"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
     </application>
 </manifest>
