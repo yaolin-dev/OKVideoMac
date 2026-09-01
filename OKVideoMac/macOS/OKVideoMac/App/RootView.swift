@@ -1702,158 +1702,187 @@ struct CloudAuthorizationView: View {
     let prompt: CloudAuthorizationPrompt
 
     var body: some View {
-        ZStack {
-            Color.black.opacity(0.32)
-                .ignoresSafeArea()
-
-            VStack(alignment: .leading, spacing: 16) {
-                HStack {
-                    Label(
-                        isAuthorization
-                            ? "网盘授权"
-                            : "配置操作",
-                        systemImage: isAuthorization
-                            ? "externaldrive.badge.person.crop"
-                            : "slider.horizontal.3"
-                    )
-                        .font(.title2.bold())
-                    Spacer()
-                    Button {
-                        Task { await state.refreshCloudAuthorization() }
-                    } label: {
-                        Label("刷新", systemImage: "arrow.clockwise")
+        GeometryReader { geometry in
+            ZStack {
+                Color.black.opacity(0.32)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        // A modal authorization surface owns the whole window.
+                        // Consume backdrop clicks so they never reach content.
                     }
-                    .disabled(isBusy || isTerminal)
+                    .accessibilityHidden(true)
+
+                authorizationCard(
+                    maximumSurfaceHeight:
+                        CloudAuthorizationPresentationPolicy
+                            .maximumSurfaceHeight(
+                                containerHeight: geometry.size.height
+                            )
+                )
+                .padding(CloudAuthorizationPresentationPolicy.outerInset)
+            }
+            .contentShape(Rectangle())
+        }
+        .zIndex(1_000)
+    }
+
+    private func authorizationCard(
+        maximumSurfaceHeight: CGFloat
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Label(
+                    isAuthorization
+                        ? "网盘授权"
+                        : "配置操作",
+                    systemImage: isAuthorization
+                        ? "externaldrive.badge.person.crop"
+                        : "slider.horizontal.3"
+                )
+                    .font(.title2.bold())
+                Spacer()
+                Button {
+                    Task { await state.refreshCloudAuthorization() }
+                } label: {
+                    Label("刷新", systemImage: "arrow.clockwise")
                 }
+                .disabled(isBusy || isTerminal)
+            }
 
-                Text(prompt.title)
-                    .font(.headline)
+            Text(prompt.title)
+                .font(.headline)
 
-                if prompt.lifecyclePhase == .completed {
-                    Label(
-                        isAuthorization ? "授权已完成" : "配置操作已完成",
-                        systemImage: "checkmark.circle.fill"
-                    )
-                    .font(.headline)
-                    .foregroundColor(.green)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 18)
-                } else if prompt.lifecyclePhase == .failed {
-                    Label(
-                        isAuthorization ? "授权尚未完成" : "配置操作尚未完成",
-                        systemImage: "exclamationmark.triangle.fill"
-                    )
-                    .font(.headline)
-                    .foregroundColor(.orange)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 18)
-                } else if isBusy {
-                    HStack(spacing: 10) {
-                        AppActivityIndicator(size: .small)
-                        Text(lifecycleStatus)
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 18)
-                } else if let surfaceFrame {
-                    VStack(spacing: 9) {
-                        AndroidActionSurfaceView(
-                            frame: surfaceFrame,
-                            disabled: isTerminal,
-                            onTap: { x, y in
-                                Task {
-                                    await state.tapCloudAuthorizationSurface(
-                                        x: x,
-                                        y: y,
-                                        frame: surfaceFrame
-                                    )
-                                }
-                            },
-                            onSwipe: { fromX, fromY, toX, toY in
-                                Task {
-                                    await state.swipeCloudAuthorizationSurface(
-                                        fromX: fromX,
-                                        fromY: fromY,
-                                        toX: toX,
-                                        toY: toY,
-                                        frame: surfaceFrame
-                                    )
-                                }
-                            }
-                        )
-                        HStack(spacing: 10) {
-                            Text("这是站点原生 Android 界面，可直接点击或拖动。")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Spacer()
-                            Button {
-                                Task {
-                                    await state.backCloudAuthorizationSurface(
-                                        frame: surfaceFrame
-                                    )
-                                }
-                            } label: {
-                                Label("返回上一层", systemImage: "arrow.uturn.backward")
-                            }
-                            .disabled(isTerminal)
-                        }
-                    }
-                    HStack(spacing: 8) {
-                        TextField(
-                            "点击 Android 输入框后，可在这里发送文字",
-                            text: $state.cloudAuthorizationInput
-                        )
-                        .textFieldStyle(.roundedBorder)
-                        .disabled(isTerminal)
-                        Button("发送文字") {
+            if prompt.lifecyclePhase == .completed {
+                Label(
+                    isAuthorization ? "授权已完成" : "配置操作已完成",
+                    systemImage: "checkmark.circle.fill"
+                )
+                .font(.headline)
+                .foregroundColor(.green)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 18)
+            } else if prompt.lifecyclePhase == .failed {
+                Label(
+                    isAuthorization ? "授权尚未完成" : "配置操作尚未完成",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.headline)
+                .foregroundColor(.orange)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 18)
+            } else if isBusy {
+                HStack(spacing: 10) {
+                    AppActivityIndicator(size: .small)
+                    Text(lifecycleStatus)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 18)
+            } else if let surfaceFrame {
+                VStack(spacing: 9) {
+                    AndroidActionSurfaceView(
+                        frame: surfaceFrame,
+                        disabled: isTerminal,
+                        maximumHeight: maximumSurfaceHeight,
+                        onTap: { x, y in
                             Task {
-                                await state.typeCloudAuthorizationSurfaceText(
+                                await state.tapCloudAuthorizationSurface(
+                                    x: x,
+                                    y: y,
+                                    frame: surfaceFrame
+                                )
+                            }
+                        },
+                        onSwipe: { fromX, fromY, toX, toY in
+                            Task {
+                                await state.swipeCloudAuthorizationSurface(
+                                    fromX: fromX,
+                                    fromY: fromY,
+                                    toX: toX,
+                                    toY: toY,
                                     frame: surfaceFrame
                                 )
                             }
                         }
-                        .disabled(
-                            isTerminal
-                                || state.cloudAuthorizationInput.isEmpty
-                        )
-                    }
-                }
-
-                if let status = prompt.status,
-                   !status.isEmpty {
-                    Text(status)
-                        .font(.callout)
-                        .foregroundColor(.secondary)
-                }
-
-                HStack {
-                    if prompt.allowsRetry {
+                    )
+                    HStack(spacing: 10) {
+                        Text("这是站点原生 Android 界面，可直接点击或拖动。")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
                         Button {
-                            Task { await state.retryCloudAuthorizationOperation() }
+                            Task {
+                                await state.backCloudAuthorizationSurface(
+                                    frame: surfaceFrame
+                                )
+                            }
                         } label: {
-                            Label("重试", systemImage: "arrow.clockwise")
+                            Label("返回上一层", systemImage: "arrow.uturn.backward")
                         }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isBusy || prompt.lifecyclePhase == .completed)
+                        .disabled(isTerminal)
                     }
-                    Spacer()
-                    Button(isPlayerAuthorization ? "取消播放" : "关闭") {
-                        Task { await state.cancelCloudAuthorization() }
+                }
+                HStack(spacing: 8) {
+                    TextField(
+                        "点击 Android 输入框后，可在这里发送文字",
+                        text: $state.cloudAuthorizationInput
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(isTerminal)
+                    Button("发送文字") {
+                        Task {
+                            await state.typeCloudAuthorizationSurfaceText(
+                                frame: surfaceFrame
+                            )
+                        }
                     }
+                    .disabled(
+                        isTerminal
+                            || state.cloudAuthorizationInput.isEmpty
+                    )
                 }
             }
-            .padding(22)
-            .frame(
-                minWidth: usesCompactSurfaceLayout ? 440 : 560,
-                idealWidth: usesCompactSurfaceLayout ? 500 : 700,
-                maxWidth: usesCompactSurfaceLayout ? 580 : 780
-            )
-            .background(.regularMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 14))
-            .shadow(radius: 24)
-            .padding()
+
+            if let status = prompt.status,
+               !status.isEmpty {
+                Text(status)
+                    .font(.callout)
+                    .foregroundColor(.secondary)
+            }
+
+            HStack {
+                if prompt.allowsRetry {
+                    Button {
+                        Task { await state.retryCloudAuthorizationOperation() }
+                    } label: {
+                        Label("重试", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isBusy || prompt.lifecyclePhase == .completed)
+                }
+                Spacer()
+                Button(isPlayerAuthorization ? "取消播放" : "关闭") {
+                    Task { await state.cancelCloudAuthorization() }
+                }
+            }
         }
-        .zIndex(1_000)
+        .padding(22)
+        .frame(
+            minWidth: usesCompactSurfaceLayout ? 440 : 560,
+            idealWidth: usesCompactSurfaceLayout ? 500 : 700,
+            maxWidth: usesCompactSurfaceLayout ? 580 : 780
+        )
+        .background(
+            .regularMaterial,
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.white.opacity(0.16), lineWidth: 1)
+        }
+        .compositingGroup()
+        .shadow(color: .black.opacity(0.42), radius: 28, x: 0, y: 12)
     }
 
     private var isAuthorization: Bool {
@@ -1903,16 +1932,29 @@ struct CloudAuthorizationView: View {
 
 }
 
+enum CloudAuthorizationPresentationPolicy {
+    static let outerInset: CGFloat = 30
+
+    static func maximumSurfaceHeight(containerHeight: CGFloat) -> CGFloat {
+        min(520, max(260, containerHeight - 270))
+    }
+}
+
 enum AndroidActionSurfacePresentationPolicy {
     static func preferredSize(
         pixelWidth: Int,
-        pixelHeight: Int
+        pixelHeight: Int,
+        maximumHeight: CGFloat = 520
     ) -> CGSize {
         guard pixelWidth > 0, pixelHeight > 0 else {
             return CGSize(width: 260, height: 260)
         }
         let ratio = CGFloat(pixelWidth) / CGFloat(pixelHeight)
-        let targetHeight = min(520, max(260, 700 / max(0.2, ratio)))
+        let heightLimit = max(260, maximumHeight)
+        let targetHeight = min(
+            heightLimit,
+            max(260, 700 / max(0.2, ratio))
+        )
         let width = min(700, targetHeight * ratio)
         return CGSize(width: width, height: width / ratio)
     }
@@ -1979,6 +2021,7 @@ enum AndroidActionSurfaceGeometryPolicy {
 private struct AndroidActionSurfaceView: View {
     let frame: AndroidActionSurfaceFrame
     let disabled: Bool
+    let maximumHeight: CGFloat
     let onTap: (Int, Int) -> Void
     let onSwipe: (Int, Int, Int, Int) -> Void
 
@@ -1988,7 +2031,8 @@ private struct AndroidActionSurfaceView: View {
                 let preferredSize =
                     AndroidActionSurfacePresentationPolicy.preferredSize(
                         pixelWidth: frame.pixelWidth,
-                        pixelHeight: frame.pixelHeight
+                        pixelHeight: frame.pixelHeight,
+                        maximumHeight: maximumHeight
                     )
                 GeometryReader { geometry in
                     let fitted = AndroidActionSurfaceGeometryPolicy.fittedRect(
@@ -2515,6 +2559,8 @@ private struct HomeLiveSectionContainer: View {
                 HomeLiveToolbarModifier(
                     showsHomeToolbar: showsHomeToolbar,
                     showsLiveToolbar: !showsHome,
+                    isInteractionBlocked:
+                        state.mainWindowCloudAuthorizationPrompt != nil,
                     layout: toolbarLayout,
                     liveSession: liveSession
                 )
@@ -2541,6 +2587,7 @@ private struct HomeLiveSectionContainer: View {
 private struct HomeLiveToolbarModifier: ViewModifier {
     let showsHomeToolbar: Bool
     let showsLiveToolbar: Bool
+    let isInteractionBlocked: Bool
     let layout: HomeToolbarLayout
     @ObservedObject var liveSession: LiveBrowserSession
 
@@ -2548,11 +2595,17 @@ private struct HomeLiveToolbarModifier: ViewModifier {
     func body(content: Content) -> some View {
         if showsHomeToolbar {
             content.toolbar {
-                HomeBrowserToolbarContent(layout: layout)
+                HomeBrowserToolbarContent(
+                    layout: layout,
+                    isInteractionBlocked: isInteractionBlocked
+                )
             }
         } else if showsLiveToolbar {
             content.toolbar {
-                LiveBrowserToolbarContent(session: liveSession)
+                LiveBrowserToolbarContent(
+                    session: liveSession,
+                    isInteractionBlocked: isInteractionBlocked
+                )
             }
         } else {
             // Search and detail pages own their toolbars. Do not attach empty
@@ -2565,6 +2618,7 @@ private struct HomeLiveToolbarModifier: ViewModifier {
 
 private struct HomeBrowserToolbarContent: ToolbarContent {
     let layout: HomeToolbarLayout
+    let isInteractionBlocked: Bool
 
     var body: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
@@ -2578,18 +2632,23 @@ private struct HomeBrowserToolbarContent: ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
             HomeSiteToolbarItem(layout: layout)
                 .frame(height: 40)
+                .disabled(isInteractionBlocked)
             HomeFilterToolbarItem(layout: layout)
                 .frame(height: 40)
+                .disabled(isInteractionBlocked)
             HomeConfigurationToolbarItem()
                 .frame(height: 40)
+                .disabled(isInteractionBlocked)
             HomeRefreshToolbarItem(layout: layout)
                 .frame(height: 40)
+                .disabled(isInteractionBlocked)
         }
     }
 }
 
 private struct LiveBrowserToolbarContent: ToolbarContent {
     @ObservedObject var session: LiveBrowserSession
+    let isInteractionBlocked: Bool
 
     var body: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
@@ -2602,6 +2661,7 @@ private struct LiveBrowserToolbarContent: ToolbarContent {
         }
         ToolbarItemGroup(placement: .primaryAction) {
             LiveToolbarView(session: session)
+                .disabled(isInteractionBlocked)
         }
     }
 }

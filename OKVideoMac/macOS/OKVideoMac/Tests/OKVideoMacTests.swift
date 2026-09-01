@@ -3892,6 +3892,36 @@ final class OKVideoMacTests: XCTestCase {
             2_400.0 / 1_080.0,
             accuracy: 0.000_1
         )
+
+        let constrainedPortrait =
+            AndroidActionSurfacePresentationPolicy.preferredSize(
+                pixelWidth: 720,
+                pixelHeight: 1_600,
+                maximumHeight: 447
+            )
+        XCTAssertEqual(constrainedPortrait.width, 201.15, accuracy: 0.000_1)
+        XCTAssertEqual(constrainedPortrait.height, 447, accuracy: 0.000_1)
+    }
+
+    func testCloudAuthorizationPresentationReservesShadowMargin() {
+        XCTAssertEqual(
+            CloudAuthorizationPresentationPolicy.maximumSurfaceHeight(
+                containerHeight: 717
+            ),
+            447
+        )
+        XCTAssertEqual(
+            CloudAuthorizationPresentationPolicy.maximumSurfaceHeight(
+                containerHeight: 900
+            ),
+            520
+        )
+        XCTAssertEqual(
+            CloudAuthorizationPresentationPolicy.maximumSurfaceHeight(
+                containerHeight: 480
+            ),
+            260
+        )
     }
 
     func testAndroidActionSurfaceLeaseRejectsStaleFrameBeforePublish() {
