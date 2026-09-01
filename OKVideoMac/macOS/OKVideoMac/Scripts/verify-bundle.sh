@@ -125,6 +125,24 @@ if [[ ! -f "$FRAMEWORKS/libOKMPVBridge.dylib" ]]; then
   echo "Bundled libmpv bridge is missing." >&2
   exit 1
 fi
+required_mpv_bridge_symbols=(
+  okmpv_create
+  okmpv_initialize
+  okmpv_get_property_string
+  okmpv_set_property_string
+  okmpv_event_size
+  okmpv_render_create
+  okmpv_render_destroy
+)
+mpv_bridge_symbols="$(
+  nm -gU "$FRAMEWORKS/libOKMPVBridge.dylib" | awk '{print $NF}'
+)"
+for symbol in "${required_mpv_bridge_symbols[@]}"; do
+  if ! grep -qx "_$symbol" <<< "$mpv_bridge_symbols"; then
+    echo "Bundled libmpv bridge is missing required symbol: $symbol" >&2
+    exit 1
+  fi
+done
 if [[ ! -f "$FRAMEWORKS/libOKQuickJS.dylib" ]]; then
   echo "Bundled QuickJS bridge is missing." >&2
   exit 1

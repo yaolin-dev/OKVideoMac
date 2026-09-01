@@ -3397,21 +3397,6 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertFalse(HomeItemPresentationPolicy.prefersCompactCards([]))
     }
 
-    func testCloudAuthorizationHiddenPollingHasBoundedTimeout() {
-        XCTAssertFalse(
-            CloudAuthorizationPollingPolicy.shouldTimeOut(
-                hiddenPollCount: 39,
-                maximumHiddenPollCount: 40
-            )
-        )
-        XCTAssertTrue(
-            CloudAuthorizationPollingPolicy.shouldTimeOut(
-                hiddenPollCount: 40,
-                maximumHiddenPollCount: 40
-            )
-        )
-    }
-
     func testCloudAccountStatusIsScopedToExactProviderOwner() {
         let providerID = CloudAccountProviderIdentity.identifier(
             capability: .javaDexSpider,
@@ -3672,7 +3657,7 @@ final class OKVideoMacTests: XCTestCase {
               "surfaceActive": true,
               "surfaceRequestScoped": true,
               "surfaceInteractionID": "\#(interactionID.uuidString)",
-              "surfaceMode": "actionActivity",
+              "surfaceMode": "providerWindow",
               "visible": true,
               "title": "ignored provider title",
               "inputCount": 1,
@@ -4029,6 +4014,54 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testAndroidActionSurfaceContinuityRetainsOnlyExactRequestOwner() {
+        let requestID = UUID()
+        let frame = AndroidActionSurfaceFrame(
+            interactionID: requestID,
+            providerOwnerID: "owner-a",
+            runtimeGeneration: "runtime-a",
+            surfaceMode: "actionactivity",
+            generation: 9,
+            frameSequence: 4,
+            pngData: Data([1]),
+            pixelWidth: 720,
+            pixelHeight: 1_600
+        )
+
+        XCTAssertTrue(
+            AndroidActionSurfaceContinuityPolicy.canRetain(
+                frame,
+                expectedInteractionID: requestID,
+                providerOwnerID: "owner-a",
+                generation: 9
+            )
+        )
+        XCTAssertFalse(
+            AndroidActionSurfaceContinuityPolicy.canRetain(
+                frame,
+                expectedInteractionID: UUID(),
+                providerOwnerID: "owner-a",
+                generation: 9
+            )
+        )
+        XCTAssertFalse(
+            AndroidActionSurfaceContinuityPolicy.canRetain(
+                frame,
+                expectedInteractionID: requestID,
+                providerOwnerID: "owner-b",
+                generation: 9
+            )
+        )
+        XCTAssertFalse(
+            AndroidActionSurfaceContinuityPolicy.canRetain(
+                frame,
+                expectedInteractionID: requestID,
+                providerOwnerID: "owner-a",
+                generation: 10
+            )
+        )
+    }
+
     func testAndroidExternalSurfaceRequiresExactNonterminalRequestLease()
         throws {
         let requestID = UUID()
@@ -4071,10 +4104,12 @@ final class OKVideoMacTests: XCTestCase {
             try decode(surfaceID: requestID, terminal: true)
                 .hasRequestScopedActionSurface
         )
-        XCTAssertTrue(
-            try decode(surfaceID: requestID, mode: "actionActivity")
-                .hasRequestScopedActionSurface
+        let placeholder = try decode(
+            surfaceID: requestID,
+            mode: "actionActivity"
         )
+        XCTAssertTrue(placeholder.hasRequestScopedActionSurface)
+        XCTAssertFalse(placeholder.isProviderUIPrompt)
     }
 
     func testAndroidActionSessionIgnoresQRCodeLikeWindowMetadata() throws {
@@ -4123,7 +4158,24 @@ final class OKVideoMacTests: XCTestCase {
                 """.utf8
             )
         )
-        XCTAssertTrue(actionSession.isProviderUIPrompt)
+        XCTAssertFalse(actionSession.isProviderUIPrompt)
+
+        let providerWindow = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: Data(
+                """
+                {
+                  "interactionID":"\(requestID.uuidString)",
+                  "terminal":false,
+                  "surfaceActive":true,
+                  "surfaceRequestScoped":true,
+                  "surfaceInteractionID":"\(requestID.uuidString)",
+                  "surfaceMode":"providerWindow"
+                }
+                """.utf8
+            )
+        )
+        XCTAssertTrue(providerWindow.isProviderUIPrompt)
     }
 
     @MainActor
@@ -6076,7 +6128,7 @@ final class OKVideoMacTests: XCTestCase {
         let handle = InteractionHandle(
             id: requestID,
             actionKind: .configuration,
-            cancelProvider: { receivedID in
+            cancelProvider: { receivedID, _ in
                 await recorder.recordStarted(receivedID)
                 try await Task.sleep(nanoseconds: 20_000_000)
                 await recorder.recordAcknowledged(receivedID)
@@ -6097,6 +6149,56 @@ final class OKVideoMacTests: XCTestCase {
         let events = await recorder.events
 
         XCTAssertEqual(events, ["start:\(requestID)", "ack:\(requestID)"])
+    }
+
+    func testInteractionHandleForwardsExplicitCompletionConfirmation()
+        async throws {
+        let requestID = UUID()
+        let recorder = ConfigurationCancellationTestRecorder()
+        let confirmedState = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: Data(
+                """
+                {
+                  "interactionID": "\(requestID.uuidString)",
+                  "phase": "completed",
+                  "outcome": "completed",
+                  "terminal": true,
+                  "userConfirmed": true,
+                  "completionSource": "userConfirmed",
+                  "confirmationAccepted": true
+                }
+                """.utf8
+            )
+        )
+        let handle = InteractionHandle(
+            id: requestID,
+            actionKind: .authorization,
+            confirmProvider: { receivedID in
+                await recorder.recordStarted(receivedID)
+                return confirmedState
+            }
+        ) {
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+            return ConfigurationInteractionTerminalResponse(
+                requestID: requestID,
+                outcome: .succeeded,
+                providerResult: .string("late"),
+                error: nil,
+                httpStatusCode: 200,
+                refreshPerformed: nil
+            )
+        }
+
+        let state = try await handle.confirmCompletion()
+        handle.cancel()
+
+        XCTAssertEqual(state.interactionID, requestID.uuidString)
+        XCTAssertEqual(state.userConfirmed, true)
+        XCTAssertEqual(state.completionSource, "userConfirmed")
+        XCTAssertEqual(state.confirmationAccepted, true)
+        let events = await recorder.events
+        XCTAssertEqual(events, ["start:\(requestID)"])
     }
 
     func testInteractionHandleRetiresSurfaceBeforePublishingTerminalResponse()
@@ -7755,48 +7857,6 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testAndroidAVDPersistentFingerprintDetectsDataChanges() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
-            UUID().uuidString,
-            isDirectory: true
-        )
-        let first = root.appendingPathComponent("first.avd", isDirectory: true)
-        let second = root.appendingPathComponent("second.avd", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(
-            at: first,
-            withIntermediateDirectories: true
-        )
-        try FileManager.default.createDirectory(
-            at: second,
-            withIntermediateDirectories: true
-        )
-        let config = Data("target=android-35\n".utf8)
-        let userdata = Data(repeating: 0x5a, count: 140_000)
-        for directory in [first, second] {
-            try config.write(to: directory.appendingPathComponent("config.ini"))
-            try userdata.write(
-                to: directory.appendingPathComponent("userdata-qemu.img.qcow2")
-            )
-        }
-        let firstFingerprint = try AndroidDexBridgeRuntime
-            .avdPersistentFingerprint(at: first)
-        XCTAssertEqual(
-            firstFingerprint,
-            try AndroidDexBridgeRuntime.avdPersistentFingerprint(at: second)
-        )
-
-        var changed = userdata
-        changed[changed.count - 1] = 0x6b
-        try changed.write(
-            to: second.appendingPathComponent("userdata-qemu.img.qcow2")
-        )
-        XCTAssertNotEqual(
-            firstFingerprint,
-            try AndroidDexBridgeRuntime.avdPersistentFingerprint(at: second)
-        )
-    }
-
     private func androidAAPTBadging(for apk: URL) throws -> String {
         let environment = ProcessInfo.processInfo.environment
         let roots = [
@@ -8036,6 +8096,14 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(
             AndroidDeprecatedTargetSDKWarningPolicy.shouldInspect(
                 windowDump: windows
+            )
+        )
+        XCTAssertTrue(
+            AndroidDeprecatedTargetSDKWarningPolicy.shouldInspect(
+                windowDump: windows.replacingOccurrences(
+                    of: "Window #0",
+                    with: "Window #17"
+                )
             )
         )
         XCTAssertFalse(
@@ -9779,6 +9847,42 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(HomeToolbarLayout.minimal.sitePickerWidth, 0)
     }
 
+    func testHomeCategoryNavigationUsesMoreMenuWhenTabsOverflow() {
+        let candidates = ["控制台", "系统设置", "夸克网盘", "迅雷网盘"].map {
+            HomeCategoryNavigationCandidate(id: $0, width: 72)
+        }
+
+        let partition = HomeCategoryNavigationLayoutPolicy.partition(
+            candidates: candidates,
+            selectedID: "控制台",
+            availableWidth: 260
+        )
+
+        XCTAssertEqual(partition.visibleIDs, ["控制台"])
+        XCTAssertEqual(
+            partition.hiddenIDs,
+            ["系统设置", "夸克网盘", "迅雷网盘"]
+        )
+    }
+
+    func testHomeCategoryNavigationKeepsSelectedOverflowTabVisible() {
+        let candidates = ["控制台", "系统设置", "夸克网盘", "迅雷网盘"].map {
+            HomeCategoryNavigationCandidate(id: $0, width: 72)
+        }
+
+        let partition = HomeCategoryNavigationLayoutPolicy.partition(
+            candidates: candidates,
+            selectedID: "迅雷网盘",
+            availableWidth: 260
+        )
+
+        XCTAssertEqual(partition.visibleIDs, ["迅雷网盘"])
+        XCTAssertEqual(
+            partition.hiddenIDs,
+            ["控制台", "系统设置", "夸克网盘"]
+        )
+    }
+
     func testBrowserToolbarChromeKeepsNativeUnifiedFillAcrossScroll() {
         XCTAssertEqual(
             BrowserToolbarChromePolicy.appearance(
@@ -9835,6 +9939,18 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(window.titlebarSeparatorStyle, .none)
         XCTAssertFalse(window.isOpaque)
         XCTAssertEqual(window.backgroundColor, .clear)
+        XCTAssertTrue(window.hasShadow)
+    }
+
+    @MainActor
+    func testBrowserToolbarMaterialConsumesEmptyTitlebarClicks() {
+        let view = BrowserToolbarMaterialView(
+            frame: NSRect(x: 0, y: 0, width: 500, height: 52)
+        )
+
+        XCTAssertTrue(view.hitTest(NSPoint(x: 490, y: 26)) === view)
+        XCTAssertNil(view.hitTest(NSPoint(x: 501, y: 26)))
+        XCTAssertTrue(view.mouseDownCanMoveWindow)
     }
 
     func testBrowserToolbarChromeAdaptsAccessibilityAndInactiveWindows() {

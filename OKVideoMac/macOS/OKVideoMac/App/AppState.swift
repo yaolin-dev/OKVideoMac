@@ -1234,6 +1234,34 @@ enum AndroidActionSurfaceLeasePolicy {
     }
 }
 
+/// Keeps the last renderable pixels during a brief Dialog/Activity or ADB
+/// capture gap, but only while they still belong to the exact request-owned
+/// Android surface. A replacement interaction, provider, or runtime generation
+/// can never inherit the previous surface.
+enum AndroidActionSurfaceContinuityPolicy {
+    static func canRetain(
+        _ frame: AndroidActionSurfaceFrame?,
+        expectedInteractionID: UUID,
+        providerOwnerID: String?,
+        generation: Int?
+    ) -> Bool {
+        guard let frame,
+              frame.interactionID == expectedInteractionID else {
+            return false
+        }
+        if let providerOwnerID = providerOwnerID?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !providerOwnerID.isEmpty,
+           frame.providerOwnerID != providerOwnerID {
+            return false
+        }
+        if let generation, frame.generation != generation {
+            return false
+        }
+        return true
+    }
+}
+
 struct CloudAuthorizationPrompt: Identifiable, Equatable {
     let id: UUID
     let interactionID: UUID
@@ -1246,6 +1274,7 @@ struct CloudAuthorizationPrompt: Identifiable, Equatable {
     var presentationTarget: CloudAuthorizationPresentationTarget
     var status: String?
     var allowsRetry: Bool
+    var allowsCompletionConfirmation: Bool
 }
 
 /// FongMi treats an action result message like `Notify.show`: it is optional,
@@ -1663,18 +1692,6 @@ enum CloudAuthorizationRetryPolicy {
         activeConfigurationID == sourceIdentity.configurationID
             && availableSiteKeys.contains(sourceIdentity.siteKey)
     }
-}
-
-enum CloudAuthorizationPollingPolicy {
-    static let maximumHiddenPollCount = 40
-
-    static func shouldTimeOut(
-        hiddenPollCount: Int,
-        maximumHiddenPollCount: Int = maximumHiddenPollCount
-    ) -> Bool {
-        hiddenPollCount >= max(1, maximumHiddenPollCount)
-    }
-
 }
 
 enum ConfigurationInteractionTerminalDecision: Equatable, Sendable {
@@ -3591,8 +3608,6 @@ final class AppState: ObservableObject {
     @Published private(set) var configurationCategoryPresentation:
         ConfigurationCategoryPresentation?
     @Published private(set) var androidRuntimeStatus: AndroidRuntimeStatus = .checking
-    @Published private(set) var androidRuntimeContinuityStatus:
-        AndroidRuntimeContinuityStatus = .checking
     @Published private(set) var isAndroidRuntimeBusy = false
 
     var mainWindowCloudAuthorizationPrompt: CloudAuthorizationPrompt? {
@@ -3686,8 +3701,11 @@ final class AppState: ObservableObject {
     private var lastCloudAuthorizationSurfaceCaptureAt: Date?
     private var configurationInteractionCoordinator =
         ConfigurationInteractionCoordinator()
-    private var configurationInteractionDismissTask: Task<Void, Never>?
     private var configurationInteractionTerminalTask: Task<Void, Never>?
+    /// Serializes provider cancellation/restart cleanup across UI dismissal
+    /// and a subsequent button click. A cleared sheet must not make its old
+    /// DEX worker invisible to the next interaction.
+    private var configurationInteractionCleanupTask: Task<Void, Never>?
     private var siteActionStatusGeneration: UInt64 = 0
     private var siteActionStatusDismissTask: Task<Void, Never>?
     private var activePlayback: ActivePlaybackContext?
@@ -5557,7 +5575,10 @@ final class AppState: ObservableObject {
                     )
                     if cloudAuthorizationPrompt?.interactionID
                         == interactionID {
-                        scheduleConfigurationInteractionDismiss(interactionID)
+                        retireCompletedConfigurationInteraction(
+                            interactionID,
+                            preservingPrompt: true
+                        )
                     } else {
                         retireCompletedConfigurationInteraction(interactionID)
                     }
@@ -5572,7 +5593,12 @@ final class AppState: ObservableObject {
                 if let interactionID,
                    configurationInteractionCoordinator.owns(interactionID) {
                     completeConfigurationInteraction(interactionID)
-                    scheduleConfigurationInteractionDismiss(interactionID)
+                    retireCompletedConfigurationInteraction(
+                        interactionID,
+                        preservingPrompt:
+                            cloudAuthorizationPrompt?.interactionID
+                                == interactionID
+                    )
                 }
                 presentHomeSearch()
                 search(query, context: .discoveryFallback)
@@ -5591,12 +5617,20 @@ final class AppState: ObservableObject {
             )
         } catch let authorization as AndroidBridgeUIRequired {
             guard siteActionStatusGeneration == actionStatusGeneration else {
-                authorization.handle?.cancel()
+                scheduleConfigurationInteractionCleanup(
+                    authorization.handle,
+                    reason: ConfigurationInteractionCancellationReason
+                        .superseded.rawValue
+                )
                 return
             }
             if let interactionID,
                !configurationInteractionCoordinator.owns(interactionID) {
-                authorization.handle?.cancel()
+                scheduleConfigurationInteractionCleanup(
+                    authorization.handle,
+                    reason: ConfigurationInteractionCancellationReason
+                        .superseded.rawValue
+                )
                 return
             }
             await presentCloudAuthorization(
@@ -5792,18 +5826,20 @@ final class AppState: ObservableObject {
     /// an empty FongMi action result is a valid silent completion and must not
     /// send a late cancel that can race the next request.
     private func retireCompletedConfigurationInteraction(
-        _ interactionID: UUID
+        _ interactionID: UUID,
+        preservingPrompt: Bool = false
     ) {
         guard configurationInteractionCoordinator.owns(interactionID),
               cloudAuthorizationContext?.operationID == interactionID else {
             return
         }
-        configurationInteractionDismissTask?.cancel()
-        configurationInteractionDismissTask = nil
+        let retainedPrompt = preservingPrompt
+            ? cloudAuthorizationPrompt
+            : nil
         cloudAuthorizationSessionID = UUID()
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = nil
-        cloudAuthorizationPrompt = nil
+        cloudAuthorizationPrompt = retainedPrompt
         cloudAuthorizationInput = ""
         cloudAuthorizationSurfaceFrame = nil
         lastCloudAuthorizationSurfaceCaptureAt = nil
@@ -5897,7 +5933,10 @@ final class AppState: ObservableObject {
                     status: "配置操作已完成"
                 )
                 if cloudAuthorizationPrompt?.interactionID == interactionID {
-                    scheduleConfigurationInteractionDismiss(interactionID)
+                    retireCompletedConfigurationInteraction(
+                        interactionID,
+                        preservingPrompt: true
+                    )
                 } else {
                     retireCompletedConfigurationInteraction(interactionID)
                 }
@@ -5928,12 +5967,20 @@ final class AppState: ObservableObject {
             )
         } catch let authorization as AndroidBridgeUIRequired {
             guard siteActionStatusGeneration == actionStatusGeneration else {
-                authorization.handle?.cancel()
+                scheduleConfigurationInteractionCleanup(
+                    authorization.handle,
+                    reason: ConfigurationInteractionCancellationReason
+                        .superseded.rawValue
+                )
                 return
             }
             if let interactionID,
                !configurationInteractionCoordinator.owns(interactionID) {
-                authorization.handle?.cancel()
+                scheduleConfigurationInteractionCleanup(
+                    authorization.handle,
+                    reason: ConfigurationInteractionCancellationReason
+                        .superseded.rawValue
+                )
                 return
             }
             await presentCloudAuthorization(
@@ -6066,16 +6113,19 @@ final class AppState: ObservableObject {
             status: phase == .invoking
                 ? "正在执行配置操作…"
                 : "正在等待站点创建下一步操作界面…",
-            allowsRetry: false
+            allowsRetry: false,
+            allowsCompletionConfirmation: false
         )
             : nil
         return request.interactionID
     }
 
     /// Retires the previous request before reserving a new native interaction.
-    /// Waiting is bounded so a broken compatibility bridge cannot freeze the
-    /// main actor, while a responsive bridge gets a chance to remove its old UI.
+    /// Cleanup may restart only the Android Bridge process when third-party
+    /// DEX code ignores interruption. Await it before a replacement request so
+    /// old callbacks can never attach themselves to the new Activity.
     private func supersedeConfigurationInteractionIfNeeded() async {
+        await configurationInteractionCleanupTask?.value
         guard cloudAuthorizationContext != nil
                 || cloudAuthorizationPrompt != nil else { return }
         let bridge = environment?.androidDexBridge
@@ -6087,19 +6137,25 @@ final class AppState: ObservableObject {
             cancellationReason: .superseded,
             cancelProviderHandle: false
         )
-        await withTaskGroup(of: Void.self) { group in
-            if let providerHandle {
-                group.addTask { await providerHandle.cancelAndWait() }
-            } else if usesLegacyBridge, let bridge {
-                group.addTask { try? await bridge.resetAuthorizationUI() }
-            } else {
-                return
-            }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-            }
-            _ = await group.next()
-            group.cancelAll()
+        if let providerHandle {
+            await providerHandle.cancelAndWait(
+                reason: ConfigurationInteractionCancellationReason
+                    .superseded.rawValue
+            )
+        } else if usesLegacyBridge, let bridge {
+            try? await bridge.resetAuthorizationUI()
+        }
+    }
+
+    private func scheduleConfigurationInteractionCleanup(
+        _ handle: InteractionHandle?,
+        reason: String
+    ) {
+        guard let handle else { return }
+        let previous = configurationInteractionCleanupTask
+        configurationInteractionCleanupTask = Task {
+            await previous?.value
+            await handle.cancelAndWait(reason: reason)
         }
     }
 
@@ -6161,25 +6217,6 @@ final class AppState: ObservableObject {
             status: message,
             allowsRetry: true
         )
-    }
-
-    private func scheduleConfigurationInteractionDismiss(
-        _ interactionID: UUID,
-        delayNanoseconds: UInt64 = 900_000_000
-    ) {
-        configurationInteractionDismissTask?.cancel()
-        configurationInteractionDismissTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: delayNanoseconds)
-            guard !Task.isCancelled, let self,
-                  self.configurationInteractionCoordinator.owns(interactionID),
-                  self.cloudAuthorizationPrompt?.lifecyclePhase == .completed else {
-                return
-            }
-            self.clearCloudAuthorization(
-                resetBridgeUI: false,
-                markPendingPlaybackCancelled: false
-            )
-        }
     }
 
     private func observeConfigurationInteractionTerminal(
@@ -6322,14 +6359,9 @@ final class AppState: ObservableObject {
             )
             cloudAuthorizationContext = current
         }
-        // The last screenshot is also an input capability. Retire it as soon as
-        // the exact request no longer exposes an actionable full-display
-        // surface (for example while the translucent host Activity is visible),
-        // rather than leaving a stale but safely rejected image on screen.
-        if !state.hasRequestScopedActionSurface {
-            cloudAuthorizationSurfaceFrame = nil
-            lastCloudAuthorizationSurfaceCaptureAt = nil
-        }
+        // Surface continuity is handled by updateCloudAuthorizationSurfaceFrame.
+        // It deliberately keeps the last frame for a very short provider
+        // transition, but never treats the Bridge placeholder as actionable UI.
         return true
     }
 
@@ -6789,12 +6821,13 @@ final class AppState: ObservableObject {
             )
             configurationInteractionCoordinator.clear(interactionID)
         }
-        configurationInteractionDismissTask?.cancel()
-        configurationInteractionDismissTask = nil
         configurationInteractionTerminalTask?.cancel()
         configurationInteractionTerminalTask = nil
         if cancelProviderHandle {
-            providerHandle?.cancel()
+            scheduleConfigurationInteractionCleanup(
+                providerHandle,
+                reason: cancellationReason.rawValue
+            )
         }
         cloudAuthorizationSessionID = UUID()
         cloudAuthorizationPollTask?.cancel()
@@ -6853,6 +6886,14 @@ final class AppState: ObservableObject {
     }
 
     func cancelCloudAuthorization() async {
+        if cloudAuthorizationContext == nil,
+           cloudAuthorizationPrompt?.lifecyclePhase.isTerminal == true {
+            cloudAuthorizationPrompt = nil
+            cloudAuthorizationInput = ""
+            cloudAuthorizationSurfaceFrame = nil
+            lastCloudAuthorizationSurfaceCaptureAt = nil
+            return
+        }
         // The Android dialog is a real native window. Merely hiding the
         // SwiftUI layer leaves it stacked behind the app and causes the next
         // detail/play call to receive the wrong provider prompt.
@@ -6867,7 +6908,9 @@ final class AppState: ObservableObject {
             cancelProviderHandle: false
         )
         if let providerHandle {
-            await providerHandle.cancelAndWait()
+            await providerHandle.cancelAndWait(
+                reason: ConfigurationInteractionCancellationReason.user.rawValue
+            )
         } else if usesLegacyBridge {
             try? await bridge?.resetAuthorizationUI()
         }
@@ -6896,8 +6939,11 @@ final class AppState: ObservableObject {
             ) {
                 return
             }
-            guard state.isProviderUIPrompt
-                    || state.hasRequestScopedActionSurface else {
+            guard state.isProviderUIPrompt else {
+                await updateCloudAuthorizationSurfaceFrame(
+                    for: state,
+                    context: context
+                )
                 startCloudAuthorizationPolling()
                 return
             }
@@ -6910,6 +6956,63 @@ final class AppState: ObservableObject {
                 return
             }
             if AsyncCancellationPolicy.isCancellation(error) {
+                return
+            }
+            failConfigurationInteraction(
+                context.operationID,
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    func confirmCloudAuthorizationCompletion() async {
+        guard let context = cloudAuthorizationContext,
+              context.operation.pendingPlayback == nil,
+              isCurrentCloudAuthorizationContext(context),
+              var prompt = cloudAuthorizationPrompt,
+              prompt.interactionID == context.operationID,
+              prompt.allowsCompletionConfirmation,
+              !prompt.lifecyclePhase.isTerminal else {
+            return
+        }
+        prompt.lifecyclePhase = .submitting
+        prompt.status = "正在确认操作结果并刷新配置…"
+        cloudAuthorizationPrompt = prompt
+        _ = configurationInteractionCoordinator.transition(
+            context.operationID,
+            to: .submitting,
+            status: prompt.status
+        )
+        do {
+            if let handle = context.providerHandle {
+                let state = try await handle.confirmCompletion()
+                guard configurationInteractionCoordinator.owns(
+                        context.operationID,
+                        generation: context.requestGeneration
+                      ),
+                      cloudAuthorizationContext?.operationID
+                        == context.operationID,
+                      acceptConfigurationInteractionState(
+                        state,
+                        context: context
+                      ) else {
+                    return
+                }
+                _ = await consumeConfigurationTerminalState(
+                    state,
+                    context: context
+                )
+                startCloudAuthorizationPolling()
+            } else {
+                await finishCloudAuthorizationAndRetry()
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            guard configurationInteractionCoordinator.owns(
+                    context.operationID,
+                    generation: context.requestGeneration
+                  ) else {
                 return
             }
             failConfigurationInteraction(
@@ -7090,10 +7193,15 @@ final class AppState: ObservableObject {
         let interactionKind = ConfigurationInteractionClassificationPolicy
             .interactionKind(for: semantic)
         let lifecyclePhase: ConfigurationInteractionPhase =
-            state.hasRequestScopedActionSurface ? .presenting : .awaitingInterface
-        let status = lifecyclePhase == .presenting
-            ? "请在 Android 原生界面中完成操作"
-            : "正在等待站点创建 Android 操作界面…"
+            state.isProviderUIPrompt ? .presenting : .awaitingInterface
+        let status: String
+        if lifecyclePhase == .presenting {
+            status = context.operation.pendingPlayback == nil
+                ? "请在 Android 原生界面中完成操作，完成后点击“完成并刷新”。"
+                : "请在 Android 原生界面中完成操作"
+        } else {
+            status = "正在等待站点创建 Android 操作界面…"
+        }
         let updated = CloudAuthorizationPrompt(
             id: previous?.id ?? UUID(),
             interactionID: operationID,
@@ -7107,9 +7215,11 @@ final class AppState: ObservableObject {
             presentationTarget: previous?.presentationTarget
                 ?? cloudAuthorizationPresentationTarget(
                     for: context.operation
-                ),
+            ),
             status: status,
-            allowsRetry: previous?.allowsRetry ?? false
+            allowsRetry: previous?.allowsRetry ?? false,
+            allowsCompletionConfirmation:
+                context.operation.pendingPlayback == nil
         )
         _ = configurationInteractionCoordinator.transition(
             operationID,
@@ -7139,9 +7249,22 @@ final class AppState: ObservableObject {
         // reported as `visible`, but the request-scoped full display is still
         // exactly the surface the user must operate. Ownership/terminal checks
         // below are the security boundary; `visible` is only UI metadata.
-        guard state.hasRequestScopedActionSurface else {
-            cloudAuthorizationSurfaceFrame = nil
-            lastCloudAuthorizationSurfaceCaptureAt = nil
+        guard state.isProviderUIPrompt else {
+            let capturedRecently = lastCloudAuthorizationSurfaceCaptureAt.map {
+                Date().timeIntervalSince($0) < 0.8
+            } ?? false
+            if !capturedRecently
+                    || !AndroidActionSurfaceContinuityPolicy.canRetain(
+                cloudAuthorizationSurfaceFrame,
+                expectedInteractionID: context.operationID,
+                providerOwnerID: state.providerOwnerID,
+                generation: nil
+            ) {
+                cloudAuthorizationSurfaceFrame = nil
+            }
+            if !capturedRecently {
+                lastCloudAuthorizationSurfaceCaptureAt = nil
+            }
             return
         }
         guard configurationInteractionCoordinator.owns(
@@ -7195,11 +7318,11 @@ final class AppState: ObservableObject {
                 return
             }
             // FLAG_SECURE yields a black screencap instead of an error on some
-            // emulator releases. Do not retain that frame or fall back to the
-            // previous request's image.
-            cloudAuthorizationSurfaceFrame = Self.isRenderableActionSurface(
-                frame.pngData
-            ) ? frame : nil
+            // emulator releases. Never publish that frame, but keep the last
+            // valid frame from this exact lease to avoid a placeholder flash.
+            if Self.isRenderableActionSurface(frame.pngData) {
+                cloudAuthorizationSurfaceFrame = frame
+            }
         } catch {
             guard configurationInteractionCoordinator.owns(
                     context.operationID,
@@ -7208,7 +7331,14 @@ final class AppState: ObservableObject {
                   cloudAuthorizationContext?.operationID == context.operationID else {
                 return
             }
-            cloudAuthorizationSurfaceFrame = nil
+            if !AndroidActionSurfaceContinuityPolicy.canRetain(
+                cloudAuthorizationSurfaceFrame,
+                expectedInteractionID: context.operationID,
+                providerOwnerID: state.providerOwnerID,
+                generation: state.interactionGeneration
+            ) {
+                cloudAuthorizationSurfaceFrame = nil
+            }
         }
     }
 
@@ -7257,7 +7387,6 @@ final class AppState: ObservableObject {
               let bridge = environment?.androidDexBridge else {
             return
         }
-        cloudAuthorizationSurfaceFrame = nil
         lastCloudAuthorizationSurfaceCaptureAt = nil
         do {
             try await bridge.tapActionSurface(
@@ -7295,7 +7424,6 @@ final class AppState: ObservableObject {
               let bridge = environment?.androidDexBridge else {
             return
         }
-        cloudAuthorizationSurfaceFrame = nil
         lastCloudAuthorizationSurfaceCaptureAt = nil
         do {
             try await bridge.swipeActionSurface(
@@ -7331,7 +7459,6 @@ final class AppState: ObservableObject {
               let bridge = environment?.androidDexBridge else {
             return
         }
-        cloudAuthorizationSurfaceFrame = nil
         lastCloudAuthorizationSurfaceCaptureAt = nil
         do {
             try await bridge.backActionSurface(frame: frame)
@@ -7366,7 +7493,6 @@ final class AppState: ObservableObject {
             try await bridge.typeActionSurface(frame: frame, text: text)
             guard isCurrentCloudAuthorizationContext(context) else { return }
             cloudAuthorizationInput = ""
-            cloudAuthorizationSurfaceFrame = nil
             lastCloudAuthorizationSurfaceCaptureAt = nil
             await refreshCloudAuthorization()
         } catch {
@@ -7383,7 +7509,6 @@ final class AppState: ObservableObject {
         let sessionID = cloudAuthorizationSessionID
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = Task { [weak self] in
-            var hiddenPollCount = 0
             var bridgeFailureCount = 0
             while !Task.isCancelled {
                 do {
@@ -7433,8 +7558,7 @@ final class AppState: ObservableObject {
                     // a request-owned Android surface, or a provider worker
                     // which has not returned yet. Pixels and view content do
                     // not participate in classification or completion.
-                    if state.hasRequestScopedActionSurface {
-                        hiddenPollCount = 0
+                    if state.isProviderUIPrompt {
                         if var current = self.cloudAuthorizationContext,
                            current.operationID == context.operationID {
                             current.hasObservedPrompt = true
@@ -7443,25 +7567,22 @@ final class AppState: ObservableObject {
                         await self.updateCloudAuthorizationPrompt(state)
                         continue
                     }
-                    hiddenPollCount += 1
-                    if state.workerReturned != true {
-                        if var prompt = self.cloudAuthorizationPrompt,
-                           prompt.interactionID == context.operationID {
-                            prompt.lifecyclePhase = .processing
-                            prompt.status = "Android 操作界面暂时不可见，正在等待站点返回…"
-                            self.cloudAuthorizationPrompt = prompt
-                        }
-                        continue
-                    }
-                    if CloudAuthorizationPollingPolicy.shouldTimeOut(
-                        hiddenPollCount: hiddenPollCount
-                    ) {
-                        context.providerHandle?.cancel()
-                        self.failConfigurationInteraction(
-                            context.operationID,
-                            message: "站点已结束 Android 界面，但没有返回最终结果，请重试。"
-                        )
-                        return
+                    await self.updateCloudAuthorizationSurfaceFrame(
+                        for: state,
+                        context: context
+                    )
+                    if var prompt = self.cloudAuthorizationPrompt,
+                       prompt.interactionID == context.operationID {
+                        prompt.lifecyclePhase = state.workerReturned == true
+                            ? .presenting
+                            : .processing
+                        prompt.status = state.workerReturned == true
+                            ? "站点方法已返回；确认 Android 操作完成后，请点击“完成并刷新”。"
+                            : "Android 操作界面暂时不可见，正在等待站点处理…"
+                        prompt.allowsCompletionConfirmation =
+                            context.operation.pendingPlayback == nil
+                                && context.hasObservedPrompt
+                        self.cloudAuthorizationPrompt = prompt
                     }
                     continue
                 } catch is CancellationError {
@@ -7469,7 +7590,11 @@ final class AppState: ObservableObject {
                 } catch {
                     bridgeFailureCount += 1
                     if bridgeFailureCount >= 6 {
-                        context.providerHandle?.cancel()
+                        self.scheduleConfigurationInteractionCleanup(
+                            context.providerHandle,
+                            reason: ConfigurationInteractionCancellationReason
+                                .providerCancelled.rawValue
+                        )
                         self.failConfigurationInteraction(
                             context.operationID,
                             message: "本机配置桥连续无法响应，请重试该操作。"
@@ -7585,30 +7710,19 @@ final class AppState: ObservableObject {
         cloudAuthorizationSessionID = UUID()
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = nil
-        let completionDelay: UInt64
-        if isPlaybackOperation {
-            // The resolver lease was handed off before the authorization UI
-            // was presented. Playback correctness therefore has no dependency
-            // on an arbitrary grace sleep, including when the provider result
-            // was already terminal by the time the overlay appeared.
-            completionDelay = 0
-        } else {
-            completionDelay = 650_000_000
-        }
-        if completionDelay > 0 {
-            try? await Task.sleep(nanoseconds: completionDelay)
-        }
         guard configurationInteractionCoordinator.owns(context.operationID),
               cloudAuthorizationContext?.operationID == context.operationID,
               isCurrentCloudAuthorizationContext(context) else {
             return
         }
-        cloudAuthorizationPrompt = nil
-        cloudAuthorizationInput = ""
-        cloudAuthorizationSurfaceFrame = nil
-        lastCloudAuthorizationSurfaceCaptureAt = nil
-        cloudAuthorizationContext = nil
-        configurationInteractionCoordinator.clear(context.operationID)
+        // Playback has an authoritative media result and can resume
+        // immediately. Legacy configuration actions have no provider-level
+        // completion callback, so retain the completed result until the user
+        // closes it instead of dismissing on a timing heuristic.
+        retireCompletedConfigurationInteraction(
+            context.operationID,
+            preservingPrompt: !isPlaybackOperation
+        )
         configurationInteractionTerminalTask = nil
         switch context.operation {
         case .playback(let pending):
@@ -9225,7 +9339,11 @@ final class AppState: ObservableObject {
                         return
                     } catch let authorization as AndroidBridgeUIRequired {
                         guard playbackSessionID == sessionID else {
-                            authorization.handle?.cancel()
+                            scheduleConfigurationInteractionCleanup(
+                                authorization.handle,
+                                reason: ConfigurationInteractionCancellationReason
+                                    .superseded.rawValue
+                            )
                             return
                         }
                         // Hand the request lease to the authorization flow
@@ -9335,7 +9453,11 @@ final class AppState: ObservableObject {
                     return
                 } catch let authorization as AndroidBridgeUIRequired {
                     guard playbackSessionID == sessionID else {
-                        authorization.handle?.cancel()
+                        scheduleConfigurationInteractionCleanup(
+                            authorization.handle,
+                            reason: ConfigurationInteractionCancellationReason
+                                .superseded.rawValue
+                        )
                         return
                     }
                     // The deferred removal below remains as an idempotent
@@ -11651,8 +11773,6 @@ final class AppState: ObservableObject {
             return
         }
         androidRuntimeStatus = await environment.androidDexBridge.runtimeStatus()
-        androidRuntimeContinuityStatus = await environment.androidDexBridge
-            .runtimeContinuityStatus()
     }
 
     func chooseAndroidSDK() async {
@@ -11725,31 +11845,6 @@ final class AppState: ObservableObject {
             androidRuntimeStatus = await environment.androidDexBridge
                 .runtimeStatus()
             show(error, title: "Android 兼容模块修复失败")
-        }
-    }
-
-    func migrateLegacyAndroidRuntime() async {
-        guard let environment, !isAndroidRuntimeBusy else { return }
-        isAndroidRuntimeBusy = true
-        androidRuntimeContinuityStatus = .migrating
-        defer { isAndroidRuntimeBusy = false }
-        do {
-            androidRuntimeStatus = .starting(
-                "正在复制并验证旧版授权环境",
-                progress: 0
-            )
-            androidRuntimeContinuityStatus = try await environment
-                .androidDexBridge.migrateLegacyRuntime()
-            androidRuntimeStatus = await environment.androidDexBridge
-                .runtimeStatus()
-            androidRuntimeContinuityStatus = await environment.androidDexBridge
-                .runtimeContinuityStatus()
-        } catch {
-            androidRuntimeStatus = await environment.androidDexBridge
-                .runtimeStatus()
-            androidRuntimeContinuityStatus = await environment.androidDexBridge
-                .runtimeContinuityStatus()
-            show(error, title: "旧版授权环境迁移失败")
         }
     }
 

@@ -115,19 +115,11 @@ struct SearchView: View {
         } label: {
             switch layout {
             case .expanded:
-                HStack(spacing: 6) {
-                    Text(searchScopeToolbarTitle)
-                        .lineLimit(1)
-                    Image(systemName: "chevron.down")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
+                Label(searchScopeToolbarTitle, systemImage: "checklist")
+                    .lineLimit(1)
             case .compact:
-                HStack(spacing: 5) {
-                    Image(systemName: "checklist")
-                    Text(searchScopeToolbarTitle)
-                        .lineLimit(1)
-                }
+                Label(searchScopeToolbarTitle, systemImage: "checklist")
+                    .lineLimit(1)
             case .minimal:
                 Image(systemName: "checklist")
             }

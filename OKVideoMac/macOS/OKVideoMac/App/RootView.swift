@@ -295,7 +295,7 @@ private final class BrowserDetailToolbarProbeView: NSView {
     }
 }
 
-private final class BrowserToolbarMaterialView: NSVisualEffectView {
+final class BrowserToolbarMaterialView: NSVisualEffectView {
     private let referenceToneView = NSView()
 
     override init(frame frameRect: NSRect) {
@@ -324,7 +324,11 @@ private final class BrowserToolbarMaterialView: NSVisualEffectView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
+        bounds.contains(point) ? self : nil
+    }
+
+    override var mouseDownCanMoveWindow: Bool {
+        true
     }
 }
 
@@ -1770,14 +1774,6 @@ struct CloudAuthorizationView: View {
                 .foregroundColor(.orange)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.vertical, 18)
-            } else if isBusy {
-                HStack(spacing: 10) {
-                    AppActivityIndicator(size: .small)
-                    Text(lifecycleStatus)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.vertical, 18)
             } else if let surfaceFrame {
                 VStack(spacing: 9) {
                     AndroidActionSurfaceView(
@@ -1805,6 +1801,16 @@ struct CloudAuthorizationView: View {
                             }
                         }
                     )
+                    .overlay(alignment: .topTrailing) {
+                        if isBusy {
+                            ProgressView()
+                                .controlSize(.small)
+                                .padding(8)
+                                .background(.regularMaterial, in: Circle())
+                                .padding(8)
+                                .accessibilityLabel(lifecycleStatus)
+                        }
+                    }
                     HStack(spacing: 10) {
                         Text("这是站点原生 Android 界面，可直接点击或拖动。")
                             .font(.caption)
@@ -1841,6 +1847,14 @@ struct CloudAuthorizationView: View {
                             || state.cloudAuthorizationInput.isEmpty
                     )
                 }
+            } else if isBusy {
+                HStack(spacing: 10) {
+                    AppActivityIndicator(size: .small)
+                    Text(lifecycleStatus)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 18)
             }
 
             if let status = prompt.status,
@@ -1859,6 +1873,18 @@ struct CloudAuthorizationView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(isBusy || prompt.lifecyclePhase == .completed)
+                }
+                if prompt.allowsCompletionConfirmation,
+                   !isTerminal {
+                    Button {
+                        Task {
+                            await state.confirmCloudAuthorizationCompletion()
+                        }
+                    } label: {
+                        Label("完成并刷新", systemImage: "checkmark.circle")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(prompt.lifecyclePhase == .submitting)
                 }
                 Spacer()
                 Button(isPlayerAuthorization ? "取消播放" : "关闭") {

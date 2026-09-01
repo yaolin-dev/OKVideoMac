@@ -341,6 +341,11 @@ if [[ ! -f "$APP_DESTINATION/Contents/Resources/LICENSE" ]] ||
   exit 1
 fi
 
+# The Swift player and C bridge evolve together. Rebuild the lightweight
+# bridge on every package so a stale native artifact can never satisfy a mere
+# file-exists check while missing symbols required by the current executable.
+"$SCRIPT_DIR/build-mpv-bridge.sh"
+
 LIBMPV_PATH="$(find "$LIBMPV_ROOT" -name 'libmpv*.dylib' -type f | head -n 1)"
 if [[ -z "$LIBMPV_PATH" ]]; then
   echo "Run build-libmpv.sh before packaging." >&2

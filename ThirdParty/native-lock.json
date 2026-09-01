@@ -196,7 +196,7 @@
     {
       "component": "zlib",
       "version": "1.3.2",
-      "upstream": "https://www.zlib.net/zlib-1.3.2.tar.gz",
+      "upstream": "https://www.zlib.net/zlib-1.3.2.tar.xz",
       "source_sha256": "d7a0654783a4da529d1bb793b7ad9c3318020af77667bcae35f95d0e42a792f3",
       "license": "Zlib",
       "build_system": "CMake via MacPorts",

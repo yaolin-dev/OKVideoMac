@@ -1,5 +1,7 @@
 package com.okvideomac.dexbridge;
 
+import android.util.Log;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -18,12 +20,10 @@ import java.util.UUID;
  * lifecycle-owned full-display surface, and event channel.</p>
  */
 final class BridgeInteractionRegistry {
+    private static final String TAG = "OKVideoInteraction";
     private static final int MAX_INTERACTIONS = 64;
     private static final int MAX_EVENTS_PER_INTERACTION = 32;
     private static final long RETENTION_MS = 10 * 60_000L;
-    private static final long DELAYED_UI_GRACE_MS = 8_000L;
-    private static final long CLOSED_UI_GRACE_MS = 750L;
-    private static final long PLAYBACK_UI_GRACE_MS = 1_500L;
     private static final Map<String, Interaction> INTERACTIONS =
             new LinkedHashMap<>();
     private static String latestID = "";
@@ -51,6 +51,7 @@ final class BridgeInteractionRegistry {
         Interaction previous = INTERACTIONS.get(latestID);
         if (previous != null && !previous.terminal()) {
             previous.discardPendingReturn();
+            previous.cancelReason = "superseded";
             previous.transition("superseded", "superseded");
         }
         Interaction interaction = new Interaction(
@@ -93,7 +94,6 @@ final class BridgeInteractionRegistry {
         if (!id.equals(latestID) || interaction.terminal()) {
             return interaction.jsonWithUI();
         }
-        long now = System.currentTimeMillis();
         boolean visible = ui != null && ui.optBoolean("visible", false);
         boolean surfaceRequestScoped = visible || (ui != null
                 && ui.optBoolean("surfaceRequestScoped", false)
@@ -133,10 +133,15 @@ final class BridgeInteractionRegistry {
         interaction.lastUI = ui == null ? emptyUI() : ui;
         interaction.updatedAt = System.currentTimeMillis();
         if (!interaction.terminal()) {
-            if (visible) {
+            if (interaction.userConfirmed && !interaction.invocationReturned) {
+                interaction.uiVisible = visible;
+                interaction.transition(
+                        "awaitingProviderReturnAfterConfirmation",
+                        "stay"
+                );
+            } else if (visible) {
                 interaction.sawUI = true;
                 interaction.uiVisible = true;
-                interaction.delayedUIDeadline = 0L;
                 interaction.phase = "awaitingUser";
                 interaction.outcome = "stay";
             } else if (surfaceDelegated && interaction.expectsProviderUI) {
@@ -147,7 +152,6 @@ final class BridgeInteractionRegistry {
                 // presentation activity. HOME/lock may produce the same
                 // conservative lifecycle signal.
                 interaction.uiVisible = false;
-                interaction.delayedUIDeadline = 0L;
                 interaction.phase = "awaitingExternalSurface";
                 interaction.outcome = "stay";
             } else if (ui != null
@@ -159,26 +163,19 @@ final class BridgeInteractionRegistry {
                 interaction.outcome = "stay";
             } else if (interaction.invocationReturned
                     && interaction.expectsProviderUI) {
-                // A normal provider return is the business result. The
-                // request-owned window lifecycle only keeps its Android
-                // surface alive long enough for a Dialog handoff/rebuild; it
-                // never classifies authorization or manufactures a result.
-                if (interaction.uiVisible
-                        || interaction.delayedUIDeadline <= 0L) {
-                    interaction.delayedUIDeadline =
-                            now + (interaction.sawUI
-                                    ? CLOSED_UI_GRACE_MS
-                                    : DELAYED_UI_GRACE_MS);
-                }
+                // Legacy Spider.action() commonly posts an Android Dialog and
+                // returns immediately. A hidden surface may only be a Dialog
+                // rebuild, Activity handoff, browser transition or temporary
+                // capture gap. It is presentation state, never proof that the
+                // user completed the operation. Keep the exact request alive
+                // until the host receives an explicit user confirmation.
                 interaction.uiVisible = false;
-                if (now >= interaction.delayedUIDeadline) {
-                    interaction.transition("completed", "completed");
-                } else {
-                    interaction.phase = interaction.sawUI
-                            ? "closingSurface"
-                            : "awaitingProviderUI";
-                    interaction.outcome = "stay";
-                }
+                interaction.transition(
+                        interaction.sawUI
+                                ? "awaitingUserConfirmation"
+                                : "awaitingProviderUI",
+                        "stay"
+                );
             } else {
                 interaction.uiVisible = false;
                 interaction.phase = "processing";
@@ -218,12 +215,11 @@ final class BridgeInteractionRegistry {
             // overwrite it.
             interaction.playbackResultReady = true;
             interaction.uiVisible = false;
+            interaction.completionSource = "providerPlaybackResult";
             interaction.transition("completed", "completed");
-        } else if (completedWithProviderResult) {
-            interaction.playbackResultReady = true;
-            interaction.delayedUIDeadline =
-                    interaction.invocationReturnedAt + PLAYBACK_UI_GRACE_MS;
-            interaction.transition("awaitingProviderUI", "stay");
+        } else if (interaction.userConfirmed) {
+            interaction.completionSource = "userConfirmed";
+            interaction.transition("completed", "completed");
         } else if (interaction.expectsProviderUI
                 && interaction.lastUI != null
                 && interaction.lastUI.optBoolean("surfaceDelegated", false)
@@ -235,13 +231,15 @@ final class BridgeInteractionRegistry {
                         "surfaceInteractionID",
                         ""
                 ))) {
-            interaction.delayedUIDeadline = 0L;
             interaction.transition("awaitingExternalSurface", "stay");
         } else if (interaction.expectsProviderUI
                 && !interaction.uiVisible) {
-            interaction.delayedUIDeadline =
-                    interaction.invocationReturnedAt + DELAYED_UI_GRACE_MS;
-            interaction.transition("awaitingProviderUI", "stay");
+            interaction.transition(
+                    interaction.sawUI
+                            ? "awaitingUserConfirmation"
+                            : "awaitingProviderUI",
+                    "stay"
+            );
         } else if (interaction.expectsProviderUI
                 && interaction.uiVisible) {
             interaction.transition("awaitingUser", "stay");
@@ -257,6 +255,31 @@ final class BridgeInteractionRegistry {
         } catch (Throwable ignored) {
         }
         return returned;
+    }
+
+    static synchronized JSONObject confirmCompleted(String requestedID) {
+        String id = resolve(requestedID);
+        Interaction interaction = INTERACTIONS.get(id);
+        if (interaction == null) return missing(id);
+        boolean accepted = id.equals(latestID) && !interaction.terminal();
+        if (accepted) {
+            interaction.userConfirmed = true;
+            interaction.completionSource = "userConfirmed";
+            if (interaction.invocationReturned) {
+                interaction.transition("completed", "completed");
+            } else {
+                interaction.transition(
+                        "awaitingProviderReturnAfterConfirmation",
+                        "stay"
+                );
+            }
+        }
+        JSONObject result = interaction.json();
+        try {
+            result.put("confirmationAccepted", accepted);
+        } catch (Throwable ignored) {
+        }
+        return result;
     }
 
     static synchronized JSONObject expectProviderUI(String requestedID) {
@@ -349,11 +372,21 @@ final class BridgeInteractionRegistry {
     }
 
     static synchronized JSONObject cancel(String requestedID) {
+        return cancel(requestedID, "hostRequested");
+    }
+
+    static synchronized JSONObject cancel(
+            String requestedID,
+            String reason
+    ) {
         String id = resolve(requestedID);
         Interaction interaction = INTERACTIONS.get(id);
         if (interaction == null) return missing(id);
         if (!interaction.terminal()) {
             interaction.discardPendingReturn();
+            interaction.cancelReason = clean(reason).isEmpty()
+                    ? "hostRequested"
+                    : clean(reason);
             interaction.transition("cancelled", "cancelled");
         }
         return interaction.json();
@@ -513,15 +546,17 @@ final class BridgeInteractionRegistry {
         String outcome = "none";
         String failure = "";
         String failureKind = "";
+        String completionSource = "";
+        String cancelReason = "";
         String uiSignature = "";
         JSONObject lastUI = emptyUI();
         boolean sawUI;
         boolean uiVisible;
         boolean expectsProviderUI;
         boolean invocationReturned;
+        boolean userConfirmed;
         boolean playbackResultReady;
         long invocationReturnedAt;
-        long delayedUIDeadline;
         String returnState = "pending";
         long eventSequence;
         final List<InteractionEvent> events = new ArrayList<>();
@@ -538,8 +573,21 @@ final class BridgeInteractionRegistry {
                 phase = nextPhase;
                 outcome = nextOutcome;
                 revision++;
+                Log.i(
+                        TAG,
+                        "interaction=" + shortID(id)
+                                + " phase=" + phase
+                                + " outcome=" + outcome
+                                + " workerReturned=" + invocationReturned
+                                + " userConfirmed=" + userConfirmed
+                );
             }
             updatedAt = System.currentTimeMillis();
+        }
+
+        private static String shortID(String value) {
+            if (value == null) return "";
+            return value.length() <= 8 ? value : value.substring(0, 8);
         }
 
         boolean terminal() {
@@ -655,6 +703,7 @@ final class BridgeInteractionRegistry {
                 value.put("updatedAt", updatedAt);
                 value.put("terminal", terminal());
                 value.put("workerReturned", invocationReturned);
+                value.put("userConfirmed", userConfirmed);
                 value.put("returnState", returnState);
                 value.put("channels", channels());
                 value.put("expectsProviderUI", expectsProviderUI);
@@ -665,8 +714,11 @@ final class BridgeInteractionRegistry {
                         lastUI == null ? emptyUI() : lastUI,
                         terminal()
                 );
-                if (delayedUIDeadline > 0L && !terminal()) {
-                    value.put("graceDeadline", delayedUIDeadline);
+                if (!completionSource.isEmpty()) {
+                    value.put("completionSource", completionSource);
+                }
+                if (!cancelReason.isEmpty()) {
+                    value.put("cancelReason", cancelReason);
                 }
                 if (!failure.isEmpty()) value.put("error", failure);
                 if (!failureKind.isEmpty()) {

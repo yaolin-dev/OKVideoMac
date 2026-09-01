@@ -78,54 +78,19 @@ struct HomeView: View {
                             if !home.recommendations.isEmpty
                                 || !mediaCategories.isEmpty {
                                 VStack(spacing: 0) {
-                                    ScrollView(.horizontal, showsIndicators: false) {
-                                        HStack(spacing: HomeBrowseGridMetrics.categorySpacing) {
-                                            if !home.recommendations.isEmpty {
-                                                Button("推荐") {
-                                                    filterLoadTask?.cancel()
-                                                    filterSelection = [:]
-                                                    state.clearCategory()
-                                                }
-                                                .buttonStyle(
-                                                    BrowseNavigationButtonStyle(
-                                                        isSelected:
-                                                            state.homePresentationSelection
-                                                            == .recommendation
-                                                    )
-                                                )
-                                            }
-                                            ForEach(mediaCategories) { category in
-                                                Button(category.name) {
-                                                    filterLoadTask?.cancel()
-                                                    filterSelection =
-                                                        HomeFilterPresentationPolicy
-                                                        .defaultSelection(
-                                                            filters: category.filters
-                                                        )
-                                                    Task {
-                                                        await state.loadCategory(
-                                                            id: category.id,
-                                                            filters: filterSelection
-                                                        )
-                                                    }
-                                                }
-                                                .buttonStyle(
-                                                    BrowseNavigationButtonStyle(
-                                                        isSelected:
-                                                            state.selectedCategoryID
-                                                            == category.id
-                                                    )
-                                                )
-                                            }
-                                        }
-                                        .padding(
-                                            .leading,
-                                            HomeBrowseGridMetrics.categoryLeadingInset
-                                        )
-                                        .padding(.trailing, 8)
-                                        .padding(
-                                            .vertical,
-                                            HomeBrowseGridMetrics.categoryVerticalPadding
+                                    HomeCategoryNavigation(
+                                        showsRecommendations:
+                                            !home.recommendations.isEmpty,
+                                        categories: mediaCategories,
+                                        selectedCategoryID:
+                                            state.selectedCategoryID,
+                                        isRecommendationSelected:
+                                            state.homePresentationSelection
+                                                == .recommendation
+                                    ) { categoryID in
+                                        selectHomeCategory(
+                                            categoryID,
+                                            categories: mediaCategories
                                         )
                                     }
                                     Divider()
@@ -331,6 +296,30 @@ struct HomeView: View {
         filterSelection = state.selectedCategoryFilters
     }
 
+    private func selectHomeCategory(
+        _ categoryID: String?,
+        categories: [VideoCategory]
+    ) {
+        filterLoadTask?.cancel()
+        guard let categoryID,
+              let category = categories.first(where: {
+                  $0.id == categoryID
+              }) else {
+            filterSelection = [:]
+            state.clearCategory()
+            return
+        }
+        filterSelection = HomeFilterPresentationPolicy.defaultSelection(
+            filters: category.filters
+        )
+        Task {
+            await state.loadCategory(
+                id: category.id,
+                filters: filterSelection
+            )
+        }
+    }
+
     @ViewBuilder
     private func homeItemGrid(_ items: [VideoSummary]) -> some View {
         let actionItems = items
@@ -478,6 +467,192 @@ enum HomeBrowseGridMetrics {
     // category strip at the same inset keeps navigation, active filters, and
     // the first poster on one optical baseline.
     static let categoryLeadingInset = HomeContentAlignment.visualLeadingInset
+}
+
+struct HomeCategoryNavigationCandidate: Equatable, Identifiable, Sendable {
+    let id: String
+    let width: CGFloat
+}
+
+struct HomeCategoryNavigationPartition: Equatable, Sendable {
+    let visibleIDs: [String]
+    let hiddenIDs: [String]
+}
+
+enum HomeCategoryNavigationLayoutPolicy {
+    static let recommendationID = "__home-recommendations__"
+    static let moreWidth: CGFloat = 62
+
+    static func partition(
+        candidates: [HomeCategoryNavigationCandidate],
+        selectedID: String?,
+        availableWidth: CGFloat
+    ) -> HomeCategoryNavigationPartition {
+        guard !candidates.isEmpty else {
+            return HomeCategoryNavigationPartition(
+                visibleIDs: [],
+                hiddenIDs: []
+            )
+        }
+        let spacing = HomeBrowseGridMetrics.categorySpacing
+        let allWidth = candidates.reduce(0) { $0 + $1.width }
+            + spacing * CGFloat(max(0, candidates.count - 1))
+        if allWidth <= availableWidth {
+            return HomeCategoryNavigationPartition(
+                visibleIDs: candidates.map(\.id),
+                hiddenIDs: []
+            )
+        }
+
+        let tabBudget = max(0, availableWidth - moreWidth - spacing)
+        var visible = [candidates[0].id]
+        var consumed = candidates[0].width
+        for candidate in candidates.dropFirst() {
+            let proposed = consumed + spacing + candidate.width
+            guard proposed <= tabBudget else { break }
+            visible.append(candidate.id)
+            consumed = proposed
+        }
+
+        if let selectedID,
+           !visible.contains(selectedID),
+           let selected = candidates.first(where: { $0.id == selectedID }) {
+            while visible.count > 1,
+                  consumed + spacing + selected.width > tabBudget {
+                guard let removedID = visible.popLast(),
+                      let removed = candidates.first(where: {
+                          $0.id == removedID
+                      }) else {
+                    break
+                }
+                consumed -= spacing + removed.width
+            }
+            if consumed + spacing + selected.width <= tabBudget {
+                visible.append(selected.id)
+            } else {
+                visible = [selected.id]
+            }
+        }
+
+        let visibleSet = Set(visible)
+        return HomeCategoryNavigationPartition(
+            visibleIDs: visible,
+            hiddenIDs: candidates.compactMap {
+                visibleSet.contains($0.id) ? nil : $0.id
+            }
+        )
+    }
+}
+
+private struct HomeCategoryNavigation: View {
+    let showsRecommendations: Bool
+    let categories: [VideoCategory]
+    let selectedCategoryID: String?
+    let isRecommendationSelected: Bool
+    let onSelect: (String?) -> Void
+
+    private var items: [Item] {
+        let recommendations = showsRecommendations
+            ? [Item(
+                id: HomeCategoryNavigationLayoutPolicy.recommendationID,
+                title: "推荐",
+                categoryID: nil
+            )]
+            : []
+        return recommendations + categories.map {
+            Item(id: $0.id, title: $0.name, categoryID: $0.id)
+        }
+    }
+
+    private var selectedID: String? {
+        if let selectedCategoryID { return selectedCategoryID }
+        return isRecommendationSelected && showsRecommendations
+            ? HomeCategoryNavigationLayoutPolicy.recommendationID
+            : nil
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let currentItems = items
+            let partition = HomeCategoryNavigationLayoutPolicy.partition(
+                candidates: currentItems.map {
+                    HomeCategoryNavigationCandidate(
+                        id: $0.id,
+                        width: Self.measuredWidth(for: $0.title)
+                    )
+                },
+                selectedID: selectedID,
+                availableWidth: max(
+                    0,
+                    proxy.size.width
+                        - HomeBrowseGridMetrics.categoryLeadingInset
+                        - 8
+                )
+            )
+            let itemsByID = Dictionary(
+                uniqueKeysWithValues: currentItems.map { ($0.id, $0) }
+            )
+
+            HStack(spacing: HomeBrowseGridMetrics.categorySpacing) {
+                ForEach(partition.visibleIDs, id: \.self) { id in
+                    if let item = itemsByID[id] {
+                        categoryButton(item)
+                    }
+                }
+
+                if !partition.hiddenIDs.isEmpty {
+                    Menu {
+                        ForEach(partition.hiddenIDs, id: \.self) { id in
+                            if let item = itemsByID[id] {
+                                Button {
+                                    onSelect(item.categoryID)
+                                } label: {
+                                    if item.id == selectedID {
+                                        Label(item.title, systemImage: "checkmark")
+                                    } else {
+                                        Text(item.title)
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        Label("更多", systemImage: "ellipsis.circle")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("显示另外 \(partition.hiddenIDs.count) 个分类")
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(.leading, HomeBrowseGridMetrics.categoryLeadingInset)
+            .padding(.trailing, 8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(height: 52)
+    }
+
+    private func categoryButton(_ item: Item) -> some View {
+        Button(item.title) {
+            onSelect(item.categoryID)
+        }
+        .buttonStyle(
+            BrowseNavigationButtonStyle(isSelected: item.id == selectedID)
+        )
+    }
+
+    private static func measuredWidth(for title: String) -> CGFloat {
+        let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        return ceil(
+            (title as NSString).size(withAttributes: [.font: font]).width
+        )
+    }
+
+    private struct Item: Identifiable {
+        let id: String
+        let title: String
+        let categoryID: String?
+    }
 }
 
 struct HomeActiveFilterToken: Equatable, Identifiable, Sendable {
@@ -1093,14 +1268,14 @@ struct HomeFilterToolbarItem: View {
             switch layout {
             case .expanded, .compact:
                 HStack(spacing: 5) {
-                    Image(systemName: "line.3.horizontal.decrease.circle")
+                    Image(systemName: "line.3.horizontal.decrease")
                     Text("筛选")
                     if activeCount > 0 {
                         filterCountBadge
                     }
                 }
             case .minimal:
-                Image(systemName: "line.3.horizontal.decrease.circle")
+                Image(systemName: "line.3.horizontal.decrease")
                     .overlay(alignment: .topTrailing) {
                         if activeCount > 0 {
                             Circle()
@@ -1111,6 +1286,7 @@ struct HomeFilterToolbarItem: View {
                     }
             }
         }
+        .buttonStyle(.bordered)
         .controlSize(.large)
         .disabled(category?.filters.isEmpty != false)
         .help(filterHelp)
@@ -1301,7 +1477,7 @@ struct HomeConfigurationToolbarItem: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundColor(.red)
         case .idle:
-            Image(systemName: "slider.horizontal.3")
+            Image(systemName: "arrow.triangle.2.circlepath")
                 .foregroundColor(.secondary)
         }
     }

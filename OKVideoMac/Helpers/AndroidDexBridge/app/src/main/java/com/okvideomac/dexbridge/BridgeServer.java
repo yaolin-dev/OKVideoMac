@@ -30,12 +30,14 @@ import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import okhttp3.OkHttpClient;
 import okhttp3.Call;
@@ -62,6 +64,8 @@ final class BridgeServer {
     private static final ExecutorService MEDIA_WORKERS =
             Executors.newFixedThreadPool(MEDIA_THREAD_COUNT);
     private static final Map<String, Future<?>> INTERACTION_WORKERS =
+            new ConcurrentHashMap<>();
+    private static final Map<String, InteractionWorkerExit> INTERACTION_EXITS =
             new ConcurrentHashMap<>();
     /**
      * Serializes the registry's latest pointer, the UI owner, and the one
@@ -283,7 +287,7 @@ final class BridgeServer {
                                     .versionName
                     );
                     health.put("generation", runtimeGeneration);
-                    health.put("interactionSchemaVersion", 2);
+                    health.put("interactionSchemaVersion", 3);
                     health.put(
                             "interactionCapabilities",
                             new JSONArray()
@@ -291,6 +295,7 @@ final class BridgeServer {
                                     .put("separateReturnSurfaceEvents")
                                     .put("playbackUIHandoff")
                                     .put("requestScopedSurfaceLease")
+                                    .put("explicitUserCompletion")
                     );
                     health.put(
                             "tvboxProxyReady",
@@ -412,20 +417,52 @@ final class BridgeServer {
                 }
                 String cancelInteraction = interactionID(path, "/cancel");
                 if ("POST".equals(method) && cancelInteraction != null) {
-                    BridgeInteractionRegistry.cancel(cancelInteraction);
+                    String cancelReason = headers.get(
+                            "x-okvideo-cancel-reason"
+                    );
+                    BridgeInteractionRegistry.cancel(
+                            cancelInteraction,
+                            cancelReason == null
+                                    ? "hostRequested"
+                                    : cancelReason
+                    );
                     boolean dismissed = releaseTerminalInteraction(
                             context,
                             cancelInteraction
+                    );
+                    boolean workerStopped = awaitInteractionWorkerStopped(
+                            cancelInteraction,
+                            1_500L
                     );
                     JSONObject state = BridgeInteractionRegistry.state(
                             cancelInteraction
                     );
                     state.put("dismissed", dismissed);
+                    state.put("workerStopped", workerStopped);
+                    state.put("requiresBridgeRestart", !workerStopped);
                     writeJSON(
                             output,
                             200,
                             state
                     );
+                    return;
+                }
+                String completeInteraction = interactionID(path, "/complete");
+                if ("POST".equals(method) && completeInteraction != null) {
+                    JSONObject state = BridgeInteractionRegistry
+                            .confirmCompleted(completeInteraction);
+                    if (state.optBoolean("terminal", false)) {
+                        boolean dismissed = releaseTerminalInteraction(
+                                context,
+                                completeInteraction
+                        );
+                        state = BridgeInteractionRegistry.state(
+                                completeInteraction
+                        );
+                        state.put("dismissed", dismissed);
+                        state.put("confirmationAccepted", true);
+                    }
+                    writeJSON(output, 200, state);
                     return;
                 }
                 if ("GET".equals(method) && "/v1/ui/state".equals(path)) {
@@ -441,13 +478,21 @@ final class BridgeServer {
                     return;
                 }
                 if ("POST".equals(method) && "/v1/ui/dismiss".equals(path)) {
+                    String latest = BridgeInteractionRegistry.latestID();
+                    JSONObject state = BridgeActivity.dismissUI(
+                            context,
+                            latest
+                    );
+                    boolean workerStopped = awaitInteractionWorkerStopped(
+                            latest,
+                            1_500L
+                    );
+                    state.put("workerStopped", workerStopped);
+                    state.put("requiresBridgeRestart", !workerStopped);
                     writeJSON(
                             output,
                             200,
-                            BridgeActivity.dismissUI(
-                                    context,
-                                    BridgeInteractionRegistry.latestID()
-                            )
+                            state
                     );
                     return;
                 }
@@ -611,7 +656,10 @@ final class BridgeServer {
                     }
                 } catch (CancellationException error) {
                     if (interactive) {
-                        BridgeInteractionRegistry.cancel(interactionID);
+                        BridgeInteractionRegistry.cancel(
+                                interactionID,
+                                "workerCancelled"
+                        );
                         releaseTerminalInteraction(context, interactionID);
                     }
                     throw error;
@@ -783,7 +831,18 @@ final class BridgeServer {
             if (!acceptsInvocation(id)) return null;
             Future<?> existing = INTERACTION_WORKERS.get(id);
             if (existing != null) return (Future<Object>) existing;
-            FutureTask<Object> claimed = new FutureTask<>(operation);
+            InteractionWorkerExit exit = new InteractionWorkerExit();
+            FutureTask<Object> claimed = new FutureTask<>(() -> {
+                if (!exit.begin()) throw new CancellationException(
+                        "Interaction cancelled before provider invocation"
+                );
+                try {
+                    return operation.call();
+                } finally {
+                    exit.finish();
+                }
+            });
+            INTERACTION_EXITS.put(id, exit);
             INTERACTION_WORKERS.put(id, claimed);
             PROVIDER_WORKERS.execute(claimed);
             return claimed;
@@ -816,6 +875,18 @@ final class BridgeServer {
         }
     }
 
+    static boolean awaitInteractionWorkerStopped(
+            String interactionID,
+            long timeoutMilliseconds
+    ) {
+        String id = interactionID == null ? "" : interactionID.trim();
+        InteractionWorkerExit exit = INTERACTION_EXITS.get(id);
+        if (exit == null) return true;
+        boolean stopped = exit.await(Math.max(0L, timeoutMilliseconds));
+        if (stopped) INTERACTION_EXITS.remove(id, exit);
+        return stopped;
+    }
+
     static boolean releaseTerminalInteraction(
             Context context,
             String interactionID
@@ -824,9 +895,14 @@ final class BridgeServer {
         if (id.isEmpty() || !BridgeInteractionRegistry.terminal(id)) {
             return false;
         }
+        boolean released;
         synchronized (INTERACTION_LIFECYCLE_LOCK) {
-            return releaseInteractionResourcesLocked(context, id);
+            released = releaseInteractionResourcesLocked(context, id);
         }
+        // Completed workers leave immediately. Remove their exit tracker here;
+        // cancelled-but-still-running workers remain observable by /cancel.
+        awaitInteractionWorkerStopped(id, 0L);
+        return released;
     }
 
     private static boolean releaseInteractionResourcesLocked(
@@ -856,7 +932,47 @@ final class BridgeServer {
         Future<?> worker = INTERACTION_WORKERS.remove(id);
         if (worker == null) return false;
         if (worker.isDone()) return true;
-        return worker.cancel(true) || worker.isCancelled();
+        boolean cancelled = worker.cancel(true) || worker.isCancelled();
+        InteractionWorkerExit exit = INTERACTION_EXITS.get(id);
+        if (cancelled && exit != null) exit.cancelBeforeStart();
+        return cancelled;
+    }
+
+    /** Tracks the real callable lifetime, not merely Future cancellation. */
+    private static final class InteractionWorkerExit {
+        private static final int QUEUED = 0;
+        private static final int STARTED = 1;
+        private static final int CANCELLED_BEFORE_START = 2;
+        private static final int FINISHED = 3;
+        private final AtomicInteger lifecycle = new AtomicInteger(QUEUED);
+        private final CountDownLatch finished = new CountDownLatch(1);
+
+        boolean begin() {
+            return lifecycle.compareAndSet(QUEUED, STARTED);
+        }
+
+        void finish() {
+            if (lifecycle.getAndSet(FINISHED) != FINISHED) {
+                finished.countDown();
+            }
+        }
+
+        void cancelBeforeStart() {
+            if (lifecycle.compareAndSet(QUEUED, CANCELLED_BEFORE_START)) {
+                finished.countDown();
+            }
+        }
+
+        boolean await(long timeoutMilliseconds) {
+            try {
+                return timeoutMilliseconds == 0L
+                        ? finished.getCount() == 0L
+                        : finished.await(timeoutMilliseconds, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
     }
 
     private static <T> T runProvider(ThrowingSupplier<T> operation)

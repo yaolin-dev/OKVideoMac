@@ -190,7 +190,7 @@ public final class BridgeActivity extends Activity {
     static JSONObject dismissUI(Context context, String interactionID)
             throws Exception {
         String id = clean(interactionID);
-        BridgeInteractionRegistry.cancel(id);
+        BridgeInteractionRegistry.cancel(id, "legacyDismiss");
         boolean dismissed = BridgeServer.releaseTerminalInteraction(context, id);
         JSONObject result = BridgeInteractionRegistry.state(id);
         result.put("dismissed", dismissed);
@@ -235,7 +235,11 @@ public final class BridgeActivity extends Activity {
         state.put("surfaceInteractionID", scoped ? interactionID : "");
         state.put(
                 "surfaceMode",
-                external ? "externalActivity" : scoped ? "actionActivity" : "none"
+                external
+                        ? "externalActivity"
+                        : providerWindow
+                        ? "providerWindow"
+                        : scoped ? "actionActivity" : "none"
         );
         state.put(
                 "surfaceHostLifecycle",

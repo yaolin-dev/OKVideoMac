@@ -540,7 +540,7 @@ public final class BridgeProtocolTest extends TestCase {
         assertFalse(hidden.getBoolean("terminal"));
     }
 
-    public void testWorkerReturnKeepsCapturedUIInHandoffGrace()
+    public void testWorkerReturnWaitsForConfirmationAfterCapturedUI()
             throws Exception {
         String id = BridgeInteractionRegistry.begin(
                 "interaction-ui-worker",
@@ -558,10 +558,91 @@ public final class BridgeProtocolTest extends TestCase {
         );
         assertEquals("processing", hidden.getString("phase"));
         JSONObject returned = BridgeInteractionRegistry.invocationReturned(id);
-        assertEquals("awaitingProviderUI", returned.getString("phase"));
+        assertEquals(
+                "awaitingUserConfirmation",
+                returned.getString("phase")
+        );
         assertEquals("stay", returned.getString("outcome"));
         assertFalse(returned.getBoolean("terminal"));
         assertTrue(returned.getBoolean("workerReturned"));
+    }
+
+    public void testHiddenSurfaceNeverCompletesWithoutUserConfirmation()
+            throws Exception {
+        String id = BridgeInteractionRegistry.begin(
+                "interaction-hidden-confirmation",
+                "configuration",
+                "action"
+        );
+        BridgeInteractionRegistry.expectProviderUI(id);
+        BridgeInteractionRegistry.observeUI(
+                id,
+                new JSONObject().put("visible", true)
+        );
+        BridgeInteractionRegistry.invocationReturned(id);
+
+        JSONObject hidden = BridgeInteractionRegistry.observeUI(
+                id,
+                new JSONObject().put("visible", false)
+        );
+        assertEquals(
+                "awaitingUserConfirmation",
+                hidden.getString("phase")
+        );
+        assertEquals("stay", hidden.getString("outcome"));
+        assertFalse(hidden.getBoolean("terminal"));
+        assertFalse(hidden.getBoolean("userConfirmed"));
+    }
+
+    public void testUserConfirmationCompletesReturnedWorker()
+            throws Exception {
+        String id = BridgeInteractionRegistry.begin(
+                "interaction-user-confirmed",
+                "authorization",
+                "action"
+        );
+        BridgeInteractionRegistry.expectProviderUI(id);
+        BridgeInteractionRegistry.invocationReturned(id);
+
+        JSONObject completed = BridgeInteractionRegistry.confirmCompleted(id);
+        assertTrue(completed.getBoolean("confirmationAccepted"));
+        assertTrue(completed.getBoolean("userConfirmed"));
+        assertEquals("userConfirmed", completed.getString("completionSource"));
+        assertEquals("completed", completed.getString("phase"));
+        assertTrue(completed.getBoolean("terminal"));
+    }
+
+    public void testConfirmationBeforeWorkerReturnWaitsForProvider()
+            throws Exception {
+        String id = BridgeInteractionRegistry.begin(
+                "interaction-confirm-before-return",
+                "configuration",
+                "action"
+        );
+        BridgeInteractionRegistry.expectProviderUI(id);
+
+        JSONObject confirmed = BridgeInteractionRegistry.confirmCompleted(id);
+        assertEquals(
+                "awaitingProviderReturnAfterConfirmation",
+                confirmed.getString("phase")
+        );
+        assertFalse(confirmed.getBoolean("terminal"));
+
+        JSONObject completed = BridgeInteractionRegistry.invocationReturned(id);
+        assertEquals("completed", completed.getString("phase"));
+        assertTrue(completed.getBoolean("terminal"));
+        assertEquals("userConfirmed", completed.getString("completionSource"));
+    }
+
+    public void testCancellationRecordsReason() throws Exception {
+        String id = BridgeInteractionRegistry.begin(
+                "interaction-cancel-reason",
+                "configuration",
+                "action"
+        );
+        JSONObject cancelled = BridgeInteractionRegistry.cancel(id, "user");
+        assertEquals("cancelled", cancelled.getString("phase"));
+        assertEquals("user", cancelled.getString("cancelReason"));
     }
 
     public void testDelayedProviderUIRemainsOwnedAfterWorkerReturns() throws Exception {
@@ -1009,7 +1090,8 @@ public final class BridgeProtocolTest extends TestCase {
         );
         BridgeActivity.prepareDialogHandoff(context, id);
         AlertDialog dialog = showOwnedDialog(id, "播放授权", null);
-        awaitCapturedUI(context, id, 2_000L);
+        JSONObject visible = awaitCapturedUI(context, id, 2_000L);
+        assertEquals("providerWindow", visible.getString("surfaceMode"));
         Future<Object> worker = BridgeServer.claimInteractionWorker(
                 id,
                 () -> "playable"
@@ -1037,6 +1119,42 @@ public final class BridgeProtocolTest extends TestCase {
         thread.join(1_000L);
         assertTrue(worker.isCancelled());
         assertFalse(thread.isAlive());
+    }
+
+    public void testIgnoredInterruptRequiresWorkerExitBeforeReuse()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        String id = "interaction-stubborn-worker-" + UUID.randomUUID();
+        BridgeServer.beginAndActivateInteraction(
+                context,
+                id,
+                "authorization",
+                "action"
+        );
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        BridgeServer.claimInteractionWorker(id, () -> {
+            entered.countDown();
+            while (release.getCount() > 0L) {
+                try {
+                    release.await(50L, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException ignored) {
+                    // Models a third-party DEX provider that swallows the
+                    // cooperative Future cancellation interrupt.
+                }
+            }
+            return "late";
+        });
+        assertTrue(entered.await(2L, TimeUnit.SECONDS));
+
+        BridgeInteractionRegistry.cancel(id, "test");
+        BridgeServer.releaseTerminalInteraction(context, id);
+        assertFalse(BridgeServer.awaitInteractionWorkerStopped(id, 100L));
+
+        release.countDown();
+        assertTrue(BridgeServer.awaitInteractionWorkerStopped(id, 2_000L));
+        assertFalse(BridgeServer.hasTrackedInteractionWorker(id));
     }
 
     public void testMissingAndUnavailableStatesExcludeTranslatedUI()

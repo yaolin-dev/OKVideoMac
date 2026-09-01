@@ -114,7 +114,9 @@ struct ConfigurationInteractionTerminalResponse: Equatable, Sendable {
 final class InteractionHandle: @unchecked Sendable, Identifiable {
     typealias StateProvider = @Sendable (UUID) async throws
         -> AndroidBridgeUIState
-    typealias CancelProvider = @Sendable (UUID) async throws -> Void
+    typealias CancelProvider = @Sendable (UUID, String) async throws -> Void
+    typealias ConfirmProvider = @Sendable (UUID) async throws
+        -> AndroidBridgeUIState
     typealias TerminalCleanup = @Sendable (UUID) async -> Void
 
     private actor State {
@@ -168,6 +170,7 @@ final class InteractionHandle: @unchecked Sendable, Identifiable {
     private let state = State()
     private let stateProvider: StateProvider?
     private let cancelProvider: CancelProvider?
+    private let confirmProvider: ConfirmProvider?
     private let terminalCleanup: TerminalCleanup?
     private var invocationTask: Task<Void, Never>?
 
@@ -176,6 +179,7 @@ final class InteractionHandle: @unchecked Sendable, Identifiable {
         actionKind: ConfigurationInteraction.ActionKind,
         stateProvider: StateProvider? = nil,
         cancelProvider: CancelProvider? = nil,
+        confirmProvider: ConfirmProvider? = nil,
         terminalCleanup: TerminalCleanup? = nil,
         operation: @escaping @Sendable () async throws
             -> ConfigurationInteractionTerminalResponse
@@ -184,6 +188,7 @@ final class InteractionHandle: @unchecked Sendable, Identifiable {
         self.actionKind = actionKind
         self.stateProvider = stateProvider
         self.cancelProvider = cancelProvider
+        self.confirmProvider = confirmProvider
         self.terminalCleanup = terminalCleanup
         let state = self.state
         let cleanup = terminalCleanup
@@ -224,20 +229,27 @@ final class InteractionHandle: @unchecked Sendable, Identifiable {
         return try await stateProvider(id)
     }
 
-    func cancel() {
+    func confirmCompletion() async throws -> AndroidBridgeUIState {
+        guard let confirmProvider else {
+            throw AppError.spider("当前桥不支持显式确认配置完成")
+        }
+        return try await confirmProvider(id)
+    }
+
+    func cancel(reason: String = "hostCancelled") {
         invocationTask?.cancel()
         guard let cancelProvider else { return }
         let requestID = id
         Task {
-            try? await cancelProvider(requestID)
+            try? await cancelProvider(requestID, reason)
         }
     }
     /// Cancels the provider worker and waits for the request-scoped bridge to
     /// acknowledge the cancellation before the host starts another action.
-    func cancelAndWait() async {
+    func cancelAndWait(reason: String = "hostCancelled") async {
         invocationTask?.cancel()
         guard let cancelProvider else { return }
-        try? await cancelProvider(id)
+        try? await cancelProvider(id, reason)
     }
 }
 
@@ -250,6 +262,10 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
     let outcome: String?
     let terminal: Bool?
     let error: String?
+    var userConfirmed: Bool? = nil
+    var completionSource: String? = nil
+    var cancelReason: String? = nil
+    var confirmationAccepted: Bool? = nil
     /// The request-scoped Android worker is the only authoritative signal
     /// that a legacy Spider has finished persisting credentials. UI changes
     /// can happen earlier while that worker is still active.
@@ -267,6 +283,11 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
     var surfaceRequestScoped: Bool? = nil
     var surfaceInteractionID: String? = nil
     var surfaceMode: String? = nil
+    /// Cancellation is cooperative inside third-party DEX code. When the
+    /// worker ignores interruption the Bridge asks the owned runtime to
+    /// restart before another interaction is admitted.
+    var workerStopped: Bool? = nil
+    var requiresBridgeRestart: Bool? = nil
 
     var interactionGeneration: Int? {
         generation ?? revision
@@ -304,7 +325,14 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
     /// render. Ordering and ordinary configuration surfaces intentionally use
     /// this predicate without becoming authorization requests.
     var isProviderUIPrompt: Bool {
-        hasRequestScopedActionSurface
+        guard hasRequestScopedActionSurface,
+              let mode = normalizedActionSurfaceMode else {
+            return false
+        }
+        // `actionActivity` is only the request-owned placeholder. Publishing
+        // it before a provider Dialog/browser exists exposes the internal
+        // "Android Action Session" page and makes slow providers look stuck.
+        return mode != "actionactivity"
     }
 
     /// A provider UI may enter the account lifecycle only when the request
@@ -1910,45 +1938,6 @@ struct AndroidRuntimeStatus: Equatable, Sendable {
     }
 }
 
-enum AndroidRuntimeContinuityPhase: String, Codable, Sendable {
-    case checking
-    case continuous
-    case legacyAvailable
-    case migrating
-    case migrated
-    case blocked
-}
-
-/// Credential-free summary of the Android runtime's persistent identity.
-/// The host never reads provider cookies or tokens from an AVD; it only
-/// compares opaque image fingerprints and moves complete, stopped AVD copies.
-struct AndroidRuntimeContinuityStatus: Equatable, Sendable {
-    let phase: AndroidRuntimeContinuityPhase
-    let title: String
-    let detail: String
-    let canMigrate: Bool
-    let legacyRuntimeLabel: String?
-    let backupLabel: String?
-
-    static let checking = AndroidRuntimeContinuityStatus(
-        phase: .checking,
-        title: "正在检查授权连续性",
-        detail: "正在确认旧版 Android 数据是否仍可恢复…",
-        canMigrate: false,
-        legacyRuntimeLabel: nil,
-        backupLabel: nil
-    )
-
-    static let migrating = AndroidRuntimeContinuityStatus(
-        phase: .migrating,
-        title: "正在迁移旧版授权环境",
-        detail: "正在创建完整副本并校验；旧 AVD 不会被修改。",
-        canMigrate: false,
-        legacyRuntimeLabel: "旧版 OKVideoDexBridge",
-        backupLabel: nil
-    )
-}
-
 enum AndroidRuntimeFailureStatePolicy {
     static func status(
         operationStatus: AndroidRuntimeStatus?,
@@ -2023,6 +2012,8 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         let error: String?
         let refreshPerformed: Bool?
         let failureKind: String?
+        let completionSource: String?
+        let cancelReason: String?
     }
 
     private enum MonitoredInvocation: Sendable {
@@ -2065,10 +2056,6 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         await runtime.status()
     }
 
-    func runtimeContinuityStatus() async -> AndroidRuntimeContinuityStatus {
-        await runtime.continuityStatus()
-    }
-
     func diagnosticSnapshot() async -> AndroidRuntimeDiagnosticSnapshot {
         await runtime.diagnosticSnapshot()
     }
@@ -2086,10 +2073,6 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     func repairRuntime() async throws -> AndroidRuntimeStatus {
         try await runtime.repair()
         return await runtime.status()
-    }
-
-    func migrateLegacyRuntime() async throws -> AndroidRuntimeContinuityStatus {
-        try await runtime.migrateLegacyRuntime()
     }
 
     func setUserSelectedSDKRoot(_ url: URL) async {
@@ -2748,7 +2731,10 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         return state
     }
 
-    func resetAuthorizationUI(interactionID: UUID? = nil) async throws {
+    func resetAuthorizationUI(
+        interactionID: UUID? = nil,
+        cancellationReason: String = "hostRequested"
+    ) async throws {
         // Invalidate the host input lease before asking Android to dismiss the
         // surface. A replacement invocation cannot start until this actor hop
         // has retired every old tap/swipe admitted by the previous session.
@@ -2760,13 +2746,54 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 5
-        let (_, response) = try await bridgeData(
+        request.setValue(
+            cancellationReason,
+            forHTTPHeaderField: "X-OKVideo-Cancel-Reason"
+        )
+        let (data, response) = try await bridgeData(
             for: request,
             legacyURL: nil
         )
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw AppError.spider("无法关闭当前网盘授权界面")
         }
+        if let state = try? JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: data
+        ), state.requiresBridgeRestart == true
+                || state.workerStopped == false {
+            // A cancelled Future does not prove that third-party DEX code has
+            // left its runner. Restart only this owned package process; its
+            // application data (including cloud-drive login state) remains.
+            try await runtime.resetAuthorizationUI()
+        }
+    }
+
+    func confirmInteractionCompletion(
+        interactionID: UUID
+    ) async throws -> AndroidBridgeUIState {
+        try await runtime.ensureReady()
+        let url = Self.interactionURL(interactionID, suffix: "complete")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 5
+        let (data, response) = try await bridgeData(
+            for: request,
+            legacyURL: nil
+        )
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw AppError.spider("无法确认当前配置操作")
+        }
+        let state = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: data
+        )
+        guard state.interactionID.flatMap(UUID.init(uuidString:))
+                == interactionID,
+              state.confirmationAccepted == true else {
+            throw AppError.spider("配置完成确认已被新的操作替换")
+        }
+        return state
     }
 
     /// Request-scoped endpoints are preferred whenever the installed bridge
@@ -2882,9 +2909,16 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                 }
                 return try await self.uiState(interactionID: interactionID)
             },
-            cancelProvider: { [weak self] interactionID in
+            cancelProvider: { [weak self] interactionID, reason in
                 guard let self else { return }
                 try await self.resetAuthorizationUI(
+                    interactionID: interactionID,
+                    cancellationReason: reason
+                )
+            },
+            confirmProvider: { [weak self] interactionID in
+                guard let self else { throw CancellationError() }
+                return try await self.confirmInteractionCompletion(
                     interactionID: interactionID
                 )
             },
@@ -2944,8 +2978,7 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                         if let state = try? await self.fetchUIState(
                             interactionID: requestID
                         ),
-                           (state.isProviderUIPrompt
-                                || state.hasRequestScopedActionSurface) {
+                           state.isProviderUIPrompt {
                             let interaction = state.configurationInteraction(
                                 requestID: requestID,
                                 actionKind: actionKind
@@ -3249,8 +3282,7 @@ struct AndroidDeprecatedTargetSDKWarningPolicy {
     }
 
     static func shouldInspect(windowDump: String) -> Bool {
-        windowDump.contains("Window #0")
-            && windowDump.contains("DeprecatedTargetSdkVersionDialog")
+        windowDump.contains("DeprecatedTargetSdkVersionDialog")
             && windowDump.contains(
                 "com.okvideomac.dexbridge/com.okvideomac.dexbridge.BridgeActivity"
             )
@@ -3671,13 +3703,6 @@ private struct AndroidRuntimeOwnershipObservation: Sendable {
     var processOwned: Bool { processState == .owned }
 }
 
-private struct AndroidLegacyAVDCandidate: Sendable {
-    let directory: URL
-    let fingerprint: String
-    let allocatedBytes: Int64
-    let modifiedAt: Date?
-}
-
 private struct AndroidRuntimeContinuityRecord: Codable, Equatable, Sendable {
     let schema: Int
     let runtimeSchema: Int
@@ -3826,16 +3851,14 @@ struct AndroidInstalledPackageContinuity: Equatable, Sendable {
 }
 
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.40"
-    static let bridgeVersionCode = 52
+    static let bridgeVersion = "0.3.41"
+    static let bridgeVersionCode = 53
     static let bridgeApplicationID = "com.okvideomac.dexbridge"
     static let bridgeCertificateSHA256 =
         "33e95ef23b662f2629a23df892aaff52ae6216f7492cfb559a63d37247a059e0"
     private static let networkCheckInterval: TimeInterval = 30
     private static let manifestSchema = 1
-    private static let continuitySchema = 1
     private static let avdName = "OKVideoMac_Runtime"
-    private static let legacyAVDName = "OKVideoDexBridge"
     static let candidateConsolePorts = Array(
         stride(from: 5_554, through: 5_682, by: 2)
     )
@@ -3846,7 +3869,6 @@ actor AndroidDexBridgeRuntime {
     private let avdDirectory: URL
     private let manifestURL: URL
     private let continuityURL: URL
-    private let migrationStagingDirectory: URL
     private let backupDirectory: URL
     private let fileManager: FileManager
     private let defaults: UserDefaults
@@ -3938,10 +3960,6 @@ actor AndroidDexBridgeRuntime {
         )
         continuityURL = runtimeDirectory.appendingPathComponent(
             "runtime-continuity.json"
-        )
-        migrationStagingDirectory = runtimeDirectory.appendingPathComponent(
-            "MigrationStaging",
-            isDirectory: true
         )
         backupDirectory = runtimeDirectory.appendingPathComponent(
             "Backups",
@@ -4602,269 +4620,6 @@ actor AndroidDexBridgeRuntime {
             return .unavailable("缺少 Android SDK Command-line Tools（avdmanager）")
         }
         return .stopped
-    }
-
-    func continuityStatus() -> AndroidRuntimeContinuityStatus {
-        if let record = loadContinuityRecord(),
-           record.schema == Self.continuitySchema,
-           record.runtimeSchema == Self.manifestSchema,
-           record.avdName == Self.avdName,
-           record.applicationID == Self.bridgeApplicationID,
-           record.bridgeCertificateSHA256 == Self.bridgeCertificateSHA256,
-           fileManager.fileExists(
-               atPath: avdDirectory.appendingPathComponent("config.ini").path
-           ) {
-            return AndroidRuntimeContinuityStatus(
-                phase: .migrated,
-                title: "旧版授权环境已迁移",
-                detail: "旧 AVD 保持只读，迁移前的当前环境也已保留备份。",
-                canMigrate: false,
-                legacyRuntimeLabel: "旧版 OKVideoDexBridge",
-                backupLabel: record.backupDirectoryName
-            )
-        }
-
-        do {
-            guard let legacy = try legacyAVDCandidates().first else {
-                return AndroidRuntimeContinuityStatus(
-                    phase: .continuous,
-                    title: "授权存储连续",
-                    detail: "当前使用固定的专用 Android 数据目录；未发现待迁移的旧 AVD。",
-                    canMigrate: false,
-                    legacyRuntimeLabel: nil,
-                    backupLabel: nil
-                )
-            }
-            let size = ByteCountFormatter.string(
-                fromByteCount: legacy.allocatedBytes,
-                countStyle: .file
-            )
-            return AndroidRuntimeContinuityStatus(
-                phase: .legacyAvailable,
-                title: "发现旧版授权数据",
-                detail: "旧版环境包含约 \(size) 的持久数据，可创建完整副本后安全迁移；原目录不会被改动。",
-                canMigrate: true,
-                legacyRuntimeLabel: "旧版 OKVideoDexBridge",
-                backupLabel: nil
-            )
-        } catch {
-            return AndroidRuntimeContinuityStatus(
-                phase: .blocked,
-                title: "无法确认授权连续性",
-                detail: LogRedactor.text(error.localizedDescription),
-                canMigrate: false,
-                legacyRuntimeLabel: nil,
-                backupLabel: nil
-            )
-        }
-    }
-
-    /// Migrates a stopped legacy AVD by copying the complete encrypted disk
-    /// set. Provider credentials are never decoded or exported to macOS.
-    /// The legacy source remains untouched and the current AVD is moved to a
-    /// timestamped rollback directory before the copy is activated.
-    func migrateLegacyRuntime() async throws -> AndroidRuntimeContinuityStatus {
-        guard loadContinuityRecord() == nil else {
-            return continuityStatus()
-        }
-        guard let legacy = try legacyAVDCandidates().first else {
-            throw AppError.spider("未发现可迁移的旧版 Android 环境")
-        }
-
-        await stop()
-        guard !runtimeProcessReferencesAVD(named: Self.avdName),
-              !runtimeProcessReferencesAVD(named: Self.legacyAVDName) else {
-            throw AppError.spider("Android Emulator 仍在运行；为保护授权数据，迁移已中止")
-        }
-
-        try createRuntimeDirectories()
-        try fileManager.createDirectory(
-            at: migrationStagingDirectory,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        try fileManager.createDirectory(
-            at: backupDirectory,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        let available = try runtimeDirectory.resourceValues(
-            forKeys: [
-                .volumeAvailableCapacityForImportantUsageKey,
-                .volumeAvailableCapacityKey
-            ]
-        )
-        let availableBytes = available.volumeAvailableCapacityForImportantUsage
-            ?? Int64(available.volumeAvailableCapacity ?? 0)
-        let safetyMargin: Int64 = 1_073_741_824
-        guard availableBytes > legacy.allocatedBytes + safetyMargin else {
-            throw AppError.spider("磁盘空间不足；迁移需要旧 AVD 大小外加至少 1 GB 安全空间")
-        }
-
-        let migrationID = UUID().uuidString
-        let stagingRoot = migrationStagingDirectory.appendingPathComponent(
-            migrationID,
-            isDirectory: true
-        )
-        let stagedAVD = stagingRoot.appendingPathComponent(
-            "\(Self.avdName).avd",
-            isDirectory: true
-        )
-        try fileManager.createDirectory(
-            at: stagingRoot,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        do {
-            try fileManager.copyItem(at: legacy.directory, to: stagedAVD)
-            for volatileName in [
-                "multiinstance.lock", "hardware-qemu.ini",
-                "emu-launch-params.txt", "snapshot.lock"
-            ] {
-                let item = stagedAVD.appendingPathComponent(volatileName)
-                if fileManager.fileExists(atPath: item.path) {
-                    try fileManager.removeItem(at: item)
-                }
-            }
-            let stagedFingerprint = try Self.avdPersistentFingerprint(
-                at: stagedAVD,
-                fileManager: fileManager
-            )
-            guard stagedFingerprint == legacy.fingerprint else {
-                throw AppError.spider("旧 AVD 副本校验失败；当前环境和旧环境均未改动")
-            }
-
-            let backupName = Self.migrationBackupName(at: Date())
-            let rollbackRoot = backupDirectory.appendingPathComponent(
-                backupName,
-                isDirectory: true
-            )
-            try fileManager.createDirectory(
-                at: rollbackRoot,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            let companionURL = avdHome.appendingPathComponent(
-                "\(Self.avdName).ini"
-            )
-            var movedCurrentAVD = false
-            var movedCompanion = false
-            var movedManifest = false
-            do {
-                if fileManager.fileExists(atPath: avdDirectory.path) {
-                    try fileManager.moveItem(
-                        at: avdDirectory,
-                        to: rollbackRoot.appendingPathComponent(
-                            "\(Self.avdName).avd"
-                        )
-                    )
-                    movedCurrentAVD = true
-                }
-                if fileManager.fileExists(atPath: companionURL.path) {
-                    try fileManager.moveItem(
-                        at: companionURL,
-                        to: rollbackRoot.appendingPathComponent(
-                            "\(Self.avdName).ini"
-                        )
-                    )
-                    movedCompanion = true
-                }
-                if fileManager.fileExists(atPath: manifestURL.path) {
-                    try fileManager.moveItem(
-                        at: manifestURL,
-                        to: rollbackRoot.appendingPathComponent(
-                            manifestURL.lastPathComponent
-                        )
-                    )
-                    movedManifest = true
-                }
-
-                try fileManager.moveItem(at: stagedAVD, to: avdDirectory)
-                try writeAVDCompanion(at: companionURL)
-                let destinationFingerprint = try Self.avdPersistentFingerprint(
-                    at: avdDirectory,
-                    fileManager: fileManager
-                )
-                guard destinationFingerprint == legacy.fingerprint else {
-                    throw AppError.spider("迁移后的 AVD 校验失败")
-                }
-                let record = AndroidRuntimeContinuityRecord(
-                    schema: Self.continuitySchema,
-                    runtimeSchema: Self.manifestSchema,
-                    avdName: Self.avdName,
-                    applicationID: Self.bridgeApplicationID,
-                    bridgeCertificateSHA256: Self.bridgeCertificateSHA256,
-                    bridgeVersionCode: Self.bridgeVersionCode,
-                    sourceFingerprint: legacy.fingerprint,
-                    destinationFingerprint: destinationFingerprint,
-                    backupDirectoryName: backupName,
-                    migratedAt: Date(),
-                    firstInstallTime: nil,
-                    androidUID: nil,
-                    dataDirectoryFingerprint: nil,
-                    authorizationStorageFingerprint: nil
-                )
-                try saveContinuityRecord(record)
-                ready = false
-                acceptsNewerBridge = false
-                lastNetworkCheck = nil
-                lastFailure = nil
-                try await ensureReady()
-                try? fileManager.removeItem(at: stagingRoot)
-                return continuityStatus()
-            } catch {
-                // Validation belongs to the same transaction as the disk
-                // switch. A migrated emulator may already be running here,
-                // so stop it before touching any AVD files.
-                await stop()
-                let failedRoot = migrationStagingDirectory.appendingPathComponent(
-                    "failed-\(migrationID)",
-                    isDirectory: true
-                )
-                if fileManager.fileExists(atPath: avdDirectory.path) {
-                    try? fileManager.moveItem(at: avdDirectory, to: failedRoot)
-                }
-                if fileManager.fileExists(atPath: companionURL.path) {
-                    try? fileManager.removeItem(at: companionURL)
-                }
-                if fileManager.fileExists(atPath: manifestURL.path) {
-                    try? fileManager.removeItem(at: manifestURL)
-                }
-                if movedCurrentAVD {
-                    try? fileManager.moveItem(
-                        at: rollbackRoot.appendingPathComponent(
-                            "\(Self.avdName).avd"
-                        ),
-                        to: avdDirectory
-                    )
-                }
-                if movedCompanion {
-                    try? fileManager.moveItem(
-                        at: rollbackRoot.appendingPathComponent(
-                            "\(Self.avdName).ini"
-                        ),
-                        to: companionURL
-                    )
-                }
-                if movedManifest {
-                    try? fileManager.moveItem(
-                        at: rollbackRoot.appendingPathComponent(
-                            manifestURL.lastPathComponent
-                        ),
-                        to: manifestURL
-                    )
-                }
-                if fileManager.fileExists(atPath: continuityURL.path) {
-                    try? fileManager.removeItem(at: continuityURL)
-                }
-                throw error
-            }
-        } catch {
-            if fileManager.fileExists(atPath: stagingRoot.path) {
-                try? fileManager.removeItem(at: stagingRoot)
-            }
-            throw error
-        }
     }
 
     func diagnosticSnapshot() async -> AndroidRuntimeDiagnosticSnapshot {
@@ -6586,114 +6341,6 @@ actor AndroidDexBridgeRuntime {
         }
     }
 
-    private func legacyAVDCandidates() throws -> [AndroidLegacyAVDCandidate] {
-        var homes: [URL] = []
-        if let configured = baseEnvironment["ANDROID_AVD_HOME"],
-           !configured.isEmpty {
-            homes.append(
-                URL(fileURLWithPath: configured, isDirectory: true)
-            )
-        }
-        homes.append(
-            homeDirectory.appendingPathComponent(
-                ".android/avd",
-                isDirectory: true
-            )
-        )
-        for volume in fileManager.mountedVolumeURLs(
-            includingResourceValuesForKeys: [.isWritableKey],
-            options: [.skipHiddenVolumes]
-        ) ?? [] {
-            homes.append(
-                volume.appendingPathComponent("AndroidAVD", isDirectory: true)
-            )
-        }
-
-        var seen = Set<String>()
-        var candidates: [AndroidLegacyAVDCandidate] = []
-        for home in homes {
-            let directory = home.appendingPathComponent(
-                "\(Self.legacyAVDName).avd",
-                isDirectory: true
-            ).standardizedFileURL
-            let normalizedPath = directory.resolvingSymlinksInPath().path
-            guard seen.insert(normalizedPath).inserted,
-                  normalizedPath != avdDirectory.resolvingSymlinksInPath().path,
-                  fileManager.fileExists(
-                      atPath: directory.appendingPathComponent("config.ini").path
-                  ),
-                  Self.hasPersistentAVDData(
-                      at: directory,
-                      fileManager: fileManager
-                  ) else { continue }
-            let values = try? directory.resourceValues(
-                forKeys: [.contentModificationDateKey]
-            )
-            candidates.append(
-                AndroidLegacyAVDCandidate(
-                    directory: directory,
-                    fingerprint: try Self.avdPersistentFingerprint(
-                        at: directory,
-                        fileManager: fileManager
-                    ),
-                    allocatedBytes: try Self.allocatedDirectorySize(
-                        directory,
-                        fileManager: fileManager
-                    ),
-                    modifiedAt: values?.contentModificationDate
-                )
-            )
-        }
-        return candidates.sorted {
-            ($0.modifiedAt ?? .distantPast) > ($1.modifiedAt ?? .distantPast)
-        }
-    }
-
-    private static func hasPersistentAVDData(
-        at directory: URL,
-        fileManager: FileManager
-    ) -> Bool {
-        ["userdata-qemu.img.qcow2", "userdata-qemu.img"].contains {
-            fileManager.fileExists(
-                atPath: directory.appendingPathComponent($0).path
-            )
-        }
-    }
-
-    static func avdPersistentFingerprint(
-        at directory: URL,
-        fileManager: FileManager = .default
-    ) throws -> String {
-        var digest = SHA256()
-        let persistentNames = [
-            "config.ini",
-            "userdata-qemu.img",
-            "userdata-qemu.img.qcow2",
-            "encryptionkey.img",
-            "encryptionkey.img.qcow2"
-        ]
-        for name in persistentNames {
-            let url = directory.appendingPathComponent(name)
-            guard fileManager.fileExists(atPath: url.path) else { continue }
-            let values = try url.resourceValues(forKeys: [.fileSizeKey])
-            let size = UInt64(values.fileSize ?? 0)
-            digest.update(data: Data("\(name):\(size)\n".utf8))
-            let handle = try FileHandle(forReadingFrom: url)
-            defer { try? handle.close() }
-            let sampleSize = 65_536
-            if let prefix = try handle.read(upToCount: sampleSize) {
-                digest.update(data: prefix)
-            }
-            if size > UInt64(sampleSize) {
-                try handle.seek(toOffset: size - UInt64(sampleSize))
-                if let suffix = try handle.read(upToCount: sampleSize) {
-                    digest.update(data: suffix)
-                }
-            }
-        }
-        return digest.finalize().map { String(format: "%02x", $0) }.joined()
-    }
-
     private static func allocatedDirectorySize(
         _ directory: URL,
         fileManager: FileManager
@@ -6736,34 +6383,6 @@ actor AndroidDexBridgeRuntime {
             return command.contains("-avd \(name)")
                 || command.contains("/\(name).avd")
         }
-    }
-
-    private func writeAVDCompanion(at url: URL) throws {
-        let configURL = avdDirectory.appendingPathComponent("config.ini")
-        let config = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
-        let target = config.split(whereSeparator: \.isNewline)
-            .first(where: { $0.hasPrefix("target=") })
-            .map { String($0.dropFirst("target=".count)) }
-            ?? "android-35"
-        let contents = """
-        avd.ini.encoding=UTF-8
-        path=\(avdDirectory.path)
-        target=\(target)
-
-        """
-        try Data(contents.utf8).write(to: url, options: [.atomic])
-        try fileManager.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: url.path
-        )
-    }
-
-    private static func migrationBackupName(at date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        return "pre-migration-\(formatter.string(from: date))"
     }
 
     private func loadContinuityRecord() -> AndroidRuntimeContinuityRecord? {
@@ -7348,6 +6967,21 @@ actor AndroidDexBridgeRuntime {
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain
     ) throws {
+        // This is a private, app-owned emulator. The Bridge intentionally
+        // targets API 27 because legacy TVBox/FongMi packages still discover
+        // ActivityThread state through pre-28 reflection. Suppress Android's
+        // generic deprecation sheet before the Activity starts so it can
+        // never be mistaken for provider-owned UI.
+        _ = try? runVerifiedADB(
+            identity,
+            toolchain: toolchain,
+            [
+                "shell", "setprop",
+                "debug.wm.disable_deprecated_target_sdk_dialog", "true"
+            ],
+            category: "adb.bridge.compatibility_warning.suppress",
+            timeout: 8
+        )
         lastBridgeComponentStartResult = try runVerifiedADB(
             identity,
             toolchain: toolchain,
@@ -7368,39 +7002,44 @@ actor AndroidDexBridgeRuntime {
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain
     ) {
-        guard let windows = try? runVerifiedADB(
-            identity,
-            toolchain: toolchain,
-            ["shell", "dumpsys", "window", "windows"],
-            category: "adb.bridge.compatibility_warning.window",
-            timeout: 8
-        ), AndroidDeprecatedTargetSDKWarningPolicy.shouldInspect(
-            windowDump: windows
-        ), let hierarchy = try? runVerifiedADB(
-            identity,
-            toolchain: toolchain,
-            ["exec-out", "uiautomator", "dump", "/dev/tty"],
-            category: "adb.bridge.compatibility_warning.ui",
-            timeout: 8
-        ), let point = AndroidDeprecatedTargetSDKWarningPolicy.dismissalPoint(
-            uiHierarchy: hierarchy
-        ) else {
-            return
+        // `am start` may return just before system_server attaches the warning
+        // window. Retry the cheap window probe briefly; only inspect/tap the
+        // UI hierarchy after the exact warning and Bridge package are found.
+        for attempt in 0..<8 {
+            if let windows = try? runVerifiedADB(
+                identity,
+                toolchain: toolchain,
+                ["shell", "dumpsys", "window", "windows"],
+                category: "adb.bridge.compatibility_warning.window",
+                timeout: 8
+            ), AndroidDeprecatedTargetSDKWarningPolicy.shouldInspect(
+                windowDump: windows
+            ), let hierarchy = try? runVerifiedADB(
+                identity,
+                toolchain: toolchain,
+                ["exec-out", "uiautomator", "dump", "/dev/tty"],
+                category: "adb.bridge.compatibility_warning.ui",
+                timeout: 8
+            ), let point = AndroidDeprecatedTargetSDKWarningPolicy
+                .dismissalPoint(uiHierarchy: hierarchy),
+               (try? runVerifiedADB(
+                    identity,
+                    toolchain: toolchain,
+                    ["shell", "input", "tap", "\(point.x)", "\(point.y)"],
+                    category: "adb.bridge.compatibility_warning.dismiss",
+                    timeout: 8
+               )) != nil {
+                appendEvent(
+                    stage: .launchingBridge,
+                    event: "compatibility_warning_dismissed",
+                    detail: "dismissed the Bridge target-SDK warning on the owned emulator"
+                )
+                return
+            }
+            if attempt < 7 {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
         }
-        guard (try? runVerifiedADB(
-            identity,
-            toolchain: toolchain,
-            ["shell", "input", "tap", "\(point.x)", "\(point.y)"],
-            category: "adb.bridge.compatibility_warning.dismiss",
-            timeout: 8
-        )) != nil else {
-            return
-        }
-        appendEvent(
-            stage: .launchingBridge,
-            event: "compatibility_warning_dismissed",
-            detail: "dismissed the Bridge target-SDK warning on the owned emulator"
-        )
     }
 
     private func removeOwnedPortForwards(
