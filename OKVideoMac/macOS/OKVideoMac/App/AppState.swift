@@ -1233,6 +1233,18 @@ enum AndroidActionSurfaceLeasePolicy {
     ) -> Bool {
         lhs == rhs
     }
+
+    /// A Dialog stack transition invalidates the pixels immediately, even
+    /// though the action/provider lease itself is unchanged. This prevents a
+    /// just-dismissed Dialog (or its QR code) from surviving the capture
+    /// throttle while Android has already exposed the layer below it.
+    static func matchesCurrentWindow(
+        _ frame: AndroidActionSurfaceFrame,
+        descriptor: AndroidActionSurfaceCaptureDescriptor?
+    ) -> Bool {
+        guard let descriptor else { return false }
+        return frame.matches(captureDescriptor: descriptor)
+    }
 }
 
 /// Keeps the last renderable pixels during a brief Dialog/Activity or ADB
@@ -7288,6 +7300,14 @@ final class AppState: ObservableObject {
                 expectedInteractionID: context.operationID,
                 expectedProviderOwnerID: state.providerOwnerID,
                 expectedGeneration: state.interactionGeneration
+           ) {
+            cloudAuthorizationSurfaceFrame = nil
+            lastCloudAuthorizationSurfaceCaptureAt = nil
+        }
+        if let previous = cloudAuthorizationSurfaceFrame,
+           !AndroidActionSurfaceLeasePolicy.matchesCurrentWindow(
+                previous,
+                descriptor: state.actionSurfaceCaptureDescriptor
            ) {
             cloudAuthorizationSurfaceFrame = nil
             lastCloudAuthorizationSurfaceCaptureAt = nil

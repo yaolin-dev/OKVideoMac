@@ -7,14 +7,18 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Rect;
+import android.graphics.drawable.ColorDrawable;
 import android.text.InputType;
+import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.BaseAdapter;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.ListView;
+import android.widget.PopupWindow;
 import android.widget.TextView;
 
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -1135,8 +1139,19 @@ public final class BridgeProtocolTest extends TestCase {
             JSONObject firstBounds = firstState.getJSONObject(
                     "surfaceWindowBounds"
             );
+            JSONObject firstContentBounds = firstState.getJSONObject(
+                    "surfaceWindowContentBounds"
+            );
             assertTrue(firstBounds.getInt("width") > 0);
             assertTrue(firstBounds.getInt("height") > 0);
+            assertTrue(firstBounds.getInt("left")
+                    <= firstContentBounds.getInt("left"));
+            assertTrue(firstBounds.getInt("top")
+                    <= firstContentBounds.getInt("top"));
+            assertTrue(firstBounds.getInt("right")
+                    >= firstContentBounds.getInt("right"));
+            assertTrue(firstBounds.getInt("bottom")
+                    >= firstContentBounds.getInt("bottom"));
             long firstRevision = firstState.getLong("surfaceWindowRevision");
 
             second = showOwnedDialog(id, "第二层", null);
@@ -1185,6 +1200,140 @@ public final class BridgeProtocolTest extends TestCase {
                 720,
                 1_600
         ));
+    }
+
+    public void testSessionWindowPolicyIncludesAttachedPanelsOnly() {
+        assertTrue(BridgeDialogWindowTracker.isSessionWindowType(
+                android.view.WindowManager.LayoutParams.TYPE_APPLICATION
+        ));
+        assertTrue(BridgeDialogWindowTracker.isSessionWindowType(
+                android.view.WindowManager.LayoutParams.TYPE_APPLICATION_ATTACHED_DIALOG
+        ));
+        assertTrue(BridgeDialogWindowTracker.isSessionWindowType(
+                android.view.WindowManager.LayoutParams.TYPE_APPLICATION_PANEL
+        ));
+        assertTrue(BridgeDialogWindowTracker.isSessionWindowType(
+                android.view.WindowManager.LayoutParams.TYPE_APPLICATION_SUB_PANEL
+        ));
+        assertTrue(BridgeDialogWindowTracker.isSessionWindowType(1005));
+        assertFalse(BridgeDialogWindowTracker.isSessionWindowType(
+                android.view.WindowManager.LayoutParams.TYPE_TOAST
+        ));
+        assertFalse(BridgeDialogWindowTracker.isSessionWindowType(
+                android.view.WindowManager.LayoutParams.TYPE_SYSTEM_ALERT
+        ));
+    }
+
+    public void testDialogCaptureGuardBandExpandsAndClampsToDisplay() {
+        Rect expanded = BridgeDialogWindowTracker.guardedCaptureBounds(
+                new Rect(30, 40, 690, 1_560),
+                720,
+                1_600,
+                2f
+        );
+        assertEquals(new Rect(6, 16, 714, 1_584), expanded);
+        Rect clamped = BridgeDialogWindowTracker.guardedCaptureBounds(
+                new Rect(2, 3, 718, 1_598),
+                720,
+                1_600,
+                3f
+        );
+        assertEquals(new Rect(0, 0, 720, 1_600), clamped);
+    }
+
+    public void testActionSessionGroupsPopupWithOwningDialogLayer()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        String id = "interaction-dialog-popup-" + UUID.randomUUID();
+        AlertDialog dialog = null;
+        PopupWindow popup = null;
+        try {
+            BridgeServer.beginAndActivateInteraction(
+                    context,
+                    id,
+                    "authorization",
+                    "action"
+            );
+            BridgeActivity.prepareDialogHandoff(context, id);
+            dialog = showOwnedDialog(id, "二维码登录", null);
+            JSONObject dialogOnly = awaitDialogMemberCount(
+                    context,
+                    id,
+                    1,
+                    2_000L
+            );
+            long dialogRevision = dialogOnly.getLong("surfaceWindowRevision");
+            popup = showOwnedPopup(dialog);
+            JSONObject grouped = awaitDialogMemberCount(
+                    context,
+                    id,
+                    2,
+                    2_000L
+            );
+            assertEquals(1, grouped.getInt("surfaceWindowStackDepth"));
+            assertTrue(grouped.getLong("surfaceWindowRevision") > dialogRevision);
+            JSONObject top = grouped.getJSONArray("surfaceDialogStack")
+                    .getJSONObject(0);
+            assertEquals(2, top.getInt("memberWindowCount"));
+            JSONObject capture = top.getJSONObject("bounds");
+            JSONObject content = top.getJSONObject("contentBounds");
+            assertTrue(capture.getInt("left") <= content.getInt("left"));
+            assertTrue(capture.getInt("top") <= content.getInt("top"));
+            assertTrue(capture.getInt("right") >= content.getInt("right"));
+            assertTrue(capture.getInt("bottom") >= content.getInt("bottom"));
+
+            dismissPopup(popup);
+            popup = null;
+            JSONObject restored = awaitDialogMemberCount(
+                    context,
+                    id,
+                    1,
+                    2_000L
+            );
+            assertEquals(1, restored.getInt("surfaceWindowStackDepth"));
+            assertTrue(restored.getLong("surfaceWindowRevision")
+                    > grouped.getLong("surfaceWindowRevision"));
+        } finally {
+            dismissPopup(popup);
+            dismissDialog(dialog);
+            if (!BridgeInteractionRegistry.terminal(id)) {
+                BridgeActivity.dismissUI(context, id);
+            }
+        }
+    }
+
+    public void testActionSessionBackingSurfaceIsBlankAndOpaque()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        String id = "interaction-blank-backing-" + UUID.randomUUID();
+        try {
+            BridgeServer.beginAndActivateInteraction(
+                    context,
+                    id,
+                    "configuration",
+                    "action"
+            );
+            BridgeActivity.prepareDialogHandoff(context, id);
+            Activity activity = BridgeActionActivity.currentActivity();
+            assertNotNull(activity);
+            InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
+                ViewGroup content = activity.findViewById(android.R.id.content);
+                assertNotNull(content);
+                assertEquals(1, content.getChildCount());
+                assertTrue(content.getChildAt(0) instanceof FrameLayout);
+                assertEquals(
+                        0,
+                        ((FrameLayout) content.getChildAt(0)).getChildCount()
+                );
+                assertNotNull(content.getChildAt(0).getBackground());
+            });
+        } finally {
+            if (!BridgeInteractionRegistry.terminal(id)) {
+                BridgeActivity.dismissUI(context, id);
+            }
+        }
     }
 
     public void testSessionDialogCommitsUnicodeThroughFocusedInputConnection()
@@ -2441,6 +2590,38 @@ public final class BridgeProtocolTest extends TestCase {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync();
     }
 
+    private static PopupWindow showOwnedPopup(AlertDialog dialog) {
+        AtomicReference<PopupWindow> result = new AtomicReference<>();
+        InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
+            TextView content = new TextView(dialog.getContext());
+            content.setText("附属窗口");
+            content.setGravity(Gravity.CENTER);
+            content.setTextColor(Color.BLACK);
+            content.setBackgroundColor(Color.WHITE);
+            PopupWindow popup = new PopupWindow(content, 260, 220, true);
+            popup.setBackgroundDrawable(new ColorDrawable(Color.WHITE));
+            popup.setOutsideTouchable(false);
+            popup.showAtLocation(
+                    dialog.getWindow().getDecorView(),
+                    Gravity.CENTER,
+                    0,
+                    0
+            );
+            result.set(popup);
+        });
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        assertNotNull(result.get());
+        assertTrue(result.get().isShowing());
+        return result.get();
+    }
+
+    private static void dismissPopup(PopupWindow popup) {
+        InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
+            if (popup != null && popup.isShowing()) popup.dismiss();
+        });
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+    }
+
     private static AlertDialog showOwnedImageDialog(
             String interactionID,
             boolean qrCode
@@ -2656,6 +2837,31 @@ public final class BridgeProtocolTest extends TestCase {
             last = BridgeActivity.uiState(context, interactionID);
             if (last.optInt("surfaceWindowStackDepth", 0) == depth
                     && !last.optString("surfaceWindowID", "").isEmpty()) {
+                return last;
+            }
+            Thread.sleep(25L);
+        }
+        return last == null
+                ? BridgeInteractionRegistry.state(interactionID)
+                : last;
+    }
+
+    private static JSONObject awaitDialogMemberCount(
+            Context context,
+            String interactionID,
+            int memberCount,
+            long timeoutMilliseconds
+    ) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMilliseconds;
+        JSONObject last = null;
+        while (System.currentTimeMillis() < deadline) {
+            last = BridgeActivity.uiState(context, interactionID);
+            JSONArray stack = last.optJSONArray("surfaceDialogStack");
+            if (stack != null && stack.length() == 1
+                    && stack.getJSONObject(0).optInt(
+                            "memberWindowCount",
+                            0
+                    ) == memberCount) {
                 return last;
             }
             Thread.sleep(25L);

@@ -290,6 +290,14 @@ public final class BridgeActivity extends Activity {
                         )
         );
         state.put(
+                "surfaceWindowContentBounds",
+                topWindow == null
+                        ? JSONObject.NULL
+                        : BridgeDialogWindowTracker.WindowEntry.boundsJSON(
+                                topWindow.contentBounds
+                        )
+        );
+        state.put(
                 "surfaceDisplayBounds",
                 windows == null ? JSONObject.NULL : windows.displayJSON()
         );

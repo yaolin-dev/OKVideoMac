@@ -22,6 +22,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -42,6 +43,11 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 final class BridgeDialogWindowTracker {
     private static final long SNAPSHOT_TIMEOUT_MS = 750L;
+    private static final float CAPTURE_GUARD_BAND_DP = 12f;
+    private static final int MIN_CAPTURE_GUARD_BAND_PX = 8;
+    private static final int MAX_CAPTURE_GUARD_BAND_PX = 32;
+    // Hidden on older public SDK stubs but stable in WindowManager since API 21.
+    private static final int TYPE_APPLICATION_ABOVE_SUB_PANEL = 1005;
     private static final double NEAR_FULL_WIDTH_COVERAGE = 0.90;
     private static final double NEAR_FULL_HEIGHT_COVERAGE = 0.88;
     private static final double NEAR_FULL_AREA_COVERAGE = 0.82;
@@ -49,6 +55,7 @@ final class BridgeDialogWindowTracker {
     private final WeakReference<Activity> owner;
     private final String interactionID;
     private final Map<View, String> windowIDs = new IdentityHashMap<>();
+    private final Map<String, List<View>> layerRoots = new HashMap<>();
     private long nextWindowSequence;
     private long revision;
     private String lastSignature = "";
@@ -131,6 +138,7 @@ final class BridgeDialogWindowTracker {
     synchronized void release() {
         released = true;
         windowIDs.clear();
+        layerRoots.clear();
         lastSignature = "released";
         revision++;
         lastSnapshot = Snapshot.empty(false, revision, 0, 0);
@@ -152,7 +160,7 @@ final class BridgeDialogWindowTracker {
         IBinder ownerToken = activityRoot == null
                 ? null
                 : activityRoot.getApplicationWindowToken();
-        List<WindowEntry> stack = new ArrayList<>();
+        List<RootEntry> candidates = new ArrayList<>();
         Set<View> retained = Collections.newSetFromMap(new IdentityHashMap<>());
         for (View root : roots) {
             if (root == null || root == activityRoot || !isVisible(root)) {
@@ -162,7 +170,7 @@ final class BridgeDialogWindowTracker {
             if (!(baseParams instanceof WindowManager.LayoutParams)) continue;
             WindowManager.LayoutParams params =
                     (WindowManager.LayoutParams) baseParams;
-            if (!isDialogWindowType(params.type)) continue;
+            if (!isSessionWindowType(params.type)) continue;
             if (!ownedBy(activity, ownerToken, root)) continue;
             Rect bounds = rootBounds(root, display.widthPixels, display.heightPixels);
             if (bounds.isEmpty()) continue;
@@ -177,17 +185,22 @@ final class BridgeDialogWindowTracker {
                 );
                 windowIDs.put(root, windowID);
             }
-            stack.add(new WindowEntry(
-                    windowID,
-                    bounds,
-                    isNearFullDisplay(
-                            bounds,
-                            display.widthPixels,
-                            display.heightPixels
-                    )
-            ));
+            candidates.add(new RootEntry(root, windowID, params, bounds));
         }
         windowIDs.keySet().retainAll(retained);
+        List<LayerBuilder> logicalLayers = groupLogicalLayers(candidates);
+        List<WindowEntry> stack = new ArrayList<>();
+        layerRoots.clear();
+        for (LayerBuilder layer : logicalLayers) {
+            WindowEntry entry = layer.windowEntry(
+                    display.widthPixels,
+                    display.heightPixels,
+                    display.density
+            );
+            if (entry.bounds.isEmpty()) continue;
+            stack.add(entry);
+            layerRoots.put(entry.windowID, entry.memberRoots);
+        }
         String signature = signature(stack, display.widthPixels, display.heightPixels);
         if (!signature.equals(lastSignature)) {
             lastSignature = signature;
@@ -217,18 +230,16 @@ final class BridgeDialogWindowTracker {
                 || !windowID.equals(top.windowID)) {
             return false;
         }
-        View root = null;
-        for (Map.Entry<View, String> entry : windowIDs.entrySet()) {
-            if (windowID.equals(entry.getValue())) {
-                root = entry.getKey();
-                break;
-            }
-        }
-        if (root == null) return false;
         // This is Android's existing focus route, not control-tree parsing.
         // The provider still owns the EditText/InputConnection and all
         // validation, selection and persistence behavior.
-        View focused = root.findFocus();
+        List<View> roots = layerRoots.get(windowID);
+        if (roots == null || roots.isEmpty()) return false;
+        View focused = null;
+        for (int index = roots.size() - 1; index >= 0; index--) {
+            focused = roots.get(index).findFocus();
+            if (focused != null) break;
+        }
         if (focused == null) return false;
         InputConnection connection = focused.onCreateInputConnection(
                 new EditorInfo()
@@ -251,6 +262,7 @@ final class BridgeDialogWindowTracker {
     }
 
     private Snapshot updateUnavailable(int displayWidth, int displayHeight) {
+        layerRoots.clear();
         String signature = "unavailable:" + displayWidth + "x" + displayHeight;
         if (!signature.equals(lastSignature)) {
             lastSignature = signature;
@@ -285,9 +297,19 @@ final class BridgeDialogWindowTracker {
                 && root.getHeight() > 0;
     }
 
-    private static boolean isDialogWindowType(int type) {
+    static boolean isDialogBaseWindowType(int type) {
         return type == WindowManager.LayoutParams.TYPE_APPLICATION
                 || type == WindowManager.LayoutParams.TYPE_APPLICATION_ATTACHED_DIALOG;
+    }
+
+    static boolean isAttachedPanelWindowType(int type) {
+        return type == WindowManager.LayoutParams.TYPE_APPLICATION_PANEL
+                || type == WindowManager.LayoutParams.TYPE_APPLICATION_SUB_PANEL
+                || type == TYPE_APPLICATION_ABOVE_SUB_PANEL;
+    }
+
+    static boolean isSessionWindowType(int type) {
+        return isDialogBaseWindowType(type) || isAttachedPanelWindowType(type);
     }
 
     private static boolean ownedBy(
@@ -328,6 +350,68 @@ final class BridgeDialogWindowTracker {
         return bounds;
     }
 
+    static int captureGuardBandPixels(float density) {
+        int pixels = Math.round(
+                CAPTURE_GUARD_BAND_DP * Math.max(1f, density)
+        );
+        return Math.max(
+                MIN_CAPTURE_GUARD_BAND_PX,
+                Math.min(MAX_CAPTURE_GUARD_BAND_PX, pixels)
+        );
+    }
+
+    static Rect guardedCaptureBounds(
+            Rect contentBounds,
+            int displayWidth,
+            int displayHeight,
+            float density
+    ) {
+        if (contentBounds == null || contentBounds.isEmpty()
+                || displayWidth <= 0 || displayHeight <= 0) {
+            return new Rect();
+        }
+        int guardBand = captureGuardBandPixels(density);
+        return new Rect(
+                Math.max(0, contentBounds.left - guardBand),
+                Math.max(0, contentBounds.top - guardBand),
+                Math.min(displayWidth, contentBounds.right + guardBand),
+                Math.min(displayHeight, contentBounds.bottom + guardBand)
+        );
+    }
+
+    private static List<LayerBuilder> groupLogicalLayers(
+            List<RootEntry> roots
+    ) {
+        List<LayerBuilder> layers = new ArrayList<>();
+        for (RootEntry root : roots) {
+            if (isDialogBaseWindowType(root.type)) {
+                layers.add(new LayerBuilder(root));
+                continue;
+            }
+            LayerBuilder owner = null;
+            for (int index = layers.size() - 1; index >= 0; index--) {
+                if (layers.get(index).hasExactParentToken(root)) {
+                    owner = layers.get(index);
+                    break;
+                }
+            }
+            if (owner == null) {
+                for (int index = layers.size() - 1; index >= 0; index--) {
+                    if (layers.get(index).hasSameApplicationToken(root)) {
+                        owner = layers.get(index);
+                        break;
+                    }
+                }
+            }
+            if (owner == null) {
+                layers.add(new LayerBuilder(root));
+            } else {
+                owner.add(root);
+            }
+        }
+        return layers;
+    }
+
     static boolean isNearFullDisplay(
             Rect bounds,
             int displayWidth,
@@ -360,11 +444,104 @@ final class BridgeDialogWindowTracker {
             value.append('|')
                     .append(entry.windowID)
                     .append(':')
+                    .append(entry.contentBounds.flattenToString())
+                    .append('>')
                     .append(entry.bounds.flattenToString())
+                    .append(':')
+                    .append(entry.memberTypes)
                     .append(':')
                     .append(entry.nearFullDisplay);
         }
         return value.toString();
+    }
+
+    private static final class RootEntry {
+        final View root;
+        final String windowID;
+        final int type;
+        final Rect bounds;
+        final IBinder layoutToken;
+        final IBinder windowToken;
+        final IBinder applicationToken;
+
+        RootEntry(
+                View root,
+                String windowID,
+                WindowManager.LayoutParams params,
+                Rect bounds
+        ) {
+            this.root = root;
+            this.windowID = windowID;
+            this.type = params.type;
+            this.bounds = new Rect(bounds);
+            layoutToken = params.token;
+            windowToken = root.getWindowToken();
+            applicationToken = root.getApplicationWindowToken();
+        }
+    }
+
+    private static final class LayerBuilder {
+        final RootEntry anchor;
+        final List<RootEntry> members = new ArrayList<>();
+        final Rect contentBounds = new Rect();
+
+        LayerBuilder(RootEntry anchor) {
+            this.anchor = anchor;
+            add(anchor);
+        }
+
+        void add(RootEntry member) {
+            members.add(member);
+            if (contentBounds.isEmpty()) {
+                contentBounds.set(member.bounds);
+            } else {
+                contentBounds.union(member.bounds);
+            }
+        }
+
+        boolean hasExactParentToken(RootEntry child) {
+            if (child.layoutToken == null) return false;
+            for (RootEntry member : members) {
+                if (child.layoutToken == member.windowToken) return true;
+            }
+            return false;
+        }
+
+        boolean hasSameApplicationToken(RootEntry child) {
+            return child.applicationToken != null
+                    && anchor.applicationToken == child.applicationToken;
+        }
+
+        WindowEntry windowEntry(
+                int displayWidth,
+                int displayHeight,
+                float density
+        ) {
+            Rect captureBounds = guardedCaptureBounds(
+                    contentBounds,
+                    displayWidth,
+                    displayHeight,
+                    density
+            );
+            List<View> roots = new ArrayList<>();
+            List<Integer> types = new ArrayList<>();
+            for (RootEntry member : members) {
+                roots.add(member.root);
+                types.add(member.type);
+            }
+            return new WindowEntry(
+                    anchor.windowID,
+                    contentBounds,
+                    captureBounds,
+                    isNearFullDisplay(
+                            captureBounds,
+                            displayWidth,
+                            displayHeight
+                    ),
+                    roots,
+                    types
+            );
+        }
     }
 
     @SuppressLint("BlockedPrivateApi")
@@ -467,13 +644,30 @@ final class BridgeDialogWindowTracker {
 
     static final class WindowEntry {
         final String windowID;
+        final Rect contentBounds;
         final Rect bounds;
         final boolean nearFullDisplay;
+        final List<View> memberRoots;
+        final List<Integer> memberTypes;
 
-        WindowEntry(String windowID, Rect bounds, boolean nearFullDisplay) {
+        WindowEntry(
+                String windowID,
+                Rect contentBounds,
+                Rect bounds,
+                boolean nearFullDisplay,
+                List<View> memberRoots,
+                List<Integer> memberTypes
+        ) {
             this.windowID = windowID;
+            this.contentBounds = new Rect(contentBounds);
             this.bounds = new Rect(bounds);
             this.nearFullDisplay = nearFullDisplay;
+            this.memberRoots = Collections.unmodifiableList(
+                    new ArrayList<>(memberRoots)
+            );
+            this.memberTypes = Collections.unmodifiableList(
+                    new ArrayList<>(memberTypes)
+            );
         }
 
         JSONObject json() {
@@ -481,7 +675,9 @@ final class BridgeDialogWindowTracker {
             try {
                 value.put("windowID", windowID);
                 value.put("bounds", boundsJSON(bounds));
+                value.put("contentBounds", boundsJSON(contentBounds));
                 value.put("nearFullDisplay", nearFullDisplay);
+                value.put("memberWindowCount", memberRoots.size());
             } catch (Throwable ignored) {
             }
             return value;

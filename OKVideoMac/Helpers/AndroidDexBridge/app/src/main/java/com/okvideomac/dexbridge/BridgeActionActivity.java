@@ -5,8 +5,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
 import android.graphics.Color;
-import android.view.Gravity;
-import android.widget.TextView;
+import android.widget.FrameLayout;
 
 import java.lang.ref.WeakReference;
 
@@ -55,13 +54,16 @@ public final class BridgeActionActivity extends Activity {
         // that global at this disposable Activity so the persistent bridge
         // host underneath survives the handoff.
         com.github.catvod.Init.set(this);
-        TextView placeholder = new TextView(this);
-        placeholder.setText("OKVideo Android Action Session");
-        placeholder.setTextColor(Color.DKGRAY);
-        placeholder.setTextSize(16f);
-        placeholder.setGravity(Gravity.CENTER);
-        placeholder.setBackgroundColor(Color.rgb(245, 245, 245));
-        setContentView(placeholder);
+        // A translucent provider Dialog is composited over this Activity by
+        // Android before the Mac captures the display. Keep the request-owned
+        // backing surface deliberately blank and opaque: debug labels or stale
+        // host content must never bleed through a transparent Dialog crop.
+        FrameLayout sessionBackground = new FrameLayout(this);
+        sessionBackground.setBackgroundColor(Color.rgb(245, 245, 245));
+        sessionBackground.setImportantForAccessibility(
+                FrameLayout.IMPORTANT_FOR_ACCESSIBILITY_NO
+        );
+        setContentView(sessionBackground);
         dialogWindowTracker = new BridgeDialogWindowTracker(this, interactionID);
     }
 

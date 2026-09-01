@@ -282,7 +282,9 @@ struct AndroidBridgeDisplayBounds: Decodable, Equatable, Sendable {
 struct AndroidBridgeDialogWindow: Decodable, Equatable, Sendable {
     let windowID: String
     let bounds: AndroidBridgeSurfaceBounds
+    let contentBounds: AndroidBridgeSurfaceBounds?
     let nearFullDisplay: Bool
+    let memberWindowCount: Int?
 }
 
 enum AndroidActionSurfacePresentationMode: String, Equatable, Sendable {
@@ -297,6 +299,7 @@ struct AndroidActionSurfaceCaptureDescriptor: Equatable, Sendable {
     let windowRevision: Int
     let windowStackDepth: Int
     let windowBounds: AndroidBridgeSurfaceBounds?
+    let windowContentBounds: AndroidBridgeSurfaceBounds?
     let displayBounds: AndroidBridgeDisplayBounds?
 }
 
@@ -404,6 +407,7 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
     var surfaceWindowRevision: Int? = nil
     var surfaceWindowStackDepth: Int? = nil
     var surfaceWindowBounds: AndroidBridgeSurfaceBounds? = nil
+    var surfaceWindowContentBounds: AndroidBridgeSurfaceBounds? = nil
     var surfaceDisplayBounds: AndroidBridgeDisplayBounds? = nil
     var surfaceDialogStack: [AndroidBridgeDialogWindow]? = nil
     var surfaceDialogTrackerAvailable: Bool? = nil
@@ -453,8 +457,16 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
             .lowercased()
         switch normalizedPresentation {
         case "dialogcrop":
+            let contentBoundsAreValid = surfaceWindowContentBounds.map {
+                $0.isValid
+                    && $0.left >= (surfaceWindowBounds?.left ?? 0)
+                    && $0.top >= (surfaceWindowBounds?.top ?? 0)
+                    && $0.right <= (surfaceWindowBounds?.right ?? 0)
+                    && $0.bottom <= (surfaceWindowBounds?.bottom ?? 0)
+            } ?? true
             guard let bounds = surfaceWindowBounds,
                   bounds.isValid,
+                  contentBoundsAreValid,
                   let display = surfaceDisplayBounds,
                   display.isValid,
                   bounds.right <= display.width,
@@ -471,6 +483,7 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
                 windowRevision: windowRevision,
                 windowStackDepth: max(1, surfaceWindowStackDepth ?? 1),
                 windowBounds: bounds,
+                windowContentBounds: surfaceWindowContentBounds,
                 displayBounds: display
             )
         case "fulldisplay":
@@ -481,6 +494,7 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
                 windowRevision: max(0, surfaceWindowRevision ?? 0),
                 windowStackDepth: max(0, surfaceWindowStackDepth ?? 0),
                 windowBounds: nil,
+                windowContentBounds: surfaceWindowContentBounds,
                 displayBounds: surfaceDisplayBounds
             )
         default:
@@ -493,6 +507,7 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
                 windowRevision: 0,
                 windowStackDepth: 0,
                 windowBounds: nil,
+                windowContentBounds: nil,
                 displayBounds: surfaceDisplayBounds
             )
         }
@@ -3272,6 +3287,7 @@ struct AndroidActionSurfaceFrame: Equatable, Sendable {
     let windowID: String
     let windowRevision: Int
     let windowStackDepth: Int
+    let windowContentBounds: AndroidBridgeSurfaceBounds?
     let captureOriginX: Int
     let captureOriginY: Int
     let displayPixelWidth: Int
@@ -3292,6 +3308,7 @@ struct AndroidActionSurfaceFrame: Equatable, Sendable {
         windowID: String = "",
         windowRevision: Int = 0,
         windowStackDepth: Int = 0,
+        windowContentBounds: AndroidBridgeSurfaceBounds? = nil,
         captureOriginX: Int = 0,
         captureOriginY: Int = 0,
         displayPixelWidth: Int? = nil,
@@ -3311,6 +3328,7 @@ struct AndroidActionSurfaceFrame: Equatable, Sendable {
         self.windowID = windowID
         self.windowRevision = windowRevision
         self.windowStackDepth = windowStackDepth
+        self.windowContentBounds = windowContentBounds
         self.captureOriginX = captureOriginX
         self.captureOriginY = captureOriginY
         self.displayPixelWidth = displayPixelWidth ?? pixelWidth
@@ -3334,6 +3352,7 @@ struct AndroidActionSurfaceFrame: Equatable, Sendable {
             && lhs.windowID == rhs.windowID
             && lhs.windowRevision == rhs.windowRevision
             && lhs.windowStackDepth == rhs.windowStackDepth
+            && lhs.windowContentBounds == rhs.windowContentBounds
             && lhs.captureOriginX == rhs.captureOriginX
             && lhs.captureOriginY == rhs.captureOriginY
             && lhs.displayPixelWidth == rhs.displayPixelWidth
@@ -3362,6 +3381,7 @@ struct AndroidActionSurfaceFrame: Equatable, Sendable {
                     height: pixelHeight
                 )
                 : nil,
+            windowContentBounds: windowContentBounds,
             displayBounds: AndroidBridgeDisplayBounds(
                 width: displayPixelWidth,
                 height: displayPixelHeight
@@ -3382,7 +3402,15 @@ struct AndroidActionSurfaceFrame: Equatable, Sendable {
         }
         switch presentationMode {
         case .dialogCrop:
-            return !windowID.isEmpty
+            let contentIsValid = windowContentBounds.map {
+                $0.isValid
+                    && $0.left >= captureOriginX
+                    && $0.top >= captureOriginY
+                    && $0.right <= captureOriginX + pixelWidth
+                    && $0.bottom <= captureOriginY + pixelHeight
+            } ?? true
+            return contentIsValid
+                && !windowID.isEmpty
                 && windowRevision > 0
                 && windowStackDepth > 0
         case .fullDisplay:
@@ -3414,8 +3442,10 @@ struct AndroidActionSurfaceFrame: Equatable, Sendable {
                 && bounds.top == captureOriginY
                 && bounds.width == pixelWidth
                 && bounds.height == pixelHeight
+                && expected.windowContentBounds == windowContentBounds
         }
-        return captureOriginX == 0
+        return expected.windowContentBounds == windowContentBounds
+            && captureOriginX == 0
             && captureOriginY == 0
             && pixelWidth == displayPixelWidth
             && pixelHeight == displayPixelHeight
@@ -4204,8 +4234,8 @@ struct AndroidInstalledPackageContinuity: Equatable, Sendable {
 }
 
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.42"
-    static let bridgeVersionCode = 54
+    static let bridgeVersion = "0.3.43"
+    static let bridgeVersionCode = 55
     static let bridgeApplicationID = "com.okvideomac.dexbridge"
     static let bridgeCertificateSHA256 =
         "33e95ef23b662f2629a23df892aaff52ae6216f7492cfb559a63d37247a059e0"
@@ -4469,6 +4499,7 @@ actor AndroidDexBridgeRuntime {
             windowID: captureDescriptor.windowID,
             windowRevision: captureDescriptor.windowRevision,
             windowStackDepth: captureDescriptor.windowStackDepth,
+            windowContentBounds: captureDescriptor.windowContentBounds,
             captureOriginX: output.originX,
             captureOriginY: output.originY,
             displayPixelWidth: displaySize.width,

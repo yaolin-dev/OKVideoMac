@@ -1703,6 +1703,7 @@ private struct TransientSiteActionStatusView: View {
 
 struct CloudAuthorizationView: View {
     @EnvironmentObject private var state: AppState
+    @State private var isTextEntryExpanded = false
     let prompt: CloudAuthorizationPrompt
 
     var body: some View {
@@ -1739,7 +1740,7 @@ struct CloudAuthorizationView: View {
         maximumSurfaceHeight: CGFloat,
         availableSurfaceWidth: CGFloat
     ) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: usesDialogCropLayout ? 12 : 16) {
             HStack {
                 Label(
                     isAuthorization
@@ -1824,6 +1825,15 @@ struct CloudAuthorizationView: View {
                             .foregroundColor(.secondary)
                         Spacer()
                         Button {
+                            isTextEntryExpanded.toggle()
+                        } label: {
+                            Label(
+                                isTextEntryExpanded ? "收起输入" : "输入文字",
+                                systemImage: "keyboard"
+                            )
+                        }
+                        .disabled(isTerminal)
+                        Button {
                             Task {
                                 await state.backCloudAuthorizationSurface(
                                     frame: surfaceFrame
@@ -1835,24 +1845,26 @@ struct CloudAuthorizationView: View {
                         .disabled(isTerminal)
                     }
                 }
-                HStack(spacing: 8) {
-                    TextField(
-                        "点击 Android 输入框后，可在这里发送文字",
-                        text: $state.cloudAuthorizationInput
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(isTerminal)
-                    Button("发送文字") {
-                        Task {
-                            await state.typeCloudAuthorizationSurfaceText(
-                                frame: surfaceFrame
-                            )
+                if isTextEntryExpanded {
+                    HStack(spacing: 8) {
+                        TextField(
+                            "点击 Android 输入框后，可在这里发送文字",
+                            text: $state.cloudAuthorizationInput
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(isTerminal)
+                        Button("发送文字") {
+                            Task {
+                                await state.typeCloudAuthorizationSurfaceText(
+                                    frame: surfaceFrame
+                                )
+                            }
                         }
+                        .disabled(
+                            isTerminal
+                                || state.cloudAuthorizationInput.isEmpty
+                        )
                     }
-                    .disabled(
-                        isTerminal
-                            || state.cloudAuthorizationInput.isEmpty
-                    )
                 }
             } else if isBusy {
                 HStack(spacing: 10) {
@@ -1899,15 +1911,18 @@ struct CloudAuthorizationView: View {
                 }
             }
         }
-        .padding(22)
+        .padding(usesDialogCropLayout ? 18 : 22)
         .frame(
             minWidth: minimumCardWidth(
+                maximumSurfaceHeight: maximumSurfaceHeight,
                 availableSurfaceWidth: availableSurfaceWidth
             ),
             idealWidth: idealCardWidth(
+                maximumSurfaceHeight: maximumSurfaceHeight,
                 availableSurfaceWidth: availableSurfaceWidth
             ),
             maxWidth: maximumCardWidth(
+                maximumSurfaceHeight: maximumSurfaceHeight,
                 availableSurfaceWidth: availableSurfaceWidth
             )
         )
@@ -1922,6 +1937,9 @@ struct CloudAuthorizationView: View {
         }
         .compositingGroup()
         .shadow(color: .black.opacity(0.42), radius: 28, x: 0, y: 12)
+        .onChange(of: prompt.interactionID) { _ in
+            isTextEntryExpanded = false
+        }
     }
 
     private var isAuthorization: Bool {
@@ -1959,36 +1977,62 @@ struct CloudAuthorizationView: View {
     }
 
     private func minimumCardWidth(
+        maximumSurfaceHeight: CGFloat,
         availableSurfaceWidth: CGFloat
     ) -> CGFloat {
         if usesDialogCropLayout {
-            return min(
-                440,
-                availableSurfaceWidth
-                    + CloudAuthorizationPresentationPolicy.cardHorizontalPadding
+            return dialogCardWidth(
+                maximumSurfaceHeight: maximumSurfaceHeight,
+                availableSurfaceWidth: availableSurfaceWidth
             )
         }
         return usesCompactSurfaceLayout ? 440 : 560
     }
 
     private func idealCardWidth(
+        maximumSurfaceHeight: CGFloat,
         availableSurfaceWidth: CGFloat
     ) -> CGFloat {
         if usesDialogCropLayout {
-            return availableSurfaceWidth
-                + CloudAuthorizationPresentationPolicy.cardHorizontalPadding
+            return dialogCardWidth(
+                maximumSurfaceHeight: maximumSurfaceHeight,
+                availableSurfaceWidth: availableSurfaceWidth
+            )
         }
         return usesCompactSurfaceLayout ? 500 : 700
     }
 
     private func maximumCardWidth(
+        maximumSurfaceHeight: CGFloat,
         availableSurfaceWidth: CGFloat
     ) -> CGFloat {
         if usesDialogCropLayout {
-            return availableSurfaceWidth
-                + CloudAuthorizationPresentationPolicy.cardHorizontalPadding
+            return dialogCardWidth(
+                maximumSurfaceHeight: maximumSurfaceHeight,
+                availableSurfaceWidth: availableSurfaceWidth
+            )
         }
         return usesCompactSurfaceLayout ? 580 : 780
+    }
+
+    private func dialogCardWidth(
+        maximumSurfaceHeight: CGFloat,
+        availableSurfaceWidth: CGFloat
+    ) -> CGFloat {
+        guard let surfaceFrame else {
+            return min(440, availableSurfaceWidth)
+        }
+        let surfaceSize = AndroidActionSurfacePresentationPolicy.preferredSize(
+            pixelWidth: surfaceFrame.pixelWidth,
+            pixelHeight: surfaceFrame.pixelHeight,
+            maximumHeight: maximumSurfaceHeight,
+            availableWidth: availableSurfaceWidth,
+            presentationMode: surfaceFrame.presentationMode
+        )
+        return CloudAuthorizationPresentationPolicy.dialogCardWidth(
+            surfaceWidth: surfaceSize.width,
+            availableSurfaceWidth: availableSurfaceWidth
+        )
     }
 
     private var lifecycleStatus: String {
@@ -2011,13 +2055,13 @@ struct CloudAuthorizationView: View {
 enum CloudAuthorizationPresentationPolicy {
     static let outerInset: CGFloat = 30
     static let cardHorizontalPadding: CGFloat = 44
-    private static let cardChromeAndMargins: CGFloat = 300
+    private static let cardChromeAndMargins: CGFloat = 280
     private static let maximumDialogLayoutWidth: CGFloat = 780
 
     static func maximumSurfaceHeight(containerHeight: CGFloat) -> CGFloat {
         min(
-            520,
-            max(260, containerHeight - cardChromeAndMargins)
+            480,
+            max(200, containerHeight - cardChromeAndMargins)
         )
     }
 
@@ -2030,6 +2074,16 @@ enum CloudAuthorizationPresentationPolicy {
                     - outerInset * 2
                     - cardHorizontalPadding
             )
+        )
+    }
+
+    static func dialogCardWidth(
+        surfaceWidth: CGFloat,
+        availableSurfaceWidth: CGFloat
+    ) -> CGFloat {
+        min(
+            availableSurfaceWidth + cardHorizontalPadding,
+            max(440, surfaceWidth + cardHorizontalPadding)
         )
     }
 }

@@ -3948,14 +3948,14 @@ final class OKVideoMacTests: XCTestCase {
             AndroidActionSurfacePresentationPolicy.preferredSize(
                 pixelWidth: 648,
                 pixelHeight: 654,
-                maximumHeight: 520,
+                maximumHeight: 480,
                 availableWidth: 780,
                 presentationMode: .dialogCrop
             )
-        XCTAssertEqual(regularDialog.height, 520, accuracy: 0.000_1)
+        XCTAssertEqual(regularDialog.height, 480, accuracy: 0.000_1)
         XCTAssertEqual(
             regularDialog.width,
-            520 * 648.0 / 654.0,
+            480 * 648.0 / 654.0,
             accuracy: 0.000_1
         )
         XCTAssertEqual(
@@ -3967,11 +3967,11 @@ final class OKVideoMacTests: XCTestCase {
         let tallDialog = AndroidActionSurfacePresentationPolicy.preferredSize(
             pixelWidth: 683,
             pixelHeight: 832,
-            maximumHeight: 520,
+            maximumHeight: 480,
             availableWidth: 780,
             presentationMode: .dialogCrop
         )
-        XCTAssertEqual(tallDialog.height, 520, accuracy: 0.000_1)
+        XCTAssertEqual(tallDialog.height, 480, accuracy: 0.000_1)
         XCTAssertEqual(
             tallDialog.width / tallDialog.height,
             683.0 / 832.0,
@@ -4107,6 +4107,14 @@ final class OKVideoMacTests: XCTestCase {
                 "width": 648,
                 "height": 654
             ],
+            "surfaceWindowContentBounds": [
+                "left": 48,
+                "top": 422,
+                "right": 672,
+                "bottom": 1_052,
+                "width": 624,
+                "height": 630
+            ],
             "surfaceDisplayBounds": [
                 "width": 720,
                 "height": 1_600
@@ -4122,6 +4130,7 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(descriptor.windowRevision, 7)
         XCTAssertEqual(descriptor.windowStackDepth, 2)
         XCTAssertEqual(descriptor.windowBounds?.left, 36)
+        XCTAssertEqual(descriptor.windowContentBounds?.left, 48)
 
         var invalid = object
         invalid["surfaceWindowBounds"] = [
@@ -4137,6 +4146,21 @@ final class OKVideoMacTests: XCTestCase {
             from: JSONSerialization.data(withJSONObject: invalid)
         )
         XCTAssertNil(invalidState.actionSurfaceCaptureDescriptor)
+
+        var invalidContent = object
+        invalidContent["surfaceWindowContentBounds"] = [
+            "left": 20,
+            "top": 422,
+            "right": 672,
+            "bottom": 1_052,
+            "width": 652,
+            "height": 630
+        ]
+        let invalidContentState = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: JSONSerialization.data(withJSONObject: invalidContent)
+        )
+        XCTAssertNil(invalidContentState.actionSurfaceCaptureDescriptor)
     }
 
     func testCloudAuthorizationPresentationReservesShadowMargin() {
@@ -4144,19 +4168,43 @@ final class OKVideoMacTests: XCTestCase {
             CloudAuthorizationPresentationPolicy.maximumSurfaceHeight(
                 containerHeight: 717
             ),
-            417
+            437
         )
         XCTAssertEqual(
             CloudAuthorizationPresentationPolicy.maximumSurfaceHeight(
                 containerHeight: 900
             ),
-            520
+            480
         )
         XCTAssertEqual(
             CloudAuthorizationPresentationPolicy.maximumSurfaceHeight(
                 containerHeight: 480
             ),
-            260
+            200
+        )
+    }
+
+    func testDialogCardWidthFollowsRenderedCropInsteadOfSheetMaximum() {
+        XCTAssertEqual(
+            CloudAuthorizationPresentationPolicy.dialogCardWidth(
+                surfaceWidth: 360,
+                availableSurfaceWidth: 780
+            ),
+            440
+        )
+        XCTAssertEqual(
+            CloudAuthorizationPresentationPolicy.dialogCardWidth(
+                surfaceWidth: 540,
+                availableSurfaceWidth: 780
+            ),
+            584
+        )
+        XCTAssertEqual(
+            CloudAuthorizationPresentationPolicy.dialogCardWidth(
+                surfaceWidth: 400,
+                availableSurfaceWidth: 240
+            ),
+            284
         )
     }
 
@@ -4262,6 +4310,78 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(AndroidActionSurfaceLeasePolicy.isExactLease(frame, frame))
         XCTAssertFalse(
             AndroidActionSurfaceLeasePolicy.isExactLease(frame, newerFrame)
+        )
+    }
+
+    func testAndroidActionSurfaceLeaseDropsPixelsWhenDialogLayerChanges() {
+        let requestID = UUID()
+        let content = AndroidBridgeSurfaceBounds(
+            left: 132,
+            top: 312,
+            right: 948,
+            bottom: 1_188,
+            width: 816,
+            height: 876
+        )
+        let frame = AndroidActionSurfaceFrame(
+            interactionID: requestID,
+            providerOwnerID: "owner-a",
+            runtimeGeneration: "runtime-a",
+            surfaceMode: "actionactivity",
+            generation: 9,
+            frameSequence: 4,
+            pngData: Data([1]),
+            pixelWidth: 840,
+            pixelHeight: 900,
+            presentationMode: .dialogCrop,
+            windowID: "dialog-a",
+            windowRevision: 7,
+            windowStackDepth: 1,
+            windowContentBounds: content,
+            captureOriginX: 120,
+            captureOriginY: 300,
+            displayPixelWidth: 1_080,
+            displayPixelHeight: 2_400
+        )
+        let current = frame.captureDescriptor
+        let nextLayer = AndroidActionSurfaceCaptureDescriptor(
+            presentationMode: .dialogCrop,
+            fallbackReason: "",
+            windowID: "dialog-b",
+            windowRevision: 8,
+            windowStackDepth: 2,
+            windowBounds: AndroidBridgeSurfaceBounds(
+                left: 100,
+                top: 280,
+                right: 980,
+                bottom: 1_220,
+                width: 880,
+                height: 940
+            ),
+            windowContentBounds: nil,
+            displayBounds: AndroidBridgeDisplayBounds(
+                width: 1_080,
+                height: 2_400
+            )
+        )
+
+        XCTAssertTrue(
+            AndroidActionSurfaceLeasePolicy.matchesCurrentWindow(
+                frame,
+                descriptor: current
+            )
+        )
+        XCTAssertFalse(
+            AndroidActionSurfaceLeasePolicy.matchesCurrentWindow(
+                frame,
+                descriptor: nextLayer
+            )
+        )
+        XCTAssertFalse(
+            AndroidActionSurfaceLeasePolicy.matchesCurrentWindow(
+                frame,
+                descriptor: nil
+            )
         )
     }
 

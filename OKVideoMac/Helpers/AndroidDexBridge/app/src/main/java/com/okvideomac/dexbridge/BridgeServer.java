@@ -287,7 +287,7 @@ final class BridgeServer {
                                     .versionName
                     );
                     health.put("generation", runtimeGeneration);
-                    health.put("interactionSchemaVersion", 4);
+                    health.put("interactionSchemaVersion", 5);
                     health.put(
                             "interactionCapabilities",
                             new JSONArray()
@@ -298,6 +298,8 @@ final class BridgeServer {
                                     .put("explicitUserCompletion")
                                     .put("sessionDialogBounds")
                                     .put("sessionDialogStack")
+                                    .put("sessionLogicalDialogLayers")
+                                    .put("dialogCaptureGuardBand")
                                     .put("dialogCropPassthrough")
                                     .put("fullSurfaceFallback")
                                     .put("dialogUnicodeInput")

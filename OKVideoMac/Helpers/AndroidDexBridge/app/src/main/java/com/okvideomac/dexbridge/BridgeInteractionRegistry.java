@@ -448,6 +448,7 @@ final class BridgeInteractionRegistry {
             value.put("surfaceWindowRevision", 0L);
             value.put("surfaceWindowStackDepth", 0);
             value.put("surfaceWindowBounds", JSONObject.NULL);
+            value.put("surfaceWindowContentBounds", JSONObject.NULL);
             value.put("surfaceDisplayBounds", JSONObject.NULL);
             value.put("surfaceDialogStack", new JSONArray());
             value.put("surfaceDialogTrackerAvailable", false);
@@ -480,6 +481,7 @@ final class BridgeInteractionRegistry {
             surface.put("windowRevision", 0L);
             surface.put("stackDepth", 0);
             surface.put("bounds", JSONObject.NULL);
+            surface.put("contentBounds", JSONObject.NULL);
             surface.put("displayBounds", JSONObject.NULL);
             surface.put("dialogStack", new JSONArray());
             surface.put("dialogTrackerAvailable", false);
@@ -554,6 +556,12 @@ final class BridgeInteractionRegistry {
                     "surfaceWindowBounds",
                     active
                             ? source.opt("surfaceWindowBounds")
+                            : JSONObject.NULL
+            );
+            destination.put(
+                    "surfaceWindowContentBounds",
+                    active
+                            ? source.opt("surfaceWindowContentBounds")
                             : JSONObject.NULL
             );
             destination.put(
@@ -774,6 +782,12 @@ final class BridgeInteractionRegistry {
                 surface.put(
                         "bounds",
                         active ? ui.opt("surfaceWindowBounds") : JSONObject.NULL
+                );
+                surface.put(
+                        "contentBounds",
+                        active
+                                ? ui.opt("surfaceWindowContentBounds")
+                                : JSONObject.NULL
                 );
                 surface.put(
                         "displayBounds",
