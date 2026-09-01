@@ -4,6 +4,7 @@ import SwiftUI
 
 struct HistoryView: View {
     @EnvironmentObject private var state: AppState
+    @Environment(\.primaryToolbarLayout) private var toolbarLayout
     @State private var isSelecting = false
     @State private var selectedIDs: Set<HistoryRecord.ID> = []
     @State private var pendingDeletion: HistoryDeletion?
@@ -36,14 +37,7 @@ struct HistoryView: View {
         }
         .navigationTitle("")
         .toolbar {
-            ToolbarItem(placement: .navigation) {
-                BrowserToolbarTitle(navigationTitle)
-            }
-            ToolbarItem(placement: .principal) {
-                Spacer(minLength: 0)
-                    .frame(maxWidth: .infinity)
-                    .accessibilityHidden(true)
-            }
+            PrimaryPageToolbarLeadingContent(title: "历史")
             ToolbarItemGroup(placement: .primaryAction) {
                 if !state.isDetailPagePresented,
                    !state.history.isEmpty {
@@ -200,54 +194,113 @@ struct HistoryView: View {
     @ViewBuilder
     private var historyManagementControls: some View {
         if isSelecting {
-            Button(allItemsSelected ? "取消全选" : "全选") {
-                selectedIDs = allItemsSelected
-                    ? []
-                    : Set(state.history.map(\.id))
-            }
-
-            Button(role: .destructive) {
-                pendingDeletion = .items(selectedIDs)
-            } label: {
-                Label(
-                    selectedIDs.isEmpty
-                        ? "删除所选"
-                        : "删除所选（\(selectedIDs.count)）",
-                    systemImage: "trash"
-                )
-            }
-            .disabled(selectedIDs.isEmpty)
-
-            Button("完成") {
-                isSelecting = false
-                selectedIDs.removeAll()
+            switch toolbarLayout {
+            case .expanded:
+                selectAllButton
+                deleteSelectedButton
+                finishSelectionButton
+            case .compact:
+                selectAllButton.labelStyle(.iconOnly)
+                deleteSelectedButton.labelStyle(.iconOnly)
+                finishSelectionButton
+            case .minimal:
+                selectionManagementMenu
+                finishSelectionButton
             }
         } else {
-            Button {
-                isSelecting = true
-            } label: {
-                Label("选择", systemImage: "checklist")
-            }
-
-            Button(role: .destructive) {
-                pendingDeletion = .all
-            } label: {
-                Label("清空历史", systemImage: "trash")
+            switch toolbarLayout {
+            case .expanded:
+                beginSelectionButton
+                clearAllButton
+            case .compact:
+                beginSelectionButton.labelStyle(.iconOnly)
+                clearAllButton.labelStyle(.iconOnly)
+            case .minimal:
+                normalManagementMenu
             }
         }
+    }
+
+    private var selectAllButton: some View {
+        Button {
+            selectedIDs = allItemsSelected
+                ? []
+                : Set(state.history.map(\.id))
+        } label: {
+            Label(
+                allItemsSelected ? "取消全选" : "全选",
+                systemImage: allItemsSelected
+                    ? "checkmark.circle.badge.xmark"
+                    : "checkmark.circle"
+            )
+        }
+        .help(allItemsSelected ? "取消全选" : "全选")
+    }
+
+    private var deleteSelectedButton: some View {
+        Button(role: .destructive) {
+            pendingDeletion = .items(selectedIDs)
+        } label: {
+            Label(
+                selectedIDs.isEmpty
+                    ? "删除所选"
+                    : "删除所选（\(selectedIDs.count)）",
+                systemImage: "trash"
+            )
+        }
+        .disabled(selectedIDs.isEmpty)
+        .help(selectedIDs.isEmpty ? "请先选择历史" : "删除所选历史")
+    }
+
+    private var finishSelectionButton: some View {
+        Button("完成") {
+            isSelecting = false
+            selectedIDs.removeAll()
+        }
+    }
+
+    private var beginSelectionButton: some View {
+        Button {
+            isSelecting = true
+        } label: {
+            Label("选择", systemImage: "checklist")
+        }
+        .help("选择历史")
+    }
+
+    private var clearAllButton: some View {
+        Button(role: .destructive) {
+            pendingDeletion = .all
+        } label: {
+            Label("清空历史", systemImage: "trash")
+        }
+        .help("清空历史")
+    }
+
+    private var selectionManagementMenu: some View {
+        Menu {
+            selectAllButton
+            deleteSelectedButton
+        } label: {
+            Label("选择操作", systemImage: "ellipsis.circle")
+                .labelStyle(.iconOnly)
+        }
+        .help("选择操作")
+    }
+
+    private var normalManagementMenu: some View {
+        Menu {
+            beginSelectionButton
+            clearAllButton
+        } label: {
+            Label("管理历史", systemImage: "ellipsis.circle")
+                .labelStyle(.iconOnly)
+        }
+        .help("管理历史")
     }
 
     private var allItemsSelected: Bool {
         !state.history.isEmpty && selectedIDs.count == state.history.count
-    }
-
-    private var navigationTitle: String {
-        let sourceName = state.activeConfigurationRecord?.name
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let sourceName, !sourceName.isEmpty else {
-            return "历史"
-        }
-        return "历史 · \(sourceName)"
     }
 
     private var deletionAlertIsPresented: Binding<Bool> {

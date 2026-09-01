@@ -336,6 +336,7 @@ struct LiveView: View {
 
 struct LiveToolbarView: View {
     @EnvironmentObject private var state: AppState
+    @Environment(\.primaryToolbarLayout) private var toolbarLayout
     @ObservedObject var session: LiveBrowserSession
 
     var body: some View {
@@ -351,21 +352,12 @@ struct LiveToolbarView: View {
                     )
                 }
                 let channelCount = allChannels.count - deletedChannels.count
-                HStack(spacing: 10) {
-                    sourceMenu(
-                        channelCount: channelCount,
-                        sourceName: source.name
-                    )
-                    groupMenu(groups)
-                    favoritesButton
-                    if !deletedChannels.isEmpty {
-                        deletedChannelsMenu(
-                            deletedChannels,
-                            sourceID: source.id
-                        )
-                    }
-                    refreshControl(sourceID: source.id)
-                }
+                toolbarControls(
+                    source: source,
+                    groups: groups,
+                    deletedChannels: deletedChannels,
+                    channelCount: channelCount
+                )
             } else if state.isLoading {
                 AppActivityIndicator(size: .small)
                     .help("正在加载直播源")
@@ -373,9 +365,62 @@ struct LiveToolbarView: View {
         }
     }
 
+    @ViewBuilder
+    private func toolbarControls(
+        source: StoredLiveSource,
+        groups: [LiveGroup],
+        deletedChannels: [LiveChannel],
+        channelCount: Int
+    ) -> some View {
+        HStack(spacing: 10) {
+            switch toolbarLayout {
+            case .expanded:
+                sourceMenu(
+                    channelCount: channelCount,
+                    sourceName: source.name,
+                    compact: false
+                )
+                groupMenu(groups, compact: false)
+                favoritesButton
+                if !deletedChannels.isEmpty {
+                    deletedChannelsMenu(
+                        deletedChannels,
+                        sourceID: source.id
+                    )
+                }
+            case .compact:
+                sourceMenu(
+                    channelCount: channelCount,
+                    sourceName: source.name,
+                    compact: true
+                )
+                groupMenu(groups, compact: true)
+                favoritesButton.labelStyle(.iconOnly)
+                if !deletedChannels.isEmpty {
+                    deletedChannelsMenu(
+                        deletedChannels,
+                        sourceID: source.id
+                    )
+                    .labelStyle(.iconOnly)
+                }
+            case .minimal:
+                condensedMenu(
+                    source: source,
+                    groups: groups,
+                    deletedChannels: deletedChannels,
+                    channelCount: channelCount
+                )
+            }
+
+            refreshControl(sourceID: source.id)
+                .labelStyle(.iconOnly)
+        }
+    }
+
     private func sourceMenu(
         channelCount: Int,
-        sourceName: String
+        sourceName: String,
+        compact: Bool
     ) -> some View {
         Menu {
             ForEach(state.liveSources) { source in
@@ -390,17 +435,18 @@ struct LiveToolbarView: View {
             }
         } label: {
             Label {
-                Text("\(sourceName) · \(channelCount)")
+                Text(compact ? sourceName : "\(sourceName) · \(channelCount)")
                     .lineLimit(1)
             } icon: {
                 Image(systemName: "dot.radiowaves.left.and.right")
             }
         }
+        .frame(maxWidth: compact ? 132 : 220)
         .disabled(state.liveSources.count < 2)
         .help("当前直播源：\(sourceName)，共 \(channelCount) 个频道")
     }
 
-    private func groupMenu(_ groups: [LiveGroup]) -> some View {
+    private func groupMenu(_ groups: [LiveGroup], compact: Bool) -> some View {
         Menu {
             Button {
                 session.selectedGroupName = nil
@@ -423,11 +469,43 @@ struct LiveToolbarView: View {
             }
         } label: {
             Label(
-                session.selectedGroupName ?? "全部频道",
+                compact
+                    ? (session.selectedGroupName ?? "全部")
+                    : (session.selectedGroupName ?? "全部频道"),
                 systemImage: "rectangle.3.group"
             )
+            .lineLimit(1)
         }
+        .frame(maxWidth: compact ? 108 : 180)
         .help("筛选频道分组")
+    }
+
+    private func condensedMenu(
+        source: StoredLiveSource,
+        groups: [LiveGroup],
+        deletedChannels: [LiveChannel],
+        channelCount: Int
+    ) -> some View {
+        Menu {
+            sourceMenu(
+                channelCount: channelCount,
+                sourceName: source.name,
+                compact: false
+            )
+            groupMenu(groups, compact: false)
+            Divider()
+            favoritesButton
+            if !deletedChannels.isEmpty {
+                deletedChannelsMenu(
+                    deletedChannels,
+                    sourceID: source.id
+                )
+            }
+        } label: {
+            Label("直播选项", systemImage: "ellipsis.circle")
+                .labelStyle(.iconOnly)
+        }
+        .help("直播源、分组和频道管理")
     }
 
     private var favoritesButton: some View {

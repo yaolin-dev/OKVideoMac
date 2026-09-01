@@ -13,30 +13,6 @@ enum AppSurfacePalette {
     }
 }
 
-enum BrowserToolbarChromeFill: Equatable {
-    case referenceTone
-}
-
-struct BrowserToolbarChromeAppearance: Equatable {
-    let fill: BrowserToolbarChromeFill
-    let separatorOpacity: Double
-}
-
-enum BrowserToolbarChromePolicy {
-    static func appearance(
-        isScrolled: Bool,
-        isWindowActive: Bool,
-        reduceTransparency: Bool
-    ) -> BrowserToolbarChromeAppearance {
-        return BrowserToolbarChromeAppearance(
-            fill: .referenceTone,
-            separatorOpacity: isScrolled
-                ? (isWindowActive ? 0.34 : 0.22)
-                : (isWindowActive ? 0.30 : 0.18)
-        )
-    }
-}
-
 enum AppSidebarMetrics {
     static let minimumWidth: CGFloat = 224
     static let idealWidth: CGFloat = 224
@@ -48,123 +24,6 @@ enum AppSidebarMetrics {
     static let iconWidth: CGFloat = 18
     static let iconTextSpacing: CGFloat = 8
     static let rowContentMinimumWidth: CGFloat = 168
-}
-
-private struct BrowserToolbarScrollReporterKey: EnvironmentKey {
-    static let defaultValue: (Bool) -> Void = { _ in }
-}
-
-extension EnvironmentValues {
-    var browserToolbarScrollReporter: (Bool) -> Void {
-        get { self[BrowserToolbarScrollReporterKey.self] }
-        set { self[BrowserToolbarScrollReporterKey.self] = newValue }
-    }
-}
-
-private struct BrowserToolbarScrollOffsetPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
-/// Place this as the first child of a browser ScrollView. The marker and the
-/// scroll-surface modifier below let the shared parent own toolbar chrome,
-/// without coupling HomeView or LiveView to the window toolbar implementation.
-struct BrowserToolbarScrollMarker: View {
-    let coordinateSpaceName: String
-
-    var body: some View {
-        GeometryReader { proxy in
-            Color.clear.preference(
-                key: BrowserToolbarScrollOffsetPreferenceKey.self,
-                value: proxy.frame(in: .named(coordinateSpaceName)).minY
-            )
-        }
-        .frame(height: 0)
-        .accessibilityHidden(true)
-    }
-}
-
-private struct BrowserToolbarScrollSurfaceModifier: ViewModifier {
-    @Environment(\.browserToolbarScrollReporter) private var reportScroll
-    @State private var lastReportedScrollState = false
-
-    let coordinateSpaceName: String
-
-    func body(content: Content) -> some View {
-        content
-            .coordinateSpace(name: coordinateSpaceName)
-            .onAppear {
-                reportScrollStateIfChanged(false)
-            }
-            .onPreferenceChange(BrowserToolbarScrollOffsetPreferenceKey.self) {
-                reportScrollStateIfChanged($0 < -0.5)
-            }
-    }
-
-    private func reportScrollStateIfChanged(_ isScrolled: Bool) {
-        guard isScrolled != lastReportedScrollState else { return }
-        // Preference delivery can happen inside SwiftUI's layout update.
-        // Defer the state mutation so it cannot recursively invalidate the
-        // AppKit hosting view's constraints in the same display cycle.
-        DispatchQueue.main.async {
-            guard isScrolled != lastReportedScrollState else { return }
-            lastReportedScrollState = isScrolled
-            reportScroll(isScrolled)
-        }
-    }
-}
-
-extension View {
-    func browserToolbarScrollSurface(named coordinateSpaceName: String) -> some View {
-        modifier(
-            BrowserToolbarScrollSurfaceModifier(
-                coordinateSpaceName: coordinateSpaceName
-            )
-        )
-    }
-}
-
-struct BrowserToolbarChromeModifier: ViewModifier {
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-
-    let isScrolled: Bool
-    let isWindowActive: Bool
-
-    private var appearance: BrowserToolbarChromeAppearance {
-        BrowserToolbarChromePolicy.appearance(
-            isScrolled: isScrolled,
-            isWindowActive: isWindowActive,
-            reduceTransparency: reduceTransparency
-        )
-    }
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if #available(macOS 13.0, *) {
-            chrome(content)
-                // Let AppKit own the complete unified toolbar surface and its
-                // hit-testing boundary. Interactive page content stays inside
-                // the window's native content layout rect instead of relying
-                // on a fixed-height sibling overlay.
-                .toolbarBackground(.visible, for: .windowToolbar)
-        } else {
-            chrome(content)
-        }
-    }
-
-    private func chrome<ChromeContent: View>(_ content: ChromeContent) -> some View {
-        content.overlay(alignment: .top) {
-            Rectangle()
-                .fill(Color(nsColor: .separatorColor))
-                .frame(height: 0.5)
-                .opacity(appearance.separatorOpacity)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-        }
-    }
 }
 
 private struct BrowserWindowVibrancyBackground: NSViewRepresentable {
@@ -2475,19 +2334,27 @@ private struct StandardBrowserSectionContainer<Content: View>: View {
     }
 
     var body: some View {
-        content
-            .environment(\.browserToolbarScrollReporter) { isScrolled in
-                if isContentScrolled != isScrolled {
-                    isContentScrolled = isScrolled
-                }
-            }
-            .modifier(
-                BrowserToolbarChromeModifier(
-                    isScrolled: isContentScrolled,
-                    isWindowActive: state.isBrowserWindowKey
+        GeometryReader { proxy in
+            content
+                .environment(
+                    \.primaryToolbarLayout,
+                    PrimaryToolbarLayoutPolicy.layout(
+                        contentWidth: proxy.size.width
+                    )
                 )
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .environment(\.browserToolbarScrollReporter) { isScrolled in
+                    if isContentScrolled != isScrolled {
+                        isContentScrolled = isScrolled
+                    }
+                }
+                .modifier(
+                    BrowserToolbarChromeModifier(
+                        isScrolled: isContentScrolled,
+                        isWindowActive: state.isBrowserWindowKey
+                    )
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
     }
 }
 
@@ -2554,6 +2421,7 @@ private struct HomeLiveSectionContainer: View {
                     LiveView(session: liveSession)
                 }
             }
+            .environment(\.primaryToolbarLayout, toolbarLayout)
             .environment(\.browserToolbarScrollReporter) { isScrolled in
                 if isBrowserContentScrolled != isScrolled {
                     isBrowserContentScrolled = isScrolled
@@ -2626,14 +2494,7 @@ private struct HomeBrowserToolbarContent: ToolbarContent {
     let isInteractionBlocked: Bool
 
     var body: some ToolbarContent {
-        ToolbarItem(placement: .navigation) {
-            BrowserToolbarTitle("点播")
-        }
-        ToolbarItem(placement: .principal) {
-            Spacer(minLength: 0)
-                .frame(maxWidth: .infinity)
-                .accessibilityHidden(true)
-        }
+        PrimaryPageToolbarLeadingContent(title: "点播")
         ToolbarItemGroup(placement: .primaryAction) {
             HomeConfigurationToolbarItem(layout: layout)
                 .frame(height: 40)
@@ -2656,33 +2517,10 @@ private struct LiveBrowserToolbarContent: ToolbarContent {
     let isInteractionBlocked: Bool
 
     var body: some ToolbarContent {
-        ToolbarItem(placement: .navigation) {
-            BrowserToolbarTitle("直播")
-        }
-        ToolbarItem(placement: .principal) {
-            Spacer(minLength: 0)
-                .frame(maxWidth: .infinity)
-                .accessibilityHidden(true)
-        }
+        PrimaryPageToolbarLeadingContent(title: "直播")
         ToolbarItemGroup(placement: .primaryAction) {
             LiveToolbarView(session: session)
                 .disabled(isInteractionBlocked)
         }
-    }
-}
-
-struct BrowserToolbarTitle: View {
-    private let title: String
-
-    init(_ title: String) {
-        self.title = title
-    }
-
-    var body: some View {
-        Text(title)
-            .font(.system(size: 19, weight: .semibold))
-            .frame(height: 40)
-            .offset(x: 10)
-            .accessibilityAddTraits(.isHeader)
     }
 }

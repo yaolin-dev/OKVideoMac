@@ -35,6 +35,7 @@
 		A2F41ABF02AE0A13544CDF2A /* CatPawProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8754CA1D367DB8EB69DB9D9 /* CatPawProtocol.swift */; };
 		A3B0AE14D90BC82289D17D61 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 115FFC7F2FD723B0F12E0D2D /* RootView.swift */; };
 		A460B1043453667657698834 /* VideoGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5707873F641B0221D67B9CBC /* VideoGrid.swift */; };
+		B83C29F7B0A24F7C9616C0D1 /* BrowserToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B74C9F0DA16E4EE2A3714BF3 /* BrowserToolbar.swift */; };
 		A55E769996EE245CA586B3C6 /* JavaScriptSpiderSiteProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E25C74DFB53809A9F2672CE /* JavaScriptSpiderSiteProvider.swift */; };
 		B1BEEF638AD2DF98A1887EA2 /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F51955D6459123DB5DAD2EAB /* SearchView.swift */; };
 		C8D0231080586D3A6558BA58 /* OKVideoPersistence in Frameworks */ = {isa = PBXBuildFile; productRef = 40F5E74826FFC180B7D5D2FD /* OKVideoPersistence */; };
@@ -68,6 +69,7 @@
 		4E25C74DFB53809A9F2672CE /* JavaScriptSpiderSiteProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JavaScriptSpiderSiteProvider.swift; sourceTree = "<group>"; };
 		50471B253F948DFB29DE1F74 /* OKVideoMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OKVideoMacApp.swift; sourceTree = "<group>"; };
 		5707873F641B0221D67B9CBC /* VideoGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoGrid.swift; sourceTree = "<group>"; };
+		B74C9F0DA16E4EE2A3714BF3 /* BrowserToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserToolbar.swift; sourceTree = "<group>"; };
 		617A00084B74B412C7C3ACB9 /* NodeHTTPSpiderSiteProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeHTTPSpiderSiteProvider.swift; sourceTree = "<group>"; };
 		63284B4134B72C9ECD12EE1B /* ImageRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageRepository.swift; sourceTree = "<group>"; };
 		689F4F5C0C244BA810946A34 /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
@@ -323,6 +325,7 @@
 		F9EEB5EB5FF3ED73839331B4 /* Shared */ = {
 			isa = PBXGroup;
 			children = (
+				B74C9F0DA16E4EE2A3714BF3 /* BrowserToolbar.swift */,
 				5707873F641B0221D67B9CBC /* VideoGrid.swift */,
 			);
 			path = Shared;
@@ -549,6 +552,7 @@
 				B1BEEF638AD2DF98A1887EA2 /* SearchView.swift in Sources */,
 				6E4F5AA244E052ECA855ECA6 /* SettingsView.swift in Sources */,
 				A460B1043453667657698834 /* VideoGrid.swift in Sources */,
+				B83C29F7B0A24F7C9616C0D1 /* BrowserToolbar.swift in Sources */,
 				3CE5EE6FA03482C30AE9FE0F /* WKWebSniffer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

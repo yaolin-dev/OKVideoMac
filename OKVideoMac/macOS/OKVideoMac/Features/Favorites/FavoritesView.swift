@@ -4,6 +4,7 @@ import SwiftUI
 
 struct FavoritesView: View {
     @EnvironmentObject private var state: AppState
+    @Environment(\.primaryToolbarLayout) private var toolbarLayout
     @State private var isSelecting = false
     @State private var selectedIDs: Set<FavoriteRecord.ID> = []
     @State private var pendingDeletion: FavoriteDeletion?
@@ -23,14 +24,7 @@ struct FavoritesView: View {
         }
         .navigationTitle("")
         .toolbar {
-            ToolbarItem(placement: .navigation) {
-                BrowserToolbarTitle("收藏")
-            }
-            ToolbarItem(placement: .principal) {
-                Spacer(minLength: 0)
-                    .frame(maxWidth: .infinity)
-                    .accessibilityHidden(true)
-            }
+            PrimaryPageToolbarLeadingContent(title: "收藏")
             ToolbarItemGroup(placement: .primaryAction) {
                 if !state.isDetailPagePresented,
                    !state.favorites.isEmpty {
@@ -79,6 +73,7 @@ struct FavoritesView: View {
                     .padding(.vertical, 4)
             }
         }
+        .browserListToolbarScrollSurface()
     }
 
     @ViewBuilder
@@ -164,41 +159,109 @@ struct FavoritesView: View {
     @ViewBuilder
     private var favoriteManagementControls: some View {
         if isSelecting {
-            Button(allItemsSelected ? "取消全选" : "全选") {
-                selectedIDs = allItemsSelected
-                    ? []
-                    : Set(state.favorites.map(\.id))
-            }
-
-            Button(role: .destructive) {
-                pendingDeletion = .items(selectedIDs)
-            } label: {
-                Label(
-                    selectedIDs.isEmpty
-                        ? "删除所选"
-                        : "删除所选（\(selectedIDs.count)）",
-                    systemImage: "trash"
-                )
-            }
-            .disabled(selectedIDs.isEmpty)
-
-            Button("完成") {
-                isSelecting = false
-                selectedIDs.removeAll()
+            switch toolbarLayout {
+            case .expanded:
+                selectAllButton
+                deleteSelectedButton
+                finishSelectionButton
+            case .compact:
+                selectAllButton.labelStyle(.iconOnly)
+                deleteSelectedButton.labelStyle(.iconOnly)
+                finishSelectionButton
+            case .minimal:
+                selectionManagementMenu
+                finishSelectionButton
             }
         } else {
-            Button {
-                isSelecting = true
-            } label: {
-                Label("选择", systemImage: "checklist")
-            }
-
-            Button(role: .destructive) {
-                pendingDeletion = .all
-            } label: {
-                Label("清空收藏", systemImage: "trash")
+            switch toolbarLayout {
+            case .expanded:
+                beginSelectionButton
+                clearAllButton
+            case .compact:
+                beginSelectionButton.labelStyle(.iconOnly)
+                clearAllButton.labelStyle(.iconOnly)
+            case .minimal:
+                normalManagementMenu
             }
         }
+    }
+
+    private var selectAllButton: some View {
+        Button {
+            selectedIDs = allItemsSelected
+                ? []
+                : Set(state.favorites.map(\.id))
+        } label: {
+            Label(
+                allItemsSelected ? "取消全选" : "全选",
+                systemImage: allItemsSelected
+                    ? "checkmark.circle.badge.xmark"
+                    : "checkmark.circle"
+            )
+        }
+        .help(allItemsSelected ? "取消全选" : "全选")
+    }
+
+    private var deleteSelectedButton: some View {
+        Button(role: .destructive) {
+            pendingDeletion = .items(selectedIDs)
+        } label: {
+            Label(
+                selectedIDs.isEmpty
+                    ? "删除所选"
+                    : "删除所选（\(selectedIDs.count)）",
+                systemImage: "trash"
+            )
+        }
+        .disabled(selectedIDs.isEmpty)
+        .help(selectedIDs.isEmpty ? "请先选择收藏" : "删除所选收藏")
+    }
+
+    private var finishSelectionButton: some View {
+        Button("完成") {
+            isSelecting = false
+            selectedIDs.removeAll()
+        }
+    }
+
+    private var beginSelectionButton: some View {
+        Button {
+            isSelecting = true
+        } label: {
+            Label("选择", systemImage: "checklist")
+        }
+        .help("选择收藏")
+    }
+
+    private var clearAllButton: some View {
+        Button(role: .destructive) {
+            pendingDeletion = .all
+        } label: {
+            Label("清空收藏", systemImage: "trash")
+        }
+        .help("清空收藏")
+    }
+
+    private var selectionManagementMenu: some View {
+        Menu {
+            selectAllButton
+            deleteSelectedButton
+        } label: {
+            Label("选择操作", systemImage: "ellipsis.circle")
+                .labelStyle(.iconOnly)
+        }
+        .help("选择操作")
+    }
+
+    private var normalManagementMenu: some View {
+        Menu {
+            beginSelectionButton
+            clearAllButton
+        } label: {
+            Label("管理收藏", systemImage: "ellipsis.circle")
+                .labelStyle(.iconOnly)
+        }
+        .help("管理收藏")
     }
 
     private var allItemsSelected: Bool {

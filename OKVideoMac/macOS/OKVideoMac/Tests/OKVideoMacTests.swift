@@ -10210,6 +10210,18 @@ final class OKVideoMacTests: XCTestCase {
             HomeToolbarLayoutPolicy.layout(contentWidth: 649),
             .minimal
         )
+        XCTAssertEqual(
+            PrimaryToolbarLayoutPolicy.layout(contentWidth: 900),
+            .expanded
+        )
+        XCTAssertEqual(
+            PrimaryToolbarLayoutPolicy.layout(contentWidth: 650),
+            .compact
+        )
+        XCTAssertEqual(
+            PrimaryToolbarLayoutPolicy.layout(contentWidth: 649),
+            .minimal
+        )
     }
 
     func testHomeToolbarCompactControlsRemainBounded() {
@@ -10293,7 +10305,7 @@ final class OKVideoMacTests: XCTestCase {
             ),
             BrowserToolbarChromeAppearance(
                 fill: .referenceTone,
-                separatorOpacity: 0.30
+                separatorOpacity: 0.10
             )
         )
         XCTAssertEqual(
@@ -10304,7 +10316,7 @@ final class OKVideoMacTests: XCTestCase {
             ),
             BrowserToolbarChromeAppearance(
                 fill: .referenceTone,
-                separatorOpacity: 0.34
+                separatorOpacity: 0.30
             )
         )
     }
@@ -10350,7 +10362,7 @@ final class OKVideoMacTests: XCTestCase {
                 isWindowActive: false,
                 reduceTransparency: false
             ).separatorOpacity,
-            0.22
+            0.20
         )
         XCTAssertEqual(
             BrowserToolbarChromePolicy.appearance(

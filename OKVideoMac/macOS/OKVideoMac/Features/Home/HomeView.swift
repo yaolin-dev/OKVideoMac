@@ -1164,33 +1164,11 @@ private struct FilterChipButtonBody: View {
     }
 }
 
-enum HomeToolbarLayout: Equatable, Sendable {
-    case expanded
-    case compact
-    case minimal
-
-    var sitePickerWidth: CGFloat {
-        switch self {
-        case .expanded: return 210
-        case .compact: return 150
-        case .minimal: return 0
-        }
-    }
-
-    var configurationPickerWidth: CGFloat {
-        switch self {
-        case .expanded: return 118
-        case .compact: return 96
-        case .minimal: return 0
-        }
-    }
-}
+typealias HomeToolbarLayout = PrimaryToolbarLayout
 
 enum HomeToolbarLayoutPolicy {
     static func layout(contentWidth: CGFloat) -> HomeToolbarLayout {
-        if contentWidth >= 900 { return .expanded }
-        if contentWidth >= 650 { return .compact }
-        return .minimal
+        PrimaryToolbarLayoutPolicy.layout(contentWidth: contentWidth)
     }
 }
 

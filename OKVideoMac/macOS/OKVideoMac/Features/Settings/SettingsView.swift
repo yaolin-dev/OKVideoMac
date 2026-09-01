@@ -33,14 +33,7 @@ struct SettingsView: View {
         }
         .navigationTitle("")
         .toolbar {
-            ToolbarItem(placement: .navigation) {
-                BrowserToolbarTitle("设置")
-            }
-            ToolbarItem(placement: .principal) {
-                Spacer(minLength: 0)
-                    .frame(maxWidth: .infinity)
-                    .accessibilityHidden(true)
-            }
+            PrimaryPageToolbarLeadingContent(title: "设置")
         }
         .task {
             await refreshCacheSize()
