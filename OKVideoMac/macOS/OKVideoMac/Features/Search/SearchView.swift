@@ -35,7 +35,7 @@ struct SearchView: View {
                     }
                     ToolbarItemGroup(placement: .primaryAction) {
                         if state.currentSearchFolder == nil {
-                            searchScopeButton(layout: toolbarLayout)
+                            searchScopeButton()
                             searchMergeControl(layout: toolbarLayout)
                             searchSortControl(layout: toolbarLayout)
                         }
@@ -107,26 +107,15 @@ struct SearchView: View {
     }
 
     @ViewBuilder
-    private func searchScopeButton(
-        layout: SearchToolbarLayout
-    ) -> some View {
+    private func searchScopeButton() -> some View {
         Button {
             showingSearchScope.toggle()
         } label: {
-            switch layout {
-            case .expanded:
-                Label(searchScopeToolbarTitle, systemImage: "checklist")
-                    .lineLimit(1)
-            case .compact:
-                Label(searchScopeToolbarTitle, systemImage: "checklist")
-                    .lineLimit(1)
-            case .minimal:
-                Image(systemName: "checklist")
-            }
+            Image(systemName: "line.3.horizontal.decrease.circle")
         }
         .buttonStyle(.bordered)
         .controlSize(.large)
-        .frame(width: layout.scopeWidth, height: 40)
+        .frame(width: 42, height: 40)
         .help("选择本次搜索使用的站点")
         .accessibilityLabel("搜索范围：\(state.searchScopeSummary)")
         .popover(isPresented: $showingSearchScope, arrowEdge: .bottom) {
@@ -135,88 +124,44 @@ struct SearchView: View {
         }
     }
 
-    @ViewBuilder
     private func searchMergeControl(
         layout: SearchToolbarLayout
     ) -> some View {
-        if layout != .minimal {
-            Toggle("合并重复", isOn: $mergesDuplicateTitles)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .fixedSize()
-                .frame(height: 40)
-                .help("将片名和年份相同的跨站结果合并为一张卡片")
-        } else {
-            Button {
-                mergesDuplicateTitles.toggle()
-            } label: {
-                Image(
-                    systemName: mergesDuplicateTitles
-                        ? "square.stack.3d.up.fill"
-                        : "square.stack.3d.up"
-                )
-                .foregroundStyle(
-                    mergesDuplicateTitles ? Color.accentColor : Color.secondary
-                )
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
-            .frame(width: 42, height: 40)
-            .help(
-                mergesDuplicateTitles
-                    ? "正在合并重复影片"
-                    : "当前按来源分别显示影片"
-            )
-            .accessibilityLabel("合并重复影片")
-            .accessibilityValue(mergesDuplicateTitles ? "已开启" : "已关闭")
+        Picker("重复影片", selection: $mergesDuplicateTitles) {
+            Text("合并重复")
+                .tag(true)
+            Text("分别显示")
+                .tag(false)
         }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .controlSize(.large)
+        .frame(width: layout.mergeWidth, height: 40)
+        .help(
+            mergesDuplicateTitles
+                ? "将片名和年份相同的跨站结果合并为一张卡片"
+                : "按来源分别显示搜索结果"
+        )
+        .accessibilityLabel("重复影片显示方式")
+        .accessibilityValue(
+            mergesDuplicateTitles ? "合并重复影片" : "按来源分别显示"
+        )
     }
 
     @ViewBuilder
     private func searchSortControl(
         layout: SearchToolbarLayout
     ) -> some View {
-        if layout == .minimal {
-            Menu {
-                ForEach(SearchResultSortOrder.allCases) { option in
-                    Button {
-                        sortOrder = option
-                    } label: {
-                        if sortOrder == option {
-                            Label(option.title, systemImage: "checkmark")
-                        } else {
-                            Text(option.title)
-                        }
-                    }
-                }
-            } label: {
-                Image(systemName: "arrow.up.arrow.down")
+        Picker("排序", selection: $sortOrder) {
+            ForEach(SearchResultSortOrder.allCases) { option in
+                Text(option.toolbarTitle).tag(option)
             }
-            .menuIndicator(.hidden)
-            .controlSize(.large)
-            .frame(width: 42, height: 40)
-            .help("排序：\(sortOrder.title)")
-        } else {
-            Picker("排序", selection: $sortOrder) {
-                ForEach(SearchResultSortOrder.allCases) { option in
-                    Text(option.toolbarTitle).tag(option)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .controlSize(.large)
-            .frame(width: layout.sortWidth, height: 40)
-            .help("排序：\(sortOrder.title)")
         }
-    }
-
-    private var searchScopeToolbarTitle: String {
-        switch state.searchSiteScope.mode {
-        case .all:
-            return "全部站点"
-        case .custom:
-            return "已选 \(state.effectiveSearchSiteKeys.count) 个站点"
-        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .controlSize(.large)
+        .frame(width: layout.sortWidth, height: 40)
+        .help("排序：\(sortOrder.title)")
     }
 
     private var searchResults: some View {
@@ -252,9 +197,7 @@ struct SearchView: View {
                 .padding(.top, 16)
                 .padding(.bottom, HomeBrowseGridMetrics.contentPadding)
             }
-            .padding(.top, BrowserToolbarMetrics.height)
         }
-        .ignoresSafeArea(.container, edges: .top)
         .browserToolbarScrollSurface(named: resultsScrollCoordinateSpace)
         .background(AppSurfacePalette.background)
     }
@@ -322,19 +265,19 @@ enum SearchToolbarLayout: Equatable, Sendable {
     case compact
     case minimal
 
-    var scopeWidth: CGFloat {
+    var mergeWidth: CGFloat {
         switch self {
-        case .expanded: return 148
+        case .expanded: return 126
         case .compact: return 112
-        case .minimal: return 42
+        case .minimal: return 102
         }
     }
 
     var sortWidth: CGFloat {
         switch self {
-        case .expanded: return 122
-        case .compact: return 104
-        case .minimal: return 42
+        case .expanded: return 112
+        case .compact: return 100
+        case .minimal: return 90
         }
     }
 
@@ -393,8 +336,7 @@ struct SearchSourceNavigationPartition: Equatable, Sendable {
 }
 
 enum SearchSourceNavigationLayoutPolicy {
-    static let spacing: CGFloat = HomeBrowseGridMetrics.categorySpacing
-    static let moreWidth: CGFloat = 54
+    static let spacing = BrowseSegmentedNavigationMetrics.separatorWidth
 
     static func partition(
         candidates: [SearchSourceNavigationCandidate],
@@ -408,6 +350,8 @@ enum SearchSourceNavigationLayoutPolicy {
             )
         }
 
+        let availableWidth = BrowseSegmentedNavigationMetrics
+            .innerAvailableWidth(availableWidth)
         let allWidth = candidates.reduce(0) { $0 + $1.width }
             + spacing * CGFloat(max(0, candidates.count - 1))
         if allWidth <= availableWidth {
@@ -417,7 +361,12 @@ enum SearchSourceNavigationLayoutPolicy {
             )
         }
 
-        let tabBudget = max(0, availableWidth - moreWidth - spacing)
+        let tabBudget = max(
+            0,
+            availableWidth
+                - BrowseSegmentedNavigationMetrics.moreWidth
+                - spacing
+        )
         var visible = [candidates[0].id]
         var consumed = candidates[0].width
 
@@ -506,42 +455,44 @@ private struct SearchSourceNavigation: View {
                 ($0.id, $0)
             })
 
-            HStack(spacing: SearchSourceNavigationLayoutPolicy.spacing) {
-                ForEach(partition.visibleIDs, id: \.self) { id in
-                    if let item = byID[id] {
-                        sourceButton(item)
+            HStack(spacing: 0) {
+                BrowseSegmentedNavigationContainer {
+                    ForEach(
+                        Array(partition.visibleIDs.enumerated()),
+                        id: \.element
+                    ) { index, id in
+                        if index > 0 {
+                            BrowseSegmentedNavigationDivider()
+                        }
+                        if let item = byID[id] {
+                            sourceButton(item)
+                        }
                     }
-                }
 
-                if !partition.hiddenIDs.isEmpty {
-                    Menu {
-                        ForEach(partition.hiddenIDs, id: \.self) { id in
-                            if let item = byID[id] {
-                                Button {
-                                    onSelect(item.key)
-                                } label: {
-                                    HStack {
-                                        Text(item.title)
-                                        Spacer()
-                                        Text("\(item.count)")
+                    if !partition.hiddenIDs.isEmpty {
+                        BrowseSegmentedNavigationDivider()
+                        Menu {
+                            ForEach(partition.hiddenIDs, id: \.self) { id in
+                                if let item = byID[id] {
+                                    Button {
+                                        onSelect(item.key)
+                                    } label: {
+                                        HStack {
+                                            Text(item.title)
+                                            Spacer()
+                                            Text("\(item.count)")
+                                        }
                                     }
                                 }
                             }
+                        } label: {
+                            BrowseSegmentedMoreLabel()
                         }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text("更多")
-                            Image(systemName: "chevron.down")
-                                .font(.caption2.weight(.semibold))
-                        }
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .frame(height: 32)
+                        .menuIndicator(.hidden)
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("显示另外 \(partition.hiddenIDs.count) 个结果来源")
                     }
-                    .menuIndicator(.hidden)
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .help("显示另外 \(partition.hiddenIDs.count) 个结果来源")
                 }
 
                 Spacer(minLength: 0)
@@ -551,18 +502,25 @@ private struct SearchSourceNavigation: View {
             .padding(.trailing, HomeBrowseGridMetrics.contentPadding)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(height: 52)
+        .frame(height: BrowseSegmentedNavigationMetrics.rowHeight)
         .overlay(alignment: .bottom) {
-            Divider()
+            BrowseSegmentedNavigationBottomDivider()
         }
     }
 
     private func sourceButton(_ item: Item) -> some View {
-        Button(item.title) {
+        Button {
             onSelect(item.key)
+        } label: {
+            BrowseSegmentedNavigationLabel(
+                title: item.title,
+                isSelected: item.id == selectedID
+            )
         }
         .buttonStyle(
-            BrowseNavigationButtonStyle(isSelected: item.id == selectedID)
+            BrowseSegmentedNavigationButtonStyle(
+                isSelected: item.id == selectedID
+            )
         )
         .help("\(item.title)，\(item.count) 项")
         .accessibilityLabel("\(item.title)，\(item.count) 项")
@@ -570,8 +528,10 @@ private struct SearchSourceNavigation: View {
 
     private static func measuredWidth(for title: String) -> CGFloat {
         let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        return ceil(
-            (title as NSString).size(withAttributes: [.font: font]).width
+        return BrowseSegmentedNavigationMetrics.segmentWidth(
+            textWidth: (title as NSString)
+                .size(withAttributes: [.font: font])
+                .width
         )
     }
 

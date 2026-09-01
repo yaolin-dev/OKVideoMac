@@ -69,10 +69,9 @@ struct SettingsView: View {
                     }
                 }
                 .padding(.horizontal, 10)
-                .padding(.top, BrowserToolbarMetrics.height + 10)
+                .padding(.top, 10)
                 .padding(.bottom, 16)
             }
-            .ignoresSafeArea(.container, edges: .top)
         }
         .background(.ultraThinMaterial)
     }
@@ -1304,11 +1303,9 @@ private struct SettingsPage<Content: View>: View {
                 content
             }
             .padding(24)
-            .padding(.top, BrowserToolbarMetrics.height)
             .frame(maxWidth: 840, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .top)
         }
-        .ignoresSafeArea(.container, edges: .top)
         .browserToolbarScrollSurface(named: scrollCoordinateSpace)
         .background(.thinMaterial)
     }

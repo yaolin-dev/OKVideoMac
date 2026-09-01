@@ -10216,6 +10216,36 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(HomeToolbarLayout.expanded.sitePickerWidth, 210)
         XCTAssertEqual(HomeToolbarLayout.compact.sitePickerWidth, 150)
         XCTAssertEqual(HomeToolbarLayout.minimal.sitePickerWidth, 0)
+        XCTAssertEqual(
+            HomeToolbarLayout.expanded.configurationPickerWidth,
+            118
+        )
+        XCTAssertEqual(
+            HomeToolbarLayout.compact.configurationPickerWidth,
+            96
+        )
+        XCTAssertEqual(
+            HomeToolbarLayout.minimal.configurationPickerWidth,
+            0
+        )
+    }
+
+    func testHomeCategoryNavigationHidesMoreAtExactFit() {
+        let candidates = ["a", "b", "c"].map {
+            HomeCategoryNavigationCandidate(id: $0, width: 72)
+        }
+
+        let exactWidth = BrowseSegmentedNavigationMetrics.containerInset * 2
+            + 72 * 3
+            + BrowseSegmentedNavigationMetrics.separatorWidth * 2
+        let partition = HomeCategoryNavigationLayoutPolicy.partition(
+            candidates: candidates,
+            selectedID: "a",
+            availableWidth: exactWidth
+        )
+
+        XCTAssertEqual(partition.visibleIDs, ["a", "b", "c"])
+        XCTAssertTrue(partition.hiddenIDs.isEmpty)
     }
 
     func testHomeCategoryNavigationUsesMoreMenuWhenTabsOverflow() {
@@ -10226,7 +10256,7 @@ final class OKVideoMacTests: XCTestCase {
         let partition = HomeCategoryNavigationLayoutPolicy.partition(
             candidates: candidates,
             selectedID: "控制台",
-            availableWidth: 260
+            availableWidth: 150
         )
 
         XCTAssertEqual(partition.visibleIDs, ["控制台"])
@@ -10244,7 +10274,7 @@ final class OKVideoMacTests: XCTestCase {
         let partition = HomeCategoryNavigationLayoutPolicy.partition(
             candidates: candidates,
             selectedID: "迅雷网盘",
-            availableWidth: 260
+            availableWidth: 150
         )
 
         XCTAssertEqual(partition.visibleIDs, ["迅雷网盘"])
@@ -10304,24 +10334,13 @@ final class OKVideoMacTests: XCTestCase {
         BrowserWindowChromeController.configure(window)
 
         XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))
-        XCTAssertTrue(window.titlebarAppearsTransparent)
+        XCTAssertFalse(window.titlebarAppearsTransparent)
         XCTAssertEqual(window.titleVisibility, .hidden)
         XCTAssertEqual(window.toolbarStyle, .unified)
         XCTAssertEqual(window.titlebarSeparatorStyle, .none)
-        XCTAssertFalse(window.isOpaque)
-        XCTAssertEqual(window.backgroundColor, .clear)
+        XCTAssertTrue(window.isOpaque)
+        XCTAssertEqual(window.backgroundColor, .windowBackgroundColor)
         XCTAssertTrue(window.hasShadow)
-    }
-
-    @MainActor
-    func testBrowserToolbarMaterialConsumesEmptyTitlebarClicks() {
-        let view = BrowserToolbarMaterialView(
-            frame: NSRect(x: 0, y: 0, width: 500, height: 52)
-        )
-
-        XCTAssertTrue(view.hitTest(NSPoint(x: 490, y: 26)) === view)
-        XCTAssertNil(view.hitTest(NSPoint(x: 501, y: 26)))
-        XCTAssertTrue(view.mouseDownCanMoveWindow)
     }
 
     func testBrowserToolbarChromeAdaptsAccessibilityAndInactiveWindows() {
@@ -10365,8 +10384,8 @@ final class OKVideoMacTests: XCTestCase {
             .minimal
         )
         XCTAssertGreaterThan(SearchToolbarLayout.expanded.statusWidth, 200)
-        XCTAssertEqual(SearchToolbarLayout.minimal.scopeWidth, 42)
-        XCTAssertEqual(SearchToolbarLayout.minimal.sortWidth, 42)
+        XCTAssertEqual(SearchToolbarLayout.minimal.mergeWidth, 102)
+        XCTAssertEqual(SearchToolbarLayout.minimal.sortWidth, 90)
     }
 
     func testSearchSourceNavigationShowsAllSourcesWhenTheyFit() {
@@ -10392,7 +10411,7 @@ final class OKVideoMacTests: XCTestCase {
         let partition = SearchSourceNavigationLayoutPolicy.partition(
             candidates: candidates,
             selectedID: "c",
-            availableWidth: 180
+            availableWidth: 120
         )
 
         XCTAssertEqual(partition.visibleIDs, ["c"])

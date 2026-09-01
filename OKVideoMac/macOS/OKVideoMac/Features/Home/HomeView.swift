@@ -93,7 +93,7 @@ struct HomeView: View {
                                             categories: mediaCategories
                                         )
                                     }
-                                    Divider()
+                                    BrowseSegmentedNavigationBottomDivider()
                                 }
                             }
                             if !home.actionItems.isEmpty {
@@ -196,14 +196,8 @@ struct HomeView: View {
                             .horizontal,
                             HomeBrowseGridMetrics.contentPadding
                         )
-                        // The ScrollView extends behind the unified titlebar
-                        // so posters can participate in the native material
-                        // blur while scrolling. This scrollable inset keeps
-                        // the category row in its original resting position.
-                        .padding(.top, BrowserToolbarMetrics.height)
                         .padding(.bottom, HomeBrowseGridMetrics.contentPadding)
                     }
-                    .ignoresSafeArea(.container, edges: .top)
                     .browserToolbarScrollSurface(
                         named: categoryScrollCoordinateSpace
                     )
@@ -447,13 +441,6 @@ private enum HomeContentAlignment {
 /// category cell starts on the same column as its corresponding filter chip.
 enum HomeBrowseGridMetrics {
     static let contentPadding: CGFloat = 16
-    // The navigation is one quiet, coherent strip rather than a run of
-    // individual pills. A wider inter-item rhythm lets dynamic labels read as
-    // columns while the strip can still scroll for long provider lists.
-    static let categorySpacing: CGFloat = 32
-    // 32-point labels plus 10 points above and below reproduce the reference
-    // navigation strip's relaxed 52-point height.
-    static let categoryVerticalPadding: CGFloat = 10
     static let labelWidth: CGFloat = 54
     static let labelContentSpacing: CGFloat = 10
     static let chipWidth: CGFloat = 78
@@ -481,7 +468,6 @@ struct HomeCategoryNavigationPartition: Equatable, Sendable {
 
 enum HomeCategoryNavigationLayoutPolicy {
     static let recommendationID = "__home-recommendations__"
-    static let moreWidth: CGFloat = 62
 
     static func partition(
         candidates: [HomeCategoryNavigationCandidate],
@@ -494,7 +480,9 @@ enum HomeCategoryNavigationLayoutPolicy {
                 hiddenIDs: []
             )
         }
-        let spacing = HomeBrowseGridMetrics.categorySpacing
+        let spacing = BrowseSegmentedNavigationMetrics.separatorWidth
+        let availableWidth = BrowseSegmentedNavigationMetrics
+            .innerAvailableWidth(availableWidth)
         let allWidth = candidates.reduce(0) { $0 + $1.width }
             + spacing * CGFloat(max(0, candidates.count - 1))
         if allWidth <= availableWidth {
@@ -504,7 +492,12 @@ enum HomeCategoryNavigationLayoutPolicy {
             )
         }
 
-        let tabBudget = max(0, availableWidth - moreWidth - spacing)
+        let tabBudget = max(
+            0,
+            availableWidth
+                - BrowseSegmentedNavigationMetrics.moreWidth
+                - spacing
+        )
         var visible = [candidates[0].id]
         var consumed = candidates[0].width
         for candidate in candidates.dropFirst() {
@@ -593,34 +586,47 @@ private struct HomeCategoryNavigation: View {
                 uniqueKeysWithValues: currentItems.map { ($0.id, $0) }
             )
 
-            HStack(spacing: HomeBrowseGridMetrics.categorySpacing) {
-                ForEach(partition.visibleIDs, id: \.self) { id in
-                    if let item = itemsByID[id] {
-                        categoryButton(item)
+            HStack(spacing: 0) {
+                BrowseSegmentedNavigationContainer {
+                    ForEach(
+                        Array(partition.visibleIDs.enumerated()),
+                        id: \.element
+                    ) { index, id in
+                        if index > 0 {
+                            BrowseSegmentedNavigationDivider()
+                        }
+                        if let item = itemsByID[id] {
+                            categoryButton(item)
+                        }
                     }
-                }
 
-                if !partition.hiddenIDs.isEmpty {
-                    Menu {
-                        ForEach(partition.hiddenIDs, id: \.self) { id in
-                            if let item = itemsByID[id] {
-                                Button {
-                                    onSelect(item.categoryID)
-                                } label: {
-                                    if item.id == selectedID {
-                                        Label(item.title, systemImage: "checkmark")
-                                    } else {
-                                        Text(item.title)
+                    if !partition.hiddenIDs.isEmpty {
+                        BrowseSegmentedNavigationDivider()
+                        Menu {
+                            ForEach(partition.hiddenIDs, id: \.self) { id in
+                                if let item = itemsByID[id] {
+                                    Button {
+                                        onSelect(item.categoryID)
+                                    } label: {
+                                        if item.id == selectedID {
+                                            Label(
+                                                item.title,
+                                                systemImage: "checkmark"
+                                            )
+                                        } else {
+                                            Text(item.title)
+                                        }
                                     }
                                 }
                             }
+                        } label: {
+                            BrowseSegmentedMoreLabel()
                         }
-                    } label: {
-                        Label("更多", systemImage: "ellipsis.circle")
+                        .menuIndicator(.hidden)
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("显示另外 \(partition.hiddenIDs.count) 个分类")
                     }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .help("显示另外 \(partition.hiddenIDs.count) 个分类")
                 }
 
                 Spacer(minLength: 0)
@@ -629,22 +635,31 @@ private struct HomeCategoryNavigation: View {
             .padding(.trailing, 8)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(height: 52)
+        .frame(height: BrowseSegmentedNavigationMetrics.rowHeight)
     }
 
     private func categoryButton(_ item: Item) -> some View {
-        Button(item.title) {
+        Button {
             onSelect(item.categoryID)
+        } label: {
+            BrowseSegmentedNavigationLabel(
+                title: item.title,
+                isSelected: item.id == selectedID
+            )
         }
         .buttonStyle(
-            BrowseNavigationButtonStyle(isSelected: item.id == selectedID)
+            BrowseSegmentedNavigationButtonStyle(
+                isSelected: item.id == selectedID
+            )
         )
     }
 
     private static func measuredWidth(for title: String) -> CGFloat {
         let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        return ceil(
-            (title as NSString).size(withAttributes: [.font: font]).width
+        return BrowseSegmentedNavigationMetrics.segmentWidth(
+            textWidth: (title as NSString)
+                .size(withAttributes: [.font: font])
+                .width
         )
     }
 
@@ -1162,6 +1177,13 @@ enum HomeToolbarLayout: Equatable, Sendable {
         }
     }
 
+    var configurationPickerWidth: CGFloat {
+        switch self {
+        case .expanded: return 118
+        case .compact: return 96
+        case .minimal: return 0
+        }
+    }
 }
 
 enum HomeToolbarLayoutPolicy {
@@ -1268,14 +1290,14 @@ struct HomeFilterToolbarItem: View {
             switch layout {
             case .expanded, .compact:
                 HStack(spacing: 5) {
-                    Image(systemName: "line.3.horizontal.decrease")
+                    Image(systemName: "line.3.horizontal.decrease.circle")
                     Text("筛选")
                     if activeCount > 0 {
                         filterCountBadge
                     }
                 }
             case .minimal:
-                Image(systemName: "line.3.horizontal.decrease")
+                Image(systemName: "line.3.horizontal.decrease.circle")
                     .overlay(alignment: .topTrailing) {
                         if activeCount > 0 {
                             Circle()
@@ -1433,35 +1455,70 @@ private struct HomeFilterPopover: View {
 
 struct HomeConfigurationToolbarItem: View {
     @EnvironmentObject private var state: AppState
+    let layout: HomeToolbarLayout
 
     var body: some View {
         if !state.configurations.isEmpty {
-            Menu {
-                ForEach(state.configurations) { record in
-                    Button {
-                        Task { await state.activateConfiguration(record.id) }
-                    } label: {
-                        if state.configurationMenuSelectionID == record.id {
-                            Label(record.name, systemImage: "checkmark")
-                        } else {
-                            Text(record.name)
-                        }
+            switch layout {
+            case .expanded, .compact:
+                Picker("配置", selection: selection) {
+                    ForEach(state.configurations) { record in
+                        Text(record.name)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .tag(record.id)
                     }
-                    .disabled(
-                        state.activeConfigurationRecord?.id == record.id
-                            && !state.isSwitchingConfiguration
-                    )
                 }
-            } label: {
-                configurationStatusIcon
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.large)
+                .frame(width: layout.configurationPickerWidth)
+                .disabled(state.isSwitchingConfiguration)
+                .help(configurationStatusHelp)
+                .accessibilityLabel(configurationStatusHelp)
+
+            case .minimal:
+                Menu {
+                    ForEach(state.configurations) { record in
+                        Button {
+                            Task {
+                                await state.activateConfiguration(record.id)
+                            }
+                        } label: {
+                            if state.configurationMenuSelectionID == record.id {
+                                Label(record.name, systemImage: "checkmark")
+                            } else {
+                                Text(record.name)
+                            }
+                        }
+                        .disabled(
+                            state.activeConfigurationRecord?.id == record.id
+                                && !state.isSwitchingConfiguration
+                        )
+                    }
+                } label: {
+                    configurationStatusIcon
+                }
+                .menuIndicator(.hidden)
+                .controlSize(.large)
+                .frame(width: 42)
+                .fixedSize()
+                .help(configurationStatusHelp)
+                .accessibilityLabel(configurationStatusHelp)
             }
-            .menuIndicator(.hidden)
-            .controlSize(.large)
-            .frame(width: 42)
-            .fixedSize()
-            .help(configurationStatusHelp)
-            .accessibilityLabel(configurationStatusHelp)
         }
+    }
+
+    private var selection: Binding<UUID> {
+        Binding(
+            get: {
+                state.configurationMenuSelectionID
+                    ?? state.configurations[0].id
+            },
+            set: { id in
+                Task { await state.activateConfiguration(id) }
+            }
+        )
     }
 
     @ViewBuilder

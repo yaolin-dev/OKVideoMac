@@ -70,21 +70,13 @@ struct FavoritesView: View {
     @ViewBuilder
     private var favoritesList: some View {
         favoriteRows
-            .ignoresSafeArea(.container, edges: .top)
     }
 
     private var favoriteRows: some View {
         List {
-            ForEach(
-                Array(state.favorites.enumerated()),
-                id: \.element.id
-            ) { index, favorite in
+            ForEach(state.favorites) { favorite in
                 favoriteRow(favorite)
                     .padding(.vertical, 4)
-                    .padding(
-                        .top,
-                        index == 0 ? BrowserToolbarMetrics.height : 0
-                    )
             }
         }
     }

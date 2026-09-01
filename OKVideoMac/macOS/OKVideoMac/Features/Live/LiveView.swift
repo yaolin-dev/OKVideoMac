@@ -189,9 +189,7 @@ struct LiveView: View {
                     }
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.top, BrowserToolbarMetrics.height)
             }
-            .ignoresSafeArea(.container, edges: .top)
             .browserToolbarScrollSurface(
                 named: channelScrollCoordinateSpace
             )

@@ -13,10 +13,6 @@ enum AppSurfacePalette {
     }
 }
 
-enum BrowserToolbarMetrics {
-    static let height: CGFloat = 52
-}
-
 enum BrowserToolbarChromeFill: Equatable {
     case referenceTone
 }
@@ -149,15 +145,11 @@ struct BrowserToolbarChromeModifier: ViewModifier {
     func body(content: Content) -> some View {
         if #available(macOS 13.0, *) {
             chrome(content)
-                // Keep the unified AppKit toolbar transparent so the Sidebar
-                // retains its own independent macOS material. The AppKit
-                // installer places a native titlebar material above the
-                // scrolling detail content, but below the real toolbar
-                // controls.
-                .toolbarBackground(.hidden, for: .windowToolbar)
-                .background {
-                    BrowserDetailToolbarBackdrop()
-                }
+                // Let AppKit own the complete unified toolbar surface and its
+                // hit-testing boundary. Interactive page content stays inside
+                // the window's native content layout rect instead of relying
+                // on a fixed-height sibling overlay.
+                .toolbarBackground(.visible, for: .windowToolbar)
         } else {
             chrome(content)
         }
@@ -172,163 +164,6 @@ struct BrowserToolbarChromeModifier: ViewModifier {
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
         }
-    }
-}
-
-private struct BrowserDetailToolbarBackdrop: NSViewRepresentable {
-    func makeNSView(context: Context) -> BrowserDetailToolbarProbeView {
-        BrowserDetailToolbarProbeView()
-    }
-
-    func updateNSView(
-        _ nsView: BrowserDetailToolbarProbeView,
-        context: Context
-    ) {
-        nsView.scheduleOverlayUpdate()
-    }
-}
-
-/// Tracks the detail column in window coordinates and owns a titlebar-only
-/// sibling view. Keeping this layer outside the SwiftUI scroll hierarchy means
-/// category rows remain visible and posters can never scroll over toolbar
-/// controls. The probe's converted leading edge preserves the Sidebar's own
-/// material and follows divider/window resizing.
-private final class BrowserDetailToolbarProbeView: NSView {
-    private let overlayView = BrowserToolbarMaterialView()
-    private var windowResizeObserver: NSObjectProtocol?
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        postsFrameChangedNotifications = true
-        postsBoundsChangedNotifications = true
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        removeWindowObserver()
-        guard let window else {
-            overlayView.removeFromSuperview()
-            return
-        }
-        windowResizeObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.didResizeNotification,
-            object: window,
-            queue: .main
-        ) { [weak self] _ in
-            self?.scheduleOverlayUpdate()
-        }
-        scheduleOverlayUpdate()
-    }
-
-    override func setFrameOrigin(_ newOrigin: NSPoint) {
-        super.setFrameOrigin(newOrigin)
-        scheduleOverlayUpdate()
-    }
-
-    override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        scheduleOverlayUpdate()
-    }
-
-    func scheduleOverlayUpdate() {
-        DispatchQueue.main.async { [weak self] in
-            self?.updateOverlay()
-        }
-    }
-
-    deinit {
-        removeWindowObserver()
-        overlayView.removeFromSuperview()
-    }
-
-    private func updateOverlay() {
-        guard let window,
-              let contentView = window.contentView,
-              bounds.width > 0 else {
-            overlayView.removeFromSuperview()
-            return
-        }
-
-        var contentBranch = contentView
-        while let parent = contentBranch.superview,
-              parent.superview != nil {
-            contentBranch = parent
-        }
-        guard let frameView = contentBranch.superview else {
-            overlayView.removeFromSuperview()
-            return
-        }
-
-        if overlayView.superview !== frameView {
-            overlayView.removeFromSuperview()
-            frameView.addSubview(
-                overlayView,
-                positioned: .above,
-                relativeTo: contentBranch
-            )
-        }
-
-        let detailRect = convert(bounds, to: frameView)
-        let frameBounds = frameView.bounds
-        let leading = max(frameBounds.minX, detailRect.minX)
-        let width = max(0, frameBounds.maxX - leading)
-        let originY = frameView.isFlipped
-            ? frameBounds.minY
-            : frameBounds.maxY - BrowserToolbarMetrics.height
-        overlayView.frame = NSRect(
-            x: leading,
-            y: originY,
-            width: width,
-            height: BrowserToolbarMetrics.height
-        )
-    }
-
-    private func removeWindowObserver() {
-        if let windowResizeObserver {
-            NotificationCenter.default.removeObserver(windowResizeObserver)
-            self.windowResizeObserver = nil
-        }
-    }
-}
-
-final class BrowserToolbarMaterialView: NSVisualEffectView {
-    private let referenceToneView = NSView()
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        material = .titlebar
-        blendingMode = .withinWindow
-        // Keep the effect active so scrolling content continues to contribute
-        // native titlebar blur. A very light neutral tint below locks the
-        // reference tone across key-window changes without flattening the
-        // material into an opaque fill.
-        state = .active
-        isEmphasized = false
-
-        referenceToneView.wantsLayer = true
-        referenceToneView.layer?.backgroundColor = NSColor(
-            calibratedWhite: 0,
-            alpha: 0.035
-        ).cgColor
-        referenceToneView.frame = bounds
-        referenceToneView.autoresizingMask = [.width, .height]
-        addSubview(referenceToneView)
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        bounds.contains(point) ? self : nil
-    }
-
-    override var mouseDownCanMoveWindow: Bool {
-        true
     }
 }
 
@@ -2800,13 +2635,13 @@ private struct HomeBrowserToolbarContent: ToolbarContent {
                 .accessibilityHidden(true)
         }
         ToolbarItemGroup(placement: .primaryAction) {
+            HomeConfigurationToolbarItem(layout: layout)
+                .frame(height: 40)
+                .disabled(isInteractionBlocked)
             HomeSiteToolbarItem(layout: layout)
                 .frame(height: 40)
                 .disabled(isInteractionBlocked)
             HomeFilterToolbarItem(layout: layout)
-                .frame(height: 40)
-                .disabled(isInteractionBlocked)
-            HomeConfigurationToolbarItem()
                 .frame(height: 40)
                 .disabled(isInteractionBlocked)
             HomeRefreshToolbarItem(layout: layout)

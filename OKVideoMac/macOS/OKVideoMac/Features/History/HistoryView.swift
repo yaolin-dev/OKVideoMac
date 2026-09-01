@@ -30,9 +30,7 @@ struct HistoryView: View {
                                 .padding(.leading, isSelecting ? 56 : 20)
                         }
                     }
-                    .padding(.top, BrowserToolbarMetrics.height)
                 }
-                .ignoresSafeArea(.container, edges: .top)
                 .browserToolbarScrollSurface(named: scrollCoordinateSpace)
             }
         }

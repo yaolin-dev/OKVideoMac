@@ -478,15 +478,18 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
 enum BrowserWindowChromeController {
     static func configure(_ window: NSWindow) {
         window.styleMask.insert(.fullSizeContentView)
-        window.titlebarAppearsTransparent = true
+        // Keep the full-size titlebar so the Sidebar can extend behind the
+        // traffic lights, but let AppKit draw the unified toolbar material.
+        // A transparent titlebar exposes scrolled posters underneath the real
+        // toolbar controls once the old custom overlay is removed.
+        window.titlebarAppearsTransparent = false
         window.titleVisibility = .hidden
         window.toolbarStyle = .unified
         window.titlebarSeparatorStyle = .none
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        // Keep AppKit's own window shadow after changing the backing surface
-        // to transparent. Refreshing it here avoids retaining a stale outline
-        // from the window's pre-configuration frame.
+        window.isOpaque = true
+        window.backgroundColor = .windowBackgroundColor
+        // Refresh AppKit's own shadow after finalizing the backing surface so
+        // it cannot retain a stale outline from the pre-configuration frame.
         window.hasShadow = true
         window.invalidateShadow()
     }

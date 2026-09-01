@@ -144,48 +144,163 @@ struct VideoGrid: View {
     }
 }
 
-/// Shared lightweight navigation treatment for browse categories and search
-/// result sources. Keeping one implementation prevents the two content grids
-/// from drifting in font weight, hover feedback, and underline geometry.
-struct BrowseNavigationButtonStyle: ButtonStyle {
+/// Shared native-looking segmented navigation treatment for home categories
+/// and search result sources. The two screens retain independent overflow and
+/// selection policies while sharing the exact same chrome and interaction
+/// feedback.
+enum BrowseSegmentedNavigationMetrics {
+    static let rowHeight: CGFloat = 52
+    static let controlHeight: CGFloat = 34
+    static let horizontalPadding: CGFloat = 14
+    static let minimumSegmentWidth: CGFloat = 62
+    static let separatorWidth: CGFloat = 1
+    static let containerInset: CGFloat = 2
+    static let moreWidth: CGFloat = 66
+
+    static func segmentWidth(textWidth: CGFloat) -> CGFloat {
+        max(
+            minimumSegmentWidth,
+            ceil(textWidth) + horizontalPadding * 2
+        )
+    }
+
+    static func innerAvailableWidth(_ availableWidth: CGFloat) -> CGFloat {
+        max(0, availableWidth - containerInset * 2)
+    }
+}
+
+struct BrowseSegmentedNavigationContainer<Content: View>: View {
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            content
+        }
+        .padding(BrowseSegmentedNavigationMetrics.containerInset)
+        .background {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.primary.opacity(0.018))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+}
+
+struct BrowseSegmentedNavigationDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor).opacity(0.32))
+            .frame(
+                width: BrowseSegmentedNavigationMetrics.separatorWidth,
+                height: 20
+            )
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
+struct BrowseSegmentedNavigationBottomDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor).opacity(0.28))
+            .frame(height: 0.5)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
+struct BrowseSegmentedNavigationLabel: View {
+    let title: String
+    let isSelected: Bool
+
+    var body: some View {
+        Text(title)
+            .font(
+                .system(
+                    size: 13,
+                    weight: isSelected ? .semibold : .medium
+                )
+            )
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(
+                .horizontal,
+                BrowseSegmentedNavigationMetrics.horizontalPadding
+            )
+            .frame(
+                minWidth: BrowseSegmentedNavigationMetrics.minimumSegmentWidth,
+                minHeight: BrowseSegmentedNavigationMetrics.controlHeight
+            )
+            .contentShape(Rectangle())
+    }
+}
+
+struct BrowseSegmentedMoreLabel: View {
+    var body: some View {
+        HStack(spacing: 5) {
+            Text("更多")
+            Image(systemName: "chevron.down")
+                .font(.caption2.weight(.semibold))
+        }
+        .font(.system(size: 13, weight: .medium))
+        .foregroundStyle(.secondary)
+        .frame(
+            width: BrowseSegmentedNavigationMetrics.moreWidth,
+            height: BrowseSegmentedNavigationMetrics.controlHeight
+        )
+        .contentShape(Rectangle())
+    }
+}
+
+struct BrowseSegmentedNavigationButtonStyle: ButtonStyle {
     let isSelected: Bool
 
     func makeBody(configuration: Configuration) -> some View {
-        BrowseNavigationButtonBody(
+        BrowseSegmentedNavigationButtonBody(
             configuration: configuration,
             isSelected: isSelected
         )
     }
 }
 
-private struct BrowseNavigationButtonBody: View {
+private struct BrowseSegmentedNavigationButtonBody: View {
     let configuration: ButtonStyle.Configuration
     let isSelected: Bool
     @State private var isHovering = false
 
     var body: some View {
-        let highlighted = isHovering && !configuration.isPressed
         configuration.label
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundColor(isSelected ? .blue : .primary)
-            .lineLimit(1)
-            .fixedSize(horizontal: true, vertical: false)
-            .frame(height: 32, alignment: .center)
-            .contentShape(Rectangle())
+            .foregroundStyle(
+                isSelected
+                    ? Color.primary
+                    : isHovering
+                        ? Color.primary.opacity(0.78)
+                        : Color.secondary
+            )
             .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: 7.5, style: .continuous)
                     .fill(
-                        highlighted
-                            ? Color.primary.opacity(0.055)
-                            : Color.clear
+                        isSelected
+                            ? Color(nsColor: .windowBackgroundColor).opacity(0.52)
+                            : isHovering
+                                ? Color.primary.opacity(0.055)
+                                : Color.clear
                     )
             )
-            .overlay(alignment: .bottom) {
-                Capsule()
-                    .fill(Color.blue.opacity(isSelected ? 1 : 0))
-                    .frame(height: 2)
+            .overlay {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 7.5, style: .continuous)
+                        .stroke(Color.primary.opacity(0.035), lineWidth: 0.5)
+                }
             }
-            .opacity(configuration.isPressed ? 0.72 : 1)
+            .opacity(configuration.isPressed ? 0.74 : 1)
             .animation(
                 .easeOut(duration: 0.12),
                 value: configuration.isPressed
