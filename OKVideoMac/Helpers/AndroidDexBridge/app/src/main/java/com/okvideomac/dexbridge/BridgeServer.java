@@ -287,7 +287,7 @@ final class BridgeServer {
                                     .versionName
                     );
                     health.put("generation", runtimeGeneration);
-                    health.put("interactionSchemaVersion", 3);
+                    health.put("interactionSchemaVersion", 4);
                     health.put(
                             "interactionCapabilities",
                             new JSONArray()
@@ -296,6 +296,11 @@ final class BridgeServer {
                                     .put("playbackUIHandoff")
                                     .put("requestScopedSurfaceLease")
                                     .put("explicitUserCompletion")
+                                    .put("sessionDialogBounds")
+                                    .put("sessionDialogStack")
+                                    .put("dialogCropPassthrough")
+                                    .put("fullSurfaceFallback")
+                                    .put("dialogUnicodeInput")
                     );
                     health.put(
                             "tvboxProxyReady",
@@ -413,6 +418,27 @@ final class BridgeServer {
                                     eventSequenceAfter(target)
                             )
                     );
+                    return;
+                }
+                String textInteraction = interactionID(path, "/text");
+                if ("POST".equals(method) && textInteraction != null) {
+                    JSONObject payload = readJSONPayload(
+                            input,
+                            headers,
+                            MAX_BODY_BYTES
+                    );
+                    boolean accepted = BridgeActionActivity.commitTextIfOwnedBy(
+                            textInteraction,
+                            payload.optString("windowID", ""),
+                            payload.optLong("windowRevision", 0L),
+                            payload.optString("text", "")
+                    );
+                    JSONObject state = withProviderOwner(
+                            BridgeActivity.uiState(context, textInteraction),
+                            textInteraction
+                    );
+                    state.put("textAccepted", accepted);
+                    writeJSON(output, accepted ? 200 : 409, state);
                     return;
                 }
                 String cancelInteraction = interactionID(path, "/cancel");

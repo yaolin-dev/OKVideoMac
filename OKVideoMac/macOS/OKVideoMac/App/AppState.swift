@@ -1214,7 +1214,8 @@ enum AndroidActionSurfaceLeasePolicy {
                 .contains(frame.surfaceMode),
               frame.frameSequence > 0,
               frame.pixelWidth > 0,
-              frame.pixelHeight > 0 else {
+              frame.pixelHeight > 0,
+              frame.hasValidCaptureGeometry else {
             return false
         }
         guard let previous else { return true }

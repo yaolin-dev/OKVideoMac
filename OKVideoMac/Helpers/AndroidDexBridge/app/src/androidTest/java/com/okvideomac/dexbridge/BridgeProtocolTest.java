@@ -6,6 +6,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.text.InputType;
 import android.view.KeyEvent;
 import android.view.View;
@@ -1105,6 +1106,165 @@ public final class BridgeProtocolTest extends TestCase {
         BridgeServer.releaseTerminalInteraction(context, id);
         assertTrue(BridgeActionActivity.awaitReleased(id, 2_000L));
         assertFalse(BridgeServer.hasTrackedInteractionWorker(id));
+    }
+
+    public void testActionSessionTracksDialogBoundsAndRestoresStack()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        String id = "interaction-dialog-stack-" + UUID.randomUUID();
+        AlertDialog first = null;
+        AlertDialog second = null;
+        try {
+            BridgeServer.beginAndActivateInteraction(
+                    context,
+                    id,
+                    "configuration",
+                    "action"
+            );
+            BridgeActivity.prepareDialogHandoff(context, id);
+            first = showOwnedDialog(id, "第一层", null);
+            JSONObject firstState = awaitDialogStack(context, id, 1, 2_000L);
+            assertEquals("dialogCrop", firstState.getString(
+                    "surfacePresentationMode"
+            ));
+            assertEquals(1, firstState.getInt("surfaceWindowStackDepth"));
+            assertTrue(firstState.getBoolean("surfaceDialogTrackerAvailable"));
+            String firstWindowID = firstState.getString("surfaceWindowID");
+            assertFalse(firstWindowID.isEmpty());
+            JSONObject firstBounds = firstState.getJSONObject(
+                    "surfaceWindowBounds"
+            );
+            assertTrue(firstBounds.getInt("width") > 0);
+            assertTrue(firstBounds.getInt("height") > 0);
+            long firstRevision = firstState.getLong("surfaceWindowRevision");
+
+            second = showOwnedDialog(id, "第二层", null);
+            JSONObject secondState = awaitDialogStack(context, id, 2, 2_000L);
+            assertEquals("dialogCrop", secondState.getString(
+                    "surfacePresentationMode"
+            ));
+            assertEquals(2, secondState.getInt("surfaceWindowStackDepth"));
+            assertFalse(firstWindowID.equals(secondState.getString(
+                    "surfaceWindowID"
+            )));
+            assertTrue(secondState.getLong("surfaceWindowRevision")
+                    > firstRevision);
+            JSONArray stack = secondState.getJSONArray("surfaceDialogStack");
+            assertEquals(firstWindowID, stack.getJSONObject(0)
+                    .getString("windowID"));
+
+            dismissDialog(second);
+            second = null;
+            JSONObject restored = awaitDialogStack(context, id, 1, 2_000L);
+            assertEquals(firstWindowID, restored.getString("surfaceWindowID"));
+            assertTrue(restored.getLong("surfaceWindowRevision")
+                    > secondState.getLong("surfaceWindowRevision"));
+        } finally {
+            dismissDialog(second);
+            dismissDialog(first);
+            if (!BridgeInteractionRegistry.terminal(id)) {
+                BridgeActivity.dismissUI(context, id);
+            }
+        }
+    }
+
+    public void testNearFullDialogPolicyKeepsFullSurfaceFallback() {
+        assertTrue(BridgeDialogWindowTracker.isNearFullDisplay(
+                new Rect(0, 48, 720, 1_552),
+                720,
+                1_600
+        ));
+        assertFalse(BridgeDialogWindowTracker.isNearFullDisplay(
+                new Rect(18, 363, 701, 1_195),
+                720,
+                1_600
+        ));
+        assertFalse(BridgeDialogWindowTracker.isNearFullDisplay(
+                new Rect(18, 560, 701, 1_120),
+                720,
+                1_600
+        ));
+    }
+
+    public void testSessionDialogCommitsUnicodeThroughFocusedInputConnection()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        String id = "interaction-dialog-text-" + UUID.randomUUID();
+        AlertDialog dialog = null;
+        try {
+            BridgeServer.beginAndActivateInteraction(
+                    context,
+                    id,
+                    "configuration",
+                    "action"
+            );
+            BridgeActivity.prepareDialogHandoff(context, id);
+            dialog = showOwnedInputDialog(id, false);
+            JSONObject state = awaitDialogStack(context, id, 1, 2_000L);
+            assertTrue(BridgeActionActivity.commitTextIfOwnedBy(
+                    id,
+                    state.getString("surfaceWindowID"),
+                    state.getLong("surfaceWindowRevision"),
+                    "中文输入"
+            ));
+            AlertDialog exactDialog = dialog;
+            AtomicReference<String> input = new AtomicReference<>();
+            InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
+                View focused = exactDialog.getWindow().getDecorView().findFocus();
+                assertTrue(focused instanceof EditText);
+                input.set(((EditText) focused).getText().toString());
+            });
+            assertEquals("中文输入", input.get());
+        } finally {
+            dismissDialog(dialog);
+            if (!BridgeInteractionRegistry.terminal(id)) {
+                BridgeActivity.dismissUI(context, id);
+            }
+        }
+    }
+
+    public void testNearFullOwnedDialogPublishesFullSurfaceFallback()
+            throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation()
+                .getTargetContext();
+        String id = "interaction-near-full-dialog-" + UUID.randomUUID();
+        AlertDialog dialog = null;
+        try {
+            BridgeServer.beginAndActivateInteraction(
+                    context,
+                    id,
+                    "authorization",
+                    "action"
+            );
+            BridgeActivity.prepareDialogHandoff(context, id);
+            dialog = showOwnedDialog(id, "透明全屏容器", null);
+            AlertDialog exactDialog = dialog;
+            InstrumentationRegistry.getInstrumentation().runOnMainSync(() ->
+                    exactDialog.getWindow().setLayout(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+            );
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            JSONObject state = awaitSurfacePresentation(
+                    context,
+                    id,
+                    "fullDisplay",
+                    2_000L
+            );
+            assertEquals(
+                    "nearFullDisplayDialog",
+                    state.getString("surfaceFallbackReason")
+            );
+            assertEquals(1, state.getInt("surfaceWindowStackDepth"));
+        } finally {
+            dismissDialog(dialog);
+            if (!BridgeInteractionRegistry.terminal(id)) {
+                BridgeActivity.dismissUI(context, id);
+            }
+        }
     }
 
     public void testCancelEndpointInterruptsTrackedWorker() throws Exception {
@@ -2477,6 +2637,50 @@ public final class BridgeProtocolTest extends TestCase {
         while (System.currentTimeMillis() < deadline) {
             last = BridgeActivity.uiState(context, interactionID);
             if (last.optBoolean("visible", false)) return last;
+            Thread.sleep(25L);
+        }
+        return last == null
+                ? BridgeInteractionRegistry.state(interactionID)
+                : last;
+    }
+
+    private static JSONObject awaitDialogStack(
+            Context context,
+            String interactionID,
+            int depth,
+            long timeoutMilliseconds
+    ) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMilliseconds;
+        JSONObject last = null;
+        while (System.currentTimeMillis() < deadline) {
+            last = BridgeActivity.uiState(context, interactionID);
+            if (last.optInt("surfaceWindowStackDepth", 0) == depth
+                    && !last.optString("surfaceWindowID", "").isEmpty()) {
+                return last;
+            }
+            Thread.sleep(25L);
+        }
+        return last == null
+                ? BridgeInteractionRegistry.state(interactionID)
+                : last;
+    }
+
+    private static JSONObject awaitSurfacePresentation(
+            Context context,
+            String interactionID,
+            String presentationMode,
+            long timeoutMilliseconds
+    ) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMilliseconds;
+        JSONObject last = null;
+        while (System.currentTimeMillis() < deadline) {
+            last = BridgeActivity.uiState(context, interactionID);
+            if (presentationMode.equals(last.optString(
+                    "surfacePresentationMode",
+                    ""
+            ))) {
+                return last;
+            }
             Thread.sleep(25L);
         }
         return last == null

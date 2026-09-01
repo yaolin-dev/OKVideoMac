@@ -17,7 +17,7 @@ import java.util.UUID;
  *
  * <p>The legacy bridge exposed whichever Android dialog happened to be on
  * screen. This registry now exposes only a request identity, provider return,
- * lifecycle-owned full-display surface, and event channel.</p>
+ * lifecycle-owned display/Dialog surface, and event channel.</p>
  */
 final class BridgeInteractionRegistry {
     private static final String TAG = "OKVideoInteraction";
@@ -442,6 +442,15 @@ final class BridgeInteractionRegistry {
             value.put("surfaceInteractionID", "");
             value.put("surfaceMode", "none");
             value.put("surfaceHostLifecycle", "none");
+            value.put("surfacePresentationMode", "none");
+            value.put("surfaceFallbackReason", "");
+            value.put("surfaceWindowID", "");
+            value.put("surfaceWindowRevision", 0L);
+            value.put("surfaceWindowStackDepth", 0);
+            value.put("surfaceWindowBounds", JSONObject.NULL);
+            value.put("surfaceDisplayBounds", JSONObject.NULL);
+            value.put("surfaceDialogStack", new JSONArray());
+            value.put("surfaceDialogTrackerAvailable", false);
         } catch (Throwable ignored) {
         }
         return value;
@@ -465,6 +474,15 @@ final class BridgeInteractionRegistry {
             surface.put("mode", "none");
             surface.put("hostLifecycle", "none");
             surface.put("generation", 0L);
+            surface.put("presentationMode", "none");
+            surface.put("fallbackReason", "");
+            surface.put("windowID", "");
+            surface.put("windowRevision", 0L);
+            surface.put("stackDepth", 0);
+            surface.put("bounds", JSONObject.NULL);
+            surface.put("displayBounds", JSONObject.NULL);
+            surface.put("dialogStack", new JSONArray());
+            surface.put("dialogTrackerAvailable", false);
             channels.put("surface", surface);
 
             JSONObject events = new JSONObject();
@@ -506,6 +524,56 @@ final class BridgeInteractionRegistry {
                     requestScoped
                             ? source.optString("surfaceHostLifecycle", "none")
                             : "none"
+            );
+            destination.put(
+                    "surfacePresentationMode",
+                    active
+                            ? source.optString(
+                                    "surfacePresentationMode",
+                                    "fullDisplay"
+                            )
+                            : "none"
+            );
+            destination.put(
+                    "surfaceFallbackReason",
+                    active ? source.optString("surfaceFallbackReason", "") : ""
+            );
+            destination.put(
+                    "surfaceWindowID",
+                    active ? source.optString("surfaceWindowID", "") : ""
+            );
+            destination.put(
+                    "surfaceWindowRevision",
+                    active ? source.optLong("surfaceWindowRevision", 0L) : 0L
+            );
+            destination.put(
+                    "surfaceWindowStackDepth",
+                    active ? source.optInt("surfaceWindowStackDepth", 0) : 0
+            );
+            destination.put(
+                    "surfaceWindowBounds",
+                    active
+                            ? source.opt("surfaceWindowBounds")
+                            : JSONObject.NULL
+            );
+            destination.put(
+                    "surfaceDisplayBounds",
+                    active
+                            ? source.opt("surfaceDisplayBounds")
+                            : JSONObject.NULL
+            );
+            destination.put(
+                    "surfaceDialogStack",
+                    active && source.optJSONArray("surfaceDialogStack") != null
+                            ? source.optJSONArray("surfaceDialogStack")
+                            : new JSONArray()
+            );
+            destination.put(
+                    "surfaceDialogTrackerAvailable",
+                    requestScoped && source.optBoolean(
+                            "surfaceDialogTrackerAvailable",
+                            false
+                    )
             );
             destination.put("generation", source.optLong("generation", 0L));
         } catch (Throwable ignored) {
@@ -678,6 +746,52 @@ final class BridgeInteractionRegistry {
                                 : "none"
                 );
                 surface.put("generation", ui.optLong("generation", 0L));
+                surface.put(
+                        "presentationMode",
+                        active
+                                ? ui.optString(
+                                        "surfacePresentationMode",
+                                        "fullDisplay"
+                                )
+                                : "none"
+                );
+                surface.put(
+                        "fallbackReason",
+                        active ? ui.optString("surfaceFallbackReason", "") : ""
+                );
+                surface.put(
+                        "windowID",
+                        active ? ui.optString("surfaceWindowID", "") : ""
+                );
+                surface.put(
+                        "windowRevision",
+                        active ? ui.optLong("surfaceWindowRevision", 0L) : 0L
+                );
+                surface.put(
+                        "stackDepth",
+                        active ? ui.optInt("surfaceWindowStackDepth", 0) : 0
+                );
+                surface.put(
+                        "bounds",
+                        active ? ui.opt("surfaceWindowBounds") : JSONObject.NULL
+                );
+                surface.put(
+                        "displayBounds",
+                        active ? ui.opt("surfaceDisplayBounds") : JSONObject.NULL
+                );
+                surface.put(
+                        "dialogStack",
+                        active && ui.optJSONArray("surfaceDialogStack") != null
+                                ? ui.optJSONArray("surfaceDialogStack")
+                                : new JSONArray()
+                );
+                surface.put(
+                        "dialogTrackerAvailable",
+                        requestScoped && ui.optBoolean(
+                                "surfaceDialogTrackerAvailable",
+                                false
+                        )
+                );
                 channels.put("surface", surface);
 
                 JSONObject eventChannel = new JSONObject();

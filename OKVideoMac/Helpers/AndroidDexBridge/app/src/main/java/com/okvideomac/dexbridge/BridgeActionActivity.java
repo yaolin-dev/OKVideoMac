@@ -31,6 +31,7 @@ public final class BridgeActionActivity extends Activity {
     private volatile boolean providerWindowActive;
     private volatile boolean sawProviderWindow;
     private volatile long surfaceGeneration;
+    private BridgeDialogWindowTracker dialogWindowTracker;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -61,6 +62,7 @@ public final class BridgeActionActivity extends Activity {
         placeholder.setGravity(Gravity.CENTER);
         placeholder.setBackgroundColor(Color.rgb(245, 245, 245));
         setContentView(placeholder);
+        dialogWindowTracker = new BridgeDialogWindowTracker(this, interactionID);
     }
 
     @Override
@@ -167,6 +169,7 @@ public final class BridgeActionActivity extends Activity {
     protected void onDestroy() {
         resumed = false;
         stopped = true;
+        if (dialogWindowTracker != null) dialogWindowTracker.release();
         BridgeActionActivity replacement;
         synchronized (lifecycleLock) {
             BridgeActionActivity activity = current.get();
@@ -252,36 +255,48 @@ public final class BridgeActionActivity extends Activity {
         String id = requestedInteractionID == null
                 ? ""
                 : requestedInteractionID.trim();
+        BridgeActionActivity activity;
         synchronized (lifecycleLock) {
-            BridgeActionActivity activity = current.get();
+            activity = current.get();
             boolean owned = usable(activity)
                     && !id.isEmpty()
                     && id.equals(activity.interactionID);
             if (!owned) return SurfaceStatus.none();
-            String lifecycle = activity.resumed
-                    ? "resumed"
-                    : activity.stopped
-                    ? "stopped"
-                    : activity.everResumed ? "paused" : "created";
-            // A request-owned ActionActivity is intentionally translucent and
-            // remains alive underneath provider-launched full-screen/browser
-            // Activities. Once it has resumed at least once, losing resumed
-            // state is the conservative lifecycle signal for that external
-            // surface. Android lifecycle cannot distinguish that delegation
-            // from HOME/lock/background, so this is presentation state only,
-            // never provider ownership or login success.
-            boolean delegatedSurfaceActive = activity.everResumed
-                    && !activity.resumed;
-            return new SurfaceStatus(
-                    true,
-                    delegatedSurfaceActive,
-                    activity.providerWindowActive,
-                    activity.sawProviderWindow,
-                    activity.windowFocused,
-                    activity.surfaceGeneration,
-                    lifecycle
-            );
         }
+        BridgeDialogWindowTracker.Snapshot windows =
+                activity.dialogWindowTracker == null
+                        ? BridgeDialogWindowTracker.Snapshot.empty(
+                                false,
+                                0L,
+                                0,
+                                0
+                        )
+                        : activity.dialogWindowTracker.snapshot();
+        if (windows.hasWindows()) activity.sawProviderWindow = true;
+        String lifecycle = activity.resumed
+                ? "resumed"
+                : activity.stopped
+                ? "stopped"
+                : activity.everResumed ? "paused" : "created";
+        // A request-owned ActionActivity is intentionally translucent and
+        // remains alive underneath provider-launched full-screen/browser
+        // Activities. Once it has resumed at least once, losing resumed
+        // state is the conservative lifecycle signal for that external
+        // surface. Android lifecycle cannot distinguish that delegation
+        // from HOME/lock/background, so this is presentation state only,
+        // never provider ownership or login success.
+        boolean delegatedSurfaceActive = activity.everResumed
+                && !activity.resumed;
+        return new SurfaceStatus(
+                true,
+                delegatedSurfaceActive,
+                activity.providerWindowActive || windows.hasWindows(),
+                activity.sawProviderWindow,
+                activity.windowFocused,
+                activity.surfaceGeneration + windows.revision,
+                lifecycle,
+                windows
+        );
     }
 
     static void finishIfOwnedByOther(String requestedInteractionID) {
@@ -317,6 +332,32 @@ public final class BridgeActionActivity extends Activity {
             }
         });
         return true;
+    }
+
+    static boolean commitTextIfOwnedBy(
+            String requestedInteractionID,
+            String windowID,
+            long windowRevision,
+            String text
+    ) {
+        String id = requestedInteractionID == null
+                ? ""
+                : requestedInteractionID.trim();
+        BridgeActionActivity activity;
+        synchronized (lifecycleLock) {
+            activity = current.get();
+            if (!usable(activity)
+                    || !id.equals(activity.interactionID)
+                    || !isCurrentRequest(id)) {
+                return false;
+            }
+        }
+        return activity.dialogWindowTracker != null
+                && activity.dialogWindowTracker.commitText(
+                        windowID,
+                        windowRevision,
+                        text
+                );
     }
 
     private void releaseAndFinish() {
@@ -488,6 +529,7 @@ public final class BridgeActionActivity extends Activity {
         final boolean windowFocused;
         final long generation;
         final String hostLifecycle;
+        final BridgeDialogWindowTracker.Snapshot dialogWindows;
 
         SurfaceStatus(
                 boolean requestScoped,
@@ -496,7 +538,8 @@ public final class BridgeActionActivity extends Activity {
                 boolean sawProviderWindow,
                 boolean windowFocused,
                 long generation,
-                String hostLifecycle
+                String hostLifecycle,
+                BridgeDialogWindowTracker.Snapshot dialogWindows
         ) {
             this.requestScoped = requestScoped;
             this.delegatedSurfaceActive = delegatedSurfaceActive;
@@ -505,6 +548,7 @@ public final class BridgeActionActivity extends Activity {
             this.windowFocused = windowFocused;
             this.generation = generation;
             this.hostLifecycle = hostLifecycle;
+            this.dialogWindows = dialogWindows;
         }
 
         private static SurfaceStatus none() {
@@ -515,7 +559,13 @@ public final class BridgeActionActivity extends Activity {
                     false,
                     false,
                     0L,
-                    "none"
+                    "none",
+                    BridgeDialogWindowTracker.Snapshot.empty(
+                            false,
+                            0L,
+                            0,
+                            0
+                    )
             );
         }
     }

@@ -3888,6 +3888,202 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(constrainedPortrait.height, 447, accuracy: 0.000_1)
     }
 
+    func testDialogCropPresentationUsesSheetSpaceAndHeightLimit() {
+        let regularDialog =
+            AndroidActionSurfacePresentationPolicy.preferredSize(
+                pixelWidth: 648,
+                pixelHeight: 654,
+                maximumHeight: 520,
+                availableWidth: 780,
+                presentationMode: .dialogCrop
+            )
+        XCTAssertEqual(regularDialog.height, 520, accuracy: 0.000_1)
+        XCTAssertEqual(
+            regularDialog.width,
+            520 * 648.0 / 654.0,
+            accuracy: 0.000_1
+        )
+        XCTAssertEqual(
+            regularDialog.width / regularDialog.height,
+            648.0 / 654.0,
+            accuracy: 0.000_1
+        )
+
+        let tallDialog = AndroidActionSurfacePresentationPolicy.preferredSize(
+            pixelWidth: 683,
+            pixelHeight: 832,
+            maximumHeight: 520,
+            availableWidth: 780,
+            presentationMode: .dialogCrop
+        )
+        XCTAssertEqual(tallDialog.height, 520, accuracy: 0.000_1)
+        XCTAssertEqual(
+            tallDialog.width / tallDialog.height,
+            683.0 / 832.0,
+            accuracy: 0.000_1
+        )
+
+        let compactSheet = AndroidActionSurfacePresentationPolicy.preferredSize(
+            pixelWidth: 600,
+            pixelHeight: 600,
+            maximumHeight: 520,
+            availableWidth: 536,
+            presentationMode: .dialogCrop
+        )
+        XCTAssertEqual(compactSheet.width, 536 * 0.80, accuracy: 0.000_1)
+        XCTAssertEqual(compactSheet.height, compactSheet.width, accuracy: 0.000_1)
+    }
+
+    func testDialogCropUsesContainerWidthInsteadOfPhoneScale() {
+        XCTAssertEqual(
+            CloudAuthorizationPresentationPolicy.availableSurfaceWidth(
+                containerWidth: 900
+            ),
+            780
+        )
+        XCTAssertEqual(
+            CloudAuthorizationPresentationPolicy.availableSurfaceWidth(
+                containerWidth: 720
+            ),
+            616
+        )
+        XCTAssertEqual(
+            CloudAuthorizationPresentationPolicy.availableSurfaceWidth(
+                containerWidth: 300
+            ),
+            240
+        )
+    }
+
+    func testDialogCropPreservesTopLeftAndroidBounds() throws {
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 4,
+            pixelsHigh: 4,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ))
+        for x in 0..<4 {
+            for y in 0..<4 {
+                bitmap.setColor(
+                    y >= 2
+                        ? NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1)
+                        : NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 1),
+                    atX: x,
+                    y: y
+                )
+            }
+        }
+        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        let cropped = try AndroidActionSurfaceImageCropper.crop(
+            pngData: png,
+            bounds: AndroidBridgeSurfaceBounds(
+                left: 0,
+                top: 0,
+                right: 4,
+                bottom: 2,
+                width: 4,
+                height: 2
+            ),
+            display: AndroidBridgeDisplayBounds(width: 4, height: 4)
+        )
+        let result = try XCTUnwrap(NSBitmapImageRep(data: cropped))
+        XCTAssertEqual(result.pixelsWide, 4)
+        XCTAssertEqual(result.pixelsHigh, 2)
+        let sample = try XCTUnwrap(result.colorAt(x: 1, y: 1)?
+            .usingColorSpace(.deviceRGB))
+        XCTAssertGreaterThan(sample.redComponent, 0.9)
+        XCTAssertLessThan(sample.blueComponent, 0.1)
+    }
+
+    func testDialogCropInputAddsAndroidWindowOrigin() throws {
+        let point = try XCTUnwrap(
+            AndroidActionSurfaceInputGeometryPolicy.displayPoint(
+                localX: 120,
+                localY: 240,
+                cropWidth: 648,
+                cropHeight: 654,
+                originX: 36,
+                originY: 410,
+                displayWidth: 720,
+                displayHeight: 1_600
+            )
+        )
+        XCTAssertEqual(point.x, 156)
+        XCTAssertEqual(point.y, 650)
+        XCTAssertNil(
+            AndroidActionSurfaceInputGeometryPolicy.displayPoint(
+                localX: 648,
+                localY: 0,
+                cropWidth: 648,
+                cropHeight: 654,
+                originX: 36,
+                originY: 410,
+                displayWidth: 720,
+                displayHeight: 1_600
+            )
+        )
+    }
+
+    func testBridgeDialogDescriptorRequiresExactSessionWindowGeometry()
+        throws {
+        let requestID = UUID()
+        let object: [String: Any] = [
+            "interactionID": requestID.uuidString,
+            "terminal": false,
+            "surfaceActive": true,
+            "surfaceRequestScoped": true,
+            "surfaceInteractionID": requestID.uuidString,
+            "surfaceMode": "providerWindow",
+            "surfacePresentationMode": "dialogCrop",
+            "surfaceWindowID": "dialog-2",
+            "surfaceWindowRevision": 7,
+            "surfaceWindowStackDepth": 2,
+            "surfaceWindowBounds": [
+                "left": 36,
+                "top": 410,
+                "right": 684,
+                "bottom": 1_064,
+                "width": 648,
+                "height": 654
+            ],
+            "surfaceDisplayBounds": [
+                "width": 720,
+                "height": 1_600
+            ]
+        ]
+        let state = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+        let descriptor = try XCTUnwrap(state.actionSurfaceCaptureDescriptor)
+        XCTAssertEqual(descriptor.presentationMode, .dialogCrop)
+        XCTAssertEqual(descriptor.windowID, "dialog-2")
+        XCTAssertEqual(descriptor.windowRevision, 7)
+        XCTAssertEqual(descriptor.windowStackDepth, 2)
+        XCTAssertEqual(descriptor.windowBounds?.left, 36)
+
+        var invalid = object
+        invalid["surfaceWindowBounds"] = [
+            "left": 36,
+            "top": 410,
+            "right": 800,
+            "bottom": 1_064,
+            "width": 764,
+            "height": 654
+        ]
+        let invalidState = try JSONDecoder().decode(
+            AndroidBridgeUIState.self,
+            from: JSONSerialization.data(withJSONObject: invalid)
+        )
+        XCTAssertNil(invalidState.actionSurfaceCaptureDescriptor)
+    }
+
     func testCloudAuthorizationPresentationReservesShadowMargin() {
         XCTAssertEqual(
             CloudAuthorizationPresentationPolicy.maximumSurfaceHeight(

@@ -1,4 +1,5 @@
 import Darwin
+import AppKit
 import CryptoKit
 import Foundation
 import OKVideoCore
@@ -253,6 +254,120 @@ final class InteractionHandle: @unchecked Sendable, Identifiable {
     }
 }
 
+struct AndroidBridgeSurfaceBounds: Decodable, Equatable, Sendable {
+    let left: Int
+    let top: Int
+    let right: Int
+    let bottom: Int
+    let width: Int
+    let height: Int
+
+    var isValid: Bool {
+        left >= 0
+            && top >= 0
+            && right > left
+            && bottom > top
+            && width == right - left
+            && height == bottom - top
+    }
+}
+
+struct AndroidBridgeDisplayBounds: Decodable, Equatable, Sendable {
+    let width: Int
+    let height: Int
+
+    var isValid: Bool { width > 0 && height > 0 }
+}
+
+struct AndroidBridgeDialogWindow: Decodable, Equatable, Sendable {
+    let windowID: String
+    let bounds: AndroidBridgeSurfaceBounds
+    let nearFullDisplay: Bool
+}
+
+enum AndroidActionSurfacePresentationMode: String, Equatable, Sendable {
+    case dialogCrop
+    case fullDisplay
+}
+
+struct AndroidActionSurfaceCaptureDescriptor: Equatable, Sendable {
+    let presentationMode: AndroidActionSurfacePresentationMode
+    let fallbackReason: String
+    let windowID: String
+    let windowRevision: Int
+    let windowStackDepth: Int
+    let windowBounds: AndroidBridgeSurfaceBounds?
+    let displayBounds: AndroidBridgeDisplayBounds?
+}
+
+enum AndroidActionSurfaceImageCropper {
+    static func crop(
+        pngData: Data,
+        bounds: AndroidBridgeSurfaceBounds,
+        display: AndroidBridgeDisplayBounds
+    ) throws -> Data {
+        guard bounds.isValid,
+              display.isValid,
+              bounds.right <= display.width,
+              bounds.bottom <= display.height,
+              let bitmap = NSBitmapImageRep(data: pngData),
+              bitmap.pixelsWide == display.width,
+              bitmap.pixelsHigh == display.height,
+              let image = bitmap.cgImage else {
+            throw AppError.spider("Android Dialog 裁剪坐标已失效")
+        }
+        // Android bounds use a top-left origin; CGImage cropping uses a
+        // bottom-left origin. The conversion is geometry only and does not
+        // inspect any Dialog child content.
+        let cropRect = CGRect(
+            x: bounds.left,
+            y: display.height - bounds.bottom,
+            width: bounds.width,
+            height: bounds.height
+        )
+        guard let cropped = image.cropping(to: cropRect) else {
+            throw AppError.spider("无法裁剪 Android Dialog 画面")
+        }
+        let representation = NSBitmapImageRep(cgImage: cropped)
+        guard let data = representation.representation(
+            using: .png,
+            properties: [:]
+        ) else {
+            throw AppError.spider("无法编码 Android Dialog 画面")
+        }
+        return data
+    }
+}
+
+enum AndroidActionSurfaceInputGeometryPolicy {
+    static func displayPoint(
+        localX: Int,
+        localY: Int,
+        cropWidth: Int,
+        cropHeight: Int,
+        originX: Int,
+        originY: Int,
+        displayWidth: Int,
+        displayHeight: Int
+    ) -> (x: Int, y: Int)? {
+        guard cropWidth > 0,
+              cropHeight > 0,
+              displayWidth > 0,
+              displayHeight > 0,
+              localX >= 0,
+              localY >= 0,
+              localX < cropWidth,
+              localY < cropHeight,
+              originX >= 0,
+              originY >= 0,
+              originX + localX < displayWidth,
+              originY + localY < displayHeight else {
+            return nil
+        }
+        return (originX + localX, originY + localY)
+    }
+}
+
 struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
     let interactionID: String?
     let revision: Int?
@@ -283,6 +398,15 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
     var surfaceRequestScoped: Bool? = nil
     var surfaceInteractionID: String? = nil
     var surfaceMode: String? = nil
+    var surfacePresentationMode: String? = nil
+    var surfaceFallbackReason: String? = nil
+    var surfaceWindowID: String? = nil
+    var surfaceWindowRevision: Int? = nil
+    var surfaceWindowStackDepth: Int? = nil
+    var surfaceWindowBounds: AndroidBridgeSurfaceBounds? = nil
+    var surfaceDisplayBounds: AndroidBridgeDisplayBounds? = nil
+    var surfaceDialogStack: [AndroidBridgeDialogWindow]? = nil
+    var surfaceDialogTrackerAvailable: Bool? = nil
     /// Cancellation is cooperative inside third-party DEX code. When the
     /// worker ignores interruption the Bridge asks the owned runtime to
     /// restart before another interaction is admitted.
@@ -319,6 +443,59 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
         surfaceMode?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
+    }
+
+    var actionSurfaceCaptureDescriptor:
+        AndroidActionSurfaceCaptureDescriptor? {
+        guard hasRequestScopedActionSurface else { return nil }
+        let normalizedPresentation = surfacePresentationMode?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch normalizedPresentation {
+        case "dialogcrop":
+            guard let bounds = surfaceWindowBounds,
+                  bounds.isValid,
+                  let display = surfaceDisplayBounds,
+                  display.isValid,
+                  bounds.right <= display.width,
+                  bounds.bottom <= display.height,
+                  let windowID = surfaceWindowID?.nonEmptyBridgeValue,
+                  let windowRevision = surfaceWindowRevision,
+                  windowRevision > 0 else {
+                return nil
+            }
+            return AndroidActionSurfaceCaptureDescriptor(
+                presentationMode: .dialogCrop,
+                fallbackReason: "",
+                windowID: windowID,
+                windowRevision: windowRevision,
+                windowStackDepth: max(1, surfaceWindowStackDepth ?? 1),
+                windowBounds: bounds,
+                displayBounds: display
+            )
+        case "fulldisplay":
+            return AndroidActionSurfaceCaptureDescriptor(
+                presentationMode: .fullDisplay,
+                fallbackReason: surfaceFallbackReason ?? "",
+                windowID: surfaceWindowID ?? "",
+                windowRevision: max(0, surfaceWindowRevision ?? 0),
+                windowStackDepth: max(0, surfaceWindowStackDepth ?? 0),
+                windowBounds: nil,
+                displayBounds: surfaceDisplayBounds
+            )
+        default:
+            // An older/fallback Bridge can still expose a request-scoped full
+            // Android display. Missing geometry must never become a crop.
+            return AndroidActionSurfaceCaptureDescriptor(
+                presentationMode: .fullDisplay,
+                fallbackReason: "dialogProtocolUnavailable",
+                windowID: "",
+                windowRevision: 0,
+                windowStackDepth: 0,
+                windowBounds: nil,
+                displayBounds: surfaceDisplayBounds
+            )
+        }
     }
 
     /// Any request-owned provider UI which the native configuration sheet can
@@ -3076,10 +3253,10 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     }
 }
 
-/// One full-display frame from the app-owned Android runtime. The frame is
-/// deliberately bound to the same request ID and UI generation used by the
-/// structured Bridge protocol; it is presentation data, never evidence that
-/// an authorization or configuration operation succeeded.
+/// One full-display or request-owned Dialog crop from the app-owned Android
+/// runtime. The frame is deliberately bound to the same request, provider,
+/// window and UI generation used by the structured Bridge protocol; it is
+/// presentation data, never evidence that an operation succeeded.
 struct AndroidActionSurfaceFrame: Equatable, Sendable {
     let interactionID: UUID
     let providerOwnerID: String
@@ -3090,6 +3267,55 @@ struct AndroidActionSurfaceFrame: Equatable, Sendable {
     let pngData: Data
     let pixelWidth: Int
     let pixelHeight: Int
+    let presentationMode: AndroidActionSurfacePresentationMode
+    let fallbackReason: String
+    let windowID: String
+    let windowRevision: Int
+    let windowStackDepth: Int
+    let captureOriginX: Int
+    let captureOriginY: Int
+    let displayPixelWidth: Int
+    let displayPixelHeight: Int
+
+    init(
+        interactionID: UUID,
+        providerOwnerID: String,
+        runtimeGeneration: String,
+        surfaceMode: String,
+        generation: Int,
+        frameSequence: UInt64,
+        pngData: Data,
+        pixelWidth: Int,
+        pixelHeight: Int,
+        presentationMode: AndroidActionSurfacePresentationMode = .fullDisplay,
+        fallbackReason: String = "",
+        windowID: String = "",
+        windowRevision: Int = 0,
+        windowStackDepth: Int = 0,
+        captureOriginX: Int = 0,
+        captureOriginY: Int = 0,
+        displayPixelWidth: Int? = nil,
+        displayPixelHeight: Int? = nil
+    ) {
+        self.interactionID = interactionID
+        self.providerOwnerID = providerOwnerID
+        self.runtimeGeneration = runtimeGeneration
+        self.surfaceMode = surfaceMode
+        self.generation = generation
+        self.frameSequence = frameSequence
+        self.pngData = pngData
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+        self.presentationMode = presentationMode
+        self.fallbackReason = fallbackReason
+        self.windowID = windowID
+        self.windowRevision = windowRevision
+        self.windowStackDepth = windowStackDepth
+        self.captureOriginX = captureOriginX
+        self.captureOriginY = captureOriginY
+        self.displayPixelWidth = displayPixelWidth ?? pixelWidth
+        self.displayPixelHeight = displayPixelHeight ?? pixelHeight
+    }
 
     static func == (
         lhs: AndroidActionSurfaceFrame,
@@ -3103,11 +3329,96 @@ struct AndroidActionSurfaceFrame: Equatable, Sendable {
             && lhs.frameSequence == rhs.frameSequence
             && lhs.pixelWidth == rhs.pixelWidth
             && lhs.pixelHeight == rhs.pixelHeight
+            && lhs.presentationMode == rhs.presentationMode
+            && lhs.fallbackReason == rhs.fallbackReason
+            && lhs.windowID == rhs.windowID
+            && lhs.windowRevision == rhs.windowRevision
+            && lhs.windowStackDepth == rhs.windowStackDepth
+            && lhs.captureOriginX == rhs.captureOriginX
+            && lhs.captureOriginY == rhs.captureOriginY
+            && lhs.displayPixelWidth == rhs.displayPixelWidth
+            && lhs.displayPixelHeight == rhs.displayPixelHeight
     }
 
     var aspectRatio: Double {
         guard pixelWidth > 0, pixelHeight > 0 else { return 1 }
         return Double(pixelWidth) / Double(pixelHeight)
+    }
+
+    var captureDescriptor: AndroidActionSurfaceCaptureDescriptor {
+        AndroidActionSurfaceCaptureDescriptor(
+            presentationMode: presentationMode,
+            fallbackReason: fallbackReason,
+            windowID: windowID,
+            windowRevision: windowRevision,
+            windowStackDepth: windowStackDepth,
+            windowBounds: presentationMode == .dialogCrop
+                ? AndroidBridgeSurfaceBounds(
+                    left: captureOriginX,
+                    top: captureOriginY,
+                    right: captureOriginX + pixelWidth,
+                    bottom: captureOriginY + pixelHeight,
+                    width: pixelWidth,
+                    height: pixelHeight
+                )
+                : nil,
+            displayBounds: AndroidBridgeDisplayBounds(
+                width: displayPixelWidth,
+                height: displayPixelHeight
+            )
+        )
+    }
+
+    var hasValidCaptureGeometry: Bool {
+        guard pixelWidth > 0,
+              pixelHeight > 0,
+              displayPixelWidth > 0,
+              displayPixelHeight > 0,
+              captureOriginX >= 0,
+              captureOriginY >= 0,
+              captureOriginX + pixelWidth <= displayPixelWidth,
+              captureOriginY + pixelHeight <= displayPixelHeight else {
+            return false
+        }
+        switch presentationMode {
+        case .dialogCrop:
+            return !windowID.isEmpty
+                && windowRevision > 0
+                && windowStackDepth > 0
+        case .fullDisplay:
+            return captureOriginX == 0
+                && captureOriginY == 0
+                && pixelWidth == displayPixelWidth
+                && pixelHeight == displayPixelHeight
+        }
+    }
+
+    func matches(
+        captureDescriptor expected: AndroidActionSurfaceCaptureDescriptor
+    ) -> Bool {
+        guard presentationMode == expected.presentationMode,
+              fallbackReason == expected.fallbackReason,
+              windowID == expected.windowID,
+              windowRevision == expected.windowRevision,
+              windowStackDepth == expected.windowStackDepth else {
+            return false
+        }
+        if let display = expected.displayBounds,
+           display.width != displayPixelWidth
+                || display.height != displayPixelHeight {
+            return false
+        }
+        if expected.presentationMode == .dialogCrop {
+            guard let bounds = expected.windowBounds else { return false }
+            return bounds.left == captureOriginX
+                && bounds.top == captureOriginY
+                && bounds.width == pixelWidth
+                && bounds.height == pixelHeight
+        }
+        return captureOriginX == 0
+            && captureOriginY == 0
+            && pixelWidth == displayPixelWidth
+            && pixelHeight == displayPixelHeight
     }
 
     static func pngPixelSize(_ data: Data) -> (width: Int, height: Int)? {
@@ -3144,14 +3455,16 @@ extension AndroidDexBridgeClient {
         guard let providerOwnerID = before.providerOwnerID?
                 .nonEmptyBridgeValue,
               let generation = before.interactionGeneration,
-              let surfaceMode = before.normalizedActionSurfaceMode else {
+              let surfaceMode = before.normalizedActionSurfaceMode,
+              let captureDescriptor = before.actionSurfaceCaptureDescriptor else {
             throw CancellationError()
         }
         let frame = try await runtime.captureActionSurface(
             interactionID: interactionID,
             providerOwnerID: providerOwnerID,
             surfaceMode: surfaceMode,
-            generation: generation
+            generation: generation,
+            captureDescriptor: captureDescriptor
         )
         let after = try await activeSurfaceState(
             interactionID: interactionID
@@ -3159,10 +3472,12 @@ extension AndroidDexBridgeClient {
         guard after.providerOwnerID?.nonEmptyBridgeValue == providerOwnerID,
               after.normalizedActionSurfaceMode == surfaceMode,
               after.interactionGeneration == generation,
+              after.actionSurfaceCaptureDescriptor == captureDescriptor,
               frame.interactionID == interactionID,
               frame.providerOwnerID == providerOwnerID,
               frame.surfaceMode == surfaceMode,
-              frame.generation == generation else {
+              frame.generation == generation,
+              frame.matches(captureDescriptor: captureDescriptor) else {
             throw CancellationError()
         }
         return frame
@@ -3179,7 +3494,9 @@ extension AndroidDexBridgeClient {
         )
         guard state.providerOwnerID?.nonEmptyBridgeValue
                 == frame.providerOwnerID,
-              state.normalizedActionSurfaceMode == frame.surfaceMode else {
+              state.normalizedActionSurfaceMode == frame.surfaceMode,
+              let descriptor = state.actionSurfaceCaptureDescriptor,
+              frame.matches(captureDescriptor: descriptor) else {
             throw CancellationError()
         }
         try await runtime.tapActionSurface(
@@ -3203,7 +3520,9 @@ extension AndroidDexBridgeClient {
         )
         guard state.providerOwnerID?.nonEmptyBridgeValue
                 == frame.providerOwnerID,
-              state.normalizedActionSurfaceMode == frame.surfaceMode else {
+              state.normalizedActionSurfaceMode == frame.surfaceMode,
+              let descriptor = state.actionSurfaceCaptureDescriptor,
+              frame.matches(captureDescriptor: descriptor) else {
             throw CancellationError()
         }
         try await runtime.swipeActionSurface(
@@ -3225,7 +3544,9 @@ extension AndroidDexBridgeClient {
         )
         guard state.providerOwnerID?.nonEmptyBridgeValue
                 == frame.providerOwnerID,
-              state.normalizedActionSurfaceMode == frame.surfaceMode else {
+              state.normalizedActionSurfaceMode == frame.surfaceMode,
+              let descriptor = state.actionSurfaceCaptureDescriptor,
+              frame.matches(captureDescriptor: descriptor) else {
             throw CancellationError()
         }
         try await runtime.backActionSurface(
@@ -3243,8 +3564,40 @@ extension AndroidDexBridgeClient {
         )
         guard state.providerOwnerID?.nonEmptyBridgeValue
                 == frame.providerOwnerID,
-              state.normalizedActionSurfaceMode == frame.surfaceMode else {
+              state.normalizedActionSurfaceMode == frame.surfaceMode,
+              let descriptor = state.actionSurfaceCaptureDescriptor,
+              frame.matches(captureDescriptor: descriptor) else {
             throw CancellationError()
+        }
+        if frame.presentationMode == .dialogCrop {
+            guard !text.isEmpty, text.utf8.count <= 16_384 else {
+                throw AppError.spider("发送到 Android 操作界面的文字为空或过长")
+            }
+            var request = URLRequest(
+                url: Self.interactionURL(frame.interactionID, suffix: "text")
+            )
+            request.httpMethod = "POST"
+            request.timeoutInterval = 5
+            request.setValue(
+                "application/json",
+                forHTTPHeaderField: "Content-Type"
+            )
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "text": text,
+                "windowID": frame.windowID,
+                "windowRevision": frame.windowRevision
+            ])
+            let (data, response) = try await bridgeData(
+                for: request,
+                legacyURL: nil
+            )
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  let value = try? JSONSerialization.jsonObject(with: data)
+                    as? [String: Any],
+                  value["textAccepted"] as? Bool == true else {
+                throw AppError.spider("Android Dialog 当前输入焦点已失效")
+            }
+            return
         }
         try await runtime.typeActionSurface(frame: frame, text: text)
     }
@@ -3851,8 +4204,8 @@ struct AndroidInstalledPackageContinuity: Equatable, Sendable {
 }
 
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.41"
-    static let bridgeVersionCode = 53
+    static let bridgeVersion = "0.3.42"
+    static let bridgeVersionCode = 54
     static let bridgeApplicationID = "com.okvideomac.dexbridge"
     static let bridgeCertificateSHA256 =
         "33e95ef23b662f2629a23df892aaff52ae6216f7492cfb559a63d37247a059e0"
@@ -3923,8 +4276,11 @@ actor AndroidDexBridgeRuntime {
         var providerOwnerID: String?
         var surfaceMode: String?
         var surfaceGeneration: Int?
+        var captureDescriptor: AndroidActionSurfaceCaptureDescriptor?
         var pixelWidth: Int?
         var pixelHeight: Int?
+        var displayPixelWidth: Int?
+        var displayPixelHeight: Int?
         /// Monotonic token assigned before each async screencap. Only the most
         /// recently admitted capture may commit after actor re-entry.
         var latestCaptureToken: UInt64 = 0
@@ -3975,9 +4331,9 @@ actor AndroidDexBridgeRuntime {
         )
     }
 
-    /// Returns a full frame from the single emulator instance owned by this
-    /// runtime. Unlike the Bridge's QR snapshot, this includes every Android
-    /// Window (Dialog, WebView, permission sheet and external Activity).
+    /// Starts the single emulator display lease owned by this ActionSession.
+    /// Each capture may remain full-display or become a Bridge-authorized
+    /// top-level Dialog crop without changing the underlying Android UI.
     func beginActionSurfaceSession(interactionID: UUID) async throws {
         let (identity, _) = try await readyOwnedRuntime()
         actionSurfaceLease = ActionSurfaceLease(
@@ -3986,8 +4342,11 @@ actor AndroidDexBridgeRuntime {
             providerOwnerID: nil,
             surfaceMode: nil,
             surfaceGeneration: nil,
+            captureDescriptor: nil,
             pixelWidth: nil,
-            pixelHeight: nil
+            pixelHeight: nil,
+            displayPixelWidth: nil,
+            displayPixelHeight: nil
         )
     }
 
@@ -4003,7 +4362,8 @@ actor AndroidDexBridgeRuntime {
         interactionID: UUID,
         providerOwnerID: String,
         surfaceMode: String,
-        generation: Int
+        generation: Int,
+        captureDescriptor: AndroidActionSurfaceCaptureDescriptor
     ) async throws -> AndroidActionSurfaceFrame {
         guard var lease = actionSurfaceLease,
               lease.interactionID == interactionID,
@@ -4015,18 +4375,20 @@ actor AndroidDexBridgeRuntime {
         lease.latestCaptureToken &+= 1
         let captureToken = lease.latestCaptureToken
         actionSurfaceLease = lease
-        let data = try await runVerifiedADBBinary(
+        let fullDisplayData = try await runVerifiedADBBinary(
             identity,
             toolchain: toolchain,
             ["exec-out", "screencap", "-p"],
             category: "adb.surface.capture",
             timeout: 5
         )
-        guard data.count >= 24,
-              data.count <= 32 * 1_024 * 1_024,
-              let size = AndroidActionSurfaceFrame.pngPixelSize(data),
-              size.width <= 8_192,
-              size.height <= 8_192,
+        guard fullDisplayData.count >= 24,
+              fullDisplayData.count <= 32 * 1_024 * 1_024,
+              let displaySize = AndroidActionSurfaceFrame.pngPixelSize(
+                fullDisplayData
+              ),
+              displaySize.width <= 8_192,
+              displaySize.height <= 8_192,
               var current = actionSurfaceLease,
               current.interactionID == interactionID,
               current.runtimeGeneration == identity.generation,
@@ -4036,11 +4398,60 @@ actor AndroidDexBridgeRuntime {
               loadIdentity()?.generation == identity.generation else {
             throw CancellationError()
         }
+        let output: (
+            data: Data,
+            width: Int,
+            height: Int,
+            originX: Int,
+            originY: Int
+        )
+        switch captureDescriptor.presentationMode {
+        case .dialogCrop:
+            guard let bounds = captureDescriptor.windowBounds,
+                  let declaredDisplay = captureDescriptor.displayBounds,
+                  declaredDisplay.width == displaySize.width,
+                  declaredDisplay.height == displaySize.height else {
+                throw CancellationError()
+            }
+            let cropped = try AndroidActionSurfaceImageCropper.crop(
+                pngData: fullDisplayData,
+                bounds: bounds,
+                display: declaredDisplay
+            )
+            guard let cropSize = AndroidActionSurfaceFrame.pngPixelSize(cropped),
+                  cropSize.width == bounds.width,
+                  cropSize.height == bounds.height else {
+                throw CancellationError()
+            }
+            output = (
+                cropped,
+                cropSize.width,
+                cropSize.height,
+                bounds.left,
+                bounds.top
+            )
+        case .fullDisplay:
+            if let declaredDisplay = captureDescriptor.displayBounds,
+               declaredDisplay.width != displaySize.width
+                    || declaredDisplay.height != displaySize.height {
+                throw CancellationError()
+            }
+            output = (
+                fullDisplayData,
+                displaySize.width,
+                displaySize.height,
+                0,
+                0
+            )
+        }
         current.providerOwnerID = providerOwnerID
         current.surfaceMode = surfaceMode
         current.surfaceGeneration = generation
-        current.pixelWidth = size.width
-        current.pixelHeight = size.height
+        current.captureDescriptor = captureDescriptor
+        current.pixelWidth = output.width
+        current.pixelHeight = output.height
+        current.displayPixelWidth = displaySize.width
+        current.displayPixelHeight = displaySize.height
         current.frameSequence = captureToken
         actionSurfaceLease = current
         return AndroidActionSurfaceFrame(
@@ -4050,9 +4461,18 @@ actor AndroidDexBridgeRuntime {
             surfaceMode: surfaceMode,
             generation: generation,
             frameSequence: captureToken,
-            pngData: data,
-            pixelWidth: size.width,
-            pixelHeight: size.height
+            pngData: output.data,
+            pixelWidth: output.width,
+            pixelHeight: output.height,
+            presentationMode: captureDescriptor.presentationMode,
+            fallbackReason: captureDescriptor.fallbackReason,
+            windowID: captureDescriptor.windowID,
+            windowRevision: captureDescriptor.windowRevision,
+            windowStackDepth: captureDescriptor.windowStackDepth,
+            captureOriginX: output.originX,
+            captureOriginY: output.originY,
+            displayPixelWidth: displaySize.width,
+            displayPixelHeight: displaySize.height
         )
     }
 
@@ -4068,7 +4488,11 @@ actor AndroidDexBridgeRuntime {
             x: x,
             y: y,
             width: lease.pixelWidth,
-            height: lease.pixelHeight
+            height: lease.pixelHeight,
+            originX: frame.captureOriginX,
+            originY: frame.captureOriginY,
+            displayWidth: lease.displayPixelWidth,
+            displayHeight: lease.displayPixelHeight
         )
         _ = try run(
             toolchain.adb,
@@ -4096,13 +4520,21 @@ actor AndroidDexBridgeRuntime {
             x: fromX,
             y: fromY,
             width: lease.pixelWidth,
-            height: lease.pixelHeight
+            height: lease.pixelHeight,
+            originX: frame.captureOriginX,
+            originY: frame.captureOriginY,
+            displayWidth: lease.displayPixelWidth,
+            displayHeight: lease.displayPixelHeight
         )
         let end = try Self.surfacePoint(
             x: toX,
             y: toY,
             width: lease.pixelWidth,
-            height: lease.pixelHeight
+            height: lease.pixelHeight,
+            originX: frame.captureOriginX,
+            originY: frame.captureOriginY,
+            displayWidth: lease.displayPixelWidth,
+            displayHeight: lease.displayPixelHeight
         )
         let duration = min(2_000, max(50, durationMilliseconds))
         _ = try run(
@@ -4198,10 +4630,14 @@ actor AndroidDexBridgeRuntime {
               lease.runtimeGeneration == frame.runtimeGeneration,
               lease.surfaceMode == frame.surfaceMode,
               lease.surfaceGeneration == frame.generation,
+              let captureDescriptor = lease.captureDescriptor,
+              frame.matches(captureDescriptor: captureDescriptor),
               lease.providerOwnerID == frame.providerOwnerID,
               lease.frameSequence == frame.frameSequence,
               lease.pixelWidth == frame.pixelWidth,
-              lease.pixelHeight == frame.pixelHeight else {
+              lease.pixelHeight == frame.pixelHeight,
+              lease.displayPixelWidth == frame.displayPixelWidth,
+              lease.displayPixelHeight == frame.displayPixelHeight else {
             throw CancellationError()
         }
         let (identity, toolchain) = try ownedRuntime(for: lease)
@@ -4212,19 +4648,29 @@ actor AndroidDexBridgeRuntime {
         x: Int,
         y: Int,
         width: Int?,
-        height: Int?
+        height: Int?,
+        originX: Int,
+        originY: Int,
+        displayWidth: Int?,
+        displayHeight: Int?
     ) throws -> (x: Int, y: Int) {
         guard let width,
               let height,
-              width > 0,
-              height > 0,
-              x >= 0,
-              y >= 0,
-              x < width,
-              y < height else {
+              let displayWidth,
+              let displayHeight,
+              let point = AndroidActionSurfaceInputGeometryPolicy.displayPoint(
+                localX: x,
+                localY: y,
+                cropWidth: width,
+                cropHeight: height,
+                originX: originX,
+                originY: originY,
+                displayWidth: displayWidth,
+                displayHeight: displayHeight
+              ) else {
             throw AppError.spider("Android 配置画面坐标已失效")
         }
-        return (x, y)
+        return point
     }
 
     private func transition(

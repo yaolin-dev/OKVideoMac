@@ -1721,6 +1721,11 @@ struct CloudAuthorizationView: View {
                         CloudAuthorizationPresentationPolicy
                             .maximumSurfaceHeight(
                                 containerHeight: geometry.size.height
+                            ),
+                    availableSurfaceWidth:
+                        CloudAuthorizationPresentationPolicy
+                            .availableSurfaceWidth(
+                                containerWidth: geometry.size.width
                             )
                 )
                 .padding(CloudAuthorizationPresentationPolicy.outerInset)
@@ -1731,7 +1736,8 @@ struct CloudAuthorizationView: View {
     }
 
     private func authorizationCard(
-        maximumSurfaceHeight: CGFloat
+        maximumSurfaceHeight: CGFloat,
+        availableSurfaceWidth: CGFloat
     ) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
@@ -1780,6 +1786,7 @@ struct CloudAuthorizationView: View {
                         frame: surfaceFrame,
                         disabled: isTerminal,
                         maximumHeight: maximumSurfaceHeight,
+                        availableWidth: availableSurfaceWidth,
                         onTap: { x, y in
                             Task {
                                 await state.tapCloudAuthorizationSurface(
@@ -1894,9 +1901,15 @@ struct CloudAuthorizationView: View {
         }
         .padding(22)
         .frame(
-            minWidth: usesCompactSurfaceLayout ? 440 : 560,
-            idealWidth: usesCompactSurfaceLayout ? 500 : 700,
-            maxWidth: usesCompactSurfaceLayout ? 580 : 780
+            minWidth: minimumCardWidth(
+                availableSurfaceWidth: availableSurfaceWidth
+            ),
+            idealWidth: idealCardWidth(
+                availableSurfaceWidth: availableSurfaceWidth
+            ),
+            maxWidth: maximumCardWidth(
+                availableSurfaceWidth: availableSurfaceWidth
+            )
         )
         .background(
             .regularMaterial,
@@ -1941,6 +1954,43 @@ struct CloudAuthorizationView: View {
         return surfaceFrame.pixelHeight > surfaceFrame.pixelWidth
     }
 
+    private var usesDialogCropLayout: Bool {
+        surfaceFrame?.presentationMode == .dialogCrop
+    }
+
+    private func minimumCardWidth(
+        availableSurfaceWidth: CGFloat
+    ) -> CGFloat {
+        if usesDialogCropLayout {
+            return min(
+                440,
+                availableSurfaceWidth
+                    + CloudAuthorizationPresentationPolicy.cardHorizontalPadding
+            )
+        }
+        return usesCompactSurfaceLayout ? 440 : 560
+    }
+
+    private func idealCardWidth(
+        availableSurfaceWidth: CGFloat
+    ) -> CGFloat {
+        if usesDialogCropLayout {
+            return availableSurfaceWidth
+                + CloudAuthorizationPresentationPolicy.cardHorizontalPadding
+        }
+        return usesCompactSurfaceLayout ? 500 : 700
+    }
+
+    private func maximumCardWidth(
+        availableSurfaceWidth: CGFloat
+    ) -> CGFloat {
+        if usesDialogCropLayout {
+            return availableSurfaceWidth
+                + CloudAuthorizationPresentationPolicy.cardHorizontalPadding
+        }
+        return usesCompactSurfaceLayout ? 580 : 780
+    }
+
     private var lifecycleStatus: String {
         switch prompt.lifecyclePhase {
         case .invoking:
@@ -1960,12 +2010,26 @@ struct CloudAuthorizationView: View {
 
 enum CloudAuthorizationPresentationPolicy {
     static let outerInset: CGFloat = 30
+    static let cardHorizontalPadding: CGFloat = 44
     private static let cardChromeAndMargins: CGFloat = 300
+    private static let maximumDialogLayoutWidth: CGFloat = 780
 
     static func maximumSurfaceHeight(containerHeight: CGFloat) -> CGFloat {
         min(
             520,
             max(260, containerHeight - cardChromeAndMargins)
+        )
+    }
+
+    static func availableSurfaceWidth(containerWidth: CGFloat) -> CGFloat {
+        min(
+            maximumDialogLayoutWidth,
+            max(
+                240,
+                containerWidth
+                    - outerInset * 2
+                    - cardHorizontalPadding
+            )
         )
     }
 }
@@ -1974,18 +2038,35 @@ enum AndroidActionSurfacePresentationPolicy {
     static func preferredSize(
         pixelWidth: Int,
         pixelHeight: Int,
-        maximumHeight: CGFloat = 520
+        maximumHeight: CGFloat = 520,
+        availableWidth: CGFloat = 700,
+        presentationMode: AndroidActionSurfacePresentationMode = .fullDisplay
     ) -> CGSize {
         guard pixelWidth > 0, pixelHeight > 0 else {
             return CGSize(width: 260, height: 260)
         }
         let ratio = CGFloat(pixelWidth) / CGFloat(pixelHeight)
         let heightLimit = max(260, maximumHeight)
+        if presentationMode == .dialogCrop {
+            let widthLimit = max(1, availableWidth)
+            let proportionalLower = widthLimit * 0.65
+            let proportionalUpper = widthLimit * 0.80
+            let softTarget = min(
+                560,
+                max(480, widthLimit * 0.72)
+            )
+            let targetWidth = min(
+                proportionalUpper,
+                max(proportionalLower, softTarget)
+            )
+            let width = min(targetWidth, heightLimit * ratio)
+            return CGSize(width: width, height: width / ratio)
+        }
         let targetHeight = min(
             heightLimit,
             max(260, 700 / max(0.2, ratio))
         )
-        let width = min(700, targetHeight * ratio)
+        let width = min(max(1, availableWidth), 700, targetHeight * ratio)
         return CGSize(width: width, height: width / ratio)
     }
 }
@@ -2052,6 +2133,7 @@ private struct AndroidActionSurfaceView: View {
     let frame: AndroidActionSurfaceFrame
     let disabled: Bool
     let maximumHeight: CGFloat
+    let availableWidth: CGFloat
     let onTap: (Int, Int) -> Void
     let onSwipe: (Int, Int, Int, Int) -> Void
 
@@ -2062,7 +2144,9 @@ private struct AndroidActionSurfaceView: View {
                     AndroidActionSurfacePresentationPolicy.preferredSize(
                         pixelWidth: frame.pixelWidth,
                         pixelHeight: frame.pixelHeight,
-                        maximumHeight: maximumHeight
+                        maximumHeight: maximumHeight,
+                        availableWidth: availableWidth,
+                        presentationMode: frame.presentationMode
                     )
                 GeometryReader { geometry in
                     let fitted = AndroidActionSurfaceGeometryPolicy.fittedRect(
@@ -2073,7 +2157,9 @@ private struct AndroidActionSurfaceView: View {
                         )
                     )
                     ZStack(alignment: .topLeading) {
-                        Color.black.opacity(0.82)
+                        if frame.presentationMode == .fullDisplay {
+                            Color.black.opacity(0.82)
+                        }
                         Image(nsImage: image)
                             .resizable()
                             .interpolation(.high)

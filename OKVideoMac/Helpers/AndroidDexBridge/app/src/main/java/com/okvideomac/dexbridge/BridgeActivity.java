@@ -17,9 +17,9 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * <p>Interactive provider actions run in a disposable
  * {@link BridgeActionActivity}. The bridge observes only that Activity's
- * request-owned lifecycle and window-focus callbacks. It never traverses
- * WindowManagerGlobal, reads provider view trees, decodes QR codes, or
- * translates Android controls into a second host UI.</p>
+ * request-owned lifecycle and top-level window metadata. It never traverses
+ * provider child-view trees, reads labels, decodes QR codes, or translates
+ * Android controls into a second host UI.</p>
  */
 public final class BridgeActivity extends Activity {
     private static volatile WeakReference<BridgeActivity> current =
@@ -224,7 +224,29 @@ public final class BridgeActivity extends Activity {
                 && !BridgeInteractionRegistry.terminal(interactionID);
         boolean scoped = current && status.requestScoped;
         boolean external = scoped && status.delegatedSurfaceActive;
-        boolean providerWindow = scoped && status.providerWindowActive;
+        BridgeDialogWindowTracker.Snapshot windows = status.dialogWindows;
+        BridgeDialogWindowTracker.WindowEntry topWindow =
+                windows == null ? null : windows.topWindow();
+        boolean providerWindow = scoped
+                && (status.providerWindowActive || topWindow != null);
+        String presentationMode = "none";
+        String fallbackReason = "";
+        if (external) {
+            presentationMode = "fullDisplay";
+            fallbackReason = "externalActivity";
+        } else if (topWindow != null) {
+            if (topWindow.nearFullDisplay) {
+                presentationMode = "fullDisplay";
+                fallbackReason = "nearFullDisplayDialog";
+            } else {
+                presentationMode = "dialogCrop";
+            }
+        } else if (providerWindow) {
+            presentationMode = "fullDisplay";
+            fallbackReason = windows != null && windows.scanAvailable
+                    ? "dialogBoundsUnavailable"
+                    : "dialogTrackerUnavailable";
+        }
 
         JSONObject state = new JSONObject();
         state.put("visible", providerWindow);
@@ -244,6 +266,40 @@ public final class BridgeActivity extends Activity {
         state.put(
                 "surfaceHostLifecycle",
                 scoped ? status.hostLifecycle : "none"
+        );
+        state.put("surfacePresentationMode", presentationMode);
+        state.put("surfaceFallbackReason", fallbackReason);
+        state.put(
+                "surfaceWindowID",
+                topWindow == null ? "" : topWindow.windowID
+        );
+        state.put(
+                "surfaceWindowRevision",
+                windows == null ? 0L : windows.revision
+        );
+        state.put(
+                "surfaceWindowStackDepth",
+                windows == null ? 0 : windows.stack.size()
+        );
+        state.put(
+                "surfaceWindowBounds",
+                topWindow == null
+                        ? JSONObject.NULL
+                        : BridgeDialogWindowTracker.WindowEntry.boundsJSON(
+                                topWindow.bounds
+                        )
+        );
+        state.put(
+                "surfaceDisplayBounds",
+                windows == null ? JSONObject.NULL : windows.displayJSON()
+        );
+        state.put(
+                "surfaceDialogStack",
+                windows == null ? new org.json.JSONArray() : windows.stackJSON()
+        );
+        state.put(
+                "surfaceDialogTrackerAvailable",
+                windows != null && windows.scanAvailable
         );
         state.put("providerWindowActive", providerWindow);
         state.put("sawProviderWindow", scoped && status.sawProviderWindow);
