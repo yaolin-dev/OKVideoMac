@@ -1934,9 +1934,13 @@ struct CloudAuthorizationView: View {
 
 enum CloudAuthorizationPresentationPolicy {
     static let outerInset: CGFloat = 30
+    private static let cardChromeAndMargins: CGFloat = 300
 
     static func maximumSurfaceHeight(containerHeight: CGFloat) -> CGFloat {
-        min(520, max(260, containerHeight - 270))
+        min(
+            520,
+            max(260, containerHeight - cardChromeAndMargins)
+        )
     }
 }
 

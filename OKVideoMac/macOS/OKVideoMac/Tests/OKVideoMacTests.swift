@@ -3908,7 +3908,7 @@ final class OKVideoMacTests: XCTestCase {
             CloudAuthorizationPresentationPolicy.maximumSurfaceHeight(
                 containerHeight: 717
             ),
-            447
+            417
         )
         XCTAssertEqual(
             CloudAuthorizationPresentationPolicy.maximumSurfaceHeight(
