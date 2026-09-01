@@ -3200,17 +3200,12 @@ enum PlayerWindowMutationPolicy {
 }
 
 enum PlayerWindowAspectPolicy {
-    static let liveAspectRatio = 16.0 / 9.0
-
     static func aspectRatio(
         isLivePlayback: Bool,
         override: String?,
         videoWidth: Int,
         videoHeight: Int
     ) -> Double? {
-        if isLivePlayback {
-            return liveAspectRatio
-        }
         if let override,
            let ratio = parsedAspectRatio(override) {
             return ratio

@@ -8961,21 +8961,22 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testLiveWindowAlwaysUsesSixteenByNineRegardlessOfChannelVideo() {
-        let ratio = PlayerWindowAspectPolicy.aspectRatio(
+    func testLiveWindowUsesManualOverrideOrDecodedChannelRatio() {
+        let overriddenRatio = PlayerWindowAspectPolicy.aspectRatio(
             isLivePlayback: true,
             override: "4:3",
-            videoWidth: 720,
+            videoWidth: 1_920,
+            videoHeight: 1_080
+        )
+        let decodedRatio = PlayerWindowAspectPolicy.aspectRatio(
+            isLivePlayback: true,
+            override: nil,
+            videoWidth: 768,
             videoHeight: 576
         )
 
-        XCTAssertEqual(ratio ?? 0, 16.0 / 9.0, accuracy: 0.0001)
-        XCTAssertTrue(
-            PlayerViewportPolicy.usesFixedLiveWindow(siteKey: "live")
-        )
-        XCTAssertFalse(
-            PlayerViewportPolicy.usesFixedLiveWindow(siteKey: "vod")
-        )
+        XCTAssertEqual(overriddenRatio ?? 0, 4.0 / 3.0, accuracy: 0.0001)
+        XCTAssertEqual(decodedRatio ?? 0, 4.0 / 3.0, accuracy: 0.0001)
         XCTAssertEqual(
             PlayerViewportPolicy.panscan(siteKey: "live"),
             0,
@@ -9151,6 +9152,138 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(size.width / size.height, 16.0 / 9.0, accuracy: 0.0001)
         XCTAssertGreaterThanOrEqual(size.width, 900)
         XCTAssertGreaterThanOrEqual(size.height, 600)
+    }
+
+    func testAutomaticPlayerWindowKeepsViewingWidthAcrossRatios() {
+        var preference = PlayerWindowPreference.default
+        preference.viewingWidth = 1_200
+
+        let cinema = PlayerWindowPreferencePolicy.contentSize(
+            preference: preference,
+            aspectRatio: 2.4,
+            maximum: NSSize(width: 2_000, height: 1_200)
+        )
+        let classic = PlayerWindowPreferencePolicy.contentSize(
+            preference: preference,
+            aspectRatio: 4.0 / 3.0,
+            maximum: NSSize(width: 2_000, height: 1_200)
+        )
+
+        XCTAssertEqual(cinema, NSSize(width: 1_200, height: 500))
+        XCTAssertEqual(classic, NSSize(width: 1_200, height: 900))
+    }
+
+    func testAutomaticPlayerWindowFitsAvailableScreenWithoutChangingRatio() {
+        var preference = PlayerWindowPreference.default
+        preference.viewingWidth = 1_600
+        let size = PlayerWindowPreferencePolicy.contentSize(
+            preference: preference,
+            aspectRatio: 4.0 / 3.0,
+            maximum: NSSize(width: 900, height: 600)
+        )
+
+        XCTAssertEqual(size.width, 800, accuracy: 0.001)
+        XCTAssertEqual(size.height, 600, accuracy: 0.001)
+        XCTAssertEqual(size.width / size.height, 4.0 / 3.0, accuracy: 0.0001)
+    }
+
+    func testFixedPlayerWindowRestoresExactSavedShape() {
+        var preference = PlayerWindowPreference.default
+        preference.mode = .fixedFrame
+        preference.fixedWidth = 1_000
+        preference.fixedHeight = 700
+
+        let size = PlayerWindowPreferencePolicy.contentSize(
+            preference: preference,
+            aspectRatio: 2.4,
+            maximum: NSSize(width: 1_800, height: 1_000)
+        )
+
+        XCTAssertEqual(size, NSSize(width: 1_000, height: 700))
+    }
+
+    @MainActor
+    func testPlayerWindowPreferenceStoreSeparatesAutomaticAndFixedSizes() throws {
+        let suiteName = "OKVideoMacTests.PlayerWindow.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let key = "fixture.player-window"
+        let store = PlayerWindowPreferenceStore(
+            defaults: defaults,
+            storageKey: key
+        )
+
+        store.saveUserFrame(
+            contentSize: NSSize(width: 1_300, height: 540),
+            windowFrame: NSRect(x: 100, y: 120, width: 1_300, height: 540),
+            visibleFrame: NSRect(x: 0, y: 0, width: 2_000, height: 1_200),
+            screenIdentifier: 42
+        )
+        XCTAssertEqual(store.preference.viewingWidth, 1_300)
+        XCTAssertEqual(store.preference.fixedWidth, 1_152)
+        XCTAssertEqual(store.preference.fixedHeight, 648)
+
+        store.setMode(.fixedFrame)
+        store.captureModeTransition(
+            to: .fixedFrame,
+            currentContentSize: NSSize(width: 1_300, height: 540)
+        )
+        store.saveUserFrame(
+            contentSize: NSSize(width: 980, height: 720),
+            windowFrame: NSRect(x: 180, y: 160, width: 980, height: 720),
+            visibleFrame: NSRect(x: 0, y: 0, width: 2_000, height: 1_200),
+            screenIdentifier: 42
+        )
+
+        let restored = PlayerWindowPreferenceStore(
+            defaults: defaults,
+            storageKey: key
+        )
+        XCTAssertEqual(restored.preference.mode, .fixedFrame)
+        XCTAssertEqual(restored.preference.viewingWidth, 1_300)
+        XCTAssertEqual(restored.preference.fixedWidth, 980)
+        XCTAssertEqual(restored.preference.fixedHeight, 720)
+        XCTAssertEqual(restored.preference.screenIdentifier, 42)
+    }
+
+    @MainActor
+    func testPlayerWindowLegacyFrameIsParsedWithoutMutatingNSWindow() throws {
+        let suiteName = "OKVideoMacTests.PlayerLegacy.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(
+            "168 123 1024 768 0 0 1440 877 ",
+            forKey: "NSWindow Frame \(PlayerWindowPreferenceStore.legacyFrameAutosaveName)"
+        )
+        let store = PlayerWindowPreferenceStore(
+            defaults: defaults,
+            storageKey: "fixture.legacy"
+        )
+
+        XCTAssertEqual(
+            store.legacyFrame(),
+            NSRect(x: 168, y: 123, width: 1_024, height: 768)
+        )
+    }
+
+    func testPlayerWindowPositionUsesNormalizedScreenCoordinates() throws {
+        let visibleFrame = NSRect(x: 1_440, y: 0, width: 1_920, height: 1_080)
+        let frame = NSRect(x: 1_920, y: 270, width: 960, height: 540)
+        let center = try XCTUnwrap(
+            PlayerWindowPreferencePolicy.normalizedCenter(
+                frame: frame,
+                visibleFrame: visibleFrame
+            )
+        )
+        let origin = PlayerWindowPreferencePolicy.frameOrigin(
+            frameSize: frame.size,
+            visibleFrame: visibleFrame,
+            normalizedCenterX: Double(center.x),
+            normalizedCenterY: Double(center.y)
+        )
+
+        XCTAssertEqual(origin.x, frame.origin.x, accuracy: 0.001)
+        XCTAssertEqual(origin.y, frame.origin.y, accuracy: 0.001)
     }
 
     @MainActor

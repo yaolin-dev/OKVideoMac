@@ -2115,7 +2115,6 @@ final class PlayerLifecycleController {
     private var rememberedAudioDelay: TimeInterval = 0
     private var rememberedAspectRatio: String?
     private var rememberedHardwareDecoding = true
-    private var usesFixedLiveWindow = false
 
     init(mode: PlayerTeardownMode = .configured()) {
         self.mode = mode
@@ -2279,14 +2278,11 @@ final class PlayerLifecycleController {
                 throw CancellationError()
             }
         }
-        usesFixedLiveWindow = PlayerViewportPolicy.usesFixedLiveWindow(
-            siteKey: media.siteKey
-        )
         try await player.load(
             media,
             startPosition: startPosition,
             requestID: requestID,
-            aspectRatio: usesFixedLiveWindow ? nil : rememberedAspectRatio,
+            aspectRatio: rememberedAspectRatio,
             panscan: PlayerViewportPolicy.panscan(siteKey: media.siteKey)
         )
     }
@@ -2357,7 +2353,6 @@ final class PlayerLifecycleController {
 
     func setAspectRatio(_ ratio: String?) async throws {
         rememberedAspectRatio = ratio
-        guard !usesFixedLiveWindow else { return }
         try await requireClient().setAspectRatio(ratio)
     }
 
@@ -2430,14 +2425,10 @@ final class PlayerLifecycleController {
 }
 
 enum PlayerViewportPolicy {
-    static func usesFixedLiveWindow(siteKey: String) -> Bool {
-        siteKey == "live"
-    }
-
     static func panscan(siteKey: String) -> Double {
-        // A fixed 16:9 live window must not imply destructive cropping.
-        // libmpv keeps the stream's display aspect ratio and naturally adds
-        // pillarbox/letterbox bars when an older source does not match 16:9.
+        // Window geometry follows mpv's decoded display size. Keep panscan at
+        // zero so adapting the outer window never crops subtitles or station
+        // logos that are part of the encoded image.
         0
     }
 }

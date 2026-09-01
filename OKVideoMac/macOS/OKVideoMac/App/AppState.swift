@@ -3579,6 +3579,7 @@ final class AppState: ObservableObject {
     @Published private(set) var appTheme: AppTheme = .system
     @Published private(set) var favoriteLiveChannelIDs: Set<String> = []
     @Published private(set) var deletedLiveChannelIDs: Set<String> = []
+    let playerWindowPreferences = PlayerWindowPreferenceStore()
     let playerSnapshotState = PlayerSnapshotState()
     private(set) var playerSnapshot: PlayerSnapshot {
         get { playerSnapshotState.snapshot }
@@ -8723,6 +8724,10 @@ final class AppState: ObservableObject {
 
     func restoreDefaultWindowLayout(_ target: AppWindowLayoutTarget) {
         appWindowLayoutCommand = AppWindowLayoutCommand(target: target)
+    }
+
+    func setPlayerWindowMode(_ mode: PlayerWindowMode) {
+        playerWindowPreferences.setMode(mode)
     }
 
     func presentQuickSwitcher() {

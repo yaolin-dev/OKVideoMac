@@ -199,17 +199,13 @@ struct SettingsView: View {
 
                 SettingsDivider()
 
-                SettingsControlRow(
-                    icon: "play.rectangle.on.rectangle.fill",
-                    color: .purple,
-                    title: "播放器窗口",
-                    subtitle: "自动记住大小和位置；默认约为 1152 × 648"
-                ) {
-                    Button("恢复默认") {
+                PlayerWindowSettingsControl(
+                    preferences: state.playerWindowPreferences,
+                    setMode: state.setPlayerWindowMode,
+                    restoreDefault: {
                         state.restoreDefaultWindowLayout(.playerWindow)
                     }
-                    .help("将播放器恢复到 16:9 的默认大小并在当前屏幕居中")
-                }
+                )
             }
 
             SettingsSectionTitle("隐私与记录")
@@ -1186,6 +1182,50 @@ private struct LiveSourceSettingsPane: View {
             types.append(m3u8)
         }
         return types
+    }
+}
+
+private struct PlayerWindowSettingsControl: View {
+    @ObservedObject var preferences: PlayerWindowPreferenceStore
+    let setMode: (PlayerWindowMode) -> Void
+    let restoreDefault: () -> Void
+
+    var body: some View {
+        SettingsControlRow(
+            icon: "play.rectangle.on.rectangle.fill",
+            color: .purple,
+            title: "播放器窗口",
+            subtitle: subtitle
+        ) {
+            HStack(spacing: 10) {
+                Picker(
+                    "播放器窗口模式",
+                    selection: Binding(
+                        get: { preferences.preference.mode },
+                        set: setMode
+                    )
+                ) {
+                    ForEach(PlayerWindowMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 250)
+
+                Button("恢复默认", action: restoreDefault)
+                    .help("清除播放器窗口的大小、位置和模式记录")
+            }
+        }
+    }
+
+    private var subtitle: String {
+        switch preferences.preference.mode {
+        case .automaticAspect:
+            return "记住窗口位置和观看尺度；高度会随视频比例调整"
+        case .fixedFrame:
+            return "精确恢复上次的宽度和高度；不同比例可能出现黑边"
+        }
     }
 }
 
