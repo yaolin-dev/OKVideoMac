@@ -10,7 +10,7 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源�
 
 ## 当前版本
 
-- 当前版本：0.3.66（Build 92）
+- 当前版本：0.3.67（Build 93）
 - 最低系统：macOS 12.0
 - 支持架构：Apple Silicon / arm64
 - 播放历史按点播配置源分组；切换同一配置内的站点不会隐藏历史，历史项仍保留

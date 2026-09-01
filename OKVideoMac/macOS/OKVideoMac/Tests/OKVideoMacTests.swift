@@ -8,6 +8,61 @@ import OKVideoPersistence
 @testable import OKVideoMac
 
 final class OKVideoMacTests: XCTestCase {
+    func testApplicationBundleProhibitsMultipleInstances() {
+        XCTAssertEqual(
+            Bundle.main.object(
+                forInfoDictionaryKey: "LSMultipleInstancesProhibited"
+            ) as? Bool,
+            true
+        )
+    }
+
+    func testApplicationInstancePolicyFindsOnlyAnotherProcess() {
+        XCTAssertNil(
+            ApplicationInstancePolicy.conflictingProcessIdentifier(
+                currentProcessIdentifier: 42,
+                runningProcessIdentifiers: [42]
+            )
+        )
+        XCTAssertEqual(
+            ApplicationInstancePolicy.conflictingProcessIdentifier(
+                currentProcessIdentifier: 42,
+                runningProcessIdentifiers: [42, 73]
+            ),
+            73
+        )
+    }
+
+    func testApplicationInstanceLeaseIsExclusiveAndReleases() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "OKVideoMacInstanceLease-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let lockURL = directory.appendingPathComponent("instance.lock")
+        var first: ApplicationInstanceLease? = try ApplicationInstanceLease(
+            lockURL: lockURL
+        )
+
+        XCTAssertThrowsError(try ApplicationInstanceLease(lockURL: lockURL)) {
+            XCTAssertTrue(
+                $0.localizedDescription.contains("另一个 OKVideoMac 实例")
+            )
+        }
+
+        first?.close()
+        first = nil
+        let reacquired = try ApplicationInstanceLease(lockURL: lockURL)
+        withExtendedLifetime(reacquired) {}
+    }
+
     func testXCTestHostUsesIsolatedRuntimeDirectories() throws {
         let directories = try AppEnvironment.runtimeDirectories(
             environment: ["XCTestConfigurationFilePath": "/tmp/test.xctestconfiguration"],
