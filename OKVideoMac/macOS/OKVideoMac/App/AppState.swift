@@ -14056,29 +14056,39 @@ final class AppState: ObservableObject {
                     _ = self.completePlaybackStartupGate(
                         requestID: requestID
                     )
-                case .ended(let requestID):
+                case .ended(let requestID, let origin):
                     guard PlaybackRequestOwnershipPolicy.accepts(
                         requestID: requestID,
                         activeRequestID: self.activePlayerRequestID
                     ) else {
                         continue
                     }
-                    if self.livePlaybackChannel != nil {
-                        self.recoverLivePlaybackAfterFailure(
+                    switch origin {
+                    case .premature(let message):
+                        self.handlePlayerEventFailure(
+                            message,
                             requestID: requestID
                         )
-                        continue
+                    case .natural, .userSeekBoundary:
+                        if self.livePlaybackChannel != nil {
+                            self.recoverLivePlaybackAfterFailure(
+                                requestID: requestID
+                            )
+                            continue
+                        }
+                        let endedSessionID = self.playbackSessionID
+                        if self.activePlayback != nil {
+                            try? await self.savePlaybackHistory(
+                                position: self.playerSnapshot.position,
+                                duration: self.playerSnapshot.duration
+                            )
+                        }
+                        if origin.permitsAutomaticAdvance {
+                            await self.advanceAfterNaturalEnd(
+                                endedSessionID: endedSessionID
+                            )
+                        }
                     }
-                    let endedSessionID = self.playbackSessionID
-                    if self.activePlayback != nil {
-                        try? await self.savePlaybackHistory(
-                            position: self.playerSnapshot.position,
-                            duration: self.playerSnapshot.duration
-                        )
-                    }
-                    await self.advanceAfterNaturalEnd(
-                        endedSessionID: endedSessionID
-                    )
                 case .error(let message, let requestID):
                     guard PlaybackRequestOwnershipPolicy.accepts(
                         requestID: requestID,
@@ -14086,38 +14096,40 @@ final class AppState: ObservableObject {
                     ) else {
                         continue
                     }
-                    if self.livePlaybackChannel != nil {
-                        self.recoverLivePlaybackAfterFailure(
-                            requestID: requestID
-                        )
-                        continue
-                    }
-                    if let requestID,
-                       self.failPlaybackStartupGate(
-                           requestID: requestID,
-                           error: AppError.playback(message)
-                       ) {
-                        self.playbackFailureSummary = message
-                        continue
-                    }
-                    if let requestID,
-                       self.playbackRequestsResolving.contains(requestID) {
-                        self.playbackFailureSummary = message
-                        continue
-                    }
-                    if let requestID {
-                        self.presentPlaybackErrorOnce(
-                            message,
-                            requestID: requestID
-                        )
-                    } else {
-                        self.show(
-                            AppError.playback(message),
-                            title: "播放器错误"
-                        )
-                    }
+                    self.handlePlayerEventFailure(
+                        message,
+                        requestID: requestID
+                    )
                 }
             }
+        }
+    }
+
+    private func handlePlayerEventFailure(
+        _ message: String,
+        requestID: UUID?
+    ) {
+        if livePlaybackChannel != nil {
+            recoverLivePlaybackAfterFailure(requestID: requestID)
+            return
+        }
+        if let requestID,
+           failPlaybackStartupGate(
+               requestID: requestID,
+               error: AppError.playback(message)
+           ) {
+            playbackFailureSummary = message
+            return
+        }
+        if let requestID,
+           playbackRequestsResolving.contains(requestID) {
+            playbackFailureSummary = message
+            return
+        }
+        if let requestID {
+            presentPlaybackErrorOnce(message, requestID: requestID)
+        } else {
+            show(AppError.playback(message), title: "播放器错误")
         }
     }
 

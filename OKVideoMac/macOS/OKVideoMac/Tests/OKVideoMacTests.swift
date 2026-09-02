@@ -6208,92 +6208,264 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testNaturalPlaybackEndRecognizesEOFPropertyAndEndFileEvent() {
-        XCTAssertTrue(
-            MPVPlaybackEndPolicy.isNaturalEnd(
+    func testPlaybackEndArbiterClassifiesFinalEndFileOnce() {
+        XCTAssertEqual(
+            MPVPlaybackEndPolicy.disposition(
                 endFileReason: 0,
                 isReplacingMedia: false,
                 hasStartedPlayback: true,
-                isSeeking: false,
                 isPausedForCache: false,
                 position: 99,
-                duration: 100
-            )
+                duration: 100,
+                isProtectedByUserSeek: false
+            ),
+            .natural
         )
-        XCTAssertTrue(
-            MPVPlaybackEndPolicy.isNaturalEnd(
-                eofReached: true,
+        XCTAssertEqual(
+            MPVPlaybackEndPolicy.disposition(
+                endFileReason: 0,
                 isReplacingMedia: false,
                 hasStartedPlayback: true,
-                isSeeking: false,
                 isPausedForCache: false,
                 position: 0,
-                duration: 0
-            )
+                duration: 0,
+                isProtectedByUserSeek: false
+            ),
+            .natural
         )
-        XCTAssertFalse(
-            MPVPlaybackEndPolicy.isNaturalEnd(
+        XCTAssertEqual(
+            MPVPlaybackEndPolicy.disposition(
                 endFileReason: 2,
                 isReplacingMedia: false,
                 hasStartedPlayback: true,
-                isSeeking: false,
                 isPausedForCache: false,
                 position: 100,
-                duration: 100
-            )
+                duration: 100,
+                isProtectedByUserSeek: false
+            ),
+            .stopped
         )
-        XCTAssertFalse(
-            MPVPlaybackEndPolicy.isNaturalEnd(
-                eofReached: true,
+        XCTAssertEqual(
+            MPVPlaybackEndPolicy.disposition(
+                endFileReason: 0,
                 isReplacingMedia: true,
                 hasStartedPlayback: true,
-                isSeeking: false,
                 isPausedForCache: false,
                 position: 100,
-                duration: 100
-            )
+                duration: 100,
+                isProtectedByUserSeek: false
+            ),
+            .ignored
         )
-        XCTAssertFalse(
-            MPVPlaybackEndPolicy.isNaturalEnd(
-                eofReached: true,
-                isReplacingMedia: false,
-                hasStartedPlayback: true,
-                isSeeking: true,
-                isPausedForCache: false,
-                position: 40,
-                duration: 100
-            )
-        )
-        XCTAssertFalse(
-            MPVPlaybackEndPolicy.isNaturalEnd(
+        XCTAssertEqual(
+            MPVPlaybackEndPolicy.disposition(
                 endFileReason: 0,
                 isReplacingMedia: false,
                 hasStartedPlayback: true,
-                isSeeking: false,
+                isPausedForCache: false,
+                position: 100,
+                duration: 100,
+                isProtectedByUserSeek: true,
+                isUserSeekToBoundary: true
+            ),
+            .userSeekBoundary
+        )
+        XCTAssertEqual(
+            MPVPlaybackEndPolicy.disposition(
+                endFileReason: 0,
+                isReplacingMedia: false,
+                hasStartedPlayback: true,
                 isPausedForCache: true,
                 position: 40,
-                duration: 100
-            )
+                duration: 100,
+                isProtectedByUserSeek: false
+            ),
+            .premature
         )
-        XCTAssertFalse(
-            MPVPlaybackEndPolicy.isNaturalEnd(
+        XCTAssertEqual(
+            MPVPlaybackEndPolicy.disposition(
                 endFileReason: 0,
                 isReplacingMedia: false,
                 hasStartedPlayback: false,
-                isSeeking: false,
                 isPausedForCache: false,
                 position: 100,
-                duration: 100
-            )
+                duration: 100,
+                isProtectedByUserSeek: false
+            ),
+            .premature
         )
-        XCTAssertFalse(
-            MPVPlaybackEndPolicy.isNaturalEnd(
+        XCTAssertEqual(
+            MPVPlaybackEndPolicy.disposition(
                 endFileReason: 0,
                 isReplacingMedia: false,
                 hasStartedPlayback: true,
-                isSeeking: false,
                 isPausedForCache: false,
                 position: 40,
+                duration: 100,
+                isProtectedByUserSeek: false
+            ),
+            .premature
+        )
+        XCTAssertEqual(
+            MPVPlaybackEndPolicy.disposition(
+                endFileReason: 4,
+                error: -13,
+                isReplacingMedia: false,
+                hasStartedPlayback: true,
+                isPausedForCache: false,
+                position: 40,
+                duration: 100,
+                isProtectedByUserSeek: false
+            ),
+            .failed
+        )
+    }
+
+    func testPostSeekGuardExpiresAfterMediaProgressNotWallClock() {
+        let requestGeneration: UInt64 = 7
+        var guardState = PlayerPostSeekEndGuard()
+        _ = guardState.begin(
+            requestGeneration: requestGeneration,
+            target: 80
+        )
+
+        guardState.observePosition(
+            80,
+            requestGeneration: requestGeneration,
+            isSeeking: true
+        )
+        XCTAssertTrue(
+            guardState.isProtecting(requestGeneration: requestGeneration)
+        )
+
+        guardState.markPlaybackRestart(
+            requestGeneration: requestGeneration
+        )
+        guardState.observePosition(
+            80,
+            requestGeneration: requestGeneration,
+            isSeeking: false
+        )
+        guardState.observePosition(
+            82.9,
+            requestGeneration: requestGeneration,
+            isSeeking: false
+        )
+        XCTAssertTrue(
+            guardState.isProtecting(requestGeneration: requestGeneration)
+        )
+
+        guardState.observePosition(
+            83.1,
+            requestGeneration: requestGeneration,
+            isSeeking: false
+        )
+        XCTAssertFalse(
+            guardState.isProtecting(requestGeneration: requestGeneration)
+        )
+    }
+
+    func testRapidSeeksOnlyLatestGenerationCanReleaseGuard() {
+        let requestGeneration: UInt64 = 11
+        var guardState = PlayerPostSeekEndGuard()
+        var firstGeneration: UInt64 = 0
+        var latestGeneration: UInt64 = 0
+
+        for index in 1...10 {
+            let generation = guardState.begin(
+                requestGeneration: requestGeneration,
+                target: TimeInterval(index * 10)
+            )
+            if index == 1 { firstGeneration = generation }
+            latestGeneration = generation
+        }
+
+        XCTAssertEqual(
+            guardState.activeSeekGeneration(
+                requestGeneration: requestGeneration
+            ),
+            latestGeneration
+        )
+        guardState.cancel(
+            requestGeneration: requestGeneration,
+            seekGeneration: firstGeneration
+        )
+        XCTAssertTrue(
+            guardState.isProtecting(requestGeneration: requestGeneration)
+        )
+
+        guardState.markPlaybackRestart(
+            requestGeneration: requestGeneration
+        )
+        guardState.observePosition(
+            100,
+            requestGeneration: requestGeneration,
+            isSeeking: false
+        )
+        guardState.observePosition(
+            110,
+            requestGeneration: requestGeneration,
+            isSeeking: false
+        )
+        XCTAssertTrue(
+            guardState.isProtecting(requestGeneration: requestGeneration)
+        )
+        for position in [110.5, 112, 113.1] {
+            guardState.observePosition(
+                position,
+                requestGeneration: requestGeneration,
+                isSeeking: false
+            )
+        }
+        XCTAssertFalse(
+            guardState.isProtecting(requestGeneration: requestGeneration)
+        )
+    }
+
+    func testSeekGuardCannotProtectReplacementRequest() {
+        var guardState = PlayerPostSeekEndGuard()
+        _ = guardState.begin(requestGeneration: 21, target: 90)
+
+        XCTAssertTrue(guardState.isProtecting(requestGeneration: 21))
+        XCTAssertFalse(guardState.isProtecting(requestGeneration: 22))
+
+        guardState.reset()
+        XCTAssertFalse(guardState.isProtecting(requestGeneration: 21))
+    }
+
+    func testOnlyNaturalEndPermitsAutomaticEpisodeAdvance() {
+        XCTAssertTrue(PlaybackEndOrigin.natural.permitsAutomaticAdvance)
+        XCTAssertFalse(
+            PlaybackEndOrigin.userSeekBoundary.permitsAutomaticAdvance
+        )
+        XCTAssertFalse(
+            PlaybackEndOrigin.premature("断流").permitsAutomaticAdvance
+        )
+    }
+
+    func testPostSeekGuardOnlyTreatsKnownEndBoundaryAsUserCompletion() {
+        let requestGeneration: UInt64 = 31
+        var guardState = PlayerPostSeekEndGuard()
+        _ = guardState.begin(
+            requestGeneration: requestGeneration,
+            target: 50
+        )
+        XCTAssertFalse(
+            guardState.isBoundarySeek(
+                requestGeneration: requestGeneration,
+                position: 50,
+                duration: 100
+            )
+        )
+
+        _ = guardState.begin(
+            requestGeneration: requestGeneration,
+            target: 98
+        )
+        XCTAssertTrue(
+            guardState.isBoundarySeek(
+                requestGeneration: requestGeneration,
+                position: 98,
                 duration: 100
             )
         )
