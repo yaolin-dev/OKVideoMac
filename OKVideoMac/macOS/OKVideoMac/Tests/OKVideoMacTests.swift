@@ -407,6 +407,52 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(first.requestID, second.requestID)
     }
 
+    @MainActor
+    func testPlayerWindowDefersFirstContentMountBeyondCommandTransaction()
+        async {
+        let state = AppState(environment: nil)
+        let controller = PlayerPlaybackWindowController(appState: state)
+        controller.prewarm()
+
+        XCTAssertTrue(controller.isWindowShellPreparedForTesting)
+        XCTAssertFalse(controller.hasMountedPlayerContentForTesting)
+
+        controller.execute(
+            PlayerWindowCommand(
+                requestID: nil,
+                kind: .showWithoutStealingFocus
+            )
+        )
+
+        // The command is delivered synchronously from SwiftUI/Combine while a
+        // List click can still be inside AppKit's layout transaction. Mounting
+        // the hosting controller here used to trigger an AppKit SIGTRAP.
+        XCTAssertFalse(controller.hasMountedPlayerContentForTesting)
+
+        await drainMainQueue()
+        XCTAssertTrue(controller.hasMountedPlayerContentForTesting)
+        controller.dismiss()
+    }
+
+    @MainActor
+    func testPlayerWindowDismissCancelsDeferredContentMount() async {
+        let state = AppState(environment: nil)
+        let controller = PlayerPlaybackWindowController(appState: state)
+        controller.prewarm()
+
+        controller.execute(
+            PlayerWindowCommand(
+                requestID: nil,
+                kind: .showWithoutStealingFocus
+            )
+        )
+        controller.dismiss()
+
+        await drainMainQueue()
+        XCTAssertFalse(controller.isWindowShellPreparedForTesting)
+        XCTAssertFalse(controller.hasMountedPlayerContentForTesting)
+    }
+
     func testPlayerFocusCompensationStopsAfterFocusOrApplicationSwitch() {
         XCTAssertTrue(
             PlayerWindowFocusCompensationPolicy.shouldRetry(

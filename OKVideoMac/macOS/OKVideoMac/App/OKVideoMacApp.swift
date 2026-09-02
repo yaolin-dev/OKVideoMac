@@ -250,9 +250,11 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     private weak var appState: AppState?
     private let preferenceStore: PlayerWindowPreferenceStore
     private var window: NSWindow?
+    private weak var playerContentContainer: NSView?
     private var hostingController: NSHostingController<AnyView>?
     private var isDismissingFromState = false
     private var pendingFocusCommandID: UUID?
+    private var pendingPresentationCommandID: UUID?
     private var hasDeferredLayoutReset = false
     private var activeGeometryRequestID: UUID?
     private var desiredAspectRatio =
@@ -308,6 +310,16 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         _ = ensureWindowShell()
     }
 
+#if DEBUG
+    var isWindowShellPreparedForTesting: Bool {
+        window != nil
+    }
+
+    var hasMountedPlayerContentForTesting: Bool {
+        hostingController != nil
+    }
+#endif
+
     func resetLayout() {
         pendingGeometryWorkItem?.cancel()
         pendingPersistenceWorkItem?.cancel()
@@ -352,17 +364,20 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     }
 
     private func showAndActivate(command: PlayerWindowCommand) {
-        guard let window = ensureWindow() else { return }
         pendingFocusCommandID = command.id
+        pendingPresentationCommandID = command.id
         // Player commands are published from SwiftUI actions. Defer all
-        // NSWindow frame and ordering mutations by one main-loop turn so they
-        // cannot re-enter the originating List/layout transaction.
-        DispatchQueue.main.async { [weak self, weak window] in
+        // NSWindow mutations, including mounting the NSHostingController, by
+        // one main-loop turn so they cannot re-enter the originating
+        // List/layout transaction.
+        DispatchQueue.main.async { [weak self] in
             guard let self,
-                  let window,
-                  self.window === window,
                   self.owns(command),
-                  self.pendingFocusCommandID == command.id else { return }
+                  self.pendingPresentationCommandID == command.id else {
+                return
+            }
+            guard let window = self.ensureWindow() else { return }
+            self.pendingPresentationCommandID = nil
             self.applyPreferredGeometry(to: window, animate: false)
             self.activateAndShow(command: command, window: window)
         }
@@ -385,12 +400,15 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     }
 
     private func showWithoutStealingFocus(command: PlayerWindowCommand) {
-        guard let window = ensureWindow() else { return }
-        DispatchQueue.main.async { [weak self, weak window] in
+        pendingPresentationCommandID = command.id
+        DispatchQueue.main.async { [weak self] in
             guard let self,
-                  let window,
-                  self.window === window,
-                  self.owns(command) else { return }
+                  self.owns(command),
+                  self.pendingPresentationCommandID == command.id else {
+                return
+            }
+            guard let window = self.ensureWindow() else { return }
+            self.pendingPresentationCommandID = nil
             self.applyPreferredGeometry(to: window, animate: false)
             self.restoreVisibleFrameIfNeeded(window)
             guard !window.isMiniaturized, !window.isVisible else { return }
@@ -408,7 +426,35 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
                     .environmentObject(appState)
             )
             let hostingController = NSHostingController(rootView: rootView)
-            window.contentViewController = hostingController
+            if #available(macOS 13.0, *) {
+                // The player root intentionally expands to the window. Its
+                // SwiftUI ideal size can therefore contain an unbounded
+                // dimension while the first playback tree is mounting. Do not
+                // let NSHostingController feed that value back into NSWindow's
+                // frame; the player geometry coordinator is the sole owner of
+                // the window size.
+                hostingController.sizingOptions = []
+            }
+
+            // Do not install the hosting controller through
+            // NSWindow.contentViewController. AppKit asks a newly installed
+            // controller for its fitting size and immediately feeds that
+            // value back into the window frame. PlayerPlaybackWindowRoot is a
+            // fill view, so its first SwiftUI sizing pass can legitimately
+            // contain an unbounded dimension; macOS 14 then traps while
+            // converting that infinity into an NSWindow display region.
+            //
+            // The window already owns a finite AppKit content view. Mount the
+            // retained hosting view inside that container and let autoresizing
+            // follow the window instead. PlayerWindowPreferenceStore remains
+            // the only code allowed to change the window geometry.
+            guard let container = playerContentContainer ?? window.contentView
+            else { return nil }
+            let hostedView = hostingController.view
+            hostedView.translatesAutoresizingMaskIntoConstraints = true
+            hostedView.frame = container.bounds
+            hostedView.autoresizingMask = [.width, .height]
+            container.addSubview(hostedView)
             self.hostingController = hostingController
         }
         return window
@@ -447,6 +493,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         )
         window.contentAspectRatio = .zero
         self.window = window
+        playerContentContainer = window.contentView
 
         configureInitialGeometry(for: window)
         return window
@@ -502,6 +549,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     func dismiss() {
         guard let window else { return }
         pendingFocusCommandID = nil
+        pendingPresentationCommandID = nil
         persistUserFrameIfEligible(window)
         cancelGeometryWork()
         isDismissingFromState = true
@@ -905,12 +953,15 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     private func clearWindowReferences() {
         cancelGeometryWork()
         pendingFocusCommandID = nil
+        pendingPresentationCommandID = nil
         hasDeferredLayoutReset = false
         activeGeometryRequestID = nil
         lastAppliedAspectRatio = nil
         appState?.setPlayerWindowKey(false)
+        hostingController?.view.removeFromSuperview()
         window?.delegate = nil
         window = nil
+        playerContentContainer = nil
         hostingController = nil
         lastProgrammaticFrame = nil
         isApplyingProgrammaticFrame = false
