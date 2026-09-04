@@ -7311,6 +7311,7 @@ final class OKVideoMacTests: XCTestCase {
         let provider = try AndroidDexSpiderSiteProvider(
             site: site,
             configurationID: configurationID,
+            configurationHosts: [],
             jarReference: "https://configuration.invalid/provider.jar",
             baseURL: nil,
             bridge: AndroidDexBridgeClient()
@@ -7364,6 +7365,7 @@ final class OKVideoMacTests: XCTestCase {
         let provider = try AndroidDexSpiderSiteProvider(
             site: site,
             configurationID: configurationID,
+            configurationHosts: [],
             jarReference: "https://configuration.invalid/provider.jar",
             baseURL: nil,
             bridge: AndroidDexBridgeClient()
@@ -10041,6 +10043,7 @@ final class OKVideoMacTests: XCTestCase {
         let androidProvider = try AndroidDexSpiderSiteProvider(
             site: site,
             configurationID: configurationID,
+            configurationHosts: [],
             jarReference: "https://configuration.invalid/provider.jar",
             baseURL: nil,
             bridge: AndroidDexBridgeClient()

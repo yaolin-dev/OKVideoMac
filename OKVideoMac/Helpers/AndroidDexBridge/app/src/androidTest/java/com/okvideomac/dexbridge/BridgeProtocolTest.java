@@ -64,6 +64,79 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class BridgeProtocolTest extends TestCase {
+    public void testConfigurationHostsReplaceInsteadOfMerging() throws Exception {
+        AtomicReference<List<String>> applied = new AtomicReference<>();
+        AtomicInteger applyCount = new AtomicInteger();
+        ConfigurationHostPolicy policy = new ConfigurationHostPolicy(hosts -> {
+            applied.set(new ArrayList<>(hosts));
+            applyCount.incrementAndGet();
+        });
+        JSONObject first = new JSONObject()
+                .put("configurationID", "configuration-a")
+                .put("hosts", new JSONArray()
+                        .put("  api.example = edge-a.example  ")
+                        .put("image.example=edge-image.example"));
+        JSONObject second = new JSONObject()
+                .put("configurationID", "configuration-b")
+                .put("hosts", new JSONArray()
+                        .put("api.example=edge-b.example"));
+
+        try (ConfigurationHostPolicy.Lease ignored = policy.acquire(first)) {
+            assertEquals(2, applied.get().size());
+            assertEquals(
+                    "  api.example = edge-a.example  ",
+                    applied.get().get(0)
+            );
+        }
+        try (ConfigurationHostPolicy.Lease ignored = policy.acquire(first)) {
+            assertEquals(1, applyCount.get());
+        }
+        try (ConfigurationHostPolicy.Lease ignored = policy.acquire(second)) {
+            assertEquals(2, applyCount.get());
+            assertEquals(1, applied.get().size());
+            assertEquals("api.example=edge-b.example", applied.get().get(0));
+        }
+    }
+
+    public void testConfigurationHostLeasePreventsMidRequestReplacement()
+            throws Exception {
+        AtomicReference<List<String>> applied = new AtomicReference<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        ConfigurationHostPolicy policy = new ConfigurationHostPolicy(
+                hosts -> applied.set(new ArrayList<>(hosts))
+        );
+        JSONObject first = new JSONObject()
+                .put("configurationID", "configuration-a")
+                .put("hosts", new JSONArray().put("api.example=edge-a.example"));
+        JSONObject second = new JSONObject()
+                .put("configurationID", "configuration-b")
+                .put("hosts", new JSONArray().put("api.example=edge-b.example"));
+        CountDownLatch waiting = new CountDownLatch(1);
+        CountDownLatch switched = new CountDownLatch(1);
+        ConfigurationHostPolicy.Lease firstLease = policy.acquire(first);
+        Thread replacement = new Thread(() -> {
+            waiting.countDown();
+            try (ConfigurationHostPolicy.Lease ignored = policy.acquire(second)) {
+                switched.countDown();
+            } catch (Throwable error) {
+                failure.set(error);
+            }
+        });
+
+        try {
+            replacement.start();
+            assertTrue(waiting.await(1, TimeUnit.SECONDS));
+            assertFalse(switched.await(100, TimeUnit.MILLISECONDS));
+            assertEquals("api.example=edge-a.example", applied.get().get(0));
+        } finally {
+            firstLease.close();
+        }
+        assertTrue(switched.await(1, TimeUnit.SECONDS));
+        replacement.join(1_000L);
+        assertNull(failure.get());
+        assertEquals("api.example=edge-b.example", applied.get().get(0));
+    }
+
     public void testBrowseThenPlaybackUsesSeparateTransientOwners()
             throws Exception {
         BridgeProviderOwnerRegistry.resetForTests();

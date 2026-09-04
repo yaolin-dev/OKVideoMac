@@ -13928,6 +13928,7 @@ final class AppState: ObservableObject {
                     provider = (try? AndroidDexSpiderSiteProvider(
                         site: site,
                         configurationID: activeConfigurationID,
+                        configurationHosts: activeConfiguration?.hosts ?? [],
                         jarReference: jarReference,
                         baseURL: baseURL,
                         bridge: environment.androidDexBridge

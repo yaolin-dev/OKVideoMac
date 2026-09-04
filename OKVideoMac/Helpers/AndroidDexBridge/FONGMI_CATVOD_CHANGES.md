@@ -14,8 +14,15 @@
 `catvod/src/main/java/com/github/catvod/net/Proxy.java` changes the initial
 proxy port from `-1` to `9978`. A four-line local comment explains that the
 macOS Android bridge requires a stable emulator port and that runtime startup
-may later override the value. `catvod/src/main/AndroidManifest.xml` differs
-only by a final newline.
+may later override the value.
+
+`catvod/src/main/java/com/github/catvod/net/OkDns.java` adds an atomic
+`replaceAll` operation and changes the alias table to an immutable volatile
+snapshot. The Bridge uses this to replace, rather than merge, top-level
+TVBox `hosts` mappings when the active configuration changes while allowing
+same-configuration Spider calls to continue concurrently.
+
+`catvod/src/main/AndroidManifest.xml` differs only by a final newline.
 
 No upstream copyright or license header is replaced. The directory is copied
 and modified FongMi/TV source and remains governed by `GPL-3.0-only`.

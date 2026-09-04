@@ -4,6 +4,7 @@ import android.content.Context;
 
 import com.github.catvod.crawler.Spider;
 import com.github.catvod.crawler.SpiderNull;
+import com.github.catvod.net.OkHttp;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -39,6 +40,7 @@ final class DexSpiderRegistry {
 
     private final Context context;
     private final OkHttpClient httpClient;
+    private final ConfigurationHostPolicy hostPolicy;
     private final Map<String, DexClassLoader> loaders = new ConcurrentHashMap<>();
     private final Map<String, Spider> spiders = new ConcurrentHashMap<>();
     private final Map<String, Method> proxyMethods = new ConcurrentHashMap<>();
@@ -52,9 +54,13 @@ final class DexSpiderRegistry {
     private DexSpiderRegistry(Context context) {
         this.context = context.getApplicationContext();
         this.httpClient = new OkHttpClient.Builder()
+                .dns(OkHttp.dns())
                 .followRedirects(true)
                 .followSslRedirects(true)
                 .build();
+        this.hostPolicy = new ConfigurationHostPolicy(
+                hosts -> OkHttp.dns().replaceAll(hosts)
+        );
     }
 
     static DexSpiderRegistry get(Context context) {
@@ -75,6 +81,17 @@ final class DexSpiderRegistry {
             destroySpider(payload, siteKey);
             return JSONObject.NULL;
         }
+        try (ConfigurationHostPolicy.Lease ignored =
+                     hostPolicy.acquire(payload)) {
+            return invokeWithHostPolicy(payload, method, arguments);
+        }
+    }
+
+    private Object invokeWithHostPolicy(
+            JSONObject payload,
+            String method,
+            JSONArray arguments
+    ) throws Exception {
         BridgeProviderOwnerRegistry.Binding providerOwner =
                 BridgeProviderOwnerRegistry.bind(payload, jarKey(payload));
         Spider spider = spider(payload);

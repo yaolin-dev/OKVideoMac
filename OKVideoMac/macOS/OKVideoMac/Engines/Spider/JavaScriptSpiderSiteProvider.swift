@@ -966,6 +966,7 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
     let capability: SiteCapability = .javaDexSpider
 
     private let configurationIdentity: String
+    private let configurationHosts: [String]
     private let baseURL: URL?
     private let jarReference: String
     private let bridge: AndroidDexBridgeClient
@@ -978,6 +979,7 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
     init(
         site: SiteConfiguration,
         configurationID: UUID,
+        configurationHosts: [String],
         jarReference: String,
         baseURL: URL?,
         bridge: AndroidDexBridgeClient
@@ -990,6 +992,7 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         self.site = site
         let normalizedConfigurationID = configurationID.uuidString.lowercased()
         configurationIdentity = normalizedConfigurationID
+        self.configurationHosts = configurationHosts
         self.jarReference = jarReference
         self.baseURL = baseURL
         self.bridge = bridge
@@ -1738,6 +1741,7 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         try await bridge.invoke(
             site: site,
             configurationID: configurationIdentity,
+            configurationHosts: configurationHosts,
             jarReference: jarReference,
             baseURL: baseURL,
             method: method,
@@ -2162,6 +2166,7 @@ enum AndroidRuntimeRecoveryPolicy {
 final class AndroidDexBridgeClient: @unchecked Sendable {
     private struct Request: Encodable {
         let configurationID: String
+        let hosts: [String]
         let siteKey: String
         let api: String
         let ext: String
@@ -2472,6 +2477,7 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     func invoke(
         site: SiteConfiguration,
         configurationID: String,
+        configurationHosts: [String],
         jarReference: String,
         baseURL: URL?,
         method: String,
@@ -2526,6 +2532,7 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         request.httpBody = try JSONEncoder().encode(
             Request(
                 configurationID: configurationID,
+                hosts: configurationHosts,
                 siteKey: site.key,
                 api: site.api,
                 ext: try Self.extString(site.ext),
@@ -4234,8 +4241,8 @@ struct AndroidInstalledPackageContinuity: Equatable, Sendable {
 }
 
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.43"
-    static let bridgeVersionCode = 55
+    static let bridgeVersion = "0.3.44"
+    static let bridgeVersionCode = 56
     static let bridgeApplicationID = "com.okvideomac.dexbridge"
     static let bridgeCertificateSHA256 =
         "33e95ef23b662f2629a23df892aaff52ae6216f7492cfb559a63d37247a059e0"
