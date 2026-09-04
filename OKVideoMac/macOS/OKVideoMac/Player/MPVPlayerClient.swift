@@ -537,6 +537,48 @@ enum MPVPlaybackEndPolicy {
     }
 }
 
+/// Interprets mpv's `eof-reached=yes` property when `keep-open=yes` keeps the
+/// current file loaded and therefore may never emit `MPV_EVENT_END_FILE`.
+/// Request ownership is deliberately part of the policy so a late property
+/// notification from a replaced file cannot advance the new playlist.
+enum MPVKeepOpenEOFPolicy {
+    static func disposition(
+        signalRequestGeneration: UInt64,
+        currentRequestGeneration: UInt64,
+        ownsActiveMedia: Bool,
+        isReplacingMedia: Bool,
+        hasStartedPlayback: Bool,
+        isPausedForCache: Bool,
+        position: TimeInterval,
+        duration: TimeInterval,
+        isProtectedByUserSeek: Bool,
+        isUserSeekToBoundary: Bool,
+        completionTolerance: TimeInterval = 3
+    ) -> MPVPlaybackEndDisposition {
+        guard signalRequestGeneration == currentRequestGeneration,
+              ownsActiveMedia,
+              !isReplacingMedia,
+              hasStartedPlayback,
+              !isPausedForCache,
+              position.isFinite,
+              duration.isFinite,
+              duration > 0 else {
+            return .ignored
+        }
+        return MPVPlaybackEndPolicy.disposition(
+            endFileReason: 0,
+            isReplacingMedia: false,
+            hasStartedPlayback: true,
+            isPausedForCache: false,
+            position: position,
+            duration: duration,
+            isProtectedByUserSeek: isProtectedByUserSeek,
+            isUserSeekToBoundary: isUserSeekToBoundary,
+            completionTolerance: completionTolerance
+        )
+    }
+}
+
 /// Retains the semantic effect of a user seek after libmpv's instantaneous
 /// `seeking` flag has returned to false. The guard expires only after native
 /// playback has restarted and the media timeline has advanced continuously;
@@ -1358,6 +1400,12 @@ final class MPVPlayerClient: PlayerClient {
                 playerID: renderOwnerID
             )
             continuation.yield(.playbackStarted(requestID: requestID))
+            queue.async { [weak self] in
+                guard let self, let signal = self.pendingEOFSignal else {
+                    return
+                }
+                self.handleKeepOpenEOFSignal(signal)
+            }
         }
     }
 
@@ -2150,13 +2198,18 @@ final class MPVPlayerClient: PlayerClient {
             }
         case "eof-reached":
             if event.flagValue != 0 {
-                pendingEOFSignal = (
+                let signal = (
                     requestGeneration: playbackRequestGeneration,
                     seekGeneration: postSeekEndGuard
                         .activeSeekGeneration(
                             requestGeneration: playbackRequestGeneration
                         )
                 )
+                pendingEOFSignal = signal
+                // Property changes in the same native poll batch may still
+                // contain the final time-pos/duration values. Arbitrate on the
+                // serial queue's next turn so the EOF decision sees them.
+                scheduleKeepOpenEOFArbitration(signal)
             } else if pendingEOFSignal?.requestGeneration
                         == playbackRequestGeneration {
                 pendingEOFSignal = nil
@@ -2219,6 +2272,13 @@ final class MPVPlayerClient: PlayerClient {
         default:
             return
         }
+        if name == "time-pos"
+            || name == "duration"
+            || name == "paused-for-cache" {
+            if let signal = pendingEOFSignal {
+                scheduleKeepOpenEOFArbitration(signal)
+            }
+        }
         if Self.isTimelineProperty(name) {
             emitTimelineSnapshot()
         } else {
@@ -2233,6 +2293,67 @@ final class MPVPlayerClient: PlayerClient {
         continuation.yield(
             .snapshot(snapshot, requestID: currentRequestID)
         )
+    }
+
+    private func scheduleKeepOpenEOFArbitration(
+        _ signal: (requestGeneration: UInt64, seekGeneration: UInt64?)
+    ) {
+        queue.async { [weak self] in
+            self?.handleKeepOpenEOFSignal(signal)
+        }
+    }
+
+    private func handleKeepOpenEOFSignal(
+        _ signal: (requestGeneration: UInt64, seekGeneration: UInt64?)
+    ) {
+        guard pendingEOFSignal?.requestGeneration
+                == signal.requestGeneration,
+              pendingEOFSignal?.seekGeneration == signal.seekGeneration,
+              !didEmitEndedForCurrentMedia else { return }
+        let requestGeneration = playbackRequestGeneration
+        let protectsUserSeek = postSeekEndGuard.isProtecting(
+            requestGeneration: requestGeneration
+        )
+        let disposition = MPVKeepOpenEOFPolicy.disposition(
+            signalRequestGeneration: signal.requestGeneration,
+            currentRequestGeneration: requestGeneration,
+            ownsActiveMedia: currentRequestID != nil
+                && activeMediaRequestID == currentRequestID,
+            isReplacingMedia: isReplacingMedia,
+            hasStartedPlayback: playbackStartSignal.hasStartedPlayback(),
+            isPausedForCache: snapshot.isPausedForCache,
+            position: snapshot.position,
+            duration: snapshot.duration,
+            isProtectedByUserSeek: protectsUserSeek,
+            isUserSeekToBoundary: postSeekEndGuard.isBoundarySeek(
+                requestGeneration: requestGeneration,
+                position: snapshot.position,
+                duration: snapshot.duration
+            )
+        )
+        PlayerExperimentLogger.performance(
+            "phase=keep_open_eof_arbiter"
+                + " disposition=\(String(describing: disposition))"
+                + " signal_generation=\(signal.requestGeneration)"
+                + " request_generation=\(requestGeneration)"
+                + " seek_generation=\(signal.seekGeneration.map(String.init) ?? "none")",
+            playerID: renderOwnerID,
+            requestID: currentRequestID,
+            mode: teardownMode
+        )
+        switch disposition {
+        case .natural:
+            emitEndedIfNeeded(origin: .natural)
+        case .userSeekBoundary:
+            emitEndedIfNeeded(origin: .userSeekBoundary)
+        case .premature:
+            let message = protectsUserSeek
+                ? "媒体在跳转过程中意外结束，请重试或切换线路"
+                : "媒体在播放进度结束前提前断开，请重试或切换线路"
+            emitPrematureEndIfNeeded(message: message)
+        case .stopped, .failed, .ignored:
+            break
+        }
     }
 
     private func emitEndedIfNeeded(origin: PlaybackEndOrigin) {

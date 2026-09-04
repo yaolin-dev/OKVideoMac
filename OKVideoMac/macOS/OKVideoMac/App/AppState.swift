@@ -8087,6 +8087,70 @@ final class AppState: ObservableObject {
         )
         if let acceptedProviderReference {
             guard isCurrentHistoryPreparation(preparationID) else { return }
+            if let nodeProvider = provider as? NodeHTTPSpiderSiteProvider,
+               NodePlaybackReplayReference.isCurrentLocator(
+                   acceptedProviderReference.stableResourceLocator
+               ) {
+                // A CatPaw nhr2 record is a replay recipe, not an episode URL.
+                // Restore it through current detail -> original flag -> exact
+                // episode -> play before constructing ActivePlayback, so the
+                // context retains every current episode for automatic advance.
+                let refreshRequest = PlaybackRefreshRequest(
+                    videoID: item.videoID,
+                    title: item.title,
+                    sourceIdentity: acceptedProviderReference.sourceIdentity,
+                    resourceIdentity:
+                        acceptedProviderReference.episodeIdentity,
+                    sourceName: item.sourceName,
+                    episodeName: item.episodeName,
+                    episodeReference:
+                        acceptedProviderReference.stableResourceLocator,
+                    providerResourceReference: acceptedProviderReference
+                )
+                do {
+                    let refreshed = try await nodeProvider.refreshPlayback(
+                        refreshRequest,
+                        transferContext: transferPlaybackContext(
+                            for: preparationID
+                        )
+                    )
+                    guard isCurrentHistoryPreparation(preparationID) else {
+                        if let receipt = refreshed.playbackResult.transferReceipt {
+                            await cleanupTransferReceipt(
+                                receipt,
+                                reason: .staleGeneration
+                            )
+                        }
+                        return
+                    }
+                    await startPlayback(
+                        detail: refreshed.detail,
+                        source: refreshed.source,
+                        episode: refreshed.episode,
+                        origin: .history(item),
+                        authoritativePlaybackResult:
+                            refreshed.playbackResult,
+                        configurationID: owningConfigurationID,
+                        continuingRequestID: preparationID,
+                        windowActivation: .preserveFocus
+                    )
+                    if let receipt = refreshed.playbackResult.transferReceipt,
+                       activePlayback?.playbackResult?.transferReceipt?
+                        .receiptID != receipt.receiptID {
+                        await cleanupTransferReceipt(
+                            receipt,
+                            reason: .resolutionFailed
+                        )
+                    }
+                    return
+                } catch is CancellationError {
+                    return
+                } catch {
+                    // Preserve the existing authorization and recovery path.
+                    // startPlayback will retry this same provider reference
+                    // and present any provider-owned authorization UI.
+                }
+            }
             var context = Self.historyPlaybackContext(
                 record: item,
                 siteName: siteName,

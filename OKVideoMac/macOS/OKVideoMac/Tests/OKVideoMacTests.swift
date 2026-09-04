@@ -6321,6 +6321,130 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testKeepOpenEOFArbiterOnlyAdvancesOwnedNaturalCompletion() {
+        XCTAssertEqual(
+            MPVKeepOpenEOFPolicy.disposition(
+                signalRequestGeneration: 7,
+                currentRequestGeneration: 7,
+                ownsActiveMedia: true,
+                isReplacingMedia: false,
+                hasStartedPlayback: true,
+                isPausedForCache: false,
+                position: 99,
+                duration: 100,
+                isProtectedByUserSeek: false,
+                isUserSeekToBoundary: false
+            ),
+            .natural
+        )
+        XCTAssertEqual(
+            MPVKeepOpenEOFPolicy.disposition(
+                signalRequestGeneration: 7,
+                currentRequestGeneration: 7,
+                ownsActiveMedia: true,
+                isReplacingMedia: false,
+                hasStartedPlayback: true,
+                isPausedForCache: false,
+                position: 99,
+                duration: 100,
+                isProtectedByUserSeek: true,
+                isUserSeekToBoundary: true
+            ),
+            .userSeekBoundary
+        )
+        XCTAssertEqual(
+            MPVKeepOpenEOFPolicy.disposition(
+                signalRequestGeneration: 7,
+                currentRequestGeneration: 7,
+                ownsActiveMedia: true,
+                isReplacingMedia: false,
+                hasStartedPlayback: true,
+                isPausedForCache: false,
+                position: 40,
+                duration: 100,
+                isProtectedByUserSeek: false,
+                isUserSeekToBoundary: false
+            ),
+            .premature
+        )
+
+        let ignoredCases: [MPVPlaybackEndDisposition] = [
+            MPVKeepOpenEOFPolicy.disposition(
+                signalRequestGeneration: 6,
+                currentRequestGeneration: 7,
+                ownsActiveMedia: true,
+                isReplacingMedia: false,
+                hasStartedPlayback: true,
+                isPausedForCache: false,
+                position: 99,
+                duration: 100,
+                isProtectedByUserSeek: false,
+                isUserSeekToBoundary: false
+            ),
+            MPVKeepOpenEOFPolicy.disposition(
+                signalRequestGeneration: 7,
+                currentRequestGeneration: 7,
+                ownsActiveMedia: false,
+                isReplacingMedia: false,
+                hasStartedPlayback: true,
+                isPausedForCache: false,
+                position: 99,
+                duration: 100,
+                isProtectedByUserSeek: false,
+                isUserSeekToBoundary: false
+            ),
+            MPVKeepOpenEOFPolicy.disposition(
+                signalRequestGeneration: 7,
+                currentRequestGeneration: 7,
+                ownsActiveMedia: true,
+                isReplacingMedia: true,
+                hasStartedPlayback: true,
+                isPausedForCache: false,
+                position: 99,
+                duration: 100,
+                isProtectedByUserSeek: false,
+                isUserSeekToBoundary: false
+            ),
+            MPVKeepOpenEOFPolicy.disposition(
+                signalRequestGeneration: 7,
+                currentRequestGeneration: 7,
+                ownsActiveMedia: true,
+                isReplacingMedia: false,
+                hasStartedPlayback: false,
+                isPausedForCache: false,
+                position: 99,
+                duration: 100,
+                isProtectedByUserSeek: false,
+                isUserSeekToBoundary: false
+            ),
+            MPVKeepOpenEOFPolicy.disposition(
+                signalRequestGeneration: 7,
+                currentRequestGeneration: 7,
+                ownsActiveMedia: true,
+                isReplacingMedia: false,
+                hasStartedPlayback: true,
+                isPausedForCache: true,
+                position: 99,
+                duration: 100,
+                isProtectedByUserSeek: false,
+                isUserSeekToBoundary: false
+            ),
+            MPVKeepOpenEOFPolicy.disposition(
+                signalRequestGeneration: 7,
+                currentRequestGeneration: 7,
+                ownsActiveMedia: true,
+                isReplacingMedia: false,
+                hasStartedPlayback: true,
+                isPausedForCache: false,
+                position: 0,
+                duration: 0,
+                isProtectedByUserSeek: false,
+                isUserSeekToBoundary: false
+            )
+        ]
+        XCTAssertTrue(ignoredCases.allSatisfy { $0 == .ignored })
+    }
+
     func testPostSeekGuardExpiresAfterMediaProgressNotWallClock() {
         let requestGeneration: UInt64 = 7
         var guardState = PlayerPostSeekEndGuard()
@@ -18054,6 +18178,65 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(refreshed.playbackResult.resourceReference, reference)
     }
 
+    func testCatPawHistoryKeepsEpisodesForAutoAdvance()
+        async throws {
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let replayStore = NodePlaybackReplayMemoryStore()
+        let initialProvider = try makeGenericNodeProvider(
+            httpClient: NodeStableReferenceHTTPClient(stableLocator: nil),
+            configurationIdentity: configurationIdentity,
+            playbackReplayStore: replayStore
+        )
+        let reference = try XCTUnwrap(
+            initialProvider.captureHistoryPlaybackResourceReference(
+                videoID: "history-video",
+                flag: "cloud-original",
+                episode: PlayEpisode(name: "第 2 集", url: "episode-2"),
+                episodeIndex: 1
+            )
+        )
+        let client = NodeStableReferenceHTTPClient(
+            stableLocator: nil,
+            detailEpisodes: [
+                (name: "第 1 集", url: "episode-1"),
+                (name: "第 2 集", url: "episode-2"),
+                (name: "第 3 集", url: "episode-3")
+            ],
+            detailSourceName: "cloud-original"
+        )
+        let restartedProvider = try makeGenericNodeProvider(
+            httpClient: client,
+            configurationIdentity: configurationIdentity,
+            playbackReplayStore: replayStore
+        )
+
+        let refreshed = try await restartedProvider.refreshPlayback(
+            PlaybackRefreshRequest(
+                videoID: "opaque-history-row-id",
+                title: "重复标题",
+                sourceIdentity: reference.sourceIdentity,
+                resourceIdentity: reference.episodeIdentity,
+                providerResourceReference: reference
+            )
+        )
+
+        XCTAssertEqual(
+            refreshed.source.episodes.map(\.url),
+            ["episode-1", "episode-2", "episode-3"]
+        )
+        XCTAssertEqual(refreshed.episode.url, "episode-2")
+        XCTAssertEqual(
+            refreshed.detail.playSources.first?.episodes.count,
+            3
+        )
+        let requests = await client.capturedRequests()
+        let playRequest = try XCTUnwrap(
+            requests.first { $0.url.path.hasSuffix("/play") }
+        )
+        XCTAssertEqual(try nodeEpisodeID(from: playRequest), "episode-2")
+        XCTAssertFalse(requests.contains { $0.url.path.hasSuffix("/search") })
+    }
+
     func testLegacyNodeReplayReferencesAreNotAccepted() throws {
         let configurationIdentity = UUID().uuidString.lowercased()
         let provider = try makeGenericNodeProvider(
@@ -18442,17 +18625,20 @@ private struct NodeProviderStubHTTPClient: HTTPClient {
 
 private actor NodeStableReferenceHTTPClient: HTTPClient {
     private let stableLocator: String?
-    private let detailEpisode: String?
+    private let detailEpisodes: [(name: String, url: String)]
     private let detailSourceName: String
     private var requests: [HTTPRequest] = []
 
     init(
         stableLocator: String?,
         detailEpisode: String? = nil,
+        detailEpisodes: [(name: String, url: String)]? = nil,
         detailSourceName: String = "cloud-original"
     ) {
         self.stableLocator = stableLocator
-        self.detailEpisode = detailEpisode
+        self.detailEpisodes = detailEpisodes
+            ?? detailEpisode.map { [(name: "历史分集", url: $0)] }
+            ?? []
         self.detailSourceName = detailSourceName
     }
 
@@ -18467,13 +18653,15 @@ private actor NodeStableReferenceHTTPClient: HTTPClient {
             )
         }
         if request.url.path.hasSuffix("/detail"),
-           let detailEpisode {
+           !detailEpisodes.isEmpty {
             let response: [String: Any] = [
                 "list": [[
                     "vod_id": "history-video",
                     "vod_name": "重复标题",
                     "vod_play_from": detailSourceName,
-                    "vod_play_url": "历史分集$\(detailEpisode)"
+                    "vod_play_url": detailEpisodes.map {
+                        "\($0.name)$\($0.url)"
+                    }.joined(separator: "#")
                 ]]
             ]
             return HTTPResponse(
