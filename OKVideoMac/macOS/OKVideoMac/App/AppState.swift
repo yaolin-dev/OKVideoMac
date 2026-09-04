@@ -2306,10 +2306,9 @@ enum HomePresentationPolicy {
     }
 
     static func defaultFilters(for category: VideoCategory) -> [String: String] {
-        Dictionary(
-            uniqueKeysWithValues: category.filters.compactMap { filter in
-                filter.options.first.map { (filter.id, $0.value) }
-            }
+        CategoryFilterCanonicalizer.canonicalSelection(
+            filters: category.filters,
+            selection: [:]
         )
     }
 }
@@ -2337,8 +2336,12 @@ enum HomeLandingSitePolicy {
 private struct HomeBrowsingSnapshot {
     let presentation: HomePresentationSelection
     let categoryID: String?
-    let filters: [String: String]
-    let page: VideoPage?
+    let categoryQueryKey: CategoryQueryKey?
+}
+
+private struct CategoryRequestTaskEntry {
+    let generation: UInt64
+    let task: Task<Bool, Never>
 }
 
 enum HomeItemRoute: Equatable, Sendable {
@@ -2389,6 +2392,364 @@ enum CategoryLoadResultPolicy {
         requestSessionID == currentSessionID
             && requestedSiteKey == currentSiteKey
             && requestedIdentity == currentIdentity
+    }
+}
+
+struct CategoryTabNamespace: Equatable, Hashable, Sendable {
+    let configurationID: UUID
+    let configurationRevision: String
+    let siteKey: String
+}
+
+enum CategoryConfigurationRevision {
+    static func make(record: StoredConfiguration) -> String {
+        var hasher = SHA256()
+        func append(_ data: Data) {
+            var count = UInt64(data.count).bigEndian
+            withUnsafeBytes(of: &count) { hasher.update(bufferPointer: $0) }
+            hasher.update(data: data)
+        }
+
+        append(Data(record.sourceKind.rawValue.utf8))
+        append(Data((record.sourceValue ?? "").utf8))
+        append(Data((record.baseURL?.absoluteString ?? "").utf8))
+        append(record.rawData)
+        return hasher.finalize().map {
+            String(format: "%02x", $0)
+        }.joined()
+    }
+}
+
+struct CategoryFilterValue: Equatable, Hashable, Sendable {
+    let key: String
+    let value: String
+}
+
+enum CategoryFilterCanonicalizer {
+    static func canonicalSelection(
+        filters: [VideoFilter],
+        selection: [String: String]
+    ) -> [String: String] {
+        var result: [String: String] = [:]
+        let knownFilterIDs = Set(filters.map(\.id))
+        for filter in filters {
+            guard let defaultOption = filter.options.first else { continue }
+            let selectedValue = selection[filter.id].flatMap { candidate in
+                filter.options.first(where: { $0.value == candidate })?.value
+            }
+            result[filter.id] = selectedValue ?? defaultOption.value
+        }
+        // Provider-defined filters are authoritative, but preserve explicitly
+        // supplied extension keys because they can still affect provider
+        // semantics even when an older home response did not describe them.
+        for (key, value) in selection where !knownFilterIDs.contains(key) {
+            result[key] = value
+        }
+        return result
+    }
+
+    static func fingerprint(
+        filters: [VideoFilter],
+        selection: [String: String]
+    ) -> [CategoryFilterValue] {
+        canonicalSelection(filters: filters, selection: selection)
+            .map { CategoryFilterValue(key: $0.key, value: $0.value) }
+            .sorted {
+                if $0.key == $1.key { return $0.value < $1.value }
+                return $0.key < $1.key
+            }
+    }
+}
+
+struct CategoryQueryKey: Equatable, Hashable, Sendable {
+    let namespace: CategoryTabNamespace
+    let categoryID: String
+    let canonicalFilters: [CategoryFilterValue]
+    let sort: String?
+
+    static func make(
+        namespace: CategoryTabNamespace,
+        category: VideoCategory,
+        selection: [String: String],
+        sort: String? = nil
+    ) -> CategoryQueryKey {
+        CategoryQueryKey(
+            namespace: namespace,
+            categoryID: category.id,
+            canonicalFilters: CategoryFilterCanonicalizer.fingerprint(
+                filters: category.filters,
+                selection: selection
+            ),
+            sort: sort
+        )
+    }
+
+    var filters: [String: String] {
+        Dictionary(
+            uniqueKeysWithValues: canonicalFilters.map {
+                ($0.key, $0.value)
+            }
+        )
+    }
+}
+
+struct CategoryStateKey: Equatable, Hashable, Sendable {
+    let namespace: CategoryTabNamespace
+    let categoryID: String
+}
+
+struct CategorySessionState: Equatable, Sendable {
+    let lastActiveQuery: CategoryQueryKey
+    let lastSelectedFilters: [String: String]
+    let sort: String?
+}
+
+struct CategoryQueryState: Equatable, Sendable {
+    let key: CategoryQueryKey
+    var page: VideoPage?
+    var isInitialLoading: Bool
+    var isRefreshing: Bool
+    var isLoadingNextPage: Bool
+    var paginationError: String?
+    var refreshError: String?
+    var lastSuccessAt: Date?
+    var requestGeneration: UInt64
+
+    var hasValidContent: Bool { page != nil }
+    var lastLoadedPage: Int { page?.pagination.page ?? 0 }
+    var pageCount: Int? { page?.pagination.pageCount }
+    var hasMore: Bool { page?.pagination.hasMore == true }
+}
+
+struct CategoryPageRequestKey: Equatable, Hashable, Sendable {
+    let queryKey: CategoryQueryKey
+    let page: Int
+}
+
+enum CategoryTabRequestDecision: Equatable, Sendable {
+    case cached
+    case start(generation: UInt64)
+    case join(generation: UInt64)
+    case rejected
+}
+
+struct CategoryTabSessionStore {
+    private(set) var categoryStates: [CategoryStateKey: CategorySessionState] = [:]
+    private(set) var queryStates: [CategoryQueryKey: CategoryQueryState] = [:]
+    private var inFlightRequests: [CategoryPageRequestKey: UInt64] = [:]
+    private var nextRequestGeneration: UInt64 = 0
+
+    mutating func queryKey(
+        namespace: CategoryTabNamespace,
+        category: VideoCategory,
+        requestedFilters: [String: String]?,
+        sort: String? = nil
+    ) -> CategoryQueryKey {
+        let categoryKey = CategoryStateKey(
+            namespace: namespace,
+            categoryID: category.id
+        )
+        let selection = requestedFilters
+            ?? categoryStates[categoryKey]?.lastSelectedFilters
+            ?? [:]
+        let key = CategoryQueryKey.make(
+            namespace: namespace,
+            category: category,
+            selection: selection,
+            sort: sort
+        )
+        categoryStates[categoryKey] = CategorySessionState(
+            lastActiveQuery: key,
+            lastSelectedFilters: key.filters,
+            sort: sort
+        )
+        return key
+    }
+
+    func state(for key: CategoryQueryKey) -> CategoryQueryState? {
+        queryStates[key]
+    }
+
+    func lastQuery(
+        namespace: CategoryTabNamespace,
+        categoryID: String
+    ) -> CategoryQueryKey? {
+        categoryStates[
+            CategoryStateKey(namespace: namespace, categoryID: categoryID)
+        ]?.lastActiveQuery
+    }
+
+    func ownsRequest(
+        for key: CategoryQueryKey,
+        page: Int,
+        generation: UInt64
+    ) -> Bool {
+        inFlightRequests[
+            CategoryPageRequestKey(queryKey: key, page: page)
+        ] == generation && queryStates[key]?.requestGeneration == generation
+    }
+
+    mutating func beginRequest(
+        for key: CategoryQueryKey,
+        page: Int,
+        forceRefresh: Bool
+    ) -> CategoryTabRequestDecision {
+        guard page >= 1, !forceRefresh || page == 1 else {
+            return .rejected
+        }
+        if page == 1,
+           !forceRefresh,
+           queryStates[key]?.hasValidContent == true {
+            return .cached
+        }
+
+        let requestKey = CategoryPageRequestKey(queryKey: key, page: page)
+        if !forceRefresh,
+           let generation = inFlightRequests[requestKey] {
+            return .join(generation: generation)
+        }
+
+        if page > 1 {
+            guard let current = queryStates[key]?.page,
+                  current.pagination.page == page - 1,
+                  current.pagination.hasMore else {
+                return .rejected
+            }
+        }
+
+        if forceRefresh {
+            inFlightRequests = inFlightRequests.filter {
+                $0.key.queryKey != key
+            }
+        }
+        nextRequestGeneration &+= 1
+        let generation = nextRequestGeneration
+        var state = queryStates[key] ?? CategoryQueryState(
+            key: key,
+            page: nil,
+            isInitialLoading: false,
+            isRefreshing: false,
+            isLoadingNextPage: false,
+            paginationError: nil,
+            refreshError: nil,
+            lastSuccessAt: nil,
+            requestGeneration: 0
+        )
+        state.requestGeneration = generation
+        if page == 1 {
+            state.isInitialLoading = state.page == nil
+            state.isRefreshing = state.page != nil
+            state.isLoadingNextPage = false
+            state.refreshError = nil
+        } else {
+            state.isLoadingNextPage = true
+            state.paginationError = nil
+        }
+        queryStates[key] = state
+        inFlightRequests[requestKey] = generation
+        return .start(generation: generation)
+    }
+
+    @discardableResult
+    mutating func completeRequest(
+        for key: CategoryQueryKey,
+        page: Int,
+        generation: UInt64,
+        loaded: VideoPage,
+        at date: Date = Date()
+    ) -> CategoryQueryState? {
+        let requestKey = CategoryPageRequestKey(queryKey: key, page: page)
+        guard inFlightRequests[requestKey] == generation,
+              var state = queryStates[key],
+              state.requestGeneration == generation else {
+            return nil
+        }
+        inFlightRequests[requestKey] = nil
+        state.page = VideoPageMerger.merge(
+            current: page > 1 ? state.page : nil,
+            loaded: loaded,
+            requestedPage: page
+        )
+        state.isInitialLoading = false
+        state.isRefreshing = false
+        state.isLoadingNextPage = false
+        state.paginationError = nil
+        state.refreshError = nil
+        state.lastSuccessAt = date
+        queryStates[key] = state
+        return state
+    }
+
+    @discardableResult
+    mutating func failRequest(
+        for key: CategoryQueryKey,
+        page: Int,
+        generation: UInt64,
+        message: String?,
+        isCancellation: Bool
+    ) -> CategoryQueryState? {
+        let requestKey = CategoryPageRequestKey(queryKey: key, page: page)
+        guard inFlightRequests[requestKey] == generation,
+              var state = queryStates[key],
+              state.requestGeneration == generation else {
+            return nil
+        }
+        inFlightRequests[requestKey] = nil
+        if page > 1 {
+            state.isLoadingNextPage = false
+            state.paginationError = isCancellation ? nil : message
+        } else {
+            state.isInitialLoading = false
+            state.isRefreshing = false
+            state.refreshError = isCancellation ? nil : message
+        }
+        queryStates[key] = state
+        return state
+    }
+
+    mutating func invalidateRequests(for key: CategoryQueryKey) {
+        inFlightRequests = inFlightRequests.filter {
+            $0.key.queryKey != key
+        }
+    }
+
+    mutating func invalidateQuery(_ key: CategoryQueryKey) {
+        queryStates[key] = nil
+        invalidateRequests(for: key)
+    }
+
+    mutating func invalidateRevisions(
+        configurationID: UUID,
+        keeping revision: String
+    ) {
+        categoryStates = categoryStates.filter {
+            $0.key.namespace.configurationID != configurationID
+                || $0.key.namespace.configurationRevision == revision
+        }
+        queryStates = queryStates.filter {
+            $0.key.namespace.configurationID != configurationID
+                || $0.key.namespace.configurationRevision == revision
+        }
+        inFlightRequests = inFlightRequests.filter {
+            $0.key.queryKey.namespace.configurationID != configurationID
+                || $0.key.queryKey.namespace.configurationRevision == revision
+        }
+    }
+
+    mutating func removeAll() {
+        categoryStates.removeAll()
+        queryStates.removeAll()
+        inFlightRequests.removeAll()
+    }
+}
+
+enum CategoryTabPublicationPolicy {
+    static func shouldPublish(
+        requestKey: CategoryQueryKey,
+        activeKey: CategoryQueryKey?,
+        currentNamespace: CategoryTabNamespace?
+    ) -> Bool {
+        requestKey == activeKey && requestKey.namespace == currentNamespace
     }
 }
 
@@ -4012,6 +4373,11 @@ final class AppState: ObservableObject {
         [HomeContentIdentity: HomeBrowsingSnapshot] = [:]
     private var homeResumeTask: Task<Void, Never>?
     private var categoryLoadSessionID = UUID()
+    private var categoryTabSessionStore = CategoryTabSessionStore()
+    private var categoryRequestTasks:
+        [CategoryPageRequestKey: CategoryRequestTaskEntry] = [:]
+    private var knownCategoryConfigurationRevisions: [UUID: String] = [:]
+    private var activeCategoryQueryKey: CategoryQueryKey?
     private var configurationCategoryLoadSessionID = UUID()
     private var playerEventTask: Task<Void, Never>?
     private let automaticEpisodeAdvanceController =
@@ -4467,6 +4833,7 @@ final class AppState: ObservableObject {
                 self.discardHomeContentIfNeeded(
                     for: self.currentHomeContentIdentity
                 )
+                self.activeCategoryQueryKey = nil
                 self.selectedCategoryID = nil
                 self.selectedCategoryFilters = [:]
                 self.categoryPage = nil
@@ -4740,6 +5107,7 @@ final class AppState: ObservableObject {
         selectedSiteKey = HomeLandingSitePolicy.defaultSiteKey(
             from: supportedSites
         )
+        activeCategoryQueryKey = nil
         selectedCategoryID = nil
         selectedCategoryFilters = [:]
         categoryPage = nil
@@ -5046,6 +5414,7 @@ final class AppState: ObservableObject {
             captureHomeBrowsingSnapshotIfValid()
         case .showRecommendation:
             categoryLoadSessionID = UUID()
+            activeCategoryQueryKey = nil
             isLoadingNextCategoryPage = false
             categoryPaginationError = nil
             selectedCategoryID = nil
@@ -5055,21 +5424,11 @@ final class AppState: ObservableObject {
             homeLoadErrorMessage = nil
             captureHomeBrowsingSnapshotIfValid()
         case .loadCategory(let id):
-            guard let category = home.categories.first(where: {
+            guard home.categories.contains(where: {
                 $0.id == id && $0.resolvedContentKind == .media
             }) else { return }
-            let filters: [String: String]
-            if selectedCategoryID == id, !selectedCategoryFilters.isEmpty {
-                filters = selectedCategoryFilters
-            } else if snapshot?.categoryID == id,
-                      let snapshotFilters = snapshot?.filters {
-                filters = snapshotFilters
-            } else {
-                filters = HomePresentationPolicy.defaultFilters(for: category)
-            }
             if await loadCategory(
                 id: id,
-                filters: filters,
                 reportErrors: reportErrors
             ) {
                 homeLoadErrorMessage = nil
@@ -5077,6 +5436,7 @@ final class AppState: ObservableObject {
             }
         case .showActions:
             categoryLoadSessionID = UUID()
+            activeCategoryQueryKey = nil
             isLoadingNextCategoryPage = false
             categoryPaginationError = nil
             selectedCategoryID = nil
@@ -5090,6 +5450,7 @@ final class AppState: ObservableObject {
             captureHomeBrowsingSnapshotIfValid()
         case .unavailable:
             categoryLoadSessionID = UUID()
+            activeCategoryQueryKey = nil
             selectedCategoryID = nil
             selectedCategoryFilters = [:]
             categoryPage = nil
@@ -5128,6 +5489,7 @@ final class AppState: ObservableObject {
         homeLoadErrorMessage = nil
         selectedSiteKey = key
         discardHomeContentIfNeeded(for: currentHomeContentIdentity)
+        activeCategoryQueryKey = nil
         selectedCategoryID = nil
         selectedCategoryFilters = [:]
         categoryPage = nil
@@ -5141,19 +5503,48 @@ final class AppState: ObservableObject {
     func loadCategory(
         id: String,
         page: Int = 1,
-        filters: [String: String] = [:],
-        reportErrors: Bool = true
+        filters: [String: String]? = nil,
+        reportErrors: Bool = true,
+        forceRefresh: Bool = false
     ) async -> Bool {
         guard let key = selectedSiteKey,
               let provider = providers[key],
               let contentIdentity = currentHomeContentIdentity,
-              siteHome?.categories.contains(where: {
+              let category = siteHome?.categories.first(where: {
                   $0.id == id && $0.resolvedContentKind == .media
-              }) == true else {
+              }),
+              let namespace = categoryTabNamespace(for: key) else {
             return false
         }
-        let sessionID: UUID
         let loadingNextPage = page > 1
+        let queryKey = categoryTabSessionStore.queryKey(
+            namespace: namespace,
+            category: category,
+            requestedFilters: filters
+        )
+        if loadingNextPage {
+            guard activeCategoryQueryKey == queryKey,
+                  selectedCategoryID == id else {
+                return false
+            }
+        } else if !forceRefresh,
+                  activeCategoryQueryKey == queryKey,
+                  categoryTabSessionStore.state(for: queryKey)?
+                    .hasValidContent == true,
+                  categoryPage != nil {
+            // Re-selecting the current, fully loaded Tab is deliberately a
+            // no-op. Do not churn loading state or invoke the provider.
+            return true
+        }
+
+        if forceRefresh {
+            cancelCategoryRequestTasks(for: queryKey)
+        }
+        let decision = categoryTabSessionStore.beginRequest(
+            for: queryKey,
+            page: page,
+            forceRefresh: forceRefresh
+        )
         let preservesCurrentPage = CategoryReloadPresentationPolicy
             .shouldPreserveCurrentPage(
                 requestedPage: page,
@@ -5161,56 +5552,113 @@ final class AppState: ObservableObject {
                 currentCategoryID: selectedCategoryID,
                 hasCurrentPage: categoryPage != nil
             )
-        if loadingNextPage {
-            guard !isLoadingNextCategoryPage,
-                  selectedCategoryID == id,
-                  categoryPage?.pagination.page == page - 1,
-                  categoryPage?.pagination.hasMore == true else {
+        switch decision {
+        case .cached:
+            categoryLoadSessionID = UUID()
+            guard let state = categoryTabSessionStore.state(for: queryKey) else {
                 return false
             }
-            sessionID = categoryLoadSessionID
-            isLoadingNextCategoryPage = true
-            categoryPaginationError = nil
-        } else {
-            categoryLoadSessionID = UUID()
-            sessionID = categoryLoadSessionID
-            selectedCategoryID = id
-            selectedCategoryFilters = filters
-            if !preservesCurrentPage {
-                categoryPage = nil
+            activeCategoryQueryKey = queryKey
+            applyCategoryQueryState(state, preserveCurrentPage: false)
+            captureHomeBrowsingSnapshotIfValid()
+            return true
+        case .rejected:
+            return false
+        case .join(let generation):
+            if !loadingNextPage {
+                categoryLoadSessionID = UUID()
             }
-            homePresentationSelection = .category(id)
-            isLoadingNextCategoryPage = false
-            categoryPaginationError = nil
-            isLoading = true
+            activeCategoryQueryKey = queryKey
+            if let state = categoryTabSessionStore.state(for: queryKey) {
+                applyCategoryQueryState(
+                    state,
+                    preserveCurrentPage: preservesCurrentPage
+                )
+            }
+            let requestKey = CategoryPageRequestKey(
+                queryKey: queryKey,
+                page: page
+            )
+            guard let entry = categoryRequestTasks[requestKey],
+                  entry.generation == generation else {
+                categoryTabSessionStore.invalidateRequests(for: queryKey)
+                return await loadCategory(
+                    id: id,
+                    page: page,
+                    filters: queryKey.filters,
+                    reportErrors: reportErrors,
+                    forceRefresh: forceRefresh
+                )
+            }
+            return await entry.task.value
+        case .start(let generation):
+            if !loadingNextPage {
+                categoryLoadSessionID = UUID()
+            }
+            activeCategoryQueryKey = queryKey
+            if let state = categoryTabSessionStore.state(for: queryKey) {
+                applyCategoryQueryState(
+                    state,
+                    preserveCurrentPage: preservesCurrentPage
+                )
+            }
+            let requestKey = CategoryPageRequestKey(
+                queryKey: queryKey,
+                page: page
+            )
+            let task = Task { @MainActor [weak self] in
+                guard let self else { return false }
+                return await self.performCategoryRequest(
+                    requestKey: requestKey,
+                    generation: generation,
+                    provider: provider,
+                    contentIdentity: contentIdentity,
+                    reportErrors: reportErrors
+                )
+            }
+            categoryRequestTasks[requestKey] = CategoryRequestTaskEntry(
+                generation: generation,
+                task: task
+            )
+            return await task.value
         }
+    }
+
+    private func performCategoryRequest(
+        requestKey: CategoryPageRequestKey,
+        generation: UInt64,
+        provider: SiteProvider,
+        contentIdentity: HomeContentIdentity,
+        reportErrors: Bool
+    ) async -> Bool {
+        let queryKey = requestKey.queryKey
+        let page = requestKey.page
         defer {
-            if categoryLoadSessionID == sessionID {
-                if loadingNextPage {
-                    isLoadingNextCategoryPage = false
-                } else {
-                    isLoading = false
-                }
+            if categoryRequestTasks[requestKey]?.generation == generation {
+                categoryRequestTasks[requestKey] = nil
             }
         }
         do {
-            let loaded = try await provider.category(id: id, page: page, filters: filters)
-            guard CategoryLoadResultPolicy.shouldAccept(
-                requestSessionID: sessionID,
-                currentSessionID: categoryLoadSessionID,
-                requestedSiteKey: key,
-                currentSiteKey: selectedSiteKey,
-                requestedIdentity: contentIdentity,
-                currentIdentity: currentHomeContentIdentity
-            ) else { return false }
+            let loaded = try await provider.category(
+                id: queryKey.categoryID,
+                page: page,
+                filters: queryKey.filters
+            )
             if page == 1,
                let home = siteHome,
                let promoted = HomePresentationPolicy
                 .promotingSingletonEmptyCategoryToAction(
                     in: home,
-                    categoryID: id,
+                    categoryID: queryKey.categoryID,
                     page: loaded
                 ) {
+                guard categoryTabSessionStore.ownsRequest(
+                    for: queryKey,
+                    page: page,
+                    generation: generation
+                ) else { return false }
+                categoryTabSessionStore.invalidateQuery(queryKey)
+                guard shouldPublishCategoryQuery(queryKey) else { return true }
                 publishHomeContent(promoted, identity: contentIdentity)
                 if let publishedHome = siteHome {
                     await cacheSiteHome(
@@ -5218,6 +5666,7 @@ final class AppState: ObservableObject {
                         identity: contentIdentity
                     )
                 }
+                activeCategoryQueryKey = nil
                 selectedCategoryID = nil
                 selectedCategoryFilters = [:]
                 categoryPage = nil
@@ -5229,77 +5678,65 @@ final class AppState: ObservableObject {
                 // where we can safely replay the category through the action
                 // mapper and preserve those upstream actions.
                 return await loadActionCategory(
-                    id: id,
-                    filters: filters,
+                    id: queryKey.categoryID,
+                    filters: queryKey.filters,
                     reportErrors: reportErrors
                 )
             }
-            selectedCategoryID = id
-            categoryPage = VideoPageMerger.merge(
-                current: page > 1 ? categoryPage : nil,
-                loaded: loaded,
-                requestedPage: page
-            )
-            categoryPaginationError = nil
+            guard let state = categoryTabSessionStore.completeRequest(
+                for: queryKey,
+                page: page,
+                generation: generation,
+                loaded: loaded
+            ) else { return false }
+            guard shouldPublishCategoryQuery(queryKey) else { return true }
+            applyCategoryQueryState(state, preserveCurrentPage: false)
             captureHomeBrowsingSnapshotIfValid()
             return true
         } catch let authorization as NodeWebAuthorizationRequired {
-            guard CategoryLoadResultPolicy.shouldAccept(
-                requestSessionID: sessionID,
-                currentSessionID: categoryLoadSessionID,
-                requestedSiteKey: key,
-                currentSiteKey: selectedSiteKey,
-                requestedIdentity: contentIdentity,
-                currentIdentity: currentHomeContentIdentity
-            ) else { return false }
-            if !loadingNextPage {
-                homeLoadErrorMessage = authorization.localizedDescription
+            guard let state = categoryTabSessionStore.failRequest(
+                for: queryKey,
+                page: page,
+                generation: generation,
+                message: authorization.localizedDescription,
+                isCancellation: false
+            ), shouldPublishCategoryQuery(queryKey) else {
+                return false
             }
+            applyCategoryQueryState(
+                state,
+                preserveCurrentPage: state.page == nil && categoryPage != nil
+            )
             presentNodeConfiguration(
                 authorization,
                 pending: .category(
                     identity: contentIdentity,
-                    siteKey: key,
-                    id: id,
+                    siteKey: queryKey.namespace.siteKey,
+                    id: queryKey.categoryID,
                     page: page,
-                    filters: filters
+                    filters: queryKey.filters
                 )
             )
             return false
-        } catch is CancellationError {
-            guard CategoryLoadResultPolicy.shouldAccept(
-                requestSessionID: sessionID,
-                currentSessionID: categoryLoadSessionID,
-                requestedSiteKey: key,
-                currentSiteKey: selectedSiteKey,
-                requestedIdentity: contentIdentity,
-                currentIdentity: currentHomeContentIdentity
-            ) else { return false }
-            return false
         } catch {
-            guard CategoryLoadResultPolicy.shouldAccept(
-                requestSessionID: sessionID,
-                currentSessionID: categoryLoadSessionID,
-                requestedSiteKey: key,
-                currentSiteKey: selectedSiteKey,
-                requestedIdentity: contentIdentity,
-                currentIdentity: currentHomeContentIdentity
-            ) else { return false }
-            if AsyncCancellationPolicy.isCancellation(error) {
-                if loadingNextPage {
-                    categoryPaginationError = nil
-                } else {
-                    homeLoadErrorMessage = nil
-                }
+            let isCancellation = AsyncCancellationPolicy.isCancellation(error)
+            let state = categoryTabSessionStore.failRequest(
+                for: queryKey,
+                page: page,
+                generation: generation,
+                message: error.localizedDescription,
+                isCancellation: isCancellation
+            )
+            guard let state,
+                  shouldPublishCategoryQuery(queryKey) else {
                 return false
             }
-            if loadingNextPage {
-                categoryPaginationError = error.localizedDescription
-            } else {
-                homeLoadErrorMessage = error.localizedDescription
-                if reportErrors {
-                    show(error, title: "分类加载失败")
-                }
+            applyCategoryQueryState(
+                state,
+                preserveCurrentPage: state.page == nil && categoryPage != nil
+            )
+            if !isCancellation, page == 1, reportErrors {
+                show(error, title: "分类加载失败")
             }
             return false
         }
@@ -5309,20 +5746,38 @@ final class AppState: ObservableObject {
         id: String,
         filters: [String: String]
     ) {
-        guard selectedCategoryID == id else { return }
-        // Supersede an in-flight category request immediately, before the
-        // short UI debounce elapses. Providers that do not cooperate with
-        // Task cancellation can then never publish an obsolete filter page.
+        guard selectedCategoryID == id,
+              let siteKey = selectedSiteKey,
+              let namespace = categoryTabNamespace(for: siteKey),
+              let category = siteHome?.categories.first(where: {
+                  $0.id == id && $0.resolvedContentKind == .media
+              }) else { return }
+        // Change visible query ownership immediately, before the short UI
+        // debounce elapses. The prior filter request may still populate its
+        // own QueryState, but can no longer publish into this selection.
         categoryLoadSessionID = UUID()
-        isLoading = false
-        isLoadingNextCategoryPage = false
-        categoryPaginationError = nil
-        selectedCategoryFilters = filters
+        let queryKey = categoryTabSessionStore.queryKey(
+            namespace: namespace,
+            category: category,
+            requestedFilters: filters
+        )
+        activeCategoryQueryKey = queryKey
+        selectedCategoryFilters = queryKey.filters
+        if let state = categoryTabSessionStore.state(for: queryKey),
+           state.hasValidContent {
+            applyCategoryQueryState(state, preserveCurrentPage: false)
+        } else {
+            isLoading = false
+            isLoadingNextCategoryPage = false
+            categoryPaginationError = nil
+            homeLoadErrorMessage = nil
+        }
         captureHomeBrowsingSnapshotIfValid()
     }
 
     func clearCategory() {
         categoryLoadSessionID = UUID()
+        activeCategoryQueryKey = nil
         isLoadingNextCategoryPage = false
         categoryPaginationError = nil
         selectedCategoryID = nil
@@ -5465,6 +5920,7 @@ final class AppState: ObservableObject {
         }
         categoryLoadSessionID = UUID()
         let sessionID = categoryLoadSessionID
+        activeCategoryQueryKey = nil
         selectedCategoryID = nil
         selectedCategoryFilters = [:]
         categoryPage = nil
@@ -5577,7 +6033,8 @@ final class AppState: ObservableObject {
     @discardableResult
     func loadSelectedSiteHome(
         refreshConfigurationIfNeeded: Bool = true,
-        reportErrors: Bool = true
+        reportErrors: Bool = true,
+        forceCategoryRefresh: Bool = false
     ) async -> Bool {
         if refreshConfigurationIfNeeded {
             _ = await refreshActiveConfigurationIfNeeded()
@@ -5618,7 +6075,8 @@ final class AppState: ObservableObject {
             let didApplyPresentation = await applyHomePresentation(
                 loaded,
                 identity: contentIdentity,
-                reportCategoryErrors: reportErrors
+                reportCategoryErrors: reportErrors,
+                forceCategoryRefresh: forceCategoryRefresh
             )
             guard didApplyPresentation else { return false }
             captureHomeBrowsingSnapshotIfValid()
@@ -5649,7 +6107,10 @@ final class AppState: ObservableObject {
             force: true,
             reportErrors: true
         )
-        await loadSelectedSiteHome(refreshConfigurationIfNeeded: false)
+        await loadSelectedSiteHome(
+            refreshConfigurationIfNeeded: false,
+            forceCategoryRefresh: true
+        )
     }
 
     /// Called when an already-loaded home screen becomes visible or the app
@@ -11614,6 +12075,8 @@ final class AppState: ObservableObject {
         isShutdownRequested = true
         playerRenderSurfaceGate.reset()
         automaticEpisodeAdvanceController.cancel()
+        cancelAllCategoryRequestTasks()
+        categoryTabSessionStore.removeAll()
         cancelAllPlaybackStartupGates()
         playbackRequestsResolving.removeAll()
         historyPlaybackTask?.cancel()
@@ -13997,6 +14460,7 @@ final class AppState: ObservableObject {
         isRecoveringHome = false
         homeLoadSessionID = UUID()
         categoryLoadSessionID = UUID()
+        activeCategoryQueryKey = nil
         selectedCategoryID = nil
         selectedCategoryFilters = [:]
         categoryPage = nil
@@ -14096,6 +14560,117 @@ final class AppState: ObservableObject {
         )
     }
 
+    private func categoryTabNamespace(
+        for siteKey: String
+    ) -> CategoryTabNamespace? {
+        guard let record = activeConfigurationRecord else { return nil }
+        let revision = CategoryConfigurationRevision.make(record: record)
+        synchronizeCategoryConfigurationRevision(
+            configurationID: record.id,
+            revision: revision
+        )
+        return CategoryTabNamespace(
+            configurationID: record.id,
+            configurationRevision: revision,
+            siteKey: siteKey
+        )
+    }
+
+    private func synchronizeCategoryConfigurationRevision(
+        configurationID: UUID,
+        revision: String
+    ) {
+        let previousRevision = knownCategoryConfigurationRevisions[
+            configurationID
+        ]
+        if previousRevision != revision {
+            let obsoleteRequestKeys = categoryRequestTasks.keys.filter {
+                $0.queryKey.namespace.configurationID == configurationID
+                    && $0.queryKey.namespace.configurationRevision != revision
+            }
+            for requestKey in obsoleteRequestKeys {
+                categoryRequestTasks[requestKey]?.task.cancel()
+                categoryRequestTasks[requestKey] = nil
+            }
+            categoryTabSessionStore.invalidateRevisions(
+                configurationID: configurationID,
+                keeping: revision
+            )
+            knownCategoryConfigurationRevisions[configurationID] = revision
+        }
+
+        if let activeKey = activeCategoryQueryKey,
+           activeKey.namespace.configurationID != configurationID
+            || activeKey.namespace.configurationRevision != revision {
+            categoryLoadSessionID = UUID()
+            activeCategoryQueryKey = nil
+            selectedCategoryID = nil
+            selectedCategoryFilters = [:]
+            categoryPage = nil
+            isLoading = false
+            isLoadingNextCategoryPage = false
+            categoryPaginationError = nil
+        }
+    }
+
+    private func cancelCategoryRequestTasks(for key: CategoryQueryKey) {
+        let requestKeys = categoryRequestTasks.keys.filter {
+            $0.queryKey == key
+        }
+        for requestKey in requestKeys {
+            categoryRequestTasks[requestKey]?.task.cancel()
+            categoryRequestTasks[requestKey] = nil
+        }
+        categoryTabSessionStore.invalidateRequests(for: key)
+    }
+
+    private func cancelAllCategoryRequestTasks() {
+        for entry in categoryRequestTasks.values {
+            entry.task.cancel()
+        }
+        categoryRequestTasks.removeAll()
+    }
+
+    private func shouldPublishCategoryQuery(
+        _ key: CategoryQueryKey
+    ) -> Bool {
+        guard selectedSiteKey == key.namespace.siteKey,
+              currentHomeContentIdentity == HomeContentIdentity(
+                configurationID: key.namespace.configurationID,
+                siteKey: key.namespace.siteKey
+              ),
+              siteHome?.categories.contains(where: {
+                $0.id == key.categoryID
+                    && $0.resolvedContentKind == .media
+              }) == true else {
+            return false
+        }
+        return CategoryTabPublicationPolicy.shouldPublish(
+            requestKey: key,
+            activeKey: activeCategoryQueryKey,
+            currentNamespace: categoryTabNamespace(
+                for: key.namespace.siteKey
+            )
+        )
+    }
+
+    private func applyCategoryQueryState(
+        _ state: CategoryQueryState,
+        preserveCurrentPage: Bool
+    ) {
+        activeCategoryQueryKey = state.key
+        selectedCategoryID = state.key.categoryID
+        selectedCategoryFilters = state.key.filters
+        if !preserveCurrentPage || state.page != nil {
+            categoryPage = state.page
+        }
+        homePresentationSelection = .category(state.key.categoryID)
+        isLoading = state.isInitialLoading || state.isRefreshing
+        isLoadingNextCategoryPage = state.isLoadingNextPage
+        categoryPaginationError = state.paginationError
+        homeLoadErrorMessage = state.refreshError
+    }
+
     private func captureHomeBrowsingSnapshotIfValid() {
         guard let identity = currentHomeContentIdentity,
               homeContentIdentity == identity,
@@ -14108,16 +14683,19 @@ final class AppState: ObservableObject {
             return
         }
         if case .category = homePresentationSelection,
-           categoryPage == nil {
-            // A category request in flight is not a stable restore point. Keep
-            // the last complete page for this configuration/site identity.
+           (activeCategoryQueryKey == nil
+            || activeCategoryQueryKey.flatMap {
+                categoryTabSessionStore.state(for: $0)?.page
+            } != categoryPage) {
+            // A category request in flight, or a staged filter that is still
+            // showing the prior query, is not a stable restore point. Keep the
+            // last complete QueryState for this configuration/site identity.
             return
         }
         homeBrowsingSnapshots[identity] = HomeBrowsingSnapshot(
             presentation: homePresentationSelection,
             categoryID: selectedCategoryID,
-            filters: selectedCategoryFilters,
-            page: categoryPage
+            categoryQueryKey: activeCategoryQueryKey
         )
     }
 
@@ -14138,7 +14716,9 @@ final class AppState: ObservableObject {
             restoresMissingCategoryPage = selectedCategoryID == id
                 && categoryPage == nil
                 && snapshot.categoryID == id
-                && snapshot.page != nil
+                && snapshot.categoryQueryKey.flatMap {
+                    categoryTabSessionStore.state(for: $0)?.page
+                } != nil
         } else {
             restoresMissingCategoryPage = false
         }
@@ -14146,6 +14726,7 @@ final class AppState: ObservableObject {
 
         switch snapshot.presentation {
         case .recommendation where !home.recommendations.isEmpty:
+            activeCategoryQueryKey = nil
             selectedCategoryID = nil
             selectedCategoryFilters = [:]
             categoryPage = nil
@@ -14154,13 +14735,18 @@ final class AppState: ObservableObject {
         case .category(let id) where home.categories.contains(where: {
             $0.id == id && $0.resolvedContentKind == .media
         }):
-            selectedCategoryID = id
-            selectedCategoryFilters = snapshot.filters
-            categoryPage = snapshot.page
-            homePresentationSelection = .category(id)
-            homeLoadErrorMessage = nil
+            if let queryKey = snapshot.categoryQueryKey,
+               queryKey.categoryID == id,
+               queryKey.namespace == categoryTabNamespace(
+                   for: identity.siteKey
+               ),
+               let state = categoryTabSessionStore.state(for: queryKey),
+               state.hasValidContent {
+                applyCategoryQueryState(state, preserveCurrentPage: false)
+            }
         case .actions where !home.actionItems.isEmpty
             || HomePresentationPolicy.firstActionCategory(in: home) != nil:
+            activeCategoryQueryKey = nil
             selectedCategoryID = nil
             selectedCategoryFilters = [:]
             categoryPage = nil
@@ -14229,15 +14815,24 @@ final class AppState: ObservableObject {
         _ home: SiteHome,
         identity: HomeContentIdentity,
         loadsCategoryContent: Bool = true,
-        reportCategoryErrors: Bool = true
+        reportCategoryErrors: Bool = true,
+        forceCategoryRefresh: Bool = false
     ) async -> Bool {
         guard currentHomeContentIdentity == identity,
               homeContentIdentity == identity else {
             return false
         }
+        var preservedCategoryID = selectedCategoryID
+        if preservedCategoryID == nil,
+           homePresentationSelection == .empty,
+           let snapshot = homeBrowsingSnapshots[identity],
+           let queryKey = snapshot.categoryQueryKey,
+           queryKey.namespace == categoryTabNamespace(for: identity.siteKey) {
+            preservedCategoryID = snapshot.categoryID
+        }
         let selection = HomePresentationPolicy.selection(
             for: home,
-            preserving: selectedCategoryID
+            preserving: preservedCategoryID
         )
         homePresentationSelection = selection
         switch selection {
@@ -14248,26 +14843,45 @@ final class AppState: ObservableObject {
             guard let category = home.categories.first(where: {
                 $0.id == id && $0.resolvedContentKind == .media
             }) else { return false }
-            let filters = selectedCategoryID == id
+            let requestedFilters = selectedCategoryID == id
                 ? selectedCategoryFilters
-                : HomePresentationPolicy.defaultFilters(for: category)
+                : nil
             if loadsCategoryContent {
                 return await loadCategory(
                     id: id,
-                    filters: filters,
-                    reportErrors: reportCategoryErrors
+                    filters: requestedFilters,
+                    reportErrors: reportCategoryErrors,
+                    forceRefresh: forceCategoryRefresh
                 )
             } else {
+                guard let namespace = categoryTabNamespace(
+                    for: identity.siteKey
+                ) else { return false }
                 categoryLoadSessionID = UUID()
-                isLoadingNextCategoryPage = false
-                categoryPaginationError = nil
-                selectedCategoryID = id
-                selectedCategoryFilters = filters
-                categoryPage = nil
+                let queryKey = categoryTabSessionStore.queryKey(
+                    namespace: namespace,
+                    category: category,
+                    requestedFilters: requestedFilters
+                )
+                activeCategoryQueryKey = queryKey
+                if let state = categoryTabSessionStore.state(for: queryKey),
+                   state.hasValidContent {
+                    applyCategoryQueryState(
+                        state,
+                        preserveCurrentPage: false
+                    )
+                } else {
+                    isLoadingNextCategoryPage = false
+                    categoryPaginationError = nil
+                    selectedCategoryID = id
+                    selectedCategoryFilters = queryKey.filters
+                    categoryPage = nil
+                }
                 return true
             }
         case .actions:
             categoryLoadSessionID = UUID()
+            activeCategoryQueryKey = nil
             isLoadingNextCategoryPage = false
             categoryPaginationError = nil
             selectedCategoryID = nil
@@ -14289,6 +14903,7 @@ final class AppState: ObservableObject {
             )
         case .empty:
             categoryLoadSessionID = UUID()
+            activeCategoryQueryKey = nil
             isLoadingNextCategoryPage = false
             categoryPaginationError = nil
             selectedCategoryID = nil
@@ -14317,6 +14932,12 @@ final class AppState: ObservableObject {
         guard let environment else {
             providers = [:]
             return
+        }
+        if let record = activeConfigurationRecord {
+            synchronizeCategoryConfigurationRevision(
+                configurationID: record.id,
+                revision: CategoryConfigurationRevision.make(record: record)
+            )
         }
         let usesNodeRuntime = activeConfigurationUsesNodeRuntime
         let nodeSourceURL = activeNodeRuntimeSourceURL

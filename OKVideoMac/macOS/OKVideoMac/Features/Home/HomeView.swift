@@ -303,14 +303,8 @@ struct HomeView: View {
             state.clearCategory()
             return
         }
-        filterSelection = HomeFilterPresentationPolicy.defaultSelection(
-            filters: category.filters
-        )
         Task {
-            await state.loadCategory(
-                id: category.id,
-                filters: filterSelection
-            )
+            await state.loadCategory(id: category.id)
         }
     }
 
@@ -687,10 +681,9 @@ enum HomeFilterPresentationPolicy {
     static func defaultSelection(
         filters: [VideoFilter]
     ) -> [String: String] {
-        Dictionary(
-            uniqueKeysWithValues: filters.compactMap { filter in
-                filter.options.first.map { (filter.id, $0.value) }
-            }
+        CategoryFilterCanonicalizer.canonicalSelection(
+            filters: filters,
+            selection: [:]
         )
     }
 
@@ -698,16 +691,9 @@ enum HomeFilterPresentationPolicy {
         filters: [VideoFilter],
         selection: [String: String]
     ) -> [String: String] {
-        Dictionary(
-            uniqueKeysWithValues: filters.compactMap { filter in
-                guard let defaultOption = filter.options.first else {
-                    return nil
-                }
-                let value = selection[filter.id].flatMap { selectedValue in
-                    filter.options.first { $0.value == selectedValue }?.value
-                } ?? defaultOption.value
-                return (filter.id, value)
-            }
+        CategoryFilterCanonicalizer.canonicalSelection(
+            filters: filters,
+            selection: selection
         )
     }
 

@@ -2950,6 +2950,512 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    private func categoryPage(
+        title: String,
+        page: Int,
+        pageCount: Int
+    ) -> VideoPage {
+        VideoPage(
+            items: [
+                VideoSummary(
+                    siteKey: "site",
+                    siteName: "站点",
+                    videoID: title,
+                    title: title
+                )
+            ],
+            pagination: Pagination(page: page, pageCount: pageCount)
+        )
+    }
+
+    func testCategoryQueryCanonicalizesFilterOrderAndProviderDefaults() {
+        let namespace = CategoryTabNamespace(
+            configurationID: UUID(),
+            configurationRevision: "revision-a",
+            siteKey: "site"
+        )
+        let category = VideoCategory(
+            id: "movie",
+            name: "电影",
+            filters: [
+                VideoFilter(
+                    id: "year",
+                    name: "年份",
+                    options: [
+                        VideoFilterOption(name: "全部", value: "all"),
+                        VideoFilterOption(name: "2026", value: "2026")
+                    ]
+                ),
+                VideoFilter(
+                    id: "area",
+                    name: "地区",
+                    options: [
+                        VideoFilterOption(name: "全部", value: "all"),
+                        VideoFilterOption(name: "中国", value: "cn")
+                    ]
+                )
+            ]
+        )
+
+        let implicitDefaults = CategoryQueryKey.make(
+            namespace: namespace,
+            category: category,
+            selection: [:]
+        )
+        let explicitDefaults = CategoryQueryKey.make(
+            namespace: namespace,
+            category: category,
+            selection: ["year": "all", "area": "all"]
+        )
+
+        XCTAssertEqual(implicitDefaults, explicitDefaults)
+        XCTAssertEqual(
+            implicitDefaults.canonicalFilters.map(\.key),
+            ["area", "year"]
+        )
+        XCTAssertEqual(
+            implicitDefaults.filters,
+            ["area": "all", "year": "all"]
+        )
+    }
+
+    func testCategoryTabsReturnToLoadedCategoryWithoutAnotherProviderCall() {
+        var store = CategoryTabSessionStore()
+        let namespace = CategoryTabNamespace(
+            configurationID: UUID(),
+            configurationRevision: "revision-a",
+            siteKey: "site"
+        )
+        let movie = VideoCategory(id: "movie", name: "热播电影")
+        let series = VideoCategory(id: "series", name: "热播剧集")
+        var providerCallCount = 0
+
+        let movieKey = store.queryKey(
+            namespace: namespace,
+            category: movie,
+            requestedFilters: nil
+        )
+        guard case .start(let movieGeneration) = store.beginRequest(
+            for: movieKey,
+            page: 1,
+            forceRefresh: false
+        ) else {
+            return XCTFail("The first movie visit must be a cache miss")
+        }
+        providerCallCount += 1
+        store.completeRequest(
+            for: movieKey,
+            page: 1,
+            generation: movieGeneration,
+            loaded: categoryPage(title: "movie-1", page: 1, pageCount: 1)
+        )
+
+        let seriesKey = store.queryKey(
+            namespace: namespace,
+            category: series,
+            requestedFilters: nil
+        )
+        guard case .start(let seriesGeneration) = store.beginRequest(
+            for: seriesKey,
+            page: 1,
+            forceRefresh: false
+        ) else {
+            return XCTFail("The first series visit must be a cache miss")
+        }
+        providerCallCount += 1
+        store.completeRequest(
+            for: seriesKey,
+            page: 1,
+            generation: seriesGeneration,
+            loaded: categoryPage(title: "series-1", page: 1, pageCount: 1)
+        )
+
+        let restoredMovieKey = store.queryKey(
+            namespace: namespace,
+            category: movie,
+            requestedFilters: nil
+        )
+        XCTAssertEqual(restoredMovieKey, movieKey)
+        XCTAssertEqual(
+            store.beginRequest(
+                for: restoredMovieKey,
+                page: 1,
+                forceRefresh: false
+            ),
+            .cached
+        )
+        XCTAssertEqual(providerCallCount, 2)
+        XCTAssertEqual(
+            store.state(for: restoredMovieKey)?.page?.items.first?.title,
+            "movie-1"
+        )
+    }
+
+    func testCategoryTabsRestoreLastFilterAndKeepPriorFilterQueries() {
+        var store = CategoryTabSessionStore()
+        let namespace = CategoryTabNamespace(
+            configurationID: UUID(),
+            configurationRevision: "revision-a",
+            siteKey: "site"
+        )
+        let movie = VideoCategory(
+            id: "movie",
+            name: "电影",
+            filters: [
+                VideoFilter(
+                    id: "genre",
+                    name: "类型",
+                    options: [
+                        VideoFilterOption(name: "全部", value: "all"),
+                        VideoFilterOption(name: "动作", value: "action")
+                    ]
+                )
+            ]
+        )
+        let series = VideoCategory(id: "series", name: "电视剧")
+
+        let defaultMovieKey = store.queryKey(
+            namespace: namespace,
+            category: movie,
+            requestedFilters: nil
+        )
+        guard case .start(let defaultGeneration) = store.beginRequest(
+            for: defaultMovieKey,
+            page: 1,
+            forceRefresh: false
+        ) else { return XCTFail("Expected default-filter miss") }
+        store.completeRequest(
+            for: defaultMovieKey,
+            page: 1,
+            generation: defaultGeneration,
+            loaded: categoryPage(title: "all-movies", page: 1, pageCount: 1)
+        )
+
+        let actionMovieKey = store.queryKey(
+            namespace: namespace,
+            category: movie,
+            requestedFilters: ["genre": "action"]
+        )
+        guard case .start(let actionGeneration) = store.beginRequest(
+            for: actionMovieKey,
+            page: 1,
+            forceRefresh: false
+        ) else { return XCTFail("Expected action-filter miss") }
+        store.completeRequest(
+            for: actionMovieKey,
+            page: 1,
+            generation: actionGeneration,
+            loaded: categoryPage(title: "action-movies", page: 1, pageCount: 1)
+        )
+
+        _ = store.queryKey(
+            namespace: namespace,
+            category: series,
+            requestedFilters: nil
+        )
+        let restoredMovieKey = store.queryKey(
+            namespace: namespace,
+            category: movie,
+            requestedFilters: nil
+        )
+        XCTAssertEqual(restoredMovieKey, actionMovieKey)
+        XCTAssertEqual(restoredMovieKey.filters, ["genre": "action"])
+        XCTAssertEqual(
+            store.beginRequest(
+                for: restoredMovieKey,
+                page: 1,
+                forceRefresh: false
+            ),
+            .cached
+        )
+
+        let explicitDefaultAgain = store.queryKey(
+            namespace: namespace,
+            category: movie,
+            requestedFilters: ["genre": "all"]
+        )
+        XCTAssertEqual(explicitDefaultAgain, defaultMovieKey)
+        XCTAssertEqual(
+            store.beginRequest(
+                for: explicitDefaultAgain,
+                page: 1,
+                forceRefresh: false
+            ),
+            .cached
+        )
+    }
+
+    func testCategoryTabKeepsMergedPaginationAcrossTabSwitches() {
+        var store = CategoryTabSessionStore()
+        let namespace = CategoryTabNamespace(
+            configurationID: UUID(),
+            configurationRevision: "revision-a",
+            siteKey: "site"
+        )
+        let movie = VideoCategory(id: "movie", name: "电影")
+        let series = VideoCategory(id: "series", name: "电视剧")
+        let movieKey = store.queryKey(
+            namespace: namespace,
+            category: movie,
+            requestedFilters: nil
+        )
+        guard case .start(let firstGeneration) = store.beginRequest(
+            for: movieKey,
+            page: 1,
+            forceRefresh: false
+        ) else { return XCTFail("Expected first page miss") }
+        store.completeRequest(
+            for: movieKey,
+            page: 1,
+            generation: firstGeneration,
+            loaded: categoryPage(title: "movie-1", page: 1, pageCount: 4)
+        )
+        guard case .start(let secondGeneration) = store.beginRequest(
+            for: movieKey,
+            page: 2,
+            forceRefresh: false
+        ) else { return XCTFail("Expected second page request") }
+        store.completeRequest(
+            for: movieKey,
+            page: 2,
+            generation: secondGeneration,
+            loaded: categoryPage(title: "movie-2", page: 2, pageCount: 4)
+        )
+
+        _ = store.queryKey(
+            namespace: namespace,
+            category: series,
+            requestedFilters: nil
+        )
+        let restoredMovieKey = store.queryKey(
+            namespace: namespace,
+            category: movie,
+            requestedFilters: nil
+        )
+        let restored = store.state(for: restoredMovieKey)
+        XCTAssertEqual(restored?.lastLoadedPage, 2)
+        XCTAssertEqual(restored?.pageCount, 4)
+        XCTAssertTrue(restored?.hasMore == true)
+        XCTAssertEqual(
+            restored?.page?.items.map(\.title),
+            ["movie-1", "movie-2"]
+        )
+        XCTAssertEqual(
+            store.beginRequest(
+                for: restoredMovieKey,
+                page: 1,
+                forceRefresh: false
+            ),
+            .cached
+        )
+    }
+
+    func testCategoryTabDeduplicatesConcurrentRequestForSameQueryAndPage() {
+        var store = CategoryTabSessionStore()
+        let namespace = CategoryTabNamespace(
+            configurationID: UUID(),
+            configurationRevision: "revision-a",
+            siteKey: "site"
+        )
+        let key = store.queryKey(
+            namespace: namespace,
+            category: VideoCategory(id: "movie", name: "电影"),
+            requestedFilters: nil
+        )
+        guard case .start(let generation) = store.beginRequest(
+            for: key,
+            page: 1,
+            forceRefresh: false
+        ) else { return XCTFail("Expected first request to start") }
+
+        XCTAssertEqual(
+            store.beginRequest(for: key, page: 1, forceRefresh: false),
+            .join(generation: generation)
+        )
+    }
+
+    func testCategoryTabSlowResponsesCannotPublishOverCurrentTab() {
+        var store = CategoryTabSessionStore()
+        let namespace = CategoryTabNamespace(
+            configurationID: UUID(),
+            configurationRevision: "revision-a",
+            siteKey: "site"
+        )
+        let categories = ["a", "b", "c"].map {
+            VideoCategory(id: $0, name: $0.uppercased())
+        }
+        var requests: [(CategoryQueryKey, UInt64)] = []
+        for category in categories {
+            let key = store.queryKey(
+                namespace: namespace,
+                category: category,
+                requestedFilters: nil
+            )
+            guard case .start(let generation) = store.beginRequest(
+                for: key,
+                page: 1,
+                forceRefresh: false
+            ) else { return XCTFail("Expected independent request") }
+            requests.append((key, generation))
+        }
+        let activeKey = requests[2].0
+
+        for (key, generation) in requests.reversed() {
+            store.completeRequest(
+                for: key,
+                page: 1,
+                generation: generation,
+                loaded: categoryPage(
+                    title: key.categoryID,
+                    page: 1,
+                    pageCount: 1
+                )
+            )
+        }
+
+        XCTAssertTrue(
+            CategoryTabPublicationPolicy.shouldPublish(
+                requestKey: activeKey,
+                activeKey: activeKey,
+                currentNamespace: namespace
+            )
+        )
+        for stale in requests.prefix(2).map(\.0) {
+            XCTAssertFalse(
+                CategoryTabPublicationPolicy.shouldPublish(
+                    requestKey: stale,
+                    activeKey: activeKey,
+                    currentNamespace: namespace
+                )
+            )
+        }
+        XCTAssertEqual(
+            store.state(for: activeKey)?.page?.items.first?.title,
+            "c"
+        )
+    }
+
+    func testCategoryTabForceRefreshBypassesHitAndOldRevisionCannotReturn() {
+        var store = CategoryTabSessionStore()
+        let configurationID = UUID()
+        let oldNamespace = CategoryTabNamespace(
+            configurationID: configurationID,
+            configurationRevision: "revision-a",
+            siteKey: "site"
+        )
+        let category = VideoCategory(id: "movie", name: "电影")
+        let oldKey = store.queryKey(
+            namespace: oldNamespace,
+            category: category,
+            requestedFilters: nil
+        )
+        guard case .start(let firstGeneration) = store.beginRequest(
+            for: oldKey,
+            page: 1,
+            forceRefresh: false
+        ) else { return XCTFail("Expected initial request") }
+        store.completeRequest(
+            for: oldKey,
+            page: 1,
+            generation: firstGeneration,
+            loaded: categoryPage(title: "old", page: 1, pageCount: 1)
+        )
+        XCTAssertEqual(
+            store.beginRequest(for: oldKey, page: 1, forceRefresh: false),
+            .cached
+        )
+
+        guard case .start(let refreshGeneration) = store.beginRequest(
+            for: oldKey,
+            page: 1,
+            forceRefresh: true
+        ) else { return XCTFail("Force refresh must bypass a valid hit") }
+        XCTAssertGreaterThan(refreshGeneration, firstGeneration)
+        XCTAssertFalse(
+            store.ownsRequest(
+                for: oldKey,
+                page: 1,
+                generation: firstGeneration
+            )
+        )
+        XCTAssertTrue(
+            store.ownsRequest(
+                for: oldKey,
+                page: 1,
+                generation: refreshGeneration
+            )
+        )
+        store.completeRequest(
+            for: oldKey,
+            page: 1,
+            generation: refreshGeneration,
+            loaded: categoryPage(title: "refreshed", page: 1, pageCount: 1)
+        )
+        XCTAssertEqual(
+            store.state(for: oldKey)?.page?.items.first?.title,
+            "refreshed"
+        )
+
+        guard case .start(let obsoleteGeneration) = store.beginRequest(
+            for: oldKey,
+            page: 1,
+            forceRefresh: true
+        ) else { return XCTFail("Expected obsolete request") }
+        store.invalidateRevisions(
+            configurationID: configurationID,
+            keeping: "revision-b"
+        )
+        XCTAssertFalse(
+            store.ownsRequest(
+                for: oldKey,
+                page: 1,
+                generation: obsoleteGeneration
+            )
+        )
+        XCTAssertNil(
+            store.completeRequest(
+                for: oldKey,
+                page: 1,
+                generation: obsoleteGeneration,
+                loaded: categoryPage(title: "obsolete", page: 1, pageCount: 1)
+            )
+        )
+        XCTAssertNil(store.state(for: oldKey))
+    }
+
+    func testCategoryConfigurationRevisionTracksSemanticContentNotTimestamp() {
+        let id = UUID()
+        let original = StoredConfiguration(
+            id: id,
+            name: "配置",
+            sourceKind: .remote,
+            sourceValue: "https://example.invalid/config.json",
+            baseURL: URL(string: "http://127.0.0.1:10001"),
+            rawData: Data("{\"spider\":\"a.jar\"}".utf8),
+            updatedAt: Date(timeIntervalSince1970: 1),
+            isActive: true
+        )
+        var timestampOnly = original
+        timestampOnly.updatedAt = Date(timeIntervalSince1970: 2)
+        var changed = timestampOnly
+        changed.rawData = Data("{\"spider\":\"b.jar\"}".utf8)
+        var changedBaseURL = timestampOnly
+        changedBaseURL.baseURL = URL(string: "http://127.0.0.1:10002")
+
+        XCTAssertEqual(
+            CategoryConfigurationRevision.make(record: original),
+            CategoryConfigurationRevision.make(record: timestampOnly)
+        )
+        XCTAssertNotEqual(
+            CategoryConfigurationRevision.make(record: original),
+            CategoryConfigurationRevision.make(record: changed)
+        )
+        XCTAssertNotEqual(
+            CategoryConfigurationRevision.make(record: original),
+            CategoryConfigurationRevision.make(record: changedBaseURL)
+        )
+    }
+
     func testFilterOverflowShowsEveryOptionWhenTheyFit() {
         let options = [
             VideoFilterOption(name: "全部", value: "all"),
