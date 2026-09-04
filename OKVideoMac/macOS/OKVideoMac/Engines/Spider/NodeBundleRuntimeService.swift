@@ -649,11 +649,11 @@ struct NodeBundleDeterministicPatch: Equatable, Sendable {
             string: "https://raw.githubusercontent.com/Darklessing/catvod/c47d135469d4a32a4178531ce1b8f4e2e936f0b8/douer/index.js"
         )!,
         inputSHA256: "0ad3ed101dc961e6d73b758a5089ac1e10a12d27666468436e1fff2e39df01cc",
-        outputSHA256: "5ca75837d540745740e24e4afe7f085e496c23467a787c290b30296700948014",
+        outputSHA256: "922df076b788fc33520954892be8ba1a1be312f0afa26dbd8c066867b8aebf71",
         patchResourceName: "catpaw-quark-lifecycle.patch",
-        patchResourceSHA256: "46df6f1021a54227241560bb5976a4550fdba79abc8090f6f724781a7b3d6d68",
+        patchResourceSHA256: "c778e76fb465db76cc4ae864ac00ff00365465584d8a934afcc3c5a92b32cdb8",
         moduleResourceName: "catpaw-quark-transfer-lifecycle",
-        moduleResourceSHA256: "bf7ffd69c4d859ba63152f855457b7d72b96c0a728405a6605ee7b4bebdee5a0",
+        moduleResourceSHA256: "57b08964472449a628ab167345a3c2b31fd700948fb71af88fbca81914d66df5",
         legacyCacheKeys: [
             // Cache identity of the formerly unpinned refs/heads/main URL.
             // Migration still requires the exact fixed input SHA before the

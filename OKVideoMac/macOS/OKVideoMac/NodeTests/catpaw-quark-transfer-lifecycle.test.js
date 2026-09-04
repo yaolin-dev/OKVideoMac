@@ -41,7 +41,11 @@ function createHarness(t, options = {}) {
     if (request.method === 'post' && request.path === 'share/sharepage/save') {
       taskSequence += 1;
       const taskID = `task-${taskSequence}`;
-      taskSavedFIDs.set(taskID, `saved-${request.body.fid_list[0]}`);
+      const suffix = options.uniqueSavedFIDs ? `-${taskSequence}` : '';
+      taskSavedFIDs.set(
+        taskID,
+        `saved-${request.body.fid_list[0]}${suffix}`
+      );
       return response({ task_id: taskID });
     }
     if (request.method === 'get' && request.path.startsWith('task?')) {
@@ -98,10 +102,9 @@ function createHarness(t, options = {}) {
 
 function request(requestID, requestGeneration) {
   return {
-    body: {
-      _okvideo: {
-        transferContext: { requestID, requestGeneration }
-      }
+    headers: {
+      'x-okvideo-transfer-request-id': requestID,
+      'x-okvideo-transfer-generation': String(requestGeneration)
     }
   };
 }
@@ -119,6 +122,68 @@ async function resolveEpisode(lifecycle, sourceFID, generation, options = {}) {
     return { parse: 0, url: media.download_url };
   });
   return play(request(requestID, generation), null);
+}
+
+async function resolveProxiedEpisode(
+  lifecycle,
+  sourceFID,
+  generation,
+  options = {}
+) {
+  const requestID = options.requestID || crypto.randomUUID();
+  const play = lifecycle.wrapPlay(async () => {
+    await lifecycle.download(
+      'share-id',
+      'share-token',
+      sourceFID,
+      `source-token-${sourceFID}`
+    );
+    const fileID = `share-token*${sourceFID}*source-token-${sourceFID}`;
+    return {
+      parse: 0,
+      url: [
+        '代理',
+        `http://127.0.0.1:2333/spider/myquark/3/proxy/quark/src/down/share-id/${fileID}/.bin`,
+        '高清',
+        `http://127.0.0.1:2333/spider/myquark/3/proxy/quark/trans/high/share-id/${fileID}/.mp4`
+      ]
+    };
+  });
+  return play(request(requestID, generation), null);
+}
+
+function proxyRequest(proxyURL, overrides = {}) {
+  const url = new URL(proxyURL);
+  const parts = url.pathname.split('/');
+  const quarkIndex = parts.indexOf('quark');
+  return {
+    query: {
+      _okvideoReceipt: url.searchParams.get('_okvideoReceipt')
+    },
+    params: {
+      site: 'quark',
+      what: parts[quarkIndex + 1],
+      flag: parts[quarkIndex + 2],
+      shareId: parts[quarkIndex + 3],
+      fileId: decodeURIComponent(parts[quarkIndex + 4]),
+      ...overrides
+    }
+  };
+}
+
+function createReply() {
+  return {
+    statusCode: 200,
+    body: null,
+    code(value) {
+      this.statusCode = value;
+      return this;
+    },
+    send(value) {
+      this.body = value;
+      return this;
+    }
+  };
 }
 
 function callsAt(harness, method, requestPath) {
@@ -209,6 +274,90 @@ test('same account, generation, and source coalesces duplicate transfer requests
   assert.ok(result._okvideo.transferReceipt);
   assert.equal(callsAt(harness, 'post', 'share/sharepage/save').length, 1);
   assert.equal(lifecycle.snapshotForTesting().entries.length, 1);
+});
+
+test('CatPaw proxy requests reuse the exact receipt created by /play', async (t) => {
+  const harness = createHarness(t);
+  const lifecycle = harness.makeLifecycle();
+  const result = await resolveProxiedEpisode(lifecycle, 'proxy-source', 8);
+  const receiptID = result._okvideo.transferReceipt.receiptID;
+  const proxyURLs = result.url.filter((value) => value.startsWith('http://'));
+  assert.equal(proxyURLs.length, 2);
+  for (const value of proxyURLs) {
+    assert.equal(new URL(value).searchParams.get('_okvideoReceipt'), receiptID);
+  }
+
+  const proxy = lifecycle.wrapProxy(async (proxyRequestValue) => {
+    const components = proxyRequestValue.params.fileId.split('*');
+    if (proxyRequestValue.params.what === 'trans') {
+      return lifecycle.transcode(
+        proxyRequestValue.params.shareId,
+        components[0],
+        components[1],
+        components[2]
+      );
+    }
+    return lifecycle.download(
+      proxyRequestValue.params.shareId,
+      components[0],
+      components[1],
+      components[2]
+    );
+  });
+
+  const download = await proxy(proxyRequest(proxyURLs[0]), createReply());
+  const transcodes = await proxy(proxyRequest(proxyURLs[1]), createReply());
+  assert.equal(download.download_url, 'https://media.invalid/saved-proxy-source');
+  assert.equal(transcodes[0].url, 'https://media.invalid/saved-proxy-source');
+  assert.equal(callsAt(harness, 'post', 'share/sharepage/save').length, 1);
+});
+
+test('proxy receipt keeps reused source FIDs isolated by playback generation', async (t) => {
+  const harness = createHarness(t, { uniqueSavedFIDs: true });
+  const lifecycle = harness.makeLifecycle();
+  const first = await resolveProxiedEpisode(lifecycle, 'same-source', 1);
+  const second = await resolveProxiedEpisode(lifecycle, 'same-source', 2);
+  const firstURL = first.url.find((value) => value.startsWith('http://'));
+  const secondURL = second.url.find((value) => value.startsWith('http://'));
+  const proxy = lifecycle.wrapProxy(async (proxyRequestValue) => {
+    const components = proxyRequestValue.params.fileId.split('*');
+    return lifecycle.download(
+      proxyRequestValue.params.shareId,
+      components[0],
+      components[1],
+      components[2]
+    );
+  });
+
+  const firstDownload = await proxy(proxyRequest(firstURL), createReply());
+  const secondDownload = await proxy(proxyRequest(secondURL), createReply());
+  assert.equal(firstDownload.download_url, 'https://media.invalid/saved-same-source-1');
+  assert.equal(secondDownload.download_url, 'https://media.invalid/saved-same-source-2');
+  assert.notEqual(
+    first._okvideo.transferReceipt.receiptID,
+    second._okvideo.transferReceipt.receiptID
+  );
+});
+
+test('proxy receipt cannot authorize a different source FID', async (t) => {
+  const harness = createHarness(t);
+  const lifecycle = harness.makeLifecycle();
+  const result = await resolveProxiedEpisode(lifecycle, 'owned-source', 1);
+  const proxyURL = result.url.find((value) => value.startsWith('http://'));
+  const reply = createReply();
+  let proxyInvoked = false;
+  const proxy = lifecycle.wrapProxy(async () => {
+    proxyInvoked = true;
+  });
+  const forged = proxyRequest(proxyURL, {
+    fileId: 'share-token*foreign-source*source-token-foreign-source'
+  });
+
+  await proxy(forged, reply);
+  assert.equal(reply.statusCode, 404);
+  assert.equal(reply.body, 'quark transfer receipt unavailable');
+  assert.equal(proxyInvoked, false);
+  assert.equal(callsAt(harness, 'post', 'share/sharepage/save').length, 1);
 });
 
 test('a reused generation in a different App request cannot reuse an old transfer', async (t) => {

@@ -262,7 +262,8 @@ final class CatPawRouteClient {
 
     func prepare(
         route: CatPawRoute,
-        payload: [String: JSONValue]
+        payload: [String: JSONValue],
+        additionalHeaders: HTTPHeaders = [:]
     ) async throws -> CatPawPreparedInvocation {
         if await capabilityRegistry.state(
             of: route,
@@ -283,7 +284,7 @@ final class CatPawRouteClient {
         }
 
         let invocationID = UUID().uuidString.lowercased()
-        var headers = requestHeaders
+        var headers = requestHeaders.merging(additionalHeaders)
         headers["Content-Type"] = "application/json; charset=utf-8"
         headers["X-OKVideo-Invocation-ID"] = invocationID
         let request = HTTPRequest(

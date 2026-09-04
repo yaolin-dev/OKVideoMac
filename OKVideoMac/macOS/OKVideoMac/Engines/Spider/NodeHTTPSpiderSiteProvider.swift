@@ -1568,27 +1568,26 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         flag: String,
         episodeURL: String
     ) async throws -> SitePlaybackResult {
-        var body: [String: JSONValue] = [
+        let body: [String: JSONValue] = [
             "flag": .string(flag),
             "id": .string(episodeURL),
             "vipFlags": .array([]),
             "flags": .array([])
         ]
+        var lifecycleHeaders: HTTPHeaders = [:]
         if let context = NodeTransferPlaybackTaskContext.current {
-            body["_okvideo"] = .object([
-                "transferContext": .object([
-                    "requestID": .string(
-                        context.requestID.uuidString.lowercased()
-                    ),
-                    "requestGeneration": .integer(
-                        Int64(clamping: context.requestGeneration)
-                    )
-                ])
-            ])
+            // Keep CatPawOpen's provider-owned /play JSON contract unchanged.
+            // The deterministic lifecycle patch consumes these host-private
+            // headers; ordinary CatPaw modules simply ignore them.
+            lifecycleHeaders["X-OKVideo-Transfer-Request-ID"] =
+                context.requestID.uuidString.lowercased()
+            lifecycleHeaders["X-OKVideo-Transfer-Generation"] =
+                String(context.requestGeneration)
         }
         let invocation = try await invoke(
             method: "play",
             body: body,
+            additionalHeaders: lifecycleHeaders,
             // POST /play may perform a cloud transfer. Blindly repeating
             // it cannot repair an expired token and can duplicate work.
             maximumAttempts: 1
@@ -2041,6 +2040,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     private func invoke(
         method: String,
         body: [String: JSONValue],
+        additionalHeaders: HTTPHeaders = [:],
         maximumAttempts: Int = 1,
         hostMessageWaitMilliseconds: Int = 0
     ) async throws -> InvocationResult {
@@ -2053,7 +2053,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             do {
                 let prepared = try await routeClient.prepare(
                     route: route,
-                    payload: body
+                    payload: body,
+                    additionalHeaders: additionalHeaders
                 )
                 let readyBaseURL = prepared.baseURL
                 let invocationID = prepared.invocationID

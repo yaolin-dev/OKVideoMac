@@ -13,6 +13,7 @@ const { AsyncLocalStorage } = require('node:async_hooks');
 const LEDGER_VERSION = 1;
 const RECEIPT_VERSION = 1;
 const PROVIDER = 'quark';
+const PROXY_RECEIPT_QUERY = '_okvideoReceipt';
 const CLEANABLE_STATES = new Set([
   'transferred',
   'cleanupPending',
@@ -241,6 +242,68 @@ function createQuarkTransferLifecycle(options) {
       savedFIDs: entry.savedFIDs.slice(),
       parentFolderFID: entry.parentFolderFID || null,
       createdAt: entry.createdAt
+    };
+  }
+
+  function appendReceiptToProxyURL(value, receiptID) {
+    if (typeof value !== 'string' || !isUUID(receiptID)) return value;
+    const isTransferProxy = [
+      '/proxy/quark/src/down/',
+      '/proxy/quark/src/redirect/',
+      '/proxy/quark/trans/'
+    ].some((marker) => value.includes(marker));
+    if (!isTransferProxy) return value;
+    const fragmentIndex = value.indexOf('#');
+    const base = fragmentIndex >= 0 ? value.slice(0, fragmentIndex) : value;
+    const fragment = fragmentIndex >= 0 ? value.slice(fragmentIndex) : '';
+    const separator = base.includes('?') ? '&' : '?';
+    return `${base}${separator}${PROXY_RECEIPT_QUERY}=${encodeURIComponent(receiptID)}${fragment}`;
+  }
+
+  function decoratePlayResult(result, receiptID) {
+    if (!result || typeof result !== 'object' || Array.isArray(result)) {
+      return result;
+    }
+    if (Array.isArray(result.url)) {
+      result.url = result.url.map((value) =>
+        appendReceiptToProxyURL(value, receiptID)
+      );
+    } else {
+      result.url = appendReceiptToProxyURL(result.url, receiptID);
+    }
+    return result;
+  }
+
+  function proxyReceiptID(request) {
+    const value = request?.query?.[PROXY_RECEIPT_QUERY];
+    return isUUID(value) ? value : null;
+  }
+
+  function proxySourceFID(request) {
+    const fileID = nonEmptyString(request?.params?.fileId, 16 * 1024);
+    if (!fileID) return null;
+    return nonEmptyString(fileID.split('*')[1]);
+  }
+
+  function proxyPlaybackContext(request, receiptID) {
+    const entry = entryForReceipt(receiptID);
+    const sourceFID = proxySourceFID(request);
+    const account = currentAccount();
+    if (!entry || !sourceFID || !account ||
+        request?.params?.site !== PROVIDER ||
+        entry.accountScope !== account.scope ||
+        entry.sourceFID !== sourceFID ||
+        !entry.savedFIDs.length ||
+        (entry.state !== 'transferred' && entry.state !== 'leased')) {
+      return null;
+    }
+    return {
+      requestID: entry.requestID,
+      requestGeneration: entry.requestGeneration,
+      receipt: receiptPayload(entry),
+      account,
+      boundReceiptID: entry.receiptID,
+      allowTransferCreation: false
     };
   }
 
@@ -672,15 +735,28 @@ function createQuarkTransferLifecycle(options) {
       return entry?.savedFIDs?.[0] || null;
     }
     const operation = serializeAccount(account.scope, async () => {
-      let entry = existingTransfer(
-        account.scope,
-        context.requestID,
-        context.requestGeneration,
-        normalizedSourceFID
-      );
+      let entry = context.boundReceiptID
+        ? entryForReceipt(context.boundReceiptID)
+        : existingTransfer(
+          account.scope,
+          context.requestID,
+          context.requestGeneration,
+          normalizedSourceFID
+        );
+      if (entry && (
+        entry.accountScope !== account.scope ||
+        entry.requestID !== context.requestID ||
+        entry.requestGeneration !== context.requestGeneration ||
+        entry.sourceFID !== normalizedSourceFID ||
+        entry.state === 'cleaned' ||
+        entry.state === 'permanentFailure'
+      )) {
+        entry = null;
+      }
       if (entry && !entry.savedFIDs.length) {
         entry = await resumeTransferUnlocked(entry, account);
       }
+      if (!entry && context.allowTransferCreation === false) return null;
       if (!entry) {
         entry = await createTransferUnlocked(
           context,
@@ -743,9 +819,16 @@ function createQuarkTransferLifecycle(options) {
   }
 
   function playbackContext(request) {
-    const value = request?.body?._okvideo?.transferContext;
-    const requestID = nonEmptyString(value?.requestID, 64);
-    const requestGeneration = positiveInteger(value?.requestGeneration);
+    const legacyValue = request?.body?._okvideo?.transferContext;
+    const requestID = nonEmptyString(
+      request?.headers?.['x-okvideo-transfer-request-id'] ||
+        legacyValue?.requestID,
+      64
+    );
+    const requestGeneration = positiveInteger(
+      request?.headers?.['x-okvideo-transfer-generation'] ||
+        legacyValue?.requestGeneration
+    );
     if (!requestID || !isUUID(requestID) || !requestGeneration) return null;
     return { requestID, requestGeneration, receipt: null };
   }
@@ -762,6 +845,7 @@ function createQuarkTransferLifecycle(options) {
           const result = await originalPlay(request, reply);
           if (context.receipt && result && typeof result === 'object' &&
               !Array.isArray(result)) {
+            decoratePlayResult(result, context.receipt.receiptID);
             result._okvideo = Object.assign({}, result._okvideo, {
               transferReceipt: context.receipt
             });
@@ -774,6 +858,36 @@ function createQuarkTransferLifecycle(options) {
           throw error;
         }
       });
+    };
+  }
+
+  function wrapProxy(originalProxy, ensureAccount) {
+    if (typeof originalProxy !== 'function') {
+      throw new Error('CatPaw proxy adapter rejected');
+    }
+    const initialize = typeof ensureAccount === 'function'
+      ? ensureAccount : async () => {};
+    return async function okvideoLifecycleProxy(request, reply) {
+      const suppliedReceipt = request?.query?.[PROXY_RECEIPT_QUERY];
+      // noSaveMode can legitimately return a CatPaw proxy without creating a
+      // transfer. Preserve that upstream path when no lifecycle capability is
+      // present; a supplied but invalid capability always fails closed.
+      if (suppliedReceipt == null) return originalProxy(request, reply);
+      await initialize(request);
+      const receiptID = proxyReceiptID(request);
+      const context = receiptID
+        ? proxyPlaybackContext(request, receiptID) : null;
+      if (!context) {
+        if (reply && typeof reply.code === 'function' &&
+            typeof reply.send === 'function') {
+          return reply.code(404).send('quark transfer receipt unavailable');
+        }
+        return null;
+      }
+      return contextStorage.run(
+        context,
+        () => originalProxy(request, reply)
+      );
     };
   }
 
@@ -931,6 +1045,7 @@ function createQuarkTransferLifecycle(options) {
     retryPendingForCurrentAccount,
     transcode,
     wrapPlay,
+    wrapProxy,
     accountScopeForCookie,
     snapshotForTesting: () => clone(ledger)
   };

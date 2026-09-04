@@ -17,6 +17,7 @@
   const originalPlay = DM;
   const originalDownload = Vae;
   const originalTranscode = gtt;
+  const originalQuarkProxy = PM;
   const originalRouteRegistration = pIn;
 
   const lifecycle = createQuarkTransferLifecycle({
@@ -57,6 +58,9 @@
   // Quark is the only provider connected in this version. Own-drive playback
   // and every other provider retain the original implementation.
   DM = lifecycle.wrapPlay(originalPlay);
+  PM = lifecycle.wrapProxy(originalQuarkProxy, async (request) => {
+    await mT(request);
+  });
   Vae = async function okvideoQuarkDownload(
     shareID,
     shareToken,

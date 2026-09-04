@@ -11077,7 +11077,7 @@ final class TransferReceiptContractTests: XCTestCase {
                     "sourceFID":"source-opaque",
                     "savedFIDs":["saved-exact"],
                     "parentFolderFID":"folder-owned",
-                    "createdAt":"2026-09-04T00:00:00Z"
+                    "createdAt":"2026-09-04T00:00:00.830Z"
                   }}
                 }
                 """.utf8
@@ -11099,6 +11099,45 @@ final class TransferReceiptContractTests: XCTestCase {
         XCTAssertEqual(result.transferReceipt?.requestID, requestID)
         XCTAssertEqual(result.transferReceipt?.requestGeneration, 19)
         XCTAssertEqual(result.transferReceipt?.savedFIDs, ["saved-exact"])
+        let receipt = try XCTUnwrap(result.transferReceipt)
+        XCTAssertEqual(
+            receipt.createdAt.timeIntervalSince1970,
+            1_788_480_000.830,
+            accuracy: 0.001
+        )
+    }
+
+    func testTransferReceiptAlsoAcceptsWholeSecondISO8601Date() throws {
+        let receiptID = UUID()
+        let requestID = UUID()
+        let value = try JSONDecoder().decode(
+            JSONValue.self,
+            from: Data(
+                """
+                {"url":"https://media.invalid/video.mp4","parse":0,
+                 "_okvideo":{"transferReceipt":{
+                   "version":1,
+                   "receiptID":"\(receiptID.uuidString.lowercased())",
+                   "provider":"quark",
+                   "accountScope":"\(String(repeating: "a", count: 64))",
+                   "requestID":"\(requestID.uuidString.lowercased())",
+                   "requestGeneration":1,
+                   "savedFIDs":["saved-exact"],
+                   "createdAt":"2026-09-04T00:00:00Z"
+                 }}}
+                """.utf8
+            )
+        )
+        let site = SiteConfiguration(
+            key: "nodejs_fixture",
+            name: "Fixture",
+            type: 3,
+            api: "/spider/fixture/3"
+        )
+
+        XCTAssertNotNil(
+            try SpiderResponseMapper.player(value, site: site).transferReceipt
+        )
     }
 
     func testMissingOrInvalidReceiptRemainsBackwardCompatible() throws {
@@ -15499,6 +15538,72 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(result.headers["Referer"], "https://response.example/")
         XCTAssertEqual(result.headers["Cookie"], "session=fixture")
         XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
+    }
+
+    func testNodePlayerKeepsCatPawPlayBodyExactWhenPassingTransferContext()
+        async throws {
+        let requestID = UUID()
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.path.hasSuffix("/init") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            XCTAssertTrue(request.url.path.hasSuffix("/play"))
+            let body = try XCTUnwrap(request.body)
+            let value = try JSONDecoder().decode(JSONValue.self, from: body)
+            XCTAssertEqual(
+                value,
+                .object([
+                    "flag": .string("阿里网盘"),
+                    "id": .string("provider-owned-episode"),
+                    "vipFlags": .array([]),
+                    "flags": .array([])
+                ])
+            )
+            XCTAssertEqual(
+                request.headers["X-OKVideo-Transfer-Request-ID"],
+                requestID.uuidString.lowercased()
+            )
+            XCTAssertEqual(
+                request.headers["X-OKVideo-Transfer-Generation"],
+                "27"
+            )
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(
+                    #"{"parse":0,"url":["原画","https://media.invalid/video.mp4"]}"#.utf8
+                )
+            )
+        }
+        let site = SiteConfiguration(
+            key: "nodejs_catpaw_contract",
+            name: "CatPaw Contract",
+            type: 3,
+            api: "/spider/catpaw-contract/3",
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        let result = try await provider.player(
+            flag: "阿里网盘",
+            episodeURL: "provider-owned-episode",
+            transferContext: NodeTransferPlaybackContext(
+                requestID: requestID,
+                requestGeneration: 27
+            )
+        )
+
+        XCTAssertEqual(result.url, "https://media.invalid/video.mp4")
     }
 
     func testNodePlayerPreparesBaiduRedirectWithProviderHeaders() async throws {
