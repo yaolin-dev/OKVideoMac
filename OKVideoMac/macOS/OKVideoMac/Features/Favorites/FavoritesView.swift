@@ -9,6 +9,7 @@ struct FavoritesView: View {
     @State private var selectedIDs: Set<FavoriteRecord.ID> = []
     @State private var pendingDeletion: FavoriteDeletion?
     @State private var focusedID: FavoriteRecord.ID?
+    private let scrollCoordinateSpace = "favorites-scroll"
 
     var body: some View {
         Group {
@@ -63,17 +64,21 @@ struct FavoritesView: View {
 
     @ViewBuilder
     private var favoritesList: some View {
-        favoriteRows
-    }
-
-    private var favoriteRows: some View {
-        List {
-            ForEach(state.favorites) { favorite in
-                favoriteRow(favorite)
-                    .padding(.vertical, 4)
+        ScrollView {
+            BrowserToolbarScrollMarker(
+                coordinateSpaceName: scrollCoordinateSpace
+            )
+            LazyVStack(spacing: 0) {
+                ForEach(state.favorites) { favorite in
+                    favoriteRow(favorite)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 8)
+                    Divider()
+                        .padding(.leading, isSelecting ? 56 : 20)
+                }
             }
         }
-        .browserListToolbarScrollSurface()
+        .browserToolbarScrollSurface(named: scrollCoordinateSpace)
     }
 
     @ViewBuilder
@@ -160,28 +165,29 @@ struct FavoritesView: View {
     private var favoriteManagementControls: some View {
         if isSelecting {
             switch toolbarLayout {
-            case .expanded:
+            case .expanded, .compact:
                 selectAllButton
+                    .primaryToolbarIconControl(isSelected: allItemsSelected)
                 deleteSelectedButton
+                    .primaryToolbarIconControl(destructive: true)
                 finishSelectionButton
-            case .compact:
-                selectAllButton.labelStyle(.iconOnly)
-                deleteSelectedButton.labelStyle(.iconOnly)
-                finishSelectionButton
+                    .primaryToolbarTextControl()
             case .minimal:
                 selectionManagementMenu
+                    .primaryToolbarMenuControl()
                 finishSelectionButton
+                    .primaryToolbarTextControl()
             }
         } else {
             switch toolbarLayout {
-            case .expanded:
+            case .expanded, .compact:
                 beginSelectionButton
+                    .primaryToolbarIconControl()
                 clearAllButton
-            case .compact:
-                beginSelectionButton.labelStyle(.iconOnly)
-                clearAllButton.labelStyle(.iconOnly)
+                    .primaryToolbarIconControl(destructive: true)
             case .minimal:
                 normalManagementMenu
+                    .primaryToolbarMenuControl()
             }
         }
     }

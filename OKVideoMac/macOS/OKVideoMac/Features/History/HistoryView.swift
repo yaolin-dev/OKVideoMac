@@ -195,28 +195,29 @@ struct HistoryView: View {
     private var historyManagementControls: some View {
         if isSelecting {
             switch toolbarLayout {
-            case .expanded:
+            case .expanded, .compact:
                 selectAllButton
+                    .primaryToolbarIconControl(isSelected: allItemsSelected)
                 deleteSelectedButton
+                    .primaryToolbarIconControl(destructive: true)
                 finishSelectionButton
-            case .compact:
-                selectAllButton.labelStyle(.iconOnly)
-                deleteSelectedButton.labelStyle(.iconOnly)
-                finishSelectionButton
+                    .primaryToolbarTextControl()
             case .minimal:
                 selectionManagementMenu
+                    .primaryToolbarMenuControl()
                 finishSelectionButton
+                    .primaryToolbarTextControl()
             }
         } else {
             switch toolbarLayout {
-            case .expanded:
+            case .expanded, .compact:
                 beginSelectionButton
+                    .primaryToolbarIconControl()
                 clearAllButton
-            case .compact:
-                beginSelectionButton.labelStyle(.iconOnly)
-                clearAllButton.labelStyle(.iconOnly)
+                    .primaryToolbarIconControl(destructive: true)
             case .minimal:
                 normalManagementMenu
+                    .primaryToolbarMenuControl()
             }
         }
     }

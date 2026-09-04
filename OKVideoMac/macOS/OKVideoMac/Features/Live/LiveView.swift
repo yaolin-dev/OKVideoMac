@@ -372,7 +372,7 @@ struct LiveToolbarView: View {
         deletedChannels: [LiveChannel],
         channelCount: Int
     ) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: PrimaryToolbarMetrics.itemSpacing) {
             switch toolbarLayout {
             case .expanded:
                 sourceMenu(
@@ -380,13 +380,20 @@ struct LiveToolbarView: View {
                     sourceName: source.name,
                     compact: false
                 )
+                .primaryToolbarMenuControl()
                 groupMenu(groups, compact: false)
+                    .primaryToolbarMenuControl()
                 favoritesButton
+                    .primaryToolbarIconControl(
+                        isSelected: session.showsFavoritesOnly,
+                        selectedColor: .yellow
+                    )
                 if !deletedChannels.isEmpty {
                     deletedChannelsMenu(
                         deletedChannels,
                         sourceID: source.id
                     )
+                    .primaryToolbarMenuControl()
                 }
             case .compact:
                 sourceMenu(
@@ -394,14 +401,20 @@ struct LiveToolbarView: View {
                     sourceName: source.name,
                     compact: true
                 )
+                .primaryToolbarMenuControl()
                 groupMenu(groups, compact: true)
-                favoritesButton.labelStyle(.iconOnly)
+                    .primaryToolbarMenuControl()
+                favoritesButton
+                    .primaryToolbarIconControl(
+                        isSelected: session.showsFavoritesOnly,
+                        selectedColor: .yellow
+                    )
                 if !deletedChannels.isEmpty {
                     deletedChannelsMenu(
                         deletedChannels,
                         sourceID: source.id
                     )
-                    .labelStyle(.iconOnly)
+                    .primaryToolbarMenuControl()
                 }
             case .minimal:
                 condensedMenu(
@@ -410,10 +423,12 @@ struct LiveToolbarView: View {
                     deletedChannels: deletedChannels,
                     channelCount: channelCount
                 )
+                .primaryToolbarMenuControl()
             }
 
+            PrimaryToolbarDivider()
             refreshControl(sourceID: source.id)
-                .labelStyle(.iconOnly)
+                .primaryToolbarIconControl()
         }
     }
 
@@ -442,6 +457,7 @@ struct LiveToolbarView: View {
             }
         }
         .frame(maxWidth: compact ? 132 : 220)
+        .controlSize(.regular)
         .disabled(state.liveSources.count < 2)
         .help("当前直播源：\(sourceName)，共 \(channelCount) 个频道")
     }
@@ -477,6 +493,7 @@ struct LiveToolbarView: View {
             .lineLimit(1)
         }
         .frame(maxWidth: compact ? 108 : 180)
+        .controlSize(.regular)
         .help("筛选频道分组")
     }
 
@@ -517,7 +534,6 @@ struct LiveToolbarView: View {
                 systemImage: session.showsFavoritesOnly ? "star.fill" : "star"
             )
         }
-        .tint(session.showsFavoritesOnly ? .yellow : .accentColor)
         .help(session.showsFavoritesOnly ? "显示全部频道" : "仅显示收藏频道")
     }
 

@@ -149,8 +149,8 @@ struct VideoGrid: View {
 /// selection policies while sharing the exact same chrome and interaction
 /// feedback.
 enum BrowseSegmentedNavigationMetrics {
-    static let rowHeight: CGFloat = 52
-    static let controlHeight: CGFloat = 34
+    static let rowHeight: CGFloat = 48
+    static let controlHeight: CGFloat = 32
     static let horizontalPadding: CGFloat = 14
     static let minimumSegmentWidth: CGFloat = 62
     static let separatorWidth: CGFloat = 1
@@ -183,11 +183,11 @@ struct BrowseSegmentedNavigationContainer<Content: View>: View {
         .padding(BrowseSegmentedNavigationMetrics.containerInset)
         .background {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Color.primary.opacity(0.018))
+                .fill(Color.primary.opacity(0.012))
         }
         .overlay {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+                .stroke(Color.primary.opacity(0.045), lineWidth: 1)
         }
         .fixedSize(horizontal: true, vertical: false)
     }
@@ -288,7 +288,7 @@ private struct BrowseSegmentedNavigationButtonBody: View {
                 RoundedRectangle(cornerRadius: 7.5, style: .continuous)
                     .fill(
                         isSelected
-                            ? Color(nsColor: .windowBackgroundColor).opacity(0.52)
+                            ? Color(nsColor: .windowBackgroundColor).opacity(0.72)
                             : isHovering
                                 ? Color.primary.opacity(0.055)
                                 : Color.clear

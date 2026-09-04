@@ -6,10 +6,10 @@ import WebKit
 
 enum AppSurfacePalette {
     static var background: Color {
-        // Keep the browse surface in the native window palette. Using the
-        // control background here turns the entire detail column paper-white
-        // and visually disconnects the category strip from the titlebar.
-        Color(nsColor: .windowBackgroundColor)
+        // Keep the right-hand content canvas bright while leaving the native
+        // split-view titlebar untouched. In particular, this must not tint the
+        // independent sidebar titlebar or its system controls.
+        Color(nsColor: .textBackgroundColor)
     }
 }
 
@@ -2497,16 +2497,18 @@ private struct HomeBrowserToolbarContent: ToolbarContent {
         PrimaryPageToolbarLeadingContent(title: "点播")
         ToolbarItemGroup(placement: .primaryAction) {
             HomeConfigurationToolbarItem(layout: layout)
-                .frame(height: 40)
+                .frame(height: PrimaryToolbarMetrics.itemHeight)
                 .disabled(isInteractionBlocked)
             HomeSiteToolbarItem(layout: layout)
-                .frame(height: 40)
+                .frame(height: PrimaryToolbarMetrics.itemHeight)
                 .disabled(isInteractionBlocked)
             HomeFilterToolbarItem(layout: layout)
-                .frame(height: 40)
+                .frame(height: PrimaryToolbarMetrics.itemHeight)
                 .disabled(isInteractionBlocked)
+            PrimaryToolbarDivider()
+                .frame(height: PrimaryToolbarMetrics.itemHeight)
             HomeRefreshToolbarItem(layout: layout)
-                .frame(height: 40)
+                .frame(height: PrimaryToolbarMetrics.itemHeight)
                 .disabled(isInteractionBlocked)
         }
     }
@@ -2520,6 +2522,7 @@ private struct LiveBrowserToolbarContent: ToolbarContent {
         PrimaryPageToolbarLeadingContent(title: "直播")
         ToolbarItemGroup(placement: .primaryAction) {
             LiveToolbarView(session: session)
+                .frame(height: PrimaryToolbarMetrics.itemHeight)
                 .disabled(isInteractionBlocked)
         }
     }

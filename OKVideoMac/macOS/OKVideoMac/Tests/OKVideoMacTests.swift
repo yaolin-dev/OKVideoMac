@@ -10576,21 +10576,29 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     func testHomeToolbarCompactControlsRemainBounded() {
-        XCTAssertEqual(HomeToolbarLayout.expanded.sitePickerWidth, 210)
-        XCTAssertEqual(HomeToolbarLayout.compact.sitePickerWidth, 150)
+        XCTAssertEqual(HomeToolbarLayout.expanded.sitePickerWidth, 190)
+        XCTAssertEqual(HomeToolbarLayout.compact.sitePickerWidth, 140)
         XCTAssertEqual(HomeToolbarLayout.minimal.sitePickerWidth, 0)
         XCTAssertEqual(
             HomeToolbarLayout.expanded.configurationPickerWidth,
-            118
+            104
         )
         XCTAssertEqual(
             HomeToolbarLayout.compact.configurationPickerWidth,
-            96
+            88
         )
         XCTAssertEqual(
             HomeToolbarLayout.minimal.configurationPickerWidth,
             0
         )
+        XCTAssertEqual(PrimaryToolbarMetrics.titleFontSize, 15)
+        XCTAssertEqual(PrimaryToolbarMetrics.titleLeadingOffset, 0)
+        XCTAssertEqual(PrimaryToolbarMetrics.itemHeight, 40)
+        XCTAssertEqual(PrimaryToolbarMetrics.controlHeight, 32)
+        XCTAssertEqual(PrimaryToolbarMetrics.iconControlSize, 32)
+        XCTAssertEqual(PrimaryToolbarMetrics.itemSpacing, 8)
+        XCTAssertEqual(BrowseSegmentedNavigationMetrics.rowHeight, 48)
+        XCTAssertEqual(BrowseSegmentedNavigationMetrics.controlHeight, 32)
     }
 
     func testHomeCategoryNavigationHidesMoreAtExactFit() {

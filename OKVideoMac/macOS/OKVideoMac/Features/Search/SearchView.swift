@@ -113,9 +113,7 @@ struct SearchView: View {
         } label: {
             Image(systemName: "line.3.horizontal.decrease.circle")
         }
-        .buttonStyle(.bordered)
-        .controlSize(.large)
-        .frame(width: 42, height: 40)
+        .primaryToolbarIconControl()
         .help("选择本次搜索使用的站点")
         .accessibilityLabel("搜索范围：\(state.searchScopeSummary)")
         .popover(isPresented: $showingSearchScope, arrowEdge: .bottom) {
@@ -135,8 +133,11 @@ struct SearchView: View {
         }
         .labelsHidden()
         .pickerStyle(.menu)
-        .controlSize(.large)
-        .frame(width: layout.mergeWidth, height: 40)
+        .controlSize(.regular)
+        .frame(
+            width: layout.mergeWidth,
+            height: PrimaryToolbarMetrics.itemHeight
+        )
         .help(
             mergesDuplicateTitles
                 ? "将片名和年份相同的跨站结果合并为一张卡片"
@@ -159,8 +160,11 @@ struct SearchView: View {
         }
         .labelsHidden()
         .pickerStyle(.menu)
-        .controlSize(.large)
-        .frame(width: layout.sortWidth, height: 40)
+        .controlSize(.regular)
+        .frame(
+            width: layout.sortWidth,
+            height: PrimaryToolbarMetrics.itemHeight
+        )
         .help("排序：\(sortOrder.title)")
     }
 
@@ -304,24 +308,18 @@ private struct SearchToolbarLeadingItem: View {
     let onBack: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: PrimaryToolbarMetrics.itemSpacing) {
             Button(action: onBack) {
                 Image(systemName: "chevron.backward")
-                    .font(.system(size: 14, weight: .medium))
-                    .frame(width: 28, height: 28)
             }
-            .buttonStyle(.borderless)
-            .controlSize(.large)
+            .primaryToolbarIconControl()
             .help(backHelp)
             .accessibilityLabel(backHelp)
 
-            Text(title)
-                .font(.system(size: 19, weight: .semibold))
+            BrowserToolbarTitle(title)
                 .lineLimit(1)
-                .accessibilityAddTraits(.isHeader)
         }
-        .frame(height: 40)
-        .offset(x: 4)
+        .frame(height: PrimaryToolbarMetrics.itemHeight)
     }
 }
 
@@ -694,7 +692,11 @@ private struct SearchToolbarStatusView: View {
             .accessibilityHidden(!isSearching)
             .help("停止搜索")
         }
-        .frame(width: layout.statusWidth, height: 40, alignment: .trailing)
+        .frame(
+            width: layout.statusWidth,
+            height: PrimaryToolbarMetrics.itemHeight,
+            alignment: .trailing
+        )
     }
 
     @ViewBuilder

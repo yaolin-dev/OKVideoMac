@@ -1190,7 +1190,7 @@ struct HomeSiteToolbarItem: View {
                 }
                 .labelsHidden()
                 .frame(width: layout.sitePickerWidth)
-                .controlSize(.large)
+                .controlSize(.regular)
                 .help(siteHelp)
                 .accessibilityLabel("选择内容站点")
 
@@ -1209,10 +1209,8 @@ struct HomeSiteToolbarItem: View {
                     }
                 } label: {
                     Image(systemName: "rectangle.stack.fill")
-                        .foregroundColor(.secondary)
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
+                .primaryToolbarMenuControl()
                 .help(siteHelp)
                 .accessibilityLabel("选择内容站点")
             }
@@ -1265,29 +1263,19 @@ struct HomeFilterToolbarItem: View {
         Button {
             isPresented = true
         } label: {
-            switch layout {
-            case .expanded, .compact:
-                HStack(spacing: 5) {
-                    Image(systemName: "line.3.horizontal.decrease.circle")
-                    Text("筛选")
+            Image(systemName: "line.3.horizontal.decrease.circle")
+                .overlay(alignment: .topTrailing) {
                     if activeCount > 0 {
-                        filterCountBadge
+                        Text("\(min(activeCount, 9))")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(width: 13, height: 13)
+                            .background(Circle().fill(Color.accentColor))
+                            .offset(x: 5, y: -5)
                     }
                 }
-            case .minimal:
-                Image(systemName: "line.3.horizontal.decrease.circle")
-                    .overlay(alignment: .topTrailing) {
-                        if activeCount > 0 {
-                            Circle()
-                                .fill(Color.blue)
-                                .frame(width: 7, height: 7)
-                                .offset(x: 3, y: -3)
-                        }
-                    }
-            }
         }
-        .buttonStyle(.bordered)
-        .controlSize(.large)
+        .primaryToolbarIconControl(isSelected: activeCount > 0)
         .disabled(category?.filters.isEmpty != false)
         .help(filterHelp)
         .accessibilityLabel(filterHelp)
@@ -1311,14 +1299,6 @@ struct HomeFilterToolbarItem: View {
         .onDisappear {
             filterLoadTask?.cancel()
         }
-    }
-
-    private var filterCountBadge: some View {
-        Text("\(activeCount)")
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(.white)
-            .frame(minWidth: 17, minHeight: 17)
-            .background(Circle().fill(Color.blue))
     }
 
     private var filterHelp: String {
@@ -1449,7 +1429,7 @@ struct HomeConfigurationToolbarItem: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
-                .controlSize(.large)
+                .controlSize(.regular)
                 .frame(width: layout.configurationPickerWidth)
                 .disabled(state.isSwitchingConfiguration)
                 .help(configurationStatusHelp)
@@ -1477,10 +1457,7 @@ struct HomeConfigurationToolbarItem: View {
                 } label: {
                     configurationStatusIcon
                 }
-                .menuIndicator(.hidden)
-                .controlSize(.large)
-                .frame(width: 42)
-                .fixedSize()
+                .primaryToolbarMenuControl()
                 .help(configurationStatusHelp)
                 .accessibilityLabel(configurationStatusHelp)
             }
@@ -1544,12 +1521,9 @@ struct HomeRefreshToolbarItem: View {
                     .controlSize(.small)
             } else {
                 Label("刷新", systemImage: "arrow.clockwise")
-                    .labelStyle(.iconOnly)
             }
         }
-        .buttonStyle(.bordered)
-        .controlSize(.large)
-        .frame(width: 42)
+        .primaryToolbarIconControl()
         .disabled(state.currentSite == nil || state.isHomeLoading)
         .help(layout == .minimal ? "刷新当前站点（⌘R，可能收入更多菜单）" : "刷新当前站点（⌘R）")
         .accessibilityLabel(state.isHomeLoading ? "正在刷新当前站点" : "刷新当前站点")

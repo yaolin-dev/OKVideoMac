@@ -25,6 +25,23 @@ enum BrowserToolbarChromePolicy {
     }
 }
 
+/// One visual rhythm for every primary page in the right-hand browser column.
+/// Page-specific actions keep their behavior, while their title, sizing,
+/// spacing and hover treatment remain consistent across Home, Live, Favorites,
+/// History, Settings and Search.
+enum PrimaryToolbarMetrics {
+    // NetEase Filmly uses a compact native-titlebar label rather than a page
+    // heading. Keep this at the same 15 pt visual scale on every main page.
+    static let titleFontSize: CGFloat = 15
+    static let itemHeight: CGFloat = 40
+    static let controlHeight: CGFloat = 32
+    static let iconControlSize: CGFloat = 32
+    static let iconFontSize: CGFloat = 15
+    static let itemSpacing: CGFloat = 8
+    static let dividerHeight: CGFloat = 20
+    static let titleLeadingOffset: CGFloat = 0
+}
+
 enum PrimaryToolbarLayout: Equatable, Sendable {
     case expanded
     case compact
@@ -32,16 +49,16 @@ enum PrimaryToolbarLayout: Equatable, Sendable {
 
     var sitePickerWidth: CGFloat {
         switch self {
-        case .expanded: return 210
-        case .compact: return 150
+        case .expanded: return 190
+        case .compact: return 140
         case .minimal: return 0
         }
     }
 
     var configurationPickerWidth: CGFloat {
         switch self {
-        case .expanded: return 118
-        case .compact: return 96
+        case .expanded: return 104
+        case .compact: return 88
         case .minimal: return 0
         }
     }
@@ -332,9 +349,149 @@ struct BrowserToolbarTitle: View {
 
     var body: some View {
         Text(title)
-            .font(.system(size: 19, weight: .semibold))
-            .frame(height: 40)
-            .offset(x: 10)
+            .font(
+                .system(
+                    size: PrimaryToolbarMetrics.titleFontSize,
+                    weight: .semibold
+                )
+            )
+            .foregroundColor(Color(nsColor: .labelColor))
+            .frame(height: PrimaryToolbarMetrics.itemHeight)
+            .offset(x: PrimaryToolbarMetrics.titleLeadingOffset)
             .accessibilityAddTraits(.isHeader)
+    }
+}
+
+struct PrimaryToolbarDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor).opacity(0.42))
+            .frame(width: 1, height: PrimaryToolbarMetrics.dividerHeight)
+            .accessibilityHidden(true)
+    }
+}
+
+private struct PrimaryToolbarIconControlModifier: ViewModifier {
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovering = false
+
+    let isSelected: Bool
+    let selectedColor: Color
+    let destructive: Bool
+
+    private var foregroundColor: Color {
+        if destructive && isHovering && isEnabled {
+            return .red
+        }
+        if isSelected {
+            return selectedColor
+        }
+        return .secondary
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .labelStyle(.iconOnly)
+            .buttonStyle(.plain)
+            .controlSize(.regular)
+            .font(
+                .system(
+                    size: PrimaryToolbarMetrics.iconFontSize,
+                    weight: .medium
+                )
+            )
+            .foregroundColor(foregroundColor)
+            .frame(
+                width: PrimaryToolbarMetrics.iconControlSize,
+                height: PrimaryToolbarMetrics.iconControlSize
+            )
+            .background {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(
+                        destructive
+                            ? Color.red.opacity(isHovering && isEnabled ? 0.09 : 0)
+                            : Color.primary.opacity(isHovering && isEnabled ? 0.055 : 0)
+                    )
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(
+                        Color.primary.opacity(isHovering && isEnabled ? 0.06 : 0),
+                        lineWidth: 0.5
+                    )
+            }
+            .contentShape(Rectangle())
+            .opacity(isEnabled ? 1 : 0.46)
+            .animation(.easeOut(duration: 0.12), value: isHovering)
+            .onHover { isHovering = $0 }
+    }
+}
+
+private struct PrimaryToolbarMenuControlModifier: ViewModifier {
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .labelStyle(.iconOnly)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .controlSize(.regular)
+            .font(
+                .system(
+                    size: PrimaryToolbarMetrics.iconFontSize,
+                    weight: .medium
+                )
+            )
+            .foregroundColor(.secondary)
+            .frame(
+                width: PrimaryToolbarMetrics.iconControlSize,
+                height: PrimaryToolbarMetrics.iconControlSize
+            )
+            .background {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(
+                        Color.primary.opacity(
+                            isHovering && isEnabled ? 0.055 : 0
+                        )
+                    )
+            }
+            .contentShape(Rectangle())
+            .opacity(isEnabled ? 1 : 0.46)
+            .animation(.easeOut(duration: 0.12), value: isHovering)
+            .onHover { isHovering = $0 }
+    }
+}
+
+private struct PrimaryToolbarTextControlModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .buttonStyle(.borderless)
+            .controlSize(.regular)
+            .frame(minHeight: PrimaryToolbarMetrics.controlHeight)
+    }
+}
+
+extension View {
+    func primaryToolbarIconControl(
+        isSelected: Bool = false,
+        selectedColor: Color = .accentColor,
+        destructive: Bool = false
+    ) -> some View {
+        modifier(
+            PrimaryToolbarIconControlModifier(
+                isSelected: isSelected,
+                selectedColor: selectedColor,
+                destructive: destructive
+            )
+        )
+    }
+
+    func primaryToolbarMenuControl() -> some View {
+        modifier(PrimaryToolbarMenuControlModifier())
+    }
+
+    func primaryToolbarTextControl() -> some View {
+        modifier(PrimaryToolbarTextControlModifier())
     }
 }
