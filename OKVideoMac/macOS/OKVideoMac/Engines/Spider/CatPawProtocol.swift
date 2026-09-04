@@ -138,10 +138,10 @@ private actor CatPawInitializationGate {
     func ensureInitialized(
         endpointKey: String,
         operation: () async throws -> Void
-    ) async throws {
+    ) async throws -> Bool {
         switch states[endpointKey] {
         case .initialized:
-            return
+            return true
         case .initializing:
             try await withCheckedThrowingContinuation { continuation in
                 guard case .initializing(var waiters) = states[endpointKey] else {
@@ -151,7 +151,7 @@ private actor CatPawInitializationGate {
                 waiters.append(continuation)
                 states[endpointKey] = .initializing(waiters)
             }
-            return
+            return false
         case nil:
             states[endpointKey] = .initializing([])
         }
@@ -161,6 +161,7 @@ private actor CatPawInitializationGate {
             let waiters = waiters(for: endpointKey)
             states[endpointKey] = .initialized
             waiters.forEach { $0.resume() }
+            return false
         } catch {
             let waiters = waiters(for: endpointKey)
             states.removeValue(forKey: endpointKey)
@@ -276,12 +277,16 @@ final class CatPawRouteClient {
         }
 
         let baseURL = try await resolveRuntimeBaseURL()
+        DetailPerformanceContext.current?.markRuntimeReady()
         let apiURL = try ResourceResolver.resolve(apiReference, relativeTo: baseURL)
-        try await initializationGate.ensureInitialized(
+        let wasAlreadyInitialized = try await initializationGate.ensureInitialized(
             endpointKey: apiURL.absoluteString
         ) { [self] in
             try await initializeModule(apiURL: apiURL)
         }
+        DetailPerformanceContext.current?.markModuleReady(
+            wasAlreadyInitialized: wasAlreadyInitialized
+        )
 
         let invocationID = UUID().uuidString.lowercased()
         var headers = requestHeaders.merging(additionalHeaders)

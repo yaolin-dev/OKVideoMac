@@ -4,6 +4,234 @@ import Foundation
 import OKVideoCore
 import OKVideoPersistence
 
+/// Request-scoped, behavior-neutral timing used to audit CatPaw detail loads.
+/// All timestamps come from the monotonic system uptime clock so wall-clock
+/// changes cannot distort a single trace.
+final class DetailPerformanceTrace: @unchecked Sendable {
+    enum Stage: String, Hashable {
+        case tap
+        case providerStart
+        case runtimeReady
+        case moduleReady
+        case detailRequest
+        case nodeResult
+        case selectedDetail
+        case firstRender
+    }
+
+    struct StageSample {
+        let uptimeNanoseconds: UInt64
+        let executionContext: String
+    }
+
+    let id = UUID().uuidString.lowercased()
+    let title: String
+    let siteKey: String
+    let videoID: String
+
+    private let lock = NSLock()
+    private var stages: [Stage: StageSample] = [:]
+    private var runtimeWasAlreadyReady: Bool?
+    private var moduleWasAlreadyInitialized: Bool?
+    private var searchActiveAtTap: Bool
+    private var searchActiveAtProviderStart: Bool?
+    private var searchActiveAtPublish: Bool?
+    private var authorizationWaitNanoseconds: UInt64 = 0
+    private var authorizationWaitCount = 0
+    private var historyBuildNanoseconds: UInt64 = 0
+    private var playSourceCount = 0
+    private var episodeCount = 0
+    private var generatedHistoryIdentityCount = 0
+    private var detailRequestAttemptCount = 0
+    private var nodeStatusCodes: [Int] = []
+    private var nodeInvocationIDs: [String] = []
+    private var didFinish = false
+
+    init(
+        title: String,
+        siteKey: String,
+        videoID: String,
+        searchActiveAtTap: Bool
+    ) {
+        self.title = title
+        self.siteKey = siteKey
+        self.videoID = videoID
+        self.searchActiveAtTap = searchActiveAtTap
+        stages[.tap] = Self.sample()
+    }
+
+    func markProviderStart(searchActive: Bool) {
+        withLock {
+            searchActiveAtProviderStart = searchActive
+            record(.providerStart)
+        }
+    }
+
+    func recordRuntimeWasAlreadyReady(_ value: Bool) {
+        withLock { runtimeWasAlreadyReady = value }
+    }
+
+    func markRuntimeReady() {
+        withLock { record(.runtimeReady) }
+    }
+
+    func markModuleReady(wasAlreadyInitialized: Bool) {
+        withLock {
+            moduleWasAlreadyInitialized = wasAlreadyInitialized
+            record(.moduleReady)
+        }
+    }
+
+    func markDetailRequest(invocationID: String) {
+        withLock {
+            detailRequestAttemptCount += 1
+            nodeInvocationIDs.append(invocationID)
+            record(.detailRequest)
+        }
+    }
+
+    func markNodeResult(statusCode: Int) {
+        withLock {
+            nodeStatusCodes.append(statusCode)
+            stages[.nodeResult] = Self.sample()
+        }
+    }
+
+    func beginAuthorizationWait() -> UInt64 {
+        let start = Self.now()
+        withLock { authorizationWaitCount += 1 }
+        return start
+    }
+
+    func endAuthorizationWait(startedAt: UInt64) {
+        let elapsed = Self.now() &- startedAt
+        withLock { authorizationWaitNanoseconds &+= elapsed }
+    }
+
+    func beginHistoryBuild(
+        playSourceCount: Int,
+        episodeCount: Int
+    ) -> UInt64 {
+        let start = Self.now()
+        withLock {
+            self.playSourceCount = playSourceCount
+            self.episodeCount = episodeCount
+        }
+        return start
+    }
+
+    func endHistoryBuild(
+        startedAt: UInt64,
+        generatedIdentityCount: Int
+    ) {
+        let elapsed = Self.now() &- startedAt
+        withLock {
+            historyBuildNanoseconds &+= elapsed
+            generatedHistoryIdentityCount = generatedIdentityCount
+        }
+    }
+
+    func markSelectedDetail(searchActive: Bool) {
+        withLock {
+            searchActiveAtPublish = searchActive
+            record(.selectedDetail)
+        }
+    }
+
+    func finishFirstRender() {
+        let report: String? = withLock {
+            guard !didFinish else { return nil }
+            didFinish = true
+            record(.firstRender)
+            return makeReport()
+        }
+        guard let report,
+              let data = "\(report)\n".data(using: .utf8) else { return }
+        FileHandle.standardError.write(data)
+    }
+
+    private func makeReport() -> String {
+        func value(_ start: Stage, _ end: Stage) -> String {
+            guard let startValue = stages[start]?.uptimeNanoseconds,
+                  let endValue = stages[end]?.uptimeNanoseconds,
+                  endValue >= startValue else { return "n/a" }
+            return Self.milliseconds(endValue - startValue)
+        }
+
+        let contexts = Stage.allCasesForReport.compactMap { stage -> String? in
+            guard let context = stages[stage]?.executionContext else { return nil }
+            return "\(stage.rawValue)=\(context)"
+        }.joined(separator: ",")
+        let statusCodes = nodeStatusCodes.map(String.init).joined(separator: ",")
+        let invocationIDs = nodeInvocationIDs.joined(separator: ",")
+        return [
+            "DetailPerf id=\(id) title=\(title) site=\(siteKey)",
+            "DetailPerf id=\(id) tap -> providerStart: \(value(.tap, .providerStart)) ms",
+            "DetailPerf id=\(id) providerStart -> runtimeReady: \(value(.providerStart, .runtimeReady)) ms",
+            "DetailPerf id=\(id) runtimeReady -> moduleReady: \(value(.runtimeReady, .moduleReady)) ms",
+            "DetailPerf id=\(id) moduleReady -> detailRequest: \(value(.moduleReady, .detailRequest)) ms",
+            "DetailPerf id=\(id) detailRequest -> nodeResult: \(value(.detailRequest, .nodeResult)) ms",
+            "DetailPerf id=\(id) authWait: \(Self.milliseconds(authorizationWaitNanoseconds)) ms count=\(authorizationWaitCount)",
+            "DetailPerf id=\(id) historyBuild: \(Self.milliseconds(historyBuildNanoseconds)) ms",
+            "DetailPerf id=\(id) nodeResult -> selectedDetail: \(value(.nodeResult, .selectedDetail)) ms",
+            "DetailPerf id=\(id) selectedDetail -> firstRender: \(value(.selectedDetail, .firstRender)) ms",
+            "DetailPerf id=\(id) total tap -> firstRender: \(value(.tap, .firstRender)) ms",
+            "DetailPerf id=\(id) sources=\(playSourceCount) episodes=\(episodeCount) historyIdentities=\(generatedHistoryIdentityCount)",
+            "DetailPerf id=\(id) runtimeAlreadyReady=\(Self.optionalBoolean(runtimeWasAlreadyReady)) moduleAlreadyInitialized=\(Self.optionalBoolean(moduleWasAlreadyInitialized)) searchActiveAtTap=\(searchActiveAtTap) searchActiveAtProviderStart=\(Self.optionalBoolean(searchActiveAtProviderStart)) searchActiveAtPublish=\(Self.optionalBoolean(searchActiveAtPublish))",
+            "DetailPerf id=\(id) detailAttempts=\(detailRequestAttemptCount) nodeStatusCodes=\(statusCodes.isEmpty ? "none" : statusCodes) nodeInvocationIDs=\(invocationIDs.isEmpty ? "none" : invocationIDs)",
+            "DetailPerf id=\(id) executionContexts=\(contexts)"
+        ].joined(separator: "\n")
+    }
+
+    private func record(_ stage: Stage) {
+        if stages[stage] == nil {
+            stages[stage] = Self.sample()
+        }
+    }
+
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+
+    private static func now() -> UInt64 {
+        DispatchTime.now().uptimeNanoseconds
+    }
+
+    private static func sample() -> StageSample {
+        StageSample(
+            uptimeNanoseconds: now(),
+            executionContext: Thread.isMainThread ? "main" : "background"
+        )
+    }
+
+    private static func milliseconds(_ nanoseconds: UInt64) -> String {
+        String(format: "%.3f", Double(nanoseconds) / 1_000_000)
+    }
+
+    private static func optionalBoolean(_ value: Bool?) -> String {
+        value.map(String.init) ?? "unknown"
+    }
+}
+
+private extension DetailPerformanceTrace.Stage {
+    static let allCasesForReport: [Self] = [
+        .tap,
+        .providerStart,
+        .runtimeReady,
+        .moduleReady,
+        .detailRequest,
+        .nodeResult,
+        .selectedDetail,
+        .firstRender
+    ]
+}
+
+enum DetailPerformanceContext {
+    @TaskLocal static var current: DetailPerformanceTrace?
+}
+
 enum AppSection: String, CaseIterable, Identifiable {
     case home = "点播"
     case live = "直播"
@@ -3731,6 +3959,7 @@ final class AppState: ObservableObject {
     private var searchTask: Task<Void, Never>?
     private var searchSessionGate = SearchSessionGate()
     private var detailLoadSessionID = UUID()
+    private var activeDetailPerformanceTrace: DetailPerformanceTrace?
     private var detailHomeSearchReturnSnapshot:
         DetailHomeSearchReturnSnapshot?
     private var homeLoadSessionID = UUID()
@@ -5395,7 +5624,10 @@ final class AppState: ObservableObject {
         await loadSelectedSiteHome(refreshConfigurationIfNeeded: false)
     }
 
-    func loadDetail(_ summary: VideoSummary) async {
+    func loadDetail(
+        _ summary: VideoSummary,
+        performanceTrace: DetailPerformanceTrace? = nil
+    ) async {
         if summary.resolvedContentKind == .action {
             await performHomeAction(SiteActionItem(summary: summary))
             return
@@ -5440,11 +5672,26 @@ final class AppState: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         do {
-            let selection = try await provider.select(summary: summary)
+            performanceTrace?.markProviderStart(searchActive: isSearching)
+            if let performanceTrace, let environment {
+                let runtimeStatus = await environment.nodeBundleRuntime
+                    .currentStatus()
+                if case .running = runtimeStatus {
+                    performanceTrace.recordRuntimeWasAlreadyReady(true)
+                } else {
+                    performanceTrace.recordRuntimeWasAlreadyReady(false)
+                }
+            }
+            let selection = try await DetailPerformanceContext.$current
+                .withValue(performanceTrace) {
+                    try await provider.select(summary: summary)
+                }
             guard detailLoadSessionID == sessionID else { return }
             pendingDetailSummary = nil
             switch selection {
             case .detail(let detail):
+                activeDetailPerformanceTrace = performanceTrace
+                performanceTrace?.markSelectedDetail(searchActive: isSearching)
                 selectedDetail = detail
             case .search(let query):
                 detailHomeSearchReturnSnapshot = nil
@@ -5736,7 +5983,23 @@ final class AppState: ObservableObject {
                 origin: .searchResults
             )
         } else {
-            Task { await loadDetail(summary) }
+            let performanceTrace: DetailPerformanceTrace?
+            if providers[summary.siteKey] is NodeHTTPSpiderSiteProvider {
+                performanceTrace = DetailPerformanceTrace(
+                    title: summary.title,
+                    siteKey: summary.siteKey,
+                    videoID: summary.videoID,
+                    searchActiveAtTap: isSearching
+                )
+            } else {
+                performanceTrace = nil
+            }
+            Task {
+                await loadDetail(
+                    summary,
+                    performanceTrace: performanceTrace
+                )
+            }
         }
     }
 
@@ -8565,6 +8828,7 @@ final class AppState: ObservableObject {
         let searchReturnSnapshot = detailHomeSearchReturnSnapshot
         detailHomeSearchReturnSnapshot = nil
         detailLoadSessionID = UUID()
+        activeDetailPerformanceTrace = nil
         selectedDetail = nil
         pendingDetailSummary = nil
         if let searchReturnSnapshot {
@@ -8574,6 +8838,13 @@ final class AppState: ObservableObject {
             searchFolderOrigin = searchReturnSnapshot.folderOrigin
             isHomeSearchPresented = true
         }
+    }
+
+    func recordDetailFirstRender(_ detail: VideoDetail) {
+        guard let trace = activeDetailPerformanceTrace,
+              trace.siteKey == detail.summary.siteKey else { return }
+        trace.finishFirstRender()
+        activeDetailPerformanceTrace = nil
     }
 
     func search(_ keyword: String) {

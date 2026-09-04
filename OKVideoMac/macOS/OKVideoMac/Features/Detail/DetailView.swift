@@ -151,7 +151,14 @@ struct DetailView: View {
                     .environmentObject(state)
             }
         }
-        .onAppear(perform: performInitialSelection)
+        .onAppear {
+            performInitialSelection()
+            // Report after SwiftUI has mounted the real detail tree and the
+            // main run loop gets its next display opportunity.
+            DispatchQueue.main.async {
+                state.recordDetailFirstRender(detail)
+            }
+        }
         .task(id: selectedSource?.id) {
             await prepareSelectedSourceEpisodes()
         }

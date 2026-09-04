@@ -1261,7 +1261,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             )
             if !awaitsHostAction,
                Self.shouldAwaitLateConfigurationMessage(after: selection),
-               let hostMessage = try await awaitRelevantHostMessage(
+               let hostMessage = try await awaitRelevantHostMessageWithPerformanceTrace(
                 initial: nil,
                 invocationID: invocation.invocationID,
                 baseURL: invocation.baseURL,
@@ -1278,7 +1278,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             throw authorization
         } catch {
             if !awaitsHostAction,
-               let hostMessage = try? await awaitRelevantHostMessage(
+               let hostMessage = try? await awaitRelevantHostMessageWithPerformanceTrace(
                 initial: nil,
                 invocationID: invocation.invocationID,
                 baseURL: invocation.baseURL,
@@ -1877,6 +1877,14 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         to selection: SiteSelectionResult
     ) -> SiteSelectionResult {
         guard case .detail(var detail) = selection else { return selection }
+        let performanceTrace = DetailPerformanceContext.current
+        let historyBuildStart = performanceTrace?.beginHistoryBuild(
+            playSourceCount: detail.playSources.count,
+            episodeCount: detail.playSources.reduce(0) {
+                $0 + $1.episodes.count
+            }
+        )
+        var generatedIdentityCount = 0
         detail.playSources = detail.playSources.map { source in
             var source = source
             source.episodes = source.episodes.enumerated().map {
@@ -1890,6 +1898,9 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 ) else {
                     return episode
                 }
+                if performanceTrace != nil {
+                    generatedIdentityCount += 1
+                }
                 var episode = episode
                 episode.referenceIdentity = reference.episodeIdentity
                 episode.providerResourceReference = reference
@@ -1901,6 +1912,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 source.referenceIdentity = sourceIdentity
             }
             return source
+        }
+        if let historyBuildStart {
+            performanceTrace?.endHistoryBuild(
+                startedAt: historyBuildStart,
+                generatedIdentityCount: generatedIdentityCount
+            )
         }
         return .detail(detail)
     }
@@ -2160,6 +2177,11 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 let invocationID = prepared.invocationID
                 let routeRequest = prepared.request
                 lastEndpoint = routeRequest.url
+                if route == .detail {
+                    DetailPerformanceContext.current?.markDetailRequest(
+                        invocationID: invocationID
+                    )
+                }
                 let response: HTTPResponse
                 if route == .play,
                    site.extra["okNodeHostMessageBridge"] == .bool(true) {
@@ -2198,6 +2220,11 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                     }
                 } else {
                     response = try await httpClient.send(routeRequest)
+                }
+                if route == .detail {
+                    DetailPerformanceContext.current?.markNodeResult(
+                        statusCode: response.statusCode
+                    )
                 }
                 let value: JSONValue
                 if response.body.isEmpty {
@@ -2620,6 +2647,33 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
 
     /// Consumes only messages owned by one invocation. Sniff requests are
     /// answered in place and do not hide a following configuration challenge.
+    private func awaitRelevantHostMessageWithPerformanceTrace(
+        initial: HostMessage?,
+        invocationID: String,
+        baseURL: URL,
+        waitMilliseconds: Int
+    ) async throws -> HostMessage? {
+        let performanceTrace = DetailPerformanceContext.current
+        let start = performanceTrace?.beginAuthorizationWait()
+        do {
+            let message = try await awaitRelevantHostMessage(
+                initial: initial,
+                invocationID: invocationID,
+                baseURL: baseURL,
+                waitMilliseconds: waitMilliseconds
+            )
+            if let start {
+                performanceTrace?.endAuthorizationWait(startedAt: start)
+            }
+            return message
+        } catch {
+            if let start {
+                performanceTrace?.endAuthorizationWait(startedAt: start)
+            }
+            throw error
+        }
+    }
+
     private func awaitRelevantHostMessage(
         initial: HostMessage?,
         invocationID: String,
