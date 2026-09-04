@@ -2716,6 +2716,24 @@ private struct PendingCloudPlayback {
     var origin: PlaybackRequestOrigin = .direct
 }
 
+private struct TransferMediaLease: Equatable {
+    let mediaInstanceID: UUID
+    let playbackSessionID: UUID
+    let requestGeneration: UInt64
+    let receipt: TransferReceipt
+}
+
+enum TransferReceiptOwnershipPolicy {
+    static func accepts(
+        _ receipt: TransferReceipt,
+        requestID: UUID,
+        requestGeneration: UInt64
+    ) -> Bool {
+        receipt.requestID == requestID
+            && receipt.requestGeneration == requestGeneration
+    }
+}
+
 private enum PendingCloudOperation {
     case playback(PendingCloudPlayback)
     case detail(VideoSummary)
@@ -3740,6 +3758,10 @@ final class AppState: ObservableObject {
     private var pendingNodeOperation: PendingNodeOperation?
     private var playbackSessionID = UUID()
     private var activePlayerRequestID = UUID()
+    private var transferRequestGeneration: UInt64 = 0
+    private var transferGenerationsByRequestID: [UUID: UInt64] = [:]
+    private var preparedTransferReceipts: [UUID: TransferReceipt] = [:]
+    private var transferMediaLeases: [UUID: TransferMediaLease] = [:]
     private let playbackStartupGates = PlaybackStartupGateController()
     private var presentedPlaybackErrorRequestIDs = Set<UUID>()
     private var playbackRequestsResolving = Set<UUID>()
@@ -6660,10 +6682,22 @@ final class AppState: ObservableObject {
             return
         }
         do {
-            let verifiedResult = try await provider.player(
-                flag: playback.source.name,
-                episodeURL: playback.episode.url
+            let transferContext = transferPlaybackContext(
+                for: playback.requestID
             )
+            let verifiedResult: SitePlaybackResult
+            if let nodeProvider = provider as? NodeHTTPSpiderSiteProvider {
+                verifiedResult = try await nodeProvider.player(
+                    flag: playback.source.name,
+                    episodeURL: playback.episode.url,
+                    transferContext: transferContext
+                )
+            } else {
+                verifiedResult = try await provider.player(
+                    flag: playback.source.name,
+                    episodeURL: playback.episode.url
+                )
+            }
             guard pendingNodeOperation?.sourceIdentity == pending.sourceIdentity,
                   nodeWebPresentation?.challengeID == presentation.challengeID,
                   playback.requestID == activePlayerRequestID,
@@ -8389,7 +8423,14 @@ final class AppState: ObservableObject {
         playbackQualities = []
         selectedPlaybackQualityID = nil
         isSwitchingPlaybackQuality = false
-        activePlayback = nil
+        // A transferred Quark file remains leased to the currently loaded
+        // mpv media until the replacement reaches file-loaded. Keep its
+        // playback context authoritative while the next episode resolves so
+        // a failed B request leaves A usable instead of presenting an empty
+        // playback state over media that is still playing.
+        if transferMediaLeases.isEmpty {
+            activePlayback = nil
+        }
         livePlaybackChannel = nil
         livePlaybackStream = nil
         livePlaybackSourceID = nil
@@ -9144,6 +9185,7 @@ final class AppState: ObservableObject {
         // requests and result clustering compete with the player's cold-start
         // proxy traffic. Keep the accumulated results for a fast return.
         let sessionID = continuingRequestID ?? UUID()
+        let nodeTransferContext = transferPlaybackContext(for: sessionID)
         playbackRequestsResolving.insert(sessionID)
         defer {
             playbackRequestsResolving.remove(sessionID)
@@ -9230,9 +9272,15 @@ final class AppState: ObservableObject {
         }
         guard playbackSessionID == sessionID else { return }
         isPlayerRenderSurfaceMountEnabled = true
-        await environment.player.stop()
+        // A transferred cloud file remains leased while its replacement is
+        // resolved. MPV's later loadfile/replace event, not the click, proves
+        // that the old media has been released.
+        if transferMediaLeases.isEmpty {
+            await environment.player.stop()
+        }
         guard playbackSessionID == sessionID else { return }
 
+        var unresolvedTransferReceipts: [UUID: TransferReceipt] = [:]
         do {
             guard detail.playSources.contains(where: { $0.id == source.id }) else {
                 throw AppError.playback("当前线路不在详情数据中")
@@ -9335,6 +9383,12 @@ final class AppState: ObservableObject {
                                     refreshRequest,
                                     interactionID: sessionID
                                 )
+                        } else if let nodeProvider = provider
+                            as? NodeHTTPSpiderSiteProvider {
+                            refreshed = try await nodeProvider.refreshPlayback(
+                                refreshRequest,
+                                transferContext: nodeTransferContext
+                            )
                         } else {
                             refreshed = try await provider.refreshPlayback(
                                 refreshRequest
@@ -9430,10 +9484,34 @@ final class AppState: ObservableObject {
                             provider: provider,
                             flag: candidateSource.name,
                             episodeURL: candidateEpisode.url,
-                            sessionID: sessionID
+                            sessionID: sessionID,
+                            transferContext: nodeTransferContext
                         )
                     }
+                    if let receipt = result.transferReceipt {
+                        unresolvedTransferReceipts[receipt.receiptID] = receipt
+                        guard TransferReceiptOwnershipPolicy.accepts(
+                            receipt,
+                            requestID: nodeTransferContext.requestID,
+                            requestGeneration:
+                                nodeTransferContext.requestGeneration
+                        ) else {
+                            await cleanupTransferReceipt(
+                                receipt,
+                                reason: .staleGeneration
+                            )
+                            unresolvedTransferReceipts[receipt.receiptID] = nil
+                            throw CancellationError()
+                        }
+                    }
                     guard playbackSessionID == sessionID else {
+                        if let receipt = result.transferReceipt {
+                            await cleanupTransferReceipt(
+                                receipt,
+                                reason: .staleGeneration
+                            )
+                            unresolvedTransferReceipts[receipt.receiptID] = nil
+                        }
                         throw CancellationError()
                     }
                     if let acceptedReference = Self.acceptedProviderResourceReference(
@@ -9533,6 +9611,13 @@ final class AppState: ObservableObject {
                 // comparison for compatibility.
                 let requestSignature = Self.playbackRequestSignature(for: result)
                 if !resolvedRequests.insert(requestSignature).inserted {
+                    if let receipt = result.transferReceipt {
+                        await cleanupTransferReceipt(
+                            receipt,
+                            reason: .resolutionFailed
+                        )
+                        unresolvedTransferReceipts[receipt.receiptID] = nil
+                    }
                     failures.append("\(candidateSource.name)：重新解析仍返回相同地址和请求上下文")
                     playbackFailureSummary = "重新解析仍返回相同地址和请求上下文"
                     continue
@@ -9622,6 +9707,15 @@ final class AppState: ObservableObject {
                                 notBefore: lateNodeAuthorizationNotBefore,
                                 playback: pending
                             ) {
+                                if let receipt = result.transferReceipt {
+                                    await cleanupTransferReceipt(
+                                        receipt,
+                                        reason: .resolutionFailed
+                                    )
+                                    unresolvedTransferReceipts[
+                                        receipt.receiptID
+                                    ] = nil
+                                }
                                 return
                             }
                         }
@@ -9631,6 +9725,9 @@ final class AppState: ObservableObject {
                             refreshPerformed: refreshWasExplicitlyObserved
                         )
                     case .resolved:
+                        if let receipt = result.transferReceipt {
+                            unresolvedTransferReceipts[receipt.receiptID] = nil
+                        }
                         playbackFailureSummary = nil
                         pendingPlayback = nil
                         return
@@ -9652,6 +9749,15 @@ final class AppState: ObservableObject {
                                 notBefore: lateNodeAuthorizationNotBefore,
                                 playback: pending
                             ) {
+                                if let receipt = result.transferReceipt {
+                                    await cleanupTransferReceipt(
+                                        receipt,
+                                        reason: .resolutionFailed
+                                    )
+                                    unresolvedTransferReceipts[
+                                        receipt.receiptID
+                                    ] = nil
+                                }
                                 return
                             }
                         }
@@ -9663,6 +9769,13 @@ final class AppState: ObservableObject {
                     case .cancelled:
                         throw CancellationError()
                     }
+                }
+                if let receipt = result.transferReceipt {
+                    await cleanupTransferReceipt(
+                        receipt,
+                        reason: .resolutionFailed
+                    )
+                    unresolvedTransferReceipts[receipt.receiptID] = nil
                 }
                 completedAttempts += attemptsInCandidate
                 if let candidateFailure {
@@ -9680,6 +9793,13 @@ final class AppState: ObservableObject {
             playerSnapshot.status = .failed(message)
             presentPlaybackErrorOnce(message, requestID: sessionID)
         } catch is CancellationError {
+            for receipt in unresolvedTransferReceipts.values {
+                await cleanupTransferReceipt(
+                    receipt,
+                    reason: .staleGeneration
+                )
+            }
+            unresolvedTransferReceipts.removeAll()
             if playbackSessionID == sessionID {
                 await dismissPlayerSurfaceAndRestoreWindow()
                 activePlayback = nil
@@ -9690,6 +9810,13 @@ final class AppState: ObservableObject {
                 playbackResolutionState = .idle
             }
         } catch {
+            for receipt in unresolvedTransferReceipts.values {
+                await cleanupTransferReceipt(
+                    receipt,
+                    reason: .resolutionFailed
+                )
+            }
+            unresolvedTransferReceipts.removeAll()
             guard playbackSessionID == sessionID else { return }
             let message = error.localizedDescription
             playbackResolutionState = .failed
@@ -9703,7 +9830,8 @@ final class AppState: ObservableObject {
         provider: any SiteProvider,
         flag: String,
         episodeURL: String,
-        sessionID: UUID
+        sessionID: UUID,
+        transferContext: NodeTransferPlaybackContext
     ) async throws -> SitePlaybackResult {
         try Task.checkCancellation()
         guard playbackSessionID == sessionID else {
@@ -9716,9 +9844,43 @@ final class AppState: ObservableObject {
                 interactionID: sessionID
             )
         }
+        if let nodeProvider = provider as? NodeHTTPSpiderSiteProvider {
+            return try await nodeProvider.player(
+                flag: flag,
+                episodeURL: episodeURL,
+                transferContext: transferContext
+            )
+        }
         return try await provider.player(
             flag: flag,
             episodeURL: episodeURL
+        )
+    }
+
+    private func transferPlaybackContext(
+        for requestID: UUID
+    ) -> NodeTransferPlaybackContext {
+        if let generation = transferGenerationsByRequestID[requestID] {
+            return NodeTransferPlaybackContext(
+                requestID: requestID,
+                requestGeneration: generation
+            )
+        }
+        transferRequestGeneration &+= 1
+        if transferRequestGeneration == 0 {
+            transferRequestGeneration = 1
+        }
+        let generation = transferRequestGeneration
+        transferGenerationsByRequestID[requestID] = generation
+        if transferGenerationsByRequestID.count > 128 {
+            let retained = Set(playbackRequestsResolving)
+                .union([requestID, playbackSessionID, activePlayerRequestID])
+            transferGenerationsByRequestID = transferGenerationsByRequestID
+                .filter { retained.contains($0.key) }
+        }
+        return NodeTransferPlaybackContext(
+            requestID: requestID,
+            requestGeneration: generation
         )
     }
 
@@ -10998,8 +11160,6 @@ final class AppState: ObservableObject {
         }
         pendingNodeOperation = nil
         nodeWebPresentation = nil
-        playerEventTask?.cancel()
-        playerEventTask = nil
         nodeRuntimeStatusTask?.cancel()
         nodeRuntimeStatusTask = nil
         nodeProfileRevisionTask?.cancel()
@@ -11024,6 +11184,10 @@ final class AppState: ObservableObject {
                 )
             }
             await self.environment?.player.shutdown()
+            await self.cleanupPreparedTransferReceipts(reason: .appShutdown)
+            await self.releaseAllTransferMediaLeases(reason: .appShutdown)
+            self.playerEventTask?.cancel()
+            self.playerEventTask = nil
             if let lease = self.activeNodePlaybackLease {
                 self.activeNodePlaybackLease = nil
                 await self.environment?.nodeBundleRuntime.releasePlaybackLease(
@@ -11143,6 +11307,8 @@ final class AppState: ObservableObject {
             // existing immediate full-destroy behavior.
             warmRetentionSeconds: shouldRetainTVBoxPlayerWarm ? 45 : 0
         )
+        await cleanupPreparedTransferReceipts(reason: .playerClosed)
+        await releaseAllTransferMediaLeases(reason: .playerClosed)
         if let lease = activeNodePlaybackLease {
             activeNodePlaybackLease = nil
             await environment?.nodeBundleRuntime.releasePlaybackLease(lease)
@@ -14039,6 +14205,9 @@ final class AppState: ObservableObject {
                         continue
                     }
                     if let requestID {
+                        await self.activatePreparedTransferLease(
+                            requestID: requestID
+                        )
                         _ = self.playbackStartupGates.arm(
                             requestID: requestID
                         )
@@ -14046,6 +14215,13 @@ final class AppState: ObservableObject {
                     await self.applyPlayerSubtitlePreference(
                         requestID: requestID
                     )
+                case .mediaReleased(let requestID):
+                    if let requestID {
+                        await self.releaseTransferMediaLease(
+                            requestID: requestID,
+                            reason: .mediaReleased
+                        )
+                    }
                 case .playbackStarted(let requestID):
                     guard PlaybackRequestOwnershipPolicy.accepts(
                         requestID: requestID,
@@ -14102,6 +14278,89 @@ final class AppState: ObservableObject {
                     )
                 }
             }
+        }
+    }
+
+    private func activatePreparedTransferLease(requestID: UUID) async {
+        guard transferMediaLeases[requestID] == nil,
+              let receipt = preparedTransferReceipts.removeValue(
+                forKey: requestID
+              ),
+              receipt.requestID == requestID else {
+            return
+        }
+        let result = await environment?.nodeBundleRuntime
+            .acquireTransferLease(receiptID: receipt.receiptID)
+        guard result?.status == .leased else {
+            if result?.status == .retryScheduled
+                || result?.status == .accountUnavailable {
+                preparedTransferReceipts[requestID] = receipt
+            }
+            return
+        }
+        transferMediaLeases[requestID] = TransferMediaLease(
+            mediaInstanceID: UUID(),
+            playbackSessionID: requestID,
+            requestGeneration: receipt.requestGeneration,
+            receipt: receipt
+        )
+    }
+
+    private func releaseTransferMediaLease(
+        requestID: UUID,
+        reason: NodeTransferCleanupReason
+    ) async {
+        guard let lease = transferMediaLeases.removeValue(
+            forKey: requestID
+        ) else { return }
+        _ = await environment?.nodeBundleRuntime.releaseTransferLease(
+            receiptID: lease.receipt.receiptID,
+            reason: reason
+        )
+    }
+
+    private func releaseAllTransferMediaLeases(
+        reason: NodeTransferCleanupReason
+    ) async {
+        let leases = transferMediaLeases
+        transferMediaLeases.removeAll()
+        for lease in leases.values {
+            _ = await environment?.nodeBundleRuntime.releaseTransferLease(
+                receiptID: lease.receipt.receiptID,
+                reason: reason
+            )
+        }
+    }
+
+    private func releaseReplacedTransferMediaLeases(
+        keeping requestID: UUID
+    ) async {
+        let releasedIDs = transferMediaLeases.keys.filter { $0 != requestID }
+        for releasedID in releasedIDs {
+            await releaseTransferMediaLease(
+                requestID: releasedID,
+                reason: .mediaReleased
+            )
+        }
+    }
+
+    private func cleanupTransferReceipt(
+        _ receipt: TransferReceipt,
+        reason: NodeTransferCleanupReason
+    ) async {
+        _ = await environment?.nodeBundleRuntime.cleanupTransfer(
+            receiptID: receipt.receiptID,
+            reason: reason
+        )
+    }
+
+    private func cleanupPreparedTransferReceipts(
+        reason: NodeTransferCleanupReason
+    ) async {
+        let receipts = preparedTransferReceipts
+        preparedTransferReceipts.removeAll()
+        for receipt in receipts.values {
+            await cleanupTransferReceipt(receipt, reason: reason)
         }
     }
 
@@ -14369,6 +14628,21 @@ final class AppState: ObservableObject {
         } else {
             acquiredNodeLease = nil
         }
+        if let receipt = scopedMedia.transferReceipt {
+            guard TransferReceiptOwnershipPolicy.accepts(
+                receipt,
+                requestID: sessionID,
+                requestGeneration: transferPlaybackContext(for: sessionID)
+                    .requestGeneration
+            ) else {
+                await cleanupTransferReceipt(
+                    receipt,
+                    reason: .staleGeneration
+                )
+                throw CancellationError()
+            }
+            preparedTransferReceipts[sessionID] = receipt
+        }
         defer {
             if let startupGate {
                 cancelPlaybackStartupGate(
@@ -14377,15 +14651,21 @@ final class AppState: ObservableObject {
                 )
             }
         }
+        var didReachFileLoaded = false
         do {
             try await loadPlayerAfterRenderSurfaceReady(
                 scopedMedia,
                 startPosition: startPosition,
                 requestID: sessionID
             )
+            didReachFileLoaded = true
             guard playbackSessionID == sessionID else {
                 throw CancellationError()
             }
+            // load() returns only after MPV_EVENT_FILE_LOADED. That native
+            // boundary proves the replaced media has been released.
+            await activatePreparedTransferLease(requestID: sessionID)
+            await releaseReplacedTransferMediaLeases(keeping: sessionID)
             // A natural EOF can leave libmpv's pause/keep-open state latched
             // while the next episode is being resolved. Reassert autoplay
             // after file-loaded, then wait for actual media progress before
@@ -14401,7 +14681,33 @@ final class AppState: ObservableObject {
                 }
             }
         } catch {
-            await environment.player.stop()
+            if didReachFileLoaded {
+                // The replacement is now the native active media. Stop waits
+                // for its actual unload boundary before the fallback release.
+                await environment.player.stop()
+                await releaseTransferMediaLease(
+                    requestID: sessionID,
+                    reason: .playerLoadFailed
+                )
+            } else if let retainedRequestID = transferMediaLeases.keys.first(
+                where: { $0 != sessionID }
+            ) {
+                // No FILE_LOADED boundary was crossed. Restore ownership to
+                // the media that mpv still holds instead of stopping A merely
+                // because preparation or loadfile submission for B failed.
+                playbackSessionID = retainedRequestID
+                activePlayerRequestID = retainedRequestID
+                pendingPlayback = nil
+                playbackResolutionState = .playing
+            }
+            if let receipt = preparedTransferReceipts.removeValue(
+                forKey: sessionID
+            ) {
+                await cleanupTransferReceipt(
+                    receipt,
+                    reason: .playerLoadFailed
+                )
+            }
             if let acquiredNodeLease {
                 await environment.nodeBundleRuntime.releasePlaybackLease(
                     acquiredNodeLease

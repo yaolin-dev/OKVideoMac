@@ -448,7 +448,8 @@ enum NodeRuntimeContractFactory {
         contract: NodeRuntimeContractKind,
         runtimeDirectory: URL,
         profileURL: URL? = nil,
-        configurationData: Data? = nil
+        configurationData: Data? = nil,
+        transferEnvironment: [String: String] = [:]
     ) throws -> NodeRuntimeLaunchPlan {
         switch contract {
         case .service:
@@ -493,7 +494,7 @@ enum NodeRuntimeContractFactory {
                     "OKVIDEO_CONTRACT_B_CONFIG_PATH": configURL.path,
                     "OKVIDEO_CONTRACT_B_STATE_PATH": stateURL.path,
                     "OKVIDEO_CONTRACT_B_PROFILE_PATH": profileURL.path
-                ],
+                ].merging(transferEnvironment) { _, transfer in transfer },
                 readinessPolicy: .hostIntegratedConfiguration,
                 stateFileURL: stateURL,
                 cleanupURLs: [configURL, stateURL]

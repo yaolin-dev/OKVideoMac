@@ -45,6 +45,8 @@
 		EB38C679BF2A786E9E0B233D /* THIRD_PARTY_LICENSES.md in Resources */ = {isa = PBXBuildFile; fileRef = 8AB307256CE6590A5494384D /* THIRD_PARTY_LICENSES.md */; };
 		F9FF431B06B6D4B13A435C8A /* AppParseExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6CD897F3EA6681258B14A99 /* AppParseExecutor.swift */; };
 		FB2A4C23694D2553091FEDF2 /* DetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E18EAE5CCFAEC3E0E3E49A /* DetailView.swift */; };
+		F0A100000000000000000001 /* catpaw-quark-transfer-lifecycle.js in Resources */ = {isa = PBXBuildFile; fileRef = F0A100000000000000000101 /* catpaw-quark-transfer-lifecycle.js */; };
+		F0A100000000000000000002 /* catpaw-quark-lifecycle.patch.js in Resources */ = {isa = PBXBuildFile; fileRef = F0A100000000000000000102 /* catpaw-quark-lifecycle.patch.js */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -97,6 +99,8 @@
 		F39511E40E3FE20271196154 /* NOTICE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = NOTICE.md; sourceTree = "<group>"; };
 		F51955D6459123DB5DAD2EAB /* SearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchView.swift; sourceTree = "<group>"; };
 		F96551D818B82A3B4B38456B /* ConfigurationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationView.swift; sourceTree = "<group>"; };
+		F0A100000000000000000101 /* catpaw-quark-transfer-lifecycle.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "NodePatches/catpaw-quark-transfer-lifecycle.js"; sourceTree = "<group>"; };
+		F0A100000000000000000102 /* catpaw-quark-lifecycle.patch.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "NodePatches/catpaw-quark-lifecycle.patch.js"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -190,6 +194,8 @@
 			children = (
 				217FFD299EC1C10BDAC94A93 /* Assets.xcassets */,
 				4027B9ADBDE079CA11AFB824 /* Localizable.strings */,
+				F0A100000000000000000101 /* catpaw-quark-transfer-lifecycle.js */,
+				F0A100000000000000000102 /* catpaw-quark-lifecycle.patch.js */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -436,6 +442,8 @@
 				0EBDF1072F01B5B03856512F /* Localizable.strings in Resources */,
 				A04BBDA44750879BBFAFB666 /* NOTICE.md in Resources */,
 				EB38C679BF2A786E9E0B233D /* THIRD_PARTY_LICENSES.md in Resources */,
+				F0A100000000000000000001 /* catpaw-quark-transfer-lifecycle.js in Resources */,
+				F0A100000000000000000002 /* catpaw-quark-lifecycle.patch.js in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

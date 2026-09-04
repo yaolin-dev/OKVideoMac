@@ -112,6 +112,9 @@ public enum PlaybackEndOrigin: Equatable, Sendable {
 public enum PlayerEvent: Equatable, Sendable {
     case snapshot(PlayerSnapshot, requestID: UUID?)
     case fileLoaded(requestID: UUID?)
+    /// Emitted only when libmpv crosses a native unload boundary for the
+    /// identified media instance (replace, stop, failure, or shutdown).
+    case mediaReleased(requestID: UUID?)
     case playbackStarted(requestID: UUID?)
     case ended(requestID: UUID?, origin: PlaybackEndOrigin)
     case error(String, requestID: UUID?)

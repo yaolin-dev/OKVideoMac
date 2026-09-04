@@ -11054,6 +11054,135 @@ final class OKVideoMacTests: XCTestCase {
     }
 }
 
+final class TransferReceiptContractTests: XCTestCase {
+    func testNamespacedTransferReceiptMapsWithoutChangingPlayerFields() throws {
+        let receiptID = UUID()
+        let requestID = UUID()
+        let value = try JSONDecoder().decode(
+            JSONValue.self,
+            from: Data(
+                """
+                {
+                  "url":"https://media.invalid/video.mp4",
+                  "parse":0,
+                  "flag":"quark",
+                  "header":{"Referer":"https://referrer.invalid/"},
+                  "_okvideo":{"transferReceipt":{
+                    "version":1,
+                    "receiptID":"\(receiptID.uuidString.lowercased())",
+                    "provider":"quark",
+                    "accountScope":"\(String(repeating: "a", count: 64))",
+                    "requestID":"\(requestID.uuidString.lowercased())",
+                    "requestGeneration":19,
+                    "sourceFID":"source-opaque",
+                    "savedFIDs":["saved-exact"],
+                    "parentFolderFID":"folder-owned",
+                    "createdAt":"2026-09-04T00:00:00Z"
+                  }}
+                }
+                """.utf8
+            )
+        )
+        let site = SiteConfiguration(
+            key: "nodejs_fixture",
+            name: "Fixture",
+            type: 3,
+            api: "/spider/fixture/3"
+        )
+
+        let result = try SpiderResponseMapper.player(value, site: site)
+
+        XCTAssertEqual(result.url, "https://media.invalid/video.mp4")
+        XCTAssertFalse(result.needsParsing)
+        XCTAssertEqual(result.headers["Referer"], "https://referrer.invalid/")
+        XCTAssertEqual(result.transferReceipt?.receiptID, receiptID)
+        XCTAssertEqual(result.transferReceipt?.requestID, requestID)
+        XCTAssertEqual(result.transferReceipt?.requestGeneration, 19)
+        XCTAssertEqual(result.transferReceipt?.savedFIDs, ["saved-exact"])
+    }
+
+    func testMissingOrInvalidReceiptRemainsBackwardCompatible() throws {
+        let site = SiteConfiguration(
+            key: "ordinary",
+            name: "Ordinary",
+            type: 3,
+            api: "/spider/ordinary/3"
+        )
+        let ordinary = try JSONDecoder().decode(
+            JSONValue.self,
+            from: Data(#"{"url":"https://media.invalid/live.m3u8","parse":0}"#.utf8)
+        )
+        let invalid = try JSONDecoder().decode(
+            JSONValue.self,
+            from: Data(
+                #"{"url":"https://media.invalid/live.m3u8","parse":0,"_okvideo":{"transferReceipt":{"version":1,"receiptID":"not-a-uuid","provider":"quark","accountScope":"bad","requestID":"bad","requestGeneration":0,"savedFIDs":[]}}}"#.utf8
+            )
+        )
+
+        XCTAssertNil(
+            try SpiderResponseMapper.player(ordinary, site: site)
+                .transferReceipt
+        )
+        XCTAssertNil(
+            try SpiderResponseMapper.player(invalid, site: site)
+                .transferReceipt
+        )
+    }
+
+    func testTransferReceiptCodablePayloadContainsNoCredentialsOrURL() throws {
+        let receipt = TransferReceipt(
+            version: 1,
+            receiptID: UUID(),
+            provider: "quark",
+            accountScope: String(repeating: "b", count: 64),
+            requestID: UUID(),
+            requestGeneration: 3,
+            sourceFID: "opaque-source",
+            savedFIDs: ["saved-exact"],
+            parentFolderFID: "folder-owned",
+            createdAt: Date(timeIntervalSince1970: 1_788_480_000)
+        )
+        let encoded = try JSONEncoder().encode(receipt)
+        let text = String(decoding: encoded, as: UTF8.self)
+
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("cookie"))
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("token"))
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("authorization"))
+        XCTAssertFalse(text.contains("http://"))
+        XCTAssertFalse(text.contains("https://"))
+        XCTAssertEqual(try JSONDecoder().decode(TransferReceipt.self, from: encoded), receipt)
+    }
+
+    func testTransferReceiptOwnershipRequiresExactRequestAndGeneration() {
+        let requestID = UUID()
+        let receipt = TransferReceipt(
+            receiptID: UUID(),
+            provider: "quark",
+            accountScope: String(repeating: "c", count: 64),
+            requestID: requestID,
+            requestGeneration: 9,
+            savedFIDs: ["saved-exact"],
+            createdAt: Date()
+        )
+
+        XCTAssertTrue(TransferReceiptOwnershipPolicy.accepts(
+            receipt,
+            requestID: requestID,
+            requestGeneration: 9
+        ))
+        XCTAssertFalse(TransferReceiptOwnershipPolicy.accepts(
+            receipt,
+            requestID: UUID(),
+            requestGeneration: 9
+        ))
+        XCTAssertFalse(TransferReceiptOwnershipPolicy.accepts(
+            receipt,
+            requestID: requestID,
+            requestGeneration: 10
+        ))
+    }
+}
+
 final class NodeBundleCompatibilityTests: XCTestCase {
     func testDescriptorUpgradesAuthenticatedHTTPAndDerivesScriptURL() throws {
         let source = try XCTUnwrap(
@@ -11364,6 +11493,95 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertNotEqual(first.cacheKey, nextVersion.cacheKey)
     }
 
+    func testPublishedCatPawMainURLIsCanonicalizedToPinnedPatchInput() throws {
+        let source = try XCTUnwrap(URL(
+            string: "https://raw.githubusercontent.com/Darklessing/catvod/refs/heads/main/douer/index.js.md5"
+        ))
+        let descriptor = try NodeBundleSourceDescriptor(url: source)
+        let patch = try XCTUnwrap(descriptor.deterministicPatch)
+
+        XCTAssertEqual(
+            descriptor.scriptURL.absoluteString,
+            "https://raw.githubusercontent.com/Darklessing/catvod/"
+                + "c47d135469d4a32a4178531ce1b8f4e2e936f0b8/douer/index.js"
+        )
+        XCTAssertEqual(
+            descriptor.checksumURL.absoluteString,
+            "https://raw.githubusercontent.com/Darklessing/catvod/"
+                + "c47d135469d4a32a4178531ce1b8f4e2e936f0b8/douer/index.js.md5"
+        )
+        XCTAssertEqual(
+            descriptor.expectedInputSHA256,
+            "0ad3ed101dc961e6d73b758a5089ac1e10a12d27666468436e1fff2e39df01cc"
+        )
+        XCTAssertEqual(descriptor.expectedSHA256, patch.outputSHA256)
+        XCTAssertEqual(descriptor.fallbackCacheKeys, patch.legacyCacheKeys)
+        XCTAssertFalse(descriptor.scriptURL.absoluteString.contains("refs/heads/main"))
+    }
+
+    func testPublishedCatPawPinConflictFailsClosed() throws {
+        let conflicting = try XCTUnwrap(URL(
+            string: "https://raw.githubusercontent.com/Darklessing/catvod/refs/heads/main/douer/index.js.md5"
+                + "#sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ))
+        XCTAssertThrowsError(try NodeBundleSourceDescriptor(url: conflicting))
+    }
+
+    func testDeterministicPatchAcceptsExactInputAndRejectsChangedInput() throws {
+        let shipped = NodeBundleDeterministicPatch.quarkLifecycleV1
+        let patchURL = try XCTUnwrap(
+            Bundle.main.url(
+                forResource: shipped.patchResourceName,
+                withExtension: "js"
+            )
+        )
+        let moduleURL = try XCTUnwrap(
+            Bundle.main.url(
+                forResource: shipped.moduleResourceName,
+                withExtension: "js"
+            )
+        )
+        let patchData = try Data(contentsOf: patchURL)
+        let moduleData = try Data(contentsOf: moduleURL)
+        let input = Data("fixed test input".utf8)
+        var expectedOutput = input
+        expectedOutput.append(0x0A)
+        expectedOutput.append(patchData)
+        let fixture = NodeBundleDeterministicPatch(
+            identifier: "fixture",
+            requestedChecksumURL: shipped.requestedChecksumURL,
+            immutableChecksumURL: shipped.immutableChecksumURL,
+            immutableScriptURL: shipped.immutableScriptURL,
+            inputSHA256: NodeBundleRuntimeService.sha256Hex(input),
+            outputSHA256: NodeBundleRuntimeService.sha256Hex(expectedOutput),
+            patchResourceName: shipped.patchResourceName,
+            patchResourceSHA256: NodeBundleRuntimeService.sha256Hex(patchData),
+            moduleResourceName: shipped.moduleResourceName,
+            moduleResourceSHA256: NodeBundleRuntimeService.sha256Hex(moduleData),
+            legacyCacheKeys: []
+        )
+
+        XCTAssertEqual(
+            try NodeBundleRuntimeService.applyDeterministicPatch(
+                input,
+                patch: fixture,
+                finalScriptURL: fixture.immutableScriptURL
+            ),
+            expectedOutput
+        )
+        XCTAssertThrowsError(
+            try NodeBundleRuntimeService.applyDeterministicPatch(
+                Data("moving main changed".utf8),
+                patch: fixture,
+                finalScriptURL: fixture.immutableScriptURL
+            )
+        ) { error in
+            guard case NodeBundleRuntimeError.sha256Mismatch = error else {
+                return XCTFail("意外错误：\(error)")
+            }
+        }
+    }
+
     func testFinalRedirectURLsDetermineWhetherTrustedPinIsRequired() throws {
         let http = try XCTUnwrap(URL(string: "http://cdn.invalid/index.js"))
         let https = try XCTUnwrap(URL(string: "https://cdn.invalid/index.js"))
@@ -11643,13 +11861,29 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                 "OKVIDEO_CONTRACT_B_CONFIG_PATH": runtime
                     .appendingPathComponent("config.json").path,
                 "OKVIDEO_CONTRACT_B_STATE_PATH": runtime
-                    .appendingPathComponent("state.json").path
+                    .appendingPathComponent("state.json").path,
+                "OKVIDEO_TRANSFER_PATCH_MODULE": runtime
+                    .appendingPathComponent("lifecycle.js").path,
+                "OKVIDEO_TRANSFER_LEDGER_PATH": runtime
+                    .appendingPathComponent("ledger.json").path,
+                "OKVIDEO_INSTALLATION_UUID":
+                    "11111111-1111-4111-8111-111111111111",
+                "OKVIDEO_INSTALLATION_HMAC_KEY": String(
+                    repeating: "ab",
+                    count: 32
+                ),
+                "OKVIDEO_TRANSFER_OWNER_SESSION_ID":
+                    "22222222-2222-4222-8222-222222222222"
             ]
         )
 
         XCTAssertNil(contractA["DEV_HTTP_PORT"])
         XCTAssertEqual(contractB["DEV_HTTP_HOST"], "0.0.0.0")
         XCTAssertEqual(contractB["DEV_HTTP_PORT"], "12345")
+        XCTAssertEqual(
+            contractB["OKVIDEO_TRANSFER_LEDGER_PATH"],
+            runtime.appendingPathComponent("ledger.json").path
+        )
         XCTAssertNil(contractB["NODE_PATH"])
         XCTAssertThrowsError(try NodeBundleRuntimeService.sanitizedNodeEnvironment(
             bundlePath: runtime.appendingPathComponent("index.js"),

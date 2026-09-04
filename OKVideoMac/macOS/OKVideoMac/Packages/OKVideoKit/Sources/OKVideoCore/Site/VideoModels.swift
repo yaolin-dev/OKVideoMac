@@ -686,6 +686,43 @@ public struct PlaybackMediaSession: Equatable, Sendable {
     }
 }
 
+public struct TransferReceipt: Codable, Equatable, Hashable, Sendable {
+    public var version: Int
+    public var receiptID: UUID
+    public var provider: String
+    public var accountScope: String
+    public var requestID: UUID
+    public var requestGeneration: UInt64
+    public var sourceFID: String?
+    public var savedFIDs: [String]
+    public var parentFolderFID: String?
+    public var createdAt: Date
+
+    public init(
+        version: Int = 1,
+        receiptID: UUID,
+        provider: String,
+        accountScope: String,
+        requestID: UUID,
+        requestGeneration: UInt64,
+        sourceFID: String? = nil,
+        savedFIDs: [String],
+        parentFolderFID: String? = nil,
+        createdAt: Date
+    ) {
+        self.version = version
+        self.receiptID = receiptID
+        self.provider = provider
+        self.accountScope = accountScope
+        self.requestID = requestID
+        self.requestGeneration = requestGeneration
+        self.sourceFID = sourceFID
+        self.savedFIDs = savedFIDs
+        self.parentFolderFID = parentFolderFID
+        self.createdAt = createdAt
+    }
+}
+
 public struct SitePlaybackResult: Equatable, Sendable {
     public enum ValidationPolicy: Equatable, Sendable {
         /// Use the generic HEAD/range reachability probe before loading.
@@ -722,6 +759,7 @@ public struct SitePlaybackResult: Equatable, Sendable {
     public var validationPolicy: ValidationPolicy
     public var resourceReference: PlaybackResourceReference?
     public var mediaSession: PlaybackMediaSession?
+    public var transferReceipt: TransferReceipt?
 
     public init(
         url: String,
@@ -744,7 +782,8 @@ public struct SitePlaybackResult: Equatable, Sendable {
         lyrics: String? = nil,
         validationPolicy: ValidationPolicy = .preflight,
         resourceReference: PlaybackResourceReference? = nil,
-        mediaSession: PlaybackMediaSession? = nil
+        mediaSession: PlaybackMediaSession? = nil,
+        transferReceipt: TransferReceipt? = nil
     ) {
         self.url = url
         self.needsParsing = needsParsing
@@ -767,6 +806,7 @@ public struct SitePlaybackResult: Equatable, Sendable {
         self.validationPolicy = validationPolicy
         self.resourceReference = resourceReference
         self.mediaSession = mediaSession
+        self.transferReceipt = transferReceipt
     }
 }
 

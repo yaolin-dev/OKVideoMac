@@ -8,6 +8,15 @@ private func nodeNonEmpty(_ value: String?) -> String? {
     return trimmed.isEmpty ? nil : trimmed
 }
 
+struct NodeTransferPlaybackContext: Equatable, Sendable {
+    let requestID: UUID
+    let requestGeneration: UInt64
+}
+
+private enum NodeTransferPlaybackTaskContext {
+    @TaskLocal static var current: NodeTransferPlaybackContext?
+}
+
 struct NodeRuntimeUnavailableSiteProvider: SiteProvider {
     let site: SiteConfiguration
     let capability: SiteCapability = .javaScriptSpider
@@ -26,6 +35,7 @@ struct NodeRuntimeUnavailableSiteProvider: SiteProvider {
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
         throw error
     }
+
     func action(_ action: String) async throws -> JSONValue { throw error }
 
     private var error: NodeBundleRuntimeError {
@@ -1318,6 +1328,18 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         }
     }
 
+    func player(
+        flag: String,
+        episodeURL: String,
+        transferContext: NodeTransferPlaybackContext
+    ) async throws -> SitePlaybackResult {
+        try await NodeTransferPlaybackTaskContext.$current.withValue(
+            transferContext
+        ) {
+            try await player(flag: flag, episodeURL: episodeURL)
+        }
+    }
+
     func refreshPlayback(
         _ request: PlaybackRefreshRequest
     ) async throws -> RefreshedSitePlayback {
@@ -1390,6 +1412,17 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             )
         }
         return try await refreshPlaybackBySelection(request)
+    }
+
+    func refreshPlayback(
+        _ request: PlaybackRefreshRequest,
+        transferContext: NodeTransferPlaybackContext
+    ) async throws -> RefreshedSitePlayback {
+        try await NodeTransferPlaybackTaskContext.$current.withValue(
+            transferContext
+        ) {
+            try await refreshPlayback(request)
+        }
     }
 
     private func refreshCatPawVideoPlayback(
@@ -1535,14 +1568,27 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         flag: String,
         episodeURL: String
     ) async throws -> SitePlaybackResult {
+        var body: [String: JSONValue] = [
+            "flag": .string(flag),
+            "id": .string(episodeURL),
+            "vipFlags": .array([]),
+            "flags": .array([])
+        ]
+        if let context = NodeTransferPlaybackTaskContext.current {
+            body["_okvideo"] = .object([
+                "transferContext": .object([
+                    "requestID": .string(
+                        context.requestID.uuidString.lowercased()
+                    ),
+                    "requestGeneration": .integer(
+                        Int64(clamping: context.requestGeneration)
+                    )
+                ])
+            ])
+        }
         let invocation = try await invoke(
             method: "play",
-            body: [
-                "flag": .string(flag),
-                "id": .string(episodeURL),
-                "vipFlags": .array([]),
-                "flags": .array([])
-            ],
+            body: body,
             // POST /play may perform a cloud transfer. Blindly repeating
             // it cannot repair an expired token and can duplicate work.
             maximumAttempts: 1

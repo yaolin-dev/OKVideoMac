@@ -70,6 +70,7 @@ public struct ResolvedMedia: Equatable, Sendable {
     public var episodeName: String
     public var parserName: String?
     public var transportProfile: MediaTransportProfile
+    public var transferReceipt: TransferReceipt?
 
     public init(
         url: URL,
@@ -80,7 +81,8 @@ public struct ResolvedMedia: Equatable, Sendable {
         sourceName: String,
         episodeName: String,
         parserName: String? = nil,
-        transportProfile: MediaTransportProfile = .standard
+        transportProfile: MediaTransportProfile = .standard,
+        transferReceipt: TransferReceipt? = nil
     ) {
         self.url = url
         self.headers = headers
@@ -91,6 +93,7 @@ public struct ResolvedMedia: Equatable, Sendable {
         self.episodeName = episodeName
         self.parserName = parserName
         self.transportProfile = transportProfile
+        self.transferReceipt = transferReceipt
     }
 }
 
@@ -546,7 +549,8 @@ public struct PlaybackResolver {
                         siteKey: candidate.siteKey,
                         sourceName: candidate.sourceName,
                         episodeName: candidate.episodeName,
-                        parserName: parser?.name
+                        parserName: parser?.name,
+                        transferReceipt: candidate.result.transferReceipt
                     )
                     continuation.yield(.state(.loading))
                     if let mediaLoader {

@@ -787,10 +787,59 @@ public enum SpiderResponseMapper {
         if let message = response.message {
             throw ProviderPlaybackError(message)
         }
-        guard let player = response.player else {
+        guard var player = response.player else {
             throw AppError.spider("Spider 播放响应缺少 url")
         }
+        player.transferReceipt = transferReceipt(value)
         return player
+    }
+
+    /// Reads only OKVideoMac's namespaced, versioned receipt extension. A
+    /// normal Spider response has no such field and remains byte-for-byte
+    /// compatible with the existing player mapping.
+    public static func transferReceipt(
+        _ value: JSONValue
+    ) -> TransferReceipt? {
+        guard let object = topLevelObject(value),
+              case .object(let extensionObject) = object["_okvideo"],
+              case .object(let receiptObject) = extensionObject[
+                  "transferReceipt"
+              ],
+              let data = try? JSONEncoder().encode(
+                  JSONValue.object(receiptObject)
+              ) else {
+            return nil
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let receipt = try? decoder.decode(
+            TransferReceipt.self,
+            from: data
+        ), receipt.version == 1,
+           receipt.provider == "quark",
+           receipt.requestGeneration > 0,
+           receipt.accountScope.range(
+               of: "^[0-9a-f]{64}$",
+               options: .regularExpression
+           ) != nil,
+           !receipt.savedFIDs.isEmpty,
+           receipt.savedFIDs.count <= 16,
+           receipt.savedFIDs.allSatisfy({ boundedReceiptIdentifier($0) }),
+           receipt.sourceFID.map(boundedReceiptIdentifier) ?? true,
+           receipt.parentFolderFID.map(boundedReceiptIdentifier) ?? true else {
+            return nil
+        }
+        return receipt
+    }
+
+    private static func boundedReceiptIdentifier(_ value: String) -> Bool {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized == value
+            && !normalized.isEmpty
+            && normalized.utf8.count <= 4_096
+            && !normalized.unicodeScalars.contains(where: {
+                CharacterSet.controlCharacters.contains($0)
+            })
     }
 
     /// Reads the explicit, versioned durable-locator contract from a Spider

@@ -636,6 +636,52 @@ enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
     }
 }
 
+struct NodeBundleDeterministicPatch: Equatable, Sendable {
+    static let quarkLifecycleV1 = NodeBundleDeterministicPatch(
+        identifier: "catpaw-quark-lifecycle-v1",
+        requestedChecksumURL: URL(
+            string: "https://raw.githubusercontent.com/Darklessing/catvod/refs/heads/main/douer/index.js.md5"
+        )!,
+        immutableChecksumURL: URL(
+            string: "https://raw.githubusercontent.com/Darklessing/catvod/c47d135469d4a32a4178531ce1b8f4e2e936f0b8/douer/index.js.md5"
+        )!,
+        immutableScriptURL: URL(
+            string: "https://raw.githubusercontent.com/Darklessing/catvod/c47d135469d4a32a4178531ce1b8f4e2e936f0b8/douer/index.js"
+        )!,
+        inputSHA256: "0ad3ed101dc961e6d73b758a5089ac1e10a12d27666468436e1fff2e39df01cc",
+        outputSHA256: "5ca75837d540745740e24e4afe7f085e496c23467a787c290b30296700948014",
+        patchResourceName: "catpaw-quark-lifecycle.patch",
+        patchResourceSHA256: "46df6f1021a54227241560bb5976a4550fdba79abc8090f6f724781a7b3d6d68",
+        moduleResourceName: "catpaw-quark-transfer-lifecycle",
+        moduleResourceSHA256: "bf7ffd69c4d859ba63152f855457b7d72b96c0a728405a6605ee7b4bebdee5a0",
+        legacyCacheKeys: [
+            // Cache identity of the formerly unpinned refs/heads/main URL.
+            // Migration still requires the exact fixed input SHA before the
+            // patch is applied; an updated main cache is rejected.
+            "28bb4a27df65c977b31ca64b04eb6effe82958b245ed7900f151dcf2c1d3a110"
+        ]
+    )
+
+    let identifier: String
+    let requestedChecksumURL: URL
+    let immutableChecksumURL: URL
+    let immutableScriptURL: URL
+    let inputSHA256: String
+    let outputSHA256: String
+    let patchResourceName: String
+    let patchResourceSHA256: String
+    let moduleResourceName: String
+    let moduleResourceSHA256: String
+    let legacyCacheKeys: [String]
+
+    static func matching(_ checksumURL: URL) -> Self? {
+        let normalized = checksumURL.absoluteString
+        return normalized == quarkLifecycleV1.requestedChecksumURL.absoluteString
+            ? quarkLifecycleV1
+            : nil
+    }
+}
+
 struct NodeBundleSourceDescriptor: Equatable, Sendable {
     static let checksumSuffix = ".js.md5"
 
@@ -645,10 +691,13 @@ struct NodeBundleSourceDescriptor: Equatable, Sendable {
     let authorizationHeader: String?
     let sourceID: String?
     let declaredVersion: String?
+    let expectedInputSHA256: String?
     let expectedSHA256: String?
+    let deterministicPatch: NodeBundleDeterministicPatch?
     let pinIdentity: String
     let cacheKey: String
     let legacyCacheKey: String
+    let fallbackCacheKeys: [String]
 
     var companionConfigurationScriptURL: URL? {
         Self.companionConfigurationURL(for: scriptURL, checksum: false)
@@ -692,8 +741,8 @@ struct NodeBundleSourceDescriptor: Equatable, Sendable {
                 "Node 资源 URL fragment 中的 sha256 必须是 64 位十六进制"
             )
         }
-        let sourceID = Self.nonEmptyFragmentValue(fragmentValues["source"])
-        let declaredVersion = Self.nonEmptyFragmentValue(fragmentValues["version"])
+        let requestedSourceID = Self.nonEmptyFragmentValue(fragmentValues["source"])
+        let requestedVersion = Self.nonEmptyFragmentValue(fragmentValues["version"])
         components.fragment = nil
 
         // Credentials must never travel over cleartext HTTP. Existing source
@@ -704,17 +753,8 @@ struct NodeBundleSourceDescriptor: Equatable, Sendable {
         }
         components.user = nil
         components.password = nil
-        guard let checksumURL = components.url else {
+        guard let requestedChecksumURL = components.url else {
             throw AppError.configuration("Node 资源校验地址无效")
-        }
-
-        let checksumPath = components.percentEncodedPath
-        guard checksumPath.lowercased().hasSuffix(".md5") else {
-            throw AppError.configuration("Node 资源校验地址缺少 .md5 后缀")
-        }
-        components.percentEncodedPath = String(checksumPath.dropLast(4))
-        guard let scriptURL = components.url else {
-            throw AppError.configuration("Node 资源脚本地址无效")
         }
 
         let authorizationHeader: String?
@@ -725,13 +765,56 @@ struct NodeBundleSourceDescriptor: Equatable, Sendable {
             authorizationHeader = nil
         }
 
+        let deterministicPatch = NodeBundleDeterministicPatch.matching(
+            requestedChecksumURL
+        )
+        if let deterministicPatch,
+           let expectedSHA256,
+           expectedSHA256 != deterministicPatch.inputSHA256 {
+            throw AppError.configuration(
+                "CatPaw 固定输入的显式 SHA-256 与当前发布版本不一致"
+            )
+        }
+
+        let checksumURL: URL
+        let scriptURL: URL
+        let sourceID: String?
+        let declaredVersion: String?
+        let expectedInputSHA256: String?
+        let executionSHA256: String?
+        if let deterministicPatch {
+            checksumURL = deterministicPatch.immutableChecksumURL
+            scriptURL = deterministicPatch.immutableScriptURL
+            sourceID = requestedSourceID ?? "darklessing-catvod"
+            declaredVersion = requestedVersion ?? deterministicPatch.identifier
+            expectedInputSHA256 = deterministicPatch.inputSHA256
+            executionSHA256 = deterministicPatch.outputSHA256
+        } else {
+            let checksumPath = components.percentEncodedPath
+            guard checksumPath.lowercased().hasSuffix(".md5") else {
+                throw AppError.configuration("Node 资源校验地址缺少 .md5 后缀")
+            }
+            components.percentEncodedPath = String(checksumPath.dropLast(4))
+            guard let resolvedScriptURL = components.url else {
+                throw AppError.configuration("Node 资源脚本地址无效")
+            }
+            checksumURL = requestedChecksumURL
+            scriptURL = resolvedScriptURL
+            sourceID = requestedSourceID
+            declaredVersion = requestedVersion
+            expectedInputSHA256 = expectedSHA256
+            executionSHA256 = expectedSHA256
+        }
+
         self.originalURL = url
         self.checksumURL = checksumURL
         self.scriptURL = scriptURL
         self.authorizationHeader = authorizationHeader
         self.sourceID = sourceID
         self.declaredVersion = declaredVersion
-        self.expectedSHA256 = expectedSHA256
+        self.expectedInputSHA256 = expectedInputSHA256
+        self.expectedSHA256 = executionSHA256
+        self.deterministicPatch = deterministicPatch
         pinIdentity = [
             "request=\(checksumURL.absoluteString)",
             "source=\(sourceID ?? "-")",
@@ -741,7 +824,7 @@ struct NodeBundleSourceDescriptor: Equatable, Sendable {
             Data(
                 ([
                     pinIdentity,
-                    "pin=\(expectedSHA256 ?? "-")",
+                    "pin=\(executionSHA256 ?? "-")",
                     "authorization=\(authorizationHeader ?? "-")"
                 ].joined(separator: "\n"))
                     .utf8
@@ -753,6 +836,7 @@ struct NodeBundleSourceDescriptor: Equatable, Sendable {
                     .utf8
             )
         )
+        fallbackCacheKeys = deterministicPatch?.legacyCacheKeys ?? []
     }
 
     private static func fragmentValues(_ fragment: String?) -> [String: String] {
@@ -873,6 +957,31 @@ enum NodeRuntimeStatus: Equatable, Sendable {
 struct NodeRuntimePlaybackLease: Equatable, Sendable {
     fileprivate let id: UUID
     fileprivate let processGeneration: UUID
+}
+
+enum NodeTransferLifecycleStatus: String, Codable, Equatable, Sendable {
+    case leased
+    case cleaned
+    case alreadyMissing
+    case stillInUse
+    case retryScheduled
+    case permanentFailure
+    case receiptNotFound
+    case accountUnavailable
+}
+
+struct NodeTransferLifecycleResult: Codable, Equatable, Sendable {
+    let status: NodeTransferLifecycleStatus
+    let receiptID: UUID?
+}
+
+enum NodeTransferCleanupReason: String, Sendable {
+    case staleGeneration
+    case resolutionFailed
+    case playerLoadFailed
+    case mediaReleased
+    case playerClosed
+    case appShutdown
 }
 
 enum NodeRuntimePlaybackLeasePolicy {
@@ -1086,6 +1195,7 @@ actor NodeBundleRuntimeService {
         let runtimeDirectory: URL
         let trustState: NodeBundleTrustState
         let configurationData: Data?
+        let deterministicPatch: NodeBundleDeterministicPatch?
     }
 
     private enum StartupSource: Sendable {
@@ -1158,6 +1268,11 @@ actor NodeBundleRuntimeService {
     private let diagnosticLogRetainedFileCount: Int
     private let readinessTimeout: TimeInterval
     private let readinessPollInterval: TimeInterval
+    /// Stable for this App process and deliberately changes on the next App
+    /// launch. Node restarts within the same process retain it, allowing the
+    /// ledger to distinguish a live mpv lease from a lease abandoned by an
+    /// App crash.
+    private let transferOwnerSessionID = UUID()
     private let sharedStartup = SharedNodeRuntimeStartup<URL>()
 
     private var process: Process?
@@ -1435,6 +1550,103 @@ actor NodeBundleRuntimeService {
         playbackLeases[lease.id] = nil
         guard playbackLeases.isEmpty, stopRequestedAfterPlayback else { return }
         await stop(force: true)
+    }
+
+    func acquireTransferLease(
+        receiptID: UUID
+    ) async -> NodeTransferLifecycleResult {
+        await invokeTransferLifecycle(
+            route: "acquire",
+            receiptID: receiptID,
+            reason: nil
+        )
+    }
+
+    func releaseTransferLease(
+        receiptID: UUID,
+        reason: NodeTransferCleanupReason = .mediaReleased
+    ) async -> NodeTransferLifecycleResult {
+        await invokeTransferLifecycle(
+            route: "release",
+            receiptID: receiptID,
+            reason: reason
+        )
+    }
+
+    func cleanupTransfer(
+        receiptID: UUID,
+        reason: NodeTransferCleanupReason
+    ) async -> NodeTransferLifecycleResult {
+        await invokeTransferLifecycle(
+            route: "cleanup",
+            receiptID: receiptID,
+            reason: reason
+        )
+    }
+
+    private func invokeTransferLifecycle(
+        route: String,
+        receiptID: UUID,
+        reason: NodeTransferCleanupReason?
+    ) async -> NodeTransferLifecycleResult {
+        guard activeRuntimeContract == .hostIntegrated,
+              let serviceBaseURL else {
+            return NodeTransferLifecycleResult(
+                status: .accountUnavailable,
+                receiptID: receiptID
+            )
+        }
+        var object: [String: Any] = [
+            "receiptID": receiptID.uuidString.lowercased()
+        ]
+        if let reason { object["reason"] = reason.rawValue }
+        guard let body = try? JSONSerialization.data(withJSONObject: object) else {
+            return NodeTransferLifecycleResult(
+                status: .permanentFailure,
+                receiptID: receiptID
+            )
+        }
+        do {
+            let response = try await localHTTPClient.send(
+                HTTPRequest(
+                    url: serviceBaseURL.appendingPathComponent(
+                        "__okvideo/transfers/\(route)"
+                    ),
+                    method: .post,
+                    headers: ["Content-Type": "application/json"],
+                    body: body,
+                    timeout: 15,
+                    maximumResponseBytes: 64 * 1_024,
+                    maximumRedirects: 0,
+                    retryPolicy: .none,
+                    allowsNonSuccessfulStatus: true
+                )
+            )
+            guard (200...299).contains(response.statusCode) else {
+                return NodeTransferLifecycleResult(
+                    status: response.statusCode == 404
+                        ? .receiptNotFound
+                        : .retryScheduled,
+                    receiptID: receiptID
+                )
+            }
+            let decoded = try JSONDecoder().decode(
+                NodeTransferLifecycleResult.self,
+                from: response.body
+            )
+            guard decoded.receiptID == nil || decoded.receiptID == receiptID else {
+                return NodeTransferLifecycleResult(
+                    status: .permanentFailure,
+                    receiptID: receiptID
+                )
+            }
+            return decoded
+        } catch {
+            return NodeTransferLifecycleResult(
+                status: .retryScheduled,
+                receiptID: receiptID
+            )
+        }
     }
 
     func activePlaybackLeaseCountForTesting() -> Int {
@@ -1799,7 +2011,12 @@ actor NodeBundleRuntimeService {
             "DEV_HTTP_PORT",
             "OKVIDEO_CONTRACT_B_CONFIG_PATH",
             "OKVIDEO_CONTRACT_B_STATE_PATH",
-            "OKVIDEO_CONTRACT_B_PROFILE_PATH"
+            "OKVIDEO_CONTRACT_B_PROFILE_PATH",
+            "OKVIDEO_TRANSFER_PATCH_MODULE",
+            "OKVIDEO_TRANSFER_LEDGER_PATH",
+            "OKVIDEO_INSTALLATION_UUID",
+            "OKVIDEO_INSTALLATION_HMAC_KEY",
+            "OKVIDEO_TRANSFER_OWNER_SESSION_ID"
         ])
         guard Set(contractAdditions.keys).isSubset(of: allowedContractBNames) else {
             throw NodeBundleRuntimeError.invalidNodeEnvironment(
@@ -2089,16 +2306,22 @@ actor NodeBundleRuntimeService {
             finalChecksumURL: checksumResponse.url,
             finalScriptURL: scriptResponse.url
         )
-        let actualMD5 = Self.md5Hex(scriptResponse.body)
-        guard actualMD5 == checksum else {
+        let inputMD5 = Self.md5Hex(scriptResponse.body)
+        guard inputMD5 == checksum else {
             throw NodeBundleRuntimeError.integrityRejected(
-                "上游 MD5 不匹配（期望 \(checksum)，实际 \(actualMD5)）"
+                "上游 MD5 不匹配（期望 \(checksum)，实际 \(inputMD5)）"
             )
         }
         guard String(data: scriptResponse.body, encoding: .utf8) != nil else {
             throw NodeBundleRuntimeError.integrityRejected("脚本不是有效 UTF-8")
         }
-        let actualSHA256 = Self.sha256Hex(scriptResponse.body)
+        let inputSHA256 = Self.sha256Hex(scriptResponse.body)
+        let executableData = try applyDeterministicPatchIfNeeded(
+            scriptResponse.body,
+            descriptor: descriptor
+        )
+        let actualMD5 = Self.md5Hex(executableData)
+        let actualSHA256 = Self.sha256Hex(executableData)
         if let knownHash = currentLegacyTOFUHash(descriptor), knownHash != actualSHA256 {
             writer.write(
                 diagnosticEvent(
@@ -2112,10 +2335,21 @@ actor NodeBundleRuntimeService {
                 )
             )
         }
+        // Preserve the established diagnostic ordering for unpinned HTTP
+        // sources: record a mismatch with an existing TOFU cache before the
+        // missing-pin rejection below. Deterministic patches independently
+        // verify their exact input before returning executableData.
+        try Self.validateTrustedSHA256(
+            expected: descriptor.expectedInputSHA256,
+            actual: inputSHA256,
+            requiresTrustedSHA256: requiresTrustedSHA256,
+            finalScriptURL: scriptResponse.url
+        )
         try Self.validateTrustedSHA256(
             expected: descriptor.expectedSHA256,
             actual: actualSHA256,
-            requiresTrustedSHA256: requiresTrustedSHA256,
+            requiresTrustedSHA256: requiresTrustedSHA256
+                || descriptor.deterministicPatch != nil,
             finalScriptURL: scriptResponse.url
         )
 
@@ -2131,7 +2365,7 @@ actor NodeBundleRuntimeService {
             pinIdentity: descriptor.pinIdentity,
             finalChecksumURL: checksumResponse.url,
             finalScriptURL: scriptResponse.url,
-            md5: checksum,
+            md5: actualMD5,
             sha256: actualSHA256,
             trustState: trustState,
             configurationMD5: companion?.md5,
@@ -2141,8 +2375,8 @@ actor NodeBundleRuntimeService {
         )
         let cacheURL = try installCacheAtomically(
             descriptor: descriptor,
-            script: scriptResponse.body,
-            checksum: checksum,
+            script: executableData,
+            checksum: actualMD5,
             configuration: companion?.data,
             metadata: metadata
         )
@@ -2259,6 +2493,97 @@ actor NodeBundleRuntimeService {
         }
     }
 
+    private func applyDeterministicPatchIfNeeded(
+        _ input: Data,
+        descriptor: NodeBundleSourceDescriptor
+    ) throws -> Data {
+        guard let patch = descriptor.deterministicPatch else { return input }
+        return try Self.applyDeterministicPatch(
+            input,
+            patch: patch,
+            finalScriptURL: descriptor.scriptURL
+        )
+    }
+
+    /// Kept internal so the integrity transform can be exercised without a
+    /// network request. Production descriptors still select the only shipped
+    /// patch and provide its immutable upstream URL.
+    static func applyDeterministicPatch(
+        _ input: Data,
+        patch: NodeBundleDeterministicPatch,
+        finalScriptURL: URL,
+        bundle: Bundle = .main
+    ) throws -> Data {
+        let inputSHA256 = Self.sha256Hex(input)
+        guard inputSHA256 == patch.inputSHA256 else {
+            throw NodeBundleRuntimeError.sha256Mismatch(
+                expected: patch.inputSHA256,
+                actual: inputSHA256,
+                finalURL: finalScriptURL
+            )
+        }
+        let patchURL = try Self.validatedNodePatchResourceURL(
+            named: patch.patchResourceName,
+            expectedSHA256: patch.patchResourceSHA256,
+            bundle: bundle
+        )
+        let patchData = try Data(contentsOf: patchURL, options: .mappedIfSafe)
+        var output = input
+        if output.last != 0x0A {
+            output.append(0x0A)
+        }
+        output.append(patchData)
+        guard output.count <= Self.maximumScriptSize else {
+            throw NodeBundleRuntimeError.integrityRejected(
+                "确定性补丁后的脚本超过 16 MiB 限制"
+            )
+        }
+        let outputSHA256 = Self.sha256Hex(output)
+        guard outputSHA256 == patch.outputSHA256 else {
+            throw NodeBundleRuntimeError.sha256Mismatch(
+                expected: patch.outputSHA256,
+                actual: outputSHA256,
+                finalURL: patchURL
+            )
+        }
+        _ = try Self.validatedNodePatchResourceURL(
+            named: patch.moduleResourceName,
+            expectedSHA256: patch.moduleResourceSHA256,
+            bundle: bundle
+        )
+        return output
+    }
+
+    private static func validatedNodePatchResourceURL(
+        named name: String,
+        expectedSHA256: String,
+        bundle: Bundle = .main
+    ) throws -> URL {
+        let candidates = [
+            bundle.url(
+                forResource: name,
+                withExtension: "js",
+                subdirectory: "NodePatches"
+            ),
+            bundle.url(forResource: name, withExtension: "js")
+        ].compactMap { $0 }
+        guard let resourceURL = candidates.first else {
+            throw NodeBundleRuntimeError.integrityRejected(
+                "应用内置 Node 补丁资源缺失"
+            )
+        }
+        let data = try Data(contentsOf: resourceURL, options: .mappedIfSafe)
+        let actualSHA256 = sha256Hex(data)
+        guard actualSHA256 == expectedSHA256 else {
+            throw NodeBundleRuntimeError.sha256Mismatch(
+                expected: expectedSHA256,
+                actual: actualSHA256,
+                finalURL: resourceURL
+            )
+        }
+        return resourceURL
+    }
+
     private func loadCachedBundle(
         _ descriptor: NodeBundleSourceDescriptor,
         cacheURL: URL
@@ -2313,7 +2638,8 @@ actor NodeBundleRuntimeService {
         try Self.validateTrustedSHA256(
             expected: descriptor.expectedSHA256,
             actual: actualSHA256,
-            requiresTrustedSHA256: requiresTrustedSHA256,
+            requiresTrustedSHA256: requiresTrustedSHA256
+                || descriptor.deterministicPatch != nil,
             finalScriptURL: metadata.finalScriptURL
         )
         let trustState = metadata.trustState
@@ -2346,27 +2672,38 @@ actor NodeBundleRuntimeService {
             finalScriptURL: metadata.finalScriptURL,
             runtimeDirectory: try runtimeDirectory(for: descriptor),
             trustState: trustState,
-            configurationData: configurationData
+            configurationData: configurationData,
+            deterministicPatch: descriptor.deterministicPatch
         )
     }
 
     private func migrateLegacyCache(
         _ descriptor: NodeBundleSourceDescriptor
     ) throws -> CachedBundle {
-        let legacyURL = cacheURL(for: descriptor.legacyCacheKey)
-        let scriptURL = legacyURL.appendingPathComponent("index.js")
-        let checksumURL = legacyURL.appendingPathComponent("index.js.md5")
-        guard FileManager.default.fileExists(atPath: scriptURL.path),
-              FileManager.default.fileExists(atPath: checksumURL.path) else {
+        let candidateKeys = [descriptor.legacyCacheKey]
+            + descriptor.fallbackCacheKeys
+        guard let legacyURL = candidateKeys
+            .map(cacheURL(for:))
+            .first(where: { candidate in
+                FileManager.default.fileExists(
+                    atPath: candidate.appendingPathComponent("index.js").path
+                )
+                    && FileManager.default.fileExists(
+                        atPath: candidate
+                            .appendingPathComponent("index.js.md5").path
+                    )
+            }) else {
             throw NodeBundleRuntimeError.legacyCacheUnavailable(
                 "旧缓存目录不存在或缺少 index.js/index.js.md5"
             )
         }
-        let data = try Data(contentsOf: scriptURL, options: .mappedIfSafe)
-        guard data.count <= Self.maximumScriptSize else {
+        let scriptURL = legacyURL.appendingPathComponent("index.js")
+        let checksumURL = legacyURL.appendingPathComponent("index.js.md5")
+        let inputData = try Data(contentsOf: scriptURL, options: .mappedIfSafe)
+        guard inputData.count <= Self.maximumScriptSize else {
             throw NodeBundleRuntimeError.integrityRejected("旧缓存超过 16 MiB 限制")
         }
-        guard String(data: data, encoding: .utf8) != nil else {
+        guard String(data: inputData, encoding: .utf8) != nil else {
             throw NodeBundleRuntimeError.integrityRejected("旧缓存脚本不是有效 UTF-8")
         }
         let checksum = try String(contentsOf: checksumURL, encoding: .utf8)
@@ -2378,38 +2715,54 @@ actor NodeBundleRuntimeService {
         ) != nil else {
             throw NodeBundleRuntimeError.integrityRejected("旧缓存 MD5 格式无效")
         }
-        let actualMD5 = Self.md5Hex(data)
-        guard checksum == actualMD5 else {
+        let inputMD5 = Self.md5Hex(inputData)
+        guard checksum == inputMD5 else {
             throw NodeBundleRuntimeError.legacyMD5Mismatch(
                 expected: checksum,
-                actual: actualMD5
+                actual: inputMD5
             )
         }
-        let actualSHA256 = Self.sha256Hex(data)
+        let inputSHA256 = Self.sha256Hex(inputData)
         let requiresPin = try Self.requiresTrustedSHA256(
             finalChecksumURL: descriptor.checksumURL,
             finalScriptURL: descriptor.scriptURL
         )
         try Self.validateTrustedSHA256(
+            expected: descriptor.expectedInputSHA256,
+            actual: inputSHA256,
+            requiresTrustedSHA256: requiresPin
+                || descriptor.deterministicPatch != nil,
+            finalScriptURL: descriptor.scriptURL
+        )
+        let data = try applyDeterministicPatchIfNeeded(
+            inputData,
+            descriptor: descriptor
+        )
+        let actualMD5 = Self.md5Hex(data)
+        let actualSHA256 = Self.sha256Hex(data)
+        try Self.validateTrustedSHA256(
             expected: descriptor.expectedSHA256,
             actual: actualSHA256,
-            requiresTrustedSHA256: requiresPin,
+            requiresTrustedSHA256: requiresPin
+                || descriptor.deterministicPatch != nil,
             finalScriptURL: descriptor.scriptURL
         )
         let metadata = CacheMetadata(
             pinIdentity: descriptor.pinIdentity,
             finalChecksumURL: descriptor.checksumURL,
             finalScriptURL: descriptor.scriptURL,
-            md5: checksum,
+            md5: actualMD5,
             sha256: actualSHA256,
-            trustState: .legacyTOFU
+            trustState: descriptor.deterministicPatch == nil
+                ? .legacyTOFU
+                : .publisherSHA256
         )
         let installedURL: URL
         do {
             installedURL = try installCacheAtomically(
                 descriptor: descriptor,
                 script: data,
-                checksum: checksum,
+                checksum: actualMD5,
                 metadata: metadata,
                 beforeCommit: migrationCommitHook
             )
@@ -2428,7 +2781,7 @@ actor NodeBundleRuntimeService {
                 code: .cacheMigrationSucceeded,
                 message: "Legacy Node bundle cache migration succeeded",
                 descriptor: descriptor,
-                trustState: .legacyTOFU
+                trustState: bundle.trustState.diagnosticState
             )
         )
         return bundle
@@ -2875,6 +3228,97 @@ actor NodeBundleRuntimeService {
         )
     }
 
+    private func transferEnvironment(
+        for bundle: CachedBundle
+    ) throws -> [String: String] {
+        guard let patch = bundle.deterministicPatch else { return [:] }
+        let root = applicationSupportDirectory.appendingPathComponent(
+            "CloudTransfers",
+            isDirectory: true
+        )
+        try secureDirectory(root)
+        let installationUUID = try stableTransferIdentityValue(
+            at: root.appendingPathComponent("installation-id"),
+            validate: { UUID(uuidString: $0) != nil },
+            generate: { UUID().uuidString.lowercased() }
+        )
+        let hmacKey = try stableTransferIdentityValue(
+            at: root.appendingPathComponent("installation-hmac-key"),
+            validate: {
+                $0.range(
+                    of: "^[0-9a-f]{64}$",
+                    options: .regularExpression
+                ) != nil
+            },
+            generate: {
+                var generator = SystemRandomNumberGenerator()
+                let bytes = (0..<32).map { _ in
+                    UInt8.random(in: .min ... .max, using: &generator)
+                }
+                return bytes.map { String(format: "%02x", $0) }.joined()
+            }
+        )
+        let moduleURL = try Self.validatedNodePatchResourceURL(
+            named: patch.moduleResourceName,
+            expectedSHA256: patch.moduleResourceSHA256
+        )
+        return [
+            "OKVIDEO_TRANSFER_PATCH_MODULE": moduleURL.path,
+            "OKVIDEO_TRANSFER_LEDGER_PATH": root
+                .appendingPathComponent("ledger-v1.json")
+                .path,
+            "OKVIDEO_INSTALLATION_UUID": installationUUID,
+            "OKVIDEO_INSTALLATION_HMAC_KEY": hmacKey,
+            "OKVIDEO_TRANSFER_OWNER_SESSION_ID": transferOwnerSessionID
+                .uuidString.lowercased()
+        ]
+    }
+
+    private func stableTransferIdentityValue(
+        at url: URL,
+        validate: (String) -> Bool,
+        generate: () -> String
+    ) throws -> String {
+        if FileManager.default.fileExists(atPath: url.path) {
+            let values = try url.resourceValues(forKeys: [
+                .isRegularFileKey,
+                .isSymbolicLinkKey,
+                .fileSizeKey
+            ])
+            if values.isRegularFile == true,
+               values.isSymbolicLink != true,
+               let size = values.fileSize,
+               size <= 512,
+               let value = try? String(contentsOf: url, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               validate(value) {
+                return value.lowercased()
+            }
+            let preserved = url.deletingLastPathComponent()
+                .appendingPathComponent(
+                    "\(url.lastPathComponent).invalid-"
+                        + "\(Int(now().timeIntervalSince1970))-"
+                        + UUID().uuidString.lowercased()
+                )
+            try FileManager.default.moveItem(at: url, to: preserved)
+        }
+        let value = generate().lowercased()
+        guard validate(value) else {
+            throw NodeBundleRuntimeError.integrityRejected(
+                "应用安装身份生成失败"
+            )
+        }
+        try Data((value + "\n").utf8).write(to: url, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: url.path
+        )
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.synchronize()
+        try handle.close()
+        return value
+    }
+
     private func ensureReady(
         source: StartupSource,
         automaticRestart: Bool,
@@ -3170,7 +3614,8 @@ actor NodeBundleRuntimeService {
             contract: contract,
             runtimeDirectory: bundle.runtimeDirectory,
             profileURL: profileURL,
-            configurationData: bundle.configurationData
+            configurationData: bundle.configurationData,
+            transferEnvironment: try transferEnvironment(for: bundle)
         )
         activeContractCleanupURLs = launchPlan.cleanupURLs
         writer.write(
