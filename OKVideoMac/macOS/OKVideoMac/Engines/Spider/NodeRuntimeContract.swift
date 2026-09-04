@@ -1418,17 +1418,15 @@ enum NodeRuntimeContractFactory {
         if (normalizedName === 'user-agent') userAgent = headerValue.trim();
         if (normalizedName === 'referer') referer = headerValue.trim();
       }
-      // Current Baidu CDN documentation requires this marker while the
-      // CatPaw App-share endpoint still expects its original netdisk identity.
-      // Preserve both identities on the one Baidu-only relay request.
-      if (!userAgent) userAgent = 'pan.baidu.com';
-      if (!userAgent.toLowerCase().includes('pan.baidu.com')) {
-        userAgent += ' pan.baidu.com';
-      }
+      // CatPawOpen's App-share dlink is issued for its exact netdisk identity.
+      // Keep that provider-published User-Agent unchanged on every Range.
+      if (!userAgent) return null;
       const headers = {'User-Agent': userAgent, 'Accept-Encoding': 'identity'};
       if (referer) headers.Referer = referer;
       return {
-        url: upstream.toString(),
+        // URL parsing above is validation only. Re-serializing a signed dlink
+        // may percent-encode signature-covered bytes such as `devuid`.
+        url: value.url,
         headers,
         expiresAt: Date.now() + baiduMediaSessionTTLMilliseconds
       };

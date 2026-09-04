@@ -2847,7 +2847,10 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         headers: HTTPHeaders,
         baseURL: URL
     ) async -> PlaybackTransportSelection? {
-        guard let upstreamURL = URL(string: selectedURL),
+        let exactSignedURL = selectedURL.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard let upstreamURL = URL(string: exactSignedURL),
               upstreamURL.scheme?.lowercased() == "https",
               upstreamURL.host?.lowercased() == "d.pcs.baidu.com",
               headers["User-Agent"]?.isEmpty == false,
@@ -2862,7 +2865,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             isDirectory: false
         )
         let payload = BaiduRuntimeMediaRegistration(
-            url: upstreamURL.absoluteString,
+            // Baidu's App-share signature covers the publisher's exact URL
+            // bytes. Foundation's `absoluteString` percent-encodes characters
+            // such as the `|` in `devuid`, invalidating an otherwise fresh
+            // CatPawOpen dlink. Parse only to validate the authority, then
+            // register the untouched signed string.
+            url: exactSignedURL,
             headers: headers.dictionary
         )
         guard let body = try? JSONEncoder().encode(payload),

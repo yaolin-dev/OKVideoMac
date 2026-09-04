@@ -15687,7 +15687,11 @@ final class NodeBundleCompatibilityTests: XCTestCase {
     }
 
     func testNodePlayerRoutesBaiduThroughRuntimeHeaderRelay() async throws {
-        let gatewayURL = "https://d.pcs.baidu.com/file/opaque?sign=runtime-only"
+        // Baidu signs the exact dlink bytes. In particular, Foundation would
+        // rewrite the raw pipe below as `%7C` if the provider rebuilt this
+        // string through URL.absoluteString before Runtime registration.
+        let gatewayURL = "https://d.pcs.baidu.com/file/opaque"
+            + "?devuid=device|serial&sign=runtime-only"
         let relayURL = "http://127.0.0.1:18988/__okvideo/baidu-media/00000000-0000-0000-0000-000000000001"
         let client = NodeProviderStubHTTPClient { request in
             if request.url.path.hasSuffix("/init") {
@@ -15727,7 +15731,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                 statusCode: 200,
                 headers: ["Content-Type": "application/json"],
                 body: Data(
-                    #"{"parse":0,"url":["原画","https://d.pcs.baidu.com/file/opaque?sign=runtime-only"],"header":{"User-Agent":"BaiduNetdisk","Referer":"https://pan.baidu.com/"}}"#.utf8
+                    #"{"parse":0,"url":["原画","\#(gatewayURL)"],"header":{"User-Agent":"BaiduNetdisk","Referer":"https://pan.baidu.com/"}}"#.utf8
                 )
             )
         }
