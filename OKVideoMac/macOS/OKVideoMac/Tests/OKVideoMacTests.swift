@@ -11234,6 +11234,46 @@ final class TransferReceiptContractTests: XCTestCase {
 }
 
 final class NodeBundleCompatibilityTests: XCTestCase {
+    func testCatPawLegacyHistoryMigrationIsStrictlyNodeScoped() {
+        let recoveredID = "https://provider.invalid/detail?id=42"
+        XCTAssertTrue(
+            CatPawHistoryMigrationPolicy.shouldCaptureRecoveredIdentity(
+                isHistory: true,
+                isAuthorizationRetry: false,
+                isNodeProvider: true,
+                hasAcceptedProviderReference: false,
+                detailID: recoveredID
+            )
+        )
+        XCTAssertFalse(
+            CatPawHistoryMigrationPolicy.shouldCaptureRecoveredIdentity(
+                isHistory: true,
+                isAuthorizationRetry: false,
+                isNodeProvider: false,
+                hasAcceptedProviderReference: false,
+                detailID: recoveredID
+            )
+        )
+        XCTAssertFalse(
+            CatPawHistoryMigrationPolicy.shouldCaptureRecoveredIdentity(
+                isHistory: true,
+                isAuthorizationRetry: false,
+                isNodeProvider: true,
+                hasAcceptedProviderReference: true,
+                detailID: recoveredID
+            )
+        )
+        XCTAssertFalse(
+            CatPawHistoryMigrationPolicy.shouldCaptureRecoveredIdentity(
+                isHistory: true,
+                isAuthorizationRetry: false,
+                isNodeProvider: true,
+                hasAcceptedProviderReference: false,
+                detailID: "cph2." + String(repeating: "a", count: 64)
+            )
+        )
+    }
+
     func testDescriptorUpgradesAuthenticatedHTTPAndDerivesScriptURL() throws {
         let source = try XCTUnwrap(
             URL(string: "http://fixture:secret@example.invalid/index.js.md5")
@@ -17842,6 +17882,19 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                 namespace: "catpaw-video-vod-id"
             )
         XCTAssertTrue(persistedVideoID.hasPrefix("cph2."))
+        XCTAssertTrue(
+            NodePlaybackReplayReference.isPersistedOpaqueIdentity(
+                persistedVideoID
+            )
+        )
+        XCTAssertFalse(
+            NodePlaybackReplayReference.isPersistedOpaqueIdentity(
+                credentialShapedVideoID
+            )
+        )
+        XCTAssertFalse(
+            NodePlaybackReplayReference.isPersistedOpaqueIdentity("cph2.bad")
+        )
         XCTAssertFalse(persistedVideoID.contains("runtime-only"))
         XCTAssertEqual(
             NodePlaybackReplayReference.persistedOpaqueIdentity(
@@ -17901,6 +17954,48 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
         XCTAssertEqual(refreshed.detail.summary.videoID, "history-video")
         XCTAssertEqual(refreshed.playbackResult.resourceReference, reference)
+    }
+
+    func testNodePlaybackKeychainReplayPersistsAcrossStoreInstances() throws {
+        let service = [
+            "com.okvideomac.tests.catpaw-replay",
+            UUID().uuidString.lowercased()
+        ].joined(separator: ".")
+        let firstStore = NodePlaybackKeychainReplayStore(service: service)
+        let secondStore = NodePlaybackKeychainReplayStore(service: service)
+        let replay = NodePlaybackReplay(
+            bundleIdentity: "bundle-stable",
+            profileIdentity: "profile-stable",
+            videoID: "https://provider.invalid/detail?id=42&token=secret",
+            flag: "cloud-original",
+            episodeURL:
+                "https://provider.invalid/file/42?quality=original&token=secret",
+            episodeName: "第 1 集",
+            episodeIndex: 0
+        )
+        var storedLocator: String?
+        defer {
+            if let storedLocator {
+                _ = firstStore.removeReplay(for: storedLocator)
+            }
+        }
+
+        let locator = try XCTUnwrap(
+            NodePlaybackReplayReference.locator(
+                configurationIdentity: UUID().uuidString.lowercased(),
+                siteIdentity: "nodejs_stable_fixture",
+                replay: replay,
+                store: firstStore
+            )
+        )
+        storedLocator = locator
+
+        XCTAssertTrue(locator.hasPrefix("nhr2."))
+        XCTAssertFalse(locator.contains("secret"))
+        XCTAssertEqual(secondStore.replay(for: locator), replay)
+        XCTAssertTrue(secondStore.removeReplay(for: locator))
+        storedLocator = nil
+        XCTAssertNil(firstStore.replay(for: locator))
     }
 
     func testCatPawVideoHistoryUsesFreshEpisodeTokenForSameProviderResource()
