@@ -3570,6 +3570,50 @@ final class PlaybackStartupGateController {
     }
 }
 
+/// Starts automatic episode replacement outside the player-event consumer.
+///
+/// The replacement path waits for `fileLoaded` and `playbackStarted`, which are
+/// delivered by that same consumer. Awaiting replacement inline from an
+/// `ended` event therefore deadlocks the application snapshot at `.loading`
+/// even though libmpv is already rendering the next file. This controller also
+/// gives manual playback, window close, and shutdown one request-scoped handle
+/// with which to invalidate an in-flight automatic replacement.
+@MainActor
+final class AutomaticEpisodeAdvanceController {
+    private(set) var requestID: UUID?
+    private var task: Task<Void, Never>?
+
+    func owns(requestID: UUID) -> Bool {
+        self.requestID == requestID
+    }
+
+    func schedule(
+        operation: @escaping @MainActor (UUID) async -> Void
+    ) {
+        cancel()
+        let requestID = UUID()
+        self.requestID = requestID
+        task = Task { @MainActor [weak self] in
+            // Let the caller return to AsyncStream iteration before beginning a
+            // flow whose completion depends on later events from that stream.
+            await Task.yield()
+            guard let self,
+                  self.requestID == requestID,
+                  !Task.isCancelled else { return }
+            await operation(requestID)
+            guard self.requestID == requestID else { return }
+            self.requestID = nil
+            self.task = nil
+        }
+    }
+
+    func cancel() {
+        requestID = nil
+        task?.cancel()
+        task = nil
+    }
+}
+
 struct ConfigurationActivationToken: Equatable, Sendable {
     let generation: UInt64
     let configurationID: UUID
@@ -3970,6 +4014,8 @@ final class AppState: ObservableObject {
     private var categoryLoadSessionID = UUID()
     private var configurationCategoryLoadSessionID = UUID()
     private var playerEventTask: Task<Void, Never>?
+    private let automaticEpisodeAdvanceController =
+        AutomaticEpisodeAdvanceController()
     private var activeSeekConfirmationID: UUID?
     private var cloudAuthorizationPollTask: Task<Void, Never>?
     private var nodeAuthorizationCompletionTask: Task<Void, Never>?
@@ -9460,8 +9506,18 @@ final class AppState: ObservableObject {
         configurationID requestedConfigurationID: UUID? = nil,
         continuingRequestID: UUID? = nil,
         authorizationRetry: Bool = false,
-        windowActivation: PlayerWindowActivationPolicy = .userInitiated
+        windowActivation: PlayerWindowActivationPolicy = .userInitiated,
+        automaticAdvanceRequestID: UUID? = nil
     ) async {
+        if let automaticAdvanceRequestID {
+            guard automaticEpisodeAdvanceController.owns(
+                requestID: automaticAdvanceRequestID
+            ), !Task.isCancelled else { return }
+        } else {
+            // A user choice or an authorization/history recovery supersedes a
+            // queued automatic transition before it can replace that choice.
+            automaticEpisodeAdvanceController.cancel()
+        }
         guard !isShutdownRequested,
               let environment,
               let activeConfigurationID = activeConfigurationRecord?.id,
@@ -11557,6 +11613,7 @@ final class AppState: ObservableObject {
 
         isShutdownRequested = true
         playerRenderSurfaceGate.reset()
+        automaticEpisodeAdvanceController.cancel()
         cancelAllPlaybackStartupGates()
         playbackRequestsResolving.removeAll()
         historyPlaybackTask?.cancel()
@@ -11693,6 +11750,7 @@ final class AppState: ObservableObject {
         let shouldRetainTVBoxPlayerWarm = activePlayback?.media.transportProfile
             == .tvBox
         playerRenderSurfaceGate.reset()
+        automaticEpisodeAdvanceController.cancel()
         cancelAllPlaybackStartupGates()
         playbackRequestsResolving.removeAll()
         historyPlaybackTask?.cancel()
@@ -14696,7 +14754,7 @@ final class AppState: ObservableObject {
                             )
                         }
                         if origin.permitsAutomaticAdvance {
-                            await self.advanceAfterNaturalEnd(
+                            self.scheduleAdvanceAfterNaturalEnd(
                                 endedSessionID: endedSessionID
                             )
                         }
@@ -14828,8 +14886,24 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func advanceAfterNaturalEnd(endedSessionID: UUID) async {
-        guard playbackSessionID == endedSessionID,
+    private func scheduleAdvanceAfterNaturalEnd(endedSessionID: UUID) {
+        automaticEpisodeAdvanceController.schedule { [weak self] requestID in
+            await self?.advanceAfterNaturalEnd(
+                endedSessionID: endedSessionID,
+                automaticAdvanceRequestID: requestID
+            )
+        }
+    }
+
+    private func advanceAfterNaturalEnd(
+        endedSessionID: UUID,
+        automaticAdvanceRequestID: UUID
+    ) async {
+        guard automaticEpisodeAdvanceController.owns(
+                  requestID: automaticAdvanceRequestID
+              ),
+              !Task.isCancelled,
+              playbackSessionID == endedSessionID,
               isPlayerPresented,
               livePlaybackChannel == nil,
               let playback = activePlayback,
@@ -14845,7 +14919,8 @@ final class AppState: ObservableObject {
             source: playback.source,
             episode: nextEpisode,
             configurationID: playback.configurationID,
-            windowActivation: .preserveFocus
+            windowActivation: .preserveFocus,
+            automaticAdvanceRequestID: automaticAdvanceRequestID
         )
     }
 

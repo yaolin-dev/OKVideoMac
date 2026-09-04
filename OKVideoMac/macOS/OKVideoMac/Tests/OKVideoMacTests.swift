@@ -6065,6 +6065,45 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testAutomaticEpisodeAdvanceRunsAfterEventHandlerReturns() async {
+        let controller = AutomaticEpisodeAdvanceController()
+        let started = expectation(description: "automatic advance started")
+        var didReturnFromEventHandler = false
+        var observedReturnBeforeStart = false
+
+        controller.schedule { requestID in
+            observedReturnBeforeStart = didReturnFromEventHandler
+            XCTAssertTrue(controller.owns(requestID: requestID))
+            started.fulfill()
+        }
+
+        // schedule must not run the replacement inline. The player event loop
+        // needs to request its next event before this operation may wait for
+        // fileLoaded/playbackStarted from that stream.
+        didReturnFromEventHandler = true
+        await fulfillment(of: [started], timeout: 1)
+
+        XCTAssertTrue(observedReturnBeforeStart)
+        XCTAssertNil(controller.requestID)
+    }
+
+    @MainActor
+    func testAutomaticEpisodeAdvanceCancellationInvalidatesQueuedWork() async {
+        let controller = AutomaticEpisodeAdvanceController()
+        var didRun = false
+
+        controller.schedule { _ in
+            didRun = true
+        }
+        controller.cancel()
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertFalse(didRun)
+        XCTAssertNil(controller.requestID)
+    }
+
     func testMouseMoveRatePolicyDropsRedundantTrackingEvents() {
         XCTAssertTrue(
             PlayerInteractionRatePolicy.shouldForwardMouseMove(
