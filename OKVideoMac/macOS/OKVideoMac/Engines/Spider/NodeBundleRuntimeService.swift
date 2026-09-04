@@ -1005,6 +1005,7 @@ enum NodeRuntimePlaybackLeasePolicy {
         }
         return mediaURL.path.hasPrefix("/spider/")
             || mediaURL.path.hasPrefix("/proxy/")
+            || mediaURL.path.hasPrefix("/__okvideo/baidu-media/")
     }
 }
 

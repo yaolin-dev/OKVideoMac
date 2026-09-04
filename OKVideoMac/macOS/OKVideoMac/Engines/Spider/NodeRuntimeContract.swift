@@ -545,6 +545,7 @@ enum NodeRuntimeContractFactory {
     const https = require('https');
     const net = require('net');
     const crypto = require('crypto');
+    const { Readable } = require('stream');
     const { AsyncLocalStorage } = require('async_hooks');
     const bundlePath = process.env.OKVIDEO_BUNDLE_PATH;
     const configPath = process.env.OKVIDEO_CONTRACT_B_CONFIG_PATH;
@@ -566,6 +567,9 @@ enum NodeRuntimeContractFactory {
     const runtimeHostMessageTTLMilliseconds = 15000;
     const runtimeHostMessageLimit = 16;
     const proxyErrorCaptureLimitBytes = 4 * 1024;
+    const baiduMediaSessionTTLMilliseconds = 8 * 60 * 60 * 1000;
+    const baiduMediaSessionLimit = 32;
+    const baiduMediaSessions = new Map();
     let hostBridgeServer = null;
     let hostBridgePort = 0;
     const originalFetch = globalThis.fetch;
@@ -1379,6 +1383,161 @@ enum NodeRuntimeContractFactory {
     function isConfigurationWebsitePath(pathname) {
       return pathname === '/website' || pathname.startsWith('/website/');
     }
+
+    function pruneBaiduMediaSessions(now = Date.now()) {
+      for (const [token, session] of baiduMediaSessions) {
+        if (!session || session.expiresAt <= now) baiduMediaSessions.delete(token);
+      }
+      while (baiduMediaSessions.size > baiduMediaSessionLimit) {
+        const oldest = baiduMediaSessions.keys().next().value;
+        if (!oldest) break;
+        baiduMediaSessions.delete(oldest);
+      }
+    }
+
+    function normalizedBaiduMediaSession(value) {
+      if (!value || typeof value !== 'object' || Array.isArray(value) ||
+          typeof value.url !== 'string' || value.url.length > 16 * 1024) {
+        return null;
+      }
+      let upstream;
+      try { upstream = new URL(value.url); }
+      catch (_) { return null; }
+      if (upstream.protocol !== 'https:' ||
+          upstream.hostname.toLowerCase() !== 'd.pcs.baidu.com') {
+        return null;
+      }
+      const publishedHeaders = value.headers && typeof value.headers === 'object' &&
+        !Array.isArray(value.headers) ? value.headers : {};
+      let userAgent = '';
+      let referer = '';
+      for (const [name, headerValue] of Object.entries(publishedHeaders)) {
+        if (typeof headerValue !== 'string' || headerValue.length > 8 * 1024 ||
+            /[\r\n\0]/.test(headerValue)) continue;
+        const normalizedName = String(name).toLowerCase();
+        if (normalizedName === 'user-agent') userAgent = headerValue.trim();
+        if (normalizedName === 'referer') referer = headerValue.trim();
+      }
+      // Current Baidu CDN documentation requires this marker while the
+      // CatPaw App-share endpoint still expects its original netdisk identity.
+      // Preserve both identities on the one Baidu-only relay request.
+      if (!userAgent) userAgent = 'pan.baidu.com';
+      if (!userAgent.toLowerCase().includes('pan.baidu.com')) {
+        userAgent += ' pan.baidu.com';
+      }
+      const headers = {'User-Agent': userAgent, 'Accept-Encoding': 'identity'};
+      if (referer) headers.Referer = referer;
+      return {
+        url: upstream.toString(),
+        headers,
+        expiresAt: Date.now() + baiduMediaSessionTTLMilliseconds
+      };
+    }
+
+    function registerBaiduMediaSession(request, response) {
+      let body = '';
+      let exceededLimit = false;
+      request.setEncoding('utf8');
+      request.on('data', (chunk) => {
+        if (exceededLimit) return;
+        body += chunk;
+        if (Buffer.byteLength(body, 'utf8') > 32 * 1024) {
+          exceededLimit = true;
+          body = '';
+        }
+      });
+      request.on('end', () => {
+        if (exceededLimit) {
+          response.statusCode = 413;
+          response.end();
+          return;
+        }
+        let value = null;
+        try { value = JSON.parse(body); }
+        catch (_) {}
+        const session = normalizedBaiduMediaSession(value);
+        if (!session) {
+          response.statusCode = 400;
+          response.end();
+          return;
+        }
+        pruneBaiduMediaSessions();
+        const token = crypto.randomUUID();
+        baiduMediaSessions.set(token, session);
+        pruneBaiduMediaSessions();
+        const port = Number(request.socket?.localPort || 0);
+        if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+          baiduMediaSessions.delete(token);
+          response.statusCode = 500;
+          response.end();
+          return;
+        }
+        response.statusCode = 201;
+        response.setHeader('Content-Type', 'application/json; charset=utf-8');
+        response.setHeader('Cache-Control', 'no-store');
+        response.end(JSON.stringify({
+          url: `http://127.0.0.1:${port}/__okvideo/baidu-media/${token}`
+        }));
+      });
+    }
+
+    async function proxyBaiduMediaSession(request, response, token) {
+      pruneBaiduMediaSessions();
+      const session = baiduMediaSessions.get(token);
+      if (!session) {
+        response.statusCode = 404;
+        response.end();
+        return;
+      }
+      const headers = Object.assign({}, session.headers);
+      const range = String(request.headers.range || '');
+      if (range && range.length <= 256 && /^bytes=\d*-\d*(?:,\d*-\d*)*$/.test(range)) {
+        headers.Range = range;
+      }
+      const ifRange = String(request.headers['if-range'] || '');
+      if (ifRange && ifRange.length <= 512 && !/[\r\n\0]/.test(ifRange)) {
+        headers['If-Range'] = ifRange;
+      }
+      const abortController = new AbortController();
+      request.once('aborted', () => abortController.abort());
+      response.once('close', () => {
+        if (!response.writableEnded) abortController.abort();
+      });
+      let upstream;
+      try {
+        upstream = await originalFetch(session.url, {
+          method: request.method === 'HEAD' ? 'HEAD' : 'GET',
+          headers,
+          redirect: 'follow',
+          signal: abortController.signal
+        });
+      } catch (_) {
+        if (!response.headersSent) response.statusCode = 502;
+        if (!response.writableEnded) response.end();
+        return;
+      }
+      response.statusCode = upstream.status;
+      for (const name of [
+        'accept-ranges', 'cache-control', 'content-disposition',
+        'content-length', 'content-range', 'content-type', 'etag',
+        'last-modified'
+      ]) {
+        const value = upstream.headers.get(name);
+        if (value) response.setHeader(name, value);
+      }
+      response.setHeader('Cache-Control', 'no-store');
+      if (request.method === 'HEAD' || !upstream.body) {
+        response.end();
+        return;
+      }
+      const stream = Readable.fromWeb(upstream.body);
+      stream.once('error', () => {
+        if (!response.headersSent) response.statusCode = 502;
+        if (!response.writableEnded) response.end();
+      });
+      stream.pipe(response);
+    }
+
     globalThis.catServerFactory = function catServerFactory(handler) {
       if (typeof handler !== 'function') {
         throw new Error('contract-b server factory arguments rejected');
@@ -1397,6 +1556,23 @@ enum NodeRuntimeContractFactory {
         }
         if (request.method === 'POST' && request.url === '/msg') {
           receiveHostMessage(request, response);
+          return;
+        }
+        if (request.method === 'POST' &&
+            requestURL.pathname === '/__okvideo/baidu-media') {
+          registerBaiduMediaSession(request, response);
+          return;
+        }
+        const baiduMediaPrefix = '/__okvideo/baidu-media/';
+        if ((request.method === 'GET' || request.method === 'HEAD') &&
+            requestURL.pathname.startsWith(baiduMediaPrefix)) {
+          const token = requestURL.pathname.slice(baiduMediaPrefix.length);
+          if (!/^[0-9a-f-]{36}$/i.test(token)) {
+            response.statusCode = 404;
+            response.end();
+            return;
+          }
+          void proxyBaiduMediaSession(request, response, token);
           return;
         }
         if (request.method === 'GET' &&

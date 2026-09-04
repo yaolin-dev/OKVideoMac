@@ -15618,6 +15618,16 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                     body: Data()
                 )
             }
+            if request.url.path == "/__okvideo/baidu-media" {
+                // Older CatPaw Runtime contracts do not provide the Baidu-only
+                // relay. The provider must retain its compatibility fallback.
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
             if request.url.absoluteString == gatewayURL {
                 XCTAssertEqual(
                     request.redirectedHeaderFields,
@@ -15674,6 +15684,78 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
         XCTAssertEqual(result.mediaSession?.rangePolicy, .forward)
         XCTAssertEqual(result.mediaSession?.transport, .compatibilityDirect)
+    }
+
+    func testNodePlayerRoutesBaiduThroughRuntimeHeaderRelay() async throws {
+        let gatewayURL = "https://d.pcs.baidu.com/file/opaque?sign=runtime-only"
+        let relayURL = "http://127.0.0.1:18988/__okvideo/baidu-media/00000000-0000-0000-0000-000000000001"
+        let client = NodeProviderStubHTTPClient { request in
+            if request.url.path.hasSuffix("/init") {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 404,
+                    headers: [:],
+                    body: Data()
+                )
+            }
+            if request.url.path == "/__okvideo/baidu-media" {
+                XCTAssertEqual(request.method, .post)
+                let body = try XCTUnwrap(request.body)
+                let object = try XCTUnwrap(
+                    JSONSerialization.jsonObject(with: body)
+                        as? [String: Any]
+                )
+                XCTAssertEqual(object["url"] as? String, gatewayURL)
+                let headers = try XCTUnwrap(
+                    object["headers"] as? [String: String]
+                )
+                XCTAssertEqual(headers["User-Agent"], "BaiduNetdisk")
+                XCTAssertEqual(headers["Referer"], "https://pan.baidu.com/")
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 201,
+                    headers: ["Content-Type": "application/json"],
+                    body: Data(#"{"url":"\#(relayURL)"}"#.utf8)
+                )
+            }
+            if request.url.absoluteString == gatewayURL {
+                XCTFail("Runtime relay registration succeeded; the host must not preflight the Baidu gateway")
+            }
+            XCTAssertTrue(request.url.path.hasSuffix("/play"))
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(
+                    #"{"parse":0,"url":["原画","https://d.pcs.baidu.com/file/opaque?sign=runtime-only"],"header":{"User-Agent":"BaiduNetdisk","Referer":"https://pan.baidu.com/"}}"#.utf8
+                )
+            )
+        }
+        let site = SiteConfiguration(
+            key: "nodejs_baidu_relay_fixture",
+            name: "Baidu Relay Fixture",
+            type: 3,
+            api: "/spider/baidu-relay-fixture/3",
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: try XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        let result = try await provider.player(
+            flag: "百度",
+            episodeURL: "opaque-episode"
+        )
+
+        XCTAssertEqual(result.url, relayURL)
+        XCTAssertEqual(result.qualities.map(\.url), [relayURL])
+        XCTAssertEqual(result.headers["User-Agent"], "BaiduNetdisk")
+        XCTAssertEqual(result.headers["Referer"], "https://pan.baidu.com/")
+        XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
+        XCTAssertEqual(result.mediaSession?.rangePolicy, .forward)
+        XCTAssertEqual(result.mediaSession?.transport, .providerLoopback)
     }
 
     func testNodePlayerRoutesOpaqueCloudDirectLinkFailureToConfiguration()
@@ -16229,6 +16311,22 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertTrue(
             NodeRuntimePlaybackLeasePolicy.owns(
                 session(url: "http://127.0.0.1:18988/proxy/hls/item.m3u8"),
+                serviceBaseURL: baseURL
+            )
+        )
+        XCTAssertTrue(
+            NodeRuntimePlaybackLeasePolicy.owns(
+                session(
+                    url: "http://127.0.0.1:18988/__okvideo/baidu-media/00000000-0000-0000-0000-000000000001"
+                ),
+                serviceBaseURL: baseURL
+            )
+        )
+        XCTAssertFalse(
+            NodeRuntimePlaybackLeasePolicy.owns(
+                session(
+                    url: "http://127.0.0.1:18988/__okvideo/not-baidu/00000000-0000-0000-0000-000000000001"
+                ),
                 serviceBaseURL: baseURL
             )
         )

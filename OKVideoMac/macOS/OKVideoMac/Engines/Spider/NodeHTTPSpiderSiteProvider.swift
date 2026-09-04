@@ -1658,7 +1658,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         let selectedProviderURL = result.url
         let transportSelection = await preferredPlaybackTransport(
             selectedURL: selectedProviderURL,
-            headers: result.headers
+            headers: result.headers,
+            baseURL: invocation.baseURL
         )
         result.url = transportSelection.url
         if result.url != selectedProviderURL {
@@ -2799,13 +2800,30 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         let rangePolicy: PlaybackMediaSession.RangePolicy
     }
 
+    private struct BaiduRuntimeMediaRegistration: Encodable {
+        let url: String
+        let headers: [String: String]
+    }
+
+    private struct BaiduRuntimeMediaRegistrationResponse: Decodable {
+        let url: String
+    }
+
     /// Honor the transport selected by the Spider response. Network probing is
     /// intentionally not performed here because CatPaw loopback URLs may mint
     /// a short-lived redirect or begin a provider-managed streaming session.
     private func preferredPlaybackTransport(
         selectedURL: String,
-        headers: HTTPHeaders
+        headers: HTTPHeaders,
+        baseURL: URL
     ) async -> PlaybackTransportSelection {
+        if let registered = await registeredBaiduRuntimeTransport(
+            selectedURL: selectedURL,
+            headers: headers,
+            baseURL: baseURL
+        ) {
+            return registered
+        }
         if let prepared = await preparedBaiduOriginalTransport(
             selectedURL: selectedURL,
             headers: headers
@@ -2815,6 +2833,68 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         return PlaybackTransportSelection(
             url: selectedURL,
             rangePolicy: .providerDefined
+        )
+    }
+
+    /// CatPaw's Baidu App-share URL is accepted only when the provider User-
+    /// Agent survives every CDN request and seek. libmpv/FFmpeg may rebuild a
+    /// request after the signed gateway redirect, so register this one Baidu-
+    /// only capability with the managed CatPaw Runtime. The loopback relay
+    /// owns Range forwarding and the upstream headers; no other provider host
+    /// can be registered on this route.
+    private func registeredBaiduRuntimeTransport(
+        selectedURL: String,
+        headers: HTTPHeaders,
+        baseURL: URL
+    ) async -> PlaybackTransportSelection? {
+        guard let upstreamURL = URL(string: selectedURL),
+              upstreamURL.scheme?.lowercased() == "https",
+              upstreamURL.host?.lowercased() == "d.pcs.baidu.com",
+              headers["User-Agent"]?.isEmpty == false,
+              baseURL.scheme?.lowercased() == "http",
+              ["127.0.0.1", "localhost", "::1"].contains(
+                  baseURL.host?.lowercased() ?? ""
+              ) else {
+            return nil
+        }
+        let endpoint = baseURL.appendingPathComponent(
+            "__okvideo/baidu-media",
+            isDirectory: false
+        )
+        let payload = BaiduRuntimeMediaRegistration(
+            url: upstreamURL.absoluteString,
+            headers: headers.dictionary
+        )
+        guard let body = try? JSONEncoder().encode(payload),
+              let response = try? await httpClient.send(
+                  HTTPRequest(
+                      url: endpoint,
+                      method: .post,
+                      headers: ["Content-Type": "application/json; charset=utf-8"],
+                      body: body,
+                      timeout: 4,
+                      maximumResponseBytes: 8 * 1_024,
+                      maximumRedirects: 0,
+                      retryPolicy: .none
+                  )
+              ),
+              (200...299).contains(response.statusCode),
+              let registration = try? JSONDecoder().decode(
+                  BaiduRuntimeMediaRegistrationResponse.self,
+                  from: response.body
+              ),
+              let relayURL = URL(string: registration.url),
+              relayURL.scheme?.lowercased() == baseURL.scheme?.lowercased(),
+              relayURL.port == baseURL.port,
+              ["127.0.0.1", "localhost", "::1"].contains(
+                  relayURL.host?.lowercased() ?? ""
+              ),
+              relayURL.path.hasPrefix("/__okvideo/baidu-media/") else {
+            return nil
+        }
+        return PlaybackTransportSelection(
+            url: relayURL.absoluteString,
+            rangePolicy: .forward
         )
     }
 
