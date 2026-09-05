@@ -224,6 +224,21 @@ final class SiteProviderTests: XCTestCase {
         XCTAssertTrue(MediaURLClassifier.isDirectMediaURL("file:///tmp/a.mp4"))
         XCTAssertFalse(MediaURLClassifier.isDirectMediaURL("javascript:alert(1)"))
         XCTAssertFalse(MediaURLClassifier.isDirectMediaURL("https://example.invalid/watch/1"))
+        XCTAssertTrue(
+            MediaURLClassifier.isSupportedAbsoluteMediaURL(
+                "rtsp://192.0.2.1/live"
+            )
+        )
+        XCTAssertFalse(
+            MediaURLClassifier.isSupportedAbsoluteMediaURL(
+                "ndr2.stale-history-token"
+            )
+        )
+        XCTAssertFalse(
+            MediaURLClassifier.isSupportedAbsoluteMediaURL(
+                "/relative/provider/error"
+            )
+        )
     }
 
     func testEmptySpiderResponseUsesActionableError() {

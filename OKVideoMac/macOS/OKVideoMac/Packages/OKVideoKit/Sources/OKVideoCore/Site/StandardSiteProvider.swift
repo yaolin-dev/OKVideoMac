@@ -223,11 +223,13 @@ public enum MediaURLClassifier {
     private static let directExtensions = [
         "m3u8", "mp4", "mkv", "webm", "mov", "flv", "ts", "mpd", "mp3", "m4a", "aac"
     ]
+    private static let supportedNetworkSchemes: Set<String> = [
+        "http", "https", "rtsp", "rtmp", "rtmps", "rtp", "udp"
+    ]
 
     public static func isDirectMediaURL(_ value: String) -> Bool {
         guard let url = URL(string: value),
-              let scheme = url.scheme?.lowercased(),
-              ["http", "https", "file"].contains(scheme) else {
+              isSupportedAbsoluteMediaURL(url) else {
             return false
         }
         let pathExtension = url.pathExtension.lowercased()
@@ -236,6 +238,26 @@ public enum MediaURLClassifier {
         }
         let lowered = value.lowercased()
         return lowered.contains(".m3u8?") || lowered.contains(".mpd?")
+    }
+
+    /// Validates the final hand-off contract shared by providers and the
+    /// player. Extensionless streams and MPV's supported network protocols
+    /// remain valid, but relative strings, provider error text and app-internal
+    /// locator tokens never reach mpv.
+    public static func isSupportedAbsoluteMediaURL(_ value: String) -> Bool {
+        guard let url = URL(string: value) else { return false }
+        return isSupportedAbsoluteMediaURL(url)
+    }
+
+    public static func isSupportedAbsoluteMediaURL(_ url: URL) -> Bool {
+        switch url.scheme?.lowercased() {
+        case let scheme? where supportedNetworkSchemes.contains(scheme):
+            return url.host?.isEmpty == false
+        case "file":
+            return url.isFileURL && url.path.hasPrefix("/")
+        default:
+            return false
+        }
     }
 }
 

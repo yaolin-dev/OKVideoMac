@@ -235,154 +235,14 @@ struct QuarkPasscodeDisabledStore: QuarkPasscodeStoring {
     func store(_: String, for _: String) -> Bool { false }
 }
 
-enum CatPawPlaybackReplayKind: String, Codable, Equatable {
-    case video
-    case pan
-}
-
-/// Provider-call identity captured before a temporary playback URL exists.
-/// `profileIdentity` is the stable profile namespace, never the mutable
-/// profile revision. The final media URL, headers and runtime session are not
-/// representable here.
-struct NodePlaybackReplay: Codable, Equatable {
-    let version: Int
-    let kind: CatPawPlaybackReplayKind
-    let bundleIdentity: String?
-    let profileIdentity: String?
-    let videoID: String?
-    let flag: String
-    let episodeURL: String
-    let episodeName: String?
-    let episodeIndex: Int?
-
-    init(
-        version: Int = 2,
-        kind: CatPawPlaybackReplayKind = .video,
-        bundleIdentity: String? = nil,
-        profileIdentity: String? = nil,
-        videoID: String? = nil,
-        flag: String,
-        episodeURL: String,
-        episodeName: String? = nil,
-        episodeIndex: Int? = nil
-    ) {
-        self.version = version
-        self.kind = kind
-        self.bundleIdentity = bundleIdentity
-        self.profileIdentity = profileIdentity
-        self.videoID = videoID
-        self.flag = flag
-        self.episodeURL = episodeURL
-        self.episodeName = episodeName
-        self.episodeIndex = episodeIndex
-    }
-}
-
-protocol NodePlaybackReplayStoring {
-    func replay(for locator: String) -> NodePlaybackReplay?
-
-    @discardableResult
-    func store(_ replay: NodePlaybackReplay, for locator: String) -> Bool
-
-    @discardableResult
-    func removeReplay(for locator: String) -> Bool
-}
-
-struct NodePlaybackDisabledReplayStore: NodePlaybackReplayStoring {
-    func replay(for _: String) -> NodePlaybackReplay? { nil }
-    func store(_: NodePlaybackReplay, for _: String) -> Bool { false }
-    func removeReplay(for _: String) -> Bool { false }
-}
-
 enum NodePlaybackReplayReference {
     static let protectedPrefix = "nhr2"
     static let directPrefix = "ndr2"
     private static let legacyProtectedPrefix = "nhr1"
-    private static let maximumFlagByteCount = 4_096
-    private static let maximumVideoByteCount = 65_536
-    private static let maximumEpisodeByteCount = 65_536
-    private static let maximumDirectLocatorByteCount = 3_500
-
-    static func locator(
-        configurationIdentity: String,
-        siteIdentity: String,
-        replay: NodePlaybackReplay,
-        store: NodePlaybackReplayStoring,
-        persistsProtectedReplay: Bool = true
-    ) -> String? {
-        guard !replay.flag.isEmpty,
-              !replay.episodeURL.isEmpty,
-              replay.flag.utf8.count <= maximumFlagByteCount,
-              (replay.videoID?.utf8.count ?? 0) <= maximumVideoByteCount,
-              replay.episodeURL.utf8.count <= maximumEpisodeByteCount else {
-            return nil
-        }
-        if !requiresProtectedStorage(replay),
-           let encoded = encodedDirectReplay(replay),
-           encoded.utf8.count <= maximumDirectLocatorByteCount {
-            return encoded
-        }
-        let locator = protectedLocator(
-            configurationIdentity: configurationIdentity,
-            siteIdentity: siteIdentity,
-            replay: replay
-        )
-        guard persistsProtectedReplay else { return nil }
-        guard store.store(replay, for: locator) else { return nil }
-        return locator
-    }
-
-    static func replay(
-        for locator: String,
-        store: NodePlaybackReplayStoring
-    ) -> NodePlaybackReplay? {
-        if locator.hasPrefix("\(directPrefix).") {
-            let encoded = locator.dropFirst(directPrefix.count + 1)
-            guard let data = base64URLDecoded(String(encoded)) else {
-                return nil
-            }
-            return try? JSONDecoder().decode(NodePlaybackReplay.self, from: data)
-        }
-        guard isProtectedLocator(locator) else { return nil }
-        return store.replay(for: locator)
-    }
-
-    private static func protectedLocator(
-        configurationIdentity: String,
-        siteIdentity: String,
-        replay: NodePlaybackReplay
-    ) -> String {
-        var data = Data()
-        for value in [
-            configurationIdentity,
-            siteIdentity,
-            replay.bundleIdentity ?? "",
-            replay.profileIdentity ?? "",
-            replay.videoID ?? "",
-            replay.kind.rawValue,
-            replay.flag,
-            replay.episodeURL,
-            replay.episodeName ?? "",
-            replay.episodeIndex.map(String.init) ?? ""
-        ] {
-            let bytes = Data(value.utf8)
-            var count = UInt64(bytes.count).bigEndian
-            withUnsafeBytes(of: &count) { data.append(contentsOf: $0) }
-            data.append(bytes)
-        }
-        let digest = SHA256.hash(data: data)
-            .map { String(format: "%02x", $0) }
-            .joined()
-        return "\(protectedPrefix).\(digest)"
-    }
 
     static func isLocator(_ value: String) -> Bool {
-        isProtectedLocator(value)
-            || (value.hasPrefix("\(directPrefix).")
-                && replay(
-                    for: value,
-                    store: NodePlaybackDisabledReplayStore()
-                ) != nil)
+        isCurrentLocator(value)
+            || value.hasPrefix("\(legacyProtectedPrefix).")
     }
 
     static func isCurrentLocator(_ value: String) -> Bool {
@@ -410,36 +270,6 @@ enum NodePlaybackReplayReference {
         guard value.hasPrefix("cph2.") else { return false }
         let digest = value.dropFirst("cph2.".count)
         return digest.count == 64 && digest.allSatisfy { $0.isHexDigit }
-    }
-
-    private static func isProtectedLocator(_ value: String) -> Bool {
-        let prefix: String
-        if value.hasPrefix("\(protectedPrefix).") {
-            prefix = protectedPrefix
-        } else if value.hasPrefix("\(legacyProtectedPrefix).") {
-            prefix = legacyProtectedPrefix
-        } else {
-            return false
-        }
-        let digest = value.dropFirst(prefix.count + 1)
-        return digest.count == 64 && digest.allSatisfy { $0.isHexDigit }
-    }
-
-    private static func encodedDirectReplay(
-        _ replay: NodePlaybackReplay
-    ) -> String? {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        guard let data = try? encoder.encode(replay) else { return nil }
-        return "\(directPrefix).\(base64URLEncoded(data))"
-    }
-
-    private static func requiresProtectedStorage(
-        _ replay: NodePlaybackReplay
-    ) -> Bool {
-        [replay.videoID, replay.episodeURL].compactMap { $0 }.contains {
-            opaqueValueRequiresProtection($0)
-        }
     }
 
     private static func opaqueValueRequiresProtection(_ rawValue: String) -> Bool {
@@ -476,23 +306,6 @@ enum NodePlaybackReplayReference {
         return false
     }
 
-    private static func base64URLEncoded(_ data: Data) -> String {
-        data.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-    }
-
-    private static func base64URLDecoded(_ value: String) -> Data? {
-        var base64 = value
-            .replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")
-        let remainder = base64.count % 4
-        if remainder != 0 {
-            base64.append(String(repeating: "=", count: 4 - remainder))
-        }
-        return Data(base64Encoded: base64)
-    }
 }
 
 /// Provider-published stable locators may still be credentials (for example a
@@ -501,41 +314,6 @@ enum NodePlaybackReplayReference {
 /// current provider detail/search path instead of being replayed directly.
 enum NodeProviderLocatorReference {
     static let prefix = "npr1"
-    private static let providerKind = "node-http-spider"
-    private static let maximumLocatorByteCount = 65_536
-
-    static func locator(
-        configurationIdentity: String,
-        siteIdentity: String,
-        schemaVersion: Int,
-        providerVersion: Int,
-        replay: NodePlaybackReplay
-    ) -> String? {
-        guard !replay.flag.isEmpty,
-              !replay.episodeURL.isEmpty,
-              replay.episodeURL.utf8.count <= maximumLocatorByteCount else {
-            return nil
-        }
-        var data = Data()
-        for value in [
-            configurationIdentity,
-            siteIdentity,
-            providerKind,
-            String(schemaVersion),
-            String(providerVersion),
-            replay.flag,
-            replay.episodeURL
-        ] {
-            let bytes = Data(value.utf8)
-            var count = UInt64(bytes.count).bigEndian
-            withUnsafeBytes(of: &count) { data.append(contentsOf: $0) }
-            data.append(bytes)
-        }
-        let digest = SHA256.hash(data: data)
-            .map { String(format: "%02x", $0) }
-            .joined()
-        return "\(prefix).\(digest)"
-    }
 
     static func isLocator(_ value: String) -> Bool {
         guard value.hasPrefix("\(prefix).") else { return false }
@@ -831,7 +609,6 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     private let diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)?
     private let ensureRuntimeReady: (@Sendable () async throws -> URL)?
     private let configurationIdentity: String?
-    private let playbackReplayStore: NodePlaybackReplayStoring
     private let capturedPlaybackReferenceLock = NSLock()
     private var capturedPlaybackReferences: [String: PlaybackResourceReference] = [:]
     private let routeClient: CatPawRouteClient
@@ -937,8 +714,6 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)? = nil,
         ensureRuntimeReady: (@Sendable () async throws -> URL)? = nil,
         quarkPasscodeStore: QuarkPasscodeStoring = QuarkPasscodeDisabledStore(),
-        playbackReplayStore: NodePlaybackReplayStoring =
-            NodePlaybackDisabledReplayStore(),
         configurationIdentity: String? = nil
     ) throws {
         guard Self.canHandle(site: site, baseURL: baseURL) else {
@@ -961,7 +736,6 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             hostMessageBridge: hostMessageBridge
         )
         _ = quarkPasscodeStore
-        self.playbackReplayStore = playbackReplayStore
         let normalizedConfigurationIdentity = configurationIdentity?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
@@ -1279,10 +1053,15 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     }
 
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
-        guard !NodePlaybackReplayReference.isCurrentLocator(episodeURL),
+        let locatorCandidate = episodeURL.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !NodePlaybackReplayReference.isLocator(locatorCandidate),
+              !NodeProviderLocatorReference.isLocator(locatorCandidate),
               !NodePlaybackReplayReference.isPersistedOpaqueIdentity(
-                  episodeURL
-              ) else {
+                  locatorCandidate
+              ),
+              !locatorCandidate.hasPrefix("runtime-v1.") else {
             throw ProviderPlaybackError(
                 "CatPaw 历史内部引用不能作为媒体地址，必须重新获取当前详情"
             )
@@ -1361,13 +1140,6 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if let reference = request.providerResourceReference,
            acceptsPlaybackResourceReference(reference) {
-            if NodePlaybackReplayReference.isCurrentLocator(
-                reference.stableResourceLocator
-            ) {
-                return try await refreshCatPawVideoPlayback(
-                    reference: reference
-                )
-            }
             guard let sourceName = requestedSourceName,
                   !sourceName.isEmpty else {
                 throw ProviderPlaybackError("历史记录缺少原播放线路标识")
@@ -1437,88 +1209,6 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         ) {
             try await refreshPlayback(request)
         }
-    }
-
-    private func refreshCatPawVideoPlayback(
-        reference: PlaybackResourceReference
-    ) async throws -> RefreshedSitePlayback {
-        guard let replay = NodePlaybackReplayReference.replay(
-            for: reference.stableResourceLocator,
-            store: playbackReplayStore
-        ), replay.kind == .video,
-           let videoID = nodeNonEmpty(replay.videoID),
-           replayBelongsToCurrentProvider(replay) else {
-            throw ProviderPlaybackError("原 CatPaw 播放身份已丢失或不属于当前 Bundle/Profile")
-        }
-
-        let detail = try await self.detail(id: videoID)
-        let sourceEpisodes: [(PlaySource, PlayEpisode)] = detail.playSources
-            .flatMap { source -> [(PlaySource, PlayEpisode)] in
-                guard source.name == replay.flag else { return [] }
-                return source.episodes.map { (source, $0) }
-            }
-        let exactMatches = sourceEpisodes.filter {
-            $0.1.url == replay.episodeURL
-        }
-        let selected: (PlaySource, PlayEpisode)?
-        if exactMatches.count == 1 {
-            selected = exactMatches.first
-        } else if exactMatches.isEmpty {
-            // Some cloud details rotate a token embedded in episodeID while
-            // preserving the same provider resource. Match the credential-
-            // free structural identity only inside the exact original flag;
-            // this is still provider replay and never a title search.
-            let replayIdentity = PlaybackReferenceIdentity.episode(
-                name: replay.episodeName ?? "",
-                reference: replay.episodeURL
-            )
-            let semanticMatches = sourceEpisodes.filter {
-                PlaybackReferenceIdentity.episode(
-                    name: $0.1.name,
-                    reference: $0.1.url
-                ) == replayIdentity
-            }
-            selected = semanticMatches.count == 1
-                ? semanticMatches.first
-                : nil
-        } else {
-            selected = nil
-        }
-        guard let selected else {
-            throw ProviderPlaybackError(
-                "最新详情中已无法唯一定位原 flag + episodeID"
-            )
-        }
-
-        var result = try await player(
-            flag: replay.flag,
-            episodeURL: selected.1.url
-        )
-        result.resourceReference = reference
-        result.mediaSession?.resourceReference = reference
-        result.mediaSession?.refreshPerformed = true
-        return RefreshedSitePlayback(
-            detail: detail,
-            source: selected.0,
-            episode: selected.1,
-            playbackResult: result
-        )
-    }
-
-    private func replayBelongsToCurrentProvider(
-        _ replay: NodePlaybackReplay
-    ) -> Bool {
-        if let expectedBundle = nodeNonEmpty(replay.bundleIdentity),
-           nodeNonEmpty(site.extra["okNodeBundleIdentity"]?.stringValue)
-            != expectedBundle {
-            return false
-        }
-        if let expectedProfile = nodeNonEmpty(replay.profileIdentity),
-           nodeNonEmpty(site.extra["okNodeProfileIdentity"]?.stringValue)
-            != expectedProfile {
-            return false
-        }
-        return true
     }
 
     private func refreshPlaybackBySelection(
@@ -1649,13 +1339,24 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             result.url,
             baseURL: invocation.baseURL
         )
-        result.qualities = result.qualities.map {
-            PlaybackQuality(
+        guard MediaURLClassifier.isSupportedAbsoluteMediaURL(result.url) else {
+            throw ProviderPlaybackError(
+                "CatPaw 播放响应未返回可用的绝对媒体地址"
+            )
+        }
+        result.qualities = result.qualities.compactMap {
+            let normalizedURL = Self.normalizePlaybackURL(
+                $0.url,
+                baseURL: invocation.baseURL
+            )
+            guard MediaURLClassifier.isSupportedAbsoluteMediaURL(
+                normalizedURL
+            ) else {
+                return nil
+            }
+            return PlaybackQuality(
                 name: $0.name,
-                url: Self.normalizePlaybackURL(
-                    $0.url,
-                    baseURL: invocation.baseURL
-                )
+                url: normalizedURL
             )
         }
         let selectedProviderURL = result.url
@@ -1665,6 +1366,11 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             baseURL: invocation.baseURL
         )
         result.url = transportSelection.url
+        guard MediaURLClassifier.isSupportedAbsoluteMediaURL(result.url) else {
+            throw ProviderPlaybackError(
+                "CatPaw 播放传输层未返回可用的绝对媒体地址"
+            )
+        }
         if result.url != selectedProviderURL {
             result.qualities = result.qualities.map { quality in
                 guard quality.url == selectedProviderURL else {
@@ -1683,12 +1389,16 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         // consume a one-shot redirect), so the player must issue the only
         // media request for both loopback and remote provider transports.
         result.validationPolicy = .playerAuthoritative
-        result.subtitles = result.subtitles.map { subtitle in
-            URL(string: Self.normalizePlaybackURL(
+        result.subtitles = result.subtitles.compactMap { subtitle in
+            let normalizedURL = Self.normalizePlaybackURL(
                 subtitle.absoluteString,
                 baseURL: invocation.baseURL
-            ))
-                ?? subtitle
+            )
+            guard let url = URL(string: normalizedURL),
+                  MediaURLClassifier.isSupportedAbsoluteMediaURL(url) else {
+                return nil
+            }
+            return url
         }
         // Media-session identity is runtime-only. Generic Node playback still
         // needs transport/range metadata even when there is no safe durable

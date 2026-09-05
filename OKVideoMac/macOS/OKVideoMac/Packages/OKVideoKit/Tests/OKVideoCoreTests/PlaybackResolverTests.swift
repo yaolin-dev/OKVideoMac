@@ -107,6 +107,50 @@ final class PlaybackResolverTests: XCTestCase {
         })
     }
 
+    func testPlayerAuthoritativeInvalidPayloadNeverReachesMediaLoader() async {
+        for invalidPayload in [
+            "unrecognized file format",
+            "ndr2.stale-history-token",
+            "/relative/provider/error"
+        ] {
+            let recorder = MediaLoaderInvocationRecorder()
+            let resolver = PlaybackResolver(
+                parseExecutor: FixtureParseExecutor(results: [:]),
+                mediaProbe: FixtureMediaProbe(validURLs: [])
+            )
+            let request = PlaybackResolutionRequest(
+                candidates: [
+                    PlaybackCandidate(
+                        siteKey: "node",
+                        siteName: "Node",
+                        sourceName: "CatPaw",
+                        episodeName: "Episode 1",
+                        result: SitePlaybackResult(
+                            url: invalidPayload,
+                            needsParsing: false,
+                            flag: "fixture",
+                            validationPolicy: .playerAuthoritative
+                        )
+                    )
+                ],
+                parsers: []
+            )
+
+            let events = await collect(
+                resolver.resolve(request) { _, _ in
+                    await recorder.recordInvocation()
+                }
+            )
+            let wasInvoked = await recorder.wasInvoked()
+
+            XCTAssertFalse(wasInvoked, invalidPayload)
+            XCTAssertTrue(events.contains { event in
+                guard case .failed(let message) = event else { return false }
+                return message.contains("播放器拒绝了非绝对")
+            }, invalidPayload)
+        }
+    }
+
     func testAndroidCloudOriginalProxyBypassesBrokenRangePreflight() async throws {
         let probe = DefaultMediaProbe(httpClient: FailingProbeHTTPClient())
         let url = try XCTUnwrap(
@@ -558,6 +602,18 @@ final class PlaybackResolverTests: XCTestCase {
             values.append(event)
         }
         return values
+    }
+}
+
+private actor MediaLoaderInvocationRecorder {
+    private var invoked = false
+
+    func recordInvocation() {
+        invoked = true
+    }
+
+    func wasInvoked() -> Bool {
+        invoked
     }
 }
 

@@ -529,6 +529,13 @@ public struct PlaybackResolver {
                             format: candidate.result.format
                         )
                     }
+                    guard MediaURLClassifier.isSupportedAbsoluteMediaURL(
+                        parsed.url
+                    ) else {
+                        throw AppError.parsing(
+                            "播放器拒绝了非绝对或不受支持的媒体地址"
+                        )
+                    }
                     continuation.yield(.state(.validating))
                     let requiresPreflight = parser != nil
                         || candidate.result.validationPolicy
