@@ -4,24 +4,24 @@ Each formal OKVideoMac binary must be published with a source set produced by
 `macOS/OKVideoMac/Scripts/create-source-release.sh` from the exact release Git
 commit. Moving branches and `latest` URLs are not corresponding-source links.
 
-For the formal 0.4.0 release (Build 94), the published set is:
+For the formal 0.4.1 release (Build 95), the published set is:
 
-- `OKVideoMac-0.4.0-build94-source.tar.gz`
-- `OKVideoMac-0.4.0-build94-third-party-source.tar.gz`
-- `OKVideoMac-0.4.0-build94-licenses.tar.gz`
-- `OKVideoMac-0.4.0-build94-SOURCE_RELEASE_INDEX.json`
-- `OKVideoMac-0.4.0-build94-SOURCE_RELEASE_MANIFEST.json`
-- `OKVideoMac-0.4.0-build94-SHA256SUMS`
-- `OKVideoMac-0.4.0-macOS-arm64.zip` (internal identity/archive carrier)
-- `OKVideoMac-0.4.0.dmg` (the public binary bound by the final manifest)
-- `OKVideoMac-0.4.0-AndroidDexBridge-release.apk`
+- `OKVideoMac-0.4.1-build95-source.tar.gz`
+- `OKVideoMac-0.4.1-build95-third-party-source.tar.gz`
+- `OKVideoMac-0.4.1-build95-licenses.tar.gz`
+- `OKVideoMac-0.4.1-build95-SOURCE_RELEASE_INDEX.json`
+- `OKVideoMac-0.4.1-build95-SOURCE_RELEASE_MANIFEST.json`
+- `OKVideoMac-0.4.1-build95-SHA256SUMS`
+- `OKVideoMac-0.4.1-macOS-arm64.zip` (internal identity/archive carrier)
+- `OKVideoMac-0.4.1.dmg` (the public binary bound by the final manifest)
+- `OKVideoMac-0.4.1-AndroidDexBridge-release.apk`
 - `THIRD_PARTY_NOTICES.md`
-- `RELEASE_NOTES_0.4.0.md`
+- `RELEASE_NOTES_0.4.1.md`
 
-The Build 94 release set also includes the macOS and Android SPDX/CycloneDX
+The Build 95 release set also includes the macOS and Android SPDX/CycloneDX
 files (`OKVideoMac-macOS.spdx.json`, `OKVideoMac-macOS.cdx.json`,
 `OKVideoMac-Android.spdx.json`, and `OKVideoMac-Android.cdx.json`), and the
-release-specific `OKVideoMac-0.4.0-build94-SHA256SUMS` that binds the release
+release-specific `OKVideoMac-0.4.1-build95-SHA256SUMS` that binds the release
 asset set. The ZIP remains the established internal `binary` identity carrier;
 it is not the public user download. The DMG is recorded separately as the
 public release artifact.
@@ -45,7 +45,7 @@ does not disguise exceptions: the missing original zlib 1.3.2 distfile and
 historical clang-11 input used by MacPorts libc++ remain explicit in the
 manifest and keep native provenance incomplete.
 
-For release 0.4.0 (94), the manifest records Xcode 16.2 and macOS SDK 15.2 as
+For release 0.4.1 (95), the manifest records Xcode 16.2 and macOS SDK 15.2 as
 the actual Phase 2 package builder. Xcode 14.2 remains the older supported
 macOS 12 baseline, but is not reported as the tool that produced this audited
 binary.
@@ -79,8 +79,8 @@ OKVideoMac/macOS/OKVideoMac/Scripts/create-source-release.sh \
   --output-dir /path/to/release \
   --cache-dir /path/to/verified-source-cache \
   --commit HEAD \
-  --binary /path/to/OKVideoMac-0.4.0-macOS-arm64.zip \
-  --release-artifact /path/to/OKVideoMac-0.4.0.dmg
+  --binary /path/to/OKVideoMac-0.4.1-macOS-arm64.zip \
+  --release-artifact /path/to/OKVideoMac-0.4.1.dmg
 ```
 
 Use `--offline` for the second run or for an air-gapped release after every
@@ -88,13 +88,8 @@ locked input is present in the cache. The script fails on a dirty worktree,
 unknown commit, binary/version mismatch, unavailable input, or any checksum
 mismatch.
 
-The public Build 94 set was generated from exact clean commit
-`f93d74fed86e3e2ffcfa4888c521a10f8e3e86f3`, tagged `v0.4.0`, and published on
-2026-09-05. The public DMG SHA-256 is
-`60b2eebc607be9cc21c8207c913b09544546f5b6b843db801873651ceaf427ea`;
-the project source archive SHA-256 is
-`eb7c8a812d9a54907f99d8656198b7227bfe19b1b29836953e768d4fe858a8f3`.
-The manifest itself is
-`11d8baf6c5098f40b10e341e2bcca0f38444bf12259c8cbb1f806c264c8f19a9`.
-Historical Build 62/63/64/65 records remain historical facts and must not be
-presented as the current release.
+The public Build 95 set is generated from the exact clean commit tagged
+`v0.4.1`. The notarized and stapled DMG, checksum, source archives, manifests,
+and SBOMs are published together on the GitHub Release. Historical
+Build 62/63/64/65/94 records remain historical facts and must not be presented
+as the current release.

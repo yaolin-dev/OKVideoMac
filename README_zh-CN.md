@@ -6,15 +6,17 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。它�
 视频 Provider、直播源、搜索、详情、收藏、历史和基于 libmpv 的播放体验，但不
 内置第三方影视源、账号、Cookie、解析服务或 DRM 密钥。
 
-当前正式版本为 **0.4.0（Build 94）**，支持 macOS 12 或更高版本、Apple Silicon
-（`arm64`）。请从 [v0.4.0 正式发布页](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.4.0)
+当前正式版本为 **0.4.1（Build 95）**，支持 macOS 12 或更高版本、Apple Silicon
+（`arm64`）。请从 [v0.4.1 正式发布页](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.4.1)
 下载经过 Developer ID 签名、Apple 公证并已 Staple 的 DMG。
 
-## 0.4.0 Highlights
+## 0.4.1 Highlights
 
-相比 0.3.41，0.4.0 是一次面向完整使用链路的大版本更新：界面更贴近原生 macOS，
-搜索与详情具备严格的请求隔离，播放器和直播切换更稳定，多个 Spider 运行时得到
-扩展，同时建立了可追溯到 exact Git commit 的 DMG、源码、SBOM 与 Notices 发布链。
+0.4.1 重点改善部分 TVBox / Java/Dex Spider 使用的可选 Android 兼容 Runtime。
+OKVideoMac 现在能够安全接管上一轮留下的健康私有 Emulator，串行化并发启动请求，
+在 ADB 尚未就绪时提供更可靠的恢复，并在 App 正常退出时自动关闭自己的 Runtime，
+同时不会影响 Android Studio 或用户其他 AVD。0.4.0 引入的原生界面、播放、搜索、
+直播、网盘与发布工程改进继续保留。
 
 ### Source Compatibility
 
@@ -24,6 +26,8 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。它�
 - Android Bridge 为部分 Java/Dex `csp_` Provider 提供可选兼容层，并强化了专用
   AVD、运行时所有权、APK 版本和签名校验；普通点播、直播、QuickJS 和 Node 不
   需要 Android。
+- 已有健康或仍在启动中的 OKVideoMac 私有 Runtime 会被自动接管；并发请求共享
+  同一次启动，正常退出 App 时会自动关闭该 Runtime。
 
 ### Search & Detail
 
@@ -131,22 +135,16 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。它�
 - Apple Silicon（`arm64`）；
 - 只有 Java/Dex `csp_` 源需要外部 Android SDK、ADB、Emulator 和 arm64 system image。
 
-下载 `OKVideoMac-0.4.0.dmg`，打开后将 `OKVideoMac.app` 拖入 Applications。
+下载 `OKVideoMac-0.4.1.dmg`，打开后将 `OKVideoMac.app` 拖入 Applications。
 正式包已经 Apple 公证，不需要也不应关闭 Gatekeeper 或 SIP。
 
 ## 二进制与源码身份
 
-0.4.0（Build 94）正式资产绑定到 Git commit
-`f93d74fed86e3e2ffcfa4888c521a10f8e3e86f3` 和 Tag `v0.4.0`：
-
-| 资产 | SHA-256 |
-| --- | --- |
-| `OKVideoMac-0.4.0.dmg` | `60b2eebc607be9cc21c8207c913b09544546f5b6b843db801873651ceaf427ea` |
-| `OKVideoMac-0.4.0-build94-source.tar.gz` | `eb7c8a812d9a54907f99d8656198b7227bfe19b1b29836953e768d4fe858a8f3` |
-
-DMG 已通过 Apple notarization、staple、`stapler validate` 和 Gatekeeper；公证提交
-ID 为 `d9db5bae-1ae9-4d0d-9e63-3ca378235e6a`。源码集包含四份 SBOM 和必要 Notices。
-原生第三方来源仍明确披露两个可复现性例外：zlib 精确归档不可用，以及历史
+0.4.1（Build 95）资产从 Tag `v0.4.1` 指向的 exact commit 构建。GitHub Release
+同时提供 `OKVideoMac-0.4.1.dmg` 与公证、Staple 后重新计算的 `.sha256` 文件。
+公开源码以 Git tag 为准；生成的 source index、manifest、SBOM、Notices 与校验和
+把二进制绑定到该 commit，避免在 tagged source 中引入循环的二进制哈希。原生
+第三方来源仍明确披露两个可复现性例外：zlib 精确归档不可用，以及历史
 MacPorts libc++/libc++abi 输入未能恢复；它们不会被误标为可重复构建。
 
 ## 已知限制
@@ -159,7 +157,7 @@ MacPorts libc++/libc++abi 输入未能恢复；它们不会被误标为可重复
 
 ## 文档与安全
 
-- [0.4.0 发布说明](Docs/RELEASE_NOTES_0.4.0.md)
+- [0.4.1 发布说明](Docs/RELEASE_NOTES_0.4.1.md)
 - [详细项目文档](OKVideoMac/README.md)
 - [兼容性指南](OKVideoMac/macOS/OKVideoMac/Docs/COMPATIBILITY.md)
 - [Android Bridge 设置](OKVideoMac/macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP_zh-CN.md)

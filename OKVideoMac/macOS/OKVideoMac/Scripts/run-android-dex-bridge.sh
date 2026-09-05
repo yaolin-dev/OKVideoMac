@@ -3,16 +3,18 @@ set -euo pipefail
 
 # DEVELOPER-ONLY MANUAL TOOL.
 # This script is not used by the OKVideoMac product runtime. It intentionally
-# assumes a maintainer-local SDK, AVD, and fixed emulator serial for legacy
+# requires an explicit SDK and uses contributor-local defaults for the AVD and
+# runtime workspace while retaining a fixed serial for legacy
 # bridge development. Public users and contributors must not treat these
 # defaults as production runtime behavior; the App uses its ownership-verified
 # managed Android runtime instead.
 
 SCRIPT_DIR=${0:A:h}
 REPOSITORY_ROOT=${SCRIPT_DIR:h:h:h}
-ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-/Volumes/XcodeDev/AndroidSDK}
-ANDROID_AVD_HOME=${ANDROID_AVD_HOME:-/Volumes/XcodeDev/AndroidAVD}
-RUNTIME_DIR=${OKVIDEO_ANDROID_RUNTIME_DIR:-/Volumes/XcodeDev/OKVideoMacBuild/AndroidRuntime}
+: ${ANDROID_SDK_ROOT:=${ANDROID_HOME:-$HOME/Library/Android/sdk}}
+: ${ANDROID_AVD_HOME:=$HOME/.android/avd}
+: ${OKVIDEO_ANDROID_RUNTIME_DIR:=${TMPDIR:-/tmp}/OKVideoMac-AndroidRuntime}
+RUNTIME_DIR=$OKVIDEO_ANDROID_RUNTIME_DIR
 APK="$REPOSITORY_ROOT/Helpers/AndroidDexBridge/app/build/outputs/apk/release/app-release.apk"
 ADB="$ANDROID_SDK_ROOT/platform-tools/adb"
 EMULATOR="$ANDROID_SDK_ROOT/emulator/emulator"

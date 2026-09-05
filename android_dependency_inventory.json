@@ -9321,7 +9321,7 @@
       "line_number": 837,
       "module": "macOS Android bridge runtime",
       "ownership": "OK 影视自有代码",
-      "dependency_name": "/Volumes/XcodeDev/AndroidSDK + adb + emulator",
+      "dependency_name": "/path/to/AndroidSDK + adb + emulator",
       "dependency_reason": "按需查找可执行工具并启动Android Emulator；缺失即在功能调用时失败",
       "dependency_level": 6,
       "phase": "运行时",
@@ -10005,7 +10005,7 @@
       "confidence": 1
     },
     {
-      "file_path": "/Volumes/XcodeDev/AndroidSDK/platforms/android-35/android.jar",
+      "file_path": "/path/to/AndroidSDK/platforms/android-35/android.jar",
       "line_number": null,
       "module": "external Android SDK",
       "ownership": "OK 影视自有代码",
@@ -10561,7 +10561,7 @@
       "line_number": 839,
       "module": "external local environment",
       "ownership": "OK 影视自有代码",
-      "dependency_name": "/Volumes/XcodeDev/OKVideoMacBuild/AndroidRuntimeApp内容生命周期",
+      "dependency_name": "/path/to/OKVideoMacBuild/AndroidRuntimeApp内容生命周期",
       "dependency_reason": "路径存在于仓库外，不能由版本库保证可再现",
       "dependency_level": 5,
       "phase": "运行时",
@@ -10593,17 +10593,17 @@
     "environment_variables_present": [],
     "hard_coded_paths": [
       {
-        "path": "/Volumes/XcodeDev/AndroidSDK",
+        "path": "/path/to/AndroidSDK",
         "exists": true,
         "approx_size": "3.5 GB"
       },
       {
-        "path": "/Volumes/XcodeDev/AndroidAVD",
+        "path": "/path/to/AndroidAVD",
         "exists": true,
         "approx_size": "2.2 GB"
       },
       {
-        "path": "/Volumes/XcodeDev/OKVideoMacBuild/AndroidRuntimeApp",
+        "path": "/path/to/OKVideoMacBuild/AndroidRuntimeApp",
         "exists": true
       },
       {

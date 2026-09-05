@@ -399,8 +399,8 @@ OKVideoMac 进程加载 native code。Android 内的 `DexClassLoader`、`System.
 | `NodeRuntime/node` | 构建机 Node 22 direct | 是 | ad-hoc，无 runtime | Node 自身需 `allow-jit` 或 `--jitless` |
 | compatibility `adb` wrapper | 用户 Application Support | 否 | unsigned zsh script | subprocess；Gatekeeper/来源可重复性风险 |
 | `adb-macos14` | 用户 Application Support | 否 | 声明 Google Team，但 `codesign --verify` 失败 | P1 外部工具完整性 |
-| Android SDK `adb` | `/Volumes/XcodeDev/AndroidSDK` | 否 | 声明 Google Team/runtime，但实际验证失败 | P1 外部工具完整性 |
-| Android Emulator | `/Volumes/XcodeDev/AndroidSDK` | 否 | 声明 Google Team/runtime，但实际验证失败 | P1，且有自身 dylib/helper 链 |
+| Android SDK `adb` | `/path/to/AndroidSDK` | 否 | 声明 Google Team/runtime，但实际验证失败 | P1 外部工具完整性 |
+| Android Emulator | `/path/to/AndroidSDK` | 否 | 声明 Google Team/runtime，但实际验证失败 | P1，且有自身 dylib/helper 链 |
 | `/bin/zsh` | Apple 系统（由 wrapper shebang 间接启动） | 否 | Apple 系统代码 | Hardened Runtime 允许 subprocess |
 
 主 App 不直接启动 macOS `java`，不启动 `ffmpeg` executable，不调用 Python、Node

@@ -5,7 +5,7 @@
 Android Bridge is an optional compatibility runtime for selected Java/Dex
 `csp_` providers. It is not a foundation for playback, Native providers,
 QuickJS, Node, Live TV, or XMLTV.
-This document describes the current OKVideoMac 0.4.0 (Build 94)
+This document describes the current OKVideoMac 0.4.1 (Build 95)
 implementation. The
 presence of the Bridge does not imply compatibility with every Java/Dex
 `csp_` Spider.
@@ -224,7 +224,7 @@ Quitting OKVideoMac does not forcibly stop the dedicated Emulator. Click
 
 ## Current platform scope
 
-The 0.4.0 public build targets Apple Silicon / arm64, and the runtime selects
+The 0.4.1 public build targets Apple Silicon / arm64, and the runtime selects
 only `arm64-v8a` system images. It does not select `x86_64` images, so this
 document does not claim Intel Mac Android Bridge support. Rosetta is not
 required.

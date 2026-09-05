@@ -610,10 +610,18 @@ def safe_member(name: str) -> bool:
 
 
 def dex_analysis(path: Path) -> dict[str, Any]:
-    candidates = [
-        Path("/Volumes/XcodeDev/AndroidSDK/build-tools/35.0.0/dexdump"),
-        Path("/Volumes/XcodeDev/AndroidSDK/build-tools/34.0.0/dexdump"),
+    sdk_roots = [
+        os.environ.get("ANDROID_SDK_ROOT"),
+        os.environ.get("ANDROID_HOME"),
+        str(Path.home() / "Library/Android/sdk"),
     ]
+    candidates: list[Path] = []
+    for sdk_root in filter(None, sdk_roots):
+        build_tools = Path(sdk_root) / "build-tools"
+        if not build_tools.is_dir():
+            continue
+        for version in sorted(build_tools.iterdir(), reverse=True):
+            candidates.append(version / "dexdump")
     tool = next((candidate for candidate in candidates if candidate.is_file()), None)
     if tool is None:
         return {"tool_available": False}

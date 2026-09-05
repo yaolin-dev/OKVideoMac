@@ -49,7 +49,7 @@
 
 - Git 基线：`c0c145896a78749bc811d2af98621518fb58902c`
 - 基线提交时间：`2026-08-13T00:21:57+08:00`
-- Release App：`/Volumes/XcodeDev/OKVideoMacBuild/Artifacts/OKVideoMac.app`
+- Release App：`/path/to/OKVideoMacBuild/Artifacts/OKVideoMac.app`
 - App 版本：`0.3.41 (62)`
 - App 时间：`2026-08-13 00:18:38 +0800`
 - ZIP：`OKVideoMac-0.3.41-macOS-arm64.zip`
@@ -184,7 +184,7 @@ OKVideoMac executable
 证据：
 
 1. 脚本未传 `-Dgpl=false`（`build-libmpv.sh:72-94`）。
-2. 实际构建缓存 `/Volumes/XcodeDev/OKVideoMacBuild/Source/mpv-0.41.0-build/config.h` 显示：
+2. 实际构建缓存 `/path/to/OKVideoMacBuild/Source/mpv-0.41.0-build/config.h` 显示：
    - `FULLCONFIG` 包含 `gpl`；
    - `#define HAVE_GPL 1`。
 3. mpv 官方说明默认 GPLv2-or-later，只有 `-Dgpl=false` 才走 LGPLv2.1-or-later：<https://github.com/mpv-player/mpv#license--copyright>。
@@ -648,7 +648,7 @@ codesign --verify --deep --strict OKVideoMac.app
 shasum -a 256 <artifacts and key binaries>
 
 rg 'HAVE_GPL|FULLCONFIG|CONFIGURATION' \
-  /Volumes/XcodeDev/OKVideoMacBuild/Source/mpv-0.41.0-build/config.h
+  /path/to/OKVideoMacBuild/Source/mpv-0.41.0-build/config.h
 strings OKVideoMac.app/Contents/Frameworks/libavutil.59.dylib
 OKVideoMac.app/Contents/Resources/NodeRuntime/node -p \
   'JSON.stringify(process.versions,null,2)'

@@ -26,13 +26,12 @@ OKVideoKit 独立测试、arm64 Release 编译和 Android Release Bridge 离线�
 `package-app.sh` Gate；此前 Build 62/63 的 App、ZIP、签名或公证结果不能代替
 本次候选验证；Build 64 保留为上一版不可变公开发布。
 
-2026-09-05 的 0.4.0（Build 94）正式发布自动门禁基线为：584 项 Xcode 测试中
-582 项通过、2 项按设计跳过，173 项 OKVideoKit 测试通过，30 项 Node / CatPaw /
+2026-09-06 的 0.4.1（Build 95）正式发布自动门禁基线为：608 项 Xcode 测试中
+604 项通过、4 项按设计跳过，173 项 OKVideoKit 测试通过，30 项 Node / CatPaw /
 Quark 测试通过；Android Release assemble 与 lint 通过，JVM unit target 为
-`NO-SOURCE`，Android instrumentation 为 70/70。最终 DMG 从 exact `main` commit
-`f93d74fed86e3e2ffcfa4888c521a10f8e3e86f3` 构建，已通过 Developer ID、Apple
-notarization、staple、Gatekeeper 和 source/binary 外层哈希绑定，并以 `v0.4.0`
-正式发布。这些结果属于该不可变发布资产；后续文档 commit 不改变其身份。
+`NO-SOURCE`，Android instrumentation 为 70/70。最终 DMG 从 `v0.4.1` 指向的
+exact clean commit 构建，并须通过 Developer ID、Apple notarization、staple、
+Gatekeeper 和 source/binary 外层哈希绑定后才能公开发布。
 
 ## Current reproducibility caveats
 

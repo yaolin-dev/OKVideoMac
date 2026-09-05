@@ -1,8 +1,8 @@
 # Compatibility
 
-- 对照版本：0.4.0（Build 94）
+- 对照版本：0.4.1（Build 95）
 - 最近更新：2026-09-05
-- 当前正式版本：0.4.0（Build 94），Apple Silicon / arm64 / macOS 12.0+
+- 当前正式版本：0.4.1（Build 95），Apple Silicon / arm64 / macOS 12.0+
 
 ## 概述
 
@@ -285,9 +285,9 @@ OKVideoMac 实现了 CatVod/CatPaw 风格 Node 视频接口的兼容子集，包
 | macOS 12.0+ | Supported | Info.plist 和全部 Mach-O `minos` 由包体脚本验证 |
 | Intel Mac / Universal Binary | Unsupported | 当前只交付 arm64 |
 | 本地 Hardened Runtime 包 | Supported | ad-hoc 签名，仅主 App 使用开发期 Library Validation 例外 |
-| Developer ID 分发 | Supported | 0.4.0（Build 94）正式 DMG 已使用 Developer ID Application 与 secure timestamp 签名，Hardened Runtime、嵌套签名和权限边界验证通过 |
-| Notarization / Staple / Gatekeeper | Supported | 0.4.0（Build 94）DMG 的 Apple notarization 状态为 `Accepted`，并已通过 staple、`stapler validate` 与 Gatekeeper |
-| 0.4.0（Build 94）正式发布 | Supported | DMG、内部 ZIP、源码、四份 SBOM、Notices 和 APK 已通过外层 manifest/SHA256SUMS 绑定到 exact commit `f93d74fed86e3e2ffcfa4888c521a10f8e3e86f3` 与 tag `v0.4.0` |
+| Developer ID 分发 | Supported | 0.4.1（Build 95）正式 DMG 使用 Developer ID Application 与 secure timestamp 签名，Hardened Runtime、嵌套签名和权限边界由发布门禁验证 |
+| Notarization / Staple / Gatekeeper | Supported | 0.4.1（Build 95）只有在 Apple notarization 返回 `Accepted` 并通过 staple、`stapler validate` 与 Gatekeeper 后才发布 |
+| 0.4.1（Build 95）正式发布 | Supported | DMG、内部 ZIP、源码、四份 SBOM、Notices 和 APK 由外层 manifest/SHA256SUMS 绑定到 tag `v0.4.1` 指向的 exact commit |
 | App Sandbox | Not Applicable | 当前为 Developer ID 外部分发目标；Sandbox 与 Hardened Runtime 是不同边界 |
 
 ## 明确不提供

@@ -155,7 +155,7 @@ handoff. Apple credential-dependent results are not claimed by this report.
    non-secret developer paths. Current release HEAD remains sanitized and the
    prior secret scan remains PASS. No history rewrite is authorized.
 2. **P2-02 — Android path portability:** optional Android compatibility still
-   has `/Volumes/XcodeDev` defaults and may need manual SDK/runtime path
+   had maintainer-specific external-volume defaults and could require manual SDK/runtime path
    configuration. Native Mode does not require Android.
 3. **P2-03 — CI/environment resilience:** local Xcode/MacPorts/Android tooling,
    Google Maven TLS availability and external-volume health affect fresh

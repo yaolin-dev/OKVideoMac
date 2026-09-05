@@ -1,6 +1,6 @@
 # Release SBOM Process
 
-Date: 2026-09-05
+Date: 2026-09-06
 
 Every packaged release contains four machine-readable documents under
 `Contents/Resources/Legal/Compliance/SBOM/`:

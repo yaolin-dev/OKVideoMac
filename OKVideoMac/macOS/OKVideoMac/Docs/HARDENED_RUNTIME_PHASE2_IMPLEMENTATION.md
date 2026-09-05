@@ -173,8 +173,8 @@ unsigned executable memory 例外。
 
 ### P1 — Android ADB/Emulator 供应链
 
-- 运行时代码固定依赖 `/Volumes/XcodeDev/AndroidSDK` 与
-  `/Volumes/XcodeDev/AndroidAVD`，不依赖普通 PATH，但不是可分发安装策略；
+- 运行时代码固定依赖 `/path/to/AndroidSDK` 与
+  `/path/to/AndroidAVD`，不依赖普通 PATH，但不是可分发安装策略；
 - 更高优先级的 compatibility ADB 位于用户可写的 Application Support，入口是未签名
   zsh wrapper，可被同一用户替换；
 - wrapper 指向 `adb-macos14`。它声明 Google Team `EQHXZ8M8AV` 与 Runtime Flag，

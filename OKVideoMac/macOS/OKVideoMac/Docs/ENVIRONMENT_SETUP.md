@@ -5,7 +5,7 @@
 
 ## 当前结论
 
-- Xcode 14.2 已安装在 `/Volumes/XcodeDev/Xcode.app`，许可、首次启动组件和
+- Xcode 14.2 已安装在 `/path/to/Xcode.app`，许可、首次启动组件和
   Command Line Tools 均已完成初始化。
 - MacPorts 2.12.5 安装在系统盘 `/opt/local`。MacPorts **没有**安装在移动
   硬盘。
@@ -24,17 +24,17 @@
 | 内容 | 实际路径 | 所在磁盘 |
 |---|---|---|
 | MacPorts 本体、ports、头文件、动态库 | `/opt/local` | 系统盘 |
-| Xcode 14.2 | `/Volumes/XcodeDev/Xcode.app` | T7 Shield 内的 APFS 稀疏卷 |
-| 下载、第三方源码、原生构建 | `/Volumes/XcodeDev/OKVideoMacBuild` | T7 Shield 内的 APFS 稀疏卷 |
-| App DerivedData | `/Volumes/XcodeDev/OKVideoMacBuild/DerivedData` | T7 Shield 内的 APFS 稀疏卷 |
-| Xcode 测试 DerivedData | `/Volumes/XcodeDev/OKVideoMacBuild/DerivedData-Test` | T7 Shield 内的 APFS 稀疏卷 |
-| SwiftPM scratch | `/Volumes/XcodeDev/OKVideoMacBuild/SwiftPM` | T7 Shield 内的 APFS 稀疏卷 |
-| 最终发布产物（预留） | `/Volumes/XcodeDev/OKVideoMacBuild/Artifacts` | T7 Shield 内的 APFS 稀疏卷 |
+| Xcode 14.2 | `/path/to/Xcode.app` | T7 Shield 内的 APFS 稀疏卷 |
+| 下载、第三方源码、原生构建 | `/path/to/OKVideoMacBuild` | T7 Shield 内的 APFS 稀疏卷 |
+| App DerivedData | `/path/to/OKVideoMacBuild/DerivedData` | T7 Shield 内的 APFS 稀疏卷 |
+| Xcode 测试 DerivedData | `/path/to/OKVideoMacBuild/DerivedData-Test` | T7 Shield 内的 APFS 稀疏卷 |
+| SwiftPM scratch | `/path/to/OKVideoMacBuild/SwiftPM` | T7 Shield 内的 APFS 稀疏卷 |
+| 最终发布产物（预留） | `/path/to/OKVideoMacBuild/Artifacts` | T7 Shield 内的 APFS 稀疏卷 |
 
 外置卷来自：
 
 ```text
-/Volumes/T7 Shield/XcodeDev.sparsebundle
+/path/to/XcodeDev.sparsebundle
 ```
 
 外置盘断开后，Xcode、ports 源码树和构建目录不可用；`/opt/local` 仍位于系统
@@ -45,7 +45,7 @@
 安装文件：
 
 ```text
-/Volumes/XcodeDev/OKVideoMacBuild/Downloads/Xcode_14.2.xip
+/path/to/OKVideoMacBuild/Downloads/Xcode_14.2.xip
 SHA-256 686b9d53ca49e50d563bc0104b1e8b4f7ccfe80064a6d689965fb819bf8efe72
 ```
 
@@ -53,19 +53,19 @@ SHA-256 686b9d53ca49e50d563bc0104b1e8b4f7ccfe80064a6d689965fb819bf8efe72
 
 ```text
 $ xcode-select -p
-/Volumes/XcodeDev/Xcode.app/Contents/Developer
+/path/to/Xcode.app/Contents/Developer
 
 $ xcodebuild -version
 Xcode 14.2
 Build version 14C18
 
 $ xcrun --show-sdk-path
-/Volumes/XcodeDev/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
+/path/to/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
 
 $ clang --version
 Apple clang version 14.0.0 (clang-1400.0.29.202)
 Target: arm64-apple-darwin21.6.0
-InstalledDir: /Volumes/XcodeDev/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin
+InstalledDir: /path/to/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin
 ```
 
 `xcodebuild -checkFirstLaunchStatus` 返回 0，Xcode GUI 已成功启动。
@@ -85,13 +85,13 @@ Version: 2.12.5
 ```text
 # Official MacPorts ports tree. This working tree has the sole origin:
 # https://github.com/macports/macports-ports.git
-file:///Volumes/XcodeDev/OKVideoMacBuild/Source/macports-ports [nosync,default]
+file:///path/to/OKVideoMacBuild/Source/macports-ports [nosync,default]
 ```
 
 工作树审计：
 
 ```text
-路径    /Volumes/XcodeDev/OKVideoMacBuild/Source/macports-ports
+路径    /path/to/OKVideoMacBuild/Source/macports-ports
 origin  https://github.com/macports/macports-ports.git
 提交    85ec43c0fa38208bc783906fbddbb1158a867d3b
 索引    41464 个 Portfile，0 个失败
@@ -169,7 +169,7 @@ libplacebo    7.360.1
 源码归档：
 
 ```text
-/Volumes/XcodeDev/OKVideoMacBuild/Downloads/mpv-v0.41.0.tar.gz
+/path/to/OKVideoMacBuild/Downloads/mpv-v0.41.0.tar.gz
 SHA-256 ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209
 ```
 
@@ -181,7 +181,7 @@ Scripts/build-libmpv.sh
 
 构建脚本固定：
 
-- `DEVELOPER_DIR=/Volumes/XcodeDev/Xcode.app/Contents/Developer`
+- `DEVELOPER_DIR=/path/to/Xcode.app/Contents/Developer`
 - arm64、`MACOSX_DEPLOYMENT_TARGET=12.0`
 - `cplayer=false`、`libmpv=true`
 - Cocoa 外壳关闭，使用 plain OpenGL Render API
@@ -202,8 +202,8 @@ Patches/mpv-0.41.0-coreaudio-without-cocoa.patch
 已验证产物：
 
 ```text
-/Volumes/XcodeDev/OKVideoMacBuild/libmpv/lib/libmpv.2.dylib
-/Volumes/XcodeDev/OKVideoMacBuild/libmpv/lib/libOKMPVBridge.dylib
+/path/to/OKVideoMacBuild/libmpv/lib/libmpv.2.dylib
+/path/to/OKVideoMacBuild/libmpv/lib/libOKMPVBridge.dylib
 ```
 
 两者均为 arm64、最低 macOS 12；桥接测试输出：
@@ -231,8 +231,8 @@ OKMPVBridge smoke passed (client API 2.5, event size 64)
 最终时：
 
 ```text
-/Volumes/XcodeDev/Xcode.app               约 12.38 GiB
-/Volumes/XcodeDev/OKVideoMacBuild         约 8.30 GiB
+/path/to/Xcode.app               约 12.38 GiB
+/path/to/OKVideoMacBuild         约 8.30 GiB
 /opt/local                                约 575 MiB（系统盘）
 ```
 
@@ -246,7 +246,7 @@ OKMPVBridge smoke passed (client API 2.5, event size 64)
 ```bash
 swift test \
   --package-path Packages/OKVideoKit \
-  --scratch-path /Volumes/XcodeDev/OKVideoMacBuild/SwiftPM
+  --scratch-path /path/to/OKVideoMacBuild/SwiftPM
 # 41 tests, 0 failures
 
 xcodebuild \
@@ -254,21 +254,21 @@ xcodebuild \
   -scheme OKVideoMac \
   -configuration Debug \
   -destination 'platform=macOS,arch=arm64' \
-  -derivedDataPath /Volumes/XcodeDev/OKVideoMacBuild/DerivedData \
+  -derivedDataPath /path/to/OKVideoMacBuild/DerivedData \
   build
 
 xcodebuild \
   -project OKVideoMac.xcodeproj \
   -scheme OKVideoMac \
   -destination 'platform=macOS,arch=arm64' \
-  -derivedDataPath /Volumes/XcodeDev/OKVideoMacBuild/DerivedData-Test \
+  -derivedDataPath /path/to/OKVideoMacBuild/DerivedData-Test \
   test
 ```
 
 Debug App：
 
 ```text
-/Volumes/XcodeDev/OKVideoMacBuild/DerivedData/Build/Products/Debug/OKVideoMac.app
+/path/to/OKVideoMacBuild/DerivedData/Build/Products/Debug/OKVideoMac.app
 ```
 
 主程序、libmpv 和桥接库均为 arm64，主程序最低系统版本为 12.0。

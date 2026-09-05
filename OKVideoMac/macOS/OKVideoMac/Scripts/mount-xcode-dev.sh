@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-XCODE_BUNDLE="${OKVIDEOMAC_XCODE_BUNDLE:-/Volumes/T7 Shield/XcodeDev.sparsebundle}"
-XCODE_VOLUME="${OKVIDEOMAC_XCODE_VOLUME:-/Volumes/XcodeDev}"
+XCODE_BUNDLE="${OKVIDEOMAC_XCODE_BUNDLE:-}"
+XCODE_VOLUME="${OKVIDEOMAC_XCODE_VOLUME:-}"
+
+if [[ -z "$XCODE_BUNDLE" || -z "$XCODE_VOLUME" ]]; then
+  echo "Set OKVIDEOMAC_XCODE_BUNDLE and OKVIDEOMAC_XCODE_VOLUME first." >&2
+  exit 64
+fi
 
 if [[ -d "$XCODE_VOLUME" ]]; then
   echo "Xcode development volume is already mounted: $XCODE_VOLUME"
@@ -10,7 +15,7 @@ elif [[ -d "$XCODE_BUNDLE" ]]; then
   hdiutil attach -nobrowse "$XCODE_BUNDLE"
 else
   echo "Xcode sparse bundle is unavailable: $XCODE_BUNDLE" >&2
-  echo "Connect the T7 Shield drive and try again." >&2
+  echo "Connect the configured external development volume and try again." >&2
   exit 1
 fi
 

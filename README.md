@@ -7,17 +7,19 @@ provides configurable video providers, live sources, search, detail, favorites,
 history, and libmpv playback. It does not bundle third-party content sources,
 accounts, cookies, parsing services, or DRM keys.
 
-The current release is **0.4.0 (Build 94)** for macOS 12 or later on Apple
+The current release is **0.4.1 (Build 95)** for macOS 12 or later on Apple
 Silicon (`arm64`). Download the Developer ID-signed, Apple-notarized, and stapled
-DMG from the [v0.4.0 release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.4.0).
+DMG from the [v0.4.1 release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.4.1).
 
-## 0.4.0 Highlights
+## 0.4.1 Highlights
 
-Compared with 0.3.41, 0.4.0 is a major update across the complete experience:
-a more native macOS UI, strict request isolation for search and detail, more
-reliable playback and live switching, broader Spider runtime coverage, and a
-release chain that maps the DMG, source, SBOMs, and notices to one exact Git
-commit.
+Version 0.4.1 improves the optional Android compatibility Runtime used by
+selected TVBox and Java/Dex Spider sources. OKVideoMac now safely adopts a
+healthy private Emulator left by an earlier App session, serializes concurrent
+startup requests, recovers more clearly while ADB is becoming ready, and closes
+its own Runtime during normal App termination without affecting Android Studio
+or other user AVDs. It retains the native macOS, playback, search, live, cloud,
+and release-engineering improvements introduced in 0.4.0.
 
 ### Source Compatibility
 
@@ -28,6 +30,9 @@ commit.
 - The optional Android Bridge supports selected Java/Dex `csp_` providers with
   stronger AVD ownership, APK version, and signature checks. Native, QuickJS,
   Node, Live, and XMLTV paths do not require Android.
+- Existing healthy or still-booting OKVideoMac private runtimes are adopted;
+  concurrent requests share one startup, and normal App Quit closes the private
+  Runtime automatically.
 
 ### Search & Detail
 
@@ -157,23 +162,18 @@ Requirements:
 - only Java/Dex `csp_` sources need an external Android SDK, ADB, Emulator, and
   arm64 system image.
 
-Download `OKVideoMac-0.4.0.dmg`, open it, and drag `OKVideoMac.app` to
+Download `OKVideoMac-0.4.1.dmg`, open it, and drag `OKVideoMac.app` to
 Applications. The official image is notarized by Apple; do not disable
 Gatekeeper or SIP.
 
 ## Binary and source identity
 
-The 0.4.0 (Build 94) release assets are bound to Git commit
-`f93d74fed86e3e2ffcfa4888c521a10f8e3e86f3` and tag `v0.4.0`:
-
-| Artifact | SHA-256 |
-| --- | --- |
-| `OKVideoMac-0.4.0.dmg` | `60b2eebc607be9cc21c8207c913b09544546f5b6b843db801873651ceaf427ea` |
-| `OKVideoMac-0.4.0-build94-source.tar.gz` | `eb7c8a812d9a54907f99d8656198b7227bfe19b1b29836953e768d4fe858a8f3` |
-
-The DMG passed Apple notarization, staple, `stapler validate`, and Gatekeeper;
-its notarization submission ID is `d9db5bae-1ae9-4d0d-9e63-3ca378235e6a`.
-The source set carries four SBOMs and the required notices. Two native provenance
+The 0.4.1 (Build 95) assets are built from the exact commit referenced by tag
+`v0.4.1`. The GitHub Release publishes `OKVideoMac-0.4.1.dmg` together with its
+post-notarization `.sha256` checksum. The source tag is the public source of
+truth; generated source indexes, manifests, SBOMs, notices, and checksums bind
+the binary to that commit without placing a circular binary hash in the tagged
+source. Two native provenance
 exceptions remain explicitly disclosed rather than overstated: the exact zlib
 archive is unavailable, and historical MacPorts libc++/libc++abi inputs could
 not be recovered.
@@ -191,7 +191,7 @@ not be recovered.
 
 ## Documentation and security
 
-- [0.4.0 release notes](Docs/RELEASE_NOTES_0.4.0.md)
+- [0.4.1 release notes](Docs/RELEASE_NOTES_0.4.1.md)
 - [Detailed project documentation](OKVideoMac/README.md)
 - [Compatibility guide](OKVideoMac/macOS/OKVideoMac/Docs/COMPATIBILITY.md)
 - [Android Bridge Setup](OKVideoMac/macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP.md)

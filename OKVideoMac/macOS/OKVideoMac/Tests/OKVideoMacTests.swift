@@ -9465,7 +9465,7 @@ final class OKVideoMacTests: XCTestCase {
                 "Library/Application Support/OKVideoMac",
                 isDirectory: true
             )
-        let sdk = URL(fileURLWithPath: "/Volumes/XcodeDev/AndroidSDK")
+        let sdk = try androidIntegrationSDKRoot()
         let firstRuntime = AndroidDexBridgeRuntime(
             applicationSupportDirectory: support
         )
@@ -9545,9 +9545,7 @@ final class OKVideoMacTests: XCTestCase {
         let runtime = AndroidDexBridgeRuntime(
             applicationSupportDirectory: support
         )
-        await runtime.setUserSelectedSDKRoot(
-            URL(fileURLWithPath: "/Volumes/XcodeDev/AndroidSDK")
-        )
+        await runtime.setUserSelectedSDKRoot(try androidIntegrationSDKRoot())
         let startup = Task { try await runtime.start() }
         var observedPID: Int32?
         for _ in 0..<240 {
@@ -10662,14 +10660,24 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    private func androidIntegrationSDKRoot() throws -> URL {
+        let environment = ProcessInfo.processInfo.environment
+        let path = try XCTUnwrap(
+            environment["OKVIDEOMAC_ANDROID_INTEGRATION_SDK_ROOT"]
+                ?? environment["ANDROID_SDK_ROOT"]
+                ?? environment["ANDROID_HOME"],
+            "Real Android integration requires an explicit SDK environment path"
+        )
+        return URL(fileURLWithPath: path)
+    }
+
     private func androidAAPTBadging(for apk: URL) throws -> String {
         let environment = ProcessInfo.processInfo.environment
         let roots = [
             environment["ANDROID_SDK_ROOT"],
             environment["ANDROID_HOME"],
             FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Android/sdk").path,
-            "/Volumes/XcodeDev/AndroidSDK"
+                .appendingPathComponent("Library/Android/sdk").path
         ].compactMap { $0 }
         let aapt = roots.lazy.compactMap { root -> URL? in
             let buildTools = URL(fileURLWithPath: root)

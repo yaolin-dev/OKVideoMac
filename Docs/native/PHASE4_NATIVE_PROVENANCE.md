@@ -3,7 +3,7 @@
 Date: 2026-08-13
 
 Release inspected:
-`/Volumes/XcodeDev/OKVideoMacBuild/Artifacts/OKVideoMac.app`
+`/path/to/OKVideoMacBuild/Artifacts/OKVideoMac.app`
 
 This is a fresh inspection of the actual packaged Release, not a copy of the
 Phase 2 report. The deterministic machine inventory is

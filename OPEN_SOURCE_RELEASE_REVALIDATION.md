@@ -263,7 +263,7 @@ runtime. Modernizing that developer script is P2.
 
 `PASS`
 
-No production runtime dependency on `/Volumes/XcodeDev`, a developer home,
+No production runtime dependency on a maintainer-specific external volume, a developer home,
 `/private/tmp`, `/tmp`, Homebrew, MacPorts, DerivedData, signing material, or a
 fixed Emulator serial was found. The `/Users/...` pattern in `LogRedactor.swift`
 is a redaction rule, not a runtime path.

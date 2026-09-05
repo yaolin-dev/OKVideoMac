@@ -20,7 +20,7 @@
 - 原生执行结果与 Android 基准结果达到本文定义的相等标准；
 - 原生引擎失败时，正式版能在用户无感或有明确提示的情况下回退；
 - 连续 30 天的实际使用记录中，当前配置没有发生 Android 回退；
-- App 包和运行时中不再引用 `/Volumes/XcodeDev/AndroidSDK`、`ANDROID_SDK_ROOT`、ADB、AVD、Android Emulator 或桥接 APK；
+- App 包和运行时中不再引用 `/path/to/AndroidSDK`、`ANDROID_SDK_ROOT`、ADB、AVD、Android Emulator 或桥接 APK；
 - Release 打包门禁自动阻止 Android 依赖重新进入正式包。
 
 ## 2. 已核实的当前依赖边界

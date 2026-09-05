@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.4.1] - 2026-09-06
+
+### Fixed
+
+- Fixed cases where an OKVideoMac-managed Android Runtime was mistaken for an
+  unrelated Emulator after an App restart.
+- Existing healthy or still-booting private runtimes are now adopted instead
+  of launching a second instance of the same AVD.
+- Concurrent Java/Dex requests now share one process-wide startup operation.
+- Improved recovery when ADB is still starting, offline, or temporarily
+  missing the expected Emulator transport.
+- Normal App termination now closes the private Android Runtime, while a later
+  launch can safely recover a runtime left by a crash or forced termination.
+
+### Safety and release engineering
+
+- Strengthened runtime ownership checks so Android Studio Emulators and other
+  user AVDs are never targeted by OKVideoMac cleanup.
+- Added PID-reuse protection and bounded, identity-verified shutdown fallback.
+- Expanded Android Runtime lifecycle, adoption, shutdown, and concurrency
+  regression coverage.
+- Removed maintainer-machine paths from current public source and release
+  tooling examples.
+
+### Known limitations
+
+- Apple Silicon (`arm64`) only; macOS 12 or later is required.
+- Java/Dex compatibility remains Experimental and requires an external Android
+  SDK, Emulator, and compatible arm64 system image.
+- Third-party Spider and cloud interfaces can change independently.
+
 ## [0.4.0] - 2026-09-05
 
 ### Added
