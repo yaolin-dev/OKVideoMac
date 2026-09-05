@@ -405,6 +405,30 @@ def make_source_release(args: argparse.Namespace) -> None:
             "sha256": sha256(licenses_archive),
         },
     }
+    notices_input = repo / "OKVideoMac/THIRD_PARTY_NOTICES.md"
+    notices = output / "THIRD_PARTY_NOTICES.md"
+    if notices_input != notices:
+        temporary_notices = notices.with_suffix(notices.suffix + ".tmp")
+        shutil.copy2(notices_input, temporary_notices)
+        os.replace(temporary_notices, notices)
+    artifacts["third_party_notices"] = {
+        "filename": notices.name,
+        "sha256": sha256(notices),
+    }
+    release_notes_input = repo / f"Docs/RELEASE_NOTES_{version}.md"
+    if not release_notes_input.is_file():
+        fail(f"Release notes are missing: {release_notes_input}")
+    release_notes = output / release_notes_input.name
+    if release_notes_input != release_notes:
+        temporary_release_notes = release_notes.with_suffix(
+            release_notes.suffix + ".tmp"
+        )
+        shutil.copy2(release_notes_input, temporary_release_notes)
+        os.replace(temporary_release_notes, release_notes)
+    artifacts["release_notes"] = {
+        "filename": release_notes.name,
+        "sha256": sha256(release_notes),
+    }
     locked_inputs = []
     for entry, local in resolved_inputs:
         record = dict(entry)
@@ -492,7 +516,14 @@ def make_source_release(args: argparse.Namespace) -> None:
         "filename": index_path.name,
         "sha256": sha256(index_path),
     }
-    output_artifacts = [project_archive, third_party_archive, licenses_archive, index_path]
+    output_artifacts = [
+        project_archive,
+        third_party_archive,
+        licenses_archive,
+        notices,
+        release_notes,
+        index_path,
+    ]
     if args.binary:
         binary_input = Path(args.binary).expanduser().resolve()
         if not binary_input.is_file():
@@ -508,6 +539,33 @@ def make_source_release(args: argparse.Namespace) -> None:
             os.replace(temporary_binary, binary)
         manifest["binary"] = {"filename": binary.name, "sha256": sha256(binary)}
         output_artifacts.insert(0, binary)
+    if args.release_artifact:
+        release_artifacts = []
+        for value in args.release_artifact:
+            artifact_input = Path(value).expanduser().resolve()
+            if not artifact_input.is_file():
+                fail(f"Release artifact does not exist: {artifact_input}")
+            expected_artifact_name = f"OKVideoMac-{version}.dmg"
+            if artifact_input.name != expected_artifact_name:
+                fail(
+                    f"Public release artifact must be {expected_artifact_name}: "
+                    f"{artifact_input.name}"
+                )
+            artifact = output / artifact_input.name
+            if artifact_input != artifact:
+                temporary_artifact = artifact.with_suffix(artifact.suffix + ".tmp")
+                shutil.copy2(artifact_input, temporary_artifact)
+                os.replace(temporary_artifact, artifact)
+            release_artifacts.append(
+                {
+                    "filename": artifact.name,
+                    "media_type": "application/x-apple-diskimage",
+                    "role": "primary-user-download",
+                    "sha256": sha256(artifact),
+                }
+            )
+            output_artifacts.append(artifact)
+        manifest["release_artifacts"] = release_artifacts
     if args.apk:
         apk_input = Path(args.apk).expanduser().resolve()
         if not apk_input.is_file():
@@ -522,10 +580,16 @@ def make_source_release(args: argparse.Namespace) -> None:
     if args.sbom:
         sboms = []
         for value in args.sbom:
-            sbom = Path(value).expanduser().resolve()
-            if not sbom.is_file():
-                fail(f"SBOM does not exist: {sbom}")
+            sbom_input = Path(value).expanduser().resolve()
+            if not sbom_input.is_file():
+                fail(f"SBOM does not exist: {sbom_input}")
+            sbom = output / sbom_input.name
+            if sbom_input != sbom:
+                temporary_sbom = sbom.with_suffix(sbom.suffix + ".tmp")
+                shutil.copy2(sbom_input, temporary_sbom)
+                os.replace(temporary_sbom, sbom)
             sboms.append({"filename": sbom.name, "sha256": sha256(sbom)})
+            output_artifacts.append(sbom)
         manifest["sbom"] = sboms
     manifest_path = output / f"{base}-SOURCE_RELEASE_MANIFEST.json"
     atomic_json(manifest_path, manifest)
@@ -545,6 +609,7 @@ def main() -> None:
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument("--commit", default="HEAD")
     parser.add_argument("--binary")
+    parser.add_argument("--release-artifact", action="append")
     parser.add_argument("--apk")
     parser.add_argument("--sbom", action="append")
     parser.add_argument("--offline", action="store_true")

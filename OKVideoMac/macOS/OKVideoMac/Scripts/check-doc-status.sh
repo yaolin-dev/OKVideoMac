@@ -67,6 +67,7 @@ assert_contains "$README" "- Android Release assemble 与 lint：通过；Androi
 assert_exact_line "$PERFORMANCE" "- 多站搜索全局并发 20；共享同一 Node runtime 的站点并发 20，聚合搜索每站只取第一页；"
 assert_contains "$SOURCE_RELEASE_PROCESS" "OKVideoMac-${VERSION}.dmg"
 assert_contains "$SOURCE_RELEASE_PROCESS" "OKVideoMac-${VERSION}-macOS-arm64.zip"
+assert_exact_line "$REPOSITORY_ROOT/Docs/RELEASE_NOTES_${VERSION}.md" "# OKVideoMac ${VERSION}（Build ${BUILD}）Release Notes"
 
 PYTHONDONTWRITEBYTECODE=1 python3 - "$NATIVE_LOCK" "$VERSION" "$BUILD" <<'PY'
 import json

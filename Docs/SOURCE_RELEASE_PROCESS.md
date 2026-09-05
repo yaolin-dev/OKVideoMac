@@ -16,6 +16,7 @@ For the 0.4.0 release candidate (Build 94), the generated set is:
 - `OKVideoMac-0.4.0.dmg` (the public binary bound by the final manifest)
 - `OKVideoMac-0.4.0-AndroidDexBridge-release.apk`
 - `THIRD_PARTY_NOTICES.md`
+- `RELEASE_NOTES_0.4.0.md`
 
 The Build 94 release set also includes the macOS and Android SPDX/CycloneDX
 files (`OKVideoMac-macOS.spdx.json`, `OKVideoMac-macOS.cdx.json`,
