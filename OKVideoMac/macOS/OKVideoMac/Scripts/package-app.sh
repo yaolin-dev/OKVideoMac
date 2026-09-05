@@ -466,6 +466,10 @@ sign_code() {
   if [[ -n "$entitlement_file" ]]; then
     arguments+=(--entitlements "$entitlement_file")
   fi
+  # File Provider can reattach FinderInfo while earlier nested binaries are
+  # being signed. Clear this exact target at the last possible moment so there
+  # is no multi-second gap between sanitization and codesign.
+  /usr/bin/xattr -cr "$target"
   codesign "${arguments[@]}" "$target"
 }
 
