@@ -586,7 +586,7 @@ enum QuarkEpisodeReference {
     }
 }
 
-final class NodeHTTPSpiderSiteProvider: SiteProvider {
+final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
     private typealias HostMessage = CatPawHostMessage
 
     private struct InvocationResult {
@@ -606,6 +606,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
 
     private let baseURL: URL
     private let httpClient: HTTPClient
+    private let aggregateSearchHTTPClient: HTTPClient
     private let diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)?
     private let ensureRuntimeReady: (@Sendable () async throws -> URL)?
     private let configurationIdentity: String?
@@ -711,6 +712,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         site: SiteConfiguration,
         baseURL: URL,
         httpClient: HTTPClient,
+        aggregateSearchHTTPClient: HTTPClient? = nil,
         diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)? = nil,
         ensureRuntimeReady: (@Sendable () async throws -> URL)? = nil,
         quarkPasscodeStore: QuarkPasscodeStoring = QuarkPasscodeDisabledStore(),
@@ -722,6 +724,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         self.site = site
         self.baseURL = baseURL
         self.httpClient = httpClient
+        self.aggregateSearchHTTPClient = aggregateSearchHTTPClient ?? httpClient
         self.diagnosticReporter = diagnosticReporter
         self.ensureRuntimeReady = ensureRuntimeReady
         routeClient = CatPawRouteClient(
@@ -977,6 +980,33 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     }
 
     func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
+        try await search(
+            keyword: keyword,
+            page: page,
+            quick: quick,
+            usesAggregateSearchTransport: false
+        )
+    }
+
+    func aggregateSearch(
+        keyword: String,
+        page: Int,
+        quick: Bool
+    ) async throws -> VideoPage {
+        try await search(
+            keyword: keyword,
+            page: page,
+            quick: quick,
+            usesAggregateSearchTransport: true
+        )
+    }
+
+    private func search(
+        keyword: String,
+        page: Int,
+        quick: Bool,
+        usesAggregateSearchTransport: Bool
+    ) async throws -> VideoPage {
         // CatPawOpen's `searchable` field describes catalogue/UI state, not a
         // trustworthy route capability. Aggregate searches deliberately try
         // every enabled Node route once; an exact route 404 is cheap and is
@@ -1007,7 +1037,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 // A first-pass aggregate search must invoke each CatPawOpen route
                 // exactly once. Retrying here occupies another Node worker and
                 // delays sites that have not received their first request yet.
-                maximumAttempts: 1
+                maximumAttempts: 1,
+                usesAggregateSearchTransport: usesAggregateSearchTransport
             )
         } catch let error as SiteSearchError {
             if error.category == .unsupportedRoute {
@@ -1734,19 +1765,24 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         body: [String: JSONValue],
         additionalHeaders: HTTPHeaders = [:],
         maximumAttempts: Int = 1,
-        hostMessageWaitMilliseconds: Int = 0
+        hostMessageWaitMilliseconds: Int = 0,
+        usesAggregateSearchTransport: Bool = false
     ) async throws -> InvocationResult {
         guard let route = CatPawRoute(rawValue: method) else {
             throw AppError.spider("未知 CatPaw 路由：\(method)")
         }
         let attempts = max(1, maximumAttempts)
+        let requestHTTPClient = usesAggregateSearchTransport
+            ? aggregateSearchHTTPClient
+            : httpClient
         var lastEndpoint = baseURL
         for attempt in 0..<attempts {
             do {
                 let prepared = try await routeClient.prepare(
                     route: route,
                     payload: body,
-                    additionalHeaders: additionalHeaders
+                    additionalHeaders: additionalHeaders,
+                    initializationHTTPClient: requestHTTPClient
                 )
                 let readyBaseURL = prepared.baseURL
                 let invocationID = prepared.invocationID
@@ -1794,7 +1830,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                         )
                     }
                 } else {
-                    response = try await httpClient.send(routeRequest)
+                    response = try await requestHTTPClient.send(routeRequest)
                 }
                 if route == .detail {
                     DetailPerformanceContext.current?.markNodeResult(

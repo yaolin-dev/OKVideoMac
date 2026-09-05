@@ -14842,6 +14842,9 @@ final class AppState: ObservableObject {
             ?? activeConfigurationRecord?.baseURL
             ?? URL(string: "http://127.0.0.1/")!
         let httpClient = configuredHTTPClient(environment: environment)
+        let aggregateSearchHTTPClient = configuredAggregateSearchHTTPClient(
+            environment: environment
+        )
         let nodeBundleRuntime = environment.nodeBundleRuntime
         let activeConfigurationID = activeConfigurationRecord?.id
         providers = Dictionary(
@@ -14864,6 +14867,7 @@ final class AppState: ObservableObject {
                             site: site,
                             baseURL: nodeFallbackBaseURL,
                             httpClient: httpClient,
+                            aggregateSearchHTTPClient: aggregateSearchHTTPClient,
                             diagnosticReporter: {
                                 [weak runtime = nodeBundleRuntime] event in
                                 Task { await runtime?.recordDiagnosticEvent(event) }
@@ -14886,6 +14890,7 @@ final class AppState: ObservableObject {
                             site: site,
                             baseURL: baseURL,
                             httpClient: httpClient,
+                            aggregateSearchHTTPClient: aggregateSearchHTTPClient,
                             diagnosticReporter: {
                                 [weak runtime = nodeBundleRuntime] event in
                                 Task { await runtime?.recordDiagnosticEvent(event) }
@@ -14944,6 +14949,15 @@ final class AppState: ObservableObject {
     private func configuredHTTPClient(environment: AppEnvironment) -> HTTPClient {
         ConfigurationPolicyHTTPClient(
             base: environment.httpClient,
+            rules: activeConfiguration?.headers ?? []
+        )
+    }
+
+    private func configuredAggregateSearchHTTPClient(
+        environment: AppEnvironment
+    ) -> HTTPClient {
+        ConfigurationPolicyHTTPClient(
+            base: environment.aggregateSearchHTTPClient,
             rules: activeConfiguration?.headers ?? []
         )
     }

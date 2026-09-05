@@ -8,6 +8,7 @@ struct AppEnvironment {
     let directories: AppDirectories
     let applicationInstanceLease: ApplicationInstanceLease
     let httpClient: URLSessionHTTPClient
+    let aggregateSearchHTTPClient: URLSessionHTTPClient
     let configurationLoader: ConfigurationLoader
     let liveSourceLoader: LiveSourceLoader
     let database: SQLiteStore
@@ -39,7 +40,8 @@ struct AppEnvironment {
                 isDirectory: false
             )
         )
-        let httpClient = URLSessionHTTPClient()
+        let interactiveHTTPClient = URLSessionHTTPClient()
+        let aggregateSearchHTTPClient = URLSessionHTTPClient()
         let imageConfiguration = URLSessionConfiguration.default
         imageConfiguration.httpMaximumConnectionsPerHost = 12
         imageConfiguration.timeoutIntervalForRequest = 15
@@ -55,13 +57,16 @@ struct AppEnvironment {
         return AppEnvironment(
             directories: directories,
             applicationInstanceLease: applicationInstanceLease,
-            httpClient: httpClient,
-            configurationLoader: ConfigurationLoader(httpClient: httpClient),
-            liveSourceLoader: LiveSourceLoader(httpClient: httpClient),
+            httpClient: interactiveHTTPClient,
+            aggregateSearchHTTPClient: aggregateSearchHTTPClient,
+            configurationLoader: ConfigurationLoader(
+                httpClient: interactiveHTTPClient
+            ),
+            liveSourceLoader: LiveSourceLoader(httpClient: interactiveHTTPClient),
             database: databaseResult.store,
             recoveredDatabaseDirectory: databaseResult.quarantinedDatabaseDirectory,
             epgService: try XMLTVService(
-                httpClient: httpClient,
+                httpClient: interactiveHTTPClient,
                 cacheDirectory: directories.caches.appendingPathComponent(
                     "EPG",
                     isDirectory: true
@@ -71,7 +76,7 @@ struct AppEnvironment {
             nodeBundleRuntime: NodeBundleRuntimeService(
                 applicationSupportDirectory: directories.applicationSupport,
                 cacheDirectory: directories.caches,
-                remoteHTTPClient: httpClient
+                remoteHTTPClient: interactiveHTTPClient
             ),
             androidDexBridge: AndroidDexBridgeClient(
                 runtime: AndroidDexBridgeRuntime(

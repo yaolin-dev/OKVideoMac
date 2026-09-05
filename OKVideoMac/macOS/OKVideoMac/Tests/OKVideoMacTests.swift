@@ -15763,6 +15763,42 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(initializedPorts, [18_988])
     }
 
+    func testNodeAggregateSearchAndInteractiveRequestsUseSeparateHTTPClients()
+        async throws {
+        let interactiveClient = NodeTransportLaneHTTPClient()
+        let aggregateSearchClient = NodeTransportLaneHTTPClient()
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: nodeLifecycleFixtureSite,
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: interactiveClient,
+            aggregateSearchHTTPClient: aggregateSearchClient
+        )
+
+        let stream = MultiSiteSearch(
+            maximumConcurrency: 20,
+            maximumPagesPerSite: 1
+        ).search(providers: [provider], keyword: "fixture")
+        for await _ in stream {}
+        _ = try await provider.detail(id: "fixture-video")
+        _ = try await provider.search(
+            keyword: "interactive-fixture",
+            page: 1,
+            quick: false
+        )
+
+        let aggregatePaths = await aggregateSearchClient.requestPaths()
+        let interactivePaths = await interactiveClient.requestPaths()
+        XCTAssertEqual(
+            aggregatePaths,
+            ["/spider/lifecycle/3/init", "/spider/lifecycle/3/search"]
+        )
+        XCTAssertEqual(
+            interactivePaths,
+            ["/spider/lifecycle/3/detail", "/spider/lifecycle/3/search"]
+        )
+        XCTAssertFalse(aggregatePaths.contains { $0.hasSuffix("/detail") })
+    }
+
     func testNodeProviderDoesNotSwallowInitFailure() async throws {
         let client = NodeLifecycleRecordingHTTPClient(initStatusCode: 500)
         let baseURL = try XCTUnwrap(URL(string: "http://127.0.0.1:18988/"))
@@ -18659,6 +18695,45 @@ private actor NodeLifecycleRecordingHTTPClient: HTTPClient {
         requests
             .filter { $0.path.hasSuffix("/init") }
             .compactMap(\.port)
+    }
+}
+
+private actor NodeTransportLaneHTTPClient: HTTPClient {
+    private var paths: [String] = []
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        paths.append(request.url.path)
+        if request.url.path.hasSuffix("/init") {
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 404,
+                headers: [:],
+                body: Data()
+            )
+        }
+        if request.url.path.hasSuffix("/search") {
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"list":[],"page":1,"pagecount":1}"#.utf8)
+            )
+        }
+        if request.url.path.hasSuffix("/detail") {
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(
+                    #"{"list":[{"vod_id":"fixture-video","vod_name":"Fixture","vod_play_from":"direct","vod_play_url":"Episode$episode-token"}]}"#.utf8
+                )
+            )
+        }
+        throw HTTPClientError.statusCode(404)
+    }
+
+    func requestPaths() -> [String] {
+        paths
     }
 }
 

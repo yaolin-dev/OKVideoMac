@@ -124,6 +124,17 @@ public enum MultiSiteSearchEvent: Equatable, Sendable {
     case finished(MultiSiteSearchTermination)
 }
 
+/// Lets a provider route aggregate-search traffic through transport resources
+/// that are isolated from user-interactive requests. Ordinary `search` calls
+/// keep their existing semantics and remain on the provider's default lane.
+public protocol AggregateSearchProviding {
+    func aggregateSearch(
+        keyword: String,
+        page: Int,
+        quick: Bool
+    ) async throws -> VideoPage
+}
+
 public enum SearchSiteOutcome: Equatable, Sendable {
     case success(siteKey: String, siteName: String, resultCount: Int)
     case failure(SearchFailure)
@@ -1172,11 +1183,20 @@ public struct MultiSiteSearch {
         let firstOutcome = FirstPageSearchOutcome()
         let providerTask = Task {
             do {
-                let result = try await provider.search(
-                    keyword: keyword,
-                    page: page,
-                    quick: quick
-                )
+                let result: VideoPage
+                if let aggregateProvider = provider as? AggregateSearchProviding {
+                    result = try await aggregateProvider.aggregateSearch(
+                        keyword: keyword,
+                        page: page,
+                        quick: quick
+                    )
+                } else {
+                    result = try await provider.search(
+                        keyword: keyword,
+                        page: page,
+                        quick: quick
+                    )
+                }
                 await firstOutcome.resolve(.page(result, keyword: keyword))
             } catch is CancellationError {
                 await firstOutcome.resolve(.cancelled)

@@ -264,7 +264,8 @@ final class CatPawRouteClient {
     func prepare(
         route: CatPawRoute,
         payload: [String: JSONValue],
-        additionalHeaders: HTTPHeaders = [:]
+        additionalHeaders: HTTPHeaders = [:],
+        initializationHTTPClient: HTTPClient? = nil
     ) async throws -> CatPawPreparedInvocation {
         if await capabilityRegistry.state(
             of: route,
@@ -282,7 +283,10 @@ final class CatPawRouteClient {
         let wasAlreadyInitialized = try await initializationGate.ensureInitialized(
             endpointKey: apiURL.absoluteString
         ) { [self] in
-            try await initializeModule(apiURL: apiURL)
+            try await initializeModule(
+                apiURL: apiURL,
+                httpClient: initializationHTTPClient ?? httpClient
+            )
         }
         DetailPerformanceContext.current?.markModuleReady(
             wasAlreadyInitialized: wasAlreadyInitialized
@@ -374,7 +378,10 @@ final class CatPawRouteClient {
         )
     }
 
-    private func initializeModule(apiURL: URL) async throws {
+    private func initializeModule(
+        apiURL: URL,
+        httpClient: HTTPClient
+    ) async throws {
         var headers = requestHeaders
         headers["Content-Type"] = "application/json; charset=utf-8"
         let response = try await httpClient.send(
