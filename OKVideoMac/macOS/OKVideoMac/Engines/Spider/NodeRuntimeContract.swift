@@ -1084,8 +1084,19 @@ enum NodeRuntimeContractFactory {
         context.authorizationChallenge = true;
       }
       const waiter = context.waiters.shift();
-      if (waiter) waiter(message);
-      else context.hostMessages.push(message);
+      if (waiter) {
+        // Keep one invocation-scoped copy for the response header. The HTTP
+        // response and the concurrent host-message monitor can complete in
+        // either order; without this copy, cancelling the losing monitor can
+        // consume and discard the only structured authorization event.
+        if (message.action === 'toast' ||
+            message.action === 'authorizationRequired') {
+          context.hostMessages.push(message);
+        }
+        waiter(message);
+      } else {
+        context.hostMessages.push(message);
+      }
       return true;
     }
 
