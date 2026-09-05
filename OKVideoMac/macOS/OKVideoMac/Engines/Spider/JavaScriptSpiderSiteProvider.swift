@@ -1859,6 +1859,7 @@ enum AndroidRuntimeFailureCategory: String, Codable, Sendable {
     case emulatorOwnershipMismatch
     case emulatorProcessMismatch
     case emulatorRuntimeConflict
+    case portConflict
     case unexpectedSerial
     case androidBootTimedOut
     case emulatorNetworkUnavailable
@@ -1944,6 +1945,10 @@ private extension String {
 
 struct AndroidRuntimeDiagnosticSnapshot: Codable, Equatable, Sendable {
     let runtimeState: String
+    let ownershipClassification: AndroidRuntimeOwnershipClassification?
+    let launchOrigin: AndroidRuntimeLaunchOrigin?
+    let appSessionID: String?
+    let runtimeSessionID: String?
     let startupStage: AndroidRuntimeStartupStage
     let progress: Double?
     let stageStartedAt: Date?
@@ -1995,12 +2000,20 @@ struct AndroidRuntimeDiagnosticSnapshot: Codable, Equatable, Sendable {
     let avdLockFiles: [String]
     let avdRuntimeFiles: [String: Bool]
     let emulatorPID: Int32?
+    let emulatorPIDBirthIdentity: String?
     let emulatorConsolePort: Int?
     let emulatorADBPort: Int?
     let emulatorSerial: String?
     let emulatorProcessRunning: Bool
     let adbDeviceState: String?
     let adbWaitTimeline: [AndroidADBWaitObservation]
+    let shutdownMechanism: AndroidRuntimeShutdownMechanism
+    let shutdownStartedAt: Date?
+    let shutdownCompletedAt: Date?
+    let shutdownElapsed: TimeInterval?
+    let shutdownForced: Bool
+    let staleAVDLocksCleared: [String]
+    let lifecycleConflictReason: String?
     let androidBootCompleted: Bool?
     let bootWaitDuration: TimeInterval?
     let ipAddresses: String?
@@ -2069,6 +2082,8 @@ struct AndroidRuntimeFailureError: LocalizedError, Sendable {
             return "Android Emulator PID 已不再属于本次启动实例。"
         case .emulatorRuntimeConflict:
             return "检测到其他 Emulator 正在使用专用 AVD 或记录端口，未执行任何操作。"
+        case .portConflict:
+            return "Android Emulator 所需端口被其他进程占用，未终止占用进程。"
         case .unexpectedSerial:
             return "ADB 发现了其他 Emulator，但没有发现本次启动所预期的设备。"
         case .androidBootTimedOut:
@@ -2317,6 +2332,14 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     func stopRuntime() async -> AndroidRuntimeStatus {
         await runtime.stop()
         return await runtime.status()
+    }
+
+    func shutdownForApplicationTermination() async {
+        await runtime.shutdownForApplicationTermination()
+    }
+
+    func beginApplicationTermination() async {
+        await runtime.beginApplicationTermination()
     }
 
     func repairRuntime() async throws -> AndroidRuntimeStatus {
@@ -4564,6 +4587,12 @@ struct AndroidToolchainResolver {
         let latest = sdkRoot.appendingPathComponent(
             "cmdline-tools/latest/bin/avdmanager"
         )
+        // `cmdline-tools` may live on a slow or temporarily unresponsive
+        // external volume. The canonical `latest` install is sufficient, so
+        // do not enumerate sibling versions when it is already usable.
+        if fileManager.isExecutableFile(atPath: latest.path) {
+            return [latest]
+        }
         let commandLineTools = sdkRoot.appendingPathComponent("cmdline-tools")
         let versions = (try? fileManager.contentsOfDirectory(
             at: commandLineTools,
@@ -4614,13 +4643,68 @@ struct AndroidRuntimeIdentity: Codable, Equatable, Sendable {
     var systemBootIdentifier: String?
     let sdkRoot: URL
     let emulatorExecutable: URL
+    var adbExecutable: URL?
     let avdName: String
     let avdDirectory: URL
     let pid: Int32
+    var pidBirthIdentity: String?
     let consolePort: Int
     let serial: String
     let forwards: [AndroidPortForwardIdentity]
     let launchedAt: Date
+    var appSessionID: String?
+    var runtimeSessionID: String?
+    var launchOrigin: AndroidRuntimeLaunchOrigin?
+    var terminationRequestedAt: Date?
+    var terminationRequestReason: String?
+}
+
+enum AndroidRuntimeLaunchOrigin: String, Codable, Equatable, Sendable {
+    case currentLaunch
+    case adoptedExisting
+}
+
+enum AndroidRuntimeOwnershipClassification: String, Codable, Equatable,
+    Sendable {
+    case ownedCurrentLaunch
+    case ownedExistingHealthy
+    case ownedExistingBooting
+    case ownedExistingOffline
+    case ownedExistingADBMissing
+    case staleRuntimeMetadata
+    case staleAVDLock
+    case externalRuntimeConflict
+    case portConflict
+}
+
+enum AndroidRuntimeShutdownMechanism: String, Codable, Equatable, Sendable {
+    case none
+    case adbEmuKill
+    case sigterm
+    case sigkill
+    case refusedOwnershipMismatch
+    case alreadyExited
+}
+
+enum AndroidRuntimeShutdownAction: Equatable, Sendable {
+    case adbEmuKill
+    case sigterm
+    case sigkill
+    case refuse
+}
+
+enum AndroidRuntimeDiscoveryAction: Equatable, Sendable {
+    case launch
+    case adopt
+    case rejectExternalConflict
+}
+
+enum AndroidRuntimeAdmissionError: LocalizedError, Sendable {
+    case terminating
+
+    var errorDescription: String? {
+        "OKVideoMac 正在退出，已拒绝重新启动 Android 兼容环境"
+    }
 }
 
 enum AndroidADBTargetState: String, Equatable, Sendable {
@@ -4764,6 +4848,16 @@ private struct AndroidRuntimeOwnershipObservation: Sendable {
     var processOwned: Bool { processState == .owned }
 }
 
+private struct AndroidManagedRuntimeProcessCandidate: Sendable {
+    let pid: Int32
+    let executable: URL
+    let command: String
+    let consolePort: Int
+    let birthIdentity: String
+    let startedAt: Date
+    let referencesPrivateAVD: Bool
+}
+
 private struct AndroidRuntimeContinuityRecord: Codable, Equatable, Sendable {
     let schema: Int
     let runtimeSchema: Int
@@ -4798,6 +4892,33 @@ private struct AndroidBinaryProcessOutput: Sendable {
     let stderr: Data
     let exitCode: Int32
     let timedOut: Bool
+}
+
+/// Drains a child-process pipe while the child is running. Waiting for a
+/// verbose command (notably `ps -axo command=`) before reading can fill the
+/// kernel pipe buffer and deadlock both processes.
+private final class AndroidProcessPipeReader: @unchecked Sendable {
+    private let group = DispatchGroup()
+    private let lock = NSLock()
+    private var data = Data()
+
+    init(_ handle: FileHandle) {
+        group.enter()
+        DispatchQueue.global(qos: .utility).async { [self] in
+            let captured = handle.readDataToEndOfFile()
+            lock.lock()
+            data = captured
+            lock.unlock()
+            group.leave()
+        }
+    }
+
+    func result() -> Data {
+        group.wait()
+        lock.lock()
+        defer { lock.unlock() }
+        return data
+    }
 }
 
 /// `Process.terminationHandler` can fire before an async waiter is installed.
@@ -4922,10 +5043,15 @@ actor AndroidRuntimeStartupSingleFlight {
     }
 
     private var inFlight: InFlight?
+    private var stopTokens = Set<UUID>()
+    private var permanentlyTerminating = false
 
     func ensureRuntime(
         _ operation: @escaping @Sendable () async throws -> Void
     ) async throws {
+        guard !permanentlyTerminating, stopTokens.isEmpty else {
+            throw AndroidRuntimeAdmissionError.terminating
+        }
         let startup: InFlight
         if let inFlight {
             startup = inFlight
@@ -4958,6 +5084,40 @@ actor AndroidRuntimeStartupSingleFlight {
         clearIfCurrent(startup.id)
     }
 
+    /// Blocks every process-local runtime instance before cancelling startup.
+    /// The token keeps a manual stop exclusive until its teardown finishes;
+    /// application termination is permanent for the remaining process life.
+    func beginStopping(permanent: Bool) async -> UUID {
+        let token = UUID()
+        stopTokens.insert(token)
+        permanentlyTerminating = permanentlyTerminating || permanent
+        if let startup = inFlight {
+            startup.task.cancel()
+            _ = await startup.task.result
+            clearIfCurrent(startup.id)
+        }
+        return token
+    }
+
+    /// Permanently closes startup admission before the rest of App teardown
+    /// is allowed to run. Repeated calls are intentionally idempotent.
+    func beginApplicationTermination() async {
+        permanentlyTerminating = true
+        if let startup = inFlight {
+            startup.task.cancel()
+            _ = await startup.task.result
+            clearIfCurrent(startup.id)
+        }
+    }
+
+    func finishStopping(_ token: UUID) {
+        stopTokens.remove(token)
+    }
+
+    func isRejectingStartup() -> Bool {
+        permanentlyTerminating || !stopTokens.isEmpty
+    }
+
     private func clearIfCurrent(_ id: UUID) {
         guard inFlight?.id == id else { return }
         inFlight = nil
@@ -4973,6 +5133,7 @@ actor AndroidDexBridgeRuntime {
     private static let networkCheckInterval: TimeInterval = 30
     private static let manifestSchema = 1
     private static let avdName = "OKVideoMac_Runtime"
+    private static let appSessionID = UUID().uuidString
     static let candidateConsolePorts = Array(
         stride(from: 5_554, through: 5_682, by: 2)
     )
@@ -5012,6 +5173,14 @@ actor AndroidDexBridgeRuntime {
     private var recentCommands: [AndroidRuntimeCommandRecord] = []
     private var lastObservedIdentity: AndroidRuntimeIdentity?
     private var lastObservedToolchain: AndroidToolchain?
+    private var lastOwnershipClassification:
+        AndroidRuntimeOwnershipClassification?
+    private var lastShutdownMechanism: AndroidRuntimeShutdownMechanism = .none
+    private var lastShutdownStartedAt: Date?
+    private var lastShutdownCompletedAt: Date?
+    private var lastShutdownForced = false
+    private var lastStaleAVDLocksCleared: [String] = []
+    private var lastLifecycleConflictReason: String?
     private var lastBootCompleted: Bool?
     private var lastBootWaitDuration: TimeInterval?
     private var lastIPAddressOutput: String?
@@ -6105,6 +6274,10 @@ actor AndroidDexBridgeRuntime {
         let emulatorSnapshot = emulatorProcessRecorder?.snapshot()
         return AndroidRuntimeDiagnosticSnapshot(
             runtimeState: runtimeState,
+            ownershipClassification: lastOwnershipClassification,
+            launchOrigin: identity?.launchOrigin,
+            appSessionID: identity?.appSessionID,
+            runtimeSessionID: identity?.runtimeSessionID,
             startupStage: currentStage,
             progress: operationStatus?.progress ?? currentStage.progress,
             stageStartedAt: stageStartedAt,
@@ -6135,9 +6308,11 @@ actor AndroidDexBridgeRuntime {
             emulatorTerminationStatus: emulatorSnapshot?.terminationStatus,
             emulatorTerminationReason: emulatorSnapshot?.terminationReason,
             emulatorTerminationRequestedByApp: emulatorSnapshot?
-                .terminationRequestedByApp ?? false,
+                .terminationRequestedByApp
+                    ?? (identity?.terminationRequestedAt != nil),
             emulatorTerminationRequestReason: emulatorSnapshot?
-                .terminationRequestReason,
+                .terminationRequestReason
+                    ?? identity?.terminationRequestReason,
             emulatorStdoutTail: emulatorSnapshot.flatMap {
                 emulatorLogTail(at: $0.stdoutURL)
             },
@@ -6191,12 +6366,22 @@ actor AndroidDexBridgeRuntime {
             avdLockFiles: avdLockFiles,
             avdRuntimeFiles: avdRuntimeFiles,
             emulatorPID: identity?.pid,
+            emulatorPIDBirthIdentity: identity?.pidBirthIdentity,
             emulatorConsolePort: identity?.consolePort,
             emulatorADBPort: identity.map { $0.consolePort + 1 },
             emulatorSerial: identity?.serial,
             emulatorProcessRunning: processRunning,
             adbDeviceState: deviceState,
             adbWaitTimeline: adbWaitTimeline,
+            shutdownMechanism: lastShutdownMechanism,
+            shutdownStartedAt: lastShutdownStartedAt,
+            shutdownCompletedAt: lastShutdownCompletedAt,
+            shutdownElapsed: lastShutdownStartedAt.map { started in
+                (lastShutdownCompletedAt ?? Date()).timeIntervalSince(started)
+            },
+            shutdownForced: lastShutdownForced,
+            staleAVDLocksCleared: lastStaleAVDLocksCleared,
+            lifecycleConflictReason: lastLifecycleConflictReason,
             androidBootCompleted: lastBootCompleted,
             bootWaitDuration: lastBootWaitDuration,
             ipAddresses: lastIPAddressOutput,
@@ -6331,24 +6516,63 @@ actor AndroidDexBridgeRuntime {
     }
 
     func stop() async {
+        let stopToken = await Self.startupSingleFlight.beginStopping(
+            permanent: false
+        )
+        await performStop(reason: "userRequestedStop")
+        await Self.startupSingleFlight.finishStopping(stopToken)
+    }
+
+    func shutdownForApplicationTermination() async {
+        await beginApplicationTermination()
+        await performStop(reason: "applicationTermination")
+    }
+
+    func beginApplicationTermination() async {
+        await Self.startupSingleFlight.beginApplicationTermination()
+    }
+
+    private func performStop(reason: String) async {
         actionSurfaceLease = nil
         managedDisplayConfigured = false
         transition(to: .stopping, event: "stop_requested")
-        await Self.startupSingleFlight.cancelAndWait()
+        lastShutdownStartedAt = Date()
+        lastShutdownCompletedAt = nil
+        lastShutdownMechanism = .none
+        lastShutdownForced = false
         ready = false
         acceptsNewerBridge = false
         lastNetworkCheck = nil
         defer {
+            lastShutdownCompletedAt = Date()
             completeCurrentStage()
             currentStage = .idle
             stageStartedAt = nil
             operationStatus = nil
         }
 
-        guard let identity = loadIdentity() else {
+        var identity = loadIdentity()
+        var toolchain = identity.flatMap {
+            resolver().toolchain(at: $0.sdkRoot)
+        }
+        if identity == nil, let resolved = resolver().resolve() {
+            toolchain = resolved
+            do {
+                identity = try discoverExistingManagedRuntime(
+                    toolchain: resolved
+                )
+            } catch {
+                lastShutdownMechanism = .refusedOwnershipMismatch
+                preserveFailure(classifiedFailure(for: error, stage: .stopping))
+                return
+            }
+        }
+        guard var identity else {
+            lastShutdownMechanism = .alreadyExited
+            clearRuntimeRecord()
             return
         }
-        guard let toolchain = resolver().toolchain(at: identity.sdkRoot) else {
+        guard let toolchain else {
             preserveFailure(
                 classifiedFailure(
                     for: AppError.spider(
@@ -6359,6 +6583,28 @@ actor AndroidDexBridgeRuntime {
             )
             return
         }
+        guard verifyProcessOwnership(identity, toolchain: toolchain) else {
+            let processPresent = processExecutablePath(pid: identity.pid) != nil
+            if !processPresent
+                || processBirthIdentity(pid: identity.pid)?.value
+                    != identity.pidBirthIdentity {
+                lastShutdownMechanism = .alreadyExited
+                clearRuntimeRecord()
+            } else {
+                lastShutdownMechanism = .refusedOwnershipMismatch
+                lastLifecycleConflictReason =
+                    "停止前 PID/executable/argv 身份校验失败"
+            }
+            return
+        }
+        identity = refreshedIdentityForCurrentSession(
+            identity,
+            toolchain: toolchain
+        )
+        identity.terminationRequestedAt = Date()
+        identity.terminationRequestReason = reason
+        lastObservedIdentity = identity
+        try? saveIdentity(identity)
         let observation = observeRuntimeOwnership(
             identity,
             toolchain: toolchain
@@ -6366,9 +6612,13 @@ actor AndroidDexBridgeRuntime {
         switch observation.decision {
         case let .clearStaleRecord(reason):
             appendStaleRecordRecovery(reason)
+            lastShutdownMechanism = .alreadyExited
             clearRuntimeRecord()
             return
         case .rejectConflictingRuntime:
+            lastShutdownMechanism = .refusedOwnershipMismatch
+            lastLifecycleConflictReason =
+                "停止时运行记录与当前进程或 ADB 设备不一致"
             preserveFailure(
                 classifiedFailure(
                     for: AppError.spider(
@@ -6379,74 +6629,114 @@ actor AndroidDexBridgeRuntime {
             )
             return
         case .reuseOwnedRuntime:
-            if !observation.deviceOwned {
-                recordEmulatorTerminationRequest(
-                    pid: identity.pid,
-                    reason: "userRequestedStop"
-                )
-                _ = Darwin.kill(identity.pid, SIGTERM)
-                for _ in 0..<20 {
-                    if processExecutablePath(pid: identity.pid) == nil {
-                        clearRuntimeRecord()
-                        return
-                    }
-                    try? await Task.sleep(nanoseconds: 250_000_000)
-                }
-                preserveFailure(
-                    classifiedFailure(
-                        for: AppError.spider(
-                            "专用 Android Emulator 未确认停止；已保留运行记录以防误操作"
-                        ),
-                        stage: .stopping
-                    )
-                )
-                return
-            }
+            break
         }
-        do {
-            recordEmulatorTerminationRequest(
-                pid: identity.pid,
-                reason: "userRequestedStop"
-            )
-            try removeOwnedPortForwards(identity, toolchain: toolchain)
-            _ = try runVerifiedADB(
-                identity,
-                toolchain: toolchain,
-                ["emu", "kill"]
-            )
-            for _ in 0..<40 {
-                if processExecutablePath(pid: identity.pid) == nil,
-                   !deviceIsReachable(identity, toolchain: toolchain) {
-                    clearRuntimeRecord()
-                    return
-                }
-                try? await Task.sleep(nanoseconds: 250_000_000)
-            }
-            if verifyProcessOwnership(identity, toolchain: toolchain) {
-                _ = Darwin.kill(identity.pid, SIGTERM)
-            }
-            for _ in 0..<20 {
-                if processExecutablePath(pid: identity.pid) == nil,
-                   !deviceIsReachable(identity, toolchain: toolchain) {
-                    clearRuntimeRecord()
-                    return
-                }
-                try? await Task.sleep(nanoseconds: 250_000_000)
-            }
+
+        guard verifyStrictProcessOwnership(identity, toolchain: toolchain)
+        else {
+            lastShutdownMechanism = .refusedOwnershipMismatch
+            lastLifecycleConflictReason =
+                "停止前未同时验证 PID 出生标识与私有 AVD 打开文件"
             preserveFailure(
                 classifiedFailure(
                     for: AppError.spider(
-                        "专用 Android Emulator 未确认停止；已保留运行记录以防误操作"
+                        "无法严格确认专用 Android Emulator，未执行终止"
                     ),
                     stage: .stopping
                 )
             )
-        } catch {
-            preserveFailure(classifiedFailure(for: error, stage: .stopping))
+            return
+        }
+
+        recordEmulatorTerminationRequest(pid: identity.pid, reason: reason)
+        if observation.deviceOwned {
+            try? removeOwnedPortForwards(identity, toolchain: toolchain)
+            _ = try? runVerifiedADB(
+                identity,
+                toolchain: toolchain,
+                ["emu", "kill"],
+                category: "adb.runtime.shutdown"
+            )
+            lastShutdownMechanism = .adbEmuKill
+            if await waitForOwnedProcessExit(identity, attempts: 20) {
+                clearRuntimeRecord()
+                return
+            }
+        }
+
+        guard verifyStrictProcessOwnership(identity, toolchain: toolchain)
+        else {
+            finishShutdownAfterIdentityChanged(identity)
+            return
+        }
+        _ = Darwin.kill(identity.pid, SIGTERM)
+        lastShutdownMechanism = .sigterm
+        if await waitForOwnedProcessExit(identity, attempts: 12) {
+            clearRuntimeRecord()
+            return
+        }
+
+        guard verifyStrictProcessOwnership(identity, toolchain: toolchain)
+        else {
+            finishShutdownAfterIdentityChanged(identity)
+            return
+        }
+        _ = Darwin.kill(identity.pid, SIGKILL)
+        lastShutdownMechanism = .sigkill
+        lastShutdownForced = true
+        if await waitForOwnedProcessExit(identity, attempts: 8) {
+            clearRuntimeRecord()
+            return
+        }
+        preserveFailure(
+            classifiedFailure(
+                for: AppError.spider(
+                    "专用 Android Emulator 未确认停止；已保留运行记录以防误操作"
+                ),
+                stage: .stopping
+            )
+        )
+    }
+
+    private func waitForOwnedProcessExit(
+        _ identity: AndroidRuntimeIdentity,
+        attempts: Int
+    ) async -> Bool {
+        for _ in 0..<attempts {
+            guard let current = processBirthIdentity(pid: identity.pid) else {
+                return true
+            }
+            if current.value != identity.pidBirthIdentity {
+                appendEvent(
+                    stage: .stopping,
+                    event: "shutdown_pid_identity_changed",
+                    detail: "pid=\(identity.pid)"
+                )
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return processBirthIdentity(pid: identity.pid) == nil
+    }
+
+    private func finishShutdownAfterIdentityChanged(
+        _ identity: AndroidRuntimeIdentity
+    ) {
+        if processBirthIdentity(pid: identity.pid)?.value
+            != identity.pidBirthIdentity {
+            lastShutdownMechanism = .alreadyExited
+            clearRuntimeRecord()
+        } else {
+            lastShutdownMechanism = .refusedOwnershipMismatch
+            lastLifecycleConflictReason =
+                "终止升级前 PID 身份或私有 AVD 校验发生变化"
         }
     }
 
     func ensureReady() async throws {
+        guard !(await Self.startupSingleFlight.isRejectingStartup()) else {
+            throw AndroidRuntimeAdmissionError.terminating
+        }
         if ready {
             guard let identity = loadIdentity(),
                   let toolchain = resolver().toolchain(at: identity.sdkRoot)
@@ -6607,45 +6897,83 @@ actor AndroidDexBridgeRuntime {
             try createRuntimeDirectories()
 
             if fileManager.fileExists(atPath: manifestURL.path) {
-                guard var recorded = loadIdentity() else {
-                    throw AppError.spider(
-                        "Android 运行记录损坏；为避免误操作其他设备，已停止"
-                    )
-                }
-                guard let recordedToolchain = resolver().toolchain(
-                    at: recorded.sdkRoot
-                ) else {
-                    throw AppError.spider(
-                        "原 Android SDK 已不可用，无法安全复用运行实例"
-                    )
-                }
-                let observation = observeRuntimeOwnership(
-                    recorded,
-                    toolchain: recordedToolchain
-                )
-                switch observation.decision {
-                case .reuseOwnedRuntime:
-                    if recorded.systemBootIdentifier != currentBootIdentifier {
-                        recorded.systemBootIdentifier = currentBootIdentifier
-                        try saveIdentity(recorded)
-                    }
-                    activeIdentity = recorded
-                    activeToolchain = recordedToolchain
-                case let .clearStaleRecord(reason):
-                    appendStaleRecordRecovery(reason)
-                    if reason == .previousSystemBoot {
-                        operationStatus = .starting(
-                            "检测到电脑重启后的旧运行记录，正在重新连接。",
-                            progress: AndroidRuntimeStartupStage.locatingSDK.progress
-                                ?? 0
+                if var recorded = loadIdentity() {
+                    guard let recordedToolchain = resolver().toolchain(
+                        at: recorded.sdkRoot
+                    ) else {
+                        throw AppError.spider(
+                            "原 Android SDK 已不可用，无法安全复用运行实例"
                         )
-                        await Task.yield()
                     }
-                    clearRuntimeRecord()
-                case .rejectConflictingRuntime:
-                    throw AppError.spider(
-                        "检测到其他 Emulator 使用了记录端口，未执行任何操作"
+                    try ensureADBServer(recordedToolchain)
+                    let observation = observeRuntimeOwnership(
+                        recorded,
+                        toolchain: recordedToolchain
                     )
+                    switch observation.decision {
+                    case .reuseOwnedRuntime:
+                        recorded = refreshedIdentityForCurrentSession(
+                            recorded,
+                            toolchain: recordedToolchain
+                        )
+                        try saveIdentity(recorded)
+                        let recordedState = adbTargetState(
+                            recorded,
+                            toolchain: recordedToolchain
+                        )
+                        lastOwnershipClassification = Self
+                            .ownershipClassification(
+                                isCurrentAppLaunch:
+                                    recorded.launchOrigin == .currentLaunch,
+                                targetState: recordedState,
+                                deviceOwned: observation.deviceOwned,
+                                processAge: Date().timeIntervalSince(
+                                    recorded.launchedAt
+                                )
+                            )
+                        activeIdentity = recorded
+                        activeToolchain = recordedToolchain
+                    case let .clearStaleRecord(reason):
+                        appendStaleRecordRecovery(reason)
+                        if reason == .previousSystemBoot {
+                            operationStatus = .starting(
+                                "检测到电脑重启后的旧运行记录，正在重新连接。",
+                                progress: AndroidRuntimeStartupStage
+                                    .locatingSDK.progress ?? 0
+                            )
+                            await Task.yield()
+                        }
+                        clearRuntimeRecord()
+                    case .rejectConflictingRuntime:
+                        throw AppError.spider(
+                            "检测到其他 Emulator 使用了记录端口，未执行任何操作"
+                        )
+                    }
+                } else {
+                    // A corrupt/legacy-incompatible record is only stale after
+                    // real process discovery proves there is no private AVD
+                    // instance. If one is alive, recover from process truth.
+                    guard let resolved = resolver().resolve() else {
+                        throw AppError.spider(
+                            "Android 运行记录损坏且无法解析原 Android SDK"
+                        )
+                    }
+                    try ensureADBServer(resolved)
+                    lastObservedToolchain = resolved
+                    if let discovered = try discoverExistingManagedRuntime(
+                        toolchain: resolved
+                    ) {
+                        activeIdentity = discovered
+                        activeToolchain = resolved
+                    } else {
+                        lastOwnershipClassification = .staleRuntimeMetadata
+                        appendEvent(
+                            stage: .locatingSDK,
+                            event: "invalid_runtime_metadata_cleared",
+                            detail: "真实进程扫描确认专用 AVD 未运行"
+                        )
+                        clearRuntimeRecord()
+                    }
                 }
             }
 
@@ -6662,25 +6990,25 @@ actor AndroidDexBridgeRuntime {
                 }
                 toolchain = resolved
                 lastObservedToolchain = toolchain
-                transition(to: .preparingAVD)
-                try ensureManagedAVD(toolchain)
-                transition(to: .launchingEmulator)
-                guard !runtimeProcessReferencesAVD(
-                    named: Self.avdName
-                ) else {
-                    throw AndroidRuntimeFailureError(
-                        record: AndroidRuntimeFailureRecord(
-                            occurredAt: Date(),
-                            stage: .launchingEmulator,
-                            category: .emulatorRuntimeConflict,
-                            message: "检测到另一个进程正在使用 OKVideoMac 专用 AVD，未重复启动"
-                        )
-                    )
-                }
+                // The Emulator connects to the adb server during its own
+                // startup. Establish the selected-SDK server first so a newly
+                // spawned guest cannot miss its initial transport handshake.
                 try ensureADBServer(toolchain)
-                identity = try await launchManagedEmulator(toolchain)
-                activeIdentity = identity
-                activeToolchain = toolchain
+                transition(to: .preparingAVD)
+                if let discovered = try discoverExistingManagedRuntime(
+                    toolchain: toolchain
+                ) {
+                    identity = discovered
+                    activeIdentity = discovered
+                    activeToolchain = toolchain
+                } else {
+                    try ensureManagedAVD(toolchain)
+                    try clearStalePrivateAVDLocksIfSafe(toolchain: toolchain)
+                    transition(to: .launchingEmulator)
+                    identity = try await launchManagedEmulator(toolchain)
+                    activeIdentity = identity
+                    activeToolchain = toolchain
+                }
             }
             lastObservedIdentity = identity
             lastObservedToolchain = toolchain
@@ -6915,7 +7243,13 @@ actor AndroidDexBridgeRuntime {
                 failure = classifiedFailure(for: error)
             }
             preserveFailure(failure)
-            if let identity = activeIdentity,
+            if Task.isCancelled {
+                appendEvent(
+                    stage: failure.record.stage,
+                    event: "startup_cleanup_deferred_to_shutdown",
+                    detail: "共享 startup 已由停止流程取消"
+                )
+            } else if let identity = activeIdentity,
                let toolchain = activeToolchain {
                 let cleaned = await cleanupFailedRuntime(
                     identity,
@@ -7716,6 +8050,78 @@ actor AndroidDexBridgeRuntime {
         return hasAVD && hasPort
     }
 
+    static func consolePort(
+        in command: String,
+        candidates: [Int] = candidateConsolePorts
+    ) -> Int? {
+        let fields = command.split(whereSeparator: { $0.isWhitespace })
+            .map(String.init)
+        for index in fields.indices {
+            if fields[index] == "-port", fields.indices.contains(index + 1),
+               let port = Int(fields[index + 1]), candidates.contains(port) {
+                return port
+            }
+            if fields[index] == "-ports", fields.indices.contains(index + 1),
+               let first = fields[index + 1].split(separator: ",").first,
+               let port = Int(first), candidates.contains(port) {
+                return port
+            }
+        }
+        return nil
+    }
+
+    static func ownershipClassification(
+        isCurrentAppLaunch: Bool,
+        targetState: AndroidADBTargetState,
+        deviceOwned: Bool,
+        processAge: TimeInterval
+    ) -> AndroidRuntimeOwnershipClassification {
+        if isCurrentAppLaunch {
+            return .ownedCurrentLaunch
+        }
+        if targetState == .device, deviceOwned {
+            return .ownedExistingHealthy
+        }
+        if targetState == .offline || targetState == .unauthorized {
+            return .ownedExistingOffline
+        }
+        if targetState == .missing, processAge < 120 {
+            return .ownedExistingBooting
+        }
+        return .ownedExistingADBMissing
+    }
+
+    static func discoveryAction(
+        matchingAVDProcessCount: Int,
+        strictlyOwnedCandidateCount: Int
+    ) -> AndroidRuntimeDiscoveryAction {
+        if matchingAVDProcessCount == 0 { return .launch }
+        if matchingAVDProcessCount == 1,
+           strictlyOwnedCandidateCount == 1 { return .adopt }
+        return .rejectExternalConflict
+    }
+
+    static func shutdownAction(
+        deviceOwned: Bool,
+        processStrictlyOwned: Bool,
+        adbAttempted: Bool,
+        sigtermAttempted: Bool
+    ) -> AndroidRuntimeShutdownAction {
+        if deviceOwned, !adbAttempted {
+            return .adbEmuKill
+        }
+        guard processStrictlyOwned else { return .refuse }
+        return sigtermAttempted ? .sigkill : .sigterm
+    }
+
+    static func mayClearStaleAVDLocks(
+        hasManagedAVDProcess: Bool,
+        hasLiveRecordedProcess: Bool,
+        managedPortsOwned: Bool
+    ) -> Bool {
+        !hasManagedAVDProcess && !hasLiveRecordedProcess && !managedPortsOwned
+    }
+
     static func isEmulatorPortConflict(_ output: String) -> Bool {
         let text = output.lowercased()
         let mentionsPort = text.contains("port") || text.contains("socket")
@@ -7806,7 +8212,249 @@ actor AndroidDexBridgeRuntime {
             let command = String(line)
             return command.contains("-avd \(name)")
                 || command.contains("/\(name).avd")
+                || command.contains("@\(name)")
         }
+    }
+
+    private func managedRuntimeProcessCandidates(
+        toolchain: AndroidToolchain
+    ) throws -> [AndroidManagedRuntimeProcessCandidate] {
+        let output = try run(
+            URL(fileURLWithPath: "/bin/ps"),
+            ["-axo", "pid=,command="],
+            category: "runtime.discovery.processes",
+            timeout: 5
+        )
+        let expectedExecutable = toolchain.emulator.standardizedFileURL
+            .resolvingSymlinksInPath()
+        let emulatorRoot = toolchain.sdkRoot
+            .appendingPathComponent("emulator", isDirectory: true)
+            .standardizedFileURL.resolvingSymlinksInPath().path + "/"
+        return output.split(whereSeparator: \.isNewline).compactMap { rawLine in
+            let line = rawLine.drop(while: { $0.isWhitespace })
+            guard let separator = line.firstIndex(where: { $0.isWhitespace }),
+                  let pid = Int32(line[..<separator]) else { return nil }
+            let command = String(
+                line[separator...].drop(while: { $0.isWhitespace })
+            )
+            guard command.contains("-avd \(Self.avdName)")
+                    || command.contains("@\(Self.avdName)")
+                    || command.contains("/\(Self.avdName).avd"),
+                  let consolePort = Self.consolePort(in: command),
+                  let executablePath = processExecutablePath(pid: pid),
+                  let processIdentity = processBirthIdentity(pid: pid)
+            else { return nil }
+            let executable = URL(fileURLWithPath: executablePath)
+                .standardizedFileURL.resolvingSymlinksInPath()
+            guard executable == expectedExecutable
+                    || executable.path.hasPrefix(emulatorRoot) else {
+                return nil
+            }
+            return AndroidManagedRuntimeProcessCandidate(
+                pid: pid,
+                executable: executable,
+                command: command,
+                consolePort: consolePort,
+                birthIdentity: processIdentity.value,
+                startedAt: processIdentity.startedAt,
+                referencesPrivateAVD: processReferencesPrivateAVD(pid: pid)
+            )
+        }
+    }
+
+    private func discoverExistingManagedRuntime(
+        toolchain: AndroidToolchain
+    ) throws -> AndroidRuntimeIdentity? {
+        let allMatchingAVDProcesses = try matchingAVDProcessCount()
+        let candidates = try managedRuntimeProcessCandidates(
+            toolchain: toolchain
+        )
+        let privateCandidates = candidates.filter(\.referencesPrivateAVD)
+        switch Self.discoveryAction(
+            matchingAVDProcessCount: allMatchingAVDProcesses,
+            strictlyOwnedCandidateCount: privateCandidates.count
+        ) {
+        case .launch:
+            return nil
+        case .rejectExternalConflict:
+            lastOwnershipClassification = .externalRuntimeConflict
+            lastLifecycleConflictReason =
+                "同名 AVD 进程未同时通过 executable、argv、port 与私有 AVD 文件校验"
+            throw AndroidRuntimeFailureError(
+                record: AndroidRuntimeFailureRecord(
+                    occurredAt: Date(),
+                    stage: .launchingEmulator,
+                    category: .emulatorRuntimeConflict,
+                    message: "检测到无法安全接管的同名 Android Emulator，未执行启动或终止"
+                )
+            )
+        case .adopt:
+            break
+        }
+        guard let candidate = privateCandidates.first else { return nil }
+
+        let identity = AndroidRuntimeIdentity(
+            schema: Self.manifestSchema,
+            generation: UUID().uuidString,
+            systemBootIdentifier: currentBootIdentifier,
+            sdkRoot: toolchain.sdkRoot,
+            emulatorExecutable: toolchain.emulator,
+            adbExecutable: toolchain.adb,
+            avdName: Self.avdName,
+            avdDirectory: avdDirectory,
+            pid: candidate.pid,
+            pidBirthIdentity: candidate.birthIdentity,
+            consolePort: candidate.consolePort,
+            serial: Self.emulatorSerial(consolePort: candidate.consolePort),
+            forwards: Self.expectedForwards,
+            launchedAt: candidate.startedAt,
+            appSessionID: Self.appSessionID,
+            runtimeSessionID: UUID().uuidString,
+            launchOrigin: .adoptedExisting,
+            terminationRequestedAt: nil,
+            terminationRequestReason: nil
+        )
+        let state = adbTargetState(identity, toolchain: toolchain)
+        let deviceOwned = state == .device
+            && verifyDeviceOwnership(identity, toolchain: toolchain)
+        lastOwnershipClassification = Self.ownershipClassification(
+            isCurrentAppLaunch: false,
+            targetState: state,
+            deviceOwned: deviceOwned,
+            processAge: Date().timeIntervalSince(candidate.startedAt)
+        )
+        lastLifecycleConflictReason = nil
+        appendEvent(
+            stage: currentStage,
+            event: "existing_runtime_adopted",
+            detail: "pid=\(candidate.pid) serial=\(identity.serial) state=\(state.rawValue)"
+        )
+        try saveIdentity(identity)
+        return identity
+    }
+
+    private func matchingAVDProcessCount() throws -> Int {
+        let output = try run(
+            URL(fileURLWithPath: "/bin/ps"),
+            ["-axo", "command="],
+            category: "runtime.discovery.avd_process_count",
+            timeout: 5
+        )
+        return output.split(whereSeparator: \.isNewline).filter { line in
+            let command = String(line)
+            return command.contains("-avd \(Self.avdName)")
+                || command.contains("@\(Self.avdName)")
+                || command.contains("/\(Self.avdName).avd")
+        }.count
+    }
+
+    private func processReferencesPrivateAVD(pid: Int32) -> Bool {
+        let lsof = URL(fileURLWithPath: "/usr/sbin/lsof")
+        guard fileManager.isExecutableFile(atPath: lsof.path) else {
+            return false
+        }
+        let output: String
+        do {
+            output = try run(
+                lsof,
+                ["-a", "-p", "\(pid)", "-Fn"],
+                category: "runtime.discovery.private_avd_files",
+                timeout: 5
+            )
+        } catch {
+            return false
+        }
+        let prefix = avdDirectory.standardizedFileURL
+            .resolvingSymlinksInPath().path + "/"
+        return output.split(whereSeparator: \.isNewline).contains { rawLine in
+            guard rawLine.first == "n" else { return false }
+            let path = String(rawLine.dropFirst())
+            return path == avdDirectory.path || path.hasPrefix(prefix)
+        }
+    }
+
+    private func processBirthIdentity(
+        pid: Int32
+    ) -> (value: String, startedAt: Date)? {
+        var info = proc_bsdinfo()
+        let expectedSize = Int32(MemoryLayout.size(ofValue: info))
+        let actualSize = proc_pidinfo(
+            pid,
+            PROC_PIDTBSDINFO,
+            0,
+            &info,
+            expectedSize
+        )
+        guard actualSize == expectedSize,
+              info.pbi_start_tvsec > 0 else { return nil }
+        let seconds = TimeInterval(info.pbi_start_tvsec)
+            + TimeInterval(info.pbi_start_tvusec) / 1_000_000
+        return (
+            "\(info.pbi_start_tvsec):\(info.pbi_start_tvusec)",
+            Date(timeIntervalSince1970: seconds)
+        )
+    }
+
+    private func adbTargetState(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) -> AndroidADBTargetState {
+        guard let listing = try? run(
+            toolchain.adb,
+            ["devices", "-l"],
+            environment: childEnvironment(for: toolchain),
+            category: "runtime.discovery.adb_devices",
+            timeout: 5
+        ) else { return .unknown }
+        return Self.adbTargetState(in: listing, serial: identity.serial)
+    }
+
+    private func clearStalePrivateAVDLocksIfSafe(
+        toolchain: AndroidToolchain
+    ) throws {
+        guard fileManager.fileExists(atPath: avdDirectory.path) else { return }
+        let entries = try fileManager.contentsOfDirectory(
+            at: avdDirectory,
+            includingPropertiesForKeys: nil,
+            options: []
+        )
+        let locks = entries.filter {
+            $0.lastPathComponent.lowercased().contains("lock")
+        }
+        guard !locks.isEmpty else { return }
+
+        let managedProcessCount = try matchingAVDProcessCount()
+        let recorded = loadIdentity()
+        let recordedProcessLive = recorded.map {
+            verifyProcessOwnership($0, toolchain: toolchain)
+        } ?? false
+        let managedPortsOwned = !(try managedRuntimeProcessCandidates(
+            toolchain: toolchain
+        )).isEmpty
+        guard Self.mayClearStaleAVDLocks(
+            hasManagedAVDProcess: managedProcessCount > 0,
+            hasLiveRecordedProcess: recordedProcessLive,
+            managedPortsOwned: managedPortsOwned
+        ) else {
+            return
+        }
+
+        var cleared: [String] = []
+        for lock in locks {
+            let normalized = lock.standardizedFileURL
+            guard normalized.deletingLastPathComponent()
+                    == avdDirectory.standardizedFileURL else { continue }
+            try fileManager.removeItem(at: normalized)
+            cleared.append(normalized.lastPathComponent)
+        }
+        guard !cleared.isEmpty else { return }
+        lastStaleAVDLocksCleared = cleared.sorted()
+        lastOwnershipClassification = .staleAVDLock
+        appendEvent(
+            stage: currentStage,
+            event: "stale_avd_locks_cleared",
+            detail: cleared.sorted().joined(separator: ",")
+        )
     }
 
     private func loadContinuityRecord() -> AndroidRuntimeContinuityRecord? {
@@ -8155,6 +8803,7 @@ actor AndroidDexBridgeRuntime {
         _ toolchain: AndroidToolchain
     ) async throws -> AndroidRuntimeIdentity {
         let generation = UUID().uuidString
+        var sawPortConflict = false
         for consolePort in Self.candidateConsolePorts {
             try Task.checkCancellation()
             let logStem = "emulator-\(generation)-\(consolePort)"
@@ -8216,20 +8865,80 @@ actor AndroidDexBridgeRuntime {
                 try? stderr.close()
                 throw error
             }
+
+            // Publish ownership immediately after spawn. App termination may
+            // cancel the early-exit observation below; shutdown must already
+            // know the exact PID and process birth identity in that window.
+            emulatorProcess = process
+            emulatorOutputHandles = [stdout, stderr]
+            let processIdentity = processBirthIdentity(
+                pid: process.processIdentifier
+            )
+            let identity = AndroidRuntimeIdentity(
+                schema: Self.manifestSchema,
+                generation: generation,
+                systemBootIdentifier: currentBootIdentifier,
+                sdkRoot: toolchain.sdkRoot,
+                emulatorExecutable: toolchain.emulator,
+                adbExecutable: toolchain.adb,
+                avdName: Self.avdName,
+                avdDirectory: avdDirectory,
+                pid: process.processIdentifier,
+                pidBirthIdentity: processIdentity?.value,
+                consolePort: consolePort,
+                serial: Self.emulatorSerial(consolePort: consolePort),
+                forwards: Self.expectedForwards,
+                launchedAt: processIdentity?.startedAt ?? launchAt,
+                appSessionID: Self.appSessionID,
+                runtimeSessionID: UUID().uuidString,
+                launchOrigin: .currentLaunch,
+                terminationRequestedAt: nil,
+                terminationRequestReason: nil
+            )
+            lastObservedIdentity = identity
+            lastOwnershipClassification = .ownedCurrentLaunch
+            lastLifecycleConflictReason = nil
+            do {
+                try saveIdentity(identity)
+                appendEvent(
+                    stage: .launchingEmulator,
+                    event: "emulator_process_launched",
+                    detail: "pid=\(identity.pid) serial=\(identity.serial)"
+                )
+            } catch {
+                recorder.recordTerminationRequestedByApp(
+                    "runtimeIdentityPersistenceFailed"
+                )
+                process.terminate()
+                for _ in 0..<10 where process.isRunning {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+                if process.isRunning {
+                    _ = Darwin.kill(process.processIdentifier, SIGKILL)
+                }
+                clearRuntimeRecord()
+                throw error
+            }
             for _ in 0..<20 where process.isRunning {
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
             if !process.isRunning {
-                try? stdout.close()
-                try? stderr.close()
+                clearRuntimeRecord()
                 let output = [
                     emulatorLogTail(at: stderrURL),
                     emulatorLogTail(at: stdoutURL)
                 ].compactMap { $0 }.joined(separator: "\n")
                 if Self.isEmulatorPortConflict(output) {
+                    sawPortConflict = true
+                    lastOwnershipClassification = .portConflict
+                    lastLifecycleConflictReason =
+                        "Emulator 无法绑定 console/ADB port \(consolePort)/\(consolePort + 1)"
                     continue
                 }
                 if Self.isEmulatorAVDConflict(output) {
+                    lastOwnershipClassification = .externalRuntimeConflict
+                    lastLifecycleConflictReason =
+                        "Emulator 报告同一 AVD 已被其他进程使用"
                     throw AndroidRuntimeFailureError(
                         record: AndroidRuntimeFailureRecord(
                             occurredAt: Date(),
@@ -8244,25 +8953,17 @@ actor AndroidDexBridgeRuntime {
                         + String(output.suffix(1_000))
                 )
             }
-
-            emulatorProcess = process
-            emulatorOutputHandles = [stdout, stderr]
-            let identity = AndroidRuntimeIdentity(
-                schema: Self.manifestSchema,
-                generation: generation,
-                systemBootIdentifier: currentBootIdentifier,
-                sdkRoot: toolchain.sdkRoot,
-                emulatorExecutable: toolchain.emulator,
-                avdName: Self.avdName,
-                avdDirectory: avdDirectory,
-                pid: process.processIdentifier,
-                consolePort: consolePort,
-                serial: Self.emulatorSerial(consolePort: consolePort),
-                forwards: Self.expectedForwards,
-                launchedAt: launchAt
-            )
-            try saveIdentity(identity)
             return identity
+        }
+        if sawPortConflict {
+            throw AndroidRuntimeFailureError(
+                record: AndroidRuntimeFailureRecord(
+                    occurredAt: Date(),
+                    stage: .launchingEmulator,
+                    category: .portConflict,
+                    message: "Android Emulator console/ADB 端口均被其他进程占用"
+                )
+            )
         }
         throw AppError.spider("没有可用的 Android Emulator console port")
     }
@@ -8294,6 +8995,11 @@ actor AndroidDexBridgeRuntime {
                 category: "adb.server.start",
                 timeout: 15
             )
+            appendEvent(
+                stage: currentStage,
+                event: "selected_sdk_adb_server_ready",
+                detail: "ADB server 已在 Emulator discovery/launch 前确认"
+            )
         } catch {
             throw AndroidRuntimeFailureError(
                 record: AndroidRuntimeFailureRecord(
@@ -8315,6 +9021,7 @@ actor AndroidDexBridgeRuntime {
         var sanitizedDevices: [String] = []
         var sawTargetOffline = false
         var sawUnexpectedEmulatorSerial = false
+        var attemptedOfflineRecovery = false
         var consolePortListening: Bool?
         var adbPortListening: Bool?
         for attempt in 0..<120 {
@@ -8406,6 +9113,27 @@ actor AndroidDexBridgeRuntime {
                     adbPortListening: adbPortListening
                 )
 
+                if targetState == .offline, !attemptedOfflineRecovery {
+                    attemptedOfflineRecovery = true
+                    operationStatus = .starting(
+                        "ADB 正在恢复专用 Emulator 连接",
+                        progress: AndroidRuntimeStartupStage.waitingForADB.progress
+                            ?? 0.18
+                    )
+                    appendEvent(
+                        stage: .waitingForADB,
+                        event: "adb_offline_recovery_requested",
+                        detail: identity.serial
+                    )
+                    _ = try? run(
+                        toolchain.adb,
+                        ["-s", identity.serial, "reconnect"],
+                        environment: childEnvironment(for: toolchain),
+                        category: "adb.wait.reconnect_owned_device",
+                        timeout: 8
+                    )
+                }
+
                 if targetState == .device {
                     guard verifyDeviceOwnership(
                         identity,
@@ -8420,6 +9148,14 @@ actor AndroidDexBridgeRuntime {
                             )
                         )
                     }
+                    lastOwnershipClassification = Self.ownershipClassification(
+                        isCurrentAppLaunch:
+                            identity.launchOrigin == .currentLaunch
+                                && identity.appSessionID == Self.appSessionID,
+                        targetState: .device,
+                        deviceOwned: true,
+                        processAge: Date().timeIntervalSince(identity.launchedAt)
+                    )
                     return
                 }
             }
@@ -8433,6 +9169,14 @@ actor AndroidDexBridgeRuntime {
             ? .offline : targetState
         let deviceOwned = effectiveTargetState == .device
             && verifyDeviceOwnership(identity, toolchain: toolchain)
+        lastOwnershipClassification = Self.ownershipClassification(
+            isCurrentAppLaunch:
+                identity.launchOrigin == .currentLaunch
+                    && identity.appSessionID == Self.appSessionID,
+            targetState: effectiveTargetState,
+            deviceOwned: deviceOwned,
+            processAge: Date().timeIntervalSince(identity.launchedAt)
+        )
         guard let category = Self.waitingForADBFailureCategory(
             processPresent: processPresent,
             processOwned: processOwned,
@@ -8544,6 +9288,8 @@ actor AndroidDexBridgeRuntime {
             message = "专用 Android Emulator 所有权校验失败；已拒绝继续操作"
         case .emulatorRuntimeConflict:
             message = "检测到其他 Emulator 使用了记录端口，未执行任何操作"
+        case .portConflict:
+            message = "Android Emulator 所需端口被其他进程占用"
         case .emulatorProcessMismatch:
             message = "Android Emulator PID 已不再属于本次启动实例"
         default:
@@ -8593,6 +9339,7 @@ actor AndroidDexBridgeRuntime {
     private func appendStaleRecordRecovery(
         _ reason: AndroidRuntimeStaleRecordReason
     ) {
+        lastOwnershipClassification = .staleRuntimeMetadata
         let detail: String
         switch reason {
         case .previousSystemBoot:
@@ -8637,10 +9384,20 @@ actor AndroidDexBridgeRuntime {
                   consolePort: identity.consolePort
               ),
               Self.candidateConsolePorts.contains(identity.consolePort),
+              identity.sdkRoot.standardizedFileURL
+                == toolchain.sdkRoot.standardizedFileURL,
               identity.emulatorExecutable.standardizedFileURL
                 == toolchain.emulator.standardizedFileURL,
+              identity.adbExecutable == nil
+                || identity.adbExecutable?.standardizedFileURL
+                    == toolchain.adb.standardizedFileURL,
               let executablePath = processExecutablePath(pid: identity.pid)
         else { return false }
+
+        if let recordedBirth = identity.pidBirthIdentity {
+            guard processBirthIdentity(pid: identity.pid)?.value
+                    == recordedBirth else { return false }
+        }
 
         let executable = URL(fileURLWithPath: executablePath)
             .standardizedFileURL.resolvingSymlinksInPath()
@@ -8660,6 +9417,46 @@ actor AndroidDexBridgeRuntime {
                 consolePort: identity.consolePort
               ) else { return false }
         return true
+    }
+
+    private func verifyStrictProcessOwnership(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) -> Bool {
+        guard let recordedBirth = identity.pidBirthIdentity,
+              processBirthIdentity(pid: identity.pid)?.value == recordedBirth,
+              verifyProcessOwnership(identity, toolchain: toolchain) else {
+            return false
+        }
+        // A Process created by this actor is direct ownership proof during
+        // the short interval before QEMU opens files below the private AVD.
+        // Adopted processes have no handle and must pass the lsof check.
+        let isCurrentChild = emulatorProcess?.processIdentifier == identity.pid
+            && emulatorProcess?.isRunning == true
+        return isCurrentChild || processReferencesPrivateAVD(pid: identity.pid)
+    }
+
+    private func refreshedIdentityForCurrentSession(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) -> AndroidRuntimeIdentity {
+        var refreshed = identity
+        refreshed.systemBootIdentifier = currentBootIdentifier
+        refreshed.adbExecutable = toolchain.adb
+        refreshed.pidBirthIdentity = processBirthIdentity(
+            pid: identity.pid
+        )?.value
+        let isCurrentChild = emulatorProcess?.processIdentifier == identity.pid
+            && emulatorProcess?.isRunning == true
+        if refreshed.runtimeSessionID == nil {
+            refreshed.runtimeSessionID = UUID().uuidString
+        }
+        refreshed.appSessionID = Self.appSessionID
+        refreshed.launchOrigin = isCurrentChild
+            ? .currentLaunch : .adoptedExisting
+        refreshed.terminationRequestedAt = nil
+        refreshed.terminationRequestReason = nil
+        return refreshed
     }
 
     private func verifyDeviceOwnership(
@@ -8982,6 +9779,12 @@ actor AndroidDexBridgeRuntime {
         case .reuseOwnedRuntime:
             break
         }
+        guard verifyStrictProcessOwnership(identity, toolchain: toolchain)
+        else {
+            lastLifecycleConflictReason =
+                "启动失败清理前未通过 PID 出生标识与私有 AVD 文件校验"
+            return false
+        }
         recordEmulatorTerminationRequest(
             pid: identity.pid,
             reason: "startupFailureCleanup"
@@ -9011,7 +9814,7 @@ actor AndroidDexBridgeRuntime {
             }
             try? await Task.sleep(nanoseconds: 250_000_000)
         }
-        if verifyProcessOwnership(identity, toolchain: toolchain) {
+        if verifyStrictProcessOwnership(identity, toolchain: toolchain) {
             _ = Darwin.kill(identity.pid, SIGTERM)
         }
         for _ in 0..<20 {
@@ -9123,13 +9926,28 @@ actor AndroidDexBridgeRuntime {
             )
             throw error
         }
+        let stdoutReader = AndroidProcessPipeReader(
+            standardOutput.fileHandleForReading
+        )
+        let stderrReader = AndroidProcessPipeReader(
+            standardError.fileHandleForReading
+        )
         if let input, let inputPipe {
             inputPipe.fileHandleForWriting.write(input)
             try? inputPipe.fileHandleForWriting.close()
         }
-        let waitResult = completed.wait(timeout: .now() + timeout)
-        let timedOut = waitResult == .timedOut
-        if timedOut, process.isRunning {
+        let deadline = Date().addingTimeInterval(max(0.1, timeout))
+        var finished = false
+        var cancelled = false
+        while !finished, Date() < deadline {
+            finished = completed.wait(timeout: .now() + 0.1) == .success
+            if !finished, Task.isCancelled {
+                cancelled = true
+                break
+            }
+        }
+        let timedOut = !finished && !cancelled
+        if (timedOut || cancelled), process.isRunning {
             process.terminate()
             if completed.wait(timeout: .now() + 1) == .timedOut,
                process.isRunning {
@@ -9137,12 +9955,13 @@ actor AndroidDexBridgeRuntime {
                 _ = completed.wait(timeout: .now() + 1)
             }
         }
-        let stdoutData = standardOutput.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = standardError.fileHandleForReading.readDataToEndOfFile()
+        let stdoutData = stdoutReader.result()
+        let stderrData = stderrReader.result()
         let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
         let stderr = String(data: stderrData, encoding: .utf8) ?? ""
         let duration = Date().timeIntervalSince(startedAt)
-        let exitCode: Int32 = timedOut ? -1 : process.terminationStatus
+        let exitCode: Int32 = (timedOut || cancelled)
+            ? -1 : process.terminationStatus
         recordCommand(
             timestamp: startedAt,
             category: category,
@@ -9152,6 +9971,9 @@ actor AndroidDexBridgeRuntime {
             duration: duration,
             timedOut: timedOut
         )
+        if cancelled {
+            throw CancellationError()
+        }
         if Self.containsSecurityException(stdout + "\n" + stderr) {
             networkRecoverySecurityException = true
         }
@@ -9265,6 +10087,7 @@ actor AndroidDexBridgeRuntime {
         timedOut: Bool
     ) {
         let isDiagnosticEvidence = category.hasPrefix("diagnostic.")
+            || category.hasPrefix("adb.server.")
             || category.hasPrefix("adb.network.")
             || category.hasPrefix("adb.boot.")
             || category.hasPrefix("adb.bridge.")

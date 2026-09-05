@@ -207,7 +207,10 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
                 self?.finishTerminationAfterShutdown()
             }
             terminationTimeoutTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                // Android shutdown is bounded internally (ADB, TERM, then an
+                // identity-checked final kill). Leave enough time for that
+                // sequence and the ordinary player/history teardown.
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
                 guard !Task.isCancelled else { return }
                 self?.finishTerminationAfterTimeout()
             }

@@ -9155,6 +9155,412 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(launchInvocationCount, 1)
     }
 
+    // MARK: - Android private runtime lifecycle contract
+
+    func testAndroidLifecycle01HealthyExistingRuntimeAdoptsWithoutLaunch()
+        async {
+        let launcher = AndroidEmulatorLauncherMock()
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.discoveryAction(
+                matchingAVDProcessCount: 1,
+                strictlyOwnedCandidateCount: 1
+            ),
+            .adopt
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.ownershipClassification(
+                isCurrentAppLaunch: false,
+                targetState: .device,
+                deviceOwned: true,
+                processAge: 300
+            ),
+            .ownedExistingHealthy
+        )
+        let count = await launcher.launchInvocationCount
+        XCTAssertEqual(count, 0)
+    }
+
+    func testAndroidLifecycle02CurrentChildRediscoveryKeepsOneLaunch()
+        async {
+        let launcher = AndroidEmulatorLauncherMock()
+        await launcher.recordLaunch()
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.ownershipClassification(
+                isCurrentAppLaunch: true,
+                targetState: .missing,
+                deviceOwned: false,
+                processAge: 1
+            ),
+            .ownedCurrentLaunch
+        )
+        let count = await launcher.launchInvocationCount
+        XCTAssertEqual(count, 1)
+    }
+
+    func testAndroidLifecycle03TenCallersAwaitExistingBootWithoutLaunch()
+        async throws {
+        let admission = AndroidRuntimeStartupSingleFlight()
+        let bootGate = NodeReadinessTestGate()
+        let discoveryCount = NodeReadinessTestCounter()
+        let launcher = AndroidEmulatorLauncherMock()
+        let callers = (0..<10).map { _ in
+            Task {
+                try await admission.ensureRuntime {
+                    await discoveryCount.increment()
+                    await bootGate.wait()
+                }
+            }
+        }
+        var observedOneDiscovery = false
+        for _ in 0..<20_000 {
+            if await discoveryCount.value == 1 {
+                observedOneDiscovery = true
+                break
+            }
+            await Task.yield()
+        }
+        XCTAssertTrue(observedOneDiscovery)
+        let launchCount = await launcher.launchInvocationCount
+        XCTAssertEqual(launchCount, 0)
+        await bootGate.open()
+        for caller in callers { try await caller.value }
+        let finalDiscoveryCount = await discoveryCount.value
+        XCTAssertEqual(finalDiscoveryCount, 1)
+    }
+
+    func testAndroidLifecycle04PreviousAppDeviceIsAdopted() async {
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.discoveryAction(
+                matchingAVDProcessCount: 1,
+                strictlyOwnedCandidateCount: 1
+            ),
+            .adopt
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.ownershipClassification(
+                isCurrentAppLaunch: false,
+                targetState: .device,
+                deviceOwned: true,
+                processAge: 600
+            ),
+            .ownedExistingHealthy
+        )
+    }
+
+    func testAndroidLifecycle05OfflineExistingRuntimeRecoversWithoutLaunch()
+        async {
+        let launcher = AndroidEmulatorLauncherMock()
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.ownershipClassification(
+                isCurrentAppLaunch: false,
+                targetState: .offline,
+                deviceOwned: false,
+                processAge: 600
+            ),
+            .ownedExistingOffline
+        )
+        let launchCount = await launcher.launchInvocationCount
+        XCTAssertEqual(launchCount, 0)
+    }
+
+    func testAndroidLifecycle06AliveMissingADBIsNotOwnershipConflict() {
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.ownershipClassification(
+                isCurrentAppLaunch: false,
+                targetState: .missing,
+                deviceOwned: false,
+                processAge: 600
+            ),
+            .ownedExistingADBMissing
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.waitingForADBFailureCategory(
+                processPresent: true,
+                processOwned: true,
+                targetState: .missing,
+                deviceOwned: false
+            ),
+            .adbDeviceMissing
+        )
+    }
+
+    func testAndroidLifecycle07StaleMetadataClearsThenLaunchesOnce()
+        async {
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.runtimeRecordDecision(
+                recordedBootIdentifier: "current",
+                currentBootIdentifier: "current",
+                processPresent: false,
+                processOwned: false,
+                deviceReachable: false,
+                deviceOwned: false
+            ),
+            .clearStaleRecord(.processExited)
+        )
+        let launcher = AndroidEmulatorLauncherMock()
+        await launcher.recordLaunch()
+        let launchCount = await launcher.launchInvocationCount
+        XCTAssertEqual(launchCount, 1)
+    }
+
+    func testAndroidLifecycle08StalePrivateLockClearsThenLaunchesOnce()
+        async {
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.mayClearStaleAVDLocks(
+                hasManagedAVDProcess: false,
+                hasLiveRecordedProcess: false,
+                managedPortsOwned: false
+            )
+        )
+        let launcher = AndroidEmulatorLauncherMock()
+        await launcher.recordLaunch()
+        let launchCount = await launcher.launchInvocationCount
+        XCTAssertEqual(launchCount, 1)
+    }
+
+    func testAndroidLifecycle09ExternalConflictIsRejectedWithoutKill() {
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.discoveryAction(
+                matchingAVDProcessCount: 1,
+                strictlyOwnedCandidateCount: 0
+            ),
+            .rejectExternalConflict
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.shutdownAction(
+                deviceOwned: false,
+                processStrictlyOwned: false,
+                adbAttempted: false,
+                sigtermAttempted: false
+            ),
+            .refuse
+        )
+    }
+
+    func testAndroidLifecycle10NormalQuitUsesGracefulADBShutdown() {
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.shutdownAction(
+                deviceOwned: true,
+                processStrictlyOwned: true,
+                adbAttempted: false,
+                sigtermAttempted: false
+            ),
+            .adbEmuKill
+        )
+    }
+
+    func testAndroidLifecycle11MissingADBUsesOwnedSIGTERM() {
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.shutdownAction(
+                deviceOwned: false,
+                processStrictlyOwned: true,
+                adbAttempted: false,
+                sigtermAttempted: false
+            ),
+            .sigterm
+        )
+    }
+
+    func testAndroidLifecycle12ForceKillRequiresRepeatedPIDIdentityCheck() {
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.shutdownAction(
+                deviceOwned: false,
+                processStrictlyOwned: true,
+                adbAttempted: true,
+                sigtermAttempted: true
+            ),
+            .sigkill
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.shutdownAction(
+                deviceOwned: false,
+                processStrictlyOwned: false,
+                adbAttempted: true,
+                sigtermAttempted: true
+            ),
+            .refuse
+        )
+    }
+
+    func testAndroidLifecycle13TerminationRejectsEveryLateEnsure() async {
+        let admission = AndroidRuntimeStartupSingleFlight()
+        let launcher = AndroidEmulatorLauncherMock()
+        await admission.beginApplicationTermination()
+        let isRejecting = await admission.isRejectingStartup()
+        XCTAssertTrue(isRejecting)
+        for _ in 0..<10 {
+            do {
+                try await admission.ensureRuntime {
+                    await launcher.recordLaunch()
+                }
+                XCTFail("terminating admission must reject startup")
+            } catch is AndroidRuntimeAdmissionError {
+                // Expected.
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+        }
+        let launchCount = await launcher.launchInvocationCount
+        XCTAssertEqual(launchCount, 0)
+    }
+
+    func testAndroidLifecycle14CrashLeftoverIsAdoptedOnNextStart() {
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.discoveryAction(
+                matchingAVDProcessCount: 1,
+                strictlyOwnedCandidateCount: 1
+            ),
+            .adopt
+        )
+    }
+
+    func testAndroidLifecycle15TwoRuntimeInstancesShareOneAdmission()
+        async throws {
+        let processWideAdmission = AndroidRuntimeStartupSingleFlight()
+        let launchGate = NodeReadinessTestGate()
+        let launcher = AndroidEmulatorLauncherMock()
+        let firstRuntimeCallers = (0..<5).map { _ in
+            Task {
+                try await processWideAdmission.ensureRuntime {
+                    await launcher.launch(waitingOn: launchGate)
+                }
+            }
+        }
+        let secondRuntimeCallers = (0..<5).map { _ in
+            Task {
+                try await processWideAdmission.ensureRuntime {
+                    await launcher.launch(waitingOn: launchGate)
+                }
+            }
+        }
+        var sawLaunch = false
+        for _ in 0..<20_000 {
+            if await launcher.launchInvocationCount == 1 {
+                sawLaunch = true
+                break
+            }
+            await Task.yield()
+        }
+        XCTAssertTrue(sawLaunch)
+        var launchCount = await launcher.launchInvocationCount
+        XCTAssertEqual(launchCount, 1)
+        await launchGate.open()
+        for caller in firstRuntimeCallers + secondRuntimeCallers {
+            try await caller.value
+        }
+        launchCount = await launcher.launchInvocationCount
+        XCTAssertLessThanOrEqual(launchCount, 1)
+    }
+
+    func testAndroidRealLifecycleStartAdoptAndStop() async throws {
+        guard ProcessInfo.processInfo.environment[
+            "OKVIDEOMAC_RUN_ANDROID_INTEGRATION"
+        ] == "1" || UserDefaults.standard.bool(
+            forKey: "OKVideoMac.RunAndroidIntegration"
+        ) else {
+            throw XCTSkip("requires explicit real private-AVD integration run")
+        }
+        let support = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                "Library/Application Support/OKVideoMac",
+                isDirectory: true
+            )
+        let sdk = URL(fileURLWithPath: "/Volumes/XcodeDev/AndroidSDK")
+        let firstRuntime = AndroidDexBridgeRuntime(
+            applicationSupportDirectory: support
+        )
+        await firstRuntime.setUserSelectedSDKRoot(sdk)
+        do {
+            let callers = (0..<10).map { _ in
+                Task { try await firstRuntime.start() }
+            }
+            for caller in callers {
+                try await caller.value
+            }
+            let first = await firstRuntime.diagnosticSnapshot()
+            let firstPID = try XCTUnwrap(first.emulatorPID)
+            XCTAssertTrue(first.emulatorProcessRunning)
+            XCTAssertEqual(first.launchOrigin, .currentLaunch)
+            XCTAssertEqual(
+                first.timeline.filter {
+                    $0.event == "emulator_process_launched"
+                }.count,
+                1
+            )
+            XCTAssertEqual(
+                first.emulatorArguments,
+                AndroidDexBridgeRuntime.emulatorLaunchArguments(
+                    consolePort: first.emulatorConsolePort ?? 0
+                )
+            )
+
+            // Simulates a new App/runtime object after a crash left the
+            // private Emulator alive. It must adopt the same PID, not launch.
+            let restartedRuntime = AndroidDexBridgeRuntime(
+                applicationSupportDirectory: support
+            )
+            await restartedRuntime.setUserSelectedSDKRoot(sdk)
+            try await restartedRuntime.start()
+            let adopted = await restartedRuntime.diagnosticSnapshot()
+            XCTAssertEqual(adopted.emulatorPID, firstPID)
+            XCTAssertEqual(adopted.launchOrigin, .adoptedExisting)
+            XCTAssertEqual(
+                adopted.ownershipClassification,
+                .ownedExistingHealthy
+            )
+
+            await restartedRuntime.stop()
+            let stopped = await restartedRuntime.diagnosticSnapshot()
+            XCTAssertFalse(stopped.emulatorProcessRunning)
+            XCTAssertEqual(stopped.shutdownMechanism, .adbEmuKill)
+            XCTAssertNotNil(stopped.shutdownCompletedAt)
+            XCTAssertFalse(stopped.shutdownForced)
+        } catch {
+            await firstRuntime.stop()
+            throw error
+        }
+    }
+
+    func testAndroidRealLifecycleQuitDuringStartupDoesNotOrphan()
+        async throws {
+        guard ProcessInfo.processInfo.environment[
+            "OKVIDEOMAC_RUN_ANDROID_STARTUP_CANCEL_INTEGRATION"
+        ] == "1" || UserDefaults.standard.bool(
+            forKey: "OKVideoMac.RunAndroidStartupCancelIntegration"
+        ) else {
+            throw XCTSkip("requires explicit startup-cancellation integration run")
+        }
+        let support = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                "Library/Application Support/OKVideoMac",
+                isDirectory: true
+            )
+        let runtime = AndroidDexBridgeRuntime(
+            applicationSupportDirectory: support
+        )
+        await runtime.setUserSelectedSDKRoot(
+            URL(fileURLWithPath: "/Volumes/XcodeDev/AndroidSDK")
+        )
+        let startup = Task { try await runtime.start() }
+        var observedPID: Int32?
+        for _ in 0..<240 {
+            let snapshot = await runtime.diagnosticSnapshot()
+            observedPID = snapshot.emulatorPID
+            if observedPID != nil { break }
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        XCTAssertNotNil(observedPID)
+        await runtime.stop()
+        _ = await startup.result
+        let final = await runtime.diagnosticSnapshot()
+        XCTAssertFalse(final.emulatorProcessRunning)
+        XCTAssertNotEqual(
+            final.shutdownMechanism,
+            .refusedOwnershipMismatch
+        )
+        XCTAssertNotNil(final.shutdownCompletedAt)
+    }
+
     func testAndroidEmulatorDiagnosticLogTailIsBoundedAndRedacted() {
         let raw = String(repeating: "prefix\n", count: 100)
             + "ERROR /Users/humphrey/private token=secret-value"
@@ -20172,6 +20578,10 @@ private actor NodeReadinessTestCounter {
 
 private actor AndroidEmulatorLauncherMock {
     private(set) var launchInvocationCount = 0
+
+    func recordLaunch() {
+        launchInvocationCount += 1
+    }
 
     func launch(waitingOn gate: NodeReadinessTestGate) async {
         launchInvocationCount += 1

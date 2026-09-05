@@ -12638,6 +12638,16 @@ final class AppState: ObservableObject {
 
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
+            let androidBridge = self.environment?.androidDexBridge
+            // Close process-wide Android startup admission before yielding to
+            // the rest of shutdown. The actual bounded process teardown can
+            // then run alongside player/history cleanup.
+            await androidBridge?.beginApplicationTermination()
+            let androidShutdownTask = androidBridge.map { bridge in
+                Task {
+                    await bridge.shutdownForApplicationTermination()
+                }
+            }
             await self.finishScheduledHistoryPersistence()
             if self.activePlayback != nil {
                 try? await self.savePlaybackHistory(
@@ -12657,6 +12667,7 @@ final class AppState: ObservableObject {
                 )
             }
             await self.environment?.nodeBundleRuntime.stop(force: true)
+            await androidShutdownTask?.value
             self.pendingPlayback = nil
             self.cloudAuthorizationContext = nil
             self.pendingHistoryWrite = nil

@@ -585,8 +585,8 @@ struct SettingsView: View {
                         systemImage: "info.circle"
                     )
                     Text(
-                        "进入 Java/Dex 站点时会自动准备；设置页按钮仅用于检查和维护。"
-                            + "退出 OKVideoMac 时不会强制关闭，可在此手动停止。"
+                        "Android 兼容环境仅在需要时启动，退出 OKVideoMac 时会自动关闭。"
+                            + "设置页按钮仅用于检查和维护。"
                     )
                     .foregroundColor(.secondary)
                 }
