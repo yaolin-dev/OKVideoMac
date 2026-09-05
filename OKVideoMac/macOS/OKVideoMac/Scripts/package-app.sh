@@ -564,8 +564,12 @@ create_archive() {
 }
 
 create_dmg() {
-  DMG_STAGING="$(mktemp -d "$OKVIDEOMAC_BUILD_ROOT/DMG-Staging.XXXXXX")"
+  # Keep DMG staging outside the repository/File Provider tree. FinderInfo can
+  # be reattached there after the signed App has already passed verification,
+  # which makes the otherwise-valid bundle fail when verified from the DMG.
+  DMG_STAGING="$(mktemp -d "${TMPDIR:-/tmp}/OKVideoMac-DMG-Staging.XXXXXX")"
   cp -R "$APP_DESTINATION" "$DMG_STAGING/OKVideoMac.app"
+  /usr/bin/xattr -cr "$DMG_STAGING/OKVideoMac.app"
   ln -s /Applications "$DMG_STAGING/Applications"
   rm -f "$DMG" "$DMG.sha256"
   hdiutil create \
