@@ -13,6 +13,7 @@ import java.net.InetSocketAddress;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.stream.Collectors;
 
 public class Proxy implements Comparable<Proxy> {
 
@@ -39,8 +40,8 @@ public class Proxy implements Comparable<Proxy> {
 
     public void init() {
         wildcard = getHosts().stream().anyMatch(host -> host.contains("*"));
-        uris = getUrls().stream().map(Uri::parse).filter(this::isValid).toList();
-        proxies = uris.stream().map(this::create).filter(Objects::nonNull).toList();
+        uris = getUrls().stream().map(Uri::parse).filter(this::isValid).collect(Collectors.toList());
+        proxies = uris.stream().map(this::create).filter(Objects::nonNull).collect(Collectors.toList());
     }
 
     public String getName() {
