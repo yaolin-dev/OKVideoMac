@@ -1849,8 +1849,11 @@ enum AndroidRuntimeFailureCategory: String, Codable, Sendable {
     case sdkIncomplete
     case javaRuntimeMissing
     case adbUnavailable
+    case adbDeviceMissing
+    case adbDeviceOffline
     case emulatorLaunchFailed
     case emulatorLaunchTimedOut
+    case emulatorExitedEarly
     case emulatorOwnershipMismatch
     case emulatorRuntimeConflict
     case androidBootTimedOut
@@ -1953,6 +1956,17 @@ struct AndroidRuntimeDiagnosticSnapshot: Codable, Equatable, Sendable {
     let emulatorExists: Bool
     let emulatorExecutable: Bool
     let emulatorVersion: String?
+    let emulatorLaunchAt: Date?
+    let emulatorExitAt: Date?
+    let emulatorLifetime: TimeInterval?
+    let emulatorTerminationStatus: Int32?
+    let emulatorTerminationReason: String?
+    let emulatorTerminationRequestedByApp: Bool
+    let emulatorTerminationRequestReason: String?
+    let emulatorStdoutTail: String?
+    let emulatorStderrTail: String?
+    let emulatorArguments: [String]
+    let emulatorEnvironment: [String: String]
     let avdManagerPath: String?
     let avdManagerExists: Bool
     let avdManagerExecutable: Bool
@@ -1970,6 +1984,10 @@ struct AndroidRuntimeDiagnosticSnapshot: Codable, Equatable, Sendable {
     let systemImageCandidates: [AndroidSystemImageDiagnostic]
     let configuredAVDSystemImageDirectory: String?
     let avdSystemImageMatchesSelection: Bool?
+    let avdConfigSummary: [String: String]
+    let avdHardwareConfigSummary: [String: String]
+    let avdLockFiles: [String]
+    let avdRuntimeFiles: [String: Bool]
     let emulatorPID: Int32?
     let emulatorSerial: String?
     let emulatorProcessRunning: Bool
@@ -2027,12 +2045,17 @@ struct AndroidRuntimeFailureError: LocalizedError, Sendable {
             return "创建专用 Android 环境需要 Java Runtime。请安装 JDK，或安装包含 JBR 的 Android Studio。"
         case .adbUnavailable:
             return "ADB 无法使用，无法连接专用 Android Emulator。"
-        case .emulatorLaunchFailed, .emulatorLaunchTimedOut, .runtimeExited:
+        case .adbDeviceMissing:
+            return "Android Emulator 仍在运行，但 ADB 未发现目标设备。"
+        case .adbDeviceOffline:
+            return "ADB 已发现专用 Android Emulator，但设备一直处于 offline 状态。"
+        case .emulatorLaunchFailed, .emulatorLaunchTimedOut,
+             .emulatorExitedEarly, .runtimeExited:
             return "Android Emulator 未能正常启动，请导出诊断后重试。"
         case .emulatorOwnershipMismatch:
             return "无法安全确认专用 Android Emulator，已停止操作其他设备。"
         case .emulatorRuntimeConflict:
-            return "检测到其他 Emulator 使用了记录端口，未执行任何操作。"
+            return "检测到其他 Emulator 正在使用专用 AVD 或记录端口，未执行任何操作。"
         case .androidBootTimedOut:
             return "Android 系统启动超时，兼容环境没有在预期时间内完成启动。"
         case .emulatorNetworkUnavailable:
@@ -4585,6 +4608,103 @@ struct AndroidRuntimeIdentity: Codable, Equatable, Sendable {
     let launchedAt: Date
 }
 
+enum AndroidADBTargetState: String, Equatable, Sendable {
+    case missing
+    case device
+    case offline
+    case unauthorized
+    case unknown
+}
+
+struct AndroidEmulatorProcessSnapshot: Equatable, Sendable {
+    let pid: Int32?
+    let launchAt: Date
+    let exitAt: Date?
+    let lifetime: TimeInterval
+    let terminationStatus: Int32?
+    let terminationReason: String?
+    let terminationRequestedByApp: Bool
+    let terminationRequestReason: String?
+    let stdoutURL: URL
+    let stderrURL: URL
+    let arguments: [String]
+    let environment: [String: String]
+}
+
+final class AndroidEmulatorProcessRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pid: Int32?
+    private let launchAt: Date
+    private var exitAt: Date?
+    private var terminationStatus: Int32?
+    private var terminationReason: String?
+    private var terminationRequestReason: String?
+    private let stdoutURL: URL
+    private let stderrURL: URL
+    private let arguments: [String]
+    private let environment: [String: String]
+
+    init(
+        launchAt: Date,
+        stdoutURL: URL,
+        stderrURL: URL,
+        arguments: [String],
+        environment: [String: String]
+    ) {
+        self.launchAt = launchAt
+        self.stdoutURL = stdoutURL
+        self.stderrURL = stderrURL
+        self.arguments = arguments
+        self.environment = environment
+    }
+
+    func processDidLaunch(pid: Int32) {
+        lock.lock()
+        self.pid = pid
+        lock.unlock()
+    }
+
+    func processDidTerminate(
+        pid: Int32,
+        status: Int32,
+        reason: String,
+        at date: Date = Date()
+    ) {
+        lock.lock()
+        self.pid = pid
+        exitAt = date
+        terminationStatus = status
+        terminationReason = reason
+        lock.unlock()
+    }
+
+    func recordTerminationRequestedByApp(_ reason: String) {
+        lock.lock()
+        terminationRequestReason = reason
+        lock.unlock()
+    }
+
+    func snapshot(at date: Date = Date()) -> AndroidEmulatorProcessSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        let end = exitAt ?? date
+        return AndroidEmulatorProcessSnapshot(
+            pid: pid,
+            launchAt: launchAt,
+            exitAt: exitAt,
+            lifetime: max(0, end.timeIntervalSince(launchAt)),
+            terminationStatus: terminationStatus,
+            terminationReason: terminationReason,
+            terminationRequestedByApp: terminationRequestReason != nil,
+            terminationRequestReason: terminationRequestReason,
+            stdoutURL: stdoutURL,
+            stderrURL: stderrURL,
+            arguments: arguments,
+            environment: environment
+        )
+    }
+}
+
 enum AndroidRuntimeProcessIdentityState: Equatable, Sendable {
     case owned
     case exited
@@ -4786,7 +4906,8 @@ actor AndroidDexBridgeRuntime {
     private let currentBootIdentifier: String
     private var userSelectedSDKRoot: String?
     private var emulatorProcess: Process?
-    private var emulatorLogHandle: FileHandle?
+    private var emulatorOutputHandles: [FileHandle] = []
+    private var emulatorProcessRecorder: AndroidEmulatorProcessRecorder?
     private var ready = false
     private var acceptsNewerBridge = false
     private var managedDisplayConfigured = false
@@ -5323,8 +5444,6 @@ actor AndroidDexBridgeRuntime {
         } else if lowercased.contains("其他 emulator")
                     || lowercased.contains("记录端口") {
             category = .emulatorRuntimeConflict
-        } else if lowercased.contains("所有权") || lowercased.contains("身份") {
-            category = .emulatorOwnershipMismatch
         } else {
             switch failedStage {
             case .locatingSDK, .preparingAVD:
@@ -5401,7 +5520,7 @@ actor AndroidDexBridgeRuntime {
             return .runtimeExited
         }
         if !processOwned {
-            return .emulatorOwnershipMismatch
+            return .emulatorRuntimeConflict
         }
         if deviceRequired && !deviceReachable {
             return .adbUnavailable
@@ -5410,6 +5529,30 @@ actor AndroidDexBridgeRuntime {
             return .emulatorOwnershipMismatch
         }
         return nil
+    }
+
+    static func waitingForADBFailureCategory(
+        processPresent: Bool,
+        processOwned: Bool,
+        targetState: AndroidADBTargetState,
+        deviceOwned: Bool
+    ) -> AndroidRuntimeFailureCategory? {
+        if !processPresent {
+            return .emulatorExitedEarly
+        }
+        if !processOwned {
+            return .emulatorRuntimeConflict
+        }
+        switch targetState {
+        case .missing:
+            return .adbDeviceMissing
+        case .offline:
+            return .adbDeviceOffline
+        case .unauthorized, .unknown:
+            return .adbUnavailable
+        case .device:
+            return deviceOwned ? nil : .emulatorOwnershipMismatch
+        }
     }
 
     static func processIdentityState(
@@ -5678,6 +5821,12 @@ actor AndroidDexBridgeRuntime {
                     devices,
                     ownedSerial: identity?.serial
                 )
+                if let serial = identity?.serial {
+                    deviceState = Self.adbTargetState(
+                        in: devices,
+                        serial: serial
+                    ).rawValue
+                }
             }
         }
 
@@ -5686,12 +5835,15 @@ actor AndroidDexBridgeRuntime {
                 identity,
                 toolchain: toolchain
             )
-            deviceState = try? run(
+            if let observedState = try? run(
                 toolchain.adb,
                 ["-s", identity.serial, "get-state"],
                 category: "diagnostic.adb.get_state",
                 timeout: 5
-            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            ).trimmingCharacters(in: .whitespacesAndNewlines),
+               !observedState.isEmpty {
+                deviceState = observedState
+            }
             if verifyOwnership(identity, toolchain: toolchain) {
                 if let boot = try? runVerifiedADB(
                     identity,
@@ -5795,6 +5947,36 @@ actor AndroidDexBridgeRuntime {
                 AndroidManagedAVDConfiguration.matches($0, contents: contents)
             } ?? false
         }
+        let hardwareConfigurationURL = avdDirectory.appendingPathComponent(
+            "hardware-qemu.ini"
+        )
+        let hardwareConfigurationContents = try? String(
+            contentsOf: hardwareConfigurationURL,
+            encoding: .utf8
+        )
+        let avdEntries = (try? fileManager.contentsOfDirectory(
+            at: avdDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        let avdLockFiles = avdEntries
+            .map(\.lastPathComponent)
+            .filter { $0.lowercased().contains("lock") }
+            .sorted()
+        let avdRuntimeFiles = Dictionary(uniqueKeysWithValues: [
+            "config.ini",
+            "hardware-qemu.ini",
+            "userdata-qemu.img",
+            "cache.img",
+            "snapshots"
+        ].map { name in
+            (
+                name,
+                fileManager.fileExists(
+                    atPath: avdDirectory.appendingPathComponent(name).path
+                )
+            )
+        })
         let apk = try? bridgeAPK()
         let apkHash = apk.flatMap(Self.sha256Hex)
         let configExists = fileManager.fileExists(
@@ -5812,6 +5994,7 @@ actor AndroidDexBridgeRuntime {
         } else {
             runtimeState = "stopped"
         }
+        let emulatorSnapshot = emulatorProcessRecorder?.snapshot()
         return AndroidRuntimeDiagnosticSnapshot(
             runtimeState: runtimeState,
             startupStage: currentStage,
@@ -5838,6 +6021,23 @@ actor AndroidDexBridgeRuntime {
                 fileManager.isExecutableFile(atPath: $0.emulator.path)
             } ?? false,
             emulatorVersion: emulatorVersion.map(Self.firstDiagnosticLine),
+            emulatorLaunchAt: emulatorSnapshot?.launchAt,
+            emulatorExitAt: emulatorSnapshot?.exitAt,
+            emulatorLifetime: emulatorSnapshot?.lifetime,
+            emulatorTerminationStatus: emulatorSnapshot?.terminationStatus,
+            emulatorTerminationReason: emulatorSnapshot?.terminationReason,
+            emulatorTerminationRequestedByApp: emulatorSnapshot?
+                .terminationRequestedByApp ?? false,
+            emulatorTerminationRequestReason: emulatorSnapshot?
+                .terminationRequestReason,
+            emulatorStdoutTail: emulatorSnapshot.flatMap {
+                emulatorLogTail(at: $0.stdoutURL)
+            },
+            emulatorStderrTail: emulatorSnapshot.flatMap {
+                emulatorLogTail(at: $0.stderrURL)
+            },
+            emulatorArguments: emulatorSnapshot?.arguments ?? [],
+            emulatorEnvironment: emulatorSnapshot?.environment ?? [:],
             avdManagerPath: avdManagerCandidate.map { _ in
                 "<sdk-root>/cmdline-tools/<version>/bin/avdmanager"
             },
@@ -5863,6 +6063,16 @@ actor AndroidDexBridgeRuntime {
             systemImageCandidates: imageDiagnostics,
             configuredAVDSystemImageDirectory: configuredImageDirectory,
             avdSystemImageMatchesSelection: imageMatchesConfiguration,
+            avdConfigSummary: diagnosticAVDConfiguration(
+                configurationContents,
+                toolchain: toolchain
+            ),
+            avdHardwareConfigSummary: diagnosticAVDConfiguration(
+                hardwareConfigurationContents,
+                toolchain: toolchain
+            ),
+            avdLockFiles: avdLockFiles,
+            avdRuntimeFiles: avdRuntimeFiles,
             emulatorPID: identity?.pid,
             emulatorSerial: identity?.serial,
             emulatorProcessRunning: processRunning,
@@ -6056,6 +6266,10 @@ actor AndroidDexBridgeRuntime {
             return
         case .reuseOwnedRuntime:
             if !observation.deviceOwned {
+                recordEmulatorTerminationRequest(
+                    pid: identity.pid,
+                    reason: "userRequestedStop"
+                )
                 _ = Darwin.kill(identity.pid, SIGTERM)
                 for _ in 0..<20 {
                     if processExecutablePath(pid: identity.pid) == nil {
@@ -6076,6 +6290,10 @@ actor AndroidDexBridgeRuntime {
             }
         }
         do {
+            recordEmulatorTerminationRequest(
+                pid: identity.pid,
+                reason: "userRequestedStop"
+            )
             try removeOwnedPortForwards(identity, toolchain: toolchain)
             _ = try runVerifiedADB(
                 identity,
@@ -6332,6 +6550,18 @@ actor AndroidDexBridgeRuntime {
                 transition(to: .preparingAVD)
                 try ensureManagedAVD(toolchain)
                 transition(to: .launchingEmulator)
+                guard !runtimeProcessReferencesAVD(
+                    named: Self.avdName
+                ) else {
+                    throw AndroidRuntimeFailureError(
+                        record: AndroidRuntimeFailureRecord(
+                            occurredAt: Date(),
+                            stage: .launchingEmulator,
+                            category: .emulatorRuntimeConflict,
+                            message: "检测到另一个进程正在使用 OKVideoMac 专用 AVD，未重复启动"
+                        )
+                    )
+                }
                 identity = try await launchManagedEmulator(toolchain)
                 activeIdentity = identity
                 activeToolchain = toolchain
@@ -7363,6 +7593,13 @@ actor AndroidDexBridgeRuntime {
         return mentionsPort && mentionsConflict
     }
 
+    static func isEmulatorAVDConflict(_ output: String) -> Bool {
+        let text = output.lowercased()
+        return text.contains("running multiple emulators with the same avd")
+            || text.contains("another emulator instance is running")
+            || text.contains("avd is already running")
+    }
+
     static func ownershipAllowsMutation(
         processOwned: Bool,
         deviceOwned: Bool
@@ -7471,6 +7708,108 @@ actor AndroidDexBridgeRuntime {
         environment.removeValue(forKey: "ANDROID_SDK_ROOT")
         environment["ANDROID_AVD_HOME"] = avdHome.path
         return environment
+    }
+
+    private func diagnosticEmulatorEnvironment(
+        _ environment: [String: String],
+        toolchain: AndroidToolchain
+    ) -> [String: String] {
+        let keys = [
+            "ANDROID_HOME",
+            "ANDROID_SDK_ROOT",
+            "ANDROID_AVD_HOME",
+            "ANDROID_SDK_HOME",
+            "ANDROID_EMULATOR_HOME",
+            "ANDROID_USER_HOME",
+            "ADB_SERVER_SOCKET",
+            "HOME",
+            "TMPDIR"
+        ]
+        return Dictionary(uniqueKeysWithValues: keys.map { key in
+            let raw = environment[key] ?? "<unset>"
+            return (
+                key,
+                sanitizedEmulatorText(raw, toolchain: toolchain)
+            )
+        })
+    }
+
+    private func diagnosticAVDConfiguration(
+        _ contents: String?,
+        toolchain: AndroidToolchain?
+    ) -> [String: String] {
+        guard let contents else { return [:] }
+        let keys = [
+            "avd.ini.displayname",
+            "disk.cachePartition",
+            "disk.cachePartition.path",
+            "disk.dataPartition.path",
+            "disk.dataPartition.size",
+            "fastboot.forceColdBoot",
+            "fastboot.forceFastBoot",
+            "hw.cpu.arch",
+            "hw.gpu.enabled",
+            "hw.gpu.mode",
+            "hw.ramSize",
+            "image.sysdir.1",
+            "snapshot.present",
+            "tag.id",
+            "target"
+        ]
+        return Dictionary(uniqueKeysWithValues: keys.compactMap { key in
+            guard let value = AndroidManagedAVDConfiguration.value(
+                for: key,
+                in: contents
+            ) else { return nil }
+            return (
+                key,
+                sanitizedEmulatorText(value, toolchain: toolchain)
+            )
+        })
+    }
+
+    private func emulatorLogTail(at url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]),
+              !data.isEmpty else { return nil }
+        let raw = Self.diagnosticLogTail(from: data)
+        guard !raw.isEmpty else { return nil }
+        return sanitizedEmulatorText(raw, toolchain: lastObservedToolchain)
+    }
+
+    static func diagnosticLogTail(
+        from data: Data,
+        maximumBytes: Int = 16_384,
+        maximumCharacters: Int = 4_000
+    ) -> String {
+        let raw = String(
+            decoding: data.suffix(maximumBytes),
+            as: UTF8.self
+        )
+        let sanitized = LogRedactor.text(raw)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(sanitized.suffix(maximumCharacters))
+    }
+
+    private func sanitizedEmulatorText(
+        _ text: String,
+        toolchain: AndroidToolchain?
+    ) -> String {
+        var safe = LogRedactor.text(text)
+        if let toolchain {
+            safe = safe.replacingOccurrences(
+                of: toolchain.sdkRoot.path,
+                with: "<sdk-root>"
+            )
+        }
+        safe = safe.replacingOccurrences(
+            of: applicationSupportDirectory.path,
+            with: "<app-support>"
+        )
+        safe = safe.replacingOccurrences(
+            of: homeDirectory.path,
+            with: "<HOME>"
+        )
+        return safe
     }
 
     private func backupManagedAVDForRenderingUpgrade() throws {
@@ -7673,14 +8012,20 @@ actor AndroidDexBridgeRuntime {
         let generation = UUID().uuidString
         for consolePort in Self.candidateConsolePorts {
             try Task.checkCancellation()
-            let logURL = runtimeDirectory.appendingPathComponent(
-                "emulator-\(generation)-\(consolePort).log"
+            let logStem = "emulator-\(generation)-\(consolePort)"
+            let stdoutURL = runtimeDirectory.appendingPathComponent(
+                "\(logStem).stdout.log"
             )
-            _ = fileManager.createFile(atPath: logURL.path, contents: nil)
-            let log = try FileHandle(forWritingTo: logURL)
+            let stderrURL = runtimeDirectory.appendingPathComponent(
+                "\(logStem).stderr.log"
+            )
+            _ = fileManager.createFile(atPath: stdoutURL.path, contents: nil)
+            _ = fileManager.createFile(atPath: stderrURL.path, contents: nil)
+            let stdout = try FileHandle(forWritingTo: stdoutURL)
+            let stderr = try FileHandle(forWritingTo: stderrURL)
             let process = Process()
             process.executableURL = toolchain.emulator
-            process.arguments = [
+            let arguments = [
                 "-avd", Self.avdName,
                 "-port", "\(consolePort)",
                 "-no-window",
@@ -7691,25 +8036,71 @@ actor AndroidDexBridgeRuntime {
                 "-gpu", "host",
                 "-accel", "on"
             ]
-            process.environment = childEnvironment(for: toolchain)
-            process.standardOutput = log
-            process.standardError = log
+            let environment = childEnvironment(for: toolchain)
+            let launchAt = Date()
+            let recorder = AndroidEmulatorProcessRecorder(
+                launchAt: launchAt,
+                stdoutURL: stdoutURL,
+                stderrURL: stderrURL,
+                arguments: arguments.map {
+                    sanitizedEmulatorText($0, toolchain: toolchain)
+                },
+                environment: diagnosticEmulatorEnvironment(
+                    environment,
+                    toolchain: toolchain
+                )
+            )
+            emulatorProcessRecorder = recorder
+            process.arguments = arguments
+            process.environment = environment
+            process.standardOutput = stdout
+            process.standardError = stderr
+            process.terminationHandler = { terminatedProcess in
+                let reason: String
+                switch terminatedProcess.terminationReason {
+                case .exit:
+                    reason = "exit"
+                case .uncaughtSignal:
+                    reason = "uncaughtSignal"
+                @unknown default:
+                    reason = "unknown"
+                }
+                recorder.processDidTerminate(
+                    pid: terminatedProcess.processIdentifier,
+                    status: terminatedProcess.terminationStatus,
+                    reason: reason
+                )
+            }
             do {
                 try process.run()
+                recorder.processDidLaunch(pid: process.processIdentifier)
             } catch {
-                try? log.close()
+                try? stdout.close()
+                try? stderr.close()
                 throw error
             }
             for _ in 0..<20 where process.isRunning {
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
             if !process.isRunning {
-                try? log.close()
-                let output = (
-                    try? String(contentsOf: logURL, encoding: .utf8)
-                ) ?? ""
+                try? stdout.close()
+                try? stderr.close()
+                let output = [
+                    emulatorLogTail(at: stderrURL),
+                    emulatorLogTail(at: stdoutURL)
+                ].compactMap { $0 }.joined(separator: "\n")
                 if Self.isEmulatorPortConflict(output) {
                     continue
+                }
+                if Self.isEmulatorAVDConflict(output) {
+                    throw AndroidRuntimeFailureError(
+                        record: AndroidRuntimeFailureRecord(
+                            occurredAt: Date(),
+                            stage: .launchingEmulator,
+                            category: .emulatorRuntimeConflict,
+                            message: "Android Emulator 拒绝重复启动同一个专用 AVD"
+                        )
+                    )
                 }
                 throw AppError.spider(
                     "Android Emulator 启动失败："
@@ -7718,7 +8109,7 @@ actor AndroidDexBridgeRuntime {
             }
 
             emulatorProcess = process
-            emulatorLogHandle = log
+            emulatorOutputHandles = [stdout, stderr]
             let identity = AndroidRuntimeIdentity(
                 schema: Self.manifestSchema,
                 generation: generation,
@@ -7731,7 +8122,7 @@ actor AndroidDexBridgeRuntime {
                 consolePort: consolePort,
                 serial: "emulator-\(consolePort)",
                 forwards: Self.expectedForwards,
-                launchedAt: Date()
+                launchedAt: launchAt
             )
             try saveIdentity(identity)
             return identity
@@ -7745,6 +8136,16 @@ actor AndroidDexBridgeRuntime {
     ) async throws {
         for _ in 0..<120 {
             try Task.checkCancellation()
+            guard processExecutablePath(pid: identity.pid) != nil else {
+                throw AndroidRuntimeFailureError(
+                    record: AndroidRuntimeFailureRecord(
+                        occurredAt: Date(),
+                        stage: .waitingForADB,
+                        category: .emulatorExitedEarly,
+                        message: "Android Emulator 在接入 ADB 前已退出"
+                    )
+                )
+            }
             if try validateManagedRuntime(
                 identity,
                 toolchain: toolchain,
@@ -7754,7 +8155,70 @@ actor AndroidDexBridgeRuntime {
             }
             try await Task.sleep(nanoseconds: 500_000_000)
         }
-        throw AppError.spider("等待专用 Android Emulator 设备身份超时")
+        let listing = (try? run(
+            toolchain.adb,
+            ["devices", "-l"],
+            category: "adb.wait.devices",
+            timeout: 5
+        )) ?? ""
+        let state = Self.adbTargetState(
+            in: listing,
+            serial: identity.serial
+        )
+        let processPresent = processExecutablePath(pid: identity.pid) != nil
+        let processOwned = processPresent
+            && verifyProcessOwnership(identity, toolchain: toolchain)
+        let deviceOwned = state == .device
+            && verifyDeviceOwnership(identity, toolchain: toolchain)
+        guard let category = Self.waitingForADBFailureCategory(
+            processPresent: processPresent,
+            processOwned: processOwned,
+            targetState: state,
+            deviceOwned: deviceOwned
+        ) else { return }
+        let message: String
+        switch category {
+        case .emulatorExitedEarly:
+            message = "Android Emulator 在接入 ADB 前已退出"
+        case .emulatorRuntimeConflict:
+            message = "Android Emulator PID 已不属于本次启动的专用实例"
+        case .adbDeviceMissing:
+            message = "Android Emulator 进程仍在运行，但 ADB 未在限定时间内发现目标设备"
+        case .adbDeviceOffline:
+            message = "ADB 已发现专用 Android Emulator，但设备一直处于 offline 状态"
+        case .emulatorOwnershipMismatch:
+            message = "ADB 设备已连接，但 AVD 名称与专用运行记录不匹配"
+        case .adbUnavailable:
+            message = "ADB 目标设备状态异常（\(state.rawValue)）"
+        default:
+            message = "Android Emulator 接入 ADB 失败"
+        }
+        throw AndroidRuntimeFailureError(
+            record: AndroidRuntimeFailureRecord(
+                occurredAt: Date(),
+                stage: .waitingForADB,
+                category: category,
+                message: message
+            )
+        )
+    }
+
+    static func adbTargetState(
+        in listing: String,
+        serial: String
+    ) -> AndroidADBTargetState {
+        for rawLine in listing.split(whereSeparator: \.isNewline) {
+            let fields = rawLine.split(whereSeparator: \.isWhitespace)
+            guard fields.count >= 2,
+                  String(fields[0]) == serial else { continue }
+            switch String(fields[1]).lowercased() {
+            case "device": return .device
+            case "offline": return .offline
+            case "unauthorized": return .unauthorized
+            default: return .unknown
+            }
+        }
+        return .missing
     }
 
     @discardableResult
@@ -7773,10 +8237,18 @@ actor AndroidDexBridgeRuntime {
             category = deviceRequired && !observation.deviceReachable
                 ? .adbUnavailable : nil
         case let .clearStaleRecord(reason):
-            category = reason == .processExited
-                ? .runtimeExited : .emulatorOwnershipMismatch
+            switch reason {
+            case .processExited:
+                category = currentStage == .waitingForADB
+                    ? .emulatorExitedEarly : .runtimeExited
+            case .previousSystemBoot:
+                category = .runtimeExited
+            case .pidReused:
+                category = .emulatorRuntimeConflict
+            }
         case .rejectConflictingRuntime:
-            category = .emulatorRuntimeConflict
+            category = observation.deviceReachable && !observation.deviceOwned
+                ? .emulatorOwnershipMismatch : .emulatorRuntimeConflict
         }
         guard let category else {
             return observation.deviceOwned
@@ -7784,10 +8256,16 @@ actor AndroidDexBridgeRuntime {
 
         let message: String
         switch category {
+        case .emulatorExitedEarly:
+            message = "Android Emulator 在接入 ADB 前已退出"
         case .runtimeExited:
             message = "专用 Android Emulator 进程已退出"
         case .adbUnavailable:
             message = "专用 Android Emulator 设备已断开"
+        case .adbDeviceMissing:
+            message = "Android Emulator 进程仍在运行，但 ADB 未发现目标设备"
+        case .adbDeviceOffline:
+            message = "ADB 目标设备处于 offline 状态"
         case .emulatorOwnershipMismatch:
             message = "专用 Android Emulator 所有权校验失败；已拒绝继续操作"
         case .emulatorRuntimeConflict:
@@ -8150,6 +8628,10 @@ actor AndroidDexBridgeRuntime {
         case .reuseOwnedRuntime:
             break
         }
+        recordEmulatorTerminationRequest(
+            pid: identity.pid,
+            reason: "startupFailureCleanup"
+        )
         if !observation.deviceOwned {
             _ = Darwin.kill(identity.pid, SIGTERM)
             for _ in 0..<20 {
@@ -8188,6 +8670,15 @@ actor AndroidDexBridgeRuntime {
         return false
     }
 
+    private func recordEmulatorTerminationRequest(
+        pid: Int32,
+        reason: String
+    ) {
+        guard let recorder = emulatorProcessRecorder,
+              recorder.snapshot().pid == pid else { return }
+        recorder.recordTerminationRequestedByApp(reason)
+    }
+
     private func loadIdentity() -> AndroidRuntimeIdentity? {
         guard let data = try? Data(contentsOf: manifestURL),
               let identity = try? JSONDecoder().decode(
@@ -8217,8 +8708,10 @@ actor AndroidDexBridgeRuntime {
     private func clearRuntimeRecord() {
         actionSurfaceLease = nil
         managedDisplayConfigured = false
-        try? emulatorLogHandle?.close()
-        emulatorLogHandle = nil
+        for handle in emulatorOutputHandles {
+            try? handle.close()
+        }
+        emulatorOutputHandles = []
         emulatorProcess = nil
         if fileManager.fileExists(atPath: manifestURL.path) {
             try? fileManager.removeItem(at: manifestURL)
@@ -8420,6 +8913,7 @@ actor AndroidDexBridgeRuntime {
             || category.hasPrefix("adb.boot.")
             || category.hasPrefix("adb.bridge.")
             || category.hasPrefix("adb.forward.")
+            || category.hasPrefix("adb.wait.")
         guard isDiagnosticEvidence else { return }
         let safeStdout = sanitizedCommandOutput(stdout, category: category)
         let safeStderr = sanitizedCommandOutput(stderr, category: category)
@@ -8466,7 +8960,8 @@ actor AndroidDexBridgeRuntime {
         _ output: String,
         category: String
     ) -> String {
-        if category == "diagnostic.adb.devices" {
+        if category == "diagnostic.adb.devices"
+            || category == "adb.wait.devices" {
             return Self.sanitizedADBDevices(
                 output,
                 ownedSerial: lastObservedIdentity?.serial

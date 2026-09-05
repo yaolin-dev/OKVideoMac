@@ -8938,7 +8938,7 @@ final class OKVideoMacTests: XCTestCase {
                 deviceReachable: true,
                 deviceOwned: true
             ),
-            .emulatorOwnershipMismatch
+            .emulatorRuntimeConflict
         )
         XCTAssertEqual(
             AndroidDexBridgeRuntime.managedRuntimeFailureCategory(
@@ -8958,6 +8958,152 @@ final class OKVideoMacTests: XCTestCase {
                 deviceReachable: false,
                 deviceOwned: false
             )
+        )
+    }
+
+    func testAndroidADBTargetStateDistinguishesMissingOfflineAndDevice() {
+        let listing = """
+        List of devices attached
+        emulator-5554 offline transport_id:1
+        emulator-5556 device product:sdk model:sdk
+        emulator-5558 unauthorized transport_id:3
+        """
+
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.adbTargetState(
+                in: listing,
+                serial: "emulator-5552"
+            ),
+            .missing
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.adbTargetState(
+                in: listing,
+                serial: "emulator-5554"
+            ),
+            .offline
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.adbTargetState(
+                in: listing,
+                serial: "emulator-5556"
+            ),
+            .device
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.adbTargetState(
+                in: listing,
+                serial: "emulator-5558"
+            ),
+            .unauthorized
+        )
+    }
+
+    func testAndroidWaitingForADBFailureStateMachineIsPrecise() {
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.waitingForADBFailureCategory(
+                processPresent: false,
+                processOwned: false,
+                targetState: .missing,
+                deviceOwned: false
+            ),
+            .emulatorExitedEarly
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.waitingForADBFailureCategory(
+                processPresent: true,
+                processOwned: true,
+                targetState: .missing,
+                deviceOwned: false
+            ),
+            .adbDeviceMissing
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.waitingForADBFailureCategory(
+                processPresent: true,
+                processOwned: true,
+                targetState: .offline,
+                deviceOwned: false
+            ),
+            .adbDeviceOffline
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.waitingForADBFailureCategory(
+                processPresent: true,
+                processOwned: true,
+                targetState: .device,
+                deviceOwned: false
+            ),
+            .emulatorOwnershipMismatch
+        )
+        XCTAssertNil(
+            AndroidDexBridgeRuntime.waitingForADBFailureCategory(
+                processPresent: true,
+                processOwned: true,
+                targetState: .device,
+                deviceOwned: true
+            )
+        )
+    }
+
+    func testAndroidEmulatorAVDConflictRecognizesActualFatalMessage() {
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.isEmulatorAVDConflict(
+                "FATAL | Running multiple emulators with the same AVD is an experimental feature."
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.isEmulatorAVDConflict(
+                "INFO | Android emulator version 37.1.11.0"
+            )
+        )
+    }
+
+    func testAndroidEmulatorDiagnosticLogTailIsBoundedAndRedacted() {
+        let raw = String(repeating: "prefix\n", count: 100)
+            + "ERROR /Users/humphrey/private token=secret-value"
+        let tail = AndroidDexBridgeRuntime.diagnosticLogTail(
+            from: Data(raw.utf8),
+            maximumBytes: 256,
+            maximumCharacters: 120
+        )
+
+        XCTAssertLessThanOrEqual(tail.count, 120)
+        XCTAssertTrue(tail.contains("<HOME>"))
+        XCTAssertTrue(tail.contains("token=<redacted>"))
+        XCTAssertFalse(tail.contains("humphrey"))
+        XCTAssertFalse(tail.contains("secret-value"))
+    }
+
+    func testAndroidEmulatorProcessRecorderAttributesAppTermination() {
+        let launch = Date(timeIntervalSince1970: 100)
+        let recorder = AndroidEmulatorProcessRecorder(
+            launchAt: launch,
+            stdoutURL: URL(fileURLWithPath: "/tmp/stdout"),
+            stderrURL: URL(fileURLWithPath: "/tmp/stderr"),
+            arguments: ["-avd", "OKVideoMac_Runtime"],
+            environment: ["ANDROID_AVD_HOME": "<app-support>/AndroidRuntime/avd"]
+        )
+        recorder.processDidLaunch(pid: 1_797)
+        recorder.recordTerminationRequestedByApp("startupFailureCleanup")
+        recorder.processDidTerminate(
+            pid: 1_797,
+            status: 15,
+            reason: "uncaughtSignal",
+            at: Date(timeIntervalSince1970: 164)
+        )
+        let snapshot = recorder.snapshot(
+            at: Date(timeIntervalSince1970: 200)
+        )
+
+        XCTAssertEqual(snapshot.pid, 1_797)
+        XCTAssertEqual(snapshot.lifetime, 64)
+        XCTAssertEqual(snapshot.terminationStatus, 15)
+        XCTAssertEqual(snapshot.terminationReason, "uncaughtSignal")
+        XCTAssertTrue(snapshot.terminationRequestedByApp)
+        XCTAssertEqual(
+            snapshot.terminationRequestReason,
+            "startupFailureCleanup"
         )
     }
 
