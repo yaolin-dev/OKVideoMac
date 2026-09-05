@@ -9515,6 +9515,13 @@ final class OKVideoMacTests: XCTestCase {
             XCTAssertEqual(stopped.shutdownMechanism, .adbEmuKill)
             XCTAssertNotNil(stopped.shutdownCompletedAt)
             XCTAssertFalse(stopped.shutdownForced)
+            let managedAVD = support
+                .appendingPathComponent("AndroidRuntime/avd")
+                .appendingPathComponent("OKVideoMac_Runtime.avd")
+            let remainingLocks = try FileManager.default
+                .contentsOfDirectory(atPath: managedAVD.path)
+                .filter { $0.lowercased().contains("lock") }
+            XCTAssertTrue(remainingLocks.isEmpty)
         } catch {
             await firstRuntime.stop()
             throw error
@@ -9559,6 +9566,13 @@ final class OKVideoMacTests: XCTestCase {
             .refusedOwnershipMismatch
         )
         XCTAssertNotNil(final.shutdownCompletedAt)
+        let managedAVD = support
+            .appendingPathComponent("AndroidRuntime/avd")
+            .appendingPathComponent("OKVideoMac_Runtime.avd")
+        let remainingLocks = try FileManager.default
+            .contentsOfDirectory(atPath: managedAVD.path)
+            .filter { $0.lowercased().contains("lock") }
+        XCTAssertTrue(remainingLocks.isEmpty)
     }
 
     func testAndroidEmulatorDiagnosticLogTailIsBoundedAndRedacted() {

@@ -6570,6 +6570,12 @@ actor AndroidDexBridgeRuntime {
         guard var identity else {
             lastShutdownMechanism = .alreadyExited
             clearRuntimeRecord()
+            if let toolchain {
+                try? clearStalePrivateAVDLocksIfSafe(
+                    toolchain: toolchain,
+                    updateOwnershipClassification: false
+                )
+            }
             return
         }
         guard let toolchain else {
@@ -6589,7 +6595,7 @@ actor AndroidDexBridgeRuntime {
                 || processBirthIdentity(pid: identity.pid)?.value
                     != identity.pidBirthIdentity {
                 lastShutdownMechanism = .alreadyExited
-                clearRuntimeRecord()
+                finishOwnedRuntimeExitCleanup(toolchain: toolchain)
             } else {
                 lastShutdownMechanism = .refusedOwnershipMismatch
                 lastLifecycleConflictReason =
@@ -6613,7 +6619,7 @@ actor AndroidDexBridgeRuntime {
         case let .clearStaleRecord(reason):
             appendStaleRecordRecovery(reason)
             lastShutdownMechanism = .alreadyExited
-            clearRuntimeRecord()
+            finishOwnedRuntimeExitCleanup(toolchain: toolchain)
             return
         case .rejectConflictingRuntime:
             lastShutdownMechanism = .refusedOwnershipMismatch
@@ -6659,33 +6665,39 @@ actor AndroidDexBridgeRuntime {
             )
             lastShutdownMechanism = .adbEmuKill
             if await waitForOwnedProcessExit(identity, attempts: 20) {
-                clearRuntimeRecord()
+                finishOwnedRuntimeExitCleanup(toolchain: toolchain)
                 return
             }
         }
 
         guard verifyStrictProcessOwnership(identity, toolchain: toolchain)
         else {
-            finishShutdownAfterIdentityChanged(identity)
+            finishShutdownAfterIdentityChanged(
+                identity,
+                toolchain: toolchain
+            )
             return
         }
         _ = Darwin.kill(identity.pid, SIGTERM)
         lastShutdownMechanism = .sigterm
         if await waitForOwnedProcessExit(identity, attempts: 12) {
-            clearRuntimeRecord()
+            finishOwnedRuntimeExitCleanup(toolchain: toolchain)
             return
         }
 
         guard verifyStrictProcessOwnership(identity, toolchain: toolchain)
         else {
-            finishShutdownAfterIdentityChanged(identity)
+            finishShutdownAfterIdentityChanged(
+                identity,
+                toolchain: toolchain
+            )
             return
         }
         _ = Darwin.kill(identity.pid, SIGKILL)
         lastShutdownMechanism = .sigkill
         lastShutdownForced = true
         if await waitForOwnedProcessExit(identity, attempts: 8) {
-            clearRuntimeRecord()
+            finishOwnedRuntimeExitCleanup(toolchain: toolchain)
             return
         }
         preserveFailure(
@@ -6720,17 +6732,28 @@ actor AndroidDexBridgeRuntime {
     }
 
     private func finishShutdownAfterIdentityChanged(
-        _ identity: AndroidRuntimeIdentity
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
     ) {
         if processBirthIdentity(pid: identity.pid)?.value
             != identity.pidBirthIdentity {
             lastShutdownMechanism = .alreadyExited
-            clearRuntimeRecord()
+            finishOwnedRuntimeExitCleanup(toolchain: toolchain)
         } else {
             lastShutdownMechanism = .refusedOwnershipMismatch
             lastLifecycleConflictReason =
                 "终止升级前 PID 身份或私有 AVD 校验发生变化"
         }
+    }
+
+    private func finishOwnedRuntimeExitCleanup(
+        toolchain: AndroidToolchain
+    ) {
+        clearRuntimeRecord()
+        try? clearStalePrivateAVDLocksIfSafe(
+            toolchain: toolchain,
+            updateOwnershipClassification: false
+        )
     }
 
     func ensureReady() async throws {
@@ -8410,7 +8433,8 @@ actor AndroidDexBridgeRuntime {
     }
 
     private func clearStalePrivateAVDLocksIfSafe(
-        toolchain: AndroidToolchain
+        toolchain: AndroidToolchain,
+        updateOwnershipClassification: Bool = true
     ) throws {
         guard fileManager.fileExists(atPath: avdDirectory.path) else { return }
         let entries = try fileManager.contentsOfDirectory(
@@ -8449,7 +8473,9 @@ actor AndroidDexBridgeRuntime {
         }
         guard !cleared.isEmpty else { return }
         lastStaleAVDLocksCleared = cleared.sorted()
-        lastOwnershipClassification = .staleAVDLock
+        if updateOwnershipClassification {
+            lastOwnershipClassification = .staleAVDLock
+        }
         appendEvent(
             stage: currentStage,
             event: "stale_avd_locks_cleared",
