@@ -218,6 +218,11 @@ fi
 rm -rf "$APP_DESTINATION"
 mkdir -p "$ARTIFACTS"
 cp -R "$APP_SOURCE" "$APP_DESTINATION"
+# Xcode/File Provider can attach Finder metadata to the unsigned build output.
+# codesign rejects resource forks and FinderInfo anywhere in the bundle, so
+# remove all host-local extended attributes from the distributable copy before
+# normalizing binaries and applying the final signatures.
+/usr/bin/xattr -cr "$APP_DESTINATION"
 # Xcode keeps DWARF sections in the unsigned Release executable even when it
 # also emits an external dSYM. Strip those sections before signing so absolute
 # build paths cannot leak into the distributable App; runtime symbols remain.
