@@ -4879,6 +4879,59 @@ struct AndroidInstalledPackageContinuity: Equatable, Sendable {
     let dataDirectory: String
 }
 
+/// Atomically admits at most one Android runtime startup operation. Every
+/// caller that arrives while launch, ADB registration, Android boot, or Bridge
+/// setup is in progress awaits the same task instead of running its own
+/// preflight and emulator launch sequence.
+actor AndroidRuntimeStartupSingleFlight {
+    private struct InFlight {
+        let id: UUID
+        let task: Task<Void, Error>
+    }
+
+    private var inFlight: InFlight?
+
+    func ensureRuntime(
+        _ operation: @escaping @Sendable () async throws -> Void
+    ) async throws {
+        let startup: InFlight
+        if let inFlight {
+            startup = inFlight
+        } else {
+            let id = UUID()
+            let task = Task {
+                try await operation()
+            }
+            let created = InFlight(id: id, task: task)
+            inFlight = created
+            startup = created
+        }
+
+        do {
+            try await startup.task.value
+            clearIfCurrent(startup.id)
+        } catch {
+            clearIfCurrent(startup.id)
+            throw error
+        }
+    }
+
+    /// Runtime teardown is the only operation allowed to cancel the shared
+    /// startup. Keep the cancelled task registered until it has fully unwound
+    /// so a new caller cannot overlap its cleanup with another launch.
+    func cancelAndWait() async {
+        guard let startup = inFlight else { return }
+        startup.task.cancel()
+        _ = await startup.task.result
+        clearIfCurrent(startup.id)
+    }
+
+    private func clearIfCurrent(_ id: UUID) {
+        guard inFlight?.id == id else { return }
+        inFlight = nil
+    }
+}
+
 actor AndroidDexBridgeRuntime {
     static let bridgeVersion = "0.3.44"
     static let bridgeVersionCode = 56
@@ -4912,7 +4965,10 @@ actor AndroidDexBridgeRuntime {
     private var acceptsNewerBridge = false
     private var managedDisplayConfigured = false
     private var lastNetworkCheck: Date?
-    private var readinessTask: Task<Void, Error>?
+    /// Process-wide because more than one provider/runtime object can be
+    /// constructed, while every instance targets the same managed AVD name.
+    private static let startupSingleFlight =
+        AndroidRuntimeStartupSingleFlight()
     private var operationStatus: AndroidRuntimeStatus?
     private var currentStage: AndroidRuntimeStartupStage = .idle
     private var stageStartedAt: Date?
@@ -6203,11 +6259,8 @@ actor AndroidDexBridgeRuntime {
         ready = false
         acceptsNewerBridge = false
         lastNetworkCheck = nil
-        let activeTask = readinessTask
-        activeTask?.cancel()
-        _ = try? await activeTask?.value
-        readinessTask = nil
-        try await prepareRuntime(
+        await Self.startupSingleFlight.cancelAndWait()
+        try await ensureRuntimeStartup(
             forceInstall: true,
             retryKnownFailedNetworkCommand: retryKnownFailedNetworkCommand
         )
@@ -6217,10 +6270,7 @@ actor AndroidDexBridgeRuntime {
         actionSurfaceLease = nil
         managedDisplayConfigured = false
         transition(to: .stopping, event: "stop_requested")
-        let task = readinessTask
-        task?.cancel()
-        readinessTask = nil
-        _ = try? await task?.value
+        await Self.startupSingleFlight.cancelAndWait()
         ready = false
         acceptsNewerBridge = false
         lastNetworkCheck = nil
@@ -6383,20 +6433,7 @@ actor AndroidDexBridgeRuntime {
                 ready = false
             }
         }
-        if let readinessTask {
-            return try await readinessTask.value
-        }
-        let task = Task {
-            try await prepareRuntime()
-        }
-        readinessTask = task
-        do {
-            try await task.value
-            readinessTask = nil
-        } catch {
-            readinessTask = nil
-            throw error
-        }
+        try await ensureRuntimeStartup()
     }
 
     func resetAuthorizationUI() async throws {
@@ -6412,7 +6449,7 @@ actor AndroidDexBridgeRuntime {
         case let .clearStaleRecord(reason):
             appendStaleRecordRecovery(reason)
             clearRuntimeRecord()
-            try await prepareRuntime()
+            try await ensureRuntimeStartup()
             return
         case .rejectConflictingRuntime:
             throw classifiedFailure(
@@ -6423,7 +6460,7 @@ actor AndroidDexBridgeRuntime {
         case .reuseOwnedRuntime:
             guard observation.deviceOwned else {
                 ready = false
-                try await prepareRuntime()
+                try await ensureRuntimeStartup()
                 return
             }
         }
@@ -6454,7 +6491,20 @@ actor AndroidDexBridgeRuntime {
 
         // If Android discarded the installed package or Activity, the normal
         // preparation path reinstalls the bundled Release bridge.
-        try await prepareRuntime()
+        try await ensureRuntimeStartup()
+    }
+
+    private func ensureRuntimeStartup(
+        forceInstall: Bool = false,
+        retryKnownFailedNetworkCommand: Bool = true
+    ) async throws {
+        try await Self.startupSingleFlight.ensureRuntime { [self] in
+            try await prepareRuntime(
+                forceInstall: forceInstall,
+                retryKnownFailedNetworkCommand:
+                    retryKnownFailedNetworkCommand
+            )
+        }
     }
 
     private func prepareRuntime(

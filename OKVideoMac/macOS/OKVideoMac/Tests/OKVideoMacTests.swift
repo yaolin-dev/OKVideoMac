@@ -9059,6 +9059,44 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testTenConcurrentAndroidEnsureRuntimeRequestsLaunchEmulatorOnce()
+        async throws {
+        let startup = AndroidRuntimeStartupSingleFlight()
+        let launchGate = NodeReadinessTestGate()
+        let launcher = AndroidEmulatorLauncherMock()
+
+        let callers = (0..<10).map { _ in
+            Task {
+                try await startup.ensureRuntime {
+                    await launcher.launch(waitingOn: launchGate)
+                }
+            }
+        }
+
+        var didLaunch = false
+        for _ in 0..<20_000 {
+            let launchInvocationCount = await launcher.launchInvocationCount
+            if launchInvocationCount == 1 {
+                didLaunch = true
+                break
+            }
+            await Task.yield()
+        }
+        XCTAssertTrue(didLaunch)
+        for _ in 0..<100 {
+            await Task.yield()
+        }
+        var launchInvocationCount = await launcher.launchInvocationCount
+        XCTAssertEqual(launchInvocationCount, 1)
+
+        await launchGate.open()
+        for caller in callers {
+            try await caller.value
+        }
+        launchInvocationCount = await launcher.launchInvocationCount
+        XCTAssertEqual(launchInvocationCount, 1)
+    }
+
     func testAndroidEmulatorDiagnosticLogTailIsBoundedAndRedacted() {
         let raw = String(repeating: "prefix\n", count: 100)
             + "ERROR /Users/humphrey/private token=secret-value"
@@ -20046,6 +20084,15 @@ private actor NodeReadinessTestCounter {
 
     func increment() {
         value += 1
+    }
+}
+
+private actor AndroidEmulatorLauncherMock {
+    private(set) var launchInvocationCount = 0
+
+    func launch(waitingOn gate: NodeReadinessTestGate) async {
+        launchInvocationCount += 1
+        await gate.wait()
     }
 }
 
