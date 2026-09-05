@@ -1854,8 +1854,12 @@ enum AndroidRuntimeFailureCategory: String, Codable, Sendable {
     case emulatorLaunchFailed
     case emulatorLaunchTimedOut
     case emulatorExitedEarly
+    case emulatorExited
+    case appRequestedTermination
     case emulatorOwnershipMismatch
+    case emulatorProcessMismatch
     case emulatorRuntimeConflict
+    case unexpectedSerial
     case androidBootTimedOut
     case emulatorNetworkUnavailable
     case bridgeAPKMissing
@@ -1967,6 +1971,8 @@ struct AndroidRuntimeDiagnosticSnapshot: Codable, Equatable, Sendable {
     let emulatorStderrTail: String?
     let emulatorArguments: [String]
     let emulatorEnvironment: [String: String]
+    let adbEnvironment: [String: String]
+    let emulatorTerminationCategory: AndroidRuntimeFailureCategory?
     let avdManagerPath: String?
     let avdManagerExists: Bool
     let avdManagerExecutable: Bool
@@ -1989,9 +1995,12 @@ struct AndroidRuntimeDiagnosticSnapshot: Codable, Equatable, Sendable {
     let avdLockFiles: [String]
     let avdRuntimeFiles: [String: Bool]
     let emulatorPID: Int32?
+    let emulatorConsolePort: Int?
+    let emulatorADBPort: Int?
     let emulatorSerial: String?
     let emulatorProcessRunning: Bool
     let adbDeviceState: String?
+    let adbWaitTimeline: [AndroidADBWaitObservation]
     let androidBootCompleted: Bool?
     let bootWaitDuration: TimeInterval?
     let ipAddresses: String?
@@ -2050,12 +2059,18 @@ struct AndroidRuntimeFailureError: LocalizedError, Sendable {
         case .adbDeviceOffline:
             return "ADB 已发现专用 Android Emulator，但设备一直处于 offline 状态。"
         case .emulatorLaunchFailed, .emulatorLaunchTimedOut,
-             .emulatorExitedEarly, .runtimeExited:
+             .emulatorExitedEarly, .emulatorExited, .runtimeExited:
             return "Android Emulator 未能正常启动，请导出诊断后重试。"
+        case .appRequestedTermination:
+            return "Android Emulator 启动已由 App 取消或结束。"
         case .emulatorOwnershipMismatch:
             return "无法安全确认专用 Android Emulator，已停止操作其他设备。"
+        case .emulatorProcessMismatch:
+            return "Android Emulator PID 已不再属于本次启动实例。"
         case .emulatorRuntimeConflict:
             return "检测到其他 Emulator 正在使用专用 AVD 或记录端口，未执行任何操作。"
+        case .unexpectedSerial:
+            return "ADB 发现了其他 Emulator，但没有发现本次启动所预期的设备。"
         case .androidBootTimedOut:
             return "Android 系统启动超时，兼容环境没有在预期时间内完成启动。"
         case .emulatorNetworkUnavailable:
@@ -4616,6 +4631,21 @@ enum AndroidADBTargetState: String, Equatable, Sendable {
     case unknown
 }
 
+struct AndroidADBWaitObservation: Codable, Equatable, Sendable {
+    let timestamp: Date
+    let expectedSerial: String
+    let targetState: String
+    let observedEmulatorSerials: [String]
+    let adbDevices: [String]
+    let emulatorPID: Int32
+    let emulatorAlive: Bool
+    let emulatorOwned: Bool
+    let consolePort: Int
+    let consolePortListening: Bool?
+    let adbPort: Int
+    let adbPortListening: Bool?
+}
+
 struct AndroidEmulatorProcessSnapshot: Equatable, Sendable {
     let pid: Int32?
     let launchAt: Date
@@ -4680,7 +4710,9 @@ final class AndroidEmulatorProcessRecorder: @unchecked Sendable {
 
     func recordTerminationRequestedByApp(_ reason: String) {
         lock.lock()
-        terminationRequestReason = reason
+        if terminationRequestReason == nil {
+            terminationRequestReason = reason
+        }
         lock.unlock()
     }
 
@@ -4993,6 +5025,7 @@ actor AndroidDexBridgeRuntime {
     private var lastNetworkRecoveryCommand: AndroidRuntimeCommandRecord?
     private var connectivityProbeResult: String?
     private var lastADBDevices: [String] = []
+    private var adbWaitTimeline: [AndroidADBWaitObservation] = []
     private var lastADBForwards: [String] = []
     private var lastBridgePackageInstalled: Bool?
     private var lastBridgeVersionCode: Int?
@@ -5234,6 +5267,7 @@ actor AndroidDexBridgeRuntime {
                 "-s", identity.serial,
                 "shell", "input", "tap", "\(point.x)", "\(point.y)"
             ],
+            environment: childEnvironment(for: toolchain),
             category: "adb.surface.tap",
             timeout: 5
         )
@@ -5280,6 +5314,7 @@ actor AndroidDexBridgeRuntime {
                 "\(end.x)", "\(end.y)",
                 "\(duration)"
             ],
+            environment: childEnvironment(for: toolchain),
             category: "adb.surface.swipe",
             timeout: 5
         )
@@ -5297,6 +5332,7 @@ actor AndroidDexBridgeRuntime {
                 "-s", identity.serial,
                 "shell", "input", "keyevent", "KEYCODE_BACK"
             ],
+            environment: childEnvironment(for: toolchain),
             category: "adb.surface.back",
             timeout: 5
         )
@@ -5321,6 +5357,7 @@ actor AndroidDexBridgeRuntime {
                 "-s", identity.serial,
                 "shell", "input", "text", encoded
             ],
+            environment: childEnvironment(for: toolchain),
             category: "adb.surface.text",
             timeout: 10
         )
@@ -5576,7 +5613,7 @@ actor AndroidDexBridgeRuntime {
             return .runtimeExited
         }
         if !processOwned {
-            return .emulatorRuntimeConflict
+            return .emulatorProcessMismatch
         }
         if deviceRequired && !deviceReachable {
             return .adbUnavailable
@@ -5591,17 +5628,19 @@ actor AndroidDexBridgeRuntime {
         processPresent: Bool,
         processOwned: Bool,
         targetState: AndroidADBTargetState,
-        deviceOwned: Bool
+        deviceOwned: Bool,
+        hasUnexpectedEmulatorSerial: Bool = false
     ) -> AndroidRuntimeFailureCategory? {
         if !processPresent {
-            return .emulatorExitedEarly
+            return .emulatorExited
         }
         if !processOwned {
-            return .emulatorRuntimeConflict
+            return .emulatorProcessMismatch
         }
         switch targetState {
         case .missing:
-            return .adbDeviceMissing
+            return hasUnexpectedEmulatorSerial
+                ? .unexpectedSerial : .adbDeviceMissing
         case .offline:
             return .adbDeviceOffline
         case .unauthorized, .unknown:
@@ -5609,6 +5648,16 @@ actor AndroidDexBridgeRuntime {
         case .device:
             return deviceOwned ? nil : .emulatorOwnershipMismatch
         }
+    }
+
+    static func emulatorTerminationCategory(
+        _ snapshot: AndroidEmulatorProcessSnapshot?
+    ) -> AndroidRuntimeFailureCategory? {
+        guard let snapshot else { return nil }
+        if snapshot.terminationRequestedByApp {
+            return .appRequestedTermination
+        }
+        return snapshot.exitAt == nil ? nil : .emulatorExited
     }
 
     static func processIdentityState(
@@ -5858,6 +5907,7 @@ actor AndroidDexBridgeRuntime {
             adbVersion = try? run(
                 toolchain.adb,
                 ["version"],
+                environment: childEnvironment(for: toolchain),
                 category: "diagnostic.adb.version",
                 timeout: 5
             )
@@ -5870,6 +5920,7 @@ actor AndroidDexBridgeRuntime {
             if let devices = try? run(
                 toolchain.adb,
                 ["devices", "-l"],
+                environment: childEnvironment(for: toolchain),
                 category: "diagnostic.adb.devices",
                 timeout: 5
             ) {
@@ -5894,6 +5945,7 @@ actor AndroidDexBridgeRuntime {
             if let observedState = try? run(
                 toolchain.adb,
                 ["-s", identity.serial, "get-state"],
+                environment: childEnvironment(for: toolchain),
                 category: "diagnostic.adb.get_state",
                 timeout: 5
             ).trimmingCharacters(in: .whitespacesAndNewlines),
@@ -6094,6 +6146,15 @@ actor AndroidDexBridgeRuntime {
             },
             emulatorArguments: emulatorSnapshot?.arguments ?? [],
             emulatorEnvironment: emulatorSnapshot?.environment ?? [:],
+            adbEnvironment: toolchain.map {
+                diagnosticEmulatorEnvironment(
+                    childEnvironment(for: $0),
+                    toolchain: $0
+                )
+            } ?? [:],
+            emulatorTerminationCategory: Self.emulatorTerminationCategory(
+                emulatorSnapshot
+            ),
             avdManagerPath: avdManagerCandidate.map { _ in
                 "<sdk-root>/cmdline-tools/<version>/bin/avdmanager"
             },
@@ -6130,9 +6191,12 @@ actor AndroidDexBridgeRuntime {
             avdLockFiles: avdLockFiles,
             avdRuntimeFiles: avdRuntimeFiles,
             emulatorPID: identity?.pid,
+            emulatorConsolePort: identity?.consolePort,
+            emulatorADBPort: identity.map { $0.consolePort + 1 },
             emulatorSerial: identity?.serial,
             emulatorProcessRunning: processRunning,
             adbDeviceState: deviceState,
+            adbWaitTimeline: adbWaitTimeline,
             androidBootCompleted: lastBootCompleted,
             bootWaitDuration: lastBootWaitDuration,
             ipAddresses: lastIPAddressOutput,
@@ -6524,6 +6588,7 @@ actor AndroidDexBridgeRuntime {
         networkRecoveryResult = nil
         lastNetworkRecoveryCommand = nil
         connectivityProbeResult = nil
+        adbWaitTimeline = []
         probeStartedAt = nil
         probeRetryCount = 0
         probeHTTPStatus = nil
@@ -6612,6 +6677,7 @@ actor AndroidDexBridgeRuntime {
                         )
                     )
                 }
+                try ensureADBServer(toolchain)
                 identity = try await launchManagedEmulator(toolchain)
                 activeIdentity = identity
                 activeToolchain = toolchain
@@ -6829,7 +6895,25 @@ actor AndroidDexBridgeRuntime {
             )
         } catch {
             ready = false
-            let failure = classifiedFailure(for: error)
+            let failure: AndroidRuntimeFailureError
+            if error is CancellationError {
+                if let identity = activeIdentity {
+                    recordEmulatorTerminationRequest(
+                        pid: identity.pid,
+                        reason: "startupCancelled"
+                    )
+                }
+                failure = AndroidRuntimeFailureError(
+                    record: AndroidRuntimeFailureRecord(
+                        occurredAt: Date(),
+                        stage: currentStage,
+                        category: .appRequestedTermination,
+                        message: "Android Emulator 启动已由 App 取消"
+                    )
+                )
+            } else {
+                failure = classifiedFailure(for: error)
+            }
             preserveFailure(failure)
             if let identity = activeIdentity,
                let toolchain = activeToolchain {
@@ -7755,8 +7839,17 @@ actor AndroidDexBridgeRuntime {
     ) -> [String: String] {
         var environment = baseEnvironment
         environment["ANDROID_HOME"] = toolchain.sdkRoot.path
-        environment.removeValue(forKey: "ANDROID_SDK_ROOT")
+        environment["ANDROID_SDK_ROOT"] = toolchain.sdkRoot.path
         environment["ANDROID_AVD_HOME"] = avdHome.path
+        environment["HOME"] = homeDirectory.path
+        let sdkPaths = [
+            toolchain.sdkRoot.appendingPathComponent("platform-tools").path,
+            toolchain.sdkRoot.appendingPathComponent("emulator").path
+        ]
+        let inheritedPath = environment["PATH"] ?? ""
+        environment["PATH"] = (sdkPaths + [inheritedPath])
+            .filter { !$0.isEmpty }
+            .joined(separator: ":")
         return environment
     }
 
@@ -7772,6 +7865,8 @@ actor AndroidDexBridgeRuntime {
             "ANDROID_EMULATOR_HOME",
             "ANDROID_USER_HOME",
             "ADB_SERVER_SOCKET",
+            "ANDROID_ADB_SERVER_PORT",
+            "PATH",
             "HOME",
             "TMPDIR"
         ]
@@ -8075,17 +8170,9 @@ actor AndroidDexBridgeRuntime {
             let stderr = try FileHandle(forWritingTo: stderrURL)
             let process = Process()
             process.executableURL = toolchain.emulator
-            let arguments = [
-                "-avd", Self.avdName,
-                "-port", "\(consolePort)",
-                "-no-window",
-                "-no-audio",
-                "-no-boot-anim",
-                "-no-metrics",
-                "-no-snapshot",
-                "-gpu", "host",
-                "-accel", "on"
-            ]
+            let arguments = Self.emulatorLaunchArguments(
+                consolePort: consolePort
+            )
             let environment = childEnvironment(for: toolchain)
             let launchAt = Date()
             let recorder = AndroidEmulatorProcessRecorder(
@@ -8170,7 +8257,7 @@ actor AndroidDexBridgeRuntime {
                 avdDirectory: avdDirectory,
                 pid: process.processIdentifier,
                 consolePort: consolePort,
-                serial: "emulator-\(consolePort)",
+                serial: Self.emulatorSerial(consolePort: consolePort),
                 forwards: Self.expectedForwards,
                 launchedAt: launchAt
             )
@@ -8180,66 +8267,199 @@ actor AndroidDexBridgeRuntime {
         throw AppError.spider("没有可用的 Android Emulator console port")
     }
 
+    static func emulatorLaunchArguments(consolePort: Int) -> [String] {
+        [
+            "-avd", avdName,
+            "-port", "\(consolePort)",
+            "-no-window",
+            "-no-audio",
+            "-no-boot-anim",
+            "-no-metrics",
+            "-no-snapshot",
+            "-gpu", "host",
+            "-accel", "on"
+        ]
+    }
+
+    static func emulatorSerial(consolePort: Int) -> String {
+        "emulator-\(consolePort)"
+    }
+
+    private func ensureADBServer(_ toolchain: AndroidToolchain) throws {
+        do {
+            _ = try run(
+                toolchain.adb,
+                ["start-server"],
+                environment: childEnvironment(for: toolchain),
+                category: "adb.server.start",
+                timeout: 15
+            )
+        } catch {
+            throw AndroidRuntimeFailureError(
+                record: AndroidRuntimeFailureRecord(
+                    occurredAt: Date(),
+                    stage: .launchingEmulator,
+                    category: .adbUnavailable,
+                    message: "无法使用所选 Android SDK 启动 ADB server"
+                )
+            )
+        }
+    }
+
     private func waitForOwnership(
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain
     ) async throws {
-        for _ in 0..<120 {
+        var targetState: AndroidADBTargetState = .missing
+        var observedEmulatorSerials: [String] = []
+        var sanitizedDevices: [String] = []
+        var sawTargetOffline = false
+        var sawUnexpectedEmulatorSerial = false
+        var consolePortListening: Bool?
+        var adbPortListening: Bool?
+        for attempt in 0..<120 {
             try Task.checkCancellation()
-            guard processExecutablePath(pid: identity.pid) != nil else {
+            let processPresent = processExecutablePath(pid: identity.pid) != nil
+            let processOwned = processPresent
+                && verifyProcessOwnership(identity, toolchain: toolchain)
+            guard processPresent else {
+                appendADBWaitObservation(
+                    identity: identity,
+                    targetState: targetState,
+                    observedEmulatorSerials: observedEmulatorSerials,
+                    adbDevices: sanitizedDevices,
+                    emulatorAlive: false,
+                    emulatorOwned: false,
+                    consolePortListening: consolePortListening,
+                    adbPortListening: adbPortListening
+                )
                 throw AndroidRuntimeFailureError(
                     record: AndroidRuntimeFailureRecord(
                         occurredAt: Date(),
                         stage: .waitingForADB,
-                        category: .emulatorExitedEarly,
+                        category: .emulatorExited,
                         message: "Android Emulator 在接入 ADB 前已退出"
                     )
                 )
             }
-            if try validateManagedRuntime(
-                identity,
-                toolchain: toolchain,
-                deviceRequired: false
-            ) {
-                return
+            guard processOwned else {
+                throw AndroidRuntimeFailureError(
+                    record: AndroidRuntimeFailureRecord(
+                        occurredAt: Date(),
+                        stage: .waitingForADB,
+                        category: .emulatorProcessMismatch,
+                        message: "Android Emulator PID 已不属于本次启动的专用实例"
+                    )
+                )
+            }
+
+            // Sample the complete device list once per second. Fixed-serial
+            // get-state alone cannot distinguish a missing target from an
+            // unexpected emulator serial or an offline device that vanished.
+            if attempt.isMultiple(of: 2) {
+                do {
+                    let listing = try run(
+                        toolchain.adb,
+                        ["devices", "-l"],
+                        environment: childEnvironment(for: toolchain),
+                        category: "adb.wait.devices",
+                        timeout: 5
+                    )
+                    targetState = Self.adbTargetState(
+                        in: listing,
+                        serial: identity.serial
+                    )
+                    observedEmulatorSerials = Self.emulatorSerials(
+                        in: listing
+                    )
+                    sawTargetOffline = sawTargetOffline
+                        || targetState == .offline
+                    sawUnexpectedEmulatorSerial =
+                        sawUnexpectedEmulatorSerial
+                        || observedEmulatorSerials.contains {
+                            $0 != identity.serial
+                        }
+                    sanitizedDevices = Self.sanitizedADBDevices(
+                        listing,
+                        ownedSerial: identity.serial
+                    )
+                    lastADBDevices = sanitizedDevices
+                } catch {
+                    targetState = .unknown
+                    observedEmulatorSerials = []
+                    sanitizedDevices = []
+                }
+
+                if attempt.isMultiple(of: 10) {
+                    let portStatus = emulatorPortStatus(identity)
+                    consolePortListening = portStatus.console
+                    adbPortListening = portStatus.adb
+                }
+                appendADBWaitObservation(
+                    identity: identity,
+                    targetState: targetState,
+                    observedEmulatorSerials: observedEmulatorSerials,
+                    adbDevices: sanitizedDevices,
+                    emulatorAlive: true,
+                    emulatorOwned: true,
+                    consolePortListening: consolePortListening,
+                    adbPortListening: adbPortListening
+                )
+
+                if targetState == .device {
+                    guard verifyDeviceOwnership(
+                        identity,
+                        toolchain: toolchain
+                    ) else {
+                        throw AndroidRuntimeFailureError(
+                            record: AndroidRuntimeFailureRecord(
+                                occurredAt: Date(),
+                                stage: .waitingForADB,
+                                category: .emulatorOwnershipMismatch,
+                                message: "ADB 设备已连接，但 AVD 名称与专用运行记录不匹配"
+                            )
+                        )
+                    }
+                    return
+                }
             }
             try await Task.sleep(nanoseconds: 500_000_000)
         }
-        let listing = (try? run(
-            toolchain.adb,
-            ["devices", "-l"],
-            category: "adb.wait.devices",
-            timeout: 5
-        )) ?? ""
-        let state = Self.adbTargetState(
-            in: listing,
-            serial: identity.serial
-        )
         let processPresent = processExecutablePath(pid: identity.pid) != nil
         let processOwned = processPresent
             && verifyProcessOwnership(identity, toolchain: toolchain)
-        let deviceOwned = state == .device
+        let effectiveTargetState: AndroidADBTargetState =
+            sawTargetOffline && targetState != .device
+            ? .offline : targetState
+        let deviceOwned = effectiveTargetState == .device
             && verifyDeviceOwnership(identity, toolchain: toolchain)
         guard let category = Self.waitingForADBFailureCategory(
             processPresent: processPresent,
             processOwned: processOwned,
-            targetState: state,
-            deviceOwned: deviceOwned
+            targetState: effectiveTargetState,
+            deviceOwned: deviceOwned,
+            hasUnexpectedEmulatorSerial: sawUnexpectedEmulatorSerial
         ) else { return }
         let message: String
         switch category {
-        case .emulatorExitedEarly:
+        case .emulatorExitedEarly, .emulatorExited:
             message = "Android Emulator 在接入 ADB 前已退出"
+        case .appRequestedTermination:
+            message = "Android Emulator 启动已由 App 结束"
         case .emulatorRuntimeConflict:
+            message = "Android Emulator PID 已不属于本次启动的专用实例"
+        case .emulatorProcessMismatch:
             message = "Android Emulator PID 已不属于本次启动的专用实例"
         case .adbDeviceMissing:
             message = "Android Emulator 进程仍在运行，但 ADB 未在限定时间内发现目标设备"
         case .adbDeviceOffline:
             message = "ADB 已发现专用 Android Emulator，但设备一直处于 offline 状态"
+        case .unexpectedSerial:
+            message = "ADB 发现了其他 Emulator serial，但未发现本次启动的目标设备"
         case .emulatorOwnershipMismatch:
             message = "ADB 设备已连接，但 AVD 名称与专用运行记录不匹配"
         case .adbUnavailable:
-            message = "ADB 目标设备状态异常（\(state.rawValue)）"
+            message = "ADB 目标设备状态异常（\(effectiveTargetState.rawValue)）"
         default:
             message = "Android Emulator 接入 ADB 失败"
         }
@@ -8290,15 +8510,15 @@ actor AndroidDexBridgeRuntime {
             switch reason {
             case .processExited:
                 category = currentStage == .waitingForADB
-                    ? .emulatorExitedEarly : .runtimeExited
+                    ? .emulatorExited : .runtimeExited
             case .previousSystemBoot:
                 category = .runtimeExited
             case .pidReused:
-                category = .emulatorRuntimeConflict
+                category = .emulatorProcessMismatch
             }
         case .rejectConflictingRuntime:
             category = observation.deviceReachable && !observation.deviceOwned
-                ? .emulatorOwnershipMismatch : .emulatorRuntimeConflict
+                ? .emulatorOwnershipMismatch : .emulatorProcessMismatch
         }
         guard let category else {
             return observation.deviceOwned
@@ -8306,8 +8526,10 @@ actor AndroidDexBridgeRuntime {
 
         let message: String
         switch category {
-        case .emulatorExitedEarly:
+        case .emulatorExitedEarly, .emulatorExited:
             message = "Android Emulator 在接入 ADB 前已退出"
+        case .appRequestedTermination:
+            message = "Android Emulator 启动已由 App 结束"
         case .runtimeExited:
             message = "专用 Android Emulator 进程已退出"
         case .adbUnavailable:
@@ -8316,10 +8538,14 @@ actor AndroidDexBridgeRuntime {
             message = "Android Emulator 进程仍在运行，但 ADB 未发现目标设备"
         case .adbDeviceOffline:
             message = "ADB 目标设备处于 offline 状态"
+        case .unexpectedSerial:
+            message = "ADB 发现了其他 Emulator，但未发现本次启动的目标设备"
         case .emulatorOwnershipMismatch:
             message = "专用 Android Emulator 所有权校验失败；已拒绝继续操作"
         case .emulatorRuntimeConflict:
             message = "检测到其他 Emulator 使用了记录端口，未执行任何操作"
+        case .emulatorProcessMismatch:
+            message = "Android Emulator PID 已不再属于本次启动实例"
         default:
             message = "专用 Android Emulator 生命周期校验失败"
         }
@@ -8407,7 +8633,9 @@ actor AndroidDexBridgeRuntime {
               identity.avdName == Self.avdName,
               identity.avdDirectory.standardizedFileURL
                 == avdDirectory.standardizedFileURL,
-              identity.serial == "emulator-\(identity.consolePort)",
+              identity.serial == Self.emulatorSerial(
+                  consolePort: identity.consolePort
+              ),
               Self.candidateConsolePorts.contains(identity.consolePort),
               identity.emulatorExecutable.standardizedFileURL
                 == toolchain.emulator.standardizedFileURL,
@@ -8440,11 +8668,13 @@ actor AndroidDexBridgeRuntime {
     ) -> Bool {
         guard let state = try? run(
             toolchain.adb,
-            ["-s", identity.serial, "get-state"]
+            ["-s", identity.serial, "get-state"],
+            environment: childEnvironment(for: toolchain)
         ), state.trimmingCharacters(in: .whitespacesAndNewlines) == "device",
         let avdOutput = try? run(
             toolchain.adb,
-            ["-s", identity.serial, "emu", "avd", "name"]
+            ["-s", identity.serial, "emu", "avd", "name"],
+            environment: childEnvironment(for: toolchain)
         ), Self.avdName(from: avdOutput) == identity.avdName else {
             return false
         }
@@ -8466,6 +8696,7 @@ actor AndroidDexBridgeRuntime {
         return try run(
             toolchain.adb,
             ["-s", identity.serial] + arguments,
+            environment: childEnvironment(for: toolchain),
             category: category,
             timeout: timeout
         )
@@ -8487,6 +8718,7 @@ actor AndroidDexBridgeRuntime {
             let result = try await Self.executeBinaryProcess(
                 toolchain.adb,
                 ["-s", identity.serial] + arguments,
+                environment: childEnvironment(for: toolchain),
                 timeout: timeout
             )
             let stderr = String(data: result.stderr, encoding: .utf8) ?? ""
@@ -8533,6 +8765,77 @@ actor AndroidDexBridgeRuntime {
         }
     }
 
+    static func emulatorSerials(in listing: String) -> [String] {
+        Array(Set(listing.split(whereSeparator: \.isNewline).compactMap {
+            rawLine in
+            let fields = rawLine.split(whereSeparator: \.isWhitespace)
+            guard fields.count >= 2 else { return nil }
+            let serial = String(fields[0])
+            return serial.hasPrefix("emulator-") ? serial : nil
+        })).sorted()
+    }
+
+    private func appendADBWaitObservation(
+        identity: AndroidRuntimeIdentity,
+        targetState: AndroidADBTargetState,
+        observedEmulatorSerials: [String],
+        adbDevices: [String],
+        emulatorAlive: Bool,
+        emulatorOwned: Bool,
+        consolePortListening: Bool?,
+        adbPortListening: Bool?
+    ) {
+        adbWaitTimeline.append(
+            AndroidADBWaitObservation(
+                timestamp: Date(),
+                expectedSerial: identity.serial,
+                targetState: targetState.rawValue,
+                observedEmulatorSerials: observedEmulatorSerials,
+                adbDevices: adbDevices,
+                emulatorPID: identity.pid,
+                emulatorAlive: emulatorAlive,
+                emulatorOwned: emulatorOwned,
+                consolePort: identity.consolePort,
+                consolePortListening: consolePortListening,
+                adbPort: identity.consolePort + 1,
+                adbPortListening: adbPortListening
+            )
+        )
+        if adbWaitTimeline.count > 80 {
+            adbWaitTimeline.removeFirst(adbWaitTimeline.count - 80)
+        }
+    }
+
+    private func emulatorPortStatus(
+        _ identity: AndroidRuntimeIdentity
+    ) -> (console: Bool?, adb: Bool?) {
+        let lsof = URL(fileURLWithPath: "/usr/sbin/lsof")
+        guard fileManager.isExecutableFile(atPath: lsof.path) else {
+            return (nil, nil)
+        }
+        let output: String
+        do {
+            output = try run(
+                lsof,
+                [
+                    "-nP", "-a", "-p", "\(identity.pid)",
+                    "-iTCP", "-sTCP:LISTEN"
+                ],
+                category: "emulator.wait.listening_ports",
+                timeout: 5
+            )
+        } catch let error as AndroidToolCommandError
+            where error.exitCode == 1 && !error.timedOut {
+            return (false, false)
+        } catch {
+            return (nil, nil)
+        }
+        return (
+            output.contains(":\(identity.consolePort) (LISTEN)"),
+            output.contains(":\(identity.consolePort + 1) (LISTEN)")
+        )
+    }
+
     private func deviceIsReachable(
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain?
@@ -8540,7 +8843,8 @@ actor AndroidDexBridgeRuntime {
         guard let toolchain,
               let state = try? run(
                 toolchain.adb,
-                ["-s", identity.serial, "get-state"]
+                ["-s", identity.serial, "get-state"],
+                environment: childEnvironment(for: toolchain)
               ) else { return false }
         return state.trimmingCharacters(in: .whitespacesAndNewlines) == "device"
     }
@@ -8879,6 +9183,7 @@ actor AndroidDexBridgeRuntime {
     private nonisolated static func executeBinaryProcess(
         _ executable: URL,
         _ arguments: [String],
+        environment: [String: String],
         timeout: TimeInterval
     ) async throws -> AndroidBinaryProcessOutput {
         let standardOutput = Pipe()
@@ -8886,6 +9191,7 @@ actor AndroidDexBridgeRuntime {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
+        process.environment = environment
         process.standardOutput = standardOutput
         process.standardError = standardError
         let termination = AndroidProcessTerminationWaiter()

@@ -8938,7 +8938,7 @@ final class OKVideoMacTests: XCTestCase {
                 deviceReachable: true,
                 deviceOwned: true
             ),
-            .emulatorRuntimeConflict
+            .emulatorProcessMismatch
         )
         XCTAssertEqual(
             AndroidDexBridgeRuntime.managedRuntimeFailureCategory(
@@ -9007,7 +9007,16 @@ final class OKVideoMacTests: XCTestCase {
                 targetState: .missing,
                 deviceOwned: false
             ),
-            .emulatorExitedEarly
+            .emulatorExited
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.waitingForADBFailureCategory(
+                processPresent: true,
+                processOwned: false,
+                targetState: .missing,
+                deviceOwned: false
+            ),
+            .emulatorProcessMismatch
         )
         XCTAssertEqual(
             AndroidDexBridgeRuntime.waitingForADBFailureCategory(
@@ -9017,6 +9026,16 @@ final class OKVideoMacTests: XCTestCase {
                 deviceOwned: false
             ),
             .adbDeviceMissing
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.waitingForADBFailureCategory(
+                processPresent: true,
+                processOwned: true,
+                targetState: .missing,
+                deviceOwned: false,
+                hasUnexpectedEmulatorSerial: true
+            ),
+            .unexpectedSerial
         )
         XCTAssertEqual(
             AndroidDexBridgeRuntime.waitingForADBFailureCategory(
@@ -9043,6 +9062,45 @@ final class OKVideoMacTests: XCTestCase {
                 targetState: .device,
                 deviceOwned: true
             )
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.emulatorSerials(
+                in: """
+                List of devices attached
+                emulator-5556 device product:sdk model:sdk
+                0123456789ABCDEF device usb:1-1
+                emulator-5558 offline
+                """
+            ),
+            ["emulator-5556", "emulator-5558"]
+        )
+    }
+
+    func testAndroidEmulatorLaunchPortDefinesExpectedSerial() {
+        let consolePort = 5_554
+        let arguments = AndroidDexBridgeRuntime.emulatorLaunchArguments(
+            consolePort: consolePort
+        )
+
+        XCTAssertEqual(
+            arguments,
+            [
+                "-avd", "OKVideoMac_Runtime",
+                "-port", "5554",
+                "-no-window",
+                "-no-audio",
+                "-no-boot-anim",
+                "-no-metrics",
+                "-no-snapshot",
+                "-gpu", "host",
+                "-accel", "on"
+            ]
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.emulatorSerial(
+                consolePort: consolePort
+            ),
+            "emulator-5554"
         )
     }
 
@@ -9142,6 +9200,31 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(
             snapshot.terminationRequestReason,
             "startupFailureCleanup"
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.emulatorTerminationCategory(snapshot),
+            .appRequestedTermination
+        )
+
+        let selfExited = AndroidEmulatorProcessRecorder(
+            launchAt: launch,
+            stdoutURL: URL(fileURLWithPath: "/tmp/stdout-self-exit"),
+            stderrURL: URL(fileURLWithPath: "/tmp/stderr-self-exit"),
+            arguments: [],
+            environment: [:]
+        )
+        selfExited.processDidLaunch(pid: 1_798)
+        selfExited.processDidTerminate(
+            pid: 1_798,
+            status: 1,
+            reason: "exit",
+            at: Date(timeIntervalSince1970: 101)
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.emulatorTerminationCategory(
+                selfExited.snapshot(at: Date(timeIntervalSince1970: 102))
+            ),
+            .emulatorExited
         )
     }
 
