@@ -2339,6 +2339,56 @@ private struct HomeBrowsingSnapshot {
     let categoryQueryKey: CategoryQueryKey?
 }
 
+struct CatPawHomeLoadKey: Equatable, Hashable, Sendable {
+    let configurationID: UUID
+    let semanticRevision: String
+    let siteKey: String
+}
+
+enum CatPawHomeLoadDecision: Equatable, Sendable {
+    case start(generation: UInt64)
+    case join(generation: UInt64)
+}
+
+struct CatPawHomeLoadCoordinator {
+    private var nextGeneration: UInt64 = 0
+    private var inFlight: [CatPawHomeLoadKey: UInt64] = [:]
+
+    mutating func begin(
+        key: CatPawHomeLoadKey,
+        forceRefresh: Bool
+    ) -> CatPawHomeLoadDecision {
+        if !forceRefresh, let generation = inFlight[key] {
+            return .join(generation: generation)
+        }
+        nextGeneration &+= 1
+        inFlight[key] = nextGeneration
+        return .start(generation: nextGeneration)
+    }
+
+    func owns(key: CatPawHomeLoadKey, generation: UInt64) -> Bool {
+        inFlight[key] == generation
+    }
+
+    mutating func finish(key: CatPawHomeLoadKey, generation: UInt64) {
+        guard owns(key: key, generation: generation) else { return }
+        inFlight[key] = nil
+    }
+
+    mutating func invalidate(key: CatPawHomeLoadKey) {
+        inFlight[key] = nil
+    }
+
+    mutating func removeAll() {
+        inFlight.removeAll()
+    }
+}
+
+private struct CatPawHomeRequestTaskEntry {
+    let generation: UInt64
+    let task: Task<Bool, Never>
+}
+
 private struct CategoryRequestTaskEntry {
     let generation: UInt64
     let task: Task<Bool, Never>
@@ -2401,8 +2451,87 @@ struct CategoryTabNamespace: Equatable, Hashable, Sendable {
     let siteKey: String
 }
 
+enum NodeConfigurationSemanticRevision {
+    static func make(record: StoredConfiguration) -> String? {
+        guard record.sourceKind == .remote,
+              let sourceValue = record.sourceValue,
+              let sourceURL = URL(string: sourceValue),
+              NodeBundleRuntimeService.supports(sourceURL) else {
+            return nil
+        }
+        return make(
+            sourceKind: record.sourceKind,
+            sourceValue: sourceValue,
+            rawData: record.rawData
+        )
+    }
+
+    static func make(
+        sourceKind: StoredConfigurationSourceKind,
+        sourceValue: String?,
+        rawData: Data
+    ) -> String? {
+        guard let nodeIdentity = NodeConfigurationSemanticIdentity.revision(
+            in: rawData
+        ) else {
+            return nil
+        }
+        var hasher = SHA256()
+        append(Data(sourceKind.rawValue.utf8), to: &hasher)
+        append(Data((sourceValue ?? "").utf8), to: &hasher)
+        append(Data(nodeIdentity.utf8), to: &hasher)
+        return hasher.finalize().map {
+            String(format: "%02x", $0)
+        }.joined()
+    }
+
+    private static func append(_ data: Data, to hasher: inout SHA256) {
+        var count = UInt64(data.count).bigEndian
+        withUnsafeBytes(of: &count) { hasher.update(bufferPointer: $0) }
+        hasher.update(data: data)
+    }
+}
+
+enum ConfigurationPublicationChange: Equatable, Sendable {
+    case unchanged
+    case transportOnly
+    case semantic
+}
+
+enum ConfigurationPublicationChangePolicy {
+    static func classify(
+        previous record: StoredConfiguration,
+        incomingRawData: Data,
+        incomingBaseURL: URL?,
+        usesNodeRuntime: Bool
+    ) -> ConfigurationPublicationChange {
+        let bytesOrEndpointChanged = record.rawData != incomingRawData
+            || record.baseURL != incomingBaseURL
+        guard bytesOrEndpointChanged else { return .unchanged }
+        guard usesNodeRuntime,
+              let previousRevision = NodeConfigurationSemanticRevision.make(
+                record: record
+              ),
+              let incomingRevision = NodeConfigurationSemanticRevision.make(
+                sourceKind: record.sourceKind,
+                sourceValue: record.sourceValue,
+                rawData: incomingRawData
+              ) else {
+            // Preserve the existing comparison contract for TVBox, ordinary
+            // remote JSON, and malformed/legacy Node records.
+            return .semantic
+        }
+        return previousRevision == incomingRevision
+            ? .transportOnly
+            : .semantic
+    }
+}
+
 enum CategoryConfigurationRevision {
     static func make(record: StoredConfiguration) -> String {
+        if let revision = NodeConfigurationSemanticRevision.make(record: record) {
+            return revision
+        }
         var hasher = SHA256()
         func append(_ data: Data) {
             var count = UInt64(data.count).bigEndian
@@ -2417,6 +2546,58 @@ enum CategoryConfigurationRevision {
         return hasher.finalize().map {
             String(format: "%02x", $0)
         }.joined()
+    }
+}
+
+enum NodeRuntimeContentTransport {
+    static func rebind(_ url: URL?, to endpoint: URL) -> URL? {
+        guard let url,
+              isLoopback(endpoint),
+              var components = URLComponents(
+                url: url,
+                resolvingAgainstBaseURL: false
+              ),
+              let sourceURL = components.url,
+              isLoopback(sourceURL),
+              components.path.hasPrefix("/spider/")
+                || components.path.hasPrefix("/proxy/")
+                || components.path.hasPrefix("/__okvideo/") else {
+            return url
+        }
+        components.scheme = endpoint.scheme
+        components.host = endpoint.host
+        components.port = endpoint.port
+        return components.url ?? url
+    }
+
+    static func rebind(_ items: [VideoSummary], to endpoint: URL) -> [VideoSummary] {
+        items.map { item in
+            var item = item
+            item.posterURL = rebind(item.posterURL, to: endpoint)
+            return item
+        }
+    }
+
+    static func rebind(_ page: VideoPage, to endpoint: URL) -> VideoPage {
+        VideoPage(
+            items: rebind(page.items, to: endpoint),
+            pagination: page.pagination
+        )
+    }
+
+    static func rebind(_ home: SiteHome, to endpoint: URL) -> SiteHome {
+        SiteHome(
+            categories: home.categories,
+            recommendations: rebind(home.recommendations, to: endpoint),
+            actionItems: home.actionItems
+        )
+    }
+
+    private static func isLoopback(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "http" else { return false }
+        return ["127.0.0.1", "localhost", "::1"].contains(
+            url.host?.lowercased() ?? ""
+        )
     }
 }
 
@@ -2736,6 +2917,22 @@ struct CategoryTabSessionStore {
         }
     }
 
+    mutating func rebindRuntimeContent(
+        configurationID: UUID,
+        to endpoint: URL
+    ) {
+        for (key, var state) in queryStates
+        where key.namespace.configurationID == configurationID {
+            if let page = state.page {
+                state.page = NodeRuntimeContentTransport.rebind(
+                    page,
+                    to: endpoint
+                )
+                queryStates[key] = state
+            }
+        }
+    }
+
     mutating func removeAll() {
         categoryStates.removeAll()
         queryStates.removeAll()
@@ -2775,22 +2972,6 @@ enum HomeAutomaticRefreshPolicy {
         hasCompletedStartup
             && selectedSection == .home
             && !isHomeSearchPresented
-    }
-}
-
-enum NodeRuntimeHomepageReloadPolicy {
-    static func shouldReload(
-        previousReadyEndpoint: URL?,
-        currentReadyEndpoint: URL,
-        usesNodeRuntime: Bool,
-        hasActiveConfiguration: Bool,
-        isConfigurationImportInProgress: Bool
-    ) -> Bool {
-        usesNodeRuntime
-            && hasActiveConfiguration
-            && !isConfigurationImportInProgress
-            && previousReadyEndpoint != nil
-            && previousReadyEndpoint != currentReadyEndpoint
     }
 }
 
@@ -4372,6 +4553,9 @@ final class AppState: ObservableObject {
     private var homeBrowsingSnapshots:
         [HomeContentIdentity: HomeBrowsingSnapshot] = [:]
     private var homeResumeTask: Task<Void, Never>?
+    private var catPawHomeLoadCoordinator = CatPawHomeLoadCoordinator()
+    private var catPawHomeRequestTasks:
+        [CatPawHomeLoadKey: CatPawHomeRequestTaskEntry] = [:]
     private var categoryLoadSessionID = UUID()
     private var categoryTabSessionStore = CategoryTabSessionStore()
     private var categoryRequestTasks:
@@ -4524,11 +4708,22 @@ final class AppState: ObservableObject {
                     recordID: record.id,
                     sourceURL: sourceURL
                 )
+                // The restore pass above already selected the site and
+                // published its cached home. Starting CatPaw must continue
+                // from that state, not run a second destructive preparation.
+                isHomeLoading = selectedSiteKey != nil
+                Task { @MainActor [weak self] in
+                    await self?.loadSelectedSiteHome(
+                        refreshConfigurationIfNeeded: false,
+                        reportErrors: false
+                    )
+                }
+            } else {
+                await prepareActiveConfigurationHome(
+                    reportLoadErrors: false,
+                    entryReason: .applicationRestore
+                )
             }
-            await prepareActiveConfigurationHome(
-                reportLoadErrors: false,
-                entryReason: .applicationRestore
-            )
         } catch {
             isHomeLoading = false
             show(error, title: "启动失败")
@@ -4640,6 +4835,8 @@ final class AppState: ObservableObject {
             configurationPostActivationTask?.cancel()
             configurationPostActivationTask = nil
             resetSearchForConfigurationChange()
+            invalidateCatPawHomeLoads()
+            categoryLoadSessionID = UUID()
             configurations = committedConfigurations
             configurationRefreshSessionID = UUID()
             configurationRefreshTask?.cancel()
@@ -4800,8 +4997,12 @@ final class AppState: ObservableObject {
                       self.activeConfigurationRecord?.id == record.id else {
                     return false
                 }
-                let changed = loaded.rawData != record.rawData
-                    || loaded.baseURL != record.baseURL
+                let change = ConfigurationPublicationChangePolicy.classify(
+                    previous: record,
+                    incomingRawData: loaded.rawData,
+                    incomingBaseURL: loaded.baseURL,
+                    usesNodeRuntime: NodeBundleRuntimeService.supports(url)
+                )
                 let updated = StoredConfiguration(
                     id: record.id,
                     name: record.name,
@@ -4815,11 +5016,14 @@ final class AppState: ObservableObject {
                 try await environment.database.saveConfiguration(updated)
                 self.configurations = try await environment.database.configurations()
                 self.activeConfigurationRecord = updated
-
-                guard changed else { return false }
-                self.homeLoadSessionID = UUID()
-                self.categoryLoadSessionID = UUID()
                 self.activeConfiguration = loaded.configuration
+
+                if change == .transportOnly, let endpoint = loaded.baseURL {
+                    self.rebindCatPawHomeTransport(to: endpoint)
+                }
+                guard change == .semantic else { return false }
+                self.invalidateCatPawHomeLoads()
+                self.categoryLoadSessionID = UUID()
                 self.rebuildProviders()
                 let previousSiteKey = self.selectedSiteKey
                 if !self.supportedSites.contains(where: {
@@ -5082,7 +5286,7 @@ final class AppState: ObservableObject {
         configurationRefreshSessionID = UUID()
         configurationRefreshTask?.cancel()
         configurationRefreshTask = nil
-        homeLoadSessionID = UUID()
+        invalidateCatPawHomeLoads()
         categoryLoadSessionID = UUID()
         detailLoadSessionID = UUID()
 
@@ -5206,7 +5410,6 @@ final class AppState: ObservableObject {
             }
             activeNodeRuntimeEndpoint = nil
             nodeRuntimeUnavailableReason = "本地缓存不可用，正在后台刷新 Node bundle"
-            rebuildProviders()
         }
 
         do {
@@ -5241,7 +5444,6 @@ final class AppState: ObservableObject {
             // offline. Only expose the error when no usable Runtime was found.
             if !restoredValidatedCache, activeNodeRuntimeEndpoint == nil {
                 nodeRuntimeUnavailableReason = error.localizedDescription
-                rebuildProviders()
             }
         }
 
@@ -5267,8 +5469,12 @@ final class AppState: ObservableObject {
               var record = activeConfigurationRecord else {
             throw CancellationError()
         }
-        let contentChanged = record.rawData != loaded.rawData
-            || record.baseURL != loaded.baseURL
+        let change = ConfigurationPublicationChangePolicy.classify(
+            previous: record,
+            incomingRawData: loaded.rawData,
+            incomingBaseURL: loaded.baseURL,
+            usesNodeRuntime: true
+        )
         record.baseURL = loaded.baseURL
         record.rawData = loaded.rawData
         record.updatedAt = loaded.loadedAt
@@ -5291,20 +5497,29 @@ final class AppState: ObservableObject {
         lastReadyNodeRuntimeEndpoint = loaded.baseURL
         nodeRuntimeUnavailableReason = ""
         let previousSiteKey = selectedSiteKey
-        rebuildProviders()
-        if !supportedSites.contains(where: { $0.key == selectedSiteKey }) {
-            selectedSiteKey = HomeLandingSitePolicy.defaultSiteKey(
-                from: supportedSites
-            )
+        if change == .semantic {
+            invalidateCatPawHomeLoads()
+            categoryLoadSessionID = UUID()
+        } else if let endpoint = loaded.baseURL {
+            rebindCatPawHomeTransport(to: endpoint)
         }
-        await loadSearchSiteScope()
+        let requiresProviderRebuild = change == .semantic || providers.isEmpty
+        if requiresProviderRebuild {
+            rebuildProviders()
+            if !supportedSites.contains(where: { $0.key == selectedSiteKey }) {
+                selectedSiteKey = HomeLandingSitePolicy.defaultSiteKey(
+                    from: supportedSites
+                )
+            }
+            await loadSearchSiteScope()
+        }
         guard isCurrentPostActivationWork(
             sessionID: sessionID,
             configurationID: recordID
         ) else {
             throw CancellationError()
         }
-        if contentChanged || selectedSiteKey != previousSiteKey
+        if change == .semantic || selectedSiteKey != previousSiteKey
             || homeContentIdentity?.configurationID != recordID {
             await prepareActiveConfigurationHome(
                 reportLoadErrors: false,
@@ -5478,7 +5693,7 @@ final class AppState: ObservableObject {
         cancelActiveCloudAuthorizationInteraction(
             nextIdentity: targetIdentity
         )
-        homeLoadSessionID = UUID()
+        invalidateCatPawHomeLoads()
         categoryLoadSessionID = UUID()
         isLoadingNextCategoryPage = false
         categoryPaginationError = nil
@@ -5636,11 +5851,18 @@ final class AppState: ObservableObject {
             }
         }
         do {
-            let loaded = try await provider.category(
+            var loaded = try await provider.category(
                 id: queryKey.categoryID,
                 page: page,
                 filters: queryKey.filters
             )
+            if provider.site.extra["okNodeRuntime"] == .bool(true),
+               let endpoint = activeNodeRuntimeEndpoint {
+                loaded = NodeRuntimeContentTransport.rebind(
+                    loaded,
+                    to: endpoint
+                )
+            }
             if page == 1,
                let home = siteHome,
                let promoted = HomePresentationPolicy
@@ -6031,7 +6253,8 @@ final class AppState: ObservableObject {
     func loadSelectedSiteHome(
         refreshConfigurationIfNeeded: Bool = true,
         reportErrors: Bool = true,
-        forceCategoryRefresh: Bool = false
+        forceCategoryRefresh: Bool = false,
+        forceHomeRefresh: Bool = false
     ) async -> Bool {
         if refreshConfigurationIfNeeded {
             _ = await refreshActiveConfigurationIfNeeded()
@@ -6043,6 +6266,75 @@ final class AppState: ObservableObject {
             isHomeLoading = false
             return selectedSiteKey == nil
         }
+        guard let loadKey = catPawHomeLoadKey(siteKey: key) else {
+            return await performSelectedSiteHomeLoad(
+                key: key,
+                provider: provider,
+                contentIdentity: contentIdentity,
+                reportErrors: reportErrors,
+                forceCategoryRefresh: forceCategoryRefresh
+            )
+        }
+
+        if forceHomeRefresh {
+            catPawHomeRequestTasks[loadKey]?.task.cancel()
+            catPawHomeRequestTasks[loadKey] = nil
+        }
+        var decision = catPawHomeLoadCoordinator.begin(
+            key: loadKey,
+            forceRefresh: forceHomeRefresh
+        )
+        if case .join(let generation) = decision {
+            if let entry = catPawHomeRequestTasks[loadKey],
+               entry.generation == generation {
+                return await entry.task.value
+            }
+            // Recover from an interrupted owner without manufacturing a
+            // second concurrent request for a still-registered generation.
+            catPawHomeLoadCoordinator.invalidate(key: loadKey)
+            decision = catPawHomeLoadCoordinator.begin(
+                key: loadKey,
+                forceRefresh: false
+            )
+        }
+        guard case .start(let generation) = decision else { return false }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return false }
+            return await self.performSelectedSiteHomeLoad(
+                key: key,
+                provider: provider,
+                contentIdentity: contentIdentity,
+                reportErrors: reportErrors,
+                forceCategoryRefresh: forceCategoryRefresh
+            )
+        }
+        catPawHomeRequestTasks[loadKey] = CatPawHomeRequestTaskEntry(
+            generation: generation,
+            task: task
+        )
+        let result = await task.value
+        if catPawHomeLoadCoordinator.owns(
+            key: loadKey,
+            generation: generation
+        ) {
+            catPawHomeLoadCoordinator.finish(
+                key: loadKey,
+                generation: generation
+            )
+            if catPawHomeRequestTasks[loadKey]?.generation == generation {
+                catPawHomeRequestTasks[loadKey] = nil
+            }
+        }
+        return result
+    }
+
+    private func performSelectedSiteHomeLoad(
+        key: String,
+        provider: SiteProvider,
+        contentIdentity: HomeContentIdentity,
+        reportErrors: Bool,
+        forceCategoryRefresh: Bool
+    ) async -> Bool {
         homeLoadSessionID = UUID()
         let sessionID = homeLoadSessionID
         isHomeLoading = true
@@ -6052,7 +6344,7 @@ final class AppState: ObservableObject {
             }
         }
         do {
-            let loaded = try await provider.home()
+            var loaded = try await provider.home()
             guard HomeLoadResultPolicy.shouldAccept(
                 requestSessionID: sessionID,
                 currentSessionID: homeLoadSessionID,
@@ -6062,6 +6354,13 @@ final class AppState: ObservableObject {
                 currentIdentity: currentHomeContentIdentity
             ) else {
                 return false
+            }
+            if provider.site.extra["okNodeRuntime"] == .bool(true),
+               let endpoint = activeNodeRuntimeEndpoint {
+                loaded = NodeRuntimeContentTransport.rebind(
+                    loaded,
+                    to: endpoint
+                )
             }
             publishHomeContent(loaded, identity: contentIdentity)
             homeLoadErrorMessage = nil
@@ -6106,7 +6405,8 @@ final class AppState: ObservableObject {
         )
         await loadSelectedSiteHome(
             refreshConfigurationIfNeeded: false,
-            forceCategoryRefresh: true
+            forceCategoryRefresh: true,
+            forceHomeRefresh: true
         )
     }
 
@@ -11999,6 +12299,7 @@ final class AppState: ObservableObject {
         isShutdownRequested = true
         playerRenderSurfaceGate.reset()
         automaticEpisodeAdvanceController.cancel()
+        invalidateCatPawHomeLoads()
         cancelAllCategoryRequestTasks()
         categoryTabSessionStore.removeAll()
         cancelAllPlaybackStartupGates()
@@ -14054,7 +14355,6 @@ final class AppState: ObservableObject {
             } catch {
                 activeNodeRuntimeEndpoint = nil
                 nodeRuntimeUnavailableReason = error.localizedDescription
-                rebuildProviders()
                 throw error
             }
         }
@@ -14179,73 +14479,32 @@ final class AppState: ObservableObject {
             }
             return
         }
-        let shouldReloadHome: Bool
         switch status {
         case .running(let endpoint):
-            shouldReloadHome = NodeRuntimeHomepageReloadPolicy.shouldReload(
-                previousReadyEndpoint: lastReadyNodeRuntimeEndpoint,
-                currentReadyEndpoint: endpoint,
-                usesNodeRuntime: activeConfigurationUsesNodeRuntime,
-                hasActiveConfiguration: activeConfiguration != nil,
-                isConfigurationImportInProgress: configurationImportOperationID != nil
-            )
+            let previousEndpoint = lastReadyNodeRuntimeEndpoint
+                ?? activeConfigurationRecord?.baseURL
             lastReadyNodeRuntimeEndpoint = endpoint
             activeNodeRuntimeEndpoint = endpoint
             rebindNodeConfigurationWebsite(to: endpoint)
             nodeRuntimeUnavailableReason = ""
+            if activeConfigurationUsesNodeRuntime,
+               activeConfiguration != nil,
+               configurationImportOperationID == nil,
+               previousEndpoint != endpoint {
+                rebindCatPawHomeTransport(to: endpoint)
+            }
         case .starting:
-            shouldReloadHome = false
             activeNodeRuntimeEndpoint = nil
             nodeRuntimeUnavailableReason = "Node Runtime 正在启动"
         case .restarting(let attempt, let reason):
-            shouldReloadHome = false
             activeNodeRuntimeEndpoint = nil
             nodeRuntimeUnavailableReason = "Node Runtime 正在第 \(attempt) 次恢复：\(reason)"
         case .failed(let reason):
-            shouldReloadHome = false
             activeNodeRuntimeEndpoint = nil
             nodeRuntimeUnavailableReason = reason
         case .stopped:
-            shouldReloadHome = false
             activeNodeRuntimeEndpoint = nil
             nodeRuntimeUnavailableReason = "Node Runtime 已停止"
-        }
-        if activeConfigurationUsesNodeRuntime, activeConfiguration != nil {
-            rebuildProviders()
-        }
-        guard shouldReloadHome,
-              case .running(let endpoint) = status,
-              let configurationID = activeConfigurationRecord?.id,
-              let siteKey = selectedSiteKey else {
-            return
-        }
-        // Invalidate an older homepage request synchronously with endpoint
-        // publication. The replacement load starts below, but the old request
-        // must not get a chance to publish models containing the stale port.
-        homeLoadSessionID = UUID()
-        Task { @MainActor [weak self] in
-            guard let self,
-                  self.activeNodeRuntimeEndpoint == endpoint,
-                  self.activeConfigurationRecord?.id == configurationID,
-                  self.selectedSiteKey == siteKey else {
-                return
-            }
-            if let environment = self.environment {
-                await environment.nodeBundleRuntime.recordDiagnosticEvent(
-                    NodeDiagnosticEvent(
-                        category: .runtime,
-                        severity: .info,
-                        code: .runtimeHomepageReloadRequested,
-                        message: "Reloading homepage after Node runtime endpoint replacement",
-                        siteKey: siteKey,
-                        operation: "home"
-                    )
-                )
-            }
-            await self.loadSelectedSiteHome(
-                refreshConfigurationIfNeeded: false,
-                reportErrors: false
-            )
         }
     }
 
@@ -14262,6 +14521,77 @@ final class AppState: ObservableObject {
             presentation.status = "CatPaw Runtime 已恢复，配置页已连接到新端口。"
         }
         nodeWebPresentation = presentation
+    }
+
+    private func rebindCatPawHomeTransport(to endpoint: URL) {
+        guard activeConfigurationUsesNodeRuntime,
+              let configurationID = activeConfigurationRecord?.id else {
+            return
+        }
+        categoryTabSessionStore.rebindRuntimeContent(
+            configurationID: configurationID,
+            to: endpoint
+        )
+        if let page = categoryPage {
+            categoryPage = NodeRuntimeContentTransport.rebind(
+                page,
+                to: endpoint
+            )
+        }
+        if let activeCategoryQueryKey,
+           let state = categoryTabSessionStore.state(
+            for: activeCategoryQueryKey
+           ),
+           let page = state.page {
+            categoryPage = page
+        }
+        guard let identity = currentHomeContentIdentity,
+              identity.configurationID == configurationID,
+              homeContentIdentity == identity,
+              let home = siteHome else {
+            return
+        }
+        let rebound = NodeRuntimeContentTransport.rebind(home, to: endpoint)
+        guard rebound != home else { return }
+        // A port rebind changes only transport-bearing poster URLs. Preserve
+        // the current presentation and action sheet instead of publishing a
+        // semantically new home model.
+        siteHome = rebound
+        Task { @MainActor [weak self] in
+            guard let self,
+                  self.currentHomeContentIdentity == identity,
+                  self.homeContentIdentity == identity,
+                  self.siteHome == rebound else {
+                return
+            }
+            await self.cacheSiteHome(rebound, identity: identity)
+        }
+    }
+
+    private func catPawHomeLoadKey(
+        siteKey: String
+    ) -> CatPawHomeLoadKey? {
+        guard activeConfigurationUsesNodeRuntime,
+              let record = activeConfigurationRecord,
+              let semanticRevision = NodeConfigurationSemanticRevision.make(
+                record: record
+              ) else {
+            return nil
+        }
+        return CatPawHomeLoadKey(
+            configurationID: record.id,
+            semanticRevision: semanticRevision,
+            siteKey: siteKey
+        )
+    }
+
+    private func invalidateCatPawHomeLoads() {
+        homeLoadSessionID = UUID()
+        for entry in catPawHomeRequestTasks.values {
+            entry.task.cancel()
+        }
+        catPawHomeRequestTasks.removeAll()
+        catPawHomeLoadCoordinator.removeAll()
     }
 
     private func selectedSiteSettingKey(for configurationID: UUID) -> String {
@@ -14384,7 +14714,7 @@ final class AppState: ObservableObject {
         homeResumeTask?.cancel()
         homeResumeTask = nil
         isRecoveringHome = false
-        homeLoadSessionID = UUID()
+        invalidateCatPawHomeLoads()
         categoryLoadSessionID = UUID()
         activeCategoryQueryKey = nil
         selectedCategoryID = nil

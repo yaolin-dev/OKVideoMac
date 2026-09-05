@@ -5342,55 +5342,192 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testNodeRuntimeHomepageReloadPolicyRequiresEndpointReplacement() throws {
-        let first = try XCTUnwrap(URL(string: "http://127.0.0.1:58001/"))
-        let replacement = try XCTUnwrap(URL(string: "http://127.0.0.1:58002/"))
+    func testCatPawConfigurationPublicationSeparatesSemanticAndTransportChanges()
+        throws {
+        func configuration(port: Int, profileRevision: String) -> Data {
+            Data(
+                """
+                {
+                  "video": {
+                    "homePageUrl": "http://127.0.0.1:\(port)/homepage",
+                    "danmuSearchUrl": "http://127.0.0.1:\(port)/website/danmu/fe",
+                    "internalDanmuUiUrl": "http://127.0.0.1:\(port)/internal-danmu/ui"
+                  },
+                  "danmaku": "http://127.0.0.1:\(port)/website/danmu/fe",
+                  "okCatPawModuleCounts": {"video": 1},
+                  "sites": [{
+                    "key": "nodejs_douban",
+                    "name": "豆瓣",
+                    "type": 3,
+                    "api": "/spider/douban/3",
+                    "okNodeRuntime": true,
+                    "okNodeBundleIdentity": "bundle-v1",
+                    "okNodeProfileIdentity": "profile-default",
+                    "okNodeProfileRevision": "\(profileRevision)",
+                    "okNodeSiteIdentity": "site-\(profileRevision)"
+                  }]
+                }
+                """.utf8
+            )
+        }
+        func configurationWithPublishedRevision(
+            port: Int,
+            profileRevision: String
+        ) throws -> Data {
+            let data = configuration(
+                port: port,
+                profileRevision: profileRevision
+            )
+            var root = try XCTUnwrap(
+                try JSONSerialization.jsonObject(with: data)
+                    as? [String: Any]
+            )
+            root[NodeConfigurationSemanticIdentity.fieldName] = try
+                NodeConfigurationSemanticIdentity.make(from: root)
+            return try JSONSerialization.data(
+                withJSONObject: root,
+                options: [.sortedKeys, .withoutEscapingSlashes]
+            )
+        }
 
-        XCTAssertFalse(
-            NodeRuntimeHomepageReloadPolicy.shouldReload(
-                previousReadyEndpoint: nil,
-                currentReadyEndpoint: first,
-                usesNodeRuntime: true,
-                hasActiveConfiguration: true,
-                isConfigurationImportInProgress: false
+        let sourceValue = "https://example.invalid/catpaw/index.js.md5"
+        let previous = StoredConfiguration(
+            name: "CatPaw",
+            sourceKind: .remote,
+            sourceValue: sourceValue,
+            baseURL: try XCTUnwrap(URL(string: "http://127.0.0.1:58001/")),
+            rawData: configuration(port: 58_001, profileRevision: "profile-v1"),
+            updatedAt: Date(),
+            isActive: true
+        )
+        let replacementEndpoint = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:58002/")
+        )
+        let transportOnly = try configurationWithPublishedRevision(
+            port: 58_002,
+            profileRevision: "profile-v1"
+        )
+        let semanticChange = try configurationWithPublishedRevision(
+            port: 58_002,
+            profileRevision: "profile-v2"
+        )
+
+        XCTAssertEqual(
+            ConfigurationPublicationChangePolicy.classify(
+                previous: previous,
+                incomingRawData: previous.rawData,
+                incomingBaseURL: previous.baseURL,
+                usesNodeRuntime: true
+            ),
+            .unchanged
+        )
+        XCTAssertEqual(
+            ConfigurationPublicationChangePolicy.classify(
+                previous: previous,
+                incomingRawData: transportOnly,
+                incomingBaseURL: replacementEndpoint,
+                usesNodeRuntime: true
+            ),
+            .transportOnly
+        )
+        XCTAssertEqual(
+            ConfigurationPublicationChangePolicy.classify(
+                previous: previous,
+                incomingRawData: semanticChange,
+                incomingBaseURL: replacementEndpoint,
+                usesNodeRuntime: true
+            ),
+            .semantic
+        )
+        XCTAssertEqual(
+            CategoryConfigurationRevision.make(record: previous),
+            NodeConfigurationSemanticRevision.make(
+                sourceKind: .remote,
+                sourceValue: sourceValue,
+                rawData: transportOnly
             )
         )
+        XCTAssertEqual(
+            ConfigurationPublicationChangePolicy.classify(
+                previous: previous,
+                incomingRawData: transportOnly,
+                incomingBaseURL: replacementEndpoint,
+                usesNodeRuntime: false
+            ),
+            .semantic,
+            "TVBox and ordinary remote configurations keep the old exact-change behavior"
+        )
+    }
+
+    func testCatPawHomeLoadCoordinatorJoinsAndForceRefreshReplacesGeneration() {
+        let key = CatPawHomeLoadKey(
+            configurationID: UUID(),
+            semanticRevision: "semantic-v1",
+            siteKey: "nodejs_douban"
+        )
+        var coordinator = CatPawHomeLoadCoordinator()
+        let first = coordinator.begin(key: key, forceRefresh: false)
+        guard case .start(let firstGeneration) = first else {
+            return XCTFail("first request must start")
+        }
+        XCTAssertEqual(
+            coordinator.begin(key: key, forceRefresh: false),
+            .join(generation: firstGeneration)
+        )
+        let replacement = coordinator.begin(key: key, forceRefresh: true)
+        guard case .start(let replacementGeneration) = replacement else {
+            return XCTFail("force refresh must start a replacement")
+        }
+        XCTAssertNotEqual(firstGeneration, replacementGeneration)
         XCTAssertFalse(
-            NodeRuntimeHomepageReloadPolicy.shouldReload(
-                previousReadyEndpoint: first,
-                currentReadyEndpoint: first,
-                usesNodeRuntime: true,
-                hasActiveConfiguration: true,
-                isConfigurationImportInProgress: false
-            )
+            coordinator.owns(key: key, generation: firstGeneration)
         )
         XCTAssertTrue(
-            NodeRuntimeHomepageReloadPolicy.shouldReload(
-                previousReadyEndpoint: first,
-                currentReadyEndpoint: replacement,
-                usesNodeRuntime: true,
-                hasActiveConfiguration: true,
-                isConfigurationImportInProgress: false
-            )
+            coordinator.owns(key: key, generation: replacementGeneration)
         )
-        XCTAssertFalse(
-            NodeRuntimeHomepageReloadPolicy.shouldReload(
-                previousReadyEndpoint: first,
-                currentReadyEndpoint: replacement,
-                usesNodeRuntime: false,
-                hasActiveConfiguration: true,
-                isConfigurationImportInProgress: false
-            )
+        coordinator.finish(key: key, generation: firstGeneration)
+        XCTAssertTrue(
+            coordinator.owns(key: key, generation: replacementGeneration),
+            "an obsolete completion must not evict the replacement request"
         )
-        XCTAssertFalse(
-            NodeRuntimeHomepageReloadPolicy.shouldReload(
-                previousReadyEndpoint: first,
-                currentReadyEndpoint: replacement,
-                usesNodeRuntime: true,
-                hasActiveConfiguration: true,
-                isConfigurationImportInProgress: true
-            )
+        coordinator.finish(key: key, generation: replacementGeneration)
+        XCTAssertEqual(
+            coordinator.begin(key: key, forceRefresh: false),
+            .start(generation: replacementGeneration + 1)
         )
+    }
+
+    func testCatPawRuntimeTransportRebindsOnlyOwnedLoopbackPosterURLs() throws {
+        let endpoint = try XCTUnwrap(URL(string: "http://127.0.0.1:58002/"))
+        let runtimePoster = try XCTUnwrap(
+            URL(string: "http://localhost:58001/proxy/poster?id=1")
+        )
+        let externalPoster = try XCTUnwrap(
+            URL(string: "https://images.example.invalid/poster.jpg")
+        )
+        let items = [
+            VideoSummary(
+                siteKey: "nodejs_douban",
+                siteName: "豆瓣",
+                videoID: "1",
+                title: "Runtime",
+                posterURL: runtimePoster
+            ),
+            VideoSummary(
+                siteKey: "nodejs_douban",
+                siteName: "豆瓣",
+                videoID: "2",
+                title: "External",
+                posterURL: externalPoster
+            )
+        ]
+
+        let rebound = NodeRuntimeContentTransport.rebind(items, to: endpoint)
+
+        XCTAssertEqual(rebound[0].posterURL?.host, "127.0.0.1")
+        XCTAssertEqual(rebound[0].posterURL?.port, 58_002)
+        XCTAssertEqual(rebound[0].posterURL?.path, "/proxy/poster")
+        XCTAssertEqual(rebound[1].posterURL, externalPoster)
     }
 
     func testEndpointReplacementRejectsStaleHomepageResult() {
@@ -12059,6 +12196,12 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             .unknown
         )
         XCTAssertEqual(configuration.danmaku, "/danmu")
+        XCTAssertEqual(
+            configuration.extra[
+                NodeConfigurationSemanticIdentity.fieldName
+            ]?.stringValue?.count,
+            64
+        )
     }
 
     func testNodeConfigurationNormalizationAcceptsSitesListShape() throws {

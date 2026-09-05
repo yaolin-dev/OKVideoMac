@@ -2,6 +2,63 @@ import CryptoKit
 import Foundation
 import OKVideoCore
 
+/// Stable identity for the host-visible CatPaw configuration. CatPaw's raw
+/// module groups also publish listener-bound website URLs, so they are a
+/// transport document rather than a semantic revision. The normalized root
+/// catalogue is the App's provider contract and already carries bundle,
+/// profile, module and site identities; hash that contract explicitly and
+/// publish the result with the configuration.
+enum NodeConfigurationSemanticIdentity {
+    static let fieldName = "okNodeSemanticRevision"
+
+    private static let runtimeProjectionKeys = Set([
+        "video", "read", "comic", "music", "pan", "danmaku"
+    ])
+
+    static func revision(in data: Data) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: data)
+            as? [String: Any] else {
+            return nil
+        }
+        if let embedded = root[fieldName] as? String,
+           isSHA256(embedded) {
+            return embedded.lowercased()
+        }
+        return try? make(from: root)
+    }
+
+    static func make(from root: [String: Any]) throws -> String {
+        guard let sites = root["sites"] as? [[String: Any]],
+              root["okCatPawModuleCounts"] is [String: Any],
+              sites.allSatisfy({ site in
+                  site["okNodeRuntime"] as? Bool == true
+                      && (site["okNodeSiteIdentity"] as? String)?.isEmpty == false
+              }) else {
+            throw AppError.configuration("Node 配置缺少稳定的模块身份")
+        }
+
+        var semanticRoot = root
+        semanticRoot.removeValue(forKey: fieldName)
+        for key in runtimeProjectionKeys {
+            semanticRoot.removeValue(forKey: key)
+        }
+        let canonical = try JSONSerialization.data(
+            withJSONObject: semanticRoot,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+        return SHA256.hash(data: canonical).map {
+            String(format: "%02x", $0)
+        }.joined()
+    }
+
+    private static func isSHA256(_ value: String) -> Bool {
+        value.count == 64 && value.unicodeScalars.allSatisfy {
+            CharacterSet(charactersIn: "0123456789abcdefABCDEF")
+                .contains($0)
+        }
+    }
+}
+
 enum NodeDiagnosticCategory: String, Codable, Equatable, Sendable {
     case transport
     case trust
@@ -1916,6 +1973,8 @@ actor NodeBundleRuntimeService {
             }
         )
         root["sites"] = sites
+        root[NodeConfigurationSemanticIdentity.fieldName] = try
+            NodeConfigurationSemanticIdentity.make(from: root)
 
         do {
             return try JSONSerialization.data(
