@@ -1,6 +1,6 @@
 # Release SBOM Process
 
-Date: 2026-08-13
+Date: 2026-09-05
 
 Every packaged release contains four machine-readable documents under
 `Contents/Resources/Legal/Compliance/SBOM/`:
@@ -26,4 +26,5 @@ aggregate carries the exact embedded APK SHA-256. Excluded xpp3 is forbidden.
 SPDX packages, validates all non-main Mach-O hashes, and compares Maven
 coordinates and versions with the Gradle lock. `verify-bundle.sh` invokes it,
 so a newly copied dylib or undeclared locked Android module fails packaging.
-The final source-release manifest includes the SHA-256 of all four SBOMs.
+The final source-release directory contains all four SBOMs, and its manifest
+and SHA256SUMS include their exact SHA-256 values beside the public DMG.

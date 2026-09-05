@@ -2,15 +2,15 @@
 
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于
 配置格式、站点类型和运行时，而不是简单以 TVBox、FongMi、MiraPlay 或 CatPawOpen
-等生态名称判断。当前版本为 **0.3.66（Build 92）**，支持 **arm64**，最低系统为
-**macOS 12.0**。
+等生态名称判断。即将发布的候选版本为 **0.4.0（Build 94）**，支持 **arm64**，
+最低系统为 **macOS 12.0**。当前公开版本仍为 0.3.41（Build 65）。
 
 项目不内置内容源、账号、Cookie、DRM key 或私人服务配置。请只导入你有权使用
 且信任的配置、脚本和媒体。
 
 ## 当前版本
 
-- 当前版本：0.3.68（Build 94）
+- 当前版本：0.4.0（Build 94）
 - 最低系统：macOS 12.0
 - 支持架构：Apple Silicon / arm64
 - 播放历史按点播配置源分组；切换同一配置内的站点不会隐藏历史，历史项仍保留
@@ -19,16 +19,18 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源�
   不会清除已经确认的登录状态，也不会存储 Cookie 或 Token
 - Android Bridge 运行时固定 AVD 身份与正式签名；发现旧版 AVD 时可在完整备份和
  复制核验后安全迁移，失败会恢复原运行环境，旧 AVD 始终保持只读
-- 发行验证：505 项 Xcode 测试通过（另有 2 项按设计跳过），129 项 OKVideoKit
-  测试与 59 项 Android Bridge 测试通过，arm64 Release 与 Android Release Bridge
-  构建通过；正式 Release packaging 已验证 28 个
-  Mach-O 的架构、部署目标、依赖闭包、签名和 Hardened Runtime
+- Xcode：584 total / 582 passed / 2 intentionally skipped / 0 failed
+- OKVideoKit：173 passed / 0 failed
+- Node / CatPaw / Quark：30 passed / 0 failed
+- Android Release assemble 与 lint：通过；Android JVM unit tests：NO-SOURCE
+- 正式 Release packaging 会验证 28 个 Mach-O 的架构、部署目标、依赖闭包、
+  Developer ID 签名和 Hardened Runtime，并生成 DMG、SBOM 与对应源码集
 - 对外分发：Build 65 已完成 Developer ID signing、Apple notarization、staple
   和 Gatekeeper 实物验收
 
 ## 安装
 
-正式公开版本发布后：
+当前公开版本安装：
 
 1. 只从本仓库官方 GitHub Releases 页面下载 0.3.41 对应的 macOS arm64 发布包；
 2. 打开 `OKVideoMac-0.3.41-macOS-arm64.dmg`；
@@ -36,6 +38,10 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源�
 4. 从 Applications 或 Finder 正常启动。
 
 不要使用来源不明或无法与本仓库发布哈希对应的第三方二进制。
+
+0.4.0（Build 94）尚处于 RC。它通过审核并合入 `main` 后，正式 DMG 会从该
+exact merge commit 重新构建、公证、staple 并发布；分支上生成的 RC DMG 不会
+直接作为正式 Release 复用。
 
 ### Gatekeeper 与 macOS 安全
 
@@ -123,6 +129,8 @@ SDK，可点击 **选择 SDK…** 并选择包含 `platform-tools` 和 `emulator
 
 功能级别状态与证据见
 [`macOS/OKVideoMac/Docs/COMPATIBILITY.md`](macOS/OKVideoMac/Docs/COMPATIBILITY.md)。
+0.4.0 面向用户的变更摘要见
+[`Docs/RELEASE_NOTES_0.4.0.md`](../Docs/RELEASE_NOTES_0.4.0.md)。
 
 ## 首次发布的已知限制与风险
 
@@ -168,24 +176,24 @@ Git tag 指向的 exact release commit 才是项目源码基准；不要把移�
 `master` 或 `latest` 当作对应源码。正式 Release 应同时提供并由统一
 `SHA256SUMS` 绑定：
 
-- source release index：`OKVideoMac-0.3.41-build65-SOURCE_RELEASE_INDEX.json`；
+- source release index：`OKVideoMac-0.4.0-build94-SOURCE_RELEASE_INDEX.json`；
 - binary-to-source mapping：
   [`Docs/BINARY_SOURCE_MAPPING.md`](../Docs/BINARY_SOURCE_MAPPING.md)；
 - binary/source manifest：
-  `OKVideoMac-0.3.41-build65-SOURCE_RELEASE_MANIFEST.json`；
-- hashes：`OKVideoMac-0.3.41-build65-SHA256SUMS`；
+  `OKVideoMac-0.4.0-build94-SOURCE_RELEASE_MANIFEST.json`；
+- hashes：`OKVideoMac-0.4.0-build94-SHA256SUMS`；
 - macOS SPDX / CycloneDX：`OKVideoMac-macOS.spdx.json`、
   `OKVideoMac-macOS.cdx.json`；
 - Android SPDX / CycloneDX：`OKVideoMac-Android.spdx.json`、
   `OKVideoMac-Android.cdx.json`；
-- exact APK：`OKVideoMac-0.3.41-AndroidDexBridge-release.apk`；
-- exact project source：`OKVideoMac-0.3.41-build65-source.tar.gz`；
+- exact APK：`OKVideoMac-0.4.0-AndroidDexBridge-release.apk`；
+- exact project source：`OKVideoMac-0.4.0-build94-source.tar.gz`；
 - third-party source package：
-  `OKVideoMac-0.3.41-build65-third-party-source.tar.gz`；
-- license package：`OKVideoMac-0.3.41-build65-licenses.tar.gz`；
-- macOS artifact：`OKVideoMac-0.3.41-macOS-arm64.dmg`。
+  `OKVideoMac-0.4.0-build94-third-party-source.tar.gz`；
+- license package：`OKVideoMac-0.4.0-build94-licenses.tar.gz`；
+- macOS artifact：`OKVideoMac-0.4.0.dmg`。
 
-当前 Build 65 文件清单与生成规则见
+0.4.0 Build 94 文件清单与生成规则见
 [`Docs/SOURCE_RELEASE_PROCESS.md`](../Docs/SOURCE_RELEASE_PROCESS.md)。Build 62/63
 发布准备阶段的历史工程状态保留在
 [Historical Build 62 Release Readiness Record](../Docs/IMMUTABLE_RELEASE_READINESS.md)。

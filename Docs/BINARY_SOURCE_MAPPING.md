@@ -1,7 +1,7 @@
-# OKVideoMac 0.3.41 (65) Binary → Source Mapping
+# OKVideoMac 0.4.0 (Build 94) Binary → Source Mapping
 
 This document answers which fixed source corresponds to each binary distributed
-in OKVideoMac 0.3.41 (65). The authoritative per-release Git commit and
+in OKVideoMac 0.4.0 (Build 94). The authoritative per-release Git commit and
 binary/source hashes are generated in `SOURCE_RELEASE_MANIFEST.json`; a public
 upload remains a separate release action. Where native reproducible-build
 evidence is missing, the status remains explicit.
@@ -14,7 +14,7 @@ Using a moving `main`, `master`, or `latest` URL is not acceptable.
 
 | Distributed binary / content | Fixed corresponding source | Changes / build relationship | Release source status |
 | --- | --- | --- | --- |
-| `Contents/MacOS/OKVideoMac` | exact Git commit recorded in the adjacent `SOURCE_RELEASE_MANIFEST.json` | Xcode Release arm64 build | Deterministic project source archive generated and hash-bound to the final binary ZIP; public upload pending |
+| `Contents/MacOS/OKVideoMac` | exact Git commit recorded in the adjacent `SOURCE_RELEASE_MANIFEST.json` | Xcode Release arm64 build | Deterministic project source is verified against the internal ZIP carrier; the public DMG is independently verified and hash-bound by the same outer manifest; public upload pending |
 | OKVideoKit code linked into the executable | `macOS/OKVideoMac/Packages/OKVideoKit` at the same project commit | project source, `GPL-3.0-only` | Fixed locally; public archive pending |
 | `libOKMPVBridge.dylib` | `macOS/OKVideoMac/Native/MPVBridge/OKMPVBridge.c` and `.h` at the Phase 4 final project commit; exact implementation recovered from project-history commit `481dc64` | project bridge dynamically linked to patched mpv and FFmpeg; restored source exports the stable 25-symbol interface including both media-probe functions | Exact stable project source is present; Phase 4 candidate rebuild and 25-symbol comparison pass; public archive pending |
 | `libmpv.dylib` | [mpv v0.41.0 archive](https://github.com/mpv-player/mpv/archive/refs/tags/v0.41.0.tar.gz), SHA `ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209`, plus `Patches/mpv-0.41.0-coreaudio-without-cocoa.patch`, SHA `f57fa49d8916d3ffc3834bb3f2a53b041c0113984bbd9f3ef6b68257b3c0af9f` | GPL-enabled Meson build; modified source | Source archive, patch, build script/options, license and hashes are included in the generated third-party source/license archives |
@@ -32,8 +32,9 @@ Using a moving `main`, `master`, or `latest` URL is not acceptable.
 ## Release maintainer rule
 
 `package-app.sh` creates the source-side index before signing and finalizes the
-outer manifest/SHA256SUMS after the final (possibly notarized) ZIP. The binary
-and every source archive must be uploaded together. If a binary hash, version,
+outer manifest/SHA256SUMS after both the verified internal ZIP carrier and the
+final (possibly notarized and stapled) public DMG exist. The DMG, source
+archives, notices, SBOMs, and checksums must be uploaded together. If a binary hash, version,
 patch, build flag, or APK dependency changes, update the locks and mapping
 before packaging. A generic upstream homepage is attribution, not a
 corresponding-source answer.
