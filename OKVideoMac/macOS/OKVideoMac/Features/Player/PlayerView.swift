@@ -718,6 +718,16 @@ struct PlayerView: View {
                     .controlSize(.regular)
                     .padding(.top, 2)
                 }
+
+                if isFailed,
+                   state.canOpenNodeConfigurationForPlaybackFailure {
+                    Button("打开网盘授权配置") {
+                        state.openNodeConfigurationForPlaybackFailure()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                    .padding(.top, 2)
+                }
             }
             .foregroundColor(.white)
             .padding(.horizontal, 24)

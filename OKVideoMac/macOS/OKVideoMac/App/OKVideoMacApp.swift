@@ -1313,20 +1313,6 @@ private struct PlayerPlaybackWindowRoot: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-
-            if let prompt = appState.playerCloudAuthorizationPrompt {
-                CloudAuthorizationView(prompt: prompt)
-                    .environmentObject(appState)
-                    .environment(\.colorScheme, .dark)
-                    .zIndex(1_000)
-            }
-
-            if let presentation = appState.playerNodeWebPresentation {
-                NodeConfigurationView(presentation: presentation)
-                    .environmentObject(appState)
-                    .environment(\.colorScheme, .dark)
-                    .zIndex(1_100)
-            }
         }
         .frame(minWidth: 800, minHeight: 450)
         .background(Color.black)
@@ -1337,6 +1323,7 @@ private struct PlayerPlaybackWindowRoot: View {
                 dismissButton: .default(Text("好"))
             )
         }
+        .appConfigurationSheet(scope: .player)
     }
 }
 

@@ -61,6 +61,316 @@ enum CatPawRuntimeURLResolver {
     }
 }
 
+enum CatPawCloudProvider: String, CaseIterable, Sendable {
+    case quark
+    case ucCookie = "uc-cookie"
+    case ucToken = "uc-token"
+    case pan115 = "115"
+    case baidu
+    case ali
+    case guangyapan
+    case xunlei
+    case yidong
+    case tianyi
+    case pan123 = "123"
+
+    var displayName: String {
+        switch self {
+        case .quark: return "夸克网盘"
+        case .ucCookie: return "UC 网盘"
+        case .ucToken: return "UC Token"
+        case .pan115: return "115 网盘"
+        case .baidu: return "百度网盘"
+        case .ali: return "阿里云盘"
+        case .guangyapan: return "光鸭盘"
+        case .xunlei: return "迅雷云盘"
+        case .yidong: return "移动云盘"
+        case .tianyi: return "天翼云盘"
+        case .pan123: return "123 网盘"
+        }
+    }
+
+    static func resolve(
+        declaredProvider: String? = nil,
+        flag: String = "",
+        message: String = ""
+    ) -> CatPawCloudProvider? {
+        if let declared = normalized(declaredProvider) {
+            if let exact = Self(rawValue: declared) { return exact }
+            switch declared {
+            case "uc", "uc-cookie": return .ucCookie
+            case "ut", "uctv", "uc-tv", "uc-token": return .ucToken
+            case "115", "my115": return .pan115
+            case "123", "my123", "pan123": return .pan123
+            default: break
+            }
+        }
+        if let declaredFlag = normalized(flag) {
+            if let exact = Self(rawValue: declaredFlag) { return exact }
+            switch declaredFlag {
+            case "uc": return .ucCookie
+            case "ut", "uctv", "uc-tv": return .ucToken
+            case "my115": return .pan115
+            case "my123", "pan123": return .pan123
+            default: break
+            }
+        }
+
+        let value = [declaredProvider, flag, message]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .lowercased()
+        if value.contains("夸克") || value.contains("quark") { return .quark }
+        if value.contains("uc-token") || value.contains("uc tv")
+            || value.contains("uc-tv") || value.contains("uctv") {
+            return .ucToken
+        }
+        if value.contains("uc网盘") || value.contains("uc 网盘")
+            || value.contains("uc cookie") || value.contains("uc-cookie") {
+            return .ucCookie
+        }
+        if value.contains("115网盘") || value.contains("115 网盘")
+            || value.contains("/115/") {
+            return .pan115
+        }
+        if value.contains("百度") || value.contains("baidu") { return .baidu }
+        if value.contains("阿里") || value.contains("alipan")
+            || value.contains("aliyun") {
+            return .ali
+        }
+        if value.contains("光鸭") || value.contains("guangyapan") {
+            return .guangyapan
+        }
+        if value.contains("迅雷") || value.contains("xunlei") { return .xunlei }
+        if value.contains("移动云盘") || value.contains("移动网盘")
+            || value.contains("yidong") {
+            return .yidong
+        }
+        if value.contains("天翼") || value.contains("tianyi") { return .tianyi }
+        if value.contains("123网盘") || value.contains("123 网盘")
+            || value.contains("123pan") || value.contains("pan123") {
+            return .pan123
+        }
+        return nil
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let normalized = value.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).lowercased()
+        return normalized.isEmpty ? nil : normalized
+    }
+}
+
+enum CatPawAuthorizationPhase: String, Equatable, Sendable {
+    case play
+    case proxy
+}
+
+enum CatPawAuthorizationReasonCode: String, Equatable, Sendable {
+    case missingCredential
+    case notLoggedIn
+    case expiredCredential
+    case unauthorizedHTTP
+    case providerDeclared
+}
+
+enum NodeAuthorizationCompletionMode: String, Equatable, Sendable {
+    case explicitSignal
+    case profileRevision
+}
+
+struct CatPawAuthorizationScope: Equatable, Sendable {
+    let challengeID: UUID
+    let playbackRequestID: UUID
+    let requestGeneration: UInt64
+    let configurationIdentity: String?
+    let semanticRevision: String?
+    let runtimeGeneration: String?
+    let siteIdentity: String?
+    let modulePath: String?
+    let profileRevisionBefore: String?
+}
+
+struct CatPawAuthorizationChallenge: Equatable, Sendable {
+    let challengeID: UUID
+    let playbackRequestID: UUID
+    let requestGeneration: UInt64
+    let configurationIdentity: String?
+    let semanticRevision: String?
+    let runtimeGeneration: String?
+    let siteIdentity: String?
+    let modulePath: String?
+    let providerID: String
+    let phase: CatPawAuthorizationPhase
+    let reasonCode: CatPawAuthorizationReasonCode
+    let profileRevisionBefore: String?
+}
+
+enum CatPawAuthorizationClassifier {
+    static func challenge(
+        action: String,
+        options: [String: JSONValue],
+        flag: String,
+        phase: CatPawAuthorizationPhase,
+        scope: CatPawAuthorizationScope
+    ) -> CatPawAuthorizationChallenge? {
+        guard action == "toast" || action == "proxyAuthorizationRequired"
+                || action == "authorizationRequired",
+              let message = message(from: options),
+              !isExpiredShareToken(message) else {
+            return nil
+        }
+        let provider: CatPawCloudProvider?
+        if action == "authorizationRequired" {
+            guard let declaredProvider = normalized(
+                options["provider"]?.stringValue
+            ) else {
+                return nil
+            }
+            provider = CatPawCloudProvider.resolve(
+                declaredProvider: declaredProvider
+            )
+        } else {
+            provider = CatPawCloudProvider.resolve(
+                declaredProvider: options["provider"]?.stringValue,
+                flag: flag,
+                message: message
+            )
+        }
+        guard let provider else { return nil }
+
+        let reason: CatPawAuthorizationReasonCode?
+        if action == "authorizationRequired" {
+            if let declaredPhase = options["phase"]?.stringValue,
+               declaredPhase != phase.rawValue {
+                return nil
+            }
+            switch options["reasonCode"]?.stringValue {
+            case CatPawAuthorizationReasonCode.missingCredential.rawValue:
+                reason = .missingCredential
+            case CatPawAuthorizationReasonCode.expiredCredential.rawValue:
+                reason = .expiredCredential
+            case CatPawAuthorizationReasonCode.unauthorizedHTTP.rawValue:
+                let statusCode = integer(
+                    from: options["upstreamStatus"] ?? options["statusCode"]
+                )
+                reason = statusCode == 401 || statusCode == 403
+                    ? .unauthorizedHTTP : nil
+            case CatPawAuthorizationReasonCode.providerDeclared.rawValue:
+                reason = .providerDeclared
+            default:
+                reason = nil
+            }
+        } else if action == "proxyAuthorizationRequired" {
+            let statusCode = integer(from: options["statusCode"])
+            if statusCode == 401 || statusCode == 403 {
+                reason = .unauthorizedHTTP
+            } else if explicitlyRequestsAuthorization(message) {
+                reason = .providerDeclared
+            } else {
+                reason = nil
+            }
+        } else if describesMissingLogin(message) {
+            reason = .notLoggedIn
+        } else if describesExpiredCredential(message) {
+            reason = .expiredCredential
+        } else if explicitlyRequestsAuthorization(message) {
+            reason = .providerDeclared
+        } else {
+            reason = nil
+        }
+        guard let reason else { return nil }
+
+        return CatPawAuthorizationChallenge(
+            challengeID: scope.challengeID,
+            playbackRequestID: scope.playbackRequestID,
+            requestGeneration: scope.requestGeneration,
+            configurationIdentity: normalized(
+                options["configurationID"]?.stringValue
+            ) ?? scope.configurationIdentity,
+            semanticRevision: normalized(
+                options["semanticRevision"]?.stringValue
+            ) ?? scope.semanticRevision,
+            runtimeGeneration: normalized(
+                options["runtimeGeneration"]?.stringValue
+            ) ?? scope.runtimeGeneration,
+            siteIdentity: normalized(options["siteIdentity"]?.stringValue)
+                ?? scope.siteIdentity,
+            modulePath: normalized(options["runtimeModulePath"]?.stringValue)
+                ?? scope.modulePath,
+            providerID: provider.rawValue,
+            phase: phase,
+            reasonCode: reason,
+            profileRevisionBefore: normalized(
+                options["profileRevisionBefore"]?.stringValue
+            ) ?? scope.profileRevisionBefore
+        )
+    }
+
+    static func message(from options: [String: JSONValue]) -> String? {
+        for key in ["message", "msg", "text", "title"] {
+            if let value = normalized(options[key]?.stringValue) {
+                return value
+            }
+        }
+        return nil
+    }
+
+    static func isExpiredShareToken(_ message: String) -> Bool {
+        let normalized = message.lowercased()
+        return normalized.contains("41016")
+            || (normalized.contains("stoken")
+                && (normalized.contains("过期")
+                    || normalized.contains("expired")))
+    }
+
+    private static func describesMissingLogin(_ message: String) -> Bool {
+        let value = message.lowercased()
+        return [
+            "未登录", "还没有登录", "请先登录", "需要登录", "扫码登录",
+            "not logged in", "login required", "require login", "please login",
+            "account unavailable"
+        ].contains(where: value.contains)
+    }
+
+    private static func describesExpiredCredential(_ message: String) -> Bool {
+        let value = message.lowercased()
+        let credential = [
+            "cookie", "token", "bduss", "credential", "授权", "登录"
+        ].contains(where: value.contains)
+        let expired = [
+            "失效", "过期", "无效", "expired", "invalid", "unauthorized"
+        ].contains(where: value.contains)
+        return credential && expired
+    }
+
+    private static func explicitlyRequestsAuthorization(_ message: String) -> Bool {
+        let value = message.lowercased()
+        return [
+            "检查授权", "重新授权", "未授权", "授权失败", "授权已失效",
+            "配置中心", "扫码登录", "unauthorized", "credential"
+        ].contains(where: value.contains)
+    }
+
+    private static func integer(from value: JSONValue?) -> Int? {
+        switch value {
+        case .integer(let value): return Int(exactly: value)
+        case .number(let value) where value.rounded() == value:
+            return Int(value)
+        case .string(let value): return Int(value)
+        default: return nil
+        }
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 enum CatPawRouteCapabilityState: String, Equatable, Sendable {
     case unknown
     case supported
@@ -514,7 +824,8 @@ final class CatPawHostMessageBridge {
         modulePath: String,
         notBefore: Date,
         baseURL: URL,
-        waitMilliseconds: Int
+        waitMilliseconds: Int,
+        playbackContext: NodeTransferPlaybackContext? = nil
     ) async throws -> CatPawHostMessage? {
         guard Self.isValidRuntimeModulePath(modulePath) else {
             throw AppError.spider("Node Runtime 事件来源无效")
@@ -525,7 +836,7 @@ final class CatPawHostMessageBridge {
                 .appendingPathComponent("runtime-host-message"),
             resolvingAgainstBaseURL: false
         )
-        components?.queryItems = [
+        var queryItems = [
             URLQueryItem(name: "source", value: modulePath),
             URLQueryItem(
                 name: "notBefore",
@@ -536,6 +847,24 @@ final class CatPawHostMessageBridge {
                 value: String(min(max(waitMilliseconds, 0), 2_000))
             )
         ]
+        if let playbackContext {
+            queryItems.append(contentsOf: [
+                URLQueryItem(
+                    name: "playbackRequestID",
+                    value: playbackContext.requestID.uuidString.lowercased()
+                ),
+                URLQueryItem(
+                    name: "requestGeneration",
+                    value: String(playbackContext.requestGeneration)
+                ),
+                URLQueryItem(
+                    name: "challengeID",
+                    value: playbackContext.authorizationChallengeID
+                        .uuidString.lowercased()
+                )
+            ])
+        }
+        components?.queryItems = queryItems
         guard let endpoint = components?.url else {
             throw AppError.spider("Node Runtime 事件轮询地址无效")
         }
@@ -834,6 +1163,9 @@ final class CatPawAuthorizationCoordinator {
         let requestID = providerChallenge == nil ? nil : invocationID
         let provider = Self.nonEmpty(options["provider"]?.stringValue)
             ?? site.name.replacingOccurrences(of: "|", with: " ")
+        let preferredProviderID = CatPawCloudProvider.resolve(
+            declaredProvider: provider
+        )?.rawValue
         let profileRevision = Self.nonEmpty(
             options["profileRevision"]?.stringValue
         ) ?? site.extra["okNodeProfileRevision"]?.stringValue
@@ -867,7 +1199,39 @@ final class CatPawAuthorizationCoordinator {
                 : "等待网盘授权，请使用对应网盘 App 扫码。",
             provider: provider,
             profileRevision: profileRevision,
-            transport: transport
+            transport: transport,
+            preferredProviderID: preferredProviderID,
+            completionMode: providerChallenge == nil
+                ? .profileRevision
+                : .explicitSignal
+        )
+    }
+
+    func playbackAuthorizationRequired(
+        challenge: CatPawAuthorizationChallenge,
+        message: String,
+        baseURL: URL
+    ) -> NodeWebAuthorizationRequired {
+        let provider = CatPawCloudProvider(
+            rawValue: challenge.providerID
+        )
+        let providerName = provider?.displayName ?? challenge.providerID
+        let detail = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prompt = detail.isEmpty
+            ? "完成登录后将自动重新验证当前影片。"
+            : "完成登录后将自动重新验证当前影片。\n\(detail)"
+        return NodeWebAuthorizationRequired(
+            challengeID: challenge.challengeID,
+            requestID: challenge.playbackRequestID.uuidString.lowercased(),
+            websiteURL: baseURL.appendingPathComponent("website"),
+            title: "需要\(providerName)授权",
+            message: prompt,
+            provider: providerName,
+            profileRevision: challenge.profileRevisionBefore,
+            transport: challenge.phase.rawValue,
+            preferredProviderID: challenge.providerID,
+            completionMode: .profileRevision,
+            challenge: challenge
         )
     }
 
@@ -883,7 +1247,11 @@ final class CatPawAuthorizationCoordinator {
             message: message,
             provider: site.name.replacingOccurrences(of: "|", with: " "),
             profileRevision: site.extra["okNodeProfileRevision"]?.stringValue,
-            transport: "web"
+            transport: "web",
+            preferredProviderID: CatPawCloudProvider.resolve(
+                declaredProvider: site.name
+            )?.rawValue,
+            completionMode: .profileRevision
         )
     }
 

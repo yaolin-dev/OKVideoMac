@@ -20,7 +20,7 @@ struct DetailLoadingView: View {
                 coordinateSpaceName: DetailPageLayout.coordinateSpaceName
             )
             HStack(alignment: .top, spacing: 26) {
-                VideoPosterView(item: summary)
+                DetailPosterView(summary: summary)
                     .frame(width: DetailPageLayout.posterWidth)
 
                 VStack(alignment: .leading, spacing: 12) {
@@ -57,12 +57,6 @@ struct DetailLoadingView: View {
                 DetailBackButton { state.dismissDetail() }
             }
         }
-        .overlay {
-            if let presentation = state.detailNodeWebPresentation {
-                NodeConfigurationView(presentation: presentation)
-                    .environmentObject(state)
-            }
-        }
     }
 }
 
@@ -92,13 +86,6 @@ struct DetailView: View {
                     Divider()
                         .padding(.horizontal, DetailPageLayout.horizontalPadding)
                     detailFactStrip
-                }
-
-                if detail.synopsis?.trimmedNonEmpty != nil
-                    || detail.actors?.trimmedNonEmpty != nil {
-                    Divider()
-                        .padding(.horizontal, DetailPageLayout.horizontalPadding)
-                    editorialInformation
                 }
 
                 Divider()
@@ -139,18 +126,6 @@ struct DetailView: View {
                 .accessibilityLabel(isFavorite ? "取消收藏" : "收藏影片")
             }
         }
-        .overlay {
-            if let prompt = state.detailCloudAuthorizationPrompt {
-                CloudAuthorizationView(prompt: prompt)
-                    .environmentObject(state)
-            }
-        }
-        .overlay {
-            if let presentation = state.detailNodeWebPresentation {
-                NodeConfigurationView(presentation: presentation)
-                    .environmentObject(state)
-            }
-        }
         .onAppear {
             performInitialSelection()
             // Report after SwiftUI has mounted the real detail tree and the
@@ -176,7 +151,7 @@ struct DetailView: View {
 
     private var detailHero: some View {
         HStack(alignment: .top, spacing: 26) {
-            VideoPosterView(item: detail.summary)
+            DetailPosterView(summary: detail.summary)
                 .frame(width: DetailPageLayout.posterWidth)
 
             VStack(alignment: .leading, spacing: 12) {
@@ -204,10 +179,41 @@ struct DetailView: View {
                 }
 
                 if let synopsis = detail.synopsis?.trimmedNonEmpty {
-                    Text(synopsis)
-                        .font(.callout)
-                        .foregroundColor(.secondary)
-                        .lineLimit(3)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(synopsis)
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                            .lineLimit(showsFullSynopsis ? nil : 3)
+                        if synopsis.count > 120 {
+                            DetailExpandButton(
+                                isExpanded: showsFullSynopsis,
+                                expandTitle: "更多",
+                                collapseTitle: "收起"
+                            ) {
+                                showsFullSynopsis.toggle()
+                            }
+                        }
+                    }
+                }
+
+                if let actors = displayActors {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("演员")
+                            .font(.callout.weight(.semibold))
+                        Text(actors)
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                            .lineLimit(showsAllActors ? nil : 2)
+                        if actors.count > 90 {
+                            DetailExpandButton(
+                                isExpanded: showsAllActors,
+                                expandTitle: "更多",
+                                collapseTitle: "收起"
+                            ) {
+                                showsAllActors.toggle()
+                            }
+                        }
+                    }
                 }
 
                 Button(action: playPrimaryEpisode) {
@@ -241,51 +247,8 @@ struct DetailView: View {
         }
     }
 
-    @ViewBuilder
-    private var editorialInformation: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            if let synopsis = detail.synopsis?.trimmedNonEmpty {
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("简介")
-                        .font(.title3.weight(.semibold))
-                    Text(synopsis)
-                        .font(.callout)
-                        .foregroundColor(.secondary)
-                        .lineLimit(showsFullSynopsis ? nil : 5)
-                    if synopsis.count > 120 {
-                        DetailExpandButton(
-                            isExpanded: showsFullSynopsis,
-                            expandTitle: "更多",
-                            collapseTitle: "收起"
-                        ) {
-                            showsFullSynopsis.toggle()
-                        }
-                    }
-                }
-            }
-
-            if let actors = detail.actors?.trimmedNonEmpty {
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("演员")
-                        .font(.title3.weight(.semibold))
-                    Text(actors)
-                        .font(.callout)
-                        .foregroundColor(.secondary)
-                        .lineLimit(showsAllActors ? nil : 3)
-                    if actors.count > 90 {
-                        DetailExpandButton(
-                            isExpanded: showsAllActors,
-                            expandTitle: "更多",
-                            collapseTitle: "收起"
-                        ) {
-                            showsAllActors.toggle()
-                        }
-                    }
-                }
-            }
-        }
-        .padding(.horizontal, DetailPageLayout.horizontalPadding)
-        .padding(.vertical, 22)
+    private var displayActors: String? {
+        SpiderDisplayTextNormalizer.people(detail.actors)
     }
 
     private var playbackBrowser: some View {
@@ -604,6 +567,17 @@ private struct DetailBackButton: View {
         }
         .help("返回上一页")
         .accessibilityLabel("返回上一页")
+    }
+}
+
+private struct DetailPosterView: View {
+    let summary: VideoSummary
+
+    var body: some View {
+        VideoPosterView(item: summary)
+            .compositingGroup()
+            .shadow(color: .black.opacity(0.10), radius: 3, y: 2)
+            .shadow(color: .black.opacity(0.20), radius: 15, y: 9)
     }
 }
 

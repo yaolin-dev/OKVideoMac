@@ -1847,6 +1847,7 @@ enum AndroidRuntimeStartupStage: String, Codable, CaseIterable, Sendable {
 
 enum AndroidRuntimeFailureCategory: String, Codable, Sendable {
     case sdkIncomplete
+    case javaRuntimeMissing
     case adbUnavailable
     case emulatorLaunchFailed
     case emulatorLaunchTimedOut
@@ -1953,11 +1954,22 @@ struct AndroidRuntimeDiagnosticSnapshot: Codable, Equatable, Sendable {
     let emulatorExecutable: Bool
     let emulatorVersion: String?
     let avdManagerPath: String?
+    let avdManagerExists: Bool
+    let avdManagerExecutable: Bool
+    let javaHome: String?
+    let javaRuntimeSource: String?
+    let javaExecutable: Bool
     let expectedAVDName: String
     let avdExists: Bool
     let avdPath: String
     let systemImage: String?
+    let systemImageAPILevel: Int?
+    let systemImageExtensionLevel: Int?
     let systemImageABI: String?
+    let systemImageDirectory: String?
+    let systemImageCandidates: [AndroidSystemImageDiagnostic]
+    let configuredAVDSystemImageDirectory: String?
+    let avdSystemImageMatchesSelection: Bool?
     let emulatorPID: Int32?
     let emulatorSerial: String?
     let emulatorProcessRunning: Bool
@@ -2011,6 +2023,8 @@ struct AndroidRuntimeFailureError: LocalizedError, Sendable {
         switch record.category {
         case .sdkIncomplete:
             return "Android SDK 不完整，请在设置中选择包含 ADB、Emulator 和系统镜像的 SDK。"
+        case .javaRuntimeMissing:
+            return "创建专用 Android 环境需要 Java Runtime。请安装 JDK，或安装包含 JBR 的 Android Studio。"
         case .adbUnavailable:
             return "ADB 无法使用，无法连接专用 Android Emulator。"
         case .emulatorLaunchFailed, .emulatorLaunchTimedOut, .runtimeExited:
@@ -3715,8 +3729,36 @@ struct AndroidDeprecatedTargetSDKWarningPolicy {
 struct AndroidSystemImage: Equatable, Sendable {
     let packageID: String
     let apiLevel: Int
+    let extensionLevel: Int
     let variant: String
+    let variantDisplayName: String?
     let architecture: String
+    let actualRelativeDirectory: String
+    let targetIdentifier: String
+
+    init(
+        packageID: String,
+        apiLevel: Int,
+        extensionLevel: Int = 0,
+        variant: String,
+        variantDisplayName: String? = nil,
+        architecture: String,
+        actualRelativeDirectory: String? = nil,
+        targetIdentifier: String? = nil
+    ) {
+        self.packageID = packageID
+        self.apiLevel = apiLevel
+        self.extensionLevel = extensionLevel
+        self.variant = variant
+        self.variantDisplayName = variantDisplayName
+        self.architecture = architecture
+        let packageComponents = packageID.split(separator: ";").map(String.init)
+        self.actualRelativeDirectory = actualRelativeDirectory
+            ?? packageComponents.joined(separator: "/")
+        self.targetIdentifier = targetIdentifier
+            ?? packageComponents.dropFirst().first
+            ?? "android-\(apiLevel)"
+    }
 
     var supportsInteractiveRendering: Bool {
         let normalized = variant.lowercased()
@@ -3724,10 +3766,15 @@ struct AndroidSystemImage: Equatable, Sendable {
     }
 
     var avdSystemImageDirectory: String {
-        "system-images/android-\(apiLevel)/\(variant)/\(architecture)/"
+        actualRelativeDirectory.hasSuffix("/")
+            ? actualRelativeDirectory
+            : actualRelativeDirectory + "/"
     }
 
     var avdTagDisplayName: String {
+        if let variantDisplayName = variantDisplayName?.nonEmptyBridgeValue {
+            return variantDisplayName
+        }
         switch variant {
         case "google_apis":
             return "Google APIs"
@@ -3736,6 +3783,337 @@ struct AndroidSystemImage: Equatable, Sendable {
         default:
             return variant
         }
+    }
+}
+
+struct AndroidSystemImageDiagnostic: Codable, Equatable, Sendable {
+    let actualRelativeDirectory: String
+    let packageID: String?
+    let apiLevel: Int?
+    let extensionLevel: Int?
+    let variant: String?
+    let architecture: String?
+    let accepted: Bool
+    let reason: String
+}
+
+private struct AndroidSystemImageInspection {
+    let actualRelativeDirectory: String
+    let image: AndroidSystemImage?
+    let metadataError: String?
+
+    var diagnostic: AndroidSystemImageDiagnostic {
+        let rejection: String?
+        if let metadataError {
+            rejection = metadataError
+        } else if let image, image.apiLevel < 24 {
+            rejection = "API 低于 Android Bridge minSdk 24"
+        } else if let image, image.architecture != "arm64-v8a" {
+            rejection = "ABI 不是 arm64-v8a"
+        } else if let image, !image.supportsInteractiveRendering {
+            rejection = "ATD 不支持交互界面捕获"
+        } else if image == nil {
+            rejection = "无法读取 system image 元数据"
+        } else {
+            rejection = nil
+        }
+        return AndroidSystemImageDiagnostic(
+            actualRelativeDirectory: actualRelativeDirectory,
+            packageID: image?.packageID,
+            apiLevel: image?.apiLevel,
+            extensionLevel: image?.extensionLevel,
+            variant: image?.variant,
+            architecture: image?.architecture,
+            accepted: rejection == nil,
+            reason: rejection ?? "可用于 OKVideoMac 专用 AVD"
+        )
+    }
+}
+
+private enum AndroidSystemImagePackageError: LocalizedError {
+    case unreadable
+    case malformedXML
+    case missingPackageID
+    case invalidPackageID
+    case directoryMismatch(expected: String, actual: String)
+    case missingAPILevel
+    case missingTag
+    case missingABI
+    case tagMismatch(expected: String, actual: String)
+    case abiMismatch(expected: String, actual: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unreadable:
+            return "package.xml 无法读取"
+        case .malformedXML:
+            return "package.xml XML 已损坏"
+        case .missingPackageID:
+            return "package.xml 缺少 localPackage path"
+        case .invalidPackageID:
+            return "localPackage path 不是 system image 身份"
+        case let .directoryMismatch(expected, actual):
+            return "localPackage path 与实际目录不一致（\(expected) != \(actual)）"
+        case .missingAPILevel:
+            return "package.xml 缺少有效 api-level"
+        case .missingTag:
+            return "package.xml 缺少 tag/id"
+        case .missingABI:
+            return "package.xml 缺少 abi"
+        case let .tagMismatch(expected, actual):
+            return "tag/id 与 package 身份不一致（\(expected) != \(actual)）"
+        case let .abiMismatch(expected, actual):
+            return "abi 与 package 身份不一致（\(expected) != \(actual)）"
+        }
+    }
+}
+
+private enum AndroidSystemImagePackageParser {
+    static func parse(
+        data: Data,
+        actualRelativeDirectory: String
+    ) throws -> AndroidSystemImage {
+        let delegate = AndroidSystemImagePackageXMLDelegate()
+        let parser = XMLParser(data: data)
+        parser.delegate = delegate
+        guard parser.parse() else {
+            throw AndroidSystemImagePackageError.malformedXML
+        }
+        guard let packageID = delegate.packageID?.nonEmptyBridgeValue else {
+            throw AndroidSystemImagePackageError.missingPackageID
+        }
+        let components = packageID.split(separator: ";").map(String.init)
+        guard components.count == 4, components[0] == "system-images" else {
+            throw AndroidSystemImagePackageError.invalidPackageID
+        }
+        let normalizedActual = AndroidManagedAVDConfiguration
+            .normalizedSystemImageDirectory(actualRelativeDirectory)
+        let expectedDirectory = components.joined(separator: "/")
+        guard normalizedActual == expectedDirectory else {
+            throw AndroidSystemImagePackageError.directoryMismatch(
+                expected: expectedDirectory,
+                actual: normalizedActual
+            )
+        }
+        guard let apiLevel = Int(delegate.apiLevel ?? ""), apiLevel > 0 else {
+            throw AndroidSystemImagePackageError.missingAPILevel
+        }
+        guard let variant = delegate.tagID?.nonEmptyBridgeValue else {
+            throw AndroidSystemImagePackageError.missingTag
+        }
+        guard let architecture = delegate.abi?.nonEmptyBridgeValue else {
+            throw AndroidSystemImagePackageError.missingABI
+        }
+        guard variant == components[2] else {
+            throw AndroidSystemImagePackageError.tagMismatch(
+                expected: components[2],
+                actual: variant
+            )
+        }
+        guard architecture == components[3] else {
+            throw AndroidSystemImagePackageError.abiMismatch(
+                expected: components[3],
+                actual: architecture
+            )
+        }
+        let extensionLevel = Int(delegate.extensionLevel ?? "") ?? 0
+        return AndroidSystemImage(
+            packageID: packageID,
+            apiLevel: apiLevel,
+            extensionLevel: max(0, extensionLevel),
+            variant: variant,
+            variantDisplayName: delegate.tagDisplay?.nonEmptyBridgeValue,
+            architecture: architecture,
+            actualRelativeDirectory: normalizedActual,
+            targetIdentifier: components[1]
+        )
+    }
+}
+
+private final class AndroidSystemImagePackageXMLDelegate:
+    NSObject, XMLParserDelegate {
+    var packageID: String?
+    var apiLevel: String?
+    var extensionLevel: String?
+    var tagID: String?
+    var tagDisplay: String?
+    var abi: String?
+
+    private var path: [String] = []
+    private var text = ""
+
+    func parser(
+        _ parser: XMLParser,
+        didStartElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?,
+        attributes attributeDict: [String: String] = [:]
+    ) {
+        path.append(elementName)
+        text = ""
+        if elementName == "localPackage" {
+            packageID = attributeDict["path"]
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        text.append(string)
+    }
+
+    func parser(
+        _ parser: XMLParser,
+        didEndElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?
+    ) {
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if elementName == "api-level" {
+            apiLevel = value
+        } else if elementName == "extension-level" {
+            extensionLevel = value
+        } else if elementName == "abi" {
+            abi = value
+        } else if path.suffix(2) == ["tag", "id"] {
+            tagID = value
+        } else if path.suffix(2) == ["tag", "display"] {
+            tagDisplay = value
+        }
+        if !path.isEmpty {
+            path.removeLast()
+        }
+        text = ""
+    }
+}
+
+struct AndroidJavaRuntime: Equatable, Sendable {
+    let home: URL
+    let executable: URL
+    let source: String
+
+    func applying(to base: [String: String]) -> [String: String] {
+        var environment = base
+        environment["JAVA_HOME"] = home.path
+        let javaBin = executable.deletingLastPathComponent().path
+        if let path = environment["PATH"], !path.isEmpty {
+            environment["PATH"] = javaBin + ":" + path
+        } else {
+            environment["PATH"] = javaBin
+        }
+        return environment
+    }
+}
+
+struct AndroidJavaRuntimeResolver {
+    let homeDirectory: URL
+    let environment: [String: String]
+    let systemApplicationsDirectory: URL
+    let fileManager: FileManager
+    let systemJavaHomeProvider: () -> URL?
+
+    init(
+        homeDirectory: URL,
+        environment: [String: String],
+        systemApplicationsDirectory: URL = URL(
+            fileURLWithPath: "/Applications",
+            isDirectory: true
+        ),
+        fileManager: FileManager,
+        systemJavaHomeProvider: @escaping () -> URL? = Self.systemJavaHome
+    ) {
+        self.homeDirectory = homeDirectory
+        self.environment = environment
+        self.systemApplicationsDirectory = systemApplicationsDirectory
+        self.fileManager = fileManager
+        self.systemJavaHomeProvider = systemJavaHomeProvider
+    }
+
+    func resolve() -> AndroidJavaRuntime? {
+        var candidates: [(URL, String)] = []
+        if let javaHome = environment["JAVA_HOME"]?.nonEmptyBridgeValue {
+            candidates.append((Self.url(from: javaHome), "JAVA_HOME"))
+        }
+        if let systemJavaHome = systemJavaHomeProvider() {
+            candidates.append((systemJavaHome, "/usr/libexec/java_home"))
+        }
+        candidates.append(contentsOf: androidStudioHomes(
+            in: systemApplicationsDirectory,
+            source: "Android Studio JBR (/Applications)"
+        ))
+        candidates.append(contentsOf: androidStudioHomes(
+            in: homeDirectory.appendingPathComponent(
+                "Applications",
+                isDirectory: true
+            ),
+            source: "Android Studio JBR (~/Applications)"
+        ))
+
+        var seen = Set<String>()
+        for (candidate, source) in candidates {
+            let home = candidate.standardizedFileURL.resolvingSymlinksInPath()
+            guard seen.insert(home.path).inserted else { continue }
+            let java = home.appendingPathComponent("bin/java")
+            if fileManager.isExecutableFile(atPath: java.path) {
+                return AndroidJavaRuntime(
+                    home: home,
+                    executable: java.resolvingSymlinksInPath(),
+                    source: source
+                )
+            }
+        }
+        return nil
+    }
+
+    private func androidStudioHomes(
+        in applicationsDirectory: URL,
+        source: String
+    ) -> [(URL, String)] {
+        guard let applications = try? fileManager.contentsOfDirectory(
+            at: applicationsDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        return applications
+            .filter {
+                $0.pathExtension == "app"
+                    && $0.deletingPathExtension().lastPathComponent
+                        .hasPrefix("Android Studio")
+            }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .map {
+                (
+                    $0.appendingPathComponent(
+                        "Contents/jbr/Contents/Home",
+                        isDirectory: true
+                    ),
+                    source
+                )
+            }
+    }
+
+    private static func url(from path: String) -> URL {
+        URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+    }
+
+    private static func systemJavaHome() -> URL? {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/libexec/java_home")
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+        guard process.terminationStatus == 0,
+              let value = String(
+                  data: output.fileHandleForReading.readDataToEndOfFile(),
+                  encoding: .utf8
+              )?.nonEmptyBridgeValue else {
+            return nil
+        }
+        return URL(fileURLWithPath: value)
     }
 }
 
@@ -3762,7 +4140,7 @@ struct AndroidManagedAVDConfiguration {
     }
 
     static func systemImageVariant(in contents: String) -> String? {
-        guard let directory = value(for: "image.sysdir.1", in: contents) else {
+        guard let directory = systemImageDirectory(in: contents) else {
             return nil
         }
         let components = directory.split(separator: "/")
@@ -3773,12 +4151,43 @@ struct AndroidManagedAVDConfiguration {
         return String(components[systemImagesIndex + 2])
     }
 
+    static func systemImageDirectory(in contents: String) -> String? {
+        guard let directory = value(
+            for: "image.sysdir.1",
+            in: contents
+        )?.nonEmptyBridgeValue else {
+            return nil
+        }
+        let normalized = normalizedSystemImageDirectory(directory)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    static func normalizedSystemImageDirectory(_ directory: String) -> String {
+        let slashNormalized = directory.replacingOccurrences(
+            of: "\\",
+            with: "/"
+        )
+        let components = slashNormalized.split(
+            separator: "/",
+            omittingEmptySubsequences: true
+        )
+        if let index = components.firstIndex(of: "system-images") {
+            return components[index...].joined(separator: "/")
+        }
+        return components.joined(separator: "/")
+    }
+
+    static func targetIdentifier(in contents: String) -> String? {
+        value(for: "target", in: contents)?.nonEmptyBridgeValue
+    }
+
     static func targetAPILevel(in contents: String) -> Int? {
-        guard let target = value(for: "target", in: contents),
+        guard let target = targetIdentifier(in: contents),
               target.hasPrefix("android-") else {
             return nil
         }
-        return Int(target.dropFirst("android-".count))
+        let version = target.dropFirst("android-".count)
+        return Int(version.split(separator: ".", maxSplits: 1)[0])
     }
 
     static func requiresInteractiveImageMigration(_ contents: String) -> Bool {
@@ -3791,6 +4200,26 @@ struct AndroidManagedAVDConfiguration {
             variant: variant,
             architecture: ""
         ).supportsInteractiveRendering
+    }
+
+    static func matches(
+        _ image: AndroidSystemImage,
+        contents: String
+    ) -> Bool {
+        if let directory = systemImageDirectory(in: contents) {
+            return directory == normalizedSystemImageDirectory(
+                image.actualRelativeDirectory
+            )
+        }
+        return targetIdentifier(in: contents) == image.targetIdentifier
+            && systemImageVariant(in: contents) == image.variant
+    }
+
+    static func requiresSystemImageMigration(
+        _ contents: String,
+        to image: AndroidSystemImage
+    ) -> Bool {
+        !matches(image, contents: contents)
     }
 
     static func updating(
@@ -3809,7 +4238,7 @@ struct AndroidManagedAVDConfiguration {
             "tag.displaynames": image.avdTagDisplayName,
             "tag.id": image.variant,
             "tag.ids": image.variant,
-            "target": "android-\(image.apiLevel)"
+            "target": image.targetIdentifier
         ]
         var seen = Set<String>()
         var lines = contents.components(separatedBy: .newlines)
@@ -3839,6 +4268,7 @@ struct AndroidManagedAVDConfiguration {
 }
 
 struct AndroidToolchainResolver {
+    static let minimumBridgeAPILevel = 24
     static let userSDKRootDefaultsKey = "OKVideoMac.AndroidSDKRoot"
 
     let applicationSupportDirectory: URL
@@ -3872,7 +4302,37 @@ struct AndroidToolchainResolver {
         )
     }
 
+    func resolveJavaRuntime() -> AndroidJavaRuntime? {
+        AndroidJavaRuntimeResolver(
+            homeDirectory: homeDirectory,
+            environment: environment,
+            fileManager: fileManager
+        ).resolve()
+    }
+
     func installedSystemImages(in toolchain: AndroidToolchain) -> [AndroidSystemImage] {
+        systemImageInspections(in: toolchain)
+            .compactMap(\.image)
+            .filter {
+                $0.apiLevel >= Self.minimumBridgeAPILevel
+                    && $0.architecture == "arm64-v8a"
+            }
+            .sorted(by: Self.precedes)
+    }
+
+    func systemImageDiagnostics(
+        in toolchain: AndroidToolchain
+    ) -> [AndroidSystemImageDiagnostic] {
+        systemImageInspections(in: toolchain)
+            .map(\.diagnostic)
+            .sorted {
+                $0.actualRelativeDirectory < $1.actualRelativeDirectory
+            }
+    }
+
+    private func systemImageInspections(
+        in toolchain: AndroidToolchain
+    ) -> [AndroidSystemImageInspection] {
         let root = toolchain.sdkRoot.appendingPathComponent("system-images")
         guard let apiDirectories = try? fileManager.contentsOfDirectory(
             at: root,
@@ -3880,16 +4340,13 @@ struct AndroidToolchainResolver {
             options: [.skipsHiddenFiles]
         ) else { return [] }
 
-        var images: [AndroidSystemImage] = []
+        var inspections: [AndroidSystemImageInspection] = []
         for apiDirectory in apiDirectories {
-            let apiName = apiDirectory.lastPathComponent
-            guard apiName.hasPrefix("android-"),
-                  let apiLevel = Int(apiName.dropFirst("android-".count)),
-                  let variants = try? fileManager.contentsOfDirectory(
+            guard let variants = try? fileManager.contentsOfDirectory(
                     at: apiDirectory,
                     includingPropertiesForKeys: [.isDirectoryKey],
                     options: [.skipsHiddenFiles]
-                  ) else { continue }
+                ) else { continue }
             for variantDirectory in variants {
                 guard let architectures = try? fileManager.contentsOfDirectory(
                     at: variantDirectory,
@@ -3897,37 +4354,50 @@ struct AndroidToolchainResolver {
                     options: [.skipsHiddenFiles]
                 ) else { continue }
                 for architectureDirectory in architectures {
-                    let architecture = architectureDirectory.lastPathComponent
-                    guard architecture == "arm64-v8a",
-                          fileManager.fileExists(
-                            atPath: architectureDirectory
-                                .appendingPathComponent("package.xml").path
-                          ) else { continue }
-                    let variant = variantDirectory.lastPathComponent
-                    images.append(
-                        AndroidSystemImage(
-                            packageID: "system-images;\(apiName);\(variant);\(architecture)",
-                            apiLevel: apiLevel,
-                            variant: variant,
-                            architecture: architecture
-                        )
+                    let relativeDirectory = [
+                        "system-images",
+                        apiDirectory.lastPathComponent,
+                        variantDirectory.lastPathComponent,
+                        architectureDirectory.lastPathComponent
+                    ].joined(separator: "/")
+                    let metadata = architectureDirectory.appendingPathComponent(
+                        "package.xml"
                     )
+                    guard let data = try? Data(contentsOf: metadata) else {
+                        inspections.append(
+                            AndroidSystemImageInspection(
+                                actualRelativeDirectory: relativeDirectory,
+                                image: nil,
+                                metadataError: AndroidSystemImagePackageError
+                                    .unreadable.localizedDescription
+                            )
+                        )
+                        continue
+                    }
+                    do {
+                        inspections.append(
+                            AndroidSystemImageInspection(
+                                actualRelativeDirectory: relativeDirectory,
+                                image: try AndroidSystemImagePackageParser.parse(
+                                    data: data,
+                                    actualRelativeDirectory: relativeDirectory
+                                ),
+                                metadataError: nil
+                            )
+                        )
+                    } catch {
+                        inspections.append(
+                            AndroidSystemImageInspection(
+                                actualRelativeDirectory: relativeDirectory,
+                                image: nil,
+                                metadataError: error.localizedDescription
+                            )
+                        )
+                    }
                 }
             }
         }
-        return images.sorted { lhs, rhs in
-            if lhs.apiLevel != rhs.apiLevel {
-                return lhs.apiLevel > rhs.apiLevel
-            }
-            let rank: (String) -> Int = { variant in
-                switch variant {
-                case "google_apis": return 0
-                case "default": return 1
-                default: return 2
-                }
-            }
-            return rank(lhs.variant) < rank(rhs.variant)
-        }
+        return inspections
     }
 
     func interactiveSystemImages(
@@ -3946,21 +4416,60 @@ struct AndroidToolchainResolver {
         guard let avdConfiguration else {
             return images.first
         }
-        let currentAPI = AndroidManagedAVDConfiguration.targetAPILevel(
+        if let currentDirectory = AndroidManagedAVDConfiguration
+            .systemImageDirectory(in: avdConfiguration),
+           let exact = images.first(where: {
+               AndroidManagedAVDConfiguration
+                   .normalizedSystemImageDirectory($0.actualRelativeDirectory)
+                   == currentDirectory
+           }) {
+            return exact
+        }
+        let currentTarget = AndroidManagedAVDConfiguration.targetIdentifier(
             in: avdConfiguration
         )
         let currentVariant = AndroidManagedAVDConfiguration.systemImageVariant(
             in: avdConfiguration
         )
-        if let currentAPI, let currentVariant,
+        if let currentTarget, let currentVariant,
            let exact = images.first(where: {
-               $0.apiLevel == currentAPI && $0.variant == currentVariant
+               $0.targetIdentifier == currentTarget
+                   && $0.variant == currentVariant
            }) {
             return exact
         }
-        guard let currentAPI else { return images.first }
-        return images.first(where: { $0.apiLevel == currentAPI })
-            ?? images.first
+        if let currentTarget,
+           let targetMatch = images.first(where: {
+               $0.targetIdentifier == currentTarget
+           }) {
+            return targetMatch
+        }
+        return images.first
+    }
+
+    private static func precedes(
+        _ lhs: AndroidSystemImage,
+        _ rhs: AndroidSystemImage
+    ) -> Bool {
+        if lhs.apiLevel != rhs.apiLevel {
+            return lhs.apiLevel > rhs.apiLevel
+        }
+        if lhs.extensionLevel != rhs.extensionLevel {
+            return lhs.extensionLevel > rhs.extensionLevel
+        }
+        let rank: (String) -> Int = { variant in
+            switch variant {
+            case "google_apis": return 0
+            case "default": return 1
+            default: return 2
+            }
+        }
+        let lhsRank = rank(lhs.variant)
+        let rhsRank = rank(rhs.variant)
+        if lhsRank != rhsRank {
+            return lhsRank < rhsRank
+        }
+        return lhs.packageID < rhs.packageID
     }
 
     private func candidateSDKRoots() -> [URL] {
@@ -3998,26 +4507,36 @@ struct AndroidToolchainResolver {
         }
     }
 
+    func avdManagerCandidate(in sdkRoot: URL) -> URL? {
+        let candidates = avdManagerCandidates(in: sdkRoot)
+        return candidates.first(where: {
+            fileManager.isExecutableFile(atPath: $0.path)
+        }) ?? candidates.first(where: {
+            fileManager.fileExists(atPath: $0.path)
+        })
+    }
+
     private func avdManager(in sdkRoot: URL) -> URL? {
+        avdManagerCandidates(in: sdkRoot).first(where: {
+            fileManager.isExecutableFile(atPath: $0.path)
+        })?.resolvingSymlinksInPath()
+    }
+
+    private func avdManagerCandidates(in sdkRoot: URL) -> [URL] {
         let latest = sdkRoot.appendingPathComponent(
             "cmdline-tools/latest/bin/avdmanager"
         )
-        if fileManager.isExecutableFile(atPath: latest.path) {
-            return latest.resolvingSymlinksInPath()
-        }
         let commandLineTools = sdkRoot.appendingPathComponent("cmdline-tools")
-        guard let versions = try? fileManager.contentsOfDirectory(
+        let versions = (try? fileManager.contentsOfDirectory(
             at: commandLineTools,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
-        ) else { return nil }
-        for version in versions.sorted(by: { $0.lastPathComponent > $1.lastPathComponent }) {
-            let candidate = version.appendingPathComponent("bin/avdmanager")
-            if fileManager.isExecutableFile(atPath: candidate.path) {
-                return candidate.resolvingSymlinksInPath()
-            }
-        }
-        return nil
+        )) ?? []
+        let versioned = versions
+            .filter { $0.lastPathComponent != "latest" }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+            .map { $0.appendingPathComponent("bin/avdmanager") }
+        return [latest] + versioned
     }
 
     static func inferredSDKRoot(fromPATHEntry entry: URL) -> URL? {
@@ -4798,6 +5317,9 @@ actor AndroidDexBridgeRuntime {
                for: probeErrorCategory
            ) {
             category = bridgeCategory
+        } else if lowercased.contains("java runtime")
+                    || lowercased.contains("java_home") {
+            category = .javaRuntimeMissing
         } else if lowercased.contains("其他 emulator")
                     || lowercased.contains("记录端口") {
             category = .emulatorRuntimeConflict
@@ -5103,6 +5625,11 @@ actor AndroidDexBridgeRuntime {
         guard toolchain.avdManager != nil else {
             return .unavailable("缺少 Android SDK Command-line Tools（avdmanager）")
         }
+        guard resolver().resolveJavaRuntime() != nil else {
+            return .unavailable(
+                "创建 AVD 缺少 Java Runtime；请安装 JDK 或 Android Studio JBR"
+            )
+        }
         return .stopped
     }
 
@@ -5240,13 +5767,38 @@ actor AndroidDexBridgeRuntime {
             }
         }
 
+        let configurationURL = avdDirectory.appendingPathComponent(
+            "config.ini"
+        )
+        let configurationContents = try? String(
+            contentsOf: configurationURL,
+            encoding: .utf8
+        )
         let image = toolchain.flatMap {
-            resolver().interactiveSystemImages(in: $0).first
+            resolver().preferredInteractiveSystemImage(
+                in: $0,
+                avdConfiguration: configurationContents
+            )
+        }
+        let javaRuntime = resolver().resolveJavaRuntime()
+        let avdManagerCandidate = toolchain.flatMap {
+            resolver().avdManagerCandidate(in: $0.sdkRoot)
+        }
+        let imageDiagnostics = toolchain.map {
+            resolver().systemImageDiagnostics(in: $0)
+        } ?? []
+        let configuredImageDirectory = configurationContents.flatMap {
+            AndroidManagedAVDConfiguration.systemImageDirectory(in: $0)
+        }
+        let imageMatchesConfiguration = configurationContents.map { contents in
+            image.map {
+                AndroidManagedAVDConfiguration.matches($0, contents: contents)
+            } ?? false
         }
         let apk = try? bridgeAPK()
         let apkHash = apk.flatMap(Self.sha256Hex)
         let configExists = fileManager.fileExists(
-            atPath: avdDirectory.appendingPathComponent("config.ini").path
+            atPath: configurationURL.path
         )
         let runtimeState: String
         if let operationStatus {
@@ -5286,14 +5838,31 @@ actor AndroidDexBridgeRuntime {
                 fileManager.isExecutableFile(atPath: $0.emulator.path)
             } ?? false,
             emulatorVersion: emulatorVersion.map(Self.firstDiagnosticLine),
-            avdManagerPath: toolchain?.avdManager.map { _ in
+            avdManagerPath: avdManagerCandidate.map { _ in
                 "<sdk-root>/cmdline-tools/<version>/bin/avdmanager"
             },
+            avdManagerExists: avdManagerCandidate.map {
+                fileManager.fileExists(atPath: $0.path)
+            } ?? false,
+            avdManagerExecutable: avdManagerCandidate.map {
+                fileManager.isExecutableFile(atPath: $0.path)
+            } ?? false,
+            javaHome: javaRuntime.map { _ in "<java-home>" },
+            javaRuntimeSource: javaRuntime?.source,
+            javaExecutable: javaRuntime.map {
+                fileManager.isExecutableFile(atPath: $0.executable.path)
+            } ?? false,
             expectedAVDName: Self.avdName,
             avdExists: configExists,
             avdPath: "<app-support>/AndroidRuntime/avd/\(Self.avdName).avd",
             systemImage: image?.packageID,
+            systemImageAPILevel: image?.apiLevel,
+            systemImageExtensionLevel: image?.extensionLevel,
             systemImageABI: image?.architecture,
+            systemImageDirectory: image?.actualRelativeDirectory,
+            systemImageCandidates: imageDiagnostics,
+            configuredAVDSystemImageDirectory: configuredImageDirectory,
+            avdSystemImageMatchesSelection: imageMatchesConfiguration,
             emulatorPID: identity?.pid,
             emulatorSerial: identity?.serial,
             emulatorProcessRunning: processRunning,
@@ -7011,13 +7580,15 @@ actor AndroidDexBridgeRuntime {
                 for: image
             )
             if updated != contents {
-                if AndroidManagedAVDConfiguration
-                    .requiresInteractiveImageMigration(contents) {
+                if AndroidManagedAVDConfiguration.requiresSystemImageMigration(
+                    contents,
+                    to: image
+                ) {
                     guard !runtimeProcessReferencesAVD(
                         named: Self.avdName
                     ) else {
                         throw AppError.spider(
-                            "Android 环境仍在运行；为保护登录数据，原生界面升级已中止"
+                            "Android 环境仍在运行；为保护登录数据，系统镜像迁移已中止"
                         )
                     }
                     try backupManagedAVDForRenderingUpgrade()
@@ -7047,6 +7618,11 @@ actor AndroidDexBridgeRuntime {
                     + "ATD 不支持界面捕获，本版本不会自动下载"
             )
         }
+        guard let javaRuntime = resolver().resolveJavaRuntime() else {
+            throw AppError.spider(
+                "创建 AVD 缺少 Java Runtime；请安装 JDK 或 Android Studio JBR"
+            )
+        }
         _ = try run(
             avdManager,
             [
@@ -7055,7 +7631,9 @@ actor AndroidDexBridgeRuntime {
                 "-k", image.packageID,
                 "-p", avdDirectory.path
             ],
-            environment: childEnvironment(for: toolchain),
+            environment: javaRuntime.applying(
+                to: childEnvironment(for: toolchain)
+            ),
             input: Data("no\n".utf8)
         )
         guard fileManager.fileExists(atPath: configuration.path) else {

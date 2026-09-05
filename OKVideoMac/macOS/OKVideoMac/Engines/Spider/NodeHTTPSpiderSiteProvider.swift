@@ -8,9 +8,33 @@ private func nodeNonEmpty(_ value: String?) -> String? {
     return trimmed.isEmpty ? nil : trimmed
 }
 
+/// Host-side interpretation of how cards emitted by a CatPaw video module
+/// should be opened. Discovery modules (for example an index/catalogue
+/// module) emit search seeds rather than provider-owned detail records.
+enum NodeSiteNavigationMode: String, Equatable, Sendable {
+    case detail
+    case discovery
+
+    static func resolve(for site: SiteConfiguration?) -> Self {
+        guard let site,
+              site.extra["okNodeRuntime"] == .bool(true) else {
+            return .detail
+        }
+        if let declared = site.extra["okNodeNavigationMode"]?.stringValue,
+           let mode = Self(rawValue: declared.lowercased()) {
+            return mode
+        }
+        // Compatibility with bundles/configurations published before the
+        // explicit navigation capability existed.
+        return site.indexs == 1 ? .discovery : .detail
+    }
+}
+
 struct NodeTransferPlaybackContext: Equatable, Sendable {
     let requestID: UUID
     let requestGeneration: UInt64
+
+    var authorizationChallengeID: UUID { requestID }
 }
 
 private enum NodeTransferPlaybackTaskContext {
@@ -54,6 +78,9 @@ struct NodeWebAuthorizationRequired: Error, LocalizedError, Equatable {
     let provider: String?
     let profileRevision: String?
     let transport: String
+    let preferredProviderID: String?
+    let completionMode: NodeAuthorizationCompletionMode
+    let challenge: CatPawAuthorizationChallenge?
 
     var errorDescription: String? { message }
 
@@ -65,7 +92,10 @@ struct NodeWebAuthorizationRequired: Error, LocalizedError, Equatable {
         message: String,
         provider: String?,
         profileRevision: String?,
-        transport: String
+        transport: String,
+        preferredProviderID: String? = nil,
+        completionMode: NodeAuthorizationCompletionMode = .profileRevision,
+        challenge: CatPawAuthorizationChallenge? = nil
     ) {
         self.challengeID = challengeID
         self.requestID = requestID
@@ -75,6 +105,9 @@ struct NodeWebAuthorizationRequired: Error, LocalizedError, Equatable {
         self.provider = provider
         self.profileRevision = profileRevision
         self.transport = transport
+        self.preferredProviderID = preferredProviderID
+        self.completionMode = completionMode
+        self.challenge = challenge
     }
 }
 
@@ -598,7 +631,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
 
     private enum PlaybackInvocationEvent: @unchecked Sendable {
         case response(HTTPResponse)
-        case hostMessage(HostMessage)
+        case authorization(NodeWebAuthorizationRequired)
     }
 
     let site: SiteConfiguration
@@ -610,6 +643,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
     private let diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)?
     private let ensureRuntimeReady: (@Sendable () async throws -> URL)?
     private let configurationIdentity: String?
+    private let configurationSemanticRevision: String?
     private let capturedPlaybackReferenceLock = NSLock()
     private var capturedPlaybackReferences: [String: PlaybackResourceReference] = [:]
     private let routeClient: CatPawRouteClient
@@ -628,7 +662,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
     func consumeLatePlaybackAuthorization(
         flag: String,
         notBefore: Date,
-        waitMilliseconds: Int = 750
+        waitMilliseconds: Int = 750,
+        transferContext: NodeTransferPlaybackContext? = nil
     ) async -> NodeWebAuthorizationRequired? {
         guard let modulePath = Self.runtimeModulePath(from: site.api),
               let readyBaseURL = try? await runtimeBaseURL() else {
@@ -645,7 +680,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
                     modulePath: modulePath,
                     notBefore: notBefore,
                     baseURL: readyBaseURL,
-                    waitMilliseconds: remaining
+                    waitMilliseconds: remaining,
+                    playbackContext: transferContext
                 )
             } catch {
                 return nil
@@ -657,6 +693,18 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             if let declaredModulePath = options["runtimeModulePath"]?.stringValue,
                declaredModulePath != modulePath {
                 continue
+            }
+            if let transferContext {
+                guard let authorization = playbackAuthorizationRequired(
+                    hostMessage: hostMessage,
+                    flag: flag,
+                    phase: .proxy,
+                    baseURL: readyBaseURL,
+                    transferContext: transferContext
+                ) else {
+                    continue
+                }
+                return authorization
             }
             let message: String
             switch hostMessage.action {
@@ -716,7 +764,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)? = nil,
         ensureRuntimeReady: (@Sendable () async throws -> URL)? = nil,
         quarkPasscodeStore: QuarkPasscodeStoring = QuarkPasscodeDisabledStore(),
-        configurationIdentity: String? = nil
+        configurationIdentity: String? = nil,
+        configurationSemanticRevision: String? = nil
     ) throws {
         guard Self.canHandle(site: site, baseURL: baseURL) else {
             throw AppError.spider("NodeHTTPSpiderSiteProvider 站点配置无效")
@@ -744,6 +793,13 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             .lowercased()
         self.configurationIdentity = normalizedConfigurationIdentity?.isEmpty == false
             ? normalizedConfigurationIdentity
+            : nil
+        let normalizedSemanticRevision = configurationSemanticRevision?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        self.configurationSemanticRevision = normalizedSemanticRevision?.isEmpty
+            == false
+            ? normalizedSemanticRevision
             : nil
     }
 
@@ -841,13 +897,14 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             maximumAttempts: 2,
             hostMessageWaitMilliseconds: awaitsHostAction ? 1_000 : 0
         )
-        if let hostMessage = invocation.hostMessage,
-           hostMessage.action == "openInternalWebview" {
-            throw try await webAuthorizationRequired(
-                hostMessage: hostMessage,
-                invocationID: invocation.invocationID,
-                baseURL: invocation.baseURL
-            )
+        if let hostMessage = invocation.hostMessage {
+            if hostMessage.action == "openInternalWebview" {
+                throw try await webAuthorizationRequired(
+                    hostMessage: hostMessage,
+                    invocationID: invocation.invocationID,
+                    baseURL: invocation.baseURL
+                )
+            }
         }
         if mapsEntirePageAsActions {
             let page = try SpiderResponseMapper.actionPage(
@@ -927,13 +984,14 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             maximumAttempts: 2,
             hostMessageWaitMilliseconds: awaitsHostAction ? 1_000 : 0
         )
-        if let hostMessage = invocation.hostMessage,
-           hostMessage.action == "openInternalWebview" {
-            throw try await webAuthorizationRequired(
-                hostMessage: hostMessage,
-                invocationID: invocation.invocationID,
-                baseURL: invocation.baseURL
-            )
+        if let hostMessage = invocation.hostMessage {
+            if hostMessage.action == "openInternalWebview" {
+                throw try await webAuthorizationRequired(
+                    hostMessage: hostMessage,
+                    invocationID: invocation.invocationID,
+                    baseURL: invocation.baseURL
+                )
+            }
         }
         do {
             let selection = try SpiderResponseMapper.selection(
@@ -1307,6 +1365,24 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
                 context.requestID.uuidString.lowercased()
             lifecycleHeaders["X-OKVideo-Transfer-Generation"] =
                 String(context.requestGeneration)
+            lifecycleHeaders["X-OKVideo-Authorization-Challenge-ID"] =
+                context.authorizationChallengeID.uuidString.lowercased()
+            if let configurationIdentity {
+                lifecycleHeaders["X-OKVideo-Configuration-ID"] =
+                    configurationIdentity
+            }
+            if let configurationSemanticRevision {
+                lifecycleHeaders["X-OKVideo-Semantic-Revision"] =
+                    configurationSemanticRevision
+            }
+            if let siteIdentity = site.extra["okNodeSiteIdentity"]?.stringValue {
+                lifecycleHeaders["X-OKVideo-Site-Identity"] = siteIdentity
+            }
+            if let profileRevision = site.extra[
+                "okNodeProfileRevision"
+            ]?.stringValue {
+                lifecycleHeaders["X-OKVideo-Profile-Revision"] = profileRevision
+            }
         }
         let invocation = try await invoke(
             method: "play",
@@ -1316,13 +1392,22 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             // it cannot repair an expired token and can duplicate work.
             maximumAttempts: 1
         )
-        if let hostMessage = invocation.hostMessage,
-           hostMessage.action == "openInternalWebview" {
-            throw try await webAuthorizationRequired(
+        if let hostMessage = invocation.hostMessage {
+            if hostMessage.action == "openInternalWebview" {
+                throw try await webAuthorizationRequired(
+                    hostMessage: hostMessage,
+                    invocationID: invocation.invocationID,
+                    baseURL: invocation.baseURL
+                )
+            }
+            if let authorization = playbackAuthorizationRequired(
                 hostMessage: hostMessage,
-                invocationID: invocation.invocationID,
+                flag: flag,
+                phase: .play,
                 baseURL: invocation.baseURL
-            )
+            ) {
+                throw authorization
+            }
         }
         var result: SitePlaybackResult
         do {
@@ -1338,21 +1423,29 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
                 invocationID: invocation.invocationID,
                 baseURL: invocation.baseURL,
                 waitMilliseconds: 1_250
-            ), hostMessage.action == "openInternalWebview" {
-                throw try await webAuthorizationRequired(
-                    hostMessage: hostMessage,
-                    invocationID: invocation.invocationID,
-                    baseURL: invocation.baseURL
-                )
-            }
-            if Self.isPlaybackAuthorizationMessage(
-                providerError.localizedDescription,
-                flag: flag
             ) {
-                throw webAuthorizationRequired(
-                    message: providerError.localizedDescription,
+                if hostMessage.action == "openInternalWebview" {
+                    throw try await webAuthorizationRequired(
+                        hostMessage: hostMessage,
+                        invocationID: invocation.invocationID,
+                        baseURL: invocation.baseURL
+                    )
+                }
+                if let authorization = playbackAuthorizationRequired(
+                    hostMessage: hostMessage,
+                    flag: flag,
+                    phase: .play,
                     baseURL: invocation.baseURL
-                )
+                ) {
+                    throw authorization
+                }
+            }
+            if let authorization = playbackAuthorizationRequired(
+                message: providerError.localizedDescription,
+                flag: flag,
+                baseURL: invocation.baseURL
+            ) {
+                throw authorization
             }
             throw providerError
         }
@@ -1410,6 +1503,25 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
                 return PlaybackQuality(
                     name: quality.name,
                     url: result.url
+                )
+            }
+        }
+        if let transferContext = NodeTransferPlaybackTaskContext.current {
+            result.url = Self.playbackCorrelatedProxyURL(
+                result.url,
+                baseURL: invocation.baseURL,
+                transferContext: transferContext,
+                modulePath: Self.runtimeModulePath(from: site.api)
+            )
+            result.qualities = result.qualities.map { quality in
+                PlaybackQuality(
+                    name: quality.name,
+                    url: Self.playbackCorrelatedProxyURL(
+                        quality.url,
+                        baseURL: invocation.baseURL,
+                        transferContext: transferContext,
+                        modulePath: Self.runtimeModulePath(from: site.api)
+                    )
                 )
             }
         }
@@ -1803,10 +1915,11 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
                             .response(try await httpClient.send(routeRequest))
                         }
                         group.addTask { [self] in
-                            .hostMessage(
+                            .authorization(
                                 try await monitorPlaybackHostMessages(
                                     invocationID: invocationID,
-                                    baseURL: readyBaseURL
+                                    baseURL: readyBaseURL,
+                                    flag: body["flag"]?.stringValue ?? ""
                                 )
                             )
                         }
@@ -1819,15 +1932,11 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
                     switch event {
                     case .response(let routeResponse):
                         response = routeResponse
-                    case .hostMessage(let hostMessage):
+                    case .authorization(let authorization):
                         Task { @MainActor in
                             NodeHostSniffBridge.cancel()
                         }
-                        throw try await webAuthorizationRequired(
-                            hostMessage: hostMessage,
-                            invocationID: invocationID,
-                            baseURL: readyBaseURL
-                        )
+                        throw authorization
                     }
                 } else {
                     response = try await requestHTTPClient.send(routeRequest)
@@ -1889,26 +1998,51 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
                 ) {
                     await routeClient.recordUnsupported(route)
                 }
-                if route == .play,
-                   Self.shouldAwaitLateAuthorizationMessage(
-                       message,
-                       flag: body["flag"]?.stringValue ?? ""
-                   ), let hostMessage = try? await awaitHostMessage(
-                       invocationID: response.headers[
-                           "X-OKVideo-Invocation-ID"
-                       ] ?? invocationID,
-                       baseURL: readyBaseURL,
-                       waitMilliseconds: 1_250
-                   ), hostMessage.action == "openInternalWebview" {
-                    throw try await webAuthorizationRequired(
-                        hostMessage: hostMessage,
-                        invocationID: response.headers[
-                            "X-OKVideo-Invocation-ID"
-                        ] ?? invocationID,
-                        baseURL: readyBaseURL
+                if route == .play {
+                    let flag = body["flag"]?.stringValue ?? ""
+                    let effectiveInvocationID = response.headers[
+                        "X-OKVideo-Invocation-ID"
+                    ] ?? invocationID
+                    var hostMessage = hostMessageBridge.decodeHeader(
+                        response.headers["X-OKVideo-Host-Message"]
                     )
+                    if hostMessage == nil,
+                       Self.shouldAwaitLateAuthorizationMessage(
+                           message,
+                           flag: flag
+                       ) {
+                        hostMessage = try? await awaitHostMessage(
+                            invocationID: effectiveInvocationID,
+                            baseURL: readyBaseURL,
+                            waitMilliseconds: 1_250
+                        )
+                    }
+                    if let hostMessage {
+                        if hostMessage.action == "openInternalWebview" {
+                            throw try await webAuthorizationRequired(
+                                hostMessage: hostMessage,
+                                invocationID: effectiveInvocationID,
+                                baseURL: readyBaseURL
+                            )
+                        }
+                        if let authorization = playbackAuthorizationRequired(
+                            hostMessage: hostMessage,
+                            flag: flag,
+                            phase: .play,
+                            baseURL: readyBaseURL
+                        ) {
+                            throw authorization
+                        }
+                    }
+                    if let authorization = playbackAuthorizationRequired(
+                        message: message,
+                        flag: flag,
+                        baseURL: readyBaseURL
+                    ) {
+                        throw authorization
+                    }
                 }
-                if Self.isAuthorizationMessage(message) {
+                if route != .play, Self.isAuthorizationMessage(message) {
                     throw webAuthorizationRequired(
                         message: message,
                         baseURL: readyBaseURL
@@ -2144,8 +2278,9 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
 
     private func monitorPlaybackHostMessages(
         invocationID: String,
-        baseURL: URL
-    ) async throws -> HostMessage {
+        baseURL: URL,
+        flag: String
+    ) async throws -> NodeWebAuthorizationRequired {
         while !Task.isCancelled {
             if let message = try await awaitHostMessage(
                 invocationID: invocationID,
@@ -2161,7 +2296,19 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
                     continue
                 }
                 if message.action == "openInternalWebview" {
-                    return message
+                    return try await webAuthorizationRequired(
+                        hostMessage: message,
+                        invocationID: invocationID,
+                        baseURL: baseURL
+                    )
+                }
+                if let authorization = playbackAuthorizationRequired(
+                    hostMessage: message,
+                    flag: flag,
+                    phase: .play,
+                    baseURL: baseURL
+                ) {
+                    return authorization
                 }
             }
             try await Task.sleep(nanoseconds: 100_000_000)
@@ -2458,6 +2605,133 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         )
     }
 
+    private func playbackAuthorizationRequired(
+        hostMessage: HostMessage,
+        flag: String,
+        phase: CatPawAuthorizationPhase,
+        baseURL: URL,
+        transferContext: NodeTransferPlaybackContext? = nil
+    ) -> NodeWebAuthorizationRequired? {
+        guard let options = hostMessage.opt.objectValue,
+              let scope = playbackAuthorizationScope(
+                  options: options,
+                  baseURL: baseURL,
+                  transferContext: transferContext
+              ), let challenge = CatPawAuthorizationClassifier.challenge(
+                  action: hostMessage.action,
+                  options: options,
+                  flag: flag,
+                  phase: phase,
+                  scope: scope
+              ), let message = CatPawAuthorizationClassifier.message(
+                  from: options
+              ) else {
+            return nil
+        }
+        return authorizationCoordinator.playbackAuthorizationRequired(
+            challenge: challenge,
+            message: LogRedactor.text(message),
+            baseURL: baseURL
+        )
+    }
+
+    private func playbackAuthorizationRequired(
+        message: String,
+        flag: String,
+        baseURL: URL,
+        transferContext: NodeTransferPlaybackContext? = nil
+    ) -> NodeWebAuthorizationRequired? {
+        playbackAuthorizationRequired(
+            hostMessage: HostMessage(
+                action: "toast",
+                requestID: nil,
+                opt: .object(["message": .string(message)])
+            ),
+            flag: flag,
+            phase: .play,
+            baseURL: baseURL,
+            transferContext: transferContext
+        )
+    }
+
+    private func playbackAuthorizationScope(
+        options: [String: JSONValue],
+        baseURL: URL,
+        transferContext: NodeTransferPlaybackContext?
+    ) -> CatPawAuthorizationScope? {
+        guard let context = transferContext
+            ?? NodeTransferPlaybackTaskContext.current else {
+            return nil
+        }
+        let normalizedRequestID = context.requestID.uuidString.lowercased()
+        if let declared = nodeNonEmpty(
+            options["playbackRequestID"]?.stringValue
+        )?.lowercased(), declared != normalizedRequestID {
+            return nil
+        }
+        if let declared = Self.unsignedInteger(
+            options["requestGeneration"]
+        ), declared != context.requestGeneration {
+            return nil
+        }
+        if let declared = nodeNonEmpty(options["challengeID"]?.stringValue),
+           declared.caseInsensitiveCompare(
+               context.authorizationChallengeID.uuidString
+           ) != .orderedSame {
+            return nil
+        }
+        let expectedModulePath = Self.runtimeModulePath(from: site.api)
+        if let declared = nodeNonEmpty(
+            options["runtimeModulePath"]?.stringValue
+        ), declared != expectedModulePath {
+            return nil
+        }
+        if let declared = nodeNonEmpty(
+            options["configurationID"]?.stringValue
+        )?.lowercased(), let configurationIdentity,
+           declared != configurationIdentity {
+            return nil
+        }
+        if let declared = nodeNonEmpty(
+            options["semanticRevision"]?.stringValue
+        )?.lowercased(), let configurationSemanticRevision,
+           declared != configurationSemanticRevision {
+            return nil
+        }
+        let expectedSiteIdentity = site.extra[
+            "okNodeSiteIdentity"
+        ]?.stringValue
+        if let declared = nodeNonEmpty(options["siteIdentity"]?.stringValue),
+           let expectedSiteIdentity, declared != expectedSiteIdentity {
+            return nil
+        }
+        return CatPawAuthorizationScope(
+            challengeID: context.authorizationChallengeID,
+            playbackRequestID: context.requestID,
+            requestGeneration: context.requestGeneration,
+            configurationIdentity: configurationIdentity,
+            semanticRevision: configurationSemanticRevision,
+            runtimeGeneration: nodeNonEmpty(
+                options["runtimeGeneration"]?.stringValue
+            ) ?? baseURL.absoluteString,
+            siteIdentity: expectedSiteIdentity,
+            modulePath: expectedModulePath,
+            profileRevisionBefore: site.extra[
+                "okNodeProfileRevision"
+            ]?.stringValue
+        )
+    }
+
+    private static func unsignedInteger(_ value: JSONValue?) -> UInt64? {
+        switch value {
+        case .integer(let value): return UInt64(exactly: value)
+        case .number(let value) where value.rounded() == value && value >= 0:
+            return UInt64(value)
+        case .string(let value): return UInt64(value)
+        default: return nil
+        }
+    }
+
     private static func decodeHostMessage(_ encoded: String?) -> HostMessage? {
         guard let encoded,
               encoded.utf8.count <= 8 * 1_024,
@@ -2598,6 +2872,48 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             url: selectedURL,
             rangePolicy: .providerDefined
         )
+    }
+
+    /// Adds only opaque lifecycle identifiers to CatPaw-owned loopback media
+    /// URLs. Contract-B removes these private query items before dispatching
+    /// to the third-party module, so its proxy semantics remain unchanged.
+    /// Remote/CDN URLs are never rewritten.
+    private static func playbackCorrelatedProxyURL(
+        _ rawURL: String,
+        baseURL: URL,
+        transferContext: NodeTransferPlaybackContext,
+        modulePath: String?
+    ) -> String {
+        guard var components = URLComponents(string: rawURL),
+              components.scheme?.lowercased() == baseURL.scheme?.lowercased(),
+              components.host?.lowercased() == baseURL.host?.lowercased(),
+              components.port == baseURL.port else {
+            return rawURL
+        }
+        let path = components.percentEncodedPath
+        let isOwnedProxy = path.hasPrefix("/proxy/")
+            || path.hasPrefix("/__okvideo/baidu-media/")
+            || modulePath.map { path.hasPrefix("\($0)/proxy/") } == true
+        guard isOwnedProxy else { return rawURL }
+        let existingQuery = components.percentEncodedQuery
+            .map { $0.isEmpty ? nil : $0 } ?? nil
+        // These values contain only UUID hex/hyphens and decimal digits. Add
+        // them to the encoded query tail directly: parsing an existing CatPaw
+        // query into URLQueryItem would decode and re-encode nested signed
+        // media URLs and could invalidate the provider signature.
+        let lifecycleQuery = [
+            "__okvideo_playback_request="
+                + transferContext.requestID.uuidString.lowercased(),
+            "__okvideo_playback_generation="
+                + String(transferContext.requestGeneration),
+            "__okvideo_authorization_challenge="
+                + transferContext.authorizationChallengeID
+                    .uuidString.lowercased()
+        ].joined(separator: "&")
+        components.percentEncodedQuery = [existingQuery, lifecycleQuery]
+            .compactMap { $0 }
+            .joined(separator: "&")
+        return components.string ?? rawURL
     }
 
     /// CatPaw's Baidu App-share URL is accepted only when the provider User-
@@ -2877,7 +3193,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             "cookie", "token", "bduss", "未登录", "请先登录", "需要登录",
             "未授权", "授权失效", "登录失效", "登录过期", "扫码登录",
             "require login", "login required", "not logged in",
-            "please login", "unauthorized", "credential"
+            "please login", "unauthorized", "credential",
+            "account unavailable"
         ]
         if credentialHints.contains(where: normalized.contains) {
             return true

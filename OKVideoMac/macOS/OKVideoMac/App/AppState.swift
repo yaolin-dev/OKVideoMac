@@ -1539,7 +1539,10 @@ struct NodeWebPresentation: Identifiable, Equatable {
     let title: String
     let message: String
     let provider: String?
+    let preferredProviderID: String?
     let transport: String
+    let completionMode: NodeAuthorizationCompletionMode
+    let challenge: CatPawAuthorizationChallenge?
     let presentationTarget: CloudAuthorizationPresentationTarget
     var lifecycleState: NodeAuthorizationLifecycleState
     var status: String?
@@ -1799,7 +1802,17 @@ enum NodeDynamicSiteCatalogPolicy {
 
 enum SearchLaunchContext: Equatable, Sendable {
     case manual
+    case discoveryCard
     case discoveryFallback
+
+    var usesConfiguredScope: Bool {
+        switch self {
+        case .manual, .discoveryCard:
+            return true
+        case .discoveryFallback:
+            return false
+        }
+    }
 }
 
 enum SearchProviderSelectionPolicy {
@@ -1809,7 +1822,7 @@ enum SearchProviderSelectionPolicy {
         options: [SearchScopeSiteOption]
     ) -> Set<String> {
         switch context {
-        case .manual:
+        case .manual, .discoveryCard:
             return SearchSiteScopePolicy.effectiveSiteKeys(
                 scope: scope,
                 options: options
@@ -1913,12 +1926,15 @@ enum NodeProfileRevisionVerificationPolicy {
         isPlayback: Bool,
         requestID: String?,
         allowsAutomaticRetry: Bool,
-        hasAttemptedVerification: Bool
+        hasAttemptedVerification: Bool,
+        acceptsProfileRevisionCompletion: Bool = false
     ) -> Bool {
         let normalizedRequestID = requestID?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return isPlayback
-            && (normalizedRequestID == nil || normalizedRequestID?.isEmpty == true)
+            && (acceptsProfileRevisionCompletion
+                || normalizedRequestID == nil
+                || normalizedRequestID?.isEmpty == true)
             && allowsAutomaticRetry
             && !hasAttemptedVerification
     }
@@ -2404,7 +2420,8 @@ enum HomeItemRoute: Equatable, Sendable {
 enum HomeItemRoutePolicy {
     static func route(
         summary: VideoSummary,
-        site: SiteConfiguration?
+        site: SiteConfiguration?,
+        inheritedNavigationMode: NodeSiteNavigationMode? = nil
     ) -> HomeItemRoute {
         if summary.resolvedContentKind == .action
             || summary.action?.nonEmpty != nil {
@@ -2413,7 +2430,10 @@ enum HomeItemRoutePolicy {
         if summary.isFolder { return .folder }
         // FongMi's `indexs` contract describes discovery/index providers.
         // Their cards are search seeds, not provider-owned detail records.
-        if site?.indexs == 1 || summary.videoID.hasPrefix("msearch:") {
+        if inheritedNavigationMode == .discovery
+            || NodeSiteNavigationMode.resolve(for: site) == .discovery
+            || site?.indexs == 1
+            || summary.videoID.hasPrefix("msearch:") {
             return .search
         }
         return .detail
@@ -2975,17 +2995,62 @@ enum HomeAutomaticRefreshPolicy {
     }
 }
 
+struct SearchFolderNavigationContext: Equatable, Sendable {
+    let navigationMode: NodeSiteNavigationMode
+    let sourceSiteKey: String
+    let configurationID: UUID?
+    let configurationRevision: String?
+    let nodeSiteIdentity: String?
+
+    static func legacy(siteKey: String) -> Self {
+        Self(
+            navigationMode: .detail,
+            sourceSiteKey: siteKey,
+            configurationID: nil,
+            configurationRevision: nil,
+            nodeSiteIdentity: nil
+        )
+    }
+
+    func isCurrent(
+        configurationID currentConfigurationID: UUID?,
+        configurationRevision currentConfigurationRevision: String?,
+        nodeSiteIdentity currentNodeSiteIdentity: String?
+    ) -> Bool {
+        guard let configurationID else {
+            // Legacy in-memory folders did not carry a revision. They retain
+            // detail navigation and therefore cannot accidentally acquire
+            // CatPaw discovery semantics.
+            return navigationMode == .detail
+        }
+        guard configurationID == currentConfigurationID,
+              configurationRevision == currentConfigurationRevision else {
+            return false
+        }
+        if let nodeSiteIdentity {
+            return nodeSiteIdentity == currentNodeSiteIdentity
+        }
+        return true
+    }
+}
+
 struct SearchFolderPage: Identifiable, Equatable {
     let id: UUID
     let folder: VideoSummary
+    let navigationContext: SearchFolderNavigationContext
     var items: [VideoSummary]
     var pagination: Pagination?
     var isLoading: Bool
     var errorMessage: String?
 
-    init(folder: VideoSummary) {
+    init(
+        folder: VideoSummary,
+        navigationContext: SearchFolderNavigationContext? = nil
+    ) {
         id = UUID()
         self.folder = folder
+        self.navigationContext = navigationContext
+            ?? .legacy(siteKey: folder.siteKey)
         items = []
         pagination = nil
         isLoading = true
@@ -3713,6 +3778,11 @@ private enum PendingNodeOperation {
             return .mainWindow
         }
     }
+}
+
+private struct PendingNodePlaybackConfigurationFallback {
+    let authorization: NodeWebAuthorizationRequired
+    let operation: PendingNodeOperation
 }
 
 private enum AppStateTiming {
@@ -4548,6 +4618,8 @@ final class AppState: ObservableObject {
     private var activeDetailPerformanceTrace: DetailPerformanceTrace?
     private var detailHomeSearchReturnSnapshot:
         DetailHomeSearchReturnSnapshot?
+    private var discoverySearchReturnSnapshot:
+        DetailHomeSearchReturnSnapshot?
     private var homeLoadSessionID = UUID()
     private var homeContentIdentity: HomeContentIdentity?
     private var homeBrowsingSnapshots:
@@ -4597,6 +4669,8 @@ final class AppState: ObservableObject {
     private var cloudAuthorizationContext: CloudAuthorizationContext?
     private var cloudAccountStatusStore = CloudAccountStatusStore()
     private var pendingNodeOperation: PendingNodeOperation?
+    private var pendingNodePlaybackConfigurationFallback:
+        PendingNodePlaybackConfigurationFallback?
     private var playbackSessionID = UUID()
     private var activePlayerRequestID = UUID()
     private var transferRequestGeneration: UInt64 = 0
@@ -6569,13 +6643,10 @@ final class AppState: ObservableObject {
                 origin: .home
             )
         case .search:
-            detailLoadSessionID = UUID()
-            selectedDetail = nil
-            pendingDetailSummary = nil
-            presentHomeSearch()
-            // An index card is a user-initiated search and therefore observes
-            // the user's configured search scope.
-            search(summary.title, context: .manual)
+            launchDiscoveryCardSearch(
+                summary,
+                preservingFolderReturn: false
+            )
         case .detail:
             await loadDetail(summary)
         }
@@ -6808,15 +6879,57 @@ final class AppState: ObservableObject {
     }
 
     func openSearchFolderItem(_ summary: VideoSummary) {
-        if summary.isFolder {
+        let currentFolder = searchFolderPath.last
+        let site = supportedSites.first { $0.key == summary.siteKey }
+        switch HomeItemRoutePolicy.route(
+            summary: summary,
+            site: site,
+            inheritedNavigationMode:
+                currentFolder?.navigationContext.navigationMode
+        ) {
+        case .action:
+            Task {
+                await performHomeAction(SiteActionItem(summary: summary))
+            }
+        case .folder:
             openSearchFolder(
                 summary,
                 replacingPath: false,
                 origin: nil
             )
-        } else {
+        case .search:
+            launchDiscoveryCardSearch(
+                summary,
+                preservingFolderReturn: true
+            )
+        case .detail:
             Task { await loadDetail(summary) }
         }
+    }
+
+    private func launchDiscoveryCardSearch(
+        _ summary: VideoSummary,
+        preservingFolderReturn: Bool
+    ) {
+        detailLoadSessionID = UUID()
+        selectedDetail = nil
+        pendingDetailSummary = nil
+        if preservingFolderReturn {
+            discoverySearchReturnSnapshot =
+                DetailHomeSearchReturnPolicy.capture(
+                    isHomeSearchPresented: isHomeSearchPresented,
+                    selectedSiteKey: selectedSearchSiteKey,
+                    folderPath: searchFolderPath,
+                    folderOrigin: searchFolderOrigin
+                )
+        } else {
+            discoverySearchReturnSnapshot = nil
+        }
+        presentHomeSearch()
+        // Discovery cards are explicit user navigation and therefore use the
+        // configured aggregate-search scope. They are not failed detail
+        // requests and must never mount DetailLoadingView first.
+        search(summary.title, context: .discoveryCard)
     }
 
     func closeSearchFolder() {
@@ -6842,14 +6955,51 @@ final class AppState: ObservableObject {
 
     func navigateBackHomeSearch() {
         if searchFolderPath.isEmpty {
-            returnFromSearchToOrigin()
+            if !restoreDiscoverySearchReturnSnapshot() {
+                returnFromSearchToOrigin()
+            }
         } else {
             navigateBackSearchFolder()
         }
     }
 
+    @discardableResult
+    private func restoreDiscoverySearchReturnSnapshot() -> Bool {
+        guard let snapshot = discoverySearchReturnSnapshot,
+              let page = snapshot.folderPath.last else {
+            return false
+        }
+        let site = supportedSites.first {
+            $0.key == page.navigationContext.sourceSiteKey
+        }
+        let currentRevision = activeConfigurationRecord.map {
+            CategoryConfigurationRevision.make(record: $0)
+        }
+        guard page.navigationContext.isCurrent(
+            configurationID: activeConfigurationRecord?.id,
+            configurationRevision: currentRevision,
+            nodeSiteIdentity: site?.extra[
+                "okNodeSiteIdentity"
+            ]?.stringValue
+        ) else {
+            discoverySearchReturnSnapshot = nil
+            return false
+        }
+        discoverySearchReturnSnapshot = nil
+        cancelSearch()
+        selectedSection = .home
+        selectedSearchSiteKey = snapshot.selectedSiteKey
+        searchFolderPath = snapshot.folderPath
+        searchFolderOrigin = snapshot.folderOrigin
+        isHomeSearchPresented = true
+        return true
+    }
+
     var homeSearchBackTitle: String {
         if searchFolderPath.isEmpty {
+            if discoverySearchReturnSnapshot?.folderPath.isEmpty == false {
+                return "返回片单"
+            }
             return "返回\((homeSearchReturnSection ?? .home).rawValue)"
         }
         return SearchFolderNavigationPolicy.backTitle(
@@ -6860,6 +7010,12 @@ final class AppState: ObservableObject {
 
     var homeSearchBackHelp: String {
         if searchFolderPath.isEmpty {
+            if isSearching {
+                return "停止搜索并保留当前结果"
+            }
+            if discoverySearchReturnSnapshot?.folderPath.isEmpty == false {
+                return "返回进入搜索前的片单目录"
+            }
             return "关闭搜索并返回\((homeSearchReturnSection ?? .home).rawValue)"
         }
         return SearchFolderNavigationPolicy.backHelp(
@@ -7535,6 +7691,37 @@ final class AppState: ObservableObject {
         _ authorization: NodeWebAuthorizationRequired,
         pending: PendingNodeOperation
     ) {
+        if let challenge = authorization.challenge {
+            guard pending.playbackRequestID == challenge.playbackRequestID,
+                  activePlayerRequestID == challenge.playbackRequestID,
+                  playbackSessionID == challenge.playbackRequestID,
+                  transferGenerationsByRequestID[
+                    challenge.playbackRequestID
+                  ] == challenge.requestGeneration,
+                  pending.sourceIdentity.configurationID
+                    == activeConfigurationRecord?.id,
+                  pending.sourceIdentity.siteKey
+                    == providers[pending.sourceIdentity.siteKey]?.site.key else {
+                return
+            }
+            if let configurationIdentity = challenge.configurationIdentity,
+               activeConfigurationRecord?.id.uuidString
+                .caseInsensitiveCompare(configurationIdentity) != .orderedSame {
+                return
+            }
+            if let expectedRevision = activeConfigurationRecord.flatMap(
+                NodeConfigurationSemanticRevision.make
+            ), challenge.semanticRevision != expectedRevision {
+                return
+            }
+            if let expectedSiteIdentity = providers[
+                pending.sourceIdentity.siteKey
+            ]?.site.extra["okNodeSiteIdentity"]?.stringValue,
+               challenge.siteIdentity != expectedSiteIdentity {
+                return
+            }
+        }
+        pendingNodePlaybackConfigurationFallback = nil
         if let previous = nodeWebPresentation {
             nodeAuthorizationCompletionTask?.cancel()
             Task {
@@ -7556,8 +7743,8 @@ final class AppState: ObservableObject {
         } ?? authorization.websiteURL
         let status: String
         if isPlaybackAuthorization {
-            status = authorization.requestID == nil
-                ? "等待配置保存；旧版 Spider 保存后只会自动验证一次。"
+            status = authorization.completionMode == .profileRevision
+                ? "等待配置保存；保存后只会自动验证当前影片一次。"
                 : "等待与当前播放请求匹配的授权完成信号。"
         } else {
             status = "配置页会保持打开；保存后可手动应用并重试原操作。"
@@ -7572,7 +7759,10 @@ final class AppState: ObservableObject {
             title: authorization.title.nonEmpty ?? "网盘配置中心",
             message: authorization.message,
             provider: authorization.provider,
+            preferredProviderID: authorization.preferredProviderID,
             transport: authorization.transport,
+            completionMode: authorization.completionMode,
+            challenge: authorization.challenge,
             presentationTarget: ConfigurationPresentationTargetPolicy
                 .resolvedTarget(
                     requested: pending.presentationTarget,
@@ -7591,7 +7781,8 @@ final class AppState: ObservableObject {
         )
         let challengeID = authorization.challengeID
         guard allowsAutomaticRetry,
-              let requestID = authorization.requestID else {
+              let requestID = authorization.requestID,
+              authorization.completionMode == .explicitSignal else {
             nodeAuthorizationCompletionTask = nil
             return
         }
@@ -7650,6 +7841,7 @@ final class AppState: ObservableObject {
             playbackFailureSummary = nil
         }
         pendingNodeOperation = nil
+        pendingNodePlaybackConfigurationFallback = nil
         nodeWebPresentation = nil
     }
 
@@ -9023,6 +9215,28 @@ final class AppState: ObservableObject {
         requestHistoryPlayback(item)
     }
 
+    var canOpenNodeConfigurationForPlaybackFailure: Bool {
+        guard let fallback = pendingNodePlaybackConfigurationFallback,
+              fallback.operation.playbackRequestID == activePlayerRequestID,
+              isPlayerPresented else {
+            return false
+        }
+        return playbackResolutionState == .failed
+            || playbackResolutionState == .exhausted
+    }
+
+    func openNodeConfigurationForPlaybackFailure() {
+        guard canOpenNodeConfigurationForPlaybackFailure,
+              let fallback = pendingNodePlaybackConfigurationFallback else {
+            return
+        }
+        pendingNodePlaybackConfigurationFallback = nil
+        presentNodeConfiguration(
+            fallback.authorization,
+            pending: fallback.operation
+        )
+    }
+
     var hasHistoryPlaybackChoices: Bool {
         !historyPlaybackChoices.isEmpty
     }
@@ -9624,6 +9838,7 @@ final class AppState: ObservableObject {
     }
 
     func search(_ keyword: String) {
+        discoverySearchReturnSnapshot = nil
         search(keyword, context: .manual)
     }
 
@@ -9690,7 +9905,7 @@ final class AppState: ObservableObject {
             scope: searchSiteScope,
             options: searchScopeSiteOptions
         )
-        if context == .manual,
+        if context.usesConfiguredScope,
            searchSiteScope.mode == .custom,
            selectedKeys.isEmpty {
             show(
@@ -9842,6 +10057,7 @@ final class AppState: ObservableObject {
     }
 
     private func dismissHomeSearch(returningTo section: AppSection) {
+        discoverySearchReturnSnapshot = nil
         cancelSearch()
         searchDraftKeyword = ""
         activeSearchKeyword = ""
@@ -9953,8 +10169,28 @@ final class AppState: ObservableObject {
     }
 
     @discardableResult
+    func performSearchBackAction() -> Bool {
+        guard isHomeSearchPresented else { return false }
+        let action = BrowserEscapeRoutePolicy.action(
+            isHomeSearchPresented: true,
+            isSearching: isSearching,
+            hasSearchFolder: !searchFolderPath.isEmpty,
+            hasDetailPresentation: selectedDetail != nil
+                || pendingDetailSummary != nil,
+            hasBlockingPresentation: mainWindowCloudAuthorizationPrompt != nil
+                || nodeWebPresentation != nil
+                || isQuickSwitcherPresented
+                || isShortcutHelpPresented
+        )
+        return performBrowserBackAction(action)
+    }
+
+    @discardableResult
     func performBrowserEscapeShortcut() -> Bool {
         guard allowsBrowserShortcuts else { return false }
+        if isHomeSearchPresented {
+            return performSearchBackAction()
+        }
         let action = BrowserEscapeRoutePolicy.action(
             isHomeSearchPresented: isHomeSearchPresented,
             isSearching: isSearching,
@@ -9966,6 +10202,13 @@ final class AppState: ObservableObject {
                 || isQuickSwitcherPresented
                 || isShortcutHelpPresented
         )
+        return performBrowserBackAction(action)
+    }
+
+    @discardableResult
+    private func performBrowserBackAction(
+        _ action: BrowserEscapeAction
+    ) -> Bool {
         switch action {
         case .none:
             return false
@@ -10018,11 +10261,11 @@ final class AppState: ObservableObject {
             await cancelCloudAuthorization()
         } else if nodeWebPresentation != nil {
             cancelNodeConfiguration()
+        } else if isHomeSearchPresented {
+            _ = performSearchBackAction()
         } else if selectedDetail != nil || pendingDetailSummary != nil {
             dismissDetail()
         } else if !searchFolderPath.isEmpty {
-            navigateBackHomeSearch()
-        } else if isHomeSearchPresented {
             navigateBackHomeSearch()
         } else if selectedSection != .home {
             selectSection(.home)
@@ -10045,6 +10288,13 @@ final class AppState: ObservableObject {
         searchTask = nil
         isSearching = false
     }
+
+#if DEBUG
+    func seedSearchResultsForTesting(_ results: [VideoSummary]) {
+        searchResults = results
+        searchClusters = SearchResultAggregator.cluster(results)
+    }
+#endif
 
     func saveSearchSiteScope(_ scope: SearchSiteScope) async -> Bool {
         guard let environment,
@@ -10350,6 +10600,7 @@ final class AppState: ObservableObject {
         }
         playbackSessionID = sessionID
         activePlayerRequestID = sessionID
+        pendingNodePlaybackConfigurationFallback = nil
         playbackQualitySwitchSessionID = UUID()
         playbackQualities = []
         selectedPlaybackQualityID = nil
@@ -11061,7 +11312,10 @@ final class AppState: ObservableObject {
               let authorization = await nodeProvider
                 .consumeLatePlaybackAuthorization(
                     flag: flag,
-                    notBefore: notBefore
+                    notBefore: notBefore,
+                    transferContext: transferPlaybackContext(
+                        for: playback.requestID
+                    )
                 ),
               playback.requestID == playbackSessionID,
               playback.requestID == activePlayerRequestID,
@@ -11085,6 +11339,40 @@ final class AppState: ObservableObject {
     ) async {
         guard playbackSessionID == requestID else { return }
         let message = LogRedactor.text(error.localizedDescription)
+        if let nodeProvider = provider as? NodeHTTPSpiderSiteProvider,
+           let playback = pendingPlayback,
+           playback.requestID == requestID,
+           let identity = activeSourceIdentity(
+               for: playback.detail.summary.siteKey
+           ), let cloudProvider = CatPawCloudProvider.resolve(
+               flag: playback.source.name,
+               message: error.message
+           ) {
+            pendingNodePlaybackConfigurationFallback =
+                PendingNodePlaybackConfigurationFallback(
+                    authorization: NodeWebAuthorizationRequired(
+                        challengeID: UUID(),
+                        requestID: nil,
+                        websiteURL: nodeProvider.configurationWebsiteURL,
+                        title: "打开\(cloudProvider.displayName)授权配置",
+                        message: "播放地址获取失败，但没有收到明确的账号失效信号。"
+                            + "如果尚未授权，可打开配置页；保存后将只验证当前影片一次。",
+                        provider: cloudProvider.displayName,
+                        profileRevision: nodeProvider.site.extra[
+                            "okNodeProfileRevision"
+                        ]?.stringValue,
+                        transport: "manual",
+                        preferredProviderID: cloudProvider.rawValue,
+                        completionMode: .profileRevision
+                    ),
+                    operation: .playback(
+                        identity: identity,
+                        playback: playback
+                    )
+                )
+        } else {
+            pendingNodePlaybackConfigurationFallback = nil
+        }
         if CloudPlaybackAuthorizationFailurePolicy.isExplicit(error.message),
            let provider,
            let scopeID = cloudAccountScopeID(
@@ -11627,6 +11915,7 @@ final class AppState: ObservableObject {
 
         activePlayback = nil
         pendingPlayback = nil
+        pendingNodePlaybackConfigurationFallback = nil
         livePlaybackChannel = channel
         livePlaybackStream = stream
         livePlaybackSourceID = sourceID
@@ -12331,6 +12620,7 @@ final class AppState: ObservableObject {
             await NodeAuthorizationSignalCenter.shared.cancel(challengeID)
         }
         pendingNodeOperation = nil
+        pendingNodePlaybackConfigurationFallback = nil
         nodeWebPresentation = nil
         nodeRuntimeStatusTask?.cancel()
         nodeRuntimeStatusTask = nil
@@ -12459,6 +12749,7 @@ final class AppState: ObservableObject {
         hasExhaustedLivePlayback = false
         livePlaybackNotice = nil
         livePlaybackAttemptedIdentifiers = []
+        pendingNodePlaybackConfigurationFallback = nil
         // Capture the final position before stop resets the player snapshot.
         await persistPlaybackProgress()
         // Ignore the stop event for history purposes. It otherwise publishes a
@@ -13486,8 +13777,18 @@ final class AppState: ObservableObject {
         let resolvedOrigin = origin
             ?? searchFolderOrigin
             ?? (isHomeSearchPresented ? .searchResults : .home)
+        let navigationContext: SearchFolderNavigationContext
+        if !replacingPath,
+           let inherited = searchFolderPath.last?.navigationContext {
+            navigationContext = inherited
+        } else {
+            navigationContext = searchFolderNavigationContext(for: summary)
+        }
         presentHomeSearch()
-        let page = SearchFolderPage(folder: summary)
+        let page = SearchFolderPage(
+            folder: summary,
+            navigationContext: navigationContext
+        )
         if replacingPath {
             searchFolderPath = [page]
             searchFolderOrigin = resolvedOrigin
@@ -13504,6 +13805,25 @@ final class AppState: ObservableObject {
                 page: 1
             )
         }
+    }
+
+    private func searchFolderNavigationContext(
+        for summary: VideoSummary
+    ) -> SearchFolderNavigationContext {
+        let site = supportedSites.first { $0.key == summary.siteKey }
+        guard let record = activeConfigurationRecord else {
+            return .legacy(siteKey: summary.siteKey)
+        }
+        return SearchFolderNavigationContext(
+            navigationMode: NodeSiteNavigationMode.resolve(for: site),
+            sourceSiteKey: summary.siteKey,
+            configurationID: record.id,
+            configurationRevision:
+                CategoryConfigurationRevision.make(record: record),
+            nodeSiteIdentity: site?.extra[
+                "okNodeSiteIdentity"
+            ]?.stringValue
+        )
     }
 
     private func loadSearchFolder(
@@ -13551,12 +13871,27 @@ final class AppState: ObservableObject {
         id: UUID,
         _ update: (inout SearchFolderPage) -> Void
     ) {
-        guard let index = searchFolderPath.firstIndex(
-            where: { $0.id == id }
-        ) else {
+        if let index = searchFolderPath.firstIndex(where: { $0.id == id }) {
+            update(&searchFolderPath[index])
             return
         }
-        update(&searchFolderPath[index])
+        // A discovery leaf temporarily replaces the visible Folder with an
+        // aggregate search. If a page request was already in flight, publish
+        // it into the retained snapshot so returning never strands the Folder
+        // in a loading state or loses a completed pagination page.
+        guard let snapshot = discoverySearchReturnSnapshot,
+              let index = snapshot.folderPath.firstIndex(
+                  where: { $0.id == id }
+              ) else {
+            return
+        }
+        var folderPath = snapshot.folderPath
+        update(&folderPath[index])
+        discoverySearchReturnSnapshot = DetailHomeSearchReturnSnapshot(
+            selectedSiteKey: snapshot.selectedSiteKey,
+            folderPath: folderPath,
+            folderOrigin: snapshot.folderOrigin
+        )
     }
 
     enum HistoryConfigurationResolution: Equatable {
@@ -14447,7 +14782,9 @@ final class AppState: ObservableObject {
                     requestID: presentation.requestID,
                     allowsAutomaticRetry: presentation.allowsAutomaticRetry,
                     hasAttemptedVerification:
-                        presentation.hasAttemptedProfileRevisionVerification
+                        presentation.hasAttemptedProfileRevisionVerification,
+                    acceptsProfileRevisionCompletion:
+                        presentation.completionMode == .profileRevision
                 ) {
                     presentation.hasAttemptedProfileRevisionVerification = true
                     presentation.lifecycleState = .saved
@@ -14459,7 +14796,8 @@ final class AppState: ObservableObject {
                     )
                 } else {
                     presentation.lifecycleState = .saved
-                    if isPlayback, presentation.requestID != nil {
+                    if isPlayback,
+                       presentation.completionMode == .explicitSignal {
                         presentation.status = "配置已保存，仍在等待当前请求的明确授权完成信号。"
                     } else if isPlayback {
                         presentation.status = "配置已保存；自动验证已执行过一次，请手动重试。"
@@ -14651,6 +14989,7 @@ final class AppState: ObservableObject {
 
     private func resetSearchForConfigurationChange() {
         detailHomeSearchReturnSnapshot = nil
+        discoverySearchReturnSnapshot = nil
         nodeAuthorizationCompletionTask?.cancel()
         nodeAuthorizationCompletionTask = nil
         if let challengeID = nodeWebPresentation?.challengeID {
@@ -15209,6 +15548,8 @@ final class AppState: ObservableObject {
         )
         let nodeBundleRuntime = environment.nodeBundleRuntime
         let activeConfigurationID = activeConfigurationRecord?.id
+        let activeConfigurationSemanticRevision = activeConfigurationRecord
+            .flatMap(NodeConfigurationSemanticRevision.make)
         providers = Dictionary(
             uniqueKeysWithValues: providerCatalogSites.map { site in
                 let provider: SiteProvider
@@ -15241,7 +15582,9 @@ final class AppState: ObservableObject {
                                 )
                             },
                             configurationIdentity: activeConfigurationID?
-                                .uuidString
+                                .uuidString,
+                            configurationSemanticRevision:
+                                activeConfigurationSemanticRevision
                         )) ?? UnsupportedSiteProvider(site: site)
                     } else if let baseURL,
                               NodeHTTPSpiderSiteProvider.canHandle(
@@ -15258,7 +15601,9 @@ final class AppState: ObservableObject {
                                 Task { await runtime?.recordDiagnosticEvent(event) }
                             },
                             configurationIdentity: activeConfigurationID?
-                                .uuidString
+                                .uuidString,
+                            configurationSemanticRevision:
+                                activeConfigurationSemanticRevision
                         )) ?? UnsupportedSiteProvider(site: site)
                     } else {
                         // `okNodeRuntime` is exclusive ownership metadata. A

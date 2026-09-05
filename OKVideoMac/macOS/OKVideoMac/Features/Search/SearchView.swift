@@ -25,7 +25,9 @@ struct SearchView: View {
                         SearchToolbarLeadingItem(
                             title: toolbarTitle,
                             backHelp: state.homeSearchBackHelp,
-                            onBack: state.navigateBackHomeSearch
+                            onBack: {
+                                _ = state.performSearchBackAction()
+                            }
                         )
                     }
                     ToolbarItem(placement: .principal) {
@@ -255,7 +257,7 @@ struct SearchView: View {
         case .deadlineReached:
             return "首轮搜索已完成；后台补页已到达时间上限。"
         case .cancelled:
-            return "搜索已取消。"
+            return "搜索已停止。"
         case .supersededByNewSearch:
             return "本次搜索已被新搜索替代。"
         default:
@@ -313,8 +315,10 @@ private struct SearchToolbarLeadingItem: View {
                 Image(systemName: "chevron.backward")
             }
             .primaryToolbarIconControl()
+            .fixedSize()
             .help(backHelp)
             .accessibilityLabel(backHelp)
+            .accessibilityIdentifier("search.back")
 
             BrowserToolbarTitle(title)
                 .lineLimit(1)
@@ -564,6 +568,14 @@ enum SearchToolbarStatusPolicy {
         termination: MultiSiteSearchTermination?
     ) -> SearchToolbarStatusPresentation {
         guard total > 0 else {
+            if termination == .cancelled
+                || termination == .supersededByNewSearch {
+                return SearchToolbarStatusPresentation(
+                    phase: .stopped,
+                    text: "已停止",
+                    accessibilityValue: "搜索已停止"
+                )
+            }
             return SearchToolbarStatusPresentation(
                 phase: .preparing,
                 text: "准备搜索",
@@ -595,6 +607,8 @@ enum SearchToolbarStatusPolicy {
             text = "✓ 已完成 \(completed)/\(total)"
         case (.compact, .stopped):
             text = "已停止 \(completed)/\(total)"
+        case (.minimal, .stopped):
+            text = "已停止"
         case (.minimal, _):
             text = "\(completed)/\(total)"
         case (_, .preparing):

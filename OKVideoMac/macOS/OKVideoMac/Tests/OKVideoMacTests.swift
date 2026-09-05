@@ -1877,6 +1877,14 @@ final class OKVideoMacTests: XCTestCase {
         )
         XCTAssertEqual(
             SearchProviderSelectionPolicy.effectiveSiteKeys(
+                context: .discoveryCard,
+                scope: manualSubset,
+                options: options
+            ),
+            ["renamed-content-a"]
+        )
+        XCTAssertEqual(
+            SearchProviderSelectionPolicy.effectiveSiteKeys(
                 context: .discoveryFallback,
                 scope: manualSubset,
                 options: options
@@ -1937,6 +1945,130 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(
             HomeItemRoutePolicy.route(summary: summary, site: detailSite),
             .detail
+        )
+    }
+
+    func testCatPawNavigationModeRequiresNodeRuntimeIdentity() {
+        let catPawDiscovery = SiteConfiguration(
+            key: "opaque-index",
+            name: "Renamed Discovery",
+            type: 3,
+            api: "/spider/opaque/3",
+            indexs: 0,
+            extra: [
+                "okNodeRuntime": .bool(true),
+                "okNodeNavigationMode": .string("discovery")
+            ]
+        )
+        let legacyCatPawDiscovery = SiteConfiguration(
+            key: "legacy-index",
+            name: "Legacy Discovery",
+            type: 3,
+            api: "/spider/legacy/3",
+            indexs: 1,
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let nonNodeIndex = SiteConfiguration(
+            key: "tvbox-index",
+            name: "Non Node Index",
+            type: 3,
+            api: "csp_NonNode",
+            indexs: 1
+        )
+
+        XCTAssertEqual(
+            NodeSiteNavigationMode.resolve(for: catPawDiscovery),
+            .discovery
+        )
+        XCTAssertEqual(
+            NodeSiteNavigationMode.resolve(for: legacyCatPawDiscovery),
+            .discovery
+        )
+        XCTAssertEqual(
+            NodeSiteNavigationMode.resolve(for: nonNodeIndex),
+            .detail
+        )
+    }
+
+    func testDiscoveryFolderLeafRoutesBeforeDetailWhileFoldersStillExpand() {
+        let leaf = VideoSummary(
+            siteKey: "opaque-index",
+            siteName: "Renamed Discovery",
+            videoID: "subject-123",
+            title: "发现型影片"
+        )
+        let folder = VideoSummary(
+            siteKey: "opaque-index",
+            siteName: "Renamed Discovery",
+            videoID: "dl-123",
+            title: "发现型片单",
+            tag: "folder"
+        )
+        let ordinarySite = SiteConfiguration(
+            key: "opaque-index",
+            name: "Renamed Discovery",
+            type: 3,
+            api: "/spider/opaque/3",
+            indexs: 0,
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+
+        XCTAssertEqual(
+            HomeItemRoutePolicy.route(
+                summary: leaf,
+                site: ordinarySite,
+                inheritedNavigationMode: .discovery
+            ),
+            .search
+        )
+        XCTAssertEqual(
+            HomeItemRoutePolicy.route(
+                summary: folder,
+                site: ordinarySite,
+                inheritedNavigationMode: .discovery
+            ),
+            .folder
+        )
+        XCTAssertEqual(
+            HomeItemRoutePolicy.route(
+                summary: leaf,
+                site: ordinarySite,
+                inheritedNavigationMode: .detail
+            ),
+            .detail
+        )
+    }
+
+    func testSearchFolderNavigationContextRejectsChangedConfiguration() {
+        let configurationID = UUID()
+        let context = SearchFolderNavigationContext(
+            navigationMode: .discovery,
+            sourceSiteKey: "opaque-index",
+            configurationID: configurationID,
+            configurationRevision: "revision-a",
+            nodeSiteIdentity: "site-a"
+        )
+
+        XCTAssertTrue(
+            context.isCurrent(
+                configurationID: configurationID,
+                configurationRevision: "revision-a",
+                nodeSiteIdentity: "site-a"
+            )
+        )
+        XCTAssertFalse(
+            context.isCurrent(
+                configurationID: configurationID,
+                configurationRevision: "revision-b",
+                nodeSiteIdentity: "site-a"
+            )
+        )
+        XCTAssertFalse(
+            context.isCurrent(
+                configurationID: configurationID,
+                configurationRevision: "revision-a",
+                nodeSiteIdentity: "site-b"
+            )
         )
     }
 
@@ -2468,6 +2600,77 @@ final class OKVideoMacTests: XCTestCase {
             XCTAssertEqual(state.searchDraftKeyword, "")
             XCTAssertEqual(state.activeSearchKeyword, "")
             XCTAssertNil(state.homeSearchReturnSection)
+        }
+    }
+
+    @MainActor
+    func testSearchBackStopsAndPreservesResultsBeforeReturningToOrigin() {
+        let state = AppState(environment: nil)
+        state.selectSection(.history)
+        state.searchFromSidebar("日掛中天")
+        let retainedResult = VideoSummary(
+            siteKey: "fixture",
+            siteName: "Fixture",
+            videoID: "video-1",
+            title: "日掛中天"
+        )
+        state.seedSearchResultsForTesting([retainedResult])
+
+        XCTAssertTrue(state.isSearching)
+        XCTAssertEqual(state.homeSearchBackHelp, "停止搜索并保留当前结果")
+        XCTAssertTrue(state.performSearchBackAction())
+
+        XCTAssertFalse(state.isSearching)
+        XCTAssertEqual(state.searchTermination, .cancelled)
+        XCTAssertEqual(state.searchResults, [retainedResult])
+        XCTAssertTrue(state.isHomeSearchPresented)
+        XCTAssertEqual(state.selectedSection, .home)
+        XCTAssertEqual(state.searchDraftKeyword, "日掛中天")
+        XCTAssertEqual(state.activeSearchKeyword, "日掛中天")
+        XCTAssertEqual(state.homeSearchBackHelp, "关闭搜索并返回历史")
+
+        XCTAssertTrue(state.performSearchBackAction())
+        XCTAssertFalse(state.isHomeSearchPresented)
+        XCTAssertEqual(state.selectedSection, .history)
+        XCTAssertEqual(state.searchDraftKeyword, "")
+        XCTAssertEqual(state.activeSearchKeyword, "")
+    }
+
+    @MainActor
+    func testSearchBackButtonEscapeAndCommandBracketShareStateTransition()
+        async {
+        func searchState() -> AppState {
+            let state = AppState(environment: nil)
+            state.selectSection(.favorites)
+            state.setBrowserWindowKey(true)
+            state.searchFromSidebar("共同入口")
+            return state
+        }
+
+        let toolbarState = searchState()
+        let escapeState = searchState()
+        let commandState = searchState()
+
+        XCTAssertTrue(toolbarState.performSearchBackAction())
+        XCTAssertTrue(escapeState.performBrowserEscapeShortcut())
+        await commandState.performBackShortcut()
+
+        for state in [toolbarState, escapeState, commandState] {
+            XCTAssertTrue(state.isHomeSearchPresented)
+            XCTAssertFalse(state.isSearching)
+            XCTAssertEqual(state.searchTermination, .cancelled)
+            XCTAssertEqual(state.selectedSection, .home)
+            XCTAssertEqual(state.activeSearchKeyword, "共同入口")
+        }
+
+        XCTAssertTrue(toolbarState.performSearchBackAction())
+        XCTAssertTrue(escapeState.performBrowserEscapeShortcut())
+        await commandState.performBackShortcut()
+
+        for state in [toolbarState, escapeState, commandState] {
+            XCTAssertFalse(state.isHomeSearchPresented)
+            XCTAssertEqual(state.selectedSection, .favorites)
+            XCTAssertEqual(state.activeSearchKeyword, "")
         }
     }
 
@@ -3781,6 +3984,181 @@ final class OKVideoMacTests: XCTestCase {
                 hasAttemptedVerification: false
             )
         )
+        XCTAssertTrue(
+            NodeProfileRevisionVerificationPolicy.shouldVerifyAutomatically(
+                isPlayback: true,
+                requestID: "request-scoped-toast",
+                allowsAutomaticRetry: true,
+                hasAttemptedVerification: false,
+                acceptsProfileRevisionCompletion: true
+            )
+        )
+        XCTAssertFalse(
+            NodeProfileRevisionVerificationPolicy.shouldVerifyAutomatically(
+                isPlayback: true,
+                requestID: "request-scoped-toast",
+                allowsAutomaticRetry: true,
+                hasAttemptedVerification: true,
+                acceptsProfileRevisionCompletion: true
+            )
+        )
+    }
+
+    func testCatPawAuthorizationClassifierRequiresCloudCredentialEvidence() {
+        let requestID = UUID()
+        let scope = CatPawAuthorizationScope(
+            challengeID: requestID,
+            playbackRequestID: requestID,
+            requestGeneration: 7,
+            configurationIdentity: "configuration",
+            semanticRevision: "semantic",
+            runtimeGeneration: "runtime",
+            siteIdentity: "site",
+            modulePath: "/spider/fixture/3",
+            profileRevisionBefore: "profile-1"
+        )
+        let expired = CatPawAuthorizationClassifier.challenge(
+            action: "toast",
+            options: [
+                "message": .string("夸克 Cookie 已失效，请重新扫码")
+            ],
+            flag: "夸克/直链",
+            phase: .play,
+            scope: scope
+        )
+        XCTAssertEqual(expired?.providerID, "quark")
+        XCTAssertEqual(expired?.playbackRequestID, requestID)
+        XCTAssertEqual(expired?.requestGeneration, 7)
+        XCTAssertEqual(expired?.reasonCode, .expiredCredential)
+
+        XCTAssertNil(CatPawAuthorizationClassifier.challenge(
+            action: "toast",
+            options: [
+                "message": .string("夸克分享 stoken 41016 expired")
+            ],
+            flag: "夸克/直链",
+            phase: .play,
+            scope: scope
+        ))
+        XCTAssertNil(CatPawAuthorizationClassifier.challenge(
+            action: "proxyAuthorizationRequired",
+            options: [
+                "statusCode": .integer(403),
+                "message": .string("CDN HTTP 403")
+            ],
+            flag: "普通直链",
+            phase: .proxy,
+            scope: scope
+        ))
+        XCTAssertNil(CatPawAuthorizationClassifier.challenge(
+            action: "toast",
+            options: [
+                "message": .string("unrecognized file format")
+            ],
+            flag: "夸克/直链",
+            phase: .play,
+            scope: scope
+        ))
+    }
+
+    func testStructuredCloudAuthorizationContractCoversEveryProvider() {
+        let requestID = UUID()
+        let scope = CatPawAuthorizationScope(
+            challengeID: UUID(),
+            playbackRequestID: requestID,
+            requestGeneration: 19,
+            configurationIdentity: "configuration",
+            semanticRevision: "semantic",
+            runtimeGeneration: "runtime",
+            siteIdentity: "site",
+            modulePath: "/spider/fixture/3",
+            profileRevisionBefore: "profile-1"
+        )
+        for provider in CatPawCloudProvider.allCases {
+            let challenge = CatPawAuthorizationClassifier.challenge(
+                action: "authorizationRequired",
+                options: [
+                    "provider": .string(provider.rawValue),
+                    "reasonCode": .string("missingCredential"),
+                    "phase": .string("play"),
+                    "message": .string("credential is missing")
+                ],
+                flag: "unrelated",
+                phase: .play,
+                scope: scope
+            )
+            XCTAssertEqual(challenge?.providerID, provider.rawValue)
+            XCTAssertEqual(challenge?.reasonCode, .missingCredential)
+            XCTAssertEqual(challenge?.playbackRequestID, requestID)
+            XCTAssertEqual(challenge?.requestGeneration, 19)
+        }
+    }
+
+    func testStructuredCloudAuthorizationRejectsNonAuthHTTPAndStalePhase() {
+        let requestID = UUID()
+        let scope = CatPawAuthorizationScope(
+            challengeID: UUID(),
+            playbackRequestID: requestID,
+            requestGeneration: 3,
+            configurationIdentity: nil,
+            semanticRevision: nil,
+            runtimeGeneration: nil,
+            siteIdentity: nil,
+            modulePath: nil,
+            profileRevisionBefore: nil
+        )
+        func challenge(
+            status: Int,
+            phase: String = "play"
+        ) -> CatPawAuthorizationChallenge? {
+            CatPawAuthorizationClassifier.challenge(
+                action: "authorizationRequired",
+                options: [
+                    "provider": .string("quark"),
+                    "reasonCode": .string("unauthorizedHTTP"),
+                    "phase": .string(phase),
+                    "upstreamStatus": .integer(Int64(status)),
+                    "message": .string("upstream response")
+                ],
+                flag: "夸克",
+                phase: .play,
+                scope: scope
+            )
+        }
+
+        XCTAssertEqual(challenge(status: 401)?.reasonCode, .unauthorizedHTTP)
+        XCTAssertEqual(challenge(status: 403)?.reasonCode, .unauthorizedHTTP)
+        XCTAssertNil(challenge(status: 400))
+        XCTAssertNil(challenge(status: 429))
+        XCTAssertNil(challenge(status: 500))
+        XCTAssertNil(challenge(status: 401, phase: "proxy"))
+    }
+
+    func testLegacyQuarkAccountUnavailableFallsBackToMissingLogin() {
+        let requestID = UUID()
+        let scope = CatPawAuthorizationScope(
+            challengeID: UUID(),
+            playbackRequestID: requestID,
+            requestGeneration: 1,
+            configurationIdentity: nil,
+            semanticRevision: nil,
+            runtimeGeneration: nil,
+            siteIdentity: nil,
+            modulePath: nil,
+            profileRevisionBefore: nil
+        )
+        let challenge = CatPawAuthorizationClassifier.challenge(
+            action: "toast",
+            options: [
+                "provider": .string("quark"),
+                "message": .string("quark account unavailable")
+            ],
+            flag: "夸克",
+            phase: .play,
+            scope: scope
+        )
+        XCTAssertEqual(challenge?.providerID, "quark")
+        XCTAssertEqual(challenge?.reasonCode, .notLoggedIn)
     }
 
     func testNodeRuntimeWebsiteLocationRebindsAfterRuntimeRestart() throws {
@@ -4715,7 +5093,7 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertNil(invalidContentState.actionSurfaceCaptureDescriptor)
     }
 
-    func testCloudAuthorizationPresentationReservesShadowMargin() {
+    func testCloudAuthorizationPresentationReservesSheetChrome() {
         XCTAssertEqual(
             CloudAuthorizationPresentationPolicy.maximumSurfaceHeight(
                 containerHeight: 717
@@ -4733,6 +5111,40 @@ final class OKVideoMacTests: XCTestCase {
                 containerHeight: 480
             ),
             200
+        )
+    }
+
+    func testConfigurationSheetsUseOneDeterministicPresentationLayer() {
+        XCTAssertNil(
+            AppConfigurationSheetPresentationPolicy.kind(
+                hasCategory: false,
+                hasCloudAuthorization: false,
+                hasNodeConfiguration: false
+            )
+        )
+        XCTAssertEqual(
+            AppConfigurationSheetPresentationPolicy.kind(
+                hasCategory: true,
+                hasCloudAuthorization: false,
+                hasNodeConfiguration: false
+            ),
+            .category
+        )
+        XCTAssertEqual(
+            AppConfigurationSheetPresentationPolicy.kind(
+                hasCategory: true,
+                hasCloudAuthorization: true,
+                hasNodeConfiguration: false
+            ),
+            .cloudAuthorization
+        )
+        XCTAssertEqual(
+            AppConfigurationSheetPresentationPolicy.kind(
+                hasCategory: true,
+                hasCloudAuthorization: true,
+                hasNodeConfiguration: true
+            ),
+            .nodeConfiguration
         )
     }
 
@@ -8794,45 +9206,27 @@ final class OKVideoMacTests: XCTestCase {
         )
         defer { try? FileManager.default.removeItem(at: root) }
         try makeFakeAndroidSDK(at: root)
-        let valid = root.appendingPathComponent(
-            "system-images/android-35/google_apis/arm64-v8a"
+        try makeFakeSystemImage(
+            at: root,
+            targetIdentifier: "android-35",
+            apiLevel: 35,
+            extensionLevel: 13,
+            variant: "google_apis",
+            architecture: "arm64-v8a"
         )
-        let automatedTestDevice = root.appendingPathComponent(
-            "system-images/android-35/aosp_atd/arm64-v8a"
+        try makeFakeSystemImage(
+            at: root,
+            targetIdentifier: "android-35",
+            apiLevel: 35,
+            variant: "aosp_atd",
+            architecture: "arm64-v8a"
         )
-        let invalid = root.appendingPathComponent(
-            "system-images/android-36/google_apis/x86_64"
-        )
-        try FileManager.default.createDirectory(
-            at: valid,
-            withIntermediateDirectories: true
-        )
-        try FileManager.default.createDirectory(
-            at: automatedTestDevice,
-            withIntermediateDirectories: true
-        )
-        try FileManager.default.createDirectory(
-            at: invalid,
-            withIntermediateDirectories: true
-        )
-        XCTAssertTrue(
-            FileManager.default.createFile(
-                atPath: valid.appendingPathComponent("package.xml").path,
-                contents: Data()
-            )
-        )
-        XCTAssertTrue(
-            FileManager.default.createFile(
-                atPath: automatedTestDevice
-                    .appendingPathComponent("package.xml").path,
-                contents: Data()
-            )
-        )
-        XCTAssertTrue(
-            FileManager.default.createFile(
-                atPath: invalid.appendingPathComponent("package.xml").path,
-                contents: Data()
-            )
+        try makeFakeSystemImage(
+            at: root,
+            targetIdentifier: "android-36",
+            apiLevel: 36,
+            variant: "google_apis",
+            architecture: "x86_64"
         )
         let resolver = AndroidToolchainResolver(
             applicationSupportDirectory: root.appendingPathComponent("Support"),
@@ -8855,6 +9249,333 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(
             resolver.interactiveSystemImages(in: toolchain).map(\.packageID),
             ["system-images;android-35;google_apis;arm64-v8a"]
+        )
+        let diagnostics = resolver.systemImageDiagnostics(in: toolchain)
+        XCTAssertEqual(diagnostics.count, 3)
+        XCTAssertEqual(diagnostics.filter(\.accepted).count, 1)
+        XCTAssertTrue(
+            diagnostics.contains(where: {
+                $0.variant == "aosp_atd" && $0.reason.contains("ATD")
+            })
+        )
+        XCTAssertTrue(
+            diagnostics.contains(where: {
+                $0.architecture == "x86_64" && $0.reason.contains("ABI")
+            })
+        )
+    }
+
+    func testAndroidToolchainResolverDiscoversAndroid37PointZeroFromMetadata()
+        throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "AndroidImages-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        try makeFakeAndroidSDK(at: root)
+        try makeFakeSystemImage(
+            at: root,
+            targetIdentifier: "android-37.0",
+            apiLevel: 37,
+            extensionLevel: 2,
+            variant: "google_apis",
+            architecture: "arm64-v8a"
+        )
+        let resolver = makeAndroidToolchainResolver(sdkRoot: root)
+        let toolchain = try XCTUnwrap(resolver.toolchain(at: root))
+        let image = try XCTUnwrap(
+            resolver.interactiveSystemImages(in: toolchain).first
+        )
+
+        XCTAssertEqual(image.apiLevel, 37)
+        XCTAssertEqual(image.extensionLevel, 2)
+        XCTAssertEqual(image.targetIdentifier, "android-37.0")
+        XCTAssertEqual(
+            image.actualRelativeDirectory,
+            "system-images/android-37.0/google_apis/arm64-v8a"
+        )
+    }
+
+    func testAndroid37PointZeroAVDPathIsPreservedAndReused() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "AndroidImages-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        try makeFakeAndroidSDK(at: root)
+        try makeFakeSystemImage(
+            at: root,
+            targetIdentifier: "android-38",
+            apiLevel: 38,
+            variant: "google_apis",
+            architecture: "arm64-v8a"
+        )
+        try makeFakeSystemImage(
+            at: root,
+            targetIdentifier: "android-37.0",
+            apiLevel: 37,
+            variant: "google_apis",
+            architecture: "arm64-v8a"
+        )
+        let resolver = makeAndroidToolchainResolver(sdkRoot: root)
+        let toolchain = try XCTUnwrap(resolver.toolchain(at: root))
+        let current = """
+        image.sysdir.1=\(root.path)/system-images/android-37.0/google_apis/arm64-v8a/
+        tag.id=google_apis
+        target=android-37.0
+        """
+        let image = try XCTUnwrap(
+            resolver.preferredInteractiveSystemImage(
+                in: toolchain,
+                avdConfiguration: current
+            )
+        )
+
+        XCTAssertEqual(image.targetIdentifier, "android-37.0")
+        XCTAssertTrue(
+            AndroidManagedAVDConfiguration.matches(
+                image,
+                contents: current
+            )
+        )
+        XCTAssertFalse(
+            AndroidManagedAVDConfiguration.requiresSystemImageMigration(
+                current,
+                to: image
+            )
+        )
+        let updated = AndroidManagedAVDConfiguration.updating(
+            current,
+            for: image
+        )
+        XCTAssertEqual(
+            AndroidManagedAVDConfiguration.value(
+                for: "image.sysdir.1",
+                in: updated
+            ),
+            "system-images/android-37.0/google_apis/arm64-v8a/"
+        )
+        XCTAssertEqual(
+            AndroidManagedAVDConfiguration.targetIdentifier(in: updated),
+            "android-37.0"
+        )
+    }
+
+    func testAndroidSystemImagesSortByAPIExtensionAndVariant() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "AndroidImages-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        try makeFakeAndroidSDK(at: root)
+        try makeFakeSystemImage(
+            at: root,
+            targetIdentifier: "android-35-ext12",
+            apiLevel: 35,
+            extensionLevel: 12,
+            variant: "google_apis",
+            architecture: "arm64-v8a"
+        )
+        try makeFakeSystemImage(
+            at: root,
+            targetIdentifier: "android-35-ext13-default",
+            apiLevel: 35,
+            extensionLevel: 13,
+            variant: "default",
+            architecture: "arm64-v8a"
+        )
+        try makeFakeSystemImage(
+            at: root,
+            targetIdentifier: "android-35-ext13-google",
+            apiLevel: 35,
+            extensionLevel: 13,
+            variant: "google_apis",
+            architecture: "arm64-v8a"
+        )
+        let resolver = makeAndroidToolchainResolver(sdkRoot: root)
+        let toolchain = try XCTUnwrap(resolver.toolchain(at: root))
+
+        XCTAssertEqual(
+            resolver.interactiveSystemImages(in: toolchain).map(\.packageID),
+            [
+                "system-images;android-35-ext13-google;google_apis;arm64-v8a",
+                "system-images;android-35-ext13-default;default;arm64-v8a",
+                "system-images;android-35-ext12;google_apis;arm64-v8a"
+            ]
+        )
+    }
+
+    func testAndroidSystemImageRejectsLowAPIAndMismatchedMetadata() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "AndroidImages-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        try makeFakeAndroidSDK(at: root)
+        try makeFakeSystemImage(
+            at: root,
+            targetIdentifier: "android-23",
+            apiLevel: 23,
+            variant: "default",
+            architecture: "arm64-v8a"
+        )
+        try makeFakeSystemImage(
+            at: root,
+            targetIdentifier: "android-37.0",
+            apiLevel: 37,
+            variant: "google_apis",
+            architecture: "arm64-v8a",
+            packageID: "system-images;android-37;google_apis;arm64-v8a"
+        )
+        let malformedDirectory = root.appendingPathComponent(
+            "system-images/android-36/default/arm64-v8a",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: malformedDirectory,
+            withIntermediateDirectories: true
+        )
+        try Data("<localPackage".utf8).write(
+            to: malformedDirectory.appendingPathComponent("package.xml")
+        )
+        let resolver = makeAndroidToolchainResolver(sdkRoot: root)
+        let toolchain = try XCTUnwrap(resolver.toolchain(at: root))
+
+        XCTAssertTrue(resolver.installedSystemImages(in: toolchain).isEmpty)
+        let diagnostics = resolver.systemImageDiagnostics(in: toolchain)
+        XCTAssertTrue(
+            diagnostics.contains(where: { $0.reason.contains("minSdk 24") })
+        )
+        XCTAssertTrue(
+            diagnostics.contains(where: {
+                $0.reason.contains("实际目录不一致")
+            })
+        )
+        XCTAssertTrue(
+            diagnostics.contains(where: { $0.reason.contains("XML 已损坏") })
+        )
+    }
+
+    func testAndroidJavaRuntimeResolverPrefersConfiguredJavaHome() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "AndroidJava-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let configuredHome = root.appendingPathComponent("ConfiguredJDK")
+        let systemHome = root.appendingPathComponent("SystemJDK")
+        try makeFakeExecutable(
+            at: configuredHome.appendingPathComponent("bin/java")
+        )
+        try makeFakeExecutable(
+            at: systemHome.appendingPathComponent("bin/java")
+        )
+        let resolver = AndroidJavaRuntimeResolver(
+            homeDirectory: root.appendingPathComponent("Home"),
+            environment: ["JAVA_HOME": configuredHome.path],
+            systemApplicationsDirectory: root.appendingPathComponent(
+                "Applications"
+            ),
+            fileManager: .default,
+            systemJavaHomeProvider: { systemHome }
+        )
+
+        let runtime = try XCTUnwrap(resolver.resolve())
+        XCTAssertEqual(
+            runtime.home,
+            configuredHome.standardizedFileURL.resolvingSymlinksInPath()
+        )
+        XCTAssertEqual(runtime.source, "JAVA_HOME")
+        let base = ["PATH": "/usr/bin", "ANDROID_HOME": "/sdk"]
+        let environment = runtime.applying(to: base)
+        XCTAssertNil(base["JAVA_HOME"])
+        XCTAssertEqual(environment["JAVA_HOME"], runtime.home.path)
+        XCTAssertEqual(
+            environment["PATH"],
+            runtime.executable.deletingLastPathComponent().path + ":/usr/bin"
+        )
+        XCTAssertEqual(environment["ANDROID_HOME"], "/sdk")
+    }
+
+    func testAndroidJavaRuntimeResolverUsesAndroidStudioJBR() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "AndroidJava-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let applications = root.appendingPathComponent("Applications")
+        let jbrHome = applications.appendingPathComponent(
+            "Android Studio.app/Contents/jbr/Contents/Home"
+        )
+        try makeFakeExecutable(at: jbrHome.appendingPathComponent("bin/java"))
+        let resolver = AndroidJavaRuntimeResolver(
+            homeDirectory: root.appendingPathComponent("Home"),
+            environment: [:],
+            systemApplicationsDirectory: applications,
+            fileManager: .default,
+            systemJavaHomeProvider: { nil }
+        )
+
+        let runtime = try XCTUnwrap(resolver.resolve())
+        XCTAssertEqual(
+            runtime.home,
+            jbrHome.standardizedFileURL.resolvingSymlinksInPath()
+        )
+        XCTAssertTrue(runtime.source.contains("Android Studio JBR"))
+    }
+
+    func testAndroidJavaRuntimeResolverUsesSystemJavaHome() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "AndroidJava-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let systemHome = root.appendingPathComponent("SystemJDK")
+        try makeFakeExecutable(at: systemHome.appendingPathComponent("bin/java"))
+        let resolver = AndroidJavaRuntimeResolver(
+            homeDirectory: root.appendingPathComponent("Home"),
+            environment: [:],
+            systemApplicationsDirectory: root.appendingPathComponent(
+                "Applications"
+            ),
+            fileManager: .default,
+            systemJavaHomeProvider: { systemHome }
+        )
+
+        let runtime = try XCTUnwrap(resolver.resolve())
+        XCTAssertEqual(
+            runtime.home,
+            systemHome.standardizedFileURL.resolvingSymlinksInPath()
+        )
+        XCTAssertEqual(runtime.source, "/usr/libexec/java_home")
+    }
+
+    func testAndroidJavaRuntimeResolverReportsMissingJava() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "AndroidJava-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let resolver = AndroidJavaRuntimeResolver(
+            homeDirectory: root.appendingPathComponent("Home"),
+            environment: ["JAVA_HOME": root.appendingPathComponent("Missing").path],
+            systemApplicationsDirectory: root.appendingPathComponent(
+                "Applications"
+            ),
+            fileManager: .default,
+            systemJavaHomeProvider: { nil }
+        )
+
+        XCTAssertNil(resolver.resolve())
+        XCTAssertTrue(
+            AndroidRuntimeFailureError(
+                record: AndroidRuntimeFailureRecord(
+                    occurredAt: Date(),
+                    stage: .preparingAVD,
+                    category: .javaRuntimeMissing,
+                    message: "创建 AVD 缺少 Java Runtime"
+                )
+            ).userFacingMessage.contains("Java Runtime")
         )
     }
 
@@ -9350,6 +10071,78 @@ final class OKVideoMacTests: XCTestCase {
                 ofItemAtPath: executable.path
             )
         }
+    }
+
+    private func makeAndroidToolchainResolver(
+        sdkRoot: URL
+    ) -> AndroidToolchainResolver {
+        AndroidToolchainResolver(
+            applicationSupportDirectory: sdkRoot.appendingPathComponent(
+                "Support"
+            ),
+            homeDirectory: sdkRoot.appendingPathComponent("Home"),
+            environment: [:],
+            userSelectedSDKRoot: sdkRoot.path,
+            fileManager: .default
+        )
+    }
+
+    private func makeFakeSystemImage(
+        at sdkRoot: URL,
+        targetIdentifier: String,
+        apiLevel: Int,
+        extensionLevel: Int = 0,
+        variant: String,
+        architecture: String,
+        packageID: String? = nil
+    ) throws {
+        let directory = sdkRoot.appendingPathComponent(
+            "system-images/\(targetIdentifier)/\(variant)/\(architecture)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let packageID = packageID
+            ?? "system-images;\(targetIdentifier);\(variant);\(architecture)"
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <sdk:sdk-repository xmlns:sdk="http://schemas.android.com/sdk/android/repo/repository2/01">
+          <localPackage path="\(packageID)">
+            <type-details>
+              <api-level>\(apiLevel)</api-level>
+              <extension-level>\(extensionLevel)</extension-level>
+              <tag>
+                <id>\(variant)</id>
+                <display>\(variant == "google_apis" ? "Google APIs" : variant)</display>
+              </tag>
+              <abi>\(architecture)</abi>
+            </type-details>
+          </localPackage>
+        </sdk:sdk-repository>
+        """
+        try Data(xml.utf8).write(
+            to: directory.appendingPathComponent("package.xml"),
+            options: [.atomic]
+        )
+    }
+
+    private func makeFakeExecutable(at url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        XCTAssertTrue(
+            FileManager.default.createFile(
+                atPath: url.path,
+                contents: Data("#!/bin/sh\nexit 0\n".utf8)
+            )
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: url.path
+        )
     }
 
     func testAndroidBridgeRewritesCloudOriginalProxyAndEncodesItsPath() {
@@ -11683,6 +12476,29 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(completed.phase, .completed)
         XCTAssertEqual(completed.text, "✓ 已完成 49/49")
         XCTAssertFalse(completed.text.contains("失败"))
+
+        let stoppedBeforeProviderEnumeration =
+            SearchToolbarStatusPolicy.presentation(
+                layout: .expanded,
+                isSearching: false,
+                firstPageCompleted: 0,
+                completed: 0,
+                total: 0,
+                termination: .cancelled
+            )
+        XCTAssertEqual(stoppedBeforeProviderEnumeration.phase, .stopped)
+        XCTAssertEqual(stoppedBeforeProviderEnumeration.text, "已停止")
+
+        let stoppedMinimal = SearchToolbarStatusPolicy.presentation(
+            layout: .minimal,
+            isSearching: false,
+            firstPageCompleted: 21,
+            completed: 17,
+            total: 58,
+            termination: .cancelled
+        )
+        XCTAssertEqual(stoppedMinimal.phase, .stopped)
+        XCTAssertEqual(stoppedMinimal.text, "已停止")
     }
 
     func testSearchResultPresentationCanMergeAndSeparateDuplicateTitles() {
@@ -11852,6 +12668,19 @@ final class OKVideoMacTests: XCTestCase {
         let third = gate.begin()
         XCTAssertFalse(gate.accepts(second))
         XCTAssertTrue(gate.accepts(third))
+    }
+
+    func testCancelledSearchSessionRejectsLateResultMutation() {
+        var gate = SearchSessionGate()
+        let cancelledSession = gate.begin()
+        var retainedResults = ["current-result"]
+
+        gate.invalidate()
+        if gate.accepts(cancelledSession) {
+            retainedResults.append("late-result")
+        }
+
+        XCTAssertEqual(retainedResults, ["current-result"])
     }
 
     func testActivityIndicatorStopsAnimationAfterLoadingDisappears() {
@@ -12492,7 +13321,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
     }
 
     func testDeterministicPatchAcceptsExactInputAndRejectsChangedInput() throws {
-        let shipped = NodeBundleDeterministicPatch.quarkLifecycleV1
+        let shipped = NodeBundleDeterministicPatch.quarkLifecycleV2
         let patchURL = try XCTUnwrap(
             Bundle.main.url(
                 forResource: shipped.patchResourceName,
@@ -14697,6 +15526,134 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         await service.stop()
     }
 
+    func testContractBPlayToastCarriesExactPlaybackAuthorizationScope()
+        async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(nodeContractBFixtureScript(
+                startDelayMilliseconds: 0,
+                emitsPlayAuthorizationToast: true
+            ).utf8)
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+        let endpoint = try await service.ensureReady(from: fixture.sourceURL)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
+        let configurationID = UUID()
+        let requestID = UUID()
+        let context = NodeTransferPlaybackContext(
+            requestID: requestID,
+            requestGeneration: 19
+        )
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: SiteConfiguration(
+                key: "play_authorization_scope",
+                name: "Play Authorization Scope",
+                type: 3,
+                api: "/spider/contract_b/3",
+                extra: [
+                    "okNodeRuntime": .bool(true),
+                    "okNodeHostMessageBridge": .bool(true),
+                    "okNodeSiteIdentity": .string("site-identity"),
+                    "okNodeProfileRevision": .string("profile-1")
+                ]
+            ),
+            baseURL: endpoint,
+            httpClient: URLSessionHTTPClient(configuration: configuration),
+            configurationIdentity: configurationID.uuidString,
+            configurationSemanticRevision: "semantic-1"
+        )
+
+        do {
+            _ = try await provider.player(
+                flag: "百度/直链",
+                episodeURL: "fixture",
+                transferContext: context
+            )
+            XCTFail("expected request-scoped authorization challenge")
+        } catch let authorization as NodeWebAuthorizationRequired {
+            let challenge = try XCTUnwrap(authorization.challenge)
+            XCTAssertEqual(challenge.challengeID, requestID)
+            XCTAssertEqual(challenge.playbackRequestID, requestID)
+            XCTAssertEqual(challenge.requestGeneration, 19)
+            XCTAssertEqual(
+                challenge.configurationIdentity,
+                configurationID.uuidString.lowercased()
+            )
+            XCTAssertEqual(challenge.semanticRevision, "semantic-1")
+            XCTAssertEqual(challenge.siteIdentity, "site-identity")
+            XCTAssertEqual(challenge.modulePath, "/spider/contract_b/3")
+            XCTAssertEqual(challenge.providerID, "baidu")
+            XCTAssertEqual(challenge.phase, .play)
+            XCTAssertEqual(authorization.preferredProviderID, "baidu")
+            XCTAssertEqual(authorization.completionMode, .profileRevision)
+        }
+        await service.stop()
+    }
+
+    func testContractBStructuredAuthorizationCarriesExactPlaybackScope()
+        async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(nodeContractBFixtureScript(
+                startDelayMilliseconds: 0,
+                emitsStructuredAuthorization: true
+            ).utf8)
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+        let endpoint = try await service.ensureReady(from: fixture.sourceURL)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
+        let requestID = UUID()
+        let context = NodeTransferPlaybackContext(
+            requestID: requestID,
+            requestGeneration: 23
+        )
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: SiteConfiguration(
+                key: "structured_authorization",
+                name: "Structured Authorization",
+                type: 3,
+                api: "/spider/contract_b/3",
+                extra: [
+                    "okNodeRuntime": .bool(true),
+                    "okNodeHostMessageBridge": .bool(true),
+                    "okNodeSiteIdentity": .string("structured-site")
+                ]
+            ),
+            baseURL: endpoint,
+            httpClient: URLSessionHTTPClient(configuration: configuration)
+        )
+
+        do {
+            _ = try await provider.player(
+                flag: "unrelated",
+                episodeURL: "fixture",
+                transferContext: context
+            )
+            XCTFail("expected structured authorization challenge")
+        } catch let authorization as NodeWebAuthorizationRequired {
+            let challenge = try XCTUnwrap(authorization.challenge)
+            XCTAssertEqual(challenge.playbackRequestID, requestID)
+            XCTAssertEqual(challenge.requestGeneration, 23)
+            XCTAssertEqual(challenge.providerID, "quark")
+            XCTAssertEqual(challenge.phase, .play)
+            XCTAssertEqual(challenge.reasonCode, .missingCredential)
+            XCTAssertEqual(authorization.preferredProviderID, "quark")
+        }
+        await service.stop()
+    }
+
     func testContractBProxyAuthorizationResponseBecomesConfigurationChallenge()
         async throws {
         let fixture = try makeLegacyCacheFixture(
@@ -14773,6 +15730,89 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             waitMilliseconds: 0
         )
         XCTAssertTrue(forbiddenAuthorization?.message.contains("HTTP 403") == true)
+        await service.stop()
+    }
+
+    func testContractBProxyAuthorizationCannotCrossPlaybackGeneration()
+        async throws {
+        let fixture = try makeLegacyCacheFixture(
+            script: Data(nodeContractBFixtureScript(
+                startDelayMilliseconds: 0,
+                returnsProxyAuthorizationURL: true
+            ).utf8)
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = makeOfflineRuntime(
+            fixture: fixture,
+            nodeExecutableURL: try testNodeExecutableURL(),
+            readinessTimeout: 5,
+            readinessPollInterval: 0.02
+        )
+        let endpoint = try await service.ensureReady(from: fixture.sourceURL)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
+        let client = URLSessionHTTPClient(configuration: configuration)
+        let configurationID = UUID()
+        let site = SiteConfiguration(
+            key: "scoped_proxy_authorization",
+            name: "Scoped Proxy Authorization",
+            type: 3,
+            api: "/spider/contract_b/3",
+            extra: [
+                "okNodeRuntime": .bool(true),
+                "okNodeSiteIdentity": .string("site-identity")
+            ]
+        )
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: endpoint,
+            httpClient: client,
+            configurationIdentity: configurationID.uuidString,
+            configurationSemanticRevision: "semantic-1"
+        )
+        let current = NodeTransferPlaybackContext(
+            requestID: UUID(),
+            requestGeneration: 41
+        )
+        let stale = NodeTransferPlaybackContext(
+            requestID: UUID(),
+            requestGeneration: 40
+        )
+        let playback = try await provider.player(
+            flag: "阿里/直链",
+            episodeURL: "fixture",
+            transferContext: current
+        )
+        let playbackURL = try XCTUnwrap(URL(string: playback.url))
+        XCTAssertEqual(
+            URLComponents(url: playbackURL, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: {
+                    $0.name == "__okvideo_playback_generation"
+                })?.value,
+            "41"
+        )
+        let startedAt = Date()
+        let (_, proxyResponse) = try await URLSession.shared.data(
+            from: playbackURL
+        )
+        XCTAssertEqual((proxyResponse as? HTTPURLResponse)?.statusCode, 403)
+        let staleResult = await provider.consumeLatePlaybackAuthorization(
+            flag: "阿里/直链",
+            notBefore: startedAt,
+            waitMilliseconds: 0,
+            transferContext: stale
+        )
+        XCTAssertNil(staleResult)
+        let currentResult = await provider.consumeLatePlaybackAuthorization(
+            flag: "阿里/直链",
+            notBefore: startedAt,
+            waitMilliseconds: 0,
+            transferContext: current
+        )
+        XCTAssertEqual(currentResult?.challenge?.playbackRequestID, current.requestID)
+        XCTAssertEqual(currentResult?.challenge?.requestGeneration, 41)
+        XCTAssertEqual(currentResult?.challenge?.providerID, "ali")
+        XCTAssertEqual(currentResult?.challenge?.phase, .proxy)
         await service.stop()
     }
 
@@ -15533,7 +16573,10 @@ final class NodeBundleCompatibilityTests: XCTestCase {
     private func nodeContractBFixtureScript(
         startDelayMilliseconds: Int,
         emitsLateSecondWrite: Bool = false,
-        startsAuxiliaryListener: Bool = false
+        startsAuxiliaryListener: Bool = false,
+        emitsPlayAuthorizationToast: Bool = false,
+        emitsStructuredAuthorization: Bool = false,
+        returnsProxyAuthorizationURL: Bool = false
     ) -> String {
         #"""
         'use strict';
@@ -15570,6 +16613,55 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                   response.end(JSON.stringify(config));
                 } else if (request.url === '/spider/contract_b/3/home') {
                   response.end(JSON.stringify({class:[],list:[]}));
+                } else if (
+                  \#(emitsStructuredAuthorization ? "true" : "false") &&
+                  request.url === '/spider/contract_b/3/play'
+                ) {
+                  fetch(`http://127.0.0.1:${catDartServerPort()}/msg`, {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({
+                      action: 'authorizationRequired',
+                      opt: {
+                        provider: 'quark',
+                        reasonCode: 'missingCredential',
+                        phase: 'play',
+                        upstreamStatus: 0,
+                        message: 'quark account unavailable'
+                      }
+                    })
+                  }).then(() => {
+                    response.statusCode = 500;
+                    response.end(JSON.stringify({error:'quark account unavailable'}));
+                  }).catch(() => {
+                    response.statusCode = 500;
+                    response.end(JSON.stringify({error:'host-message-failed'}));
+                  });
+                } else if (
+                  \#(emitsPlayAuthorizationToast ? "true" : "false") &&
+                  request.url === '/spider/contract_b/3/play'
+                ) {
+                  fetch(`http://127.0.0.1:${catDartServerPort()}/msg`, {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({
+                      action: 'toast',
+                      opt: {message: '百度 Cookie 已失效，请重新扫码'}
+                    })
+                  }).then(() => {
+                    response.end(JSON.stringify({parse: 0, url: ''}));
+                  }).catch(() => {
+                    response.statusCode = 500;
+                    response.end(JSON.stringify({error:'host-message-failed'}));
+                  });
+                } else if (
+                  \#(returnsProxyAuthorizationURL ? "true" : "false") &&
+                  request.url === '/spider/contract_b/3/play'
+                ) {
+                  response.end(JSON.stringify({
+                    parse: 0,
+                    url: `http://127.0.0.1:${runtimePort}/proxy/ali/forbidden`
+                  }));
                 } else if (request.url === '/auxiliary') {
                   response.end(JSON.stringify(auxiliary && auxiliary.address()));
                 } else if (request.url === '/bridge-port') {
@@ -16723,7 +17815,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertEqual(result.mediaSession?.transport, .providerLoopback)
     }
 
-    func testNodePlayerRoutesOpaqueCloudDirectLinkFailureToConfiguration()
+    func testNodePlayerDoesNotTreatOpaqueCloudDirectLinkFailureAsAuthorization()
         async throws {
         let site = SiteConfiguration(
             key: "nodejs_tgsou",
@@ -16770,13 +17862,11 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                 flag: "百度网盘",
                 episodeURL: "opaque-episode"
             )
-            XCTFail("缺少百度授权时不应打开 0 KB 播放器")
-        } catch let authorization as NodeWebAuthorizationRequired {
-            XCTAssertEqual(
-                authorization.websiteURL.absoluteString,
-                "http://127.0.0.1:18988/website"
-            )
-            XCTAssertTrue(authorization.message.contains("百度网盘"))
+            XCTFail("缺少媒体地址时不应打开 0 KB 播放器")
+        } catch is NodeWebAuthorizationRequired {
+            XCTFail("没有凭据失效证据时不能强制弹出授权页")
+        } catch let error as ProviderPlaybackError {
+            XCTAssertTrue(error.message.contains("百度网盘获取原画直链失败"))
         }
     }
 

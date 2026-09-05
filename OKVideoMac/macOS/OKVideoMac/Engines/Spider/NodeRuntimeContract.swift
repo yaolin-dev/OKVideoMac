@@ -575,6 +575,154 @@ enum NodeRuntimeContractFactory {
     const originalFetch = globalThis.fetch;
     const originalHTTPRequest = http.request;
     const originalHTTPSRequest = https.request;
+    const runtimeGeneration = crypto.randomUUID();
+    const playbackContexts = new Map();
+    const playbackContextTTLMilliseconds = 15 * 60 * 1000;
+    const playbackContextLimit = 64;
+    const playbackQueryKeys = {
+      requestID: '__okvideo_playback_request',
+      generation: '__okvideo_playback_generation',
+      challengeID: '__okvideo_authorization_challenge'
+    };
+
+    function normalizedUUID(value) {
+      if (Array.isArray(value)) value = value[0];
+      if (typeof value !== 'string' ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+        return null;
+      }
+      return value.toLowerCase();
+    }
+
+    function normalizedGeneration(value) {
+      if (Array.isArray(value)) value = value[0];
+      if (typeof value !== 'string' || !/^[1-9][0-9]{0,19}$/.test(value)) {
+        return null;
+      }
+      const number = Number(value);
+      return Number.isSafeInteger(number) && number > 0 ? number : null;
+    }
+
+    function boundedIdentity(value, maximumLength) {
+      if (Array.isArray(value)) value = value[0];
+      if (typeof value !== 'string') return null;
+      const normalized = value.trim();
+      return normalized.length > 0 && normalized.length <= maximumLength
+        ? normalized
+        : null;
+    }
+
+    function prunePlaybackContexts(now) {
+      for (const [key, context] of playbackContexts) {
+        if (now - context.createdAt > playbackContextTTLMilliseconds) {
+          playbackContexts.delete(key);
+        }
+      }
+      while (playbackContexts.size > playbackContextLimit) {
+        playbackContexts.delete(playbackContexts.keys().next().value);
+      }
+    }
+
+    function playbackContextKey(requestID, generation, challengeID) {
+      return `${requestID}:${generation}:${challengeID}`;
+    }
+
+    function registerPlaybackContext(request, pathname) {
+      if (request.method !== 'POST' || !pathname.endsWith('/play') ||
+          !runtimeModulePath(pathname)) return null;
+      const requestID = normalizedUUID(
+        request.headers['x-okvideo-transfer-request-id']
+      );
+      const generation = normalizedGeneration(
+        request.headers['x-okvideo-transfer-generation']
+      );
+      const challengeID = normalizedUUID(
+        request.headers['x-okvideo-authorization-challenge-id']
+      );
+      if (!requestID || !generation || !challengeID) return null;
+      const context = {
+        challengeID,
+        playbackRequestID: requestID,
+        requestGeneration: generation,
+        configurationID: boundedIdentity(
+          request.headers['x-okvideo-configuration-id'], 128
+        ),
+        semanticRevision: boundedIdentity(
+          request.headers['x-okvideo-semantic-revision'], 256
+        ),
+        runtimeGeneration,
+        siteIdentity: boundedIdentity(
+          request.headers['x-okvideo-site-identity'], 256
+        ),
+        runtimeModulePath: runtimeModulePath(pathname),
+        profileRevisionBefore: boundedIdentity(
+          request.headers['x-okvideo-profile-revision'], 256
+        ),
+        createdAt: Date.now()
+      };
+      prunePlaybackContexts(context.createdAt);
+      playbackContexts.set(
+        playbackContextKey(requestID, generation, challengeID),
+        context
+      );
+      return context;
+    }
+
+    function consumePlaybackContextFromProxy(request, requestURL) {
+      if (request.method !== 'GET' && request.method !== 'HEAD') return null;
+      const requestID = normalizedUUID(
+        requestURL.searchParams.get(playbackQueryKeys.requestID)
+      );
+      const generation = normalizedGeneration(
+        requestURL.searchParams.get(playbackQueryKeys.generation)
+      );
+      const challengeID = normalizedUUID(
+        requestURL.searchParams.get(playbackQueryKeys.challengeID)
+      );
+      if (!requestID || !generation || !challengeID) return null;
+      const key = playbackContextKey(requestID, generation, challengeID);
+      prunePlaybackContexts(Date.now());
+      const context = playbackContexts.get(key) || null;
+      if (!context) return null;
+      const rawRequestURL = request.url || '';
+      const questionMarker = `?${playbackQueryKeys.requestID}=`;
+      const ampersandMarker = `&${playbackQueryKeys.requestID}=`;
+      const questionIndex = rawRequestURL.lastIndexOf(questionMarker);
+      const ampersandIndex = rawRequestURL.lastIndexOf(ampersandMarker);
+      const markerIndex = Math.max(questionIndex, ampersandIndex);
+      if (markerIndex >= 0) {
+        // Swift appends the three private fields as the final raw query tail.
+        // Strip that exact tail without decoding or re-encoding any provider-
+        // signed nested URL that precedes it.
+        request.url = rawRequestURL.slice(0, markerIndex);
+      } else {
+        requestURL.searchParams.delete(playbackQueryKeys.requestID);
+        requestURL.searchParams.delete(playbackQueryKeys.generation);
+        requestURL.searchParams.delete(playbackQueryKeys.challengeID);
+        request.url = requestURL.pathname + requestURL.search;
+      }
+      return context;
+    }
+
+    function optionsWithPlaybackContext(context, options, phase) {
+      const playback = context && context.playbackContext;
+      if (!playback) return Object.assign({}, options);
+      const identity = {
+        challengeID: playback.challengeID,
+        playbackRequestID: playback.playbackRequestID,
+        requestGeneration: playback.requestGeneration,
+        runtimeGeneration: playback.runtimeGeneration,
+        runtimeModulePath: playback.runtimeModulePath,
+        phase
+      };
+      for (const key of [
+        'configurationID', 'semanticRevision', 'siteIdentity',
+        'profileRevisionBefore'
+      ]) {
+        if (playback[key]) identity[key] = playback[key];
+      }
+      return Object.assign({}, options, identity);
+    }
 
     function writeState(state) {
       const temporary = statePath + '.tmp-' + process.pid;
@@ -760,6 +908,28 @@ enum NodeRuntimeContractFactory {
         }
         return { action: 'toast', opt };
       }
+      if (value.action === 'authorizationRequired') {
+        const provider = typeof value.opt.provider === 'string'
+          ? value.opt.provider.trim().toLowerCase() : '';
+        const reasonCode = typeof value.opt.reasonCode === 'string'
+          ? value.opt.reasonCode.trim() : '';
+        const phase = typeof value.opt.phase === 'string'
+          ? value.opt.phase.trim().toLowerCase() : '';
+        const message = typeof value.opt.message === 'string'
+          ? value.opt.message.trim() : '';
+        if (!/^[a-z0-9-]{1,64}$/.test(provider) ||
+            !['missingCredential', 'expiredCredential',
+              'unauthorizedHTTP', 'providerDeclared'].includes(reasonCode) ||
+            (phase !== 'play' && phase !== 'proxy') ||
+            !message || message.length > 1024) return null;
+        const opt = { provider, reasonCode, phase, message };
+        const upstreamStatus = Number(value.opt.upstreamStatus);
+        if (Number.isInteger(upstreamStatus) &&
+            upstreamStatus >= 100 && upstreamStatus <= 599) {
+          opt.upstreamStatus = upstreamStatus;
+        }
+        return { action: 'authorizationRequired', opt };
+      }
       if (value.action === 'openInternalWebview') {
         const url = normalizeOwnedLoopbackURL(value.opt.url);
         if (!url) return null;
@@ -897,7 +1067,20 @@ enum NodeRuntimeContractFactory {
 
     function publishHostMessage(context, message) {
       if (!context || context.hostMessages.length >= 8) return false;
-      if (message.action === 'openInternalWebview') {
+      if (message.action === 'toast' ||
+          message.action === 'authorizationRequired' ||
+          message.action === 'openInternalWebview' ||
+          message.action === 'authorizationCompleted') {
+        message = Object.assign({}, message, {
+          opt: optionsWithPlaybackContext(
+            context,
+            message.opt,
+            context.proxyRequest ? 'proxy' : 'play'
+          )
+        });
+      }
+      if (message.action === 'openInternalWebview' ||
+          message.action === 'authorizationRequired') {
         context.authorizationChallenge = true;
       }
       const waiter = context.waiters.shift();
@@ -926,18 +1109,47 @@ enum NodeRuntimeContractFactory {
       }
     }
 
-    function runtimeHostMessageMatches(entry, modulePath, notBefore) {
+    function runtimeHostMessageMatches(
+      entry,
+      modulePath,
+      notBefore,
+      playbackRequestID,
+      requestGeneration,
+      challengeID
+    ) {
       const sourceMatches = entry.modulePath === modulePath ||
         (entry.modulePath === null &&
           entry.message.action === 'proxyAuthorizationRequired');
-      return sourceMatches && entry.createdAt >= notBefore;
+      if (!sourceMatches || entry.createdAt < notBefore) return false;
+      const opt = entry.message.opt || {};
+      if (playbackRequestID && opt.playbackRequestID !== playbackRequestID) {
+        return false;
+      }
+      if (requestGeneration && opt.requestGeneration !== requestGeneration) {
+        return false;
+      }
+      if (challengeID && opt.challengeID !== challengeID) return false;
+      return true;
     }
 
-    function takeRuntimeHostMessage(modulePath, notBefore) {
+    function takeRuntimeHostMessage(
+      modulePath,
+      notBefore,
+      playbackRequestID,
+      requestGeneration,
+      challengeID
+    ) {
       const now = Date.now();
       pruneRuntimeHostMessages(now);
       const index = runtimeHostMessages.findIndex((entry) =>
-        runtimeHostMessageMatches(entry, modulePath, notBefore)
+        runtimeHostMessageMatches(
+          entry,
+          modulePath,
+          notBefore,
+          playbackRequestID,
+          requestGeneration,
+          challengeID
+        )
       );
       if (index < 0) return null;
       return runtimeHostMessages.splice(index, 1)[0];
@@ -961,6 +1173,7 @@ enum NodeRuntimeContractFactory {
     function publishRuntimeHostMessage(context, message) {
       if (!context ||
           (message.action !== 'toast' &&
+            message.action !== 'authorizationRequired' &&
             message.action !== 'proxyAuthorizationRequired')) return false;
       const modulePath = runtimeModulePath(context.requestPath);
       if (!modulePath && message.action !== 'proxyAuthorizationRequired') {
@@ -970,15 +1183,25 @@ enum NodeRuntimeContractFactory {
       const event = {
         action: message.action,
         opt: Object.assign(
-          {},
-          message.opt,
+          optionsWithPlaybackContext(
+            context,
+            message.opt,
+            context.proxyRequest ? 'proxy' : 'play'
+          ),
           modulePath ? {runtimeModulePath: modulePath} : {},
           {runtimeEventAtMilliseconds: createdAt}
         )
       };
       const entry = { message: event, modulePath, createdAt };
       const waiterIndex = runtimeHostWaiters.findIndex((waiter) =>
-        runtimeHostMessageMatches(entry, waiter.modulePath, waiter.notBefore)
+        runtimeHostMessageMatches(
+          entry,
+          waiter.modulePath,
+          waiter.notBefore,
+          waiter.playbackRequestID,
+          waiter.requestGeneration,
+          waiter.challengeID
+        )
       );
       if (waiterIndex >= 0) {
         const waiter = runtimeHostWaiters[waiterIndex];
@@ -993,8 +1216,22 @@ enum NodeRuntimeContractFactory {
       return true;
     }
 
-    function pollRuntimeHostMessage(response, modulePath, notBefore, waitMilliseconds) {
-      const entry = takeRuntimeHostMessage(modulePath, notBefore);
+    function pollRuntimeHostMessage(
+      response,
+      modulePath,
+      notBefore,
+      waitMilliseconds,
+      playbackRequestID,
+      requestGeneration,
+      challengeID
+    ) {
+      const entry = takeRuntimeHostMessage(
+        modulePath,
+        notBefore,
+        playbackRequestID,
+        requestGeneration,
+        challengeID
+      );
       if (entry) {
         deliverHostMessage(response, entry.message);
         return;
@@ -1014,6 +1251,9 @@ enum NodeRuntimeContractFactory {
         response,
         modulePath,
         notBefore,
+        playbackRequestID,
+        requestGeneration,
+        challengeID,
         completed: false,
         timer: null
       };
@@ -1317,8 +1557,15 @@ enum NodeRuntimeContractFactory {
           });
           return;
         }
-        const published = accepted && (accepted.action === 'toast'
-          ? publishRuntimeHostMessage(context, accepted)
+        // A toast emitted while the request-scoped /play invocation is still
+        // active belongs in that invocation's mailbox. Proxy requests cannot
+        // be polled by libmpv, so their events use the filtered runtime queue.
+        const published = accepted &&
+          (accepted.action === 'toast' ||
+           accepted.action === 'authorizationRequired'
+          ? (context && context.playbackContext && !context.proxyRequest
+              ? publishHostMessage(context, accepted)
+              : publishRuntimeHostMessage(context, accepted))
           : publishHostMessage(context, accepted));
         response.statusCode = published ? 200 : 400;
         response.end(published ? '{"ok":true}' : '{"ok":false}');
@@ -1479,7 +1726,12 @@ enum NodeRuntimeContractFactory {
       });
     }
 
-    async function proxyBaiduMediaSession(request, response, token) {
+    async function proxyBaiduMediaSession(
+      request,
+      response,
+      token,
+      playbackContext
+    ) {
       pruneBaiduMediaSessions();
       const session = baiduMediaSessions.get(token);
       if (!session) {
@@ -1515,6 +1767,25 @@ enum NodeRuntimeContractFactory {
         return;
       }
       response.statusCode = upstream.status;
+      if ((upstream.status === 401 || upstream.status === 403) &&
+          playbackContext) {
+        publishRuntimeHostMessage({
+          requestPath: playbackContext.runtimeModulePath,
+          proxyRequest: {
+            modulePath: playbackContext.runtimeModulePath,
+            provider: 'baidu'
+          },
+          playbackContext
+        }, {
+          action: 'proxyAuthorizationRequired',
+          opt: {
+            statusCode: upstream.status,
+            provider: 'baidu',
+            message: `百度网盘代理返回 HTTP ${upstream.status}，请检查授权`,
+            transport: 'proxy'
+          }
+        });
+      }
       for (const name of [
         'accept-ranges', 'cache-control', 'content-disposition',
         'content-length', 'content-range', 'content-type', 'etag',
@@ -1542,6 +1813,10 @@ enum NodeRuntimeContractFactory {
       }
       const server = http.createServer((request, response) => {
         const requestURL = new URL(request.url || '/', 'http://127.0.0.1');
+        const playbackContext = consumePlaybackContextFromProxy(
+          request,
+          requestURL
+        ) || registerPlaybackContext(request, requestURL.pathname);
         // CatPawOpen intentionally publishes /website to the local network so
         // its QR code can be opened by a phone. Keep Spider, bridge and host
         // capability routes loopback-only even though the managed listener is
@@ -1570,7 +1845,12 @@ enum NodeRuntimeContractFactory {
             response.end();
             return;
           }
-          void proxyBaiduMediaSession(request, response, token);
+          void proxyBaiduMediaSession(
+            request,
+            response,
+            token,
+            playbackContext
+          );
           return;
         }
         if (request.method === 'GET' &&
@@ -1638,11 +1918,33 @@ enum NodeRuntimeContractFactory {
             ? Math.max(now - runtimeHostMessageTTLMilliseconds,
                 Math.min(requestedNotBefore, now + 1000))
             : now;
+          const requestedPlaybackRequestID = normalizedUUID(
+            requestURL.searchParams.get('playbackRequestID')
+          );
+          const requestedGeneration = normalizedGeneration(
+            requestURL.searchParams.get('requestGeneration')
+          );
+          const requestedChallengeID = normalizedUUID(
+            requestURL.searchParams.get('challengeID')
+          );
+          const hasPlaybackFilter = requestURL.searchParams.has(
+            'playbackRequestID'
+          ) || requestURL.searchParams.has('requestGeneration') ||
+            requestURL.searchParams.has('challengeID');
+          if (hasPlaybackFilter && (!requestedPlaybackRequestID ||
+              !requestedGeneration || !requestedChallengeID)) {
+            response.statusCode = 400;
+            response.end();
+            return;
+          }
           pollRuntimeHostMessage(
             response,
             modulePath,
             notBefore,
-            Number(requestURL.searchParams.get('wait') || 0)
+            Number(requestURL.searchParams.get('wait') || 0),
+            requestedPlaybackRequestID,
+            requestedGeneration,
+            requestedChallengeID
           );
           return;
         }
@@ -1668,6 +1970,7 @@ enum NodeRuntimeContractFactory {
           id: invocationID,
           response,
           requestPath: requestURL.pathname,
+          playbackContext,
           proxyRequest: proxyRequestDescriptor(requestURL.pathname),
           proxyResponseChunks: [],
           proxyResponseBytes: 0,

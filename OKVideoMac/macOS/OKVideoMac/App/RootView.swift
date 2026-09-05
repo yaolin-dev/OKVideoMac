@@ -258,6 +258,133 @@ extension View {
     }
 }
 
+enum AppConfigurationSheetScope: Equatable {
+    case browser
+    case player
+}
+
+enum AppConfigurationSheetPresentationKind: Equatable {
+    case category
+    case cloudAuthorization
+    case nodeConfiguration
+}
+
+enum AppConfigurationSheetPresentationPolicy {
+    static func kind(
+        hasCategory: Bool,
+        hasCloudAuthorization: Bool,
+        hasNodeConfiguration: Bool
+    ) -> AppConfigurationSheetPresentationKind? {
+        // Match the former overlay z-order while presenting only one native
+        // sheet. A provider-owned page supersedes an authorization surface,
+        // which in turn supersedes its configuration-category launcher.
+        if hasNodeConfiguration { return .nodeConfiguration }
+        if hasCloudAuthorization { return .cloudAuthorization }
+        if hasCategory { return .category }
+        return nil
+    }
+}
+
+struct AppConfigurationSheetModifier: ViewModifier {
+    @EnvironmentObject private var state: AppState
+    let scope: AppConfigurationSheetScope
+
+    func body(content: Content) -> some View {
+        content.sheet(isPresented: isPresented) {
+            AppConfigurationSheetHost(scope: scope)
+                .environmentObject(state)
+                // Every surface provides an explicit cancel action. Prevent
+                // AppKit's implicit dismissal from hiding request-owned state
+                // without cancelling the corresponding provider operation.
+                .interactiveDismissDisabled()
+        }
+    }
+
+    private var isPresented: Binding<Bool> {
+        Binding(
+            get: { presentationKind != nil },
+            set: { presented in
+                guard !presented else { return }
+                dismissActivePresentation()
+            }
+        )
+    }
+
+    private var presentationKind: AppConfigurationSheetPresentationKind? {
+        switch scope {
+        case .browser:
+            return AppConfigurationSheetPresentationPolicy.kind(
+                hasCategory: state.configurationCategoryPresentation != nil,
+                hasCloudAuthorization:
+                    state.mainWindowCloudAuthorizationPrompt != nil
+                        || state.detailCloudAuthorizationPrompt != nil,
+                hasNodeConfiguration:
+                    state.mainWindowNodeWebPresentation != nil
+                        || state.detailNodeWebPresentation != nil
+            )
+        case .player:
+            return AppConfigurationSheetPresentationPolicy.kind(
+                hasCategory: false,
+                hasCloudAuthorization:
+                    state.playerCloudAuthorizationPrompt != nil,
+                hasNodeConfiguration:
+                    state.playerNodeWebPresentation != nil
+            )
+        }
+    }
+
+    private func dismissActivePresentation() {
+        switch presentationKind {
+        case .nodeConfiguration:
+            state.cancelNodeConfiguration()
+        case .cloudAuthorization:
+            Task { await state.cancelCloudAuthorization() }
+        case .category:
+            state.closeConfigurationCategory()
+        case nil:
+            break
+        }
+    }
+}
+
+extension View {
+    func appConfigurationSheet(
+        scope: AppConfigurationSheetScope
+    ) -> some View {
+        modifier(AppConfigurationSheetModifier(scope: scope))
+    }
+}
+
+struct AppConfigurationSheetHost: View {
+    @EnvironmentObject private var state: AppState
+    let scope: AppConfigurationSheetScope
+
+    @ViewBuilder
+    var body: some View {
+        switch scope {
+        case .browser:
+            if let presentation = state.mainWindowNodeWebPresentation
+                ?? state.detailNodeWebPresentation {
+                NodeConfigurationView(presentation: presentation)
+            } else if let prompt = state.mainWindowCloudAuthorizationPrompt
+                ?? state.detailCloudAuthorizationPrompt {
+                CloudAuthorizationView(prompt: prompt)
+            } else if let presentation =
+                state.configurationCategoryPresentation {
+                ConfigurationCategoryView(presentation: presentation)
+            }
+        case .player:
+            if let presentation = state.playerNodeWebPresentation {
+                NodeConfigurationView(presentation: presentation)
+                    .environment(\.colorScheme, .dark)
+            } else if let prompt = state.playerCloudAuthorizationPrompt {
+                CloudAuthorizationView(prompt: prompt)
+                    .environment(\.colorScheme, .dark)
+            }
+        }
+    }
+}
+
 struct RootView: View {
     @EnvironmentObject private var state: AppState
     @StateObject private var liveSession = LiveBrowserSession()
@@ -276,30 +403,13 @@ struct RootView: View {
                 dismissButton: .default(Text("好"))
             )
         }
-        .overlay {
-            if let presentation = state.configurationCategoryPresentation {
-                ConfigurationCategoryView(presentation: presentation)
-                    .environmentObject(state)
-            }
-        }
-        .overlay {
-            if let prompt = state.mainWindowCloudAuthorizationPrompt {
-                CloudAuthorizationView(prompt: prompt)
-                    .environmentObject(state)
-            }
-        }
+        .appConfigurationSheet(scope: .browser)
         .overlay(alignment: .bottom) {
             if let status = state.siteActionStatus {
                 TransientSiteActionStatusView(status: status)
                     .padding(.bottom, 22)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .allowsHitTesting(false)
-            }
-        }
-        .overlay {
-            if let presentation = state.mainWindowNodeWebPresentation {
-                NodeConfigurationView(presentation: presentation)
-                    .environmentObject(state)
+                .allowsHitTesting(false)
             }
         }
         .overlay {
@@ -698,16 +808,7 @@ private struct ConfigurationCategoryView: View {
     let presentation: ConfigurationCategoryPresentation
 
     var body: some View {
-        ZStack {
-            backdrop
-            card
-        }
-        .zIndex(900)
-    }
-
-    private var backdrop: some View {
-        Color.black.opacity(0.42)
-            .ignoresSafeArea()
+        card
     }
 
     private var card: some View {
@@ -720,10 +821,7 @@ private struct ConfigurationCategoryView: View {
             footer
         }
         .frame(width: 680, height: 620)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .shadow(radius: 28, y: 12)
-        .padding(24)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private var header: some View {
@@ -880,200 +978,188 @@ enum PlayerSurfaceBackdropPolicy {
 }
 
 struct NodeConfigurationView: View {
-    @EnvironmentObject private var state: AppState
-    let presentation: NodeWebPresentation
-    @State private var pageState: NodeConfigurationPageState = .loading
+  @EnvironmentObject private var state: AppState
+  let presentation: NodeWebPresentation
+  @State private var pageState: NodeConfigurationPageState = .loading
 
-    private var isVerifying: Bool {
-        presentation.lifecycleState == .verifying
-    }
+  private var isVerifying: Bool {
+    presentation.lifecycleState == .verifying
+  }
 
-    private var isPlayerAuthorization: Bool {
-        if case .player = presentation.presentationTarget { return true }
-        return false
-    }
+  private var isPlayerAuthorization: Bool {
+    if case .player = presentation.presentationTarget { return true }
+    return false
+  }
 
-    var body: some View {
-        ZStack {
-            Color.black.opacity(0.52)
-                .ignoresSafeArea()
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack(spacing: 12) {
+        Image(systemName: "externaldrive.badge.person.crop")
+          .font(.system(size: 23, weight: .semibold))
+          .foregroundColor(.accentColor)
+        VStack(alignment: .leading, spacing: 3) {
+          Text(presentation.title)
+            .font(.headline)
+          Text(
+            presentation.message
+          )
+          .font(.caption)
+          .foregroundColor(.secondary)
+          .lineLimit(2)
+        }
+        Spacer(minLength: 12)
+        Button {
+          pageState = .loading
+          state.refreshNodeConfigurationWebsite()
+        } label: {
+          Label("刷新", systemImage: "arrow.clockwise")
+        }
+        .disabled(isVerifying)
+      }
+      .padding(.horizontal, 18)
+      .frame(height: 68)
 
-            VStack(spacing: 0) {
-                HStack(spacing: 12) {
-                    Image(systemName: "externaldrive.badge.person.crop")
-                        .font(.system(size: 23, weight: .semibold))
-                        .foregroundColor(.accentColor)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(isPlayerAuthorization ? "等待网盘授权" : presentation.title)
-                            .font(.headline)
-                        Text(
-                            isPlayerAuthorization
-                                ? "请使用对应网盘 App 扫码，授权成功后会自动继续播放。"
-                                : presentation.message
-                        )
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .lineLimit(2)
-                    }
-                    Spacer(minLength: 12)
-                    Button {
-                        pageState = .loading
-                        state.refreshNodeConfigurationWebsite()
-                    } label: {
-                        Label("刷新", systemImage: "arrow.clockwise")
-                    }
-                    .disabled(isVerifying)
-                }
-                .padding(.horizontal, 18)
-                .frame(height: 68)
+      Divider()
 
-                Divider()
+      ZStack {
+        NodeConfigurationWebView(
+          url: presentation.url,
+          revision: presentation.revision,
+          preferredProviderID: presentation.preferredProviderID,
+          pageState: $pageState
+        )
+        .background(Color(nsColor: .textBackgroundColor))
 
-                ZStack {
-                    NodeConfigurationWebView(
-                        url: presentation.url,
-                        revision: presentation.revision,
-                        pageState: $pageState
-                    )
-                    .background(Color(nsColor: .textBackgroundColor))
-
-                    switch pageState {
-                    case .loading:
-                        VStack(spacing: 12) {
-                            AppActivityIndicator(size: .regular)
-                            Text("正在打开配置页…")
-                                .font(.callout.weight(.semibold))
-                            Text("正在连接当前 CatPaw Runtime")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        .padding(24)
-                        .background(.regularMaterial)
-                        .clipShape(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        )
-                    case .failed(let message):
-                        VStack(spacing: 12) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.system(size: 28, weight: .semibold))
-                                .foregroundColor(.orange)
-                            Text("配置页不可用")
-                                .font(.headline)
-                            Text(message)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.center)
-                                .frame(maxWidth: 420)
-                            Button("重新加载") {
-                                pageState = .loading
-                                state.refreshNodeConfigurationWebsite()
-                            }
-                        }
-                        .padding(28)
-                        .background(.regularMaterial)
-                        .clipShape(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        )
-                    case .ready:
-                        EmptyView()
-                    }
-                }
-
-                Divider()
-
-                HStack(spacing: 12) {
-                    if isVerifying {
-                        AppActivityIndicator(size: .small)
-                    } else {
-                        Image(systemName: footerSystemImage)
-                            .foregroundColor(footerColor)
-                    }
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(footerTitle)
-                            .font(.caption.weight(.semibold))
-                        if let status = presentation.status,
-                           !status.trimmingCharacters(
-                            in: .whitespacesAndNewlines
-                           ).isEmpty {
-                            Text(status)
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                                .lineLimit(2)
-                        }
-                    }
-                    Spacer()
-                    Button("关闭") {
-                        state.cancelNodeConfiguration()
-                    }
-                    Button {
-                        Task { await state.completeNodeConfigurationAndRetry() }
-                    } label: {
-                        Label(
-                            isPlayerAuthorization
-                                ? "我已授权，立即验证"
-                                : "应用配置并重试",
-                            systemImage: "arrow.right.circle.fill"
-                        )
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(isVerifying)
-                }
-                .padding(.horizontal, 18)
-                .frame(height: 64)
+        switch pageState {
+        case .loading:
+          VStack(spacing: 12) {
+            AppActivityIndicator(size: .regular)
+            Text("正在打开配置页…")
+              .font(.callout.weight(.semibold))
+            Text("正在连接当前 CatPaw Runtime")
+              .font(.caption)
+              .foregroundColor(.secondary)
+          }
+          .padding(24)
+          .background(.regularMaterial)
+          .clipShape(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+          )
+        case .failed(let message):
+          VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+              .font(.system(size: 28, weight: .semibold))
+              .foregroundColor(.orange)
+            Text("配置页不可用")
+              .font(.headline)
+            Text(message)
+              .font(.caption)
+              .foregroundColor(.secondary)
+              .multilineTextAlignment(.center)
+              .frame(maxWidth: 420)
+            Button("重新加载") {
+              pageState = .loading
+              state.refreshNodeConfigurationWebsite()
             }
-            .frame(
-                minWidth: 820,
-                idealWidth: 1_040,
-                maxWidth: 1_160,
-                minHeight: 580,
-                idealHeight: 760,
-                maxHeight: 840
-            )
-            .background(.regularMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
-            }
-            .shadow(color: .black.opacity(0.35), radius: 36, y: 14)
-            .padding(26)
+          }
+          .padding(28)
+          .background(.regularMaterial)
+          .clipShape(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+          )
+        case .ready:
+          EmptyView()
         }
-        .zIndex(2_000)
-    }
+      }
 
-    private var footerTitle: String {
-        switch presentation.lifecycleState {
-        case .waiting:
-            return presentation.allowsAutomaticRetry
-                ? "正在等待授权完成信号"
-                : "请确认授权状态后手动验证"
-        case .saved:
-            return isPlayerAuthorization
-                ? "配置已保存，等待授权验证"
-                : "配置已保存"
-        case .verifying:
-            return "正在验证授权并恢复原请求"
-        case .needsManualRetry:
-            return "需要手动确认"
-        }
-    }
+      Divider()
 
-    private var footerSystemImage: String {
-        switch presentation.lifecycleState {
-        case .waiting: return "qrcode.viewfinder"
-        case .saved: return "checkmark.circle.fill"
-        case .verifying: return "arrow.triangle.2.circlepath"
-        case .needsManualRetry: return "exclamationmark.triangle.fill"
+      HStack(spacing: 12) {
+        if isVerifying {
+          AppActivityIndicator(size: .small)
+        } else {
+          Image(systemName: footerSystemImage)
+            .foregroundColor(footerColor)
         }
+        VStack(alignment: .leading, spacing: 2) {
+          Text(footerTitle)
+            .font(.caption.weight(.semibold))
+          if let status = presentation.status,
+            !status.trimmingCharacters(
+              in: .whitespacesAndNewlines
+            ).isEmpty
+          {
+            Text(status)
+              .font(.caption2)
+              .foregroundColor(.secondary)
+              .lineLimit(2)
+          }
+        }
+        Spacer()
+        Button("关闭") {
+          state.cancelNodeConfiguration()
+        }
+        .keyboardShortcut(.cancelAction)
+        Button {
+          Task { await state.completeNodeConfigurationAndRetry() }
+        } label: {
+          Label(
+            isPlayerAuthorization
+              ? "我已授权，立即验证"
+              : "应用配置并重试",
+            systemImage: "arrow.right.circle.fill"
+          )
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(isVerifying)
+      }
+      .padding(.horizontal, 18)
+      .frame(height: 64)
     }
+    .frame(
+      minWidth: 820,
+      idealWidth: 1_040,
+      maxWidth: 1_160,
+      minHeight: 580,
+      idealHeight: 760,
+      maxHeight: 840
+    )
+    .background(Color(nsColor: .windowBackgroundColor))
+  }
 
-    private var footerColor: Color {
-        switch presentation.lifecycleState {
-        case .saved: return .green
-        case .needsManualRetry: return .orange
-        case .waiting, .verifying: return .accentColor
-        }
+  private var footerTitle: String {
+    switch presentation.lifecycleState {
+    case .waiting:
+      return presentation.allowsAutomaticRetry
+        ? "正在等待授权完成信号"
+        : "请确认授权状态后手动验证"
+    case .saved:
+      return isPlayerAuthorization
+        ? "配置已保存，等待授权验证"
+        : "配置已保存"
+    case .verifying:
+      return "正在验证授权并恢复原请求"
+    case .needsManualRetry:
+      return "需要手动确认"
     }
+  }
+
+  private var footerSystemImage: String {
+    switch presentation.lifecycleState {
+    case .waiting: return "qrcode.viewfinder"
+    case .saved: return "checkmark.circle.fill"
+    case .verifying: return "arrow.triangle.2.circlepath"
+    case .needsManualRetry: return "exclamationmark.triangle.fill"
+    }
+  }
+
+  private var footerColor: Color {
+    switch presentation.lifecycleState {
+    case .saved: return .green
+    case .needsManualRetry: return .orange
+    case .waiting, .verifying: return .accentColor
+    }
+  }
 }
 
 enum NodeConfigurationPageState: Equatable {
@@ -1102,10 +1188,15 @@ enum NodeConfigurationNavigationPolicy {
 private struct NodeConfigurationWebView: NSViewRepresentable {
     let url: URL
     let revision: Int
+    let preferredProviderID: String?
     @Binding var pageState: NodeConfigurationPageState
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(origin: url, pageState: $pageState)
+        Coordinator(
+            origin: url,
+            preferredProviderID: preferredProviderID,
+            pageState: $pageState
+        )
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -1116,6 +1207,7 @@ private struct NodeConfigurationWebView: NSViewRepresentable {
         webView.uiDelegate = context.coordinator
         context.coordinator.lastRevision = revision
         context.coordinator.origin = url
+        context.coordinator.preferredProviderID = preferredProviderID
         webView.load(URLRequest(url: url))
         return webView
     }
@@ -1123,6 +1215,10 @@ private struct NodeConfigurationWebView: NSViewRepresentable {
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.origin = url
         context.coordinator.pageState = $pageState
+        if context.coordinator.preferredProviderID != preferredProviderID {
+            context.coordinator.preferredProviderID = preferredProviderID
+            context.coordinator.selectPreferredProvider(in: webView)
+        }
         guard context.coordinator.lastRevision != revision else { return }
         context.coordinator.lastRevision = revision
         DispatchQueue.main.async {
@@ -1134,10 +1230,16 @@ private struct NodeConfigurationWebView: NSViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var lastRevision = -1
         var origin: URL
+        var preferredProviderID: String?
         var pageState: Binding<NodeConfigurationPageState>
 
-        init(origin: URL, pageState: Binding<NodeConfigurationPageState>) {
+        init(
+            origin: URL,
+            preferredProviderID: String?,
+            pageState: Binding<NodeConfigurationPageState>
+        ) {
             self.origin = origin
+            self.preferredProviderID = preferredProviderID
             self.pageState = pageState
         }
 
@@ -1153,6 +1255,42 @@ private struct NodeConfigurationWebView: NSViewRepresentable {
             didFinish navigation: WKNavigation?
         ) {
             pageState.wrappedValue = .ready
+            selectPreferredProvider(in: webView)
+        }
+
+        func selectPreferredProvider(in webView: WKWebView) {
+            guard let preferredProviderID,
+                  CatPawCloudProvider(rawValue: preferredProviderID) != nil else {
+                return
+            }
+            let tabID = "account-tab-\(preferredProviderID)"
+            let script = """
+            (() => {
+              const tabID = \(Self.javaScriptString(tabID));
+              const select = () => {
+                const tab = document.getElementById(tabID);
+                if (!tab) return false;
+                tab.click();
+                return true;
+              };
+              if (select()) return true;
+              const observer = new MutationObserver(() => {
+                if (select()) observer.disconnect();
+              });
+              observer.observe(document.documentElement, {
+                childList: true,
+                subtree: true
+              });
+              setTimeout(() => observer.disconnect(), 5000);
+              return false;
+            })();
+            """
+            webView.evaluateJavaScript(script)
+        }
+
+        private static func javaScriptString(_ value: String) -> String {
+            let data = (try? JSONEncoder().encode(value)) ?? Data("\"\"".utf8)
+            return String(data: data, encoding: .utf8) ?? "\"\""
         }
 
         func webView(
@@ -1402,32 +1540,34 @@ struct CloudAuthorizationView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            ZStack {
-                Color.black.opacity(0.32)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        // A modal authorization surface owns the whole window.
-                        // Consume backdrop clicks so they never reach content.
-                    }
-                    .accessibilityHidden(true)
-
-                authorizationCard(
-                    maximumSurfaceHeight:
-                        CloudAuthorizationPresentationPolicy
-                            .maximumSurfaceHeight(
-                                containerHeight: geometry.size.height
-                            ),
-                    availableSurfaceWidth:
-                        CloudAuthorizationPresentationPolicy
-                            .availableSurfaceWidth(
-                                containerWidth: geometry.size.width
-                            )
-                )
-                .padding(CloudAuthorizationPresentationPolicy.outerInset)
-            }
-            .contentShape(Rectangle())
+            authorizationCard(
+                maximumSurfaceHeight:
+                    CloudAuthorizationPresentationPolicy
+                        .maximumSurfaceHeight(
+                            containerHeight: geometry.size.height
+                        ),
+                availableSurfaceWidth:
+                    CloudAuthorizationPresentationPolicy
+                        .availableSurfaceWidth(
+                            containerWidth: geometry.size.width
+                        )
+            )
+            .padding(CloudAuthorizationPresentationPolicy.outerInset)
+            .frame(
+                maxWidth: .infinity,
+                maxHeight: .infinity,
+                alignment: .center
+            )
         }
-        .zIndex(1_000)
+        .frame(
+            minWidth: 520,
+            idealWidth: 820,
+            maxWidth: 900,
+            minHeight: 420,
+            idealHeight: 720,
+            maxHeight: 840
+        )
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private func authorizationCard(
@@ -1603,6 +1743,7 @@ struct CloudAuthorizationView: View {
                 Button(isPlayerAuthorization ? "取消播放" : "关闭") {
                     Task { await state.cancelCloudAuthorization() }
                 }
+                .keyboardShortcut(.cancelAction)
             }
         }
         .padding(usesDialogCropLayout ? 18 : 22)
@@ -1620,17 +1761,6 @@ struct CloudAuthorizationView: View {
                 availableSurfaceWidth: availableSurfaceWidth
             )
         )
-        .background(
-            .regularMaterial,
-            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(0.16), lineWidth: 1)
-        }
-        .compositingGroup()
-        .shadow(color: .black.opacity(0.42), radius: 28, x: 0, y: 12)
         .onChange(of: prompt.interactionID) { _ in
             isTextEntryExpanded = false
         }

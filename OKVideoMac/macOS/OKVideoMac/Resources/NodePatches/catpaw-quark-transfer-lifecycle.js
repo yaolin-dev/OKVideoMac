@@ -10,9 +10,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { AsyncLocalStorage } = require('node:async_hooks');
 
-const LEDGER_VERSION = 1;
+const LEDGER_VERSION = 2;
+const LEGACY_LEDGER_VERSION = 1;
 const RECEIPT_VERSION = 1;
 const PROVIDER = 'quark';
+const APPLICATION_FOLDER_NAME = 'OKVideoMac';
+const DIRECTORY_PAGE_SIZE = 200;
+const AUTHORIZATION_ERROR_CODE = 'OKVIDEO_CLOUD_AUTHORIZATION_REQUIRED';
 const PROXY_RECEIPT_QUERY = '_okvideoReceipt';
 const CLEANABLE_STATES = new Set([
   'transferred',
@@ -53,18 +57,16 @@ function createEmptyLedger() {
   return {
     version: LEDGER_VERSION,
     folders: {},
+    scopeAliases: {},
     entries: []
   };
 }
 
-function validateLedger(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      value.version !== LEDGER_VERSION ||
-      !value.folders || typeof value.folders !== 'object' ||
-      Array.isArray(value.folders) || !Array.isArray(value.entries)) {
-    throw new Error('transfer ledger schema rejected');
+function validateReceiptEntries(entries) {
+  if (!Array.isArray(entries)) {
+    throw new Error('transfer ledger entries rejected');
   }
-  for (const entry of value.entries) {
+  for (const entry of entries) {
     if (!entry || typeof entry !== 'object' ||
         !isUUID(entry.receiptID) || entry.version !== RECEIPT_VERSION ||
         entry.provider !== PROVIDER ||
@@ -80,6 +82,62 @@ function validateLedger(value) {
       throw new Error('transfer ledger entry rejected');
     }
   }
+}
+
+function sanitizedFolderRecords(value) {
+  const output = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return output;
+  for (const [scope, record] of Object.entries(value)) {
+    if (!/^[0-9a-f]{64}$/.test(scope) || !record ||
+        typeof record !== 'object' || Array.isArray(record)) continue;
+    const rootFolderFID = nonEmptyString(record.rootFolderFID);
+    const installationFolderFID = nonEmptyString(record.installationFolderFID);
+    if (!rootFolderFID && !installationFolderFID) continue;
+    const normalized = {};
+    if (rootFolderFID) normalized.rootFolderFID = rootFolderFID;
+    if (installationFolderFID) {
+      normalized.installationFolderFID = installationFolderFID;
+    }
+    const createdAt = isoDate(record.createdAt);
+    const updatedAt = isoDate(record.updatedAt);
+    if (createdAt) normalized.createdAt = createdAt;
+    if (updatedAt) normalized.updatedAt = updatedAt;
+    output[scope] = normalized;
+  }
+  return output;
+}
+
+function upgradeLegacyLedger(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      value.version !== LEGACY_LEDGER_VERSION) {
+    throw new Error('legacy transfer ledger schema rejected');
+  }
+  validateReceiptEntries(value.entries);
+  return {
+    version: LEDGER_VERSION,
+    folders: sanitizedFolderRecords(value.folders),
+    scopeAliases: {},
+    entries: value.entries
+  };
+}
+
+function validateLedger(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      value.version !== LEDGER_VERSION ||
+      !value.folders || typeof value.folders !== 'object' ||
+      Array.isArray(value.folders) ||
+      !value.scopeAliases || typeof value.scopeAliases !== 'object' ||
+      Array.isArray(value.scopeAliases)) {
+    throw new Error('transfer ledger schema rejected');
+  }
+  value.folders = sanitizedFolderRecords(value.folders);
+  for (const [legacyScope, stableScope] of Object.entries(value.scopeAliases)) {
+    if (!/^[0-9a-f]{64}$/.test(legacyScope) ||
+        !/^[0-9a-f]{64}$/.test(String(stableScope || ''))) {
+      throw new Error('transfer ledger scope alias rejected');
+    }
+  }
+  validateReceiptEntries(value.entries);
   return value;
 }
 
@@ -102,7 +160,10 @@ function readLedger(ledgerPath, now) {
     if (data.length === 0 || data.length > 8 * 1024 * 1024) {
       throw new Error('transfer ledger size rejected');
     }
-    return validateLedger(JSON.parse(data.toString('utf8')));
+    const parsed = JSON.parse(data.toString('utf8'));
+    return parsed?.version === LEGACY_LEDGER_VERSION
+      ? upgradeLegacyLedger(parsed)
+      : validateLedger(parsed);
   } catch (_) {
     quarantineCorruptLedger(ledgerPath, now);
     return createEmptyLedger();
@@ -146,6 +207,9 @@ function createQuarkTransferLifecycle(options) {
     ? options.setSourceCache : () => {};
   const clearSourceCache = typeof options.clearSourceCache === 'function'
     ? options.clearSourceCache : () => {};
+  const publishAuthorizationRequired =
+    typeof options.publishAuthorizationRequired === 'function'
+      ? options.publishAuthorizationRequired : async () => {};
   const now = typeof options.now === 'function' ? options.now : () => new Date();
   const randomUUID = typeof options.randomUUID === 'function'
     ? options.randomUUID : () => crypto.randomUUID();
@@ -167,6 +231,7 @@ function createQuarkTransferLifecycle(options) {
   const accountQueues = new Map();
   const sourceCache = new Map();
   const scheduledOrphanTimers = new Map();
+  const validatedFolderScopes = new Set();
 
   fs.mkdirSync(path.dirname(ledgerPath), { recursive: true, mode: 0o700 });
   try { fs.chmodSync(path.dirname(ledgerPath), 0o700); } catch (_) {}
@@ -194,7 +259,29 @@ function createQuarkTransferLifecycle(options) {
     return value instanceof Date ? value : new Date(value);
   }
 
-  function accountScopeForCookie(cookie) {
+  function cookieValue(cookie, name) {
+    const normalized = nonEmptyString(cookie, 64 * 1024);
+    if (!normalized) return null;
+    for (const component of normalized.split(';')) {
+      const separator = component.indexOf('=');
+      if (separator < 0 || component.slice(0, separator).trim() !== name) {
+        continue;
+      }
+      return nonEmptyString(component.slice(separator + 1), 16 * 1024);
+    }
+    return null;
+  }
+
+  function scopeForStableAccountID(stableAccountID) {
+    const normalized = nonEmptyString(stableAccountID, 16 * 1024);
+    if (!normalized) return null;
+    return crypto.createHmac('sha256', hmacKey)
+      .update('quark\0', 'utf8')
+      .update(normalized, 'utf8')
+      .digest('hex');
+  }
+
+  function legacyScopeForCookie(cookie) {
     const normalized = nonEmptyString(cookie, 64 * 1024);
     if (!normalized) return null;
     return crypto.createHmac('sha256', hmacKey)
@@ -203,10 +290,72 @@ function createQuarkTransferLifecycle(options) {
       .digest('hex');
   }
 
+  function accountScopeForCookie(cookie) {
+    return scopeForStableAccountID(cookieValue(cookie, '__uid'));
+  }
+
   function currentAccount() {
     const cookie = nonEmptyString(getCookie(), 64 * 1024);
     if (!cookie) return null;
-    return { cookie, scope: accountScopeForCookie(cookie) };
+    const stableAccountID = cookieValue(cookie, '__uid');
+    return {
+      cookie,
+      stableAccountID,
+      scope: scopeForStableAccountID(stableAccountID),
+      legacyScope: legacyScopeForCookie(cookie)
+    };
+  }
+
+  function canonicalScope(scope) {
+    let current = scope;
+    const seen = new Set();
+    while (current && ledger.scopeAliases[current] && !seen.has(current)) {
+      seen.add(current);
+      current = ledger.scopeAliases[current];
+    }
+    return current;
+  }
+
+  function authorizationError(reasonCode, message, upstreamStatus = 0) {
+    const error = new Error(message);
+    error.code = AUTHORIZATION_ERROR_CODE;
+    error.okvideoAuthorization = {
+      provider: PROVIDER,
+      reasonCode,
+      phase: 'play',
+      upstreamStatus: Number(upstreamStatus) || 0,
+      message
+    };
+    return error;
+  }
+
+  function accountOrAuthorizationError() {
+    const account = currentAccount();
+    if (!account) {
+      throw authorizationError(
+        'missingCredential',
+        'quark account unavailable'
+      );
+    }
+    if (!account.scope || !account.stableAccountID) {
+      throw authorizationError(
+        'expiredCredential',
+        'quark account identity unavailable'
+      );
+    }
+    return account;
+  }
+
+  function throwForAccountAuthorization(result, message) {
+    const status = statusCode(result);
+    if (status === 401 || status === 403) {
+      throw authorizationError('unauthorizedHTTP', message, status);
+    }
+  }
+
+  function isAuthorizationError(error) {
+    return error?.code === AUTHORIZATION_ERROR_CODE &&
+      error.okvideoAuthorization?.provider === PROVIDER;
   }
 
   function entryForReceipt(receiptID) {
@@ -221,7 +370,7 @@ function createQuarkTransferLifecycle(options) {
   function existingTransfer(scope, requestID, generation, sourceFID) {
     return ledger.entries.find((entry) =>
       entry.provider === PROVIDER &&
-      entry.accountScope === scope &&
+      canonicalScope(entry.accountScope) === scope &&
       entry.requestID === requestID &&
       entry.requestGeneration === generation &&
       entry.sourceFID === sourceFID &&
@@ -290,8 +439,9 @@ function createQuarkTransferLifecycle(options) {
     const sourceFID = proxySourceFID(request);
     const account = currentAccount();
     if (!entry || !sourceFID || !account ||
+        !account.scope ||
         request?.params?.site !== PROVIDER ||
-        entry.accountScope !== account.scope ||
+        canonicalScope(entry.accountScope) !== account.scope ||
         entry.sourceFID !== sourceFID ||
         !entry.savedFIDs.length ||
         (entry.state !== 'transferred' && entry.state !== 'leased')) {
@@ -355,7 +505,7 @@ function createQuarkTransferLifecycle(options) {
       if (accountQueues.get(scope) === tracked) accountQueues.delete(scope);
     });
     accountQueues.set(scope, tracked);
-    return run;
+    return tracked;
   }
 
   async function callAPI(method, requestPath, body, account) {
@@ -378,6 +528,95 @@ function createQuarkTransferLifecycle(options) {
     }
   }
 
+  function directoryFID(item) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+    const directory = item.dir === true || Number(item.dir) === 1 ||
+      item.file_type === 'folder' || item.type === 'folder' ||
+      item.obj_category === 'folder';
+    return directory ? nonEmptyString(item.fid) : null;
+  }
+
+  async function listDirectory(parentFID, account) {
+    const entries = [];
+    for (let page = 1; page <= 100; page += 1) {
+      const requestPath = 'file/sort?' + new URLSearchParams({
+        pdir_fid: parentFID,
+        _page: String(page),
+        _size: String(DIRECTORY_PAGE_SIZE),
+        _fetch_total: '1',
+        _sort: 'file_type:asc,updated_at:desc'
+      }).toString();
+      const result = await callAPI('get', requestPath, null, account);
+      throwForAccountAuthorization(
+        result,
+        'quark account authorization expired'
+      );
+      const data = responseData(result);
+      if (!isSuccessful(result) || !data || !Array.isArray(data.list)) {
+        const error = new Error('application transfer folder discovery failed');
+        error.result = result;
+        throw error;
+      }
+      entries.push(...data.list);
+      if (data.list.length < DIRECTORY_PAGE_SIZE) break;
+      const total = Number(data.metadata?._total || data.total || 0);
+      if (total > 0 && entries.length >= total) break;
+    }
+    return entries;
+  }
+
+  function namedDirectories(entries, name) {
+    return entries.flatMap((entry) => {
+      const fid = directoryFID(entry);
+      return fid && entry.file_name === name ? [{ fid, entry }] : [];
+    });
+  }
+
+  async function findNamedDirectories(parentFID, name, account) {
+    return namedDirectories(await listDirectory(parentFID, account), name);
+  }
+
+  function folderRecordMatches(record, rootFolderFID, installationFolderFID) {
+    return record &&
+      (!record.rootFolderFID || record.rootFolderFID === rootFolderFID) &&
+      (!record.installationFolderFID ||
+        record.installationFolderFID === installationFolderFID);
+  }
+
+  function bindDiscoveredFolders(account, rootFolderFID, installationFolderFID) {
+    const timestamp = currentTime().toISOString();
+    const previous = ledger.folders[account.scope] || {};
+    ledger.folders[account.scope] = {
+      rootFolderFID,
+      installationFolderFID,
+      createdAt: previous.createdAt || timestamp,
+      updatedAt: timestamp
+    };
+    for (const [oldScope, record] of Object.entries(ledger.folders)) {
+      if (oldScope === account.scope ||
+          !folderRecordMatches(record, rootFolderFID, installationFolderFID)) {
+        continue;
+      }
+      ledger.scopeAliases[oldScope] = account.scope;
+    }
+    if (account.legacyScope && account.legacyScope !== account.scope &&
+        ledger.folders[account.legacyScope]) {
+      ledger.scopeAliases[account.legacyScope] = account.scope;
+    }
+    for (const entry of ledger.entries) {
+      if (entry.accountScope === account.scope) continue;
+      const aliasesToCurrent = canonicalScope(entry.accountScope) === account.scope;
+      const ownsInstallationFolder =
+        entry.parentFolderFID === installationFolderFID;
+      if (aliasesToCurrent || ownsInstallationFolder) {
+        ledger.scopeAliases[entry.accountScope] = account.scope;
+        entry.accountScope = account.scope;
+        entry.updatedAt = timestamp;
+      }
+    }
+    persistLedger();
+  }
+
   async function createFolder(parentFID, name, account) {
     const result = await callAPI('post', 'file', {
       pdir_fid: parentFID,
@@ -385,37 +624,104 @@ function createQuarkTransferLifecycle(options) {
       dir_path: '',
       dir_init_lock: false
     }, account);
+    throwForAccountAuthorization(
+      result,
+      'quark account authorization expired'
+    );
     const fid = nonEmptyString(responseData(result)?.fid);
-    if (!isSuccessful(result) || !fid) {
-      const error = new Error('application transfer folder creation failed');
-      error.result = result;
-      throw error;
+    if (isSuccessful(result) && fid) return fid;
+
+    const matches = await findNamedDirectories(parentFID, name, account);
+    if (matches.length === 1) return matches[0].fid;
+    const error = new Error(matches.length > 1
+      ? 'application transfer folder conflict'
+      : 'application transfer folder creation failed');
+    error.result = result;
+    throw error;
+  }
+
+  async function installationMatches(rootFolderFID, account) {
+    return findNamedDirectories(rootFolderFID, installationUUID, account);
+  }
+
+  async function discoverApplicationFolders(account, allowCreate) {
+    const stableRecord = ledger.folders[account.scope];
+    const legacyRecord = account.legacyScope
+      ? ledger.folders[account.legacyScope] : null;
+    const preferredRootFIDs = [
+      stableRecord?.rootFolderFID,
+      legacyRecord?.rootFolderFID
+    ].filter(Boolean);
+    const rootMatches = await findNamedDirectories(
+      '0',
+      APPLICATION_FOLDER_NAME,
+      account
+    );
+
+    let root = rootMatches.find((candidate) =>
+      preferredRootFIDs.includes(candidate.fid)
+    ) || null;
+    let installation = null;
+    const rootsWithInstallation = [];
+    for (const candidate of rootMatches) {
+      const matches = await installationMatches(candidate.fid, account);
+      if (matches.length > 1) {
+        throw new Error('application transfer folder conflict');
+      }
+      if (matches.length === 1) {
+        rootsWithInstallation.push({ root: candidate, installation: matches[0] });
+      }
     }
-    return fid;
+
+    if (rootsWithInstallation.length > 1) {
+      const preferred = rootsWithInstallation.find((candidate) =>
+        preferredRootFIDs.includes(candidate.root.fid)
+      );
+      if (!preferred) throw new Error('application transfer folder conflict');
+      root = preferred.root;
+      installation = preferred.installation;
+    } else if (rootsWithInstallation.length === 1) {
+      root = rootsWithInstallation[0].root;
+      installation = rootsWithInstallation[0].installation;
+    }
+
+    if (!root) {
+      if (rootMatches.length > 1) {
+        throw new Error('application transfer folder conflict');
+      }
+      if (rootMatches.length === 1) root = rootMatches[0];
+    }
+    if (!root) {
+      if (!allowCreate) return null;
+      root = {
+        fid: await createFolder('0', APPLICATION_FOLDER_NAME, account)
+      };
+    }
+    if (!installation) {
+      const matches = await installationMatches(root.fid, account);
+      if (matches.length > 1) {
+        throw new Error('application transfer folder conflict');
+      }
+      installation = matches[0] || null;
+    }
+    if (!installation) {
+      if (!allowCreate) return null;
+      installation = {
+        fid: await createFolder(root.fid, installationUUID, account)
+      };
+    }
+    bindDiscoveredFolders(account, root.fid, installation.fid);
+    validatedFolderScopes.add(account.scope);
+    return installation.fid;
   }
 
   async function ensureApplicationFolderUnlocked(scope, account) {
     const recorded = ledger.folders[scope];
-    if (recorded && nonEmptyString(recorded.installationFolderFID)) {
+    if (validatedFolderScopes.has(scope) &&
+        nonEmptyString(recorded?.installationFolderFID)) {
       return recorded.installationFolderFID;
     }
-    const folder = recorded && typeof recorded === 'object'
-      ? recorded : { createdAt: currentTime().toISOString() };
-    if (!nonEmptyString(folder.rootFolderFID)) {
-      folder.rootFolderFID = await createFolder('0', 'OKVideoMac', account);
-      folder.updatedAt = currentTime().toISOString();
-      ledger.folders[scope] = folder;
-      persistLedger();
-    }
-    folder.installationFolderFID = await createFolder(
-      folder.rootFolderFID,
-      installationUUID,
-      account
-    );
-    folder.updatedAt = currentTime().toISOString();
-    ledger.folders[scope] = folder;
-    persistLedger();
-    return folder.installationFolderFID;
+    return discoverApplicationFolders(account, true);
   }
 
   function savedFIDFromTask(result) {
@@ -442,7 +748,10 @@ function createQuarkTransferLifecycle(options) {
         markError(entry, result, 'accountUnavailable');
         persistLedger();
         scheduleRecoveryCheck(entry);
-        return null;
+        throwForAccountAuthorization(
+          result,
+          'quark account authorization expired'
+        );
       }
       const savedFID = savedFIDFromTask(result);
       if (isSuccessful(result) && savedFID) return savedFID;
@@ -539,6 +848,10 @@ function createQuarkTransferLifecycle(options) {
       pdir_fid: '0',
       scene: 'link'
     }, account);
+    throwForAccountAuthorization(
+      saveResult,
+      'quark account authorization expired'
+    );
     const taskID = nonEmptyString(responseData(saveResult)?.task_id);
     if (!isSuccessful(saveResult) || !taskID) {
       // Without a provider task ID there is no exact identity that can be
@@ -593,7 +906,8 @@ function createQuarkTransferLifecycle(options) {
     if (entry.state === 'leased') {
       return { status: 'stillInUse', receiptID: entry.receiptID };
     }
-    if (!account || account.scope !== entry.accountScope) {
+    if (!account || !account.scope ||
+        account.scope !== canonicalScope(entry.accountScope)) {
       entry.state = 'retryPending';
       entry.cleanupAttempts += 1;
       entry.nextRetryAt = new Date(
@@ -672,7 +986,7 @@ function createQuarkTransferLifecycle(options) {
   async function recoverScopeUnlocked(scope, account) {
     const currentMilliseconds = currentTime().getTime();
     const candidates = ledger.entries.filter((entry) =>
-      entry.accountScope === scope && (
+      canonicalScope(entry.accountScope) === scope && (
         CLEANABLE_STATES.has(entry.state) ||
         (entry.state === 'leased' &&
           entry.leaseOwnerSessionID !== ownerSessionID)
@@ -705,7 +1019,10 @@ function createQuarkTransferLifecycle(options) {
   async function recoverCurrentAccount(account) {
     await serializeAccount(
       account.scope,
-      () => recoverScopeUnlocked(account.scope, account)
+      async () => {
+        await discoverApplicationFolders(account, false);
+        return recoverScopeUnlocked(account.scope, account);
+      }
     );
   }
 
@@ -719,8 +1036,13 @@ function createQuarkTransferLifecycle(options) {
         !normalizedShareToken || !normalizedSourceToken) {
       return null;
     }
-    const account = context.account || currentAccount();
-    if (!account) throw new Error('quark account unavailable');
+    const account = context.account || accountOrAuthorizationError();
+    if (!account.scope) {
+      throw authorizationError(
+        'expiredCredential',
+        'quark account identity unavailable'
+      );
+    }
     context.account = account;
     await recoverCurrentAccount(account);
     const key = transferKey(
@@ -798,6 +1120,10 @@ function createQuarkTransferLifecycle(options) {
       { fids: [savedFID] },
       context?.account || currentAccount()
     );
+    throwForAccountAuthorization(
+      result,
+      'quark account authorization expired'
+    );
     const data = responseData(result);
     return isSuccessful(result) && Array.isArray(data) ? data[0] || null : null;
   }
@@ -813,6 +1139,10 @@ function createQuarkTransferLifecycle(options) {
       resolutions: 'normal,low,high,super,2k,4k',
       supports: 'fmp4'
     }, context?.account || currentAccount());
+    throwForAccountAuthorization(
+      result,
+      'quark account authorization expired'
+    );
     const data = responseData(result);
     return isSuccessful(result) && data && Array.isArray(data.video_list)
       ? data.video_list : null;
@@ -854,6 +1184,13 @@ function createQuarkTransferLifecycle(options) {
         } catch (error) {
           if (context.receipt) {
             await cleanup(context.receipt.receiptID, 'playURLFailure');
+          }
+          if (isAuthorizationError(error)) {
+            try {
+              await publishAuthorizationRequired(
+                clone(error.okvideoAuthorization)
+              );
+            } catch (_) {}
           }
           throw error;
         }
@@ -923,8 +1260,14 @@ function createQuarkTransferLifecycle(options) {
     const entry = entryForReceipt(receiptID);
     if (!entry) return { status: 'receiptNotFound', receiptID: receiptID || null };
     const account = currentAccount();
+    if (account?.scope && canonicalScope(entry.accountScope) !== account.scope) {
+      await serializeAccount(
+        account.scope,
+        () => discoverApplicationFolders(account, false)
+      );
+    }
     return serializeAccount(
-      entry.accountScope,
+      canonicalScope(entry.accountScope),
       () => deleteEntryUnlocked(entry, account, reason)
     );
   }
@@ -932,7 +1275,14 @@ function createQuarkTransferLifecycle(options) {
   async function release(receiptID, reason) {
     const entry = entryForReceipt(receiptID);
     if (!entry) return { status: 'receiptNotFound', receiptID: receiptID || null };
-    return serializeAccount(entry.accountScope, async () => {
+    const account = currentAccount();
+    if (account?.scope && canonicalScope(entry.accountScope) !== account.scope) {
+      await serializeAccount(
+        account.scope,
+        () => discoverApplicationFolders(account, false)
+      );
+    }
+    return serializeAccount(canonicalScope(entry.accountScope), async () => {
       if (entry.state === 'cleaned') {
         return { status: 'alreadyMissing', receiptID: entry.receiptID };
       }
@@ -941,7 +1291,7 @@ function createQuarkTransferLifecycle(options) {
         entry.updatedAt = currentTime().toISOString();
         persistLedger();
       }
-      return deleteEntryUnlocked(entry, currentAccount(), reason || 'mediaReleased');
+      return deleteEntryUnlocked(entry, account, reason || 'mediaReleased');
     });
   }
 
@@ -970,9 +1320,15 @@ function createQuarkTransferLifecycle(options) {
       if (changed) persistLedger();
       return [{ status: 'accountUnavailable', receiptID: null }];
     }
+    if (!account.scope) {
+      return [{ status: 'accountUnavailable', receiptID: null }];
+    }
     return serializeAccount(
       account.scope,
-      () => recoverScopeUnlocked(account.scope, account)
+      async () => {
+        await discoverApplicationFolders(account, false);
+        return recoverScopeUnlocked(account.scope, account);
+      }
     );
   }
 

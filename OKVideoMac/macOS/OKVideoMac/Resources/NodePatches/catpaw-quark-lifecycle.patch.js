@@ -1,5 +1,5 @@
 ;
-// OKVideoMac deterministic CatPaw Quark lifecycle patch, version 1.
+// OKVideoMac deterministic CatPaw Quark lifecycle patch, version 2.
 // The surrounding bundle is accepted only at its pinned input SHA-256 and the
 // final concatenated script is accepted only at its pinned output SHA-256.
 (() => {
@@ -31,6 +31,12 @@
     },
     clearSourceCache: (sourceFID, savedFID) => {
       if (D6[sourceFID] === savedFID) delete D6[sourceFID];
+    },
+    publishAuthorizationRequired: async (authorization) => {
+      await messageToDart({
+        action: 'authorizationRequired',
+        opt: authorization
+      });
     },
     api: async (request) => {
       const separator = request.path.includes('?') ? '&' : '?';

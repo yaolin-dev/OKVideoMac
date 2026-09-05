@@ -14,9 +14,29 @@ const {
 const INSTALLATION_ID = '11111111-1111-4111-8111-111111111111';
 const OWNER_SESSION_ID = '22222222-2222-4222-8222-222222222222';
 const HMAC_KEY = 'ab'.repeat(32);
+const DEFAULT_COOKIE = '__uid=account-a; sid=account-a; token=secret';
 
 function response(data, status = 200) {
   return { status, data: { data } };
+}
+
+function stableScope(cookie) {
+  const uidComponent = String(cookie || '').split(';').find((component) =>
+    component.trim().startsWith('__uid=')
+  );
+  const uid = uidComponent?.trim().slice('__uid='.length) || '';
+  if (!uid) return null;
+  return crypto.createHmac('sha256', Buffer.from(HMAC_KEY, 'hex'))
+    .update('quark\0', 'utf8')
+    .update(uid, 'utf8')
+    .digest('hex');
+}
+
+function legacyScope(cookie) {
+  return crypto.createHmac('sha256', Buffer.from(HMAC_KEY, 'hex'))
+    .update('quark\0', 'utf8')
+    .update(cookie, 'utf8')
+    .digest('hex');
 }
 
 function createHarness(t, options = {}) {
@@ -24,19 +44,64 @@ function createHarness(t, options = {}) {
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const ledgerPath = path.join(directory, 'ledger.json');
   let currentMilliseconds = Date.parse('2026-09-04T00:00:00.000Z');
-  let cookie = options.cookie || 'sid=account-a; token=secret';
+  let cookie = options.cookie || DEFAULT_COOKIE;
   let folderSequence = 0;
   let taskSequence = 0;
   const taskSavedFIDs = new Map();
   const calls = [];
   const deleteStatuses = [];
+  const folderCreateStatuses = [];
+  const authorizationEvents = [];
+  const directoryEntries = new Map();
+
+  function children(scope, parentFID) {
+    const key = `${scope}\0${parentFID}`;
+    if (!directoryEntries.has(key)) directoryEntries.set(key, []);
+    return directoryEntries.get(key);
+  }
+
+  function addDirectory(scope, parentFID, name, fid) {
+    children(scope, parentFID).push({
+      fid,
+      file_name: name,
+      dir: true
+    });
+  }
 
   const api = async (request) => {
     calls.push(structuredClone(request));
     if (options.beforeAPI) await options.beforeAPI(request);
+    if (options.apiOverride) {
+      const overridden = await options.apiOverride(request, {
+        addDirectory,
+        children,
+        directoryEntries
+      });
+      if (overridden) return overridden;
+    }
+    if (request.method === 'get' && request.path.startsWith('file/sort?')) {
+      const parameters = new URLSearchParams(request.path.split('?')[1]);
+      const parentFID = parameters.get('pdir_fid');
+      return response({
+        list: structuredClone(children(request.accountScope, parentFID)),
+        metadata: { _total: children(request.accountScope, parentFID).length }
+      });
+    }
     if (request.method === 'post' && request.path === 'file') {
       folderSequence += 1;
-      return response({ fid: `folder-${folderSequence}` });
+      const status = folderCreateStatuses.length
+        ? folderCreateStatuses.shift() : 200;
+      if (status < 200 || status >= 300) {
+        return { status, data: { message: 'mock folder creation failure' } };
+      }
+      const fid = `folder-${folderSequence}`;
+      addDirectory(
+        request.accountScope,
+        request.body.pdir_fid,
+        request.body.file_name,
+        fid
+      );
+      return response({ fid });
     }
     if (request.method === 'post' && request.path === 'share/sharepage/save') {
       taskSequence += 1;
@@ -84,17 +149,32 @@ function createHarness(t, options = {}) {
       sleep: async () => {},
       orphanGraceMilliseconds: 1000,
       retryBaseMilliseconds: 1000,
-      timersEnabled: false
+      timersEnabled: false,
+      publishAuthorizationRequired: async (event) => {
+        authorizationEvents.push(structuredClone(event));
+      }
     });
   }
 
   return {
     api,
+    authorizationEvents,
     calls,
     deleteStatuses,
+    folderCreateStatuses,
     directory,
     ledgerPath,
     makeLifecycle,
+    seedWorkspace(cookieValue = cookie, rootFID = 'existing-root',
+                  installationFID = 'existing-installation') {
+      const scope = stableScope(cookieValue);
+      addDirectory(scope, '0', 'OKVideoMac', rootFID);
+      addDirectory(scope, rootFID, INSTALLATION_ID, installationFID);
+      return { scope, rootFID, installationFID };
+    },
+    seedDirectory(cookieValue, parentFID, name, fid) {
+      addDirectory(stableScope(cookieValue), parentFID, name, fid);
+    },
     advance(milliseconds) { currentMilliseconds += milliseconds; },
     setCookie(value) { cookie = value; }
   };
@@ -216,7 +296,7 @@ test('A -> B -> C keeps the active file leased and deletes only recorded saved F
     .flatMap((call) => call.body.filelist);
   assert.deepEqual(deleted, ['saved-source-a', 'saved-source-b', 'saved-source-c']);
   assert.ok(!deleted.includes('unrelated-user-file'));
-  assert.equal(harness.calls.some((call) => /list/i.test(call.path)), false);
+  assert.equal(harness.calls.some((call) => call.path.startsWith('file/sort?')), true);
   assert.equal(callsAt(harness, 'post', 'file').length, 2);
 });
 
@@ -485,7 +565,7 @@ test('account loss preserves the receipt for a later authenticated retry', async
   assert.equal((await lifecycle.release(receiptID, 'appShutdown')).status, 'accountUnavailable');
   assert.equal(callsAt(harness, 'post', 'file/delete').length, 0);
 
-  harness.setCookie('sid=account-a; token=secret');
+  harness.setCookie(DEFAULT_COOKIE);
   harness.advance(6 * 60 * 60 * 1000 + 1);
   const recovered = await lifecycle.retryPendingForCurrentAccount();
   assert.equal(recovered[0].status, 'cleaned');
@@ -542,7 +622,7 @@ test('account queues serialize one scope while allowing different scopes to over
   });
   const lifecycle = harness.makeLifecycle();
 
-  harness.setCookie('sid=account-a');
+  harness.setCookie('__uid=account-a; sid=account-a');
   await Promise.all([
     resolveEpisode(lifecycle, 'same-a', 1),
     resolveEpisode(lifecycle, 'same-b', 2)
@@ -550,9 +630,9 @@ test('account queues serialize one scope while allowing different scopes to over
   for (const maximum of maximumByScope.values()) assert.equal(maximum, 1);
 
   maximumTotal = 0;
-  harness.setCookie('sid=account-a');
+  harness.setCookie('__uid=account-a; sid=account-a');
   const accountA = resolveEpisode(lifecycle, 'parallel-a', 3);
-  harness.setCookie('sid=account-b');
+  harness.setCookie('__uid=account-b; sid=account-b');
   const accountB = resolveEpisode(lifecycle, 'parallel-b', 4);
   await Promise.all([accountA, accountB]);
   assert.equal(maximumTotal, 2);
@@ -564,8 +644,185 @@ test('account queues serialize one scope while allowing different scopes to over
   assert.equal(new Set(parallelCalls.map((call) => call.accountCookie)).size, 2);
 });
 
+test('volatile Cookie rotation keeps one stable account scope and workspace', async (t) => {
+  const firstCookie = '__uid=account-a; __puus=old; ctoken=old-token';
+  const secondCookie = '__uid=account-a; __puus=new; ctoken=new-token';
+  const harness = createHarness(t, { cookie: firstCookie });
+  const lifecycle = harness.makeLifecycle();
+  const first = await resolveEpisode(lifecycle, 'rotation-a', 1);
+  harness.setCookie(secondCookie);
+  const second = await resolveEpisode(lifecycle, 'rotation-b', 2);
+
+  assert.equal(
+    first._okvideo.transferReceipt.accountScope,
+    second._okvideo.transferReceipt.accountScope
+  );
+  assert.equal(first._okvideo.transferReceipt.accountScope, stableScope(firstCookie));
+  assert.equal(callsAt(harness, 'post', 'file').length, 2);
+  assert.equal(Object.keys(lifecycle.snapshotForTesting().folders).length, 1);
+});
+
+test('same account re-scan reuses cloud folders after local ledger loss', async (t) => {
+  const firstCookie = '__uid=account-a; sid=first-login';
+  const nextCookie = '__uid=account-a; sid=next-login';
+  const harness = createHarness(t, { cookie: firstCookie });
+  harness.seedWorkspace(firstCookie, 'cloud-root', 'cloud-installation');
+  harness.setCookie(nextCookie);
+  const lifecycle = harness.makeLifecycle();
+  const result = await resolveEpisode(lifecycle, 'rescanned', 1);
+
+  assert.equal(result._okvideo.transferReceipt.parentFolderFID, 'cloud-installation');
+  assert.equal(callsAt(harness, 'post', 'file').length, 0);
+});
+
+test('stale ledger folder FIDs are rediscovered without creating duplicates', async (t) => {
+  const harness = createHarness(t);
+  const scope = stableScope(DEFAULT_COOKIE);
+  fs.writeFileSync(harness.ledgerPath, JSON.stringify({
+    version: 2,
+    folders: {
+      [scope]: {
+        rootFolderFID: 'stale-root',
+        installationFolderFID: 'stale-installation'
+      }
+    },
+    scopeAliases: {},
+    entries: []
+  }), { mode: 0o600 });
+  harness.seedWorkspace(DEFAULT_COOKIE, 'actual-root', 'actual-installation');
+  const lifecycle = harness.makeLifecycle();
+  const result = await resolveEpisode(lifecycle, 'rediscovered', 1);
+
+  assert.equal(result._okvideo.transferReceipt.parentFolderFID, 'actual-installation');
+  assert.equal(callsAt(harness, 'post', 'file').length, 0);
+  assert.equal(
+    lifecycle.snapshotForTesting().folders[scope].rootFolderFID,
+    'actual-root'
+  );
+});
+
+test('legacy Cookie-scoped ledger migrates receipts to the stable account scope', async (t) => {
+  const oldCookie = '__uid=account-a; __puus=old-cookie';
+  const newCookie = '__uid=account-a; __puus=renewed-cookie';
+  const harness = createHarness(t, { cookie: oldCookie });
+  const firstRuntime = harness.makeLifecycle();
+  const first = await resolveEpisode(firstRuntime, 'legacy-file', 1);
+  const oldScope = legacyScope(oldCookie);
+  const stable = stableScope(oldCookie);
+  const stored = JSON.parse(fs.readFileSync(harness.ledgerPath, 'utf8'));
+  const folder = stored.folders[stable];
+  stored.version = 1;
+  stored.folders = { [oldScope]: folder };
+  delete stored.scopeAliases;
+  stored.entries[0].accountScope = oldScope;
+  fs.writeFileSync(harness.ledgerPath, JSON.stringify(stored), { mode: 0o600 });
+
+  harness.setCookie(newCookie);
+  const upgradedRuntime = harness.makeLifecycle();
+  const second = await resolveEpisode(upgradedRuntime, 'post-migration', 2);
+  const snapshot = upgradedRuntime.snapshotForTesting();
+
+  assert.equal(snapshot.version, 2);
+  assert.equal(snapshot.scopeAliases[oldScope], stable);
+  assert.equal(snapshot.entries[0].accountScope, stable);
+  assert.equal(second._okvideo.transferReceipt.accountScope, stable);
+  assert.equal(callsAt(harness, 'post', 'file').length, 2);
+  assert.equal(first._okvideo.transferReceipt.savedFIDs[0], 'saved-legacy-file');
+});
+
+test('a concurrent folder creation conflict is reconciled by exact discovery', async (t) => {
+  let sequence = 0;
+  const harness = createHarness(t, {
+    apiOverride: async (apiRequest, drive) => {
+      if (apiRequest.method !== 'post' || apiRequest.path !== 'file') return null;
+      sequence += 1;
+      const fid = `raced-folder-${sequence}`;
+      drive.addDirectory(
+        apiRequest.accountScope,
+        apiRequest.body.pdir_fid,
+        apiRequest.body.file_name,
+        fid
+      );
+      return { status: 400, data: { message: 'already exists' } };
+    }
+  });
+  const lifecycle = harness.makeLifecycle();
+  const result = await resolveEpisode(lifecycle, 'raced', 1);
+
+  assert.equal(result._okvideo.transferReceipt.parentFolderFID, 'raced-folder-2');
+  assert.equal(harness.authorizationEvents.length, 0);
+});
+
+test('missing Quark credentials publish a structured authorization event', async (t) => {
+  const harness = createHarness(t);
+  harness.setCookie('');
+  const lifecycle = harness.makeLifecycle();
+
+  await assert.rejects(
+    resolveEpisode(lifecycle, 'missing-account', 1),
+    (error) => error.code === 'OKVIDEO_CLOUD_AUTHORIZATION_REQUIRED'
+  );
+  assert.deepEqual(harness.authorizationEvents, [{
+    provider: 'quark',
+    reasonCode: 'missingCredential',
+    phase: 'play',
+    upstreamStatus: 0,
+    message: 'quark account unavailable'
+  }]);
+  assert.equal(callsAt(harness, 'post', 'file').length, 0);
+});
+
+test('only account API 401 and 403 become authorization events', async (t) => {
+  for (const status of [401, 403]) {
+    await t.test(String(status), async (subtest) => {
+      const harness = createHarness(subtest, {
+        apiOverride: async (apiRequest) =>
+          apiRequest.method === 'get' && apiRequest.path.startsWith('file/sort?')
+            ? { status, data: { message: 'account rejected' } }
+            : null
+      });
+      const lifecycle = harness.makeLifecycle();
+      await assert.rejects(
+        resolveEpisode(lifecycle, `authorization-${status}`, 1),
+        (error) => error.code === 'OKVIDEO_CLOUD_AUTHORIZATION_REQUIRED'
+      );
+      assert.equal(harness.authorizationEvents[0].reasonCode, 'unauthorizedHTTP');
+      assert.equal(harness.authorizationEvents[0].upstreamStatus, status);
+    });
+  }
+});
+
+test('ordinary folder 400 and Quark share stoken failures do not request authorization', async (t) => {
+  await t.test('folder 400', async (subtest) => {
+    const harness = createHarness(subtest);
+    harness.folderCreateStatuses.push(400);
+    const lifecycle = harness.makeLifecycle();
+    await assert.rejects(
+      resolveEpisode(lifecycle, 'folder-400', 1),
+      /application transfer folder creation failed/
+    );
+    assert.equal(harness.authorizationEvents.length, 0);
+  });
+
+  await t.test('share stoken 41016', async (subtest) => {
+    const harness = createHarness(subtest, {
+      apiOverride: async (apiRequest) =>
+        apiRequest.method === 'post' &&
+        apiRequest.path === 'share/sharepage/save'
+          ? { status: 400, data: { code: 41016, message: 'stoken invalid' } }
+          : null
+    });
+    const lifecycle = harness.makeLifecycle();
+    await assert.rejects(
+      resolveEpisode(lifecycle, 'share-stoken', 1),
+      /durable task identity/
+    );
+    assert.equal(harness.authorizationEvents.length, 0);
+  });
+});
+
 test('ledger and receipt omit credentials, share tokens, and playback URLs', async (t) => {
-  const secretCookie = 'sid=raw-cookie-secret; authorization=must-not-persist';
+  const secretCookie = '__uid=secret-account; sid=raw-cookie-secret; authorization=must-not-persist';
   const harness = createHarness(t, { cookie: secretCookie });
   const lifecycle = harness.makeLifecycle();
   const result = await resolveEpisode(lifecycle, 'opaque-source', 1);

@@ -694,8 +694,8 @@ enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
 }
 
 struct NodeBundleDeterministicPatch: Equatable, Sendable {
-    static let quarkLifecycleV1 = NodeBundleDeterministicPatch(
-        identifier: "catpaw-quark-lifecycle-v1",
+    static let quarkLifecycleV2 = NodeBundleDeterministicPatch(
+        identifier: "catpaw-quark-lifecycle-v2",
         requestedChecksumURL: URL(
             string: "https://raw.githubusercontent.com/Darklessing/catvod/refs/heads/main/douer/index.js.md5"
         )!,
@@ -706,11 +706,11 @@ struct NodeBundleDeterministicPatch: Equatable, Sendable {
             string: "https://raw.githubusercontent.com/Darklessing/catvod/c47d135469d4a32a4178531ce1b8f4e2e936f0b8/douer/index.js"
         )!,
         inputSHA256: "0ad3ed101dc961e6d73b758a5089ac1e10a12d27666468436e1fff2e39df01cc",
-        outputSHA256: "922df076b788fc33520954892be8ba1a1be312f0afa26dbd8c066867b8aebf71",
+        outputSHA256: "21de5bd519f056199688fa4be265b6ac42a549a1cd8d256a248e18cafd856371",
         patchResourceName: "catpaw-quark-lifecycle.patch",
-        patchResourceSHA256: "c778e76fb465db76cc4ae864ac00ff00365465584d8a934afcc3c5a92b32cdb8",
+        patchResourceSHA256: "8ff76dde6c944de760fc5a0df52fe1bf9c5ebbc7eb00062115cbbef0a76dac91",
         moduleResourceName: "catpaw-quark-transfer-lifecycle",
-        moduleResourceSHA256: "57b08964472449a628ab167345a3c2b31fd700948fb71af88fbca81914d66df5",
+        moduleResourceSHA256: "e0cb843d5c84fec74f17594e937287b2cd8bbcda746d981013d55cb5978dabf4",
         legacyCacheKeys: [
             // Cache identity of the formerly unpinned refs/heads/main URL.
             // Migration still requires the exact fixed input SHA before the
@@ -733,8 +733,8 @@ struct NodeBundleDeterministicPatch: Equatable, Sendable {
 
     static func matching(_ checksumURL: URL) -> Self? {
         let normalized = checksumURL.absoluteString
-        return normalized == quarkLifecycleV1.requestedChecksumURL.absoluteString
-            ? quarkLifecycleV1
+        return normalized == quarkLifecycleV2.requestedChecksumURL.absoluteString
+            ? quarkLifecycleV2
             : nil
     }
 }
@@ -1889,6 +1889,17 @@ actor NodeBundleRuntimeService {
             site["okNodeModuleKind"] = CatPawModuleKind.video.rawValue
             site["okNodeSpiderType"] = descriptor.spiderType
             site["okNodeHostMessageBridge"] = supportsHostMessageBridge
+            let indexValue: Int
+            if let value = site["indexs"] as? NSNumber {
+                indexValue = value.intValue
+            } else if let value = site["indexs"] as? Int {
+                indexValue = value
+            } else {
+                indexValue = 0
+            }
+            site["okNodeNavigationMode"] = indexValue == 1
+                ? "discovery"
+                : "detail"
             site["okNodeSiteIdentity"] = scopedIdentity(
                 kind: .video,
                 key: descriptor.siteKey
