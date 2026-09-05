@@ -2,6 +2,155 @@ import XCTest
 @testable import OKVideoCore
 
 final class PlaybackResolverTests: XCTestCase {
+    func testPlaybackResourceReferenceRoundTripsWithoutRuntimeSecrets() throws {
+        let reference = PlaybackResourceReference(
+            configurationIdentity: "configuration-v1",
+            siteIdentity: "site-v1",
+            providerKind: "android-dex-spider",
+            providerVersion: 1,
+            stableResourceLocator: "provider://opaque/item/42",
+            sourceIdentity: "source-hash",
+            episodeIdentity: "episode-hash",
+            stability: .providerStable,
+            expiresAt: Date(timeIntervalSince1970: 123_456)
+        )
+
+        let data = try JSONEncoder().encode(reference)
+        let decoded = try JSONDecoder().decode(
+            PlaybackResourceReference.self,
+            from: data
+        )
+
+        XCTAssertEqual(decoded, reference)
+        let text = try XCTUnwrap(String(data: data, encoding: .utf8))
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("authorization"))
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("cookie"))
+    }
+
+    func testPlaybackMediaSessionKeepsRequestContextRuntimeOnly() {
+        let reference = PlaybackResourceReference(
+            configurationIdentity: "configuration-v1",
+            siteIdentity: "site-v1",
+            providerKind: "android-dex-spider",
+            providerVersion: 1,
+            stableResourceLocator: "provider://opaque/item/42",
+            sourceIdentity: "source-hash",
+            episodeIdentity: "episode-hash",
+            stability: .providerReplay
+        )
+        let session = PlaybackMediaSession(
+            sessionID: "session-1",
+            transport: .providerLoopback,
+            mediaURL: "http://127.0.0.1:19978/proxy/media/session-1",
+            headers: ["Authorization": "runtime-only"],
+            authorizationContextReference: "bridge-context-1",
+            proxyRequestID: "request-1",
+            upstreamResourceFingerprint: String(repeating: "a", count: 64),
+            refreshPerformed: true,
+            redirectPolicy: .follow,
+            rangePolicy: .forward,
+            resourceReference: reference
+        )
+        let result = SitePlaybackResult(
+            url: session.mediaURL,
+            needsParsing: false,
+            flag: "opaque",
+            headers: session.headers,
+            validationPolicy: .playerAuthoritative,
+            resourceReference: reference,
+            mediaSession: session
+        )
+
+        XCTAssertEqual(result.resourceReference, reference)
+        XCTAssertEqual(result.mediaSession, session)
+        XCTAssertEqual(result.mediaSession?.transport, .providerLoopback)
+        XCTAssertEqual(result.mediaSession?.rangePolicy, .forward)
+        XCTAssertEqual(
+            result.mediaSession?.upstreamResourceFingerprint,
+            String(repeating: "a", count: 64)
+        )
+        XCTAssertEqual(result.mediaSession?.refreshPerformed, true)
+    }
+
+    func testPlayerAuthoritativeDirectMediaBypassesGenericPreflight() async {
+        let resolver = PlaybackResolver(
+            parseExecutor: FixtureParseExecutor(results: [:]),
+            mediaProbe: FixtureMediaProbe(validURLs: [])
+        )
+        let result = SitePlaybackResult(
+            url: "https://authenticated.example.invalid/movie.mp4",
+            needsParsing: false,
+            flag: "authenticated",
+            headers: ["Cookie": "session=fixture"],
+            validationPolicy: .playerAuthoritative
+        )
+        let request = PlaybackResolutionRequest(
+            candidates: [
+                PlaybackCandidate(
+                    siteKey: "node",
+                    siteName: "Node",
+                    sourceName: "Authenticated",
+                    episodeName: "Episode 1",
+                    result: result
+                )
+            ],
+            parsers: []
+        )
+
+        let events = await collect(resolver.resolve(request))
+
+        XCTAssertTrue(events.contains { event in
+            guard case .resolved(let media) = event else { return false }
+            return media.url.absoluteString
+                == "https://authenticated.example.invalid/movie.mp4"
+                && media.headers["Cookie"] == "session=fixture"
+        })
+    }
+
+    func testPlayerAuthoritativeInvalidPayloadNeverReachesMediaLoader() async {
+        for invalidPayload in [
+            "unrecognized file format",
+            "ndr2.stale-history-token",
+            "/relative/provider/error"
+        ] {
+            let recorder = MediaLoaderInvocationRecorder()
+            let resolver = PlaybackResolver(
+                parseExecutor: FixtureParseExecutor(results: [:]),
+                mediaProbe: FixtureMediaProbe(validURLs: [])
+            )
+            let request = PlaybackResolutionRequest(
+                candidates: [
+                    PlaybackCandidate(
+                        siteKey: "node",
+                        siteName: "Node",
+                        sourceName: "CatPaw",
+                        episodeName: "Episode 1",
+                        result: SitePlaybackResult(
+                            url: invalidPayload,
+                            needsParsing: false,
+                            flag: "fixture",
+                            validationPolicy: .playerAuthoritative
+                        )
+                    )
+                ],
+                parsers: []
+            )
+
+            let events = await collect(
+                resolver.resolve(request) { _, _ in
+                    await recorder.recordInvocation()
+                }
+            )
+            let wasInvoked = await recorder.wasInvoked()
+
+            XCTAssertFalse(wasInvoked, invalidPayload)
+            XCTAssertTrue(events.contains { event in
+                guard case .failed(let message) = event else { return false }
+                return message.contains("播放器拒绝了非绝对")
+            }, invalidPayload)
+        }
+    }
+
     func testAndroidCloudOriginalProxyBypassesBrokenRangePreflight() async throws {
         let probe = DefaultMediaProbe(httpClient: FailingProbeHTTPClient())
         let url = try XCTUnwrap(
@@ -35,16 +184,150 @@ final class PlaybackResolverTests: XCTestCase {
         XCTAssertTrue(isValid)
     }
 
-    func testNodeRuntimeMediaProxyBypassesUnsupportedHeadPreflight() async throws {
-        let probe = DefaultMediaProbe(httpClient: FailingProbeHTTPClient())
+    func testNodeRuntimeMediaProxyRequiresReadableMediaBytes() async throws {
         let url = try XCTUnwrap(
             URL(string: "http://127.0.0.1:18989/spider/wexyueyue/proxy/media?id=fixture")
+        )
+        let client = ScriptedProbeHTTPClient(responses: [
+            HTTPResponse(
+                url: url,
+                statusCode: 206,
+                headers: [
+                    "Content-Type": "video/mp4",
+                    "Content-Range": "bytes 0-3/4096"
+                ],
+                body: Data([0, 0, 0, 24])
+            )
+        ])
+
+        let isValid = try await DefaultMediaProbe(httpClient: client)
+            .validate(url: url, headers: ["Cookie": "session=fixture"])
+
+        XCTAssertTrue(isValid)
+        XCTAssertTrue(DefaultMediaProbe.isNodeRuntimeMediaProxy(url))
+        let requests = await client.requests()
+        XCTAssertEqual(requests.map(\.method), [.get])
+        XCTAssertEqual(requests.last?.headers["Range"], "bytes=0-16383")
+        XCTAssertEqual(requests.last?.headers["Cookie"], "session=fixture")
+    }
+
+    func testNodeRuntimeMediaProxyAcceptsLargeBodyWhenServerIgnoresRange()
+        async throws {
+        let url = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:18989/spider/fixture/4/proxy/media?id=large")
+        )
+        let probe = DefaultMediaProbe(
+            httpClient: ResponseTooLargeProbeHTTPClient()
         )
 
         let isValid = try await probe.validate(url: url, headers: [:])
 
         XCTAssertTrue(isValid)
-        XCTAssertTrue(DefaultMediaProbe.isNodeRuntimeMediaProxy(url))
+    }
+
+    func testAndroidBridgeMediaSessionIsNotMisclassifiedAsNodeProxy() throws {
+        let url = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:19978/proxy/media/session-123")
+        )
+
+        XCTAssertTrue(DefaultMediaProbe.isAndroidBridgeMediaSession(url))
+        XCTAssertFalse(DefaultMediaProbe.isNodeRuntimeMediaProxy(url))
+    }
+
+    func testAndroidBridgeMediaSessionRequiresReadableMediaBytes() async throws {
+        let url = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:19978/proxy/media/session-readable")
+        )
+        let client = ScriptedProbeHTTPClient(responses: [
+            HTTPResponse(
+                url: url,
+                statusCode: 206,
+                headers: [
+                    "Content-Type": "video/mp4",
+                    "Content-Range": "bytes 0-3/4096"
+                ],
+                body: Data([0, 0, 0, 24])
+            )
+        ])
+
+        let isValid = try await DefaultMediaProbe(httpClient: client)
+            .validate(url: url, headers: [:])
+
+        XCTAssertTrue(isValid)
+        let requests = await client.requests()
+        XCTAssertEqual(requests.map(\.method), [.get])
+        XCTAssertEqual(requests.last?.headers["Range"], "bytes=0-16383")
+    }
+
+    func testAndroidBridgeMediaSessionRejectsJSONErrorBody() async throws {
+        let url = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:19978/proxy/media/session-error")
+        )
+        let client = ScriptedProbeHTTPClient(responses: [
+            HTTPResponse(
+                url: url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"error":"login required"}"#.utf8)
+            )
+        ])
+
+        do {
+            _ = try await DefaultMediaProbe(httpClient: client)
+                .validate(url: url, headers: [:])
+            XCTFail("JSON provider error must not pass the media probe")
+        } catch let error as AppError {
+            XCTAssertEqual(
+                error,
+                .playback("网盘播放地址没有返回真实媒体数据")
+            )
+        }
+    }
+
+    func testAndroidBridgeMediaSessionSurfacesClassifiedProxyFailure()
+        async throws {
+        let url = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:19978/proxy/media/session-proxy-failure")
+        )
+        let client = ScriptedProbeHTTPClient(responses: [
+            HTTPResponse(
+                url: url,
+                statusCode: 502,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"ok":false,"error":"Spider internal proxy failed"}"#.utf8)
+            )
+        ])
+
+        do {
+            _ = try await DefaultMediaProbe(httpClient: client)
+                .validate(url: url, headers: [:])
+            XCTFail("classified bridge failure must stop playback")
+        } catch let error as AppError {
+            XCTAssertEqual(error, .playback("Spider 内部代理处理失败"))
+        }
+    }
+
+    func testAndroidBridgeMediaSessionDistinguishesExpiredCapability()
+        async throws {
+        let url = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:19978/proxy/media/session-expired")
+        )
+        let client = ScriptedProbeHTTPClient(responses: [
+            HTTPResponse(
+                url: url,
+                statusCode: 410,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"ok":false,"error":"Media session expired or missing"}"#.utf8)
+            )
+        ])
+
+        do {
+            _ = try await DefaultMediaProbe(httpClient: client)
+                .validate(url: url, headers: [:])
+            XCTFail("expired bridge capability must stop playback")
+        } catch let error as AppError {
+            XCTAssertEqual(error, .playback("播放会话已过期，请重新解析"))
+        }
     }
 
     func testAndroidCloudOriginalProxyBypassIsRestrictedToExpectedEndpoint() throws {
@@ -86,6 +369,63 @@ final class PlaybackResolverTests: XCTestCase {
             guard case .resolved(let media) = event else { return false }
             return media.url.absoluteString == "https://media.example.invalid/direct.m3u8"
                 && media.parserName == nil
+        })
+    }
+
+    func testParserRequiredCandidateExplainsMissingParser() async {
+        let resolver = PlaybackResolver(
+            parseExecutor: FixtureParseExecutor(results: [:]),
+            mediaProbe: FixtureMediaProbe(validURLs: [])
+        )
+        let request = PlaybackResolutionRequest(
+            candidates: [candidate(
+                source: "QY",
+                url: "https://player.example.invalid/watch/42",
+                needsParsing: true
+            )],
+            parsers: []
+        )
+
+        let events = await collect(resolver.resolve(request))
+
+        XCTAssertTrue(events.contains { event in
+            guard case .failed(let message) = event else { return false }
+            return message.contains("线路返回待解析地址")
+                && message.contains("没有可用解析器")
+        })
+    }
+
+    func testAndroidBridgeFailureDiagnosesUpstreamBeforeReportingMPVError() async {
+        let url = "http://127.0.0.1:19978/proxy/media/session-123"
+        let resolver = PlaybackResolver(
+            parseExecutor: FixtureParseExecutor(results: [:]),
+            mediaProbe: FixtureMediaProbe(validURLs: [])
+        )
+        let result = SitePlaybackResult(
+            url: url,
+            needsParsing: false,
+            flag: "fixture",
+            validationPolicy: .playerAuthoritative
+        )
+        let request = PlaybackResolutionRequest(
+            candidates: [PlaybackCandidate(
+                siteKey: "fixture",
+                siteName: "Fixture",
+                sourceName: "VIP",
+                episodeName: "Episode 2",
+                result: result
+            )],
+            parsers: []
+        )
+
+        let events = await collect(resolver.resolve(request) { _, _ in
+            throw AppError.playback("loading failed")
+        })
+
+        XCTAssertTrue(events.contains { event in
+            guard case .failed(let message) = event else { return false }
+            return message.contains("Android 内部播放代理")
+                && message.contains("没有返回媒体数据")
         })
     }
 
@@ -265,9 +605,51 @@ final class PlaybackResolverTests: XCTestCase {
     }
 }
 
+private actor MediaLoaderInvocationRecorder {
+    private var invoked = false
+
+    func recordInvocation() {
+        invoked = true
+    }
+
+    func wasInvoked() -> Bool {
+        invoked
+    }
+}
+
 private struct FailingProbeHTTPClient: HTTPClient {
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         throw HTTPClientError.transport("the preflight client must not be called")
+    }
+}
+
+private struct ResponseTooLargeProbeHTTPClient: HTTPClient {
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        throw HTTPClientError.responseTooLarge(
+            limit: request.maximumResponseBytes,
+            actual: request.maximumResponseBytes + 1
+        )
+    }
+}
+
+private actor ScriptedProbeHTTPClient: HTTPClient {
+    private var remaining: [HTTPResponse]
+    private var recorded: [HTTPRequest] = []
+
+    init(responses: [HTTPResponse]) {
+        remaining = responses
+    }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        recorded.append(request)
+        guard !remaining.isEmpty else {
+            throw HTTPClientError.transport("missing scripted response")
+        }
+        return remaining.removeFirst()
+    }
+
+    func requests() -> [HTTPRequest] {
+        recorded
     }
 }
 

@@ -19,6 +19,8 @@ struct LiveView: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var navigation: AppNavigationState
     @ObservedObject var session: LiveBrowserSession
+    @StateObject private var logoURLCache = LiveChannelLogoURLCache()
+    private let channelScrollCoordinateSpace = "live-channel-scroll"
 
     var body: some View {
         Group {
@@ -29,7 +31,6 @@ struct LiveView: View {
                     .frame(minWidth: 520)
             }
         }
-        .background(AppSurfacePalette.background.ignoresSafeArea())
         .onAppear {
             updateActivation(for: navigation.selectedSection)
         }
@@ -55,6 +56,19 @@ struct LiveView: View {
             }
             Task { await loadSelectedIfNeeded() }
         }
+        .onChange(of: state.shortcutLiveRefreshRequest) { _ in
+            guard session.isActive,
+                  let source = selectedSource,
+                  source.sourceKind == .remote else { return }
+            Task { await state.refreshLiveSource(source.id) }
+        }
+        .onChange(of: state.shortcutLiveSourceSelection) { request in
+            guard let request,
+                  state.liveSources.contains(where: {
+                      $0.id == request.sourceID
+                  }) else { return }
+            session.selectedSourceID = request.sourceID
+        }
     }
 
     private var emptyLibrary: some View {
@@ -66,7 +80,7 @@ struct LiveView: View {
             )
             Button {
                 state.selectedSettingsPane = .liveSources
-                state.selectedSection = .settings
+                state.selectSection(.settings)
             } label: {
                 Label("打开直播源设置", systemImage: "gearshape")
             }
@@ -83,7 +97,7 @@ struct LiveView: View {
                 sourceName: source.name
             )
         } else if state.isLoading {
-            ProgressView("正在加载直播源…")
+            AppActivityLabel("正在加载直播源…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             EmptyStateView(
@@ -107,61 +121,78 @@ struct LiveView: View {
             sourceName: sourceName
         )
         let programmeDate = Date()
-        return VStack(spacing: 0) {
-            liveSourceBackgroundStatus(sourceID: sourceID)
-
-            if channels.isEmpty {
-                EmptyStateView(
-                    systemImage: session.showsFavoritesOnly ? "star" : "magnifyingglass",
-                    title: session.showsFavoritesOnly ? "还没有收藏频道" : "没有匹配的频道",
-                    message: session.showsFavoritesOnly
-                        ? "点击频道卡片右上角的星标即可收藏。"
-                        : "请更换分组或搜索关键词。"
+        return GeometryReader { viewport in
+            ScrollView {
+                BrowserToolbarScrollMarker(
+                    coordinateSpaceName: channelScrollCoordinateSpace
                 )
-            } else {
-                ScrollView {
-                    LazyVGrid(
-                        columns: [
-                            GridItem(
-                                .adaptive(minimum: 238, maximum: 340),
-                                spacing: 18,
-                                alignment: .top
+                VStack(spacing: 0) {
+                    liveSourceBackgroundStatus(sourceID: sourceID)
+
+                    if channels.isEmpty {
+                        EmptyStateView(
+                            systemImage: session.showsFavoritesOnly
+                                ? "star"
+                                : "magnifyingglass",
+                            title: session.showsFavoritesOnly
+                                ? "还没有收藏频道"
+                                : "没有匹配的频道",
+                            message: session.showsFavoritesOnly
+                                ? "点击频道卡片右上角的星标即可收藏。"
+                                : "请更换分组或搜索关键词。"
+                        )
+                        .frame(
+                            maxWidth: .infinity,
+                            minHeight: max(0, viewport.size.height - 72)
+                        )
+                    } else {
+                        LazyVGrid(
+                            columns: [
+                                GridItem(
+                                    .adaptive(minimum: 238, maximum: 340),
+                                    spacing: 18,
+                                    alignment: .top
+                                )
+                            ],
+                            alignment: .leading,
+                            spacing: 20
+                        ) {
+                            ForEach(channels) { channel in
+                                let programmes = state.liveProgrammes(
+                                    for: channel,
+                                    sourceID: sourceID,
+                                    at: programmeDate
+                                )
+                                LiveChannelCard(
+                                    channel: channel,
+                                    artworkURLs: logoURLCache.urls(for: channel),
+                                    navigationChannels: channels,
+                                    sourceID: sourceID,
+                                    sourceName: sourceName,
+                                    currentEPGProgramme: programmes.current,
+                                    nextEPGProgramme: programmes.next
+                                )
+                                .environmentObject(state)
+                            }
+                        }
+                        .padding(20)
+
+                        if hiddenCount > 0 {
+                            Label(
+                                "\(hiddenCount) 个受保护分组已隐藏",
+                                systemImage: "lock"
                             )
-                        ],
-                        alignment: .leading,
-                        spacing: 20
-                    ) {
-                        ForEach(channels) { channel in
-                            let programmes = state.liveProgrammes(
-                                for: channel,
-                                sourceID: sourceID,
-                                at: programmeDate
-                            )
-                            LiveChannelCard(
-                                channel: channel,
-                                navigationChannels: channels,
-                                sourceID: sourceID,
-                                sourceName: sourceName,
-                                currentEPGProgramme: programmes.current,
-                                nextEPGProgramme: programmes.next
-                            )
-                            .environmentObject(state)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .padding(.bottom, 20)
                         }
                     }
-                    .padding(20)
-
-                    if hiddenCount > 0 {
-                        Label(
-                            "\(hiddenCount) 个受保护分组已隐藏",
-                            systemImage: "lock"
-                        )
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .padding(.bottom, 20)
-                    }
                 }
-                .background(AppSurfacePalette.background)
+                .frame(maxWidth: .infinity)
             }
+            .browserToolbarScrollSurface(
+                named: channelScrollCoordinateSpace
+            )
         }
     }
 
@@ -228,8 +259,7 @@ struct LiveView: View {
     ) -> some View {
         HStack(spacing: 8) {
             if showsProgress {
-                ProgressView()
-                    .controlSize(.mini)
+                AppActivityIndicator(size: .mini)
             } else {
                 Image(systemName: systemImage)
             }
@@ -306,6 +336,7 @@ struct LiveView: View {
 
 struct LiveToolbarView: View {
     @EnvironmentObject private var state: AppState
+    @Environment(\.primaryToolbarLayout) private var toolbarLayout
     @ObservedObject var session: LiveBrowserSession
 
     var body: some View {
@@ -321,35 +352,90 @@ struct LiveToolbarView: View {
                     )
                 }
                 let channelCount = allChannels.count - deletedChannels.count
-                HStack(spacing: 10) {
-                    sourceMenu(
-                        channelCount: channelCount,
-                        sourceName: source.name
-                    )
-                    groupMenu(groups)
-                    favoritesButton
-                    if !deletedChannels.isEmpty {
-                        deletedChannelsMenu(
-                            deletedChannels,
-                            sourceID: source.id
-                        )
-                    }
-                    refreshControl(sourceID: source.id)
-                    TextField("搜索频道", text: $session.searchText)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 220)
-                }
+                toolbarControls(
+                    source: source,
+                    groups: groups,
+                    deletedChannels: deletedChannels,
+                    channelCount: channelCount
+                )
             } else if state.isLoading {
-                ProgressView()
-                    .controlSize(.small)
+                AppActivityIndicator(size: .small)
                     .help("正在加载直播源")
             }
         }
     }
 
+    @ViewBuilder
+    private func toolbarControls(
+        source: StoredLiveSource,
+        groups: [LiveGroup],
+        deletedChannels: [LiveChannel],
+        channelCount: Int
+    ) -> some View {
+        HStack(spacing: PrimaryToolbarMetrics.itemSpacing) {
+            switch toolbarLayout {
+            case .expanded:
+                sourceMenu(
+                    channelCount: channelCount,
+                    sourceName: source.name,
+                    compact: false
+                )
+                .primaryToolbarMenuControl()
+                groupMenu(groups, compact: false)
+                    .primaryToolbarMenuControl()
+                favoritesButton
+                    .primaryToolbarIconControl(
+                        isSelected: session.showsFavoritesOnly,
+                        selectedColor: .yellow
+                    )
+                if !deletedChannels.isEmpty {
+                    deletedChannelsMenu(
+                        deletedChannels,
+                        sourceID: source.id
+                    )
+                    .primaryToolbarMenuControl()
+                }
+            case .compact:
+                sourceMenu(
+                    channelCount: channelCount,
+                    sourceName: source.name,
+                    compact: true
+                )
+                .primaryToolbarMenuControl()
+                groupMenu(groups, compact: true)
+                    .primaryToolbarMenuControl()
+                favoritesButton
+                    .primaryToolbarIconControl(
+                        isSelected: session.showsFavoritesOnly,
+                        selectedColor: .yellow
+                    )
+                if !deletedChannels.isEmpty {
+                    deletedChannelsMenu(
+                        deletedChannels,
+                        sourceID: source.id
+                    )
+                    .primaryToolbarMenuControl()
+                }
+            case .minimal:
+                condensedMenu(
+                    source: source,
+                    groups: groups,
+                    deletedChannels: deletedChannels,
+                    channelCount: channelCount
+                )
+                .primaryToolbarMenuControl()
+            }
+
+            PrimaryToolbarDivider()
+            refreshControl(sourceID: source.id)
+                .primaryToolbarIconControl()
+        }
+    }
+
     private func sourceMenu(
         channelCount: Int,
-        sourceName: String
+        sourceName: String,
+        compact: Bool
     ) -> some View {
         Menu {
             ForEach(state.liveSources) { source in
@@ -364,17 +450,19 @@ struct LiveToolbarView: View {
             }
         } label: {
             Label {
-                Text("\(sourceName) · \(channelCount)")
+                Text(compact ? sourceName : "\(sourceName) · \(channelCount)")
                     .lineLimit(1)
             } icon: {
                 Image(systemName: "dot.radiowaves.left.and.right")
             }
         }
+        .frame(maxWidth: compact ? 132 : 220)
+        .controlSize(.regular)
         .disabled(state.liveSources.count < 2)
         .help("当前直播源：\(sourceName)，共 \(channelCount) 个频道")
     }
 
-    private func groupMenu(_ groups: [LiveGroup]) -> some View {
+    private func groupMenu(_ groups: [LiveGroup], compact: Bool) -> some View {
         Menu {
             Button {
                 session.selectedGroupName = nil
@@ -397,11 +485,44 @@ struct LiveToolbarView: View {
             }
         } label: {
             Label(
-                session.selectedGroupName ?? "全部频道",
+                compact
+                    ? (session.selectedGroupName ?? "全部")
+                    : (session.selectedGroupName ?? "全部频道"),
                 systemImage: "rectangle.3.group"
             )
+            .lineLimit(1)
         }
+        .frame(maxWidth: compact ? 108 : 180)
+        .controlSize(.regular)
         .help("筛选频道分组")
+    }
+
+    private func condensedMenu(
+        source: StoredLiveSource,
+        groups: [LiveGroup],
+        deletedChannels: [LiveChannel],
+        channelCount: Int
+    ) -> some View {
+        Menu {
+            sourceMenu(
+                channelCount: channelCount,
+                sourceName: source.name,
+                compact: false
+            )
+            groupMenu(groups, compact: false)
+            Divider()
+            favoritesButton
+            if !deletedChannels.isEmpty {
+                deletedChannelsMenu(
+                    deletedChannels,
+                    sourceID: source.id
+                )
+            }
+        } label: {
+            Label("直播选项", systemImage: "ellipsis.circle")
+                .labelStyle(.iconOnly)
+        }
+        .help("直播源、分组和频道管理")
     }
 
     private var favoritesButton: some View {
@@ -413,7 +534,6 @@ struct LiveToolbarView: View {
                 systemImage: session.showsFavoritesOnly ? "star.fill" : "star"
             )
         }
-        .tint(session.showsFavoritesOnly ? .yellow : .accentColor)
         .help(session.showsFavoritesOnly ? "显示全部频道" : "仅显示收藏频道")
     }
 
@@ -459,8 +579,7 @@ struct LiveToolbarView: View {
     @ViewBuilder
     private func refreshControl(sourceID: UUID) -> some View {
         if state.isLoading {
-            ProgressView()
-                .controlSize(.small)
+            AppActivityIndicator(size: .small)
                 .help("正在刷新直播源")
         } else {
             Button {
@@ -510,6 +629,7 @@ private struct LiveChannelCard: View {
     @EnvironmentObject private var state: AppState
     @Environment(\.colorScheme) private var colorScheme
     let channel: LiveChannel
+    let artworkURLs: [URL]
     let navigationChannels: [LiveChannel]
     let sourceID: UUID
     let sourceName: String
@@ -669,7 +789,7 @@ private struct LiveChannelCard: View {
             )
 
             RemoteImageCandidates(
-                urls: LiveChannelLogoResolver.urls(for: channel)
+                urls: artworkURLs
             ) { image in
                 image
                     .resizable()
@@ -872,6 +992,34 @@ enum LiveChannelLogoResolver {
     }
 }
 
+final class LiveChannelLogoURLCache: ObservableObject {
+    private struct Key: Hashable {
+        let logoURL: URL?
+        let tvgID: String?
+        let tvgName: String?
+        let name: String
+    }
+
+    private var values: [Key: [URL]] = [:]
+    private(set) var computationCount = 0
+
+    func urls(for channel: LiveChannel) -> [URL] {
+        let key = Key(
+            logoURL: channel.logoURL,
+            tvgID: channel.tvgID,
+            tvgName: channel.tvgName,
+            name: channel.name
+        )
+        if let cached = values[key] {
+            return cached
+        }
+        let urls = LiveChannelLogoResolver.urls(for: channel)
+        values[key] = urls
+        computationCount += 1
+        return urls
+    }
+}
+
 struct LiveSourceImportSheet: View {
     enum Mode: String, CaseIterable, Identifiable {
         case remote = "URL"
@@ -927,8 +1075,7 @@ struct LiveSourceImportSheet: View {
             Spacer()
             if let importPhase {
                 HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
+                    AppActivityIndicator(size: .small)
                     Text(importPhase.title)
                         .font(.callout)
                         .foregroundColor(.secondary)
@@ -947,8 +1094,7 @@ struct LiveSourceImportSheet: View {
                 } label: {
                     if isSubmitting {
                         HStack(spacing: 6) {
-                            ProgressView()
-                                .controlSize(.small)
+                            AppActivityIndicator(size: .small)
                             Text("添加中")
                         }
                     } else {

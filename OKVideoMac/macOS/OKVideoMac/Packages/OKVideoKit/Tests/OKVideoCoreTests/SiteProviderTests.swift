@@ -2,6 +2,32 @@ import XCTest
 @testable import OKVideoCore
 
 final class SiteProviderTests: XCTestCase {
+    func testPlayerDecoderPreservesExtendedCatPawFields() throws {
+        let configuration = try ConfigurationParser().parse(
+            Data(#"{"sites":[{"key":"fixture","name":"Fixture","type":0,"api":"https://example.invalid/api.php"}]}"#.utf8)
+        )
+        let site = try XCTUnwrap(configuration.sites.first)
+        let response = try UpstreamResponseDecoder.decodeJSON(
+            Data(
+                #"{"url":"https://cdn.invalid/movie.m3u8","parse":0,"key":"secret","click":"selector","code":"script","jxFrom":"fixture-jx","danmaku":{"url":"https://cdn.invalid/danmu.xml"},"drm":{"type":"widevine"},"artwork":"https://cdn.invalid/art.jpg","desc":"说明","position":42.5,"lrc":"[00:01]歌词"}"#.utf8
+            ),
+            site: site,
+            baseURL: nil
+        )
+        let result = try XCTUnwrap(response.player)
+
+        XCTAssertEqual(result.key, "secret")
+        XCTAssertEqual(result.click, "selector")
+        XCTAssertEqual(result.code, "script")
+        XCTAssertEqual(result.jxFrom, "fixture-jx")
+        XCTAssertEqual(result.artwork, "https://cdn.invalid/art.jpg")
+        XCTAssertEqual(result.description, "说明")
+        XCTAssertEqual(result.position, 42.5)
+        XCTAssertEqual(result.lyrics, "[00:01]歌词")
+        XCTAssertNotNil(result.danmaku)
+        XCTAssertNotNil(result.drm)
+    }
+
     func testPlayListParserNeverInventsEpisodeNumbersFromArrayPosition() {
         let sources = PlayListParser.parse(
             sourceNames: "主线路",
@@ -198,6 +224,21 @@ final class SiteProviderTests: XCTestCase {
         XCTAssertTrue(MediaURLClassifier.isDirectMediaURL("file:///tmp/a.mp4"))
         XCTAssertFalse(MediaURLClassifier.isDirectMediaURL("javascript:alert(1)"))
         XCTAssertFalse(MediaURLClassifier.isDirectMediaURL("https://example.invalid/watch/1"))
+        XCTAssertTrue(
+            MediaURLClassifier.isSupportedAbsoluteMediaURL(
+                "rtsp://192.0.2.1/live"
+            )
+        )
+        XCTAssertFalse(
+            MediaURLClassifier.isSupportedAbsoluteMediaURL(
+                "ndr2.stale-history-token"
+            )
+        )
+        XCTAssertFalse(
+            MediaURLClassifier.isSupportedAbsoluteMediaURL(
+                "/relative/provider/error"
+            )
+        )
     }
 
     func testEmptySpiderResponseUsesActionableError() {
@@ -272,6 +313,83 @@ final class SiteProviderTests: XCTestCase {
 
         XCTAssertTrue(home.categories.isEmpty)
         XCTAssertTrue(home.recommendations.isEmpty)
+    }
+
+    func testSpiderHomeDoesNotGuessActionsFromCategoryOrItemIdentifiers() throws {
+        let site = SiteConfiguration(
+            key: "generic-node-site",
+            name: "Generic Node Site",
+            type: 4,
+            api: "/spider/generic/4"
+        )
+
+        let home = try SpiderResponseMapper.home(
+            .string(
+                #"{"class":[{"type_id":"setting","type_name":"任意功能入口"}],"list":[{"vod_id":"config-center","vod_name":"任意操作卡片","vod_pic":"https://example.invalid/poster.jpg"}]}"#
+            ),
+            homeVideoValue: nil,
+            site: site,
+            baseURL: nil
+        )
+
+        XCTAssertEqual(home.categories.map(\.resolvedContentKind), [.media])
+        XCTAssertEqual(home.recommendations.map(\.title), ["任意操作卡片"])
+        XCTAssertTrue(home.actionItems.isEmpty)
+    }
+
+    func testSpiderHomeKeepsMediaWhoseTextOrIdentifierLooksFunctional() throws {
+        let site = SiteConfiguration(
+            key: "semantic-media",
+            name: "Semantic Media",
+            type: 3,
+            api: "csp_SemanticMedia"
+        )
+
+        let home = try SpiderResponseMapper.home(
+            .string(
+                #"{"class":[{"type_id":"https://example.invalid/category","type_name":"设置中心电影"}],"list":[{"vod_id":"https://example.invalid/detail/1","vod_name":"配置中心往事","type_id":"https://example.invalid/category","vod_pic":"https://example.invalid/poster.jpg"}]}"#
+            ),
+            homeVideoValue: nil,
+            site: site,
+            baseURL: nil
+        )
+
+        XCTAssertEqual(home.categories.map(\.name), ["设置中心电影"])
+        XCTAssertEqual(home.recommendations.map(\.title), ["配置中心往事"])
+        XCTAssertEqual(
+            home.recommendations.first?.videoID,
+            "https://example.invalid/detail/1"
+        )
+    }
+
+    func testSpiderHomePreservesExplicitRecommendationCategoryOnlyWhenProvided() throws {
+        let site = SiteConfiguration(
+            key: "recommendation-semantics",
+            name: "Recommendation Semantics",
+            type: 3,
+            api: "csp_Recommendation"
+        )
+        let explicit = try SpiderResponseMapper.home(
+            .string(
+                #"{"class":[{"type_id":"recommend","type_name":"推荐"}],"list":[]}"#
+            ),
+            homeVideoValue: nil,
+            site: site,
+            baseURL: nil
+        )
+        let absent = try SpiderResponseMapper.home(
+            .string(
+                #"{"class":[{"type_id":"movie","type_name":"电影"}],"list":[{"vod_id":"home-feed-1","vod_name":"首页影片"}]}"#
+            ),
+            homeVideoValue: nil,
+            site: site,
+            baseURL: nil
+        )
+
+        XCTAssertEqual(explicit.categories.map(\.name), ["推荐"])
+        XCTAssertEqual(absent.categories.map(\.name), ["电影"])
+        XCTAssertFalse(absent.categories.contains { $0.name == "推荐" })
+        XCTAssertEqual(absent.recommendations.map(\.title), ["首页影片"])
     }
 
     func testPromotionalPlaceholderIsExcludedAndMissingIDsRemainDiscoverable() throws {
@@ -405,7 +523,7 @@ final class SiteProviderTests: XCTestCase {
         )
     }
 
-    func testPlayerPrefersOriginalQualityOverFongMiURLObjectPosition() throws {
+    func testPlayerHonorsFongMiURLObjectPositionWithOriginalQuality() throws {
         let site = SiteConfiguration(
             key: "quality-object",
             name: "Quality Object",
@@ -422,7 +540,7 @@ final class SiteProviderTests: XCTestCase {
 
         XCTAssertEqual(
             response.player?.url,
-            "https://media.example.invalid/original.mp4"
+            "https://media.example.invalid/smart.m3u8"
         )
         XCTAssertEqual(response.player?.qualities.map(\.name), ["Original", "Smart"])
     }
@@ -448,7 +566,7 @@ final class SiteProviderTests: XCTestCase {
         )
     }
 
-    func testPlayerFindsOriginalQualityWhenItIsNotFirstInArray() throws {
+    func testPlayerKeepsProviderOrderWhenOriginalQualityIsSecond() throws {
         let site = SiteConfiguration(
             key: "quality-array-original-second",
             name: "Quality Array Original Second",
@@ -465,7 +583,7 @@ final class SiteProviderTests: XCTestCase {
 
         XCTAssertEqual(
             response.player?.url,
-            "https://media.example.invalid/original.mp4"
+            "https://media.example.invalid/smart.m3u8"
         )
         XCTAssertEqual(response.player?.qualities.map(\.name), ["智能", "原画质"])
     }
@@ -501,6 +619,45 @@ final class SiteProviderTests: XCTestCase {
         )
 
         XCTAssertEqual(summary.action, "LoginShow")
+        XCTAssertEqual(summary.resolvedContentKind, .action)
+    }
+
+    func testLegacySiteHomeCacheDecodesWithoutActionItems() throws {
+        let data = Data(
+            #"{"categories":[],"recommendations":[]}"#.utf8
+        )
+
+        let home = try JSONDecoder().decode(SiteHome.self, from: data)
+
+        XCTAssertTrue(home.categories.isEmpty)
+        XCTAssertTrue(home.recommendations.isEmpty)
+        XCTAssertTrue(home.actionItems.isEmpty)
+    }
+
+    func testHomeFunctionRouteRoundTripsAndLegacyActionsRemainCompatible() throws {
+        let category = SiteActionItem(
+            siteKey: "drive",
+            siteName: "Drive",
+            itemID: "settings",
+            title: "Settings",
+            route: .actionCategory(categoryID: "settings")
+        )
+        let decoded = try JSONDecoder().decode(
+            SiteActionItem.self,
+            from: JSONEncoder().encode(category)
+        )
+        XCTAssertEqual(
+            decoded.resolvedRoute,
+            .actionCategory(categoryID: "settings")
+        )
+
+        let legacy = try JSONDecoder().decode(
+            SiteActionItem.self,
+            from: Data(
+                #"{"siteKey":"drive","siteName":"Drive","itemID":"login","title":"Login","action":"LoginShow"}"#.utf8
+            )
+        )
+        XCTAssertEqual(legacy.resolvedRoute, .command(action: "LoginShow"))
     }
 
     func testBlankDetailPlaceholderIsRecognizedAsAction() throws {
@@ -564,6 +721,320 @@ final class SiteProviderTests: XCTestCase {
         XCTAssertEqual(detail.summary.remarks, "全集")
         XCTAssertEqual(detail.playSources.first?.name, "夸克")
         XCTAssertEqual(detail.playSources.first?.episodes.count, 1)
+    }
+
+    func testSuccessfulEmptyDetailReturnsOneShotSearchSelection() throws {
+        let site = SiteConfiguration(
+            key: "renamed-source",
+            name: "Renamed Source",
+            type: 3,
+            api: "https://runtime.example.test/spider/arbitrary/3"
+        )
+        let fallback = VideoSummary(
+            siteKey: site.key,
+            siteName: site.name,
+            videoID: "opaque-item-927",
+            title: "  Arbitrary Film  "
+        )
+
+        XCTAssertEqual(
+            try SpiderResponseMapper.selection(
+                .object([:]),
+                site: site,
+                baseURL: nil,
+                fallbackSummary: fallback,
+                allowsPlaceholderAction: false
+            ),
+            .search("Arbitrary Film")
+        )
+        XCTAssertEqual(fallback.resolvedContentKind, .media)
+    }
+
+    func testSuccessfulEmptyDetailRejectsUnsearchableFallbackTitle() throws {
+        let site = SiteConfiguration(
+            key: "another-source",
+            name: "Another Source",
+            type: 3,
+            api: "https://changed.example.test/spider/opaque/3"
+        )
+
+        for title in ["", "   ", "---", "…", "untitled"] {
+            XCTAssertThrowsError(
+                try SpiderResponseMapper.selection(
+                    .object([:]),
+                    site: site,
+                    baseURL: nil,
+                    fallbackSummary: VideoSummary(
+                        siteKey: site.key,
+                        siteName: site.name,
+                        videoID: UUID().uuidString,
+                        title: title
+                    ),
+                    allowsPlaceholderAction: false
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? AppError,
+                    .contentUnavailable("当前内容源未提供可打开的详情")
+                )
+            }
+        }
+    }
+
+    func testCategoryNavigationRequiresNormalizedCateValue() throws {
+        let site = SiteConfiguration(
+            key: "source-after-rename",
+            name: "Source After Rename",
+            type: 3,
+            api: "https://different-domain.example.test/spider/site/3"
+        )
+        let page = try SpiderResponseMapper.page(
+            .object([
+                "list": .array([
+                    .object([
+                        "vod_id": .string("opaque-a"),
+                        "vod_name": .string("Object Callback"),
+                        "vod_pic": .string(
+                            "https://images.changed.example.test/object.webp"
+                        ),
+                        "cate": .object([:])
+                    ]),
+                    .object([
+                        "vod_id": .string("opaque-b"),
+                        "vod_name": .string("Null Callback"),
+                        "cate": .null
+                    ]),
+                    .object([
+                        "vod_id": .string("opaque-c"),
+                        "vod_name": .string("Blank Callback"),
+                        "cate": .string("   \n")
+                    ]),
+                    .object([
+                        "vod_id": .string("opaque-d"),
+                        "vod_name": .string("Named Callback"),
+                        "cate": .string(" callback ")
+                    ]),
+                    .object([
+                        "vod_id": .string("opaque-e"),
+                        "vod_name": .string("No Callback")
+                    ])
+                ])
+            ]),
+            site: site,
+            baseURL: nil,
+            page: 1
+        )
+
+        XCTAssertEqual(page.items.map(\.isFolder), [true, false, false, true, false])
+        XCTAssertEqual(
+            page.items.first?.posterURL?.absoluteString,
+            "https://images.changed.example.test/object.webp"
+        )
+    }
+
+    func testActionPagePreservesAllCardsUnderExplicitActionCategory() throws {
+        let site = SiteConfiguration(
+            key: "renamed-action-source",
+            name: "Renamed Action Source",
+            type: 4,
+            api: "/spider/renamed/4"
+        )
+        let page = try SpiderResponseMapper.actionPage(
+            .object([
+                "list": .array([
+                    .object([
+                        "vod_id": .string("configure-account"),
+                        "vod_name": .string("账户设置"),
+                        "action": .string("configure")
+                    ]),
+                    .object([
+                        "vod_id": .string("ordinary-movie"),
+                        "vod_name": .string("普通影片"),
+                        "vod_play_url": .string("第一集$https://media.example/1.m3u8")
+                    ])
+                ]),
+                "page": .integer(1),
+                "pagecount": .integer(1)
+            ]),
+            site: site,
+            baseURL: URL(string: "http://127.0.0.1:18988/"),
+            page: 1
+        )
+
+        XCTAssertEqual(
+            page.items.map(\.videoID),
+            ["configure-account", "ordinary-movie"]
+        )
+        XCTAssertTrue(page.items.allSatisfy {
+            $0.resolvedContentKind == .action
+        })
+    }
+
+    func testJavaDexCategoryPreservesExplicitActionsWithoutChangingNodePage()
+        throws {
+        let site = SiteConfiguration(
+            key: "multi-config-source",
+            name: "Multi Config Source",
+            type: 3,
+            api: "csp_FishConfig"
+        )
+        let payload: JSONValue = .object([
+            "list": .array([
+                .object([
+                    "vod_id": .string("config-health"),
+                    "vod_name": .string("配置检查"),
+                    "action": .string("config_health")
+                ]),
+                .object([
+                    "vod_id": .string("ordinary-movie"),
+                    "vod_name": .string("普通影片")
+                ]),
+                .object([
+                    "vod_id": .string("unsupported-entry"),
+                    "vod_name": .string("不支持"),
+                    "vod_tag": .string("unsupported")
+                ])
+            ]),
+            "page": .integer(1),
+            "pagecount": .integer(1)
+        ])
+
+        let javaDex = try SpiderResponseMapper.javaDexCategoryPage(
+            payload,
+            site: site,
+            baseURL: nil,
+            page: 1
+        )
+        XCTAssertEqual(
+            javaDex.items.map(\.videoID),
+            ["config-health", "ordinary-movie"]
+        )
+        XCTAssertEqual(
+            javaDex.items.map(\.resolvedContentKind),
+            [.action, .media]
+        )
+
+        // NodeHTTPSpiderSiteProvider deliberately continues through `page`.
+        // Its host-message configuration transport must remain isolated from
+        // the Android/Dex action-card contract.
+        let node = try SpiderResponseMapper.page(
+            payload,
+            site: site,
+            baseURL: nil,
+            page: 1
+        )
+        XCTAssertEqual(node.items.map(\.videoID), ["ordinary-movie"])
+    }
+
+    func testPlayerAcceptsPluralHeadersAndCanonicalHeaderWins() throws {
+        let site = SiteConfiguration(
+            key: "header-source",
+            name: "Header Source",
+            type: 4,
+            api: "/spider/header/4"
+        )
+        let result = try SpiderResponseMapper.player(
+            .object([
+                "parse": .integer(0),
+                "url": .string("https://media.example/movie.mp4"),
+                "headers": .object([
+                    "Referer": .string("https://plural.example/"),
+                    "Cookie": .string("session=fixture")
+                ]),
+                "header": .object([
+                    "Referer": .string("https://canonical.example/")
+                ])
+            ]),
+            site: site
+        )
+
+        XCTAssertEqual(result.headers["Referer"], "https://canonical.example/")
+        XCTAssertEqual(result.headers["Cookie"], "session=fixture")
+    }
+
+    func testPlayerReadsExplicitProviderStableResourceDescriptor() throws {
+        let value: JSONValue = .object([
+            "parse": .integer(0),
+            "url": .string("http://127.0.0.1:18988/src/down/ephemeral"),
+            "providerResourceReference": .object([
+                "schemaVersion": .integer(1),
+                "providerVersion": .integer(1),
+                "stableResourceLocator": .string("node-item-42-file-7"),
+                "stability": .string("providerStable")
+            ])
+        ])
+
+        XCTAssertEqual(
+            SpiderResponseMapper.providerPlaybackResourceDescriptor(value),
+            ProviderPlaybackResourceDescriptor(
+                schemaVersion: 1,
+                providerVersion: 1,
+                stableResourceLocator: "node-item-42-file-7",
+                stability: .providerStable
+            )
+        )
+    }
+
+    func testPlayerReadsSecretFreeCloudStableDescription() throws {
+        let value: JSONValue = .object([
+            "parse": .integer(0),
+            "url": .string("http://127.0.0.1:18988/src/down/ephemeral"),
+            "providerResourceReference": .object([
+                "schemaVersion": .integer(1),
+                "providerVersion": .integer(1),
+                "stableResourceLocator": .string("quark-share-file"),
+                "stability": .string("providerStable"),
+                "stableDescription": .object([
+                    "provider": .string("quark"),
+                    "shareId": .string("share-123"),
+                    "fileId": .string("file-456"),
+                    "sourceKey": .string("quark-line"),
+                    "episodeName": .string("第 1 集")
+                ])
+            ])
+        ])
+
+        let descriptor = try XCTUnwrap(
+            SpiderResponseMapper.providerPlaybackResourceDescriptor(value)
+        )
+        XCTAssertEqual(
+            descriptor.stableDescription,
+            ProviderPlaybackStableDescription(
+                provider: "quark",
+                shareID: "share-123",
+                fileID: "file-456",
+                sourceKey: "quark-line",
+                episodeName: "第 1 集"
+            )
+        )
+    }
+
+    func testPlayerRejectsImplicitOrSensitiveProviderResourceDescriptor() {
+        let implicit: JSONValue = .object([
+            "url": .string("http://127.0.0.1:18988/src/down/ephemeral")
+        ])
+        XCTAssertNil(
+            SpiderResponseMapper.providerPlaybackResourceDescriptor(implicit)
+        )
+
+        for locator in [
+            "https://media.example.invalid/signed/item-42",
+            "node-item-42-token-secret",
+            #"{"fileId":"42"}"#
+        ] {
+            let value: JSONValue = .object([
+                "url": .string("http://127.0.0.1:18988/src/down/ephemeral"),
+                "providerResourceReference": .object([
+                    "schemaVersion": .integer(1),
+                    "providerVersion": .integer(1),
+                    "stableResourceLocator": .string(locator),
+                    "stability": .string("providerStable")
+                ])
+            ])
+            XCTAssertNil(
+                SpiderResponseMapper.providerPlaybackResourceDescriptor(value)
+            )
+        }
     }
 
     func testContentSiteBlankDetailPlaceholderIsNotAnAction() throws {
@@ -630,8 +1101,291 @@ final class SiteProviderTests: XCTestCase {
                 site: site
             )
         ) { error in
-            XCTAssertEqual(error as? AppError, .spider("未扫码授权无法观看"))
+            XCTAssertEqual(
+                error as? ProviderPlaybackError,
+                ProviderPlaybackError("未扫码授权无法观看")
+            )
         }
+    }
+
+    func testSpiderPlayerPrefersProviderMessageOverFallbackURL() throws {
+        let site = SiteConfiguration(
+            key: "drive-message",
+            name: "Drive Message",
+            type: 3,
+            api: "csp_Fixture"
+        )
+
+        XCTAssertThrowsError(
+            try SpiderResponseMapper.player(
+                .object([
+                    "parse": .integer(0),
+                    "url": .string("https://fallback.example.invalid/movie.mp4"),
+                    "msg": .string("账号未授权，无法获取播放地址")
+                ]),
+                site: site
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ProviderPlaybackError,
+                ProviderPlaybackError("账号未授权，无法获取播放地址")
+            )
+        }
+    }
+
+    func testSpiderPlayerSurfacesNestedProviderError() throws {
+        let site = SiteConfiguration(
+            key: "nested-error",
+            name: "Nested Error",
+            type: 4,
+            api: "/spider/nested/4"
+        )
+
+        XCTAssertThrowsError(
+            try SpiderResponseMapper.player(
+                .object([
+                    "parse": .integer(0),
+                    "url": .array([]),
+                    "error": .object([
+                        "message": .string("百度网盘 Cookie 已失效")
+                    ])
+                ]),
+                site: site
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ProviderPlaybackError,
+                ProviderPlaybackError("百度网盘 Cookie 已失效")
+            )
+        }
+    }
+
+    func testSpiderPlayerRejectsStringifiedEmptyURLSentinels() throws {
+        let site = SiteConfiguration(
+            key: "empty-url",
+            name: "Empty URL",
+            type: 4,
+            api: "/spider/empty/4"
+        )
+
+        for sentinel in ["{}", "[]", "null", "undefined"] {
+            XCTAssertThrowsError(
+                try SpiderResponseMapper.player(
+                    .object([
+                        "parse": .integer(0),
+                        "url": .string(sentinel)
+                    ]),
+                    site: site
+                )
+            )
+        }
+    }
+
+    func testPlaybackRefreshSearchesAfterStaleDetailLosesResource() async throws {
+        let oldSource = PlaySource(
+            name: "旧线路名",
+            episodes: [
+                PlayEpisode(
+                    name: "旧集名",
+                    url: "https://old.invalid/play?id=7&token=expired",
+                    referenceIdentity: "episode-7"
+                )
+            ],
+            referenceIdentity: "provider-line-7"
+        )
+        let refreshedSource = PlaySource(
+            name: "新线路名",
+            episodes: [
+                PlayEpisode(
+                    name: "新集名",
+                    url: "https://new.invalid/play?id=7&token=fresh",
+                    referenceIdentity: "episode-7"
+                )
+            ],
+            referenceIdentity: "provider-line-7"
+        )
+        let provider = RefreshPlaybackSiteProvider(
+            details: [
+                "stale-id": Self.refreshDetail(
+                    id: "stale-id",
+                    title: "同名旧条目",
+                    sourceIdentity: "unrelated-line"
+                ),
+                "fresh-id": VideoDetail(
+                    summary: Self.refreshSummary(id: "fresh-id", title: "目标影片"),
+                    playSources: [refreshedSource]
+                )
+            ],
+            searchPage: VideoPage(
+                items: [Self.refreshSummary(id: "fresh-id", title: "目标影片")],
+                pagination: Pagination(page: 1, pageCount: 1)
+            ),
+            playerResult: SitePlaybackResult(
+                url: "https://new.invalid/signed?id=7",
+                needsParsing: false,
+                flag: "新线路名",
+                headers: ["Authorization": "Bearer refreshed"]
+            )
+        )
+
+        let refreshed = try await provider.refreshPlayback(
+            PlaybackRefreshRequest(
+                videoID: "stale-id",
+                title: "目标影片",
+                sourceIdentity: oldSource.stableIdentity,
+                resourceIdentity: oldSource.episodes[0].stableIdentity,
+                sourceName: oldSource.name,
+                episodeName: oldSource.episodes[0].name
+            )
+        )
+
+        XCTAssertEqual(refreshed.detail.summary.videoID, "fresh-id")
+        XCTAssertEqual(refreshed.source.name, "新线路名")
+        XCTAssertEqual(refreshed.episode.name, "新集名")
+        XCTAssertEqual(
+            refreshed.playbackResult.headers["Authorization"],
+            "Bearer refreshed"
+        )
+        XCTAssertEqual(
+            provider.playerRequests,
+            ["新线路名::https://new.invalid/play?id=7&token=fresh"]
+        )
+    }
+
+    func testPlaybackRefreshDisambiguatesDuplicateTitlesByResourceIdentity() async throws {
+        let expectedSource = PlaySource(
+            name: "UC",
+            episodes: [
+                PlayEpisode(
+                    name: "目标文件",
+                    url: "opaque-provider-reference",
+                    referenceIdentity: "resource-42"
+                )
+            ],
+            referenceIdentity: "provider-line-42"
+        )
+        let unrelated = Self.refreshDetail(
+            id: "duplicate-a",
+            title: "同名影片",
+            sourceIdentity: "unrelated-line"
+        )
+        let expected = VideoDetail(
+            summary: Self.refreshSummary(id: "duplicate-b", title: "同名影片"),
+            playSources: [expectedSource]
+        )
+        let provider = RefreshPlaybackSiteProvider(
+            details: [
+                "stale-id": unrelated,
+                "duplicate-a": unrelated,
+                "duplicate-b": expected
+            ],
+            searchPage: VideoPage(
+                items: [
+                    Self.refreshSummary(id: "duplicate-a", title: "同名影片"),
+                    Self.refreshSummary(id: "duplicate-b", title: "同名影片")
+                ],
+                pagination: Pagination(page: 1, pageCount: 1)
+            ),
+            playerResult: SitePlaybackResult(
+                url: "https://fresh.invalid/media",
+                needsParsing: false,
+                flag: "UC"
+            )
+        )
+
+        let refreshed = try await provider.refreshPlayback(
+            PlaybackRefreshRequest(
+                videoID: "stale-id",
+                title: "同名影片",
+                sourceIdentity: "provider-line-42",
+                resourceIdentity: "resource-42",
+                sourceName: "UC",
+                episodeName: "目标文件",
+                episodeReference: "opaque-provider-reference"
+            )
+        )
+
+        XCTAssertEqual(refreshed.detail.summary.videoID, "duplicate-b")
+        XCTAssertEqual(
+            refreshed.episode.stableIdentity,
+            expectedSource.episodes[0].stableIdentity
+        )
+        XCTAssertEqual(
+            provider.playerRequests,
+            ["UC::opaque-provider-reference"]
+        )
+    }
+
+    func testPlaybackRefreshNeverFallsThroughToUnrelatedResource() async throws {
+        let unrelated = Self.refreshDetail(
+            id: "fresh-id",
+            title: "目标影片",
+            sourceIdentity: "different-line"
+        )
+        let provider = RefreshPlaybackSiteProvider(
+            details: ["stale-id": unrelated, "fresh-id": unrelated],
+            searchPage: VideoPage(
+                items: [Self.refreshSummary(id: "fresh-id", title: "目标影片")],
+                pagination: Pagination(page: 1, pageCount: 1)
+            ),
+            playerResult: SitePlaybackResult(
+                url: "https://should-not-play.invalid/video",
+                needsParsing: false,
+                flag: "other"
+            )
+        )
+
+        do {
+            _ = try await provider.refreshPlayback(
+                PlaybackRefreshRequest(
+                    videoID: "stale-id",
+                    title: "目标影片",
+                    sourceIdentity: "missing-source",
+                    resourceIdentity: "missing-resource",
+                    sourceName: "旧线路",
+                    episodeName: "旧集"
+                )
+            )
+            XCTFail("同资源无法定位时不应静默切换到其他线路")
+        } catch {
+            XCTAssertEqual(
+                error as? AppError,
+                .playback("无法从最新详情唯一匹配原历史线路")
+            )
+        }
+        XCTAssertTrue(provider.playerRequests.isEmpty)
+    }
+
+    private static func refreshSummary(id: String, title: String) -> VideoSummary {
+        VideoSummary(
+            siteKey: "refresh-fixture",
+            siteName: "Refresh Fixture",
+            videoID: id,
+            title: title
+        )
+    }
+
+    private static func refreshDetail(
+        id: String,
+        title: String,
+        sourceIdentity: String
+    ) -> VideoDetail {
+        VideoDetail(
+            summary: refreshSummary(id: id, title: title),
+            playSources: [
+                PlaySource(
+                    name: "其他线路",
+                    episodes: [
+                        PlayEpisode(
+                            name: "其他集",
+                            url: "https://other.invalid/play?id=99",
+                            referenceIdentity: "other-episode"
+                        )
+                    ],
+                    referenceIdentity: sourceIdentity
+                )
+            ]
+        )
     }
 
     private static func response(_ json: String) -> HTTPResponse {
@@ -641,6 +1395,66 @@ final class SiteProviderTests: XCTestCase {
             headers: ["Content-Type": "application/json"],
             body: Data(json.utf8)
         )
+    }
+}
+
+private final class RefreshPlaybackSiteProvider: SiteProvider {
+    let site = SiteConfiguration(
+        key: "refresh-fixture",
+        name: "Refresh Fixture",
+        type: 1,
+        api: "https://example.invalid/api"
+    )
+    let capability: SiteCapability = .standardJSON
+    let details: [String: VideoDetail]
+    let searchPage: VideoPage
+    let playerResult: SitePlaybackResult
+    private(set) var playerRequests: [String] = []
+
+    init(
+        details: [String: VideoDetail],
+        searchPage: VideoPage,
+        playerResult: SitePlaybackResult
+    ) {
+        self.details = details
+        self.searchPage = searchPage
+        self.playerResult = playerResult
+    }
+
+    func home() async throws -> SiteHome {
+        SiteHome(categories: [], recommendations: [])
+    }
+
+    func category(
+        id: String,
+        page: Int,
+        filters: [String: String]
+    ) async throws -> VideoPage {
+        VideoPage(items: [], pagination: Pagination(page: page, pageCount: 1))
+    }
+
+    func select(id: String) async throws -> SiteSelectionResult {
+        .detail(try await detail(id: id))
+    }
+
+    func detail(id: String) async throws -> VideoDetail {
+        guard let detail = details[id] else {
+            throw AppError.contentUnavailable("fixture detail missing")
+        }
+        return detail
+    }
+
+    func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
+        searchPage
+    }
+
+    func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
+        playerRequests.append("\(flag)::\(episodeURL)")
+        return playerResult
+    }
+
+    func action(_ action: String) async throws -> JSONValue {
+        .null
     }
 }
 

@@ -51,6 +51,37 @@ final class ConfigurationLoaderTests: XCTestCase {
         XCTAssertEqual(loaded.configuration.sites.first?.key, "wrapped")
     }
 
+    func testRemoteLoadDecodesImageWrappedTVBoxJSONC() async throws {
+        let jsonc = Data(
+            #"""
+            {
+              "sites": [
+                {"key":"first","name":"First","type":1,"api":"https://example.invalid/api"},
+                // {"key":"disabled","name":"Disabled","type":1,"api":"https://example.invalid/off"},
+              ],
+              "lives": [],
+            }
+            """#.utf8
+        )
+        var wrapped = Data([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10])
+        wrapped.append(Data("Random42**".utf8))
+        wrapped.append(Data(jsonc.base64EncodedString().utf8))
+        let client = StubHTTPClient(
+            response: HTTPResponse(
+                url: URL(string: "http://example.invalid/tv")!,
+                statusCode: 200,
+                headers: ["Content-Type": "image/x-ms-bmp"],
+                body: wrapped
+            )
+        )
+
+        let loaded = try await ConfigurationLoader(httpClient: client)
+            .load(.remote(URL(string: "http://example.invalid/tv")!))
+
+        XCTAssertEqual(loaded.rawData, jsonc)
+        XCTAssertEqual(loaded.configuration.sites.map(\.key), ["first"])
+    }
+
     func testImageWithoutFongMiPayloadIsRejectedClearly() async {
         let client = StubHTTPClient(
             response: HTTPResponse(

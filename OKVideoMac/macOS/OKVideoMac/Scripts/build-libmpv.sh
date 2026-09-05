@@ -6,12 +6,15 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/build-environment.sh"
 
 BUILD_ROOT="$OKVIDEOMAC_BUILD_ROOT/libmpv"
+INSTALL_PREFIX="/opt/okvideomac/libmpv"
+INSTALL_STAGE="$OKVIDEOMAC_BUILD_ROOT/libmpv-install-stage"
 SOURCE_ROOT="$OKVIDEOMAC_BUILD_ROOT/Source"
 DOWNLOAD_ROOT="$OKVIDEOMAC_BUILD_ROOT/Downloads"
 ARCHIVE="$DOWNLOAD_ROOT/mpv-v0.41.0.tar.gz"
 SOURCE_DIR="$SOURCE_ROOT/mpv-0.41.0"
 MESON_BUILD_DIR="$SOURCE_ROOT/mpv-0.41.0-build"
 PATCH_FILE="$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-without-cocoa.patch"
+VIDEOTOOLBOX_GL_PATCH_FILE="$PROJECT_DIR/Patches/mpv-0.41.0-libmpv-videotoolbox-gl.patch"
 URL="https://github.com/mpv-player/mpv/archive/refs/tags/v0.41.0.tar.gz"
 EXPECTED_SHA256="ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209"
 
@@ -27,6 +30,10 @@ for tool in curl shasum tar otool lipo; do
 done
 if [[ ! -f "$PATCH_FILE" ]]; then
   echo "Required mpv patch missing: $PATCH_FILE" >&2
+  exit 1
+fi
+if [[ ! -f "$VIDEOTOOLBOX_GL_PATCH_FILE" ]]; then
+  echo "Required mpv patch missing: $VIDEOTOOLBOX_GL_PATCH_FILE" >&2
   exit 1
 fi
 for macports_tool in meson ninja pkg-config; do
@@ -68,10 +75,13 @@ fi
 if ! grep -q "sources += files('osdep/utils-mac.c')" "$SOURCE_DIR/meson.build"; then
   /usr/bin/patch -d "$SOURCE_DIR" -p1 -i "$PATCH_FILE"
 fi
+if ! grep -q '#if HAVE_COCOA && HAVE_SWIFT' "$SOURCE_DIR/player/clipboard/clipboard.c"; then
+  /usr/bin/patch -d "$SOURCE_DIR" -p1 -i "$VIDEOTOOLBOX_GL_PATCH_FILE"
+fi
 
-rm -rf "$MESON_BUILD_DIR"
+rm -rf "$MESON_BUILD_DIR" "$INSTALL_STAGE"
 MACOSX_DEPLOYMENT_TARGET=12.0 /opt/local/bin/meson setup "$MESON_BUILD_DIR" "$SOURCE_DIR" \
-  --prefix "$BUILD_ROOT" \
+  --prefix "$INSTALL_PREFIX" \
   --buildtype release \
   -Dcplayer=false \
   -Dlibmpv=true \
@@ -89,12 +99,17 @@ MACOSX_DEPLOYMENT_TARGET=12.0 /opt/local/bin/meson setup "$MESON_BUILD_DIR" "$SO
   -Dlibavdevice=disabled \
   -Dplain-gl=enabled \
   -Dgl=enabled \
-  -Dcocoa=disabled \
-  -Dvideotoolbox-gl=disabled \
+  -Dcocoa=enabled \
+  -Dgl-cocoa=enabled \
+  -Dvideotoolbox-gl=enabled \
   -Dcoreaudio=enabled
 
 MACOSX_DEPLOYMENT_TARGET=12.0 /opt/local/bin/meson compile -C "$MESON_BUILD_DIR"
-/opt/local/bin/meson install -C "$MESON_BUILD_DIR"
+DESTDIR="$INSTALL_STAGE" /opt/local/bin/meson install -C "$MESON_BUILD_DIR"
+rm -rf "$BUILD_ROOT"
+mkdir -p "$BUILD_ROOT"
+cp -R "$INSTALL_STAGE$INSTALL_PREFIX/." "$BUILD_ROOT/"
+rm -rf "$INSTALL_STAGE"
 mkdir -p "$BUILD_ROOT/licenses"
 cp "$SOURCE_DIR/LICENSE.GPL" "$BUILD_ROOT/licenses/mpv-GPL-2.0-or-later.txt"
 cp "$SOURCE_DIR/LICENSE.LGPL" "$BUILD_ROOT/licenses/mpv-LGPL-2.1-or-later.txt"
@@ -111,6 +126,8 @@ install_name_tool -id '@rpath/libmpv.dylib' "$LIBMPV_PATH"
 BRIDGE_SOURCE="$PROJECT_DIR/Native/MPVBridge/OKMPVBridge.c"
 BRIDGE_OUTPUT="$BUILD_ROOT/lib/libOKMPVBridge.dylib"
 BRIDGE_SMOKE="$BUILD_ROOT/bin/mpv-bridge-smoke"
+FFMPEG_CFLAGS=( $("$PKG_CONFIG" --cflags libavformat libavcodec libavutil) )
+FFMPEG_LIBS=( $("$PKG_CONFIG" --libs libavformat libavcodec libavutil) )
 mkdir -p "$(dirname "$BRIDGE_OUTPUT")"
 MACOSX_DEPLOYMENT_TARGET=12.0 clang \
   -arch arm64 \
@@ -120,13 +137,12 @@ MACOSX_DEPLOYMENT_TARGET=12.0 clang \
   -Werror \
   -dynamiclib \
   -mmacosx-version-min=12.0 \
+  "${FFMPEG_CFLAGS[@]}" \
   -I"$BUILD_ROOT/include" \
   "$BRIDGE_SOURCE" \
   -L"$(dirname "$LIBMPV_PATH")" \
   -lmpv \
-  -lavformat \
-  -lavcodec \
-  -lavutil \
+  "${FFMPEG_LIBS[@]}" \
   -Wl,-install_name,@rpath/libOKMPVBridge.dylib \
   -Wl,-rpath,@loader_path \
   -o "$BRIDGE_OUTPUT"

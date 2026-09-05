@@ -23,6 +23,27 @@ struct UpstreamVideo {
     var playURL: String?
     var tag: String?
     var action: String?
+    var contentKind: VideoContentKind
+    var isCategoryNavigation: Bool
+}
+
+/// Interprets only protocol metadata. Human-facing names, poster URLs, and
+/// identifiers that merely happen to look like URLs are deliberately ignored.
+enum ProtocolContentSemantics {
+    static func kind(
+        categoryID: String?,
+        action: String?,
+        tag: String?
+    ) -> VideoContentKind {
+        if action?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            return .action
+        }
+        if tag?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare("unsupported") == .orderedSame {
+            return .unsupported
+        }
+        return .media
+    }
 }
 
 enum UpstreamResponseDecoder {
@@ -82,7 +103,8 @@ enum UpstreamResponseDecoder {
     static func summaries(
         from videos: [UpstreamVideo],
         site: SiteConfiguration,
-        baseURL: URL?
+        baseURL: URL?,
+        inheritedContentKind: VideoContentKind? = nil
     ) -> [VideoSummary] {
         videos.compactMap { video in
             guard video.id != "-1001", !video.name.isEmpty else {
@@ -101,6 +123,9 @@ enum UpstreamResponseDecoder {
                 identifier = "msearch:\(site.key):\(video.name)"
             }
             let posterURL = video.picture.flatMap { try? ResourceResolver.resolve($0, relativeTo: baseURL) }
+            let contentKind = video.contentKind == .media
+                ? (inheritedContentKind ?? .media)
+                : video.contentKind
             return VideoSummary(
                 siteKey: site.key,
                 siteName: site.name,
@@ -110,10 +135,26 @@ enum UpstreamResponseDecoder {
                 remarks: video.remarks,
                 year: video.year,
                 categoryName: video.typeName,
-                tag: video.tag,
-                action: video.action
+                tag: video.tag?.nonEmptyValue
+                    ?? (video.isCategoryNavigation ? "folder" : nil),
+                action: video.action,
+                contentKind: contentKind == .media ? nil : contentKind
             )
         }
+    }
+
+    static func mediaSummaries(
+        from videos: [UpstreamVideo],
+        site: SiteConfiguration,
+        baseURL: URL?,
+        inheritedContentKind: VideoContentKind? = nil
+    ) -> [VideoSummary] {
+        summaries(
+            from: videos,
+            site: site,
+            baseURL: baseURL,
+            inheritedContentKind: inheritedContentKind
+        ).filter { $0.resolvedContentKind == .media }
     }
 
     static func detail(
@@ -151,7 +192,17 @@ enum UpstreamResponseDecoder {
                   !name.isEmpty else {
                 return nil
             }
-            return VideoCategory(id: id, name: name, filters: filters[id] ?? [])
+            let contentKind = ProtocolContentSemantics.kind(
+                categoryID: id,
+                action: string(object["action"]),
+                tag: string(object["tag"])
+            )
+            return VideoCategory(
+                id: id,
+                name: name,
+                filters: filters[id] ?? [],
+                contentKind: contentKind == .media ? nil : contentKind
+            )
         }
     }
 
@@ -185,6 +236,9 @@ enum UpstreamResponseDecoder {
         guard case .array(let items) = value else { return [] }
         return items.compactMap { item in
             guard case .object(let object) = item else { return nil }
+            let categoryID = string(object["type_id"])
+            let tag = string(object["vod_tag"]) ?? string(object["tag"])
+            let action = string(object["action"])
             return UpstreamVideo(
                 id: string(object["vod_id"]) ?? string(object["id"]) ?? "",
                 name: string(object["vod_name"]) ?? string(object["name"]) ?? "",
@@ -198,9 +252,44 @@ enum UpstreamResponseDecoder {
                 content: string(object["vod_content"]) ?? string(object["des"]),
                 playFrom: string(object["vod_play_from"]),
                 playURL: string(object["vod_play_url"]),
-                tag: string(object["vod_tag"]) ?? string(object["tag"]),
-                action: string(object["action"])
+                tag: tag,
+                action: action,
+                contentKind: ProtocolContentSemantics.kind(
+                    categoryID: categoryID,
+                    action: action,
+                    tag: tag
+                ),
+                // Contract-B discovery factories serialize valid `cate`
+                // callbacks as structural navigation metadata, including an
+                // empty object. Nil and blank string forms are normalized out;
+                // display names, source keys, and identifier shapes are never
+                // consulted.
+                isCategoryNavigation: normalizedCategoryNavigation(
+                    object["cate"]
+                )
             )
+        }
+    }
+
+    /// A serialized category callback is commonly represented as an object.
+    /// String forms are accepted only after whitespace normalization. Null,
+    /// empty, and whitespace-only values carry no navigation semantics.
+    private static func normalizedCategoryNavigation(
+        _ value: JSONValue?
+    ) -> Bool {
+        switch value {
+        case .object:
+            return true
+        case .string(let value):
+            return !value.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ).isEmpty
+        case .bool(let value):
+            return value
+        case .array(let values):
+            return !values.isEmpty
+        case .integer, .number, .null, nil:
+            return false
         }
     }
 
@@ -214,7 +303,11 @@ enum UpstreamResponseDecoder {
             )
         }
         let needsParsing = integer(object["parse"]) == 1 || integer(object["jx"]) == 1
-        let headers = decodeHeaders(object["header"])
+        // Contract-B spiders in the wild use both `header` (FongMi) and
+        // `headers` (common Node convention). Preserve both spellings and let
+        // the canonical singular form win when the same field is present.
+        let headers = HTTPHeaders(decodeHeaders(object["headers"]))
+            .merging(HTTPHeaders(decodeHeaders(object["header"])))
         var subtitles: [URL] = []
         if case .array(let rawSubtitles) = object["subs"] {
             subtitles = rawSubtitles.compactMap { item in
@@ -228,17 +321,28 @@ enum UpstreamResponseDecoder {
             needsParsing: needsParsing,
             playURL: string(object["playUrl"]),
             flag: string(object["flag"]) ?? "",
-            headers: HTTPHeaders(headers),
+            headers: headers,
             format: string(object["format"]),
             subtitles: subtitles,
-            qualities: qualities
+            qualities: qualities,
+            key: string(object["key"]),
+            click: string(object["click"]),
+            code: string(object["code"]),
+            jxFrom: string(object["jxFrom"] ?? object["jxfrom"]),
+            danmaku: object["danmaku"] ?? object["danmu"],
+            drm: object["drm"],
+            artwork: string(object["artwork"] ?? object["pic"]),
+            description: string(object["desc"] ?? object["description"]),
+            position: number(object["position"]),
+            lyrics: string(object["lrc"] ?? object["lyrics"])
         )
     }
 
     /// Matches FongMi's `UrlAdapter`: player responses may return either one
     /// URL, alternating quality-name/URL pairs, or a persisted Url object. Keep
-    /// every quality for the player and prefer the provider's original/source
-    /// stream even when a stale persisted position points at a smart variant.
+    /// every quality for the player and honor the provider's array order or
+    /// explicit position. CatPaw cloud spiders deliberately put their managed
+    /// proxy before the short-lived original redirect.
     private static func playerURLSelection(_ value: JSONValue?) -> (
         url: String,
         qualities: [PlaybackQuality]
@@ -287,25 +391,23 @@ enum UpstreamResponseDecoder {
         fallbackPosition: Int
     ) -> (url: String, qualities: [PlaybackQuality])? {
         guard !qualities.isEmpty else { return nil }
-        let selected = qualities.first(where: { isOriginalQualityName($0.name) })
-            ?? (qualities.indices.contains(fallbackPosition)
-                ? qualities[fallbackPosition]
-                : qualities[0])
+        let selected = qualities.indices.contains(fallbackPosition)
+            ? qualities[fallbackPosition]
+            : qualities[0]
         return (selected.url, qualities)
-    }
-
-    private static func isOriginalQualityName(_ name: String) -> Bool {
-        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        return normalized.contains("原画")
-            || normalized.contains("原畫")
-            || normalized.contains("original")
-            || normalized.contains("source")
     }
 
     private static func nonEmptyTrimmed(_ value: String) -> String? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        guard !trimmed.isEmpty else { return nil }
+        // Some Node bundles stringify an empty object/array when a cloud
+        // resolver fails. Those sentinel values are business failures, not
+        // relative media URLs, and must never reach libmpv.
+        let sentinel = trimmed.lowercased()
+        guard !["{}", "[]", "null", "undefined"].contains(sentinel) else {
+            return nil
+        }
+        return trimmed
     }
 
     private static func decodeHeaders(_ value: JSONValue?) -> [String: String] {
@@ -372,9 +474,49 @@ enum UpstreamResponseDecoder {
         }
     }
 
+    private static func number(_ value: JSONValue?) -> Double? {
+        switch value {
+        case .integer(let value): return Double(value)
+        case .number(let value): return value
+        case .string(let value): return Double(value)
+        default: return nil
+        }
+    }
+
     private static func firstNonEmptyString(_ values: JSONValue?...) -> String? {
-        values.lazy.compactMap(string).first {
-            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        values.lazy.compactMap { messageString($0) }.first
+    }
+
+    /// CatPaw bundles are not consistent about error shape. In addition to a
+    /// plain `error` string, Axios/Fastify wrappers often return an object such
+    /// as `{ error: { message: "..." } }`. Preserve that business message so
+    /// the host can classify authorization failures before opening the player.
+    private static func messageString(
+        _ value: JSONValue?,
+        depth: Int = 0
+    ) -> String? {
+        guard depth < 4 else { return nil }
+        switch value {
+        case .string(let value):
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        case .integer(let value):
+            return String(value)
+        case .number(let value):
+            return String(value)
+        case .object(let object):
+            for key in ["message", "msg", "errMsg", "error", "detail", "reason"] {
+                if let message = messageString(object[key], depth: depth + 1) {
+                    return message
+                }
+            }
+            return nil
+        case .array(let values):
+            return values.lazy.compactMap {
+                messageString($0, depth: depth + 1)
+            }.first
+        case .bool, .null, nil:
+            return nil
         }
     }
 }
@@ -392,24 +534,43 @@ public enum SpiderResponseMapper {
             baseURL: baseURL,
             allowEmpty: true
         )
-        let recommendations: [UpstreamVideo]
+        let recommendationResponse: UpstreamResponse
         if let homeVideoValue {
-            recommendations = try decode(
+            recommendationResponse = try decode(
                 homeVideoValue,
                 site: site,
                 baseURL: baseURL,
                 allowEmpty: true
-            ).videos
-        } else {
-            recommendations = home.videos
-        }
-        return SiteHome(
-            categories: home.categories,
-            recommendations: UpstreamResponseDecoder.summaries(
-                from: recommendations,
-                site: site,
-                baseURL: baseURL
             )
+        } else {
+            recommendationResponse = home
+        }
+        let inheritedKind: VideoContentKind? =
+            !recommendationResponse.categories.isEmpty
+            && recommendationResponse.categories.allSatisfy {
+                $0.resolvedContentKind != .media
+            }
+                ? .action
+                : nil
+        let summaries = UpstreamResponseDecoder.summaries(
+            from: recommendationResponse.videos,
+            site: site,
+            baseURL: baseURL,
+            inheritedContentKind: inheritedKind
+        )
+        return SiteHome(
+            // Preserve structural category semantics. Presentation decides
+            // which categories are media navigation and never sends action
+            // categories through the category/movie path.
+            categories: home.categories.filter {
+                $0.resolvedContentKind != .unsupported
+            },
+            recommendations: summaries.filter {
+                $0.resolvedContentKind == .media
+            },
+            actionItems: summaries.filter {
+                $0.resolvedContentKind == .action
+            }.map(SiteActionItem.init(summary:))
         )
     }
 
@@ -426,11 +587,65 @@ public enum SpiderResponseMapper {
             allowEmpty: true
         )
         return VideoPage(
-            items: UpstreamResponseDecoder.summaries(
+            items: UpstreamResponseDecoder.mediaSummaries(
                 from: response.videos,
                 site: site,
                 baseURL: baseURL
             ),
+            pagination: Pagination(page: page, pageCount: response.pageCount)
+        )
+    }
+
+    /// Preserves the mixed media/action list used by CatVod Java/Dex
+    /// `categoryContent`. FongMi dispatches every item with an explicit
+    /// `action` through `Spider.action` while ordinary items continue to
+    /// detail. Keep this mapper scoped to AndroidDex callers: Node/HTTP
+    /// bundles own a separate host-message configuration contract and retain
+    /// the media-only behavior of `page`.
+    public static func javaDexCategoryPage(
+        _ value: JSONValue,
+        site: SiteConfiguration,
+        baseURL: URL?,
+        page: Int
+    ) throws -> VideoPage {
+        let response = try decode(
+            value,
+            site: site,
+            baseURL: baseURL,
+            allowEmpty: true
+        )
+        return VideoPage(
+            items: UpstreamResponseDecoder.summaries(
+                from: response.videos,
+                site: site,
+                baseURL: baseURL
+            ).filter { $0.resolvedContentKind != .unsupported },
+            pagination: Pagination(page: page, pageCount: response.pageCount)
+        )
+    }
+
+    /// Maps a category that the provider has already classified as an action
+    /// surface. A regular page intentionally keeps media only; using it here
+    /// erases configuration cards before the host can present them.
+    public static func actionPage(
+        _ value: JSONValue,
+        site: SiteConfiguration,
+        baseURL: URL?,
+        page: Int
+    ) throws -> VideoPage {
+        let response = try decode(
+            value,
+            site: site,
+            baseURL: baseURL,
+            allowEmpty: true
+        )
+        return VideoPage(
+            items: UpstreamResponseDecoder.summaries(
+                from: response.videos,
+                site: site,
+                baseURL: baseURL,
+                inheritedContentKind: .action
+            ).filter { $0.resolvedContentKind == .action },
             pagination: Pagination(page: page, pageCount: response.pageCount)
         )
     }
@@ -445,6 +660,8 @@ public enum SpiderResponseMapper {
             return detail
         case .action:
             throw AppError.spider("Spider 返回了设置操作结果，而不是影视详情")
+        case .search:
+            throw AppError.spider("Spider 返回了发现条目，而不是影视详情")
         }
     }
 
@@ -457,6 +674,8 @@ public enum SpiderResponseMapper {
     ) throws -> SiteSelectionResult {
         let response = try decode(value, site: site, baseURL: baseURL)
         if let video = response.videos.first(where: {
+            $0.contentKind == .media
+                &&
             !$0.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }) {
@@ -468,7 +687,8 @@ public enum SpiderResponseMapper {
                 )
             )
         }
-        if let fallbackSummary,
+        if fallbackSummary?.resolvedContentKind != .action,
+           let fallbackSummary,
            var video = response.videos.first(where: {
                detailPayloadIsRecoverable($0)
            }) {
@@ -492,8 +712,9 @@ public enum SpiderResponseMapper {
                 )
             )
         }
-        if response.videos.contains(where: {
-            $0.action?.nonEmptyValue != nil
+        if fallbackSummary?.resolvedContentKind == .action
+            || response.videos.contains(where: {
+            $0.contentKind == .action || $0.action?.nonEmptyValue != nil
         }) {
             return .action(value)
         }
@@ -506,14 +727,38 @@ public enum SpiderResponseMapper {
         if let message = response.message {
             throw AppError.spider(message)
         }
+        if response.videos.isEmpty, let fallbackSummary {
+            guard let query = searchableQuery(from: fallbackSummary.title) else {
+                throw AppError.contentUnavailable(
+                    "当前内容源未提供可打开的详情"
+                )
+            }
+            return .search(query)
+        }
         if !response.videos.isEmpty {
             throw AppError.spider("Spider 详情响应缺少可识别的影视信息")
         }
         throw AppError.spider("Spider 详情响应没有有效项目")
     }
 
+    private static func searchableQuery(from title: String) -> String? {
+        let query = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty,
+              query.rangeOfCharacter(from: .alphanumerics) != nil else {
+            return nil
+        }
+        let sentinel = query.lowercased()
+        guard !["n/a", "na", "null", "undefined", "untitled"].contains(
+            sentinel
+        ) else {
+            return nil
+        }
+        return query
+    }
+
     private static func detailPayloadIsRecoverable(_ video: UpstreamVideo) -> Bool {
-        guard video.action?.nonEmptyValue == nil else { return false }
+        guard video.contentKind == .media,
+              video.action?.nonEmptyValue == nil else { return false }
         return [
             video.typeName,
             video.picture,
@@ -534,13 +779,194 @@ public enum SpiderResponseMapper {
         site: SiteConfiguration
     ) throws -> SitePlaybackResult {
         let response = try decode(value, site: site, baseURL: nil)
-        guard let player = response.player else {
-            if let message = response.message {
-                throw AppError.spider(message)
-            }
+        // Match FongMi's playback contract: a provider-authored message is a
+        // terminal provider outcome even when the same object also contains a
+        // URL. Several legacy cloud spiders leave a stale/fallback URL beside
+        // `msg`; handing that URL to the player hides the real authorization
+        // or provider error behind a generic `loading failed`.
+        if let message = response.message {
+            throw ProviderPlaybackError(message)
+        }
+        guard var player = response.player else {
             throw AppError.spider("Spider 播放响应缺少 url")
         }
+        player.transferReceipt = transferReceipt(value)
         return player
+    }
+
+    /// Reads only OKVideoMac's namespaced, versioned receipt extension. A
+    /// normal Spider response has no such field and remains byte-for-byte
+    /// compatible with the existing player mapping.
+    public static func transferReceipt(
+        _ value: JSONValue
+    ) -> TransferReceipt? {
+        guard let object = topLevelObject(value),
+              case .object(let extensionObject) = object["_okvideo"],
+              case .object(let receiptObject) = extensionObject[
+                  "transferReceipt"
+              ],
+              let data = try? JSONEncoder().encode(
+                  JSONValue.object(receiptObject)
+              ) else {
+            return nil
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let value = try container.decode(String.self)
+            let fractional = ISO8601DateFormatter()
+            fractional.formatOptions = [
+                .withInternetDateTime,
+                .withFractionalSeconds
+            ]
+            if let date = fractional.date(from: value) {
+                return date
+            }
+            let wholeSeconds = ISO8601DateFormatter()
+            wholeSeconds.formatOptions = [.withInternetDateTime]
+            if let date = wholeSeconds.date(from: value) {
+                return date
+            }
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Transfer receipt createdAt is not ISO-8601"
+            )
+        }
+        guard let receipt = try? decoder.decode(
+            TransferReceipt.self,
+            from: data
+        ), receipt.version == 1,
+           receipt.provider == "quark",
+           receipt.requestGeneration > 0,
+           receipt.accountScope.range(
+               of: "^[0-9a-f]{64}$",
+               options: .regularExpression
+           ) != nil,
+           !receipt.savedFIDs.isEmpty,
+           receipt.savedFIDs.count <= 16,
+           receipt.savedFIDs.allSatisfy({ boundedReceiptIdentifier($0) }),
+           receipt.sourceFID.map(boundedReceiptIdentifier) ?? true,
+           receipt.parentFolderFID.map(boundedReceiptIdentifier) ?? true else {
+            return nil
+        }
+        return receipt
+    }
+
+    private static func boundedReceiptIdentifier(_ value: String) -> Bool {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized == value
+            && !normalized.isEmpty
+            && normalized.utf8.count <= 4_096
+            && !normalized.unicodeScalars.contains(where: {
+                CharacterSet.controlCharacters.contains($0)
+            })
+    }
+
+    /// Reads the explicit, versioned durable-locator contract from a Spider
+    /// player response. This deliberately does not inspect `url`, `playUrl`,
+    /// headers, quality URLs, or localhost proxy paths: none of those prove a
+    /// stable resource identity and they may contain short-lived credentials.
+    public static func providerPlaybackResourceDescriptor(
+        _ value: JSONValue
+    ) -> ProviderPlaybackResourceDescriptor? {
+        guard let object = topLevelObject(value),
+              case .object(let reference) = object[
+                  "providerResourceReference"
+              ],
+              let schemaVersion = strictInteger(reference["schemaVersion"]),
+              let providerVersion = strictInteger(reference["providerVersion"]),
+              case .string(let rawLocator) = reference[
+                  "stableResourceLocator"
+              ],
+              case .string(let rawStability) = reference["stability"],
+              let stability = PlaybackResourceReference.Stability(
+                  rawValue: rawStability
+              ),
+              schemaVersion == 1,
+              providerVersion == 1,
+              stability == .providerStable,
+              reference["expiresAt"] == nil || reference["expiresAt"] == .null,
+              let safeLocator = PlaybackPersistencePolicy
+                  .sanitizedOpaqueLocator(rawLocator),
+              safeLocator == rawLocator else {
+            return nil
+        }
+        let stableDescription: ProviderPlaybackStableDescription?
+        if case .object(let description) = reference["stableDescription"] {
+            guard let provider = boundedStableDescriptionString(
+                description["provider"]
+            ), let shareID = boundedStableDescriptionString(
+                description["shareId"]
+            ), let fileID = boundedStableDescriptionString(
+                description["fileId"]
+            ), let sourceKey = boundedStableDescriptionString(
+                description["sourceKey"]
+            ), let episodeName = boundedStableDescriptionString(
+                description["episodeName"]
+            ), provider.caseInsensitiveCompare("quark") == .orderedSame else {
+                return nil
+            }
+            stableDescription = ProviderPlaybackStableDescription(
+                provider: provider.lowercased(),
+                shareID: shareID,
+                fileID: fileID,
+                sourceKey: sourceKey,
+                episodeName: episodeName
+            )
+        } else {
+            stableDescription = nil
+        }
+        return ProviderPlaybackResourceDescriptor(
+            schemaVersion: schemaVersion,
+            providerVersion: providerVersion,
+            stableResourceLocator: safeLocator,
+            stability: stability,
+            stableDescription: stableDescription
+        )
+    }
+
+    private static func boundedStableDescriptionString(
+        _ value: JSONValue?
+    ) -> String? {
+        guard case .string(let rawValue) = value else { return nil }
+        let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty,
+              normalized.utf8.count <= 4_096,
+              !normalized.unicodeScalars.contains(where: {
+                  CharacterSet.controlCharacters.contains($0)
+              }) else {
+            return nil
+        }
+        return normalized
+    }
+
+    private static func topLevelObject(
+        _ value: JSONValue
+    ) -> [String: JSONValue]? {
+        if case .object(let object) = value {
+            return object
+        }
+        guard case .string(let encoded) = value,
+              let data = encoded.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(
+                  JSONValue.self,
+                  from: data
+              ),
+              case .object(let object) = decoded else {
+            return nil
+        }
+        return object
+    }
+
+    private static func strictInteger(_ value: JSONValue?) -> Int? {
+        switch value {
+        case .integer(let value):
+            return Int(exactly: value)
+        case .number(let value) where value.isFinite && value.rounded() == value:
+            return Int(exactly: value)
+        default:
+            return nil
+        }
     }
 
     private static func decode(
@@ -694,6 +1120,9 @@ private final class XMLVideoParserDelegate: NSObject, XMLParserDelegate {
             currentVideo?[name] = value
         }
         if name == "video", let video = currentVideo {
+            let categoryID = video["type_id"]
+            let tag = video["vod_tag"] ?? video["tag"]
+            let action = video["action"]
             videos.append(
                 UpstreamVideo(
                     id: video["id"] ?? video["vod_id"] ?? "",
@@ -708,8 +1137,14 @@ private final class XMLVideoParserDelegate: NSObject, XMLParserDelegate {
                     content: video["des"] ?? video["vod_content"],
                     playFrom: video["dl"] ?? video["vod_play_from"],
                     playURL: video["dd"] ?? video["vod_play_url"],
-                    tag: video["vod_tag"] ?? video["tag"],
-                    action: video["action"]
+                    tag: tag,
+                    action: action,
+                    contentKind: ProtocolContentSemantics.kind(
+                        categoryID: categoryID,
+                        action: action,
+                        tag: tag
+                    ),
+                    isCategoryNavigation: false
                 )
             )
             currentVideo = nil

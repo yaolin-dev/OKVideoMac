@@ -45,6 +45,15 @@ public struct PlayerSnapshot: Equatable, Sendable {
     public var duration: TimeInterval
     public var bufferedPercent: Double
     public var networkSpeedBytesPerSecond: Int64
+    /// True while mpv is locating and decoding the requested timeline point.
+    /// This is intentionally independent from `status`: a paused player can
+    /// seek, and a seek can also wait for the network cache.
+    public var isSeeking: Bool
+    /// True only when mpv has paused playback to refill its cache.
+    public var isPausedForCache: Bool
+    /// The user-requested seek destination. Internal mpv resyncs may leave it
+    /// nil while `isSeeking` is true.
+    public var seekTarget: TimeInterval?
     public var volume: Double
     public var isMuted: Bool
     public var speed: Double
@@ -58,6 +67,9 @@ public struct PlayerSnapshot: Equatable, Sendable {
         duration: TimeInterval = 0,
         bufferedPercent: Double = 0,
         networkSpeedBytesPerSecond: Int64 = 0,
+        isSeeking: Bool = false,
+        isPausedForCache: Bool = false,
+        seekTarget: TimeInterval? = nil,
         volume: Double = 100,
         isMuted: Bool = false,
         speed: Double = 1,
@@ -70,6 +82,11 @@ public struct PlayerSnapshot: Equatable, Sendable {
         self.duration = duration
         self.bufferedPercent = bufferedPercent
         self.networkSpeedBytesPerSecond = max(0, networkSpeedBytesPerSecond)
+        self.isSeeking = isSeeking
+        self.isPausedForCache = isPausedForCache
+        self.seekTarget = seekTarget.flatMap {
+            $0.isFinite && $0 >= 0 ? $0 : nil
+        }
         self.volume = volume
         self.isMuted = isMuted
         self.speed = speed
@@ -79,11 +96,27 @@ public struct PlayerSnapshot: Equatable, Sendable {
     }
 }
 
+/// Business meaning of a native playback termination. libmpv's EOF signals
+/// describe transport state only; they do not by themselves prove that an
+/// episode played naturally to completion.
+public enum PlaybackEndOrigin: Equatable, Sendable {
+    case natural
+    case userSeekBoundary
+    case premature(String)
+
+    public var permitsAutomaticAdvance: Bool {
+        self == .natural
+    }
+}
+
 public enum PlayerEvent: Equatable, Sendable {
     case snapshot(PlayerSnapshot, requestID: UUID?)
     case fileLoaded(requestID: UUID?)
+    /// Emitted only when libmpv crosses a native unload boundary for the
+    /// identified media instance (replace, stop, failure, or shutdown).
+    case mediaReleased(requestID: UUID?)
     case playbackStarted(requestID: UUID?)
-    case ended(requestID: UUID?)
+    case ended(requestID: UUID?, origin: PlaybackEndOrigin)
     case error(String, requestID: UUID?)
 }
 

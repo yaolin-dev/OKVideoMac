@@ -2,6 +2,15 @@ plugins {
     id "com.android.application"
 }
 
+def bridgeReleaseKeystore = System.getenv("OKVIDEOMAC_ANDROID_BRIDGE_KEYSTORE")
+def bridgeReleaseStorePassword = System.getenv(
+    "OKVIDEOMAC_ANDROID_BRIDGE_STORE_PASSWORD"
+)
+def bridgeReleaseKeyAlias = System.getenv("OKVIDEOMAC_ANDROID_BRIDGE_KEY_ALIAS")
+def bridgeReleaseKeyPassword = System.getenv(
+    "OKVIDEOMAC_ANDROID_BRIDGE_KEY_PASSWORD"
+)
+
 android {
     namespace = "com.okvideomac.dexbridge"
     compileSdk = 35
@@ -15,15 +24,30 @@ android {
         // dialogs with a null Context. Keep compiling with the current SDK,
         // but declare the compatibility level expected by those packages.
         targetSdk = 27
-        versionCode = 27
-        versionName = "0.3.15"
+        versionCode = 56
+        versionName = "0.3.44"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        if (bridgeReleaseKeystore != null) {
+            bridgeRelease {
+                storeFile = file(bridgeReleaseKeystore)
+                storePassword = bridgeReleaseStorePassword
+                keyAlias = bridgeReleaseKeyAlias
+                keyPassword = bridgeReleaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
         release {
-            // Keep the existing signing identity so install -r upgrades the
-            // bridge without deleting the user's cloud-drive login data.
-            signingConfig signingConfigs.debug
+            // The packaging script supplies a pinned, persistent key whose
+            // certificate is verified before and after this build. Never fall
+            // back to Gradle's machine-local debug keystore for a deliverable.
+            if (bridgeReleaseKeystore != null) {
+                signingConfig = signingConfigs.bridgeRelease
+            }
             debuggable false
             minifyEnabled false
         }
@@ -50,4 +74,6 @@ android {
 
 dependencies {
     implementation project(":catvod")
+    androidTestImplementation "junit:junit:4.13.2"
+    androidTestImplementation "androidx.test:runner:1.6.2"
 }

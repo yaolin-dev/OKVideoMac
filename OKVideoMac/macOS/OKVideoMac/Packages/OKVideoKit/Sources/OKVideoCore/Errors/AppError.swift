@@ -1,10 +1,26 @@
 import Foundation
 
+/// A terminal message authored by `playerContent`. Unlike a transport or
+/// decoder failure, this must not be hidden by retrying a fallback URL that
+/// happened to be present in the same provider response.
+public struct ProviderPlaybackError: Error, Equatable, LocalizedError, Sendable {
+    public let message: String
+
+    public init(_ message: String) {
+        self.message = message
+    }
+
+    public var errorDescription: String? {
+        "Spider 错误：\(message)"
+    }
+}
+
 public enum AppError: Error, Equatable, LocalizedError, Sendable {
     case configuration(String)
     case network(String)
     case decoding(String)
     case site(String)
+    case contentUnavailable(String)
     case spider(String)
     case javascript(String)
     case parsing(String)
@@ -21,6 +37,7 @@ public enum AppError: Error, Equatable, LocalizedError, Sendable {
         case .network(let message): return "网络错误：\(message)"
         case .decoding(let message): return "数据解析错误：\(message)"
         case .site(let message): return "站点错误：\(message)"
+        case .contentUnavailable(let message): return message
         case .spider(let message): return "Spider 错误：\(message)"
         case .javascript(let message): return "JavaScript 错误：\(message)"
         case .parsing(let message): return "播放解析错误：\(message)"

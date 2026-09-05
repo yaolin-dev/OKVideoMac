@@ -249,6 +249,20 @@ enum MPVRenderSurfaceReadinessPolicy {
     }
 }
 
+enum MPVRenderVisibilityPolicy {
+    static func shouldRequestDisplay(
+        isAttachedToWindow: Bool,
+        isWindowVisible: Bool,
+        isMiniaturized: Bool,
+        isOcclusionVisible: Bool
+    ) -> Bool {
+        isAttachedToWindow
+            && isWindowVisible
+            && !isMiniaturized
+            && isOcclusionVisible
+    }
+}
+
 final class MPVOpenGLView: NSOpenGLView {
     private let player: MPVPlayerClient
     private let renderOwnerID: UUID
@@ -302,6 +316,11 @@ final class MPVOpenGLView: NSOpenGLView {
         super.prepareOpenGL()
         guard renderContext == nil else { return }
         openGLContext?.makeCurrentContext()
+        var swapInterval: GLint = 1
+        openGLContext?.setValues(
+            &swapInterval,
+            for: NSOpenGLContext.Parameter.swapInterval
+        )
         let box = MPVRenderCallbackBox(view: self)
         callbackBox = box
         do {
@@ -329,6 +348,7 @@ final class MPVOpenGLView: NSOpenGLView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        updateWindowObservers()
         evaluateSurfaceReadiness()
     }
 
@@ -414,8 +434,24 @@ final class MPVOpenGLView: NSOpenGLView {
               let openGLContext else { return }
         openGLContext.makeCurrentContext()
         let flags = player.renderUpdate(renderContext)
-        if flags & mpvRenderUpdateFrame != 0 {
+        guard flags & mpvRenderUpdateFrame != 0 else { return }
+        if MPVRenderVisibilityPolicy.shouldRequestDisplay(
+            isAttachedToWindow: window != nil,
+            isWindowVisible: window?.isVisible == true,
+            isMiniaturized: window?.isMiniaturized == true,
+            isOcclusionVisible:
+                window?.occlusionState.contains(.visible) == true
+        ) {
             needsDisplay = true
+        } else {
+            // Advanced render control requires every announced frame to be
+            // acknowledged. Skip it without touching the drawable so hidden
+            // or miniaturized playback cannot block the mpv core.
+            do {
+                try player.skipRender(renderContext)
+            } catch {
+                report(error)
+            }
         }
     }
 
@@ -449,6 +485,39 @@ final class MPVOpenGLView: NSOpenGLView {
         guard notification.userInfo?["renderOwnerID"] as? String
                 == renderOwnerID.uuidString else { return }
         tearDown()
+    }
+
+    @objc private func windowVisibilityChanged(_ notification: Notification) {
+        guard notification.object as? NSWindow === window,
+              MPVRenderVisibilityPolicy.shouldRequestDisplay(
+                  isAttachedToWindow: window != nil,
+                  isWindowVisible: window?.isVisible == true,
+                  isMiniaturized: window?.isMiniaturized == true,
+                  isOcclusionVisible:
+                      window?.occlusionState.contains(.visible) == true
+              ) else { return }
+        needsDisplay = true
+        callbackBox?.requestDisplay()
+        evaluateSurfaceReadiness()
+    }
+
+    private func updateWindowObservers() {
+        let center = NotificationCenter.default
+        let names: [Notification.Name] = [
+            NSWindow.didChangeOcclusionStateNotification,
+            NSWindow.didDeminiaturizeNotification
+        ]
+        for name in names {
+            center.removeObserver(self, name: name, object: nil)
+            if let window {
+                center.addObserver(
+                    self,
+                    selector: #selector(windowVisibilityChanged(_:)),
+                    name: name,
+                    object: window
+                )
+            }
+        }
     }
 
     private func evaluateSurfaceReadiness() {

@@ -1,11 +1,15 @@
+import AppKit
 import OKVideoPersistence
 import SwiftUI
 
 struct HistoryView: View {
     @EnvironmentObject private var state: AppState
+    @Environment(\.primaryToolbarLayout) private var toolbarLayout
     @State private var isSelecting = false
     @State private var selectedIDs: Set<HistoryRecord.ID> = []
     @State private var pendingDeletion: HistoryDeletion?
+    @State private var focusedID: HistoryRecord.ID?
+    private let scrollCoordinateSpace = "history-scroll"
 
     var body: some View {
         Group {
@@ -17,6 +21,9 @@ struct HistoryView: View {
                 )
             } else {
                 ScrollView {
+                    BrowserToolbarScrollMarker(
+                        coordinateSpaceName: scrollCoordinateSpace
+                    )
                     LazyVStack(spacing: 0) {
                         ForEach(state.history) { item in
                             historyRow(item)
@@ -25,12 +32,15 @@ struct HistoryView: View {
                         }
                     }
                 }
+                .browserToolbarScrollSurface(named: scrollCoordinateSpace)
             }
         }
-        .navigationTitle("历史")
+        .navigationTitle("")
         .toolbar {
-            ToolbarItemGroup {
-                if !state.history.isEmpty {
+            PrimaryPageToolbarLeadingContent(title: "历史")
+            ToolbarItemGroup(placement: .primaryAction) {
+                if !state.isDetailPagePresented,
+                   !state.history.isEmpty {
                     historyManagementControls
                 }
             }
@@ -48,9 +58,19 @@ struct HistoryView: View {
         }
         .onChange(of: state.history.map(\.id)) { availableIDs in
             selectedIDs.formIntersection(availableIDs)
+            if focusedID.map({ availableIDs.contains($0) }) != true {
+                focusedID = availableIDs.first
+            }
             if state.history.isEmpty {
                 isSelecting = false
             }
+        }
+        .onAppear {
+            focusedID = focusedID ?? state.history.first?.id
+        }
+        .background {
+            AppKeyCommandMonitor(handler: handleKeyCommand)
+                .frame(width: 0, height: 0)
         }
     }
 
@@ -61,7 +81,7 @@ struct HistoryView: View {
                 if isSelecting {
                     toggleSelection(item.id)
                 } else {
-                    Task { await state.openHistory(item) }
+                    state.requestHistoryPlayback(item)
                 }
             } label: {
                 HStack(spacing: 14) {
@@ -87,7 +107,10 @@ struct HistoryView: View {
                 .padding(.vertical, 14)
             }
             .buttonStyle(.plain)
-            .appInteractiveHover(cornerRadius: 10, selected: selectedIDs.contains(item.id))
+            .appInteractiveHover(
+                cornerRadius: 10,
+                selected: selectedIDs.contains(item.id) || focusedID == item.id
+            )
             .contextMenu {
                 Button(role: .destructive) {
                     pendingDeletion = .items([item.id])
@@ -138,7 +161,11 @@ struct HistoryView: View {
                     .font(.headline)
                     .lineLimit(1)
                 Text(
-                    [item.sourceName, item.episodeName]
+                    [
+                        state.historySiteName(for: item),
+                        item.sourceName,
+                        item.episodeName
+                    ]
                         .compactMap { $0 }
                         .joined(separator: " · ")
                 )
@@ -167,41 +194,110 @@ struct HistoryView: View {
     @ViewBuilder
     private var historyManagementControls: some View {
         if isSelecting {
-            Button(allItemsSelected ? "取消全选" : "全选") {
-                selectedIDs = allItemsSelected
-                    ? []
-                    : Set(state.history.map(\.id))
-            }
-
-            Button(role: .destructive) {
-                pendingDeletion = .items(selectedIDs)
-            } label: {
-                Label(
-                    selectedIDs.isEmpty
-                        ? "删除所选"
-                        : "删除所选（\(selectedIDs.count)）",
-                    systemImage: "trash"
-                )
-            }
-            .disabled(selectedIDs.isEmpty)
-
-            Button("完成") {
-                isSelecting = false
-                selectedIDs.removeAll()
+            switch toolbarLayout {
+            case .expanded, .compact:
+                selectAllButton
+                    .primaryToolbarIconControl(isSelected: allItemsSelected)
+                deleteSelectedButton
+                    .primaryToolbarIconControl(destructive: true)
+                finishSelectionButton
+                    .primaryToolbarTextControl()
+            case .minimal:
+                selectionManagementMenu
+                    .primaryToolbarMenuControl()
+                finishSelectionButton
+                    .primaryToolbarTextControl()
             }
         } else {
-            Button {
-                isSelecting = true
-            } label: {
-                Label("选择", systemImage: "checklist")
-            }
-
-            Button(role: .destructive) {
-                pendingDeletion = .all
-            } label: {
-                Label("清空历史", systemImage: "trash")
+            switch toolbarLayout {
+            case .expanded, .compact:
+                beginSelectionButton
+                    .primaryToolbarIconControl()
+                clearAllButton
+                    .primaryToolbarIconControl(destructive: true)
+            case .minimal:
+                normalManagementMenu
+                    .primaryToolbarMenuControl()
             }
         }
+    }
+
+    private var selectAllButton: some View {
+        Button {
+            selectedIDs = allItemsSelected
+                ? []
+                : Set(state.history.map(\.id))
+        } label: {
+            Label(
+                allItemsSelected ? "取消全选" : "全选",
+                systemImage: allItemsSelected
+                    ? "checkmark.circle.badge.xmark"
+                    : "checkmark.circle"
+            )
+        }
+        .help(allItemsSelected ? "取消全选" : "全选")
+    }
+
+    private var deleteSelectedButton: some View {
+        Button(role: .destructive) {
+            pendingDeletion = .items(selectedIDs)
+        } label: {
+            Label(
+                selectedIDs.isEmpty
+                    ? "删除所选"
+                    : "删除所选（\(selectedIDs.count)）",
+                systemImage: "trash"
+            )
+        }
+        .disabled(selectedIDs.isEmpty)
+        .help(selectedIDs.isEmpty ? "请先选择历史" : "删除所选历史")
+    }
+
+    private var finishSelectionButton: some View {
+        Button("完成") {
+            isSelecting = false
+            selectedIDs.removeAll()
+        }
+    }
+
+    private var beginSelectionButton: some View {
+        Button {
+            isSelecting = true
+        } label: {
+            Label("选择", systemImage: "checklist")
+        }
+        .help("选择历史")
+    }
+
+    private var clearAllButton: some View {
+        Button(role: .destructive) {
+            pendingDeletion = .all
+        } label: {
+            Label("清空历史", systemImage: "trash")
+        }
+        .help("清空历史")
+    }
+
+    private var selectionManagementMenu: some View {
+        Menu {
+            selectAllButton
+            deleteSelectedButton
+        } label: {
+            Label("选择操作", systemImage: "ellipsis.circle")
+                .labelStyle(.iconOnly)
+        }
+        .help("选择操作")
+    }
+
+    private var normalManagementMenu: some View {
+        Menu {
+            beginSelectionButton
+            clearAllButton
+        } label: {
+            Label("管理历史", systemImage: "ellipsis.circle")
+                .labelStyle(.iconOnly)
+        }
+        .help("管理历史")
     }
 
     private var allItemsSelected: Bool {
@@ -256,6 +352,55 @@ struct HistoryView: View {
             selectedIDs.removeAll()
             isSelecting = false
         }
+    }
+
+    private func handleKeyCommand(_ event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(
+            [.command, .option, .control, .shift]
+        )
+        if modifiers == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "a" {
+            isSelecting = true
+            selectedIDs = Set(state.history.map(\.id))
+            return true
+        }
+        guard modifiers.isEmpty else { return false }
+        switch event.keyCode {
+        case 125:
+            moveFocus(by: 1)
+        case 126:
+            moveFocus(by: -1)
+        case 36, 76:
+            guard let focusedID,
+                  let item = state.history.first(where: {
+                      $0.id == focusedID
+                  }) else { return false }
+            if isSelecting {
+                toggleSelection(focusedID)
+            } else {
+                state.requestHistoryPlayback(item)
+            }
+        case 51, 117:
+            guard let focusedID else { return false }
+            pendingDeletion = .items(
+                isSelecting && !selectedIDs.isEmpty
+                    ? selectedIDs : [focusedID]
+            )
+        case 53:
+            guard isSelecting else { return false }
+            isSelecting = false
+            selectedIDs.removeAll()
+        default:
+            return false
+        }
+        return true
+    }
+
+    private func moveFocus(by offset: Int) {
+        let ids = state.history.map(\.id)
+        guard !ids.isEmpty else { return }
+        let currentIndex = focusedID.flatMap { ids.firstIndex(of: $0) } ?? 0
+        focusedID = ids[min(max(currentIndex + offset, 0), ids.count - 1)]
     }
 }
 

@@ -4,6 +4,7 @@ import android.content.Context;
 
 import com.github.catvod.crawler.Spider;
 import com.github.catvod.crawler.SpiderNull;
+import com.github.catvod.net.OkHttp;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -20,8 +21,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 import dalvik.system.DexClassLoader;
 import okhttp3.OkHttpClient;
@@ -30,26 +31,36 @@ import okhttp3.Response;
 
 final class DexSpiderRegistry {
     private static final long PLAYBACK_HANDOFF_CACHE_MS = 30_000L;
+    // com.github.catvod.Proxy stores one process-global port. Serialize only
+    // TVBox playerContent resolution so two sites can never steal the active
+    // compatibility-proxy owner from each other.
+    private static final ReentrantLock PLAYER_CONTENT_PROXY_LOCK =
+            new ReentrantLock(true);
     private static volatile DexSpiderRegistry instance;
 
     private final Context context;
     private final OkHttpClient httpClient;
+    private final ConfigurationHostPolicy hostPolicy;
     private final Map<String, DexClassLoader> loaders = new ConcurrentHashMap<>();
     private final Map<String, Spider> spiders = new ConcurrentHashMap<>();
     private final Map<String, Method> proxyMethods = new ConcurrentHashMap<>();
     private final Map<String, Object> spiderLocks = new ConcurrentHashMap<>();
     private final Map<String, Object> loaderLocks = new ConcurrentHashMap<>();
-    private final Map<String, Object> playbackLocks = new ConcurrentHashMap<>();
+    private final Map<String, PlaybackLock> playbackLocks =
+            new ConcurrentHashMap<>();
     private final Map<String, CachedPlayback> completedPlaybacks =
             new ConcurrentHashMap<>();
-    private volatile String recentKey;
 
     private DexSpiderRegistry(Context context) {
         this.context = context.getApplicationContext();
         this.httpClient = new OkHttpClient.Builder()
+                .dns(OkHttp.dns())
                 .followRedirects(true)
                 .followSslRedirects(true)
                 .build();
+        this.hostPolicy = new ConfigurationHostPolicy(
+                hosts -> OkHttp.dns().replaceAll(hosts)
+        );
     }
 
     static DexSpiderRegistry get(Context context) {
@@ -67,20 +78,31 @@ final class DexSpiderRegistry {
         if (arguments == null) arguments = new JSONArray();
         if ("destroy".equals(method)) {
             String siteKey = requireString(payload, "siteKey");
-            String key = spiderKey(payload, siteKey);
-            Spider removed = spiders.remove(key);
-            if (removed != null) removed.destroy();
-            completedPlaybacks.keySet().removeIf(
-                    item -> item.startsWith(key + "\u0000")
-            );
+            destroySpider(payload, siteKey);
             return JSONObject.NULL;
         }
+        try (ConfigurationHostPolicy.Lease ignored =
+                     hostPolicy.acquire(payload)) {
+            return invokeWithHostPolicy(payload, method, arguments);
+        }
+    }
+
+    private Object invokeWithHostPolicy(
+            JSONObject payload,
+            String method,
+            JSONArray arguments
+    ) throws Exception {
+        BridgeProviderOwnerRegistry.Binding providerOwner =
+                BridgeProviderOwnerRegistry.bind(payload, jarKey(payload));
         Spider spider = spider(payload);
         if (requiresDialogHandoff(payload, method)) {
-            BridgeActivity.prepareDialogHandoff(context);
+            BridgeActivity.prepareDialogHandoff(
+                    context,
+                    payload.optString("interactionID", "")
+            );
         }
         if ("play".equals(method)) {
-            return invokePlayer(payload, spider, arguments);
+            return invokePlayer(payload, spider, arguments, providerOwner);
         }
         String raw;
         switch (method) {
@@ -129,53 +151,249 @@ final class DexSpiderRegistry {
         return decodeRawResult(raw);
     }
 
-    private static boolean requiresDialogHandoff(
+    private void destroySpider(JSONObject payload, String siteKey) {
+        String key = spiderKey(payload, siteKey);
+        Object lock = spiderLocks.computeIfAbsent(key, ignored -> new Object());
+        synchronized (lock) {
+            Spider removed = spiders.remove(key);
+            if (removed != null) removed.destroy();
+            completedPlaybacks.keySet().removeIf(
+                    item -> item.startsWith(key + "\u0000")
+            );
+        }
+    }
+
+    static boolean requiresDialogHandoff(
             JSONObject payload,
             String method
     ) {
-        if (!"detail".equals(method) && !"action".equals(method)) return false;
-        String api = payload.optString("api", "").toLowerCase(Locale.ROOT);
-        String siteKey = payload.optString("siteKey", "").toLowerCase(Locale.ROOT);
-        return api.contains("config") || siteKey.contains("config");
+        if (!"detail".equals(method)
+                && !"action".equals(method)
+                && !"play".equals(method)) {
+            return false;
+        }
+        // The host owns action semantics and sends these request-scoped
+        // signals. A monitored request is not automatically a UI request:
+        // explicit command/immediate actions must be allowed to return without
+        // creating a disposable Activity or entering the provider-UI grace
+        // period. All other interactive kinds may hand off to provider UI.
+        // Never infer this behavior from source keys, API class names,
+        // domains, localized labels, or provider names.
+        if (!payload.optBoolean("monitorsAuthorization", false)) return false;
+        String interactionKind = payload
+                .optString("interactionKind", "")
+                .trim()
+                .toLowerCase(Locale.ROOT);
+        // A monitored playerContent call owns the same disposable Activity as
+        // any other interactive provider request. Several cloud providers
+        // synchronously wait inside playerContent while their native login UI
+        // is visible; excluding playback here splits that one invocation into
+        // unrelated action/UI requests and loses the eventual media result.
+        // The declared kind remains "playback" throughout -- UI visibility is
+        // presentation state and never rewrites action semantics.
+        return !"command".equals(interactionKind)
+                && !"immediate".equals(interactionKind);
     }
 
     private Object invokePlayer(
             JSONObject payload,
             Spider spider,
-            JSONArray arguments
+            JSONArray arguments,
+            BridgeProviderOwnerRegistry.Binding providerOwner
     ) throws Exception {
         String siteKey = requireString(payload, "siteKey");
         String playbackKey = spiderKey(payload, siteKey)
                 + "\u0000" + arguments.optString(0, "")
                 + "\u0000" + arguments.optString(1, "");
-        String cached = takeCompletedPlayback(playbackKey);
-        if (cached != null) return decodeRawResult(cached);
-
-        Object lock = playbackLocks.computeIfAbsent(
-                playbackKey,
-                ignored -> new Object()
-        );
-        synchronized (lock) {
-            // The original Mac request remains inside playerContent while the
-            // Android login dialog is visible. Its HTTP socket is intentionally
-            // abandoned so the native prompt can be shown. A retry after login
-            // must consume that original result instead of invoking the same
-            // stateful Spider concurrently and losing its temporary URL.
-            cached = takeCompletedPlayback(playbackKey);
-            if (cached != null) return decodeRawResult(cached);
-            String raw = spider.playerContent(
-                    arguments.getString(0),
-                    arguments.getString(1),
-                    stringList(arguments, 2)
+        boolean refreshRequested = requestsPlaybackRefresh(payload);
+        JSONObject siteHeaders = payload.optJSONObject("siteHeaders");
+        if (refreshRequested) completedPlaybacks.remove(playbackKey);
+        String cached = refreshRequested
+                ? null
+                : takeCompletedPlayback(playbackKey);
+        if (cached != null) {
+            return decodePlaybackResult(
+                    cached,
+                    false,
+                    siteHeaders,
+                    providerOwner
             );
-            if (isPlayableResponse(raw)) {
-                completedPlaybacks.put(
-                        playbackKey,
-                        new CachedPlayback(raw == null ? "" : raw)
-                );
-            }
-            return decodeRawResult(raw);
         }
+
+        PlaybackLock lock = retainPlaybackLock(playbackKey);
+        try {
+            synchronized (lock) {
+                // The original Mac request remains inside playerContent while
+                // an Android login dialog is visible. A non-refresh retry may
+                // consume that completed handoff. A true same-resource refresh
+                // always bypasses it so an expiring signature is regenerated.
+                // Repeat the invalidation while holding the per-resource lock:
+                // a normal invocation that was already in flight may have
+                // populated the handoff cache after the optimistic removal
+                // above.
+                if (refreshRequested) completedPlaybacks.remove(playbackKey);
+                cached = refreshRequested
+                        ? null
+                        : takeCompletedPlayback(playbackKey);
+                if (cached != null) {
+                    return decodePlaybackResult(
+                            cached,
+                            false,
+                            siteHeaders,
+                            providerOwner
+                    );
+                }
+                PLAYER_CONTENT_PROXY_LOCK.lockInterruptibly();
+                try {
+                    return invokePlayerWithCompatibilityProxy(
+                            spider,
+                            arguments,
+                            providerOwner,
+                            playbackKey,
+                            refreshRequested,
+                            siteHeaders
+                    );
+                } finally {
+                    PLAYER_CONTENT_PROXY_LOCK.unlock();
+                }
+            }
+        } finally {
+            releasePlaybackLock(playbackKey, lock);
+        }
+    }
+
+    private Object invokePlayerWithCompatibilityProxy(
+            Spider spider,
+            JSONArray arguments,
+            BridgeProviderOwnerRegistry.Binding providerOwner,
+            String playbackKey,
+            boolean refreshRequested,
+            JSONObject siteHeaders
+    ) throws Exception {
+        Throwable firstError = null;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            FongMiCompatProxyServer.Lease lease = null;
+            try {
+                if (attempt > 0) {
+                    FongMiCompatProxyServer.restart(context);
+                    // Any cached raw localhost URL was issued against the old
+                    // process-global port. Never wrap it into a fresh session.
+                    completedPlaybacks.clear();
+                }
+                lease = FongMiCompatProxyServer.acquire(
+                        context,
+                        providerOwner
+                );
+                String raw = spider.playerContent(
+                        arguments.getString(0),
+                        arguments.getString(1),
+                        stringList(arguments, 2)
+                );
+                FongMiCompatProxyServer.Failure proxyFailure = lease.failure();
+                if (proxyFailure != FongMiCompatProxyServer.Failure.NONE
+                        && !isPlayableResponse(raw)) {
+                    if (attempt == 0) {
+                        firstError = playbackProxyFailure(proxyFailure, null);
+                        continue;
+                    }
+                    throw playbackProxyFailure(proxyFailure, firstError);
+                }
+                if (!refreshRequested && isPlayableResponse(raw)) {
+                    completedPlaybacks.put(
+                            playbackKey,
+                            new CachedPlayback(raw == null ? "" : raw)
+                    );
+                }
+                // Secure a returned compatibility URL while its exact owner
+                // lease is still active. The resulting 9978 media capability
+                // permanently retains that owner after this lease closes.
+                return decodePlaybackResult(
+                        raw,
+                        refreshRequested,
+                        siteHeaders,
+                        providerOwner
+                );
+            } catch (Throwable error) {
+                FongMiCompatProxyServer.Failure proxyFailure = lease == null
+                        ? FongMiCompatProxyServer.Failure.NOT_READY
+                        : lease.failure();
+                if (attempt == 0
+                        && proxyFailure != FongMiCompatProxyServer.Failure.NONE) {
+                    firstError = playbackProxyFailure(proxyFailure, error);
+                    continue;
+                }
+                if (proxyFailure != FongMiCompatProxyServer.Failure.NONE) {
+                    throw playbackProxyFailure(proxyFailure, error);
+                }
+                if (error instanceof Exception) throw (Exception) error;
+                if (error instanceof Error) throw (Error) error;
+                throw new IllegalStateException("playerContent failed", error);
+            } finally {
+                if (lease != null) lease.close();
+            }
+        }
+        throw new IllegalStateException(
+                "TVBox local proxy recovery failed",
+                firstError
+        );
+    }
+
+    private static IllegalStateException playbackProxyFailure(
+            FongMiCompatProxyServer.Failure failure,
+            Throwable cause
+    ) {
+        String message = failure == FongMiCompatProxyServer.Failure.NOT_READY
+                ? "TVBox 本地代理未就绪"
+                : "Spider 内部代理处理失败";
+        return cause == null
+                ? new IllegalStateException(message)
+                : new IllegalStateException(message, cause);
+    }
+
+    /**
+     * Retains the per-resource lock before waiting on its monitor. Removing a
+     * bare monitor as soon as its current owner exits lets a third caller
+     * create a different monitor while a second caller is still queued on the
+     * old one. The retain count keeps every waiter on the same monitor and
+     * still allows unused playback keys to be reclaimed.
+     */
+    private PlaybackLock retainPlaybackLock(String playbackKey) {
+        return playbackLocks.compute(playbackKey, (ignored, existing) -> {
+            PlaybackLock retained = existing == null
+                    ? new PlaybackLock()
+                    : existing;
+            retained.retainCount++;
+            return retained;
+        });
+    }
+
+    private void releasePlaybackLock(String playbackKey, PlaybackLock lock) {
+        playbackLocks.compute(playbackKey, (ignored, current) -> {
+            if (current != lock) return current;
+            current.retainCount--;
+            return current.retainCount == 0 ? null : current;
+        });
+    }
+
+    static boolean requestsPlaybackRefresh(JSONObject payload) {
+        return payload != null
+                && (payload.optBoolean("refreshPlayback", false)
+                || payload.optBoolean("bypassPlaybackCache", false)
+                || payload.optBoolean("refreshRequested", false));
+    }
+
+    private static Object decodePlaybackResult(
+            String raw,
+            boolean refreshPerformed,
+            JSONObject siteHeaders,
+            BridgeProviderOwnerRegistry.Binding providerOwner
+    ) {
+        return BridgeMediaSessionRegistry.securePlaybackResult(
+                decodeRawResult(raw),
+                refreshPerformed,
+                siteHeaders,
+                providerOwner
+        );
     }
 
     /**
@@ -186,37 +404,68 @@ final class DexSpiderRegistry {
         if (raw == null || raw.trim().isEmpty()) return false;
         try {
             Object value = new JSONTokener(raw).nextValue();
-            if (!(value instanceof JSONObject)) return false;
-            JSONObject object = (JSONObject) value;
-            Object url = object.opt("url");
-            if (url instanceof String) {
-                return !((String) url).trim().isEmpty();
-            }
-            if (url instanceof JSONArray) {
-                JSONArray urls = (JSONArray) url;
-                // FongMi UrlAdapter uses alternating quality-name/URL pairs.
-                for (int index = 1; index < urls.length(); index += 2) {
-                    if (!urls.optString(index, "").trim().isEmpty()) return true;
-                }
-            }
-            if (url instanceof JSONObject) {
-                JSONObject urlObject = (JSONObject) url;
-                JSONArray values = urlObject.optJSONArray("values");
-                if (values == null || values.length() == 0) return false;
-                // A persisted position can point at an unavailable smart
-                // stream while another quality (usually original) is valid.
-                for (int index = 0; index < values.length(); index++) {
-                    JSONObject item = values.optJSONObject(index);
-                    if (item != null
-                            && !item.optString("v", "").trim().isEmpty()) {
-                        return true;
-                    }
-                }
-            }
-            return false;
+            return isPlayableResult(value);
         } catch (Throwable ignored) {
             return false;
         }
+    }
+
+    /** Provider-neutral structural check used by the interaction lifecycle. */
+    static boolean isPlayableResult(Object value) {
+        if (!(value instanceof JSONObject)) return false;
+        JSONObject object = (JSONObject) value;
+        if (!providerPlaybackMessage(object).isEmpty()) return false;
+        Object url = object.opt("url");
+        if (url instanceof String) {
+            return !((String) url).trim().isEmpty();
+        }
+        if (url instanceof JSONArray) {
+            JSONArray urls = (JSONArray) url;
+            // FongMi UrlAdapter uses alternating quality-name/URL pairs.
+            for (int index = 1; index < urls.length(); index += 2) {
+                if (!urls.optString(index, "").trim().isEmpty()) return true;
+            }
+        }
+        if (url instanceof JSONObject) {
+            JSONObject urlObject = (JSONObject) url;
+            JSONArray values = urlObject.optJSONArray("values");
+            if (values == null || values.length() == 0) return false;
+            // A persisted position can point at an unavailable smart stream
+            // while another quality (usually original) is valid.
+            for (int index = 0; index < values.length(); index++) {
+                JSONObject item = values.optJSONObject(index);
+                if (item != null && !item.optString("v", "").trim().isEmpty()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Returns the provider-authored terminal playback message without
+     * interpreting its language or attempting to infer an account provider.
+     */
+    static String providerPlaybackMessage(Object value) {
+        return providerMessage(value);
+    }
+
+    /**
+     * Returns a provider-authored event message without assigning it UI or
+     * outcome semantics. Playback callers may still treat a message-only
+     * result as their terminal error; configuration actions expose the same
+     * value on the request-owned event channel.
+     */
+    static String providerMessage(Object value) {
+        if (!(value instanceof JSONObject)) return "";
+        JSONObject object = (JSONObject) value;
+        for (String key : new String[] {"msg", "errMsg", "error"}) {
+            Object raw = object.opt(key);
+            if (raw == null || raw == JSONObject.NULL) continue;
+            String message = String.valueOf(raw).trim();
+            if (!message.isEmpty()) return message;
+        }
+        return "";
     }
 
     private String takeCompletedPlayback(String key) {
@@ -248,76 +497,20 @@ final class DexSpiderRegistry {
         }
     }
 
-    Object[] proxy(Map<String, String> params) {
-        Method recent = recentKey == null ? null : proxyMethods.get(recentKey);
-        Object[] result = invokeProxy(recent, params);
-        if (result != null) return result;
-        for (Map.Entry<String, Method> entry : proxyMethods.entrySet()) {
-            if (Objects.equals(entry.getKey(), recentKey)) continue;
-            result = invokeProxy(entry.getValue(), params);
-            if (result != null) return result;
-        }
-        return null;
+    private static final class PlaybackLock {
+        // Access is serialized by ConcurrentHashMap.compute for this key.
+        int retainCount;
     }
 
-    boolean submitCloudCredential(String rawProvider, String credential)
-            throws Exception {
-        Map<String, String> params = cloudCredentialParameters(
-                rawProvider,
-                credential
-        );
-        Object[] response = proxy(params);
-        if (response == null || response.length < 3
-                || !(response[0] instanceof Integer)
-                || !(response[2] instanceof InputStream)) {
-            throw new IllegalStateException(
-                    "No compatible cloud credential handler is active"
-            );
-        }
-        int status = (Integer) response[0];
-        try (InputStream ignored = (InputStream) response[2]) {
-            boolean accepted = status >= 200 && status < 300;
-            if (accepted) completedPlaybacks.clear();
-            return accepted;
-        }
-    }
-
-    static Map<String, String> cloudCredentialParameters(
-            String rawProvider,
-            String credential
-    ) throws Exception {
-        String provider = rawProvider == null
-                ? ""
-                : rawProvider.trim().toLowerCase(Locale.ROOT);
-        String command;
-        switch (provider) {
-            case "baidu":
-            case "quark":
-            case "ali":
-            case "bili":
-                command = provider;
-                break;
-            case "uc":
-                command = "UC";
-                break;
-            default:
-                throw new IllegalArgumentException("Unsupported cloud provider");
-        }
-        if (credential == null || credential.trim().isEmpty()) {
-            throw new IllegalArgumentException("Cloud credential is empty");
-        }
-        if (credential.getBytes(StandardCharsets.UTF_8).length > 64 * 1024) {
-            throw new IllegalArgumentException("Cloud credential exceeds 64 KiB");
-        }
-        Map<String, String> params = new HashMap<>();
-        params.put("do", command);
-        params.put("type", "input");
-        // FongMi's NanoHTTPD hands the Spider a decoded parameter map. This
-        // bridge calls the Spider directly, so passing a percent-encoded value
-        // stores the encoded text as the credential and makes Baidu report it
-        // as unset on the next playback attempt.
-        params.put("关注[太太太硬了]", credential.trim());
-        return params;
+    Object[] proxy(
+            BridgeProviderOwnerRegistry.Binding owner,
+            Map<String, String> params
+    ) {
+        if (owner == null || owner.jarKey.isEmpty()) return null;
+        // A proxy call is part of the provider capability that created it.
+        // Never guess from the most recently used jar or probe every loaded
+        // jar: both approaches can leak credentials/media across sites.
+        return invokeProxy(proxyMethods.get(owner.jarKey), params);
     }
 
     private Spider spider(JSONObject payload) throws Exception {
@@ -325,14 +518,12 @@ final class DexSpiderRegistry {
         String key = spiderKey(payload, siteKey);
         Spider existing = spiders.get(key);
         if (existing != null) {
-            recentKey = jarKey(payload);
             return existing;
         }
         Object lock = spiderLocks.computeIfAbsent(key, ignored -> new Object());
         synchronized (lock) {
             existing = spiders.get(key);
             if (existing != null) {
-                recentKey = jarKey(payload);
                 return existing;
             }
             String api = requireString(payload, "api");
@@ -341,7 +532,6 @@ final class DexSpiderRegistry {
             }
             String jarKey = jarKey(payload);
             DexClassLoader loader = loader(payload, jarKey);
-            recentKey = jarKey;
             Spider created;
             try {
                 Class<?> type = loader.loadClass(

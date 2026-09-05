@@ -1,6 +1,130 @@
 import OKVideoCore
 import SwiftUI
 
+struct AppActivityIndicatorLifecycle: Equatable {
+    static let cycleDuration: TimeInterval = 0.85
+
+    private(set) var isVisible = false
+    private(set) var reduceMotion = false
+
+    var isAnimating: Bool {
+        isVisible && !reduceMotion
+    }
+
+    mutating func appear(reduceMotion: Bool) {
+        isVisible = true
+        self.reduceMotion = reduceMotion
+    }
+
+    mutating func updateReduceMotion(_ reduceMotion: Bool) {
+        self.reduceMotion = reduceMotion
+    }
+
+    mutating func disappear() {
+        isVisible = false
+    }
+
+    func rotationDegrees(at date: Date) -> Double {
+        guard isAnimating else { return 0 }
+        let elapsed = date.timeIntervalSinceReferenceDate
+            .truncatingRemainder(dividingBy: Self.cycleDuration)
+        return elapsed / Self.cycleDuration * 360
+    }
+}
+
+struct AppActivityIndicator: View {
+    enum Size {
+        case mini
+        case small
+        case regular
+
+        var diameter: CGFloat {
+            switch self {
+            case .mini: return 12
+            case .small: return 16
+            case .regular: return 28
+            }
+        }
+
+        var lineWidth: CGFloat {
+            switch self {
+            case .mini: return 1.5
+            case .small: return 2
+            case .regular: return 3
+            }
+        }
+    }
+
+    let size: Size
+    let tint: Color
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var lifecycle = AppActivityIndicatorLifecycle()
+
+    init(size: Size = .regular, tint: Color = .accentColor) {
+        self.size = size
+        self.tint = tint
+    }
+
+    var body: some View {
+        TimelineView(
+            .animation(
+                minimumInterval: 1.0 / 60.0,
+                paused: !lifecycle.isAnimating
+            )
+        ) { timeline in
+            Circle()
+                .trim(from: 0.08, to: 0.76)
+                .stroke(
+                    tint,
+                    style: StrokeStyle(
+                        lineWidth: size.lineWidth,
+                        lineCap: .round
+                    )
+                )
+                .frame(width: size.diameter, height: size.diameter)
+                .rotationEffect(
+                    .degrees(lifecycle.rotationDegrees(at: timeline.date))
+                )
+        }
+        .frame(width: size.diameter, height: size.diameter)
+        .fixedSize()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("正在加载")
+        .onAppear {
+            lifecycle.appear(reduceMotion: reduceMotion)
+        }
+        .onDisappear {
+            lifecycle.disappear()
+        }
+        .onChange(of: reduceMotion) { newValue in
+            lifecycle.updateReduceMotion(newValue)
+        }
+    }
+}
+
+struct AppActivityLabel: View {
+    let title: String
+    let size: AppActivityIndicator.Size
+
+    init(
+        _ title: String,
+        size: AppActivityIndicator.Size = .regular
+    ) {
+        self.title = title
+        self.size = size
+    }
+
+    var body: some View {
+        VStack(spacing: 9) {
+            AppActivityIndicator(size: size)
+            Text(title)
+                .font(.callout)
+                .foregroundColor(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
 struct VideoGrid: View {
     let items: [VideoSummary]
     let onSelect: (VideoSummary) -> Void
@@ -17,6 +141,172 @@ struct VideoGrid: View {
                 }
             }
         }
+    }
+}
+
+/// Shared native-looking segmented navigation treatment for home categories
+/// and search result sources. The two screens retain independent overflow and
+/// selection policies while sharing the exact same chrome and interaction
+/// feedback.
+enum BrowseSegmentedNavigationMetrics {
+    static let rowHeight: CGFloat = 48
+    static let controlHeight: CGFloat = 32
+    static let horizontalPadding: CGFloat = 14
+    static let minimumSegmentWidth: CGFloat = 62
+    static let separatorWidth: CGFloat = 1
+    static let containerInset: CGFloat = 2
+    static let moreWidth: CGFloat = 66
+
+    static func segmentWidth(textWidth: CGFloat) -> CGFloat {
+        max(
+            minimumSegmentWidth,
+            ceil(textWidth) + horizontalPadding * 2
+        )
+    }
+
+    static func innerAvailableWidth(_ availableWidth: CGFloat) -> CGFloat {
+        max(0, availableWidth - containerInset * 2)
+    }
+}
+
+struct BrowseSegmentedNavigationContainer<Content: View>: View {
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            content
+        }
+        .padding(BrowseSegmentedNavigationMetrics.containerInset)
+        .background {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.primary.opacity(0.012))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(Color.primary.opacity(0.045), lineWidth: 1)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+}
+
+struct BrowseSegmentedNavigationDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor).opacity(0.32))
+            .frame(
+                width: BrowseSegmentedNavigationMetrics.separatorWidth,
+                height: 20
+            )
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
+struct BrowseSegmentedNavigationBottomDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor).opacity(0.28))
+            .frame(height: 0.5)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
+struct BrowseSegmentedNavigationLabel: View {
+    let title: String
+    let isSelected: Bool
+
+    var body: some View {
+        Text(title)
+            .font(
+                .system(
+                    size: 13,
+                    weight: isSelected ? .semibold : .medium
+                )
+            )
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(
+                .horizontal,
+                BrowseSegmentedNavigationMetrics.horizontalPadding
+            )
+            .frame(
+                minWidth: BrowseSegmentedNavigationMetrics.minimumSegmentWidth,
+                minHeight: BrowseSegmentedNavigationMetrics.controlHeight
+            )
+            .contentShape(Rectangle())
+    }
+}
+
+struct BrowseSegmentedMoreLabel: View {
+    var body: some View {
+        HStack(spacing: 5) {
+            Text("更多")
+            Image(systemName: "chevron.down")
+                .font(.caption2.weight(.semibold))
+        }
+        .font(.system(size: 13, weight: .medium))
+        .foregroundStyle(.secondary)
+        .frame(
+            width: BrowseSegmentedNavigationMetrics.moreWidth,
+            height: BrowseSegmentedNavigationMetrics.controlHeight
+        )
+        .contentShape(Rectangle())
+    }
+}
+
+struct BrowseSegmentedNavigationButtonStyle: ButtonStyle {
+    let isSelected: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        BrowseSegmentedNavigationButtonBody(
+            configuration: configuration,
+            isSelected: isSelected
+        )
+    }
+}
+
+private struct BrowseSegmentedNavigationButtonBody: View {
+    let configuration: ButtonStyle.Configuration
+    let isSelected: Bool
+    @State private var isHovering = false
+
+    var body: some View {
+        configuration.label
+            .foregroundStyle(
+                isSelected
+                    ? Color.primary
+                    : isHovering
+                        ? Color.primary.opacity(0.78)
+                        : Color.secondary
+            )
+            .background(
+                RoundedRectangle(cornerRadius: 7.5, style: .continuous)
+                    .fill(
+                        isSelected
+                            ? Color(nsColor: .windowBackgroundColor).opacity(0.72)
+                            : isHovering
+                                ? Color.primary.opacity(0.055)
+                                : Color.clear
+                    )
+            )
+            .overlay {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 7.5, style: .continuous)
+                        .stroke(Color.primary.opacity(0.035), lineWidth: 0.5)
+                }
+            }
+            .opacity(configuration.isPressed ? 0.74 : 1)
+            .animation(
+                .easeOut(duration: 0.12),
+                value: configuration.isPressed
+            )
+            .animation(.easeOut(duration: 0.13), value: isHovering)
+            .onHover { isHovering = $0 }
     }
 }
 
@@ -138,7 +428,27 @@ struct VideoPosterView: View {
     let item: VideoSummary
 
     var body: some View {
-        PosterView(url: item.posterURL)
+        Group {
+            if item.posterURL != nil {
+                PosterView(url: item.posterURL)
+            } else if item.isFolder {
+                categoryNavigationPoster
+            } else {
+                PosterView(url: nil)
+            }
+        }
+            .overlay(alignment: .topTrailing) {
+                if item.isFolder, item.posterURL != nil {
+                    Image(systemName: "rectangle.stack.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(6)
+                        .background(Color.black.opacity(0.62))
+                        .clipShape(Circle())
+                        .padding(7)
+                        .accessibilityLabel("分类导航")
+                }
+            }
             .overlay(alignment: .bottomTrailing) {
                 if let rating = VideoCardMetadata.ratingText(
                     from: item.remarks
@@ -155,6 +465,24 @@ struct VideoPosterView: View {
                         .accessibilityLabel("评分 \(rating)")
                 }
             }
+    }
+
+    private var categoryNavigationPoster: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.accentColor.opacity(0.1))
+            VStack(spacing: 10) {
+                Image(systemName: "rectangle.stack.fill")
+                    .font(.system(size: 34, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+                Text("分类导航")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .aspectRatio(2 / 3, contentMode: .fit)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("分类导航")
     }
 }
 
@@ -179,8 +507,7 @@ struct AutomaticPageLoader: View {
                 .help(errorMessage ?? "下一页加载失败")
             } else if hasTriggered {
                 HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
+                    AppActivityIndicator(size: .small)
                     Text("正在准备下一页…")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -287,7 +614,7 @@ struct PosterView: View {
                         .scaledToFit()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } placeholder: {
-                    ProgressView()
+                    AppActivityIndicator(size: .regular)
                 }
             } else {
                 placeholder

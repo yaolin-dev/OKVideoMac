@@ -3,20 +3,31 @@ import Foundation
 import OKVideoCore
 import SwiftUI
 
+private enum DetailPageLayout {
+    static let maximumContentWidth: CGFloat = 1120
+    static let horizontalPadding: CGFloat = 28
+    static let posterWidth: CGFloat = 172
+    static let coordinateSpaceName = "browser-detail-scroll"
+}
+
 struct DetailLoadingView: View {
     @EnvironmentObject private var state: AppState
     let summary: VideoSummary
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .top, spacing: 20) {
-                VideoPosterView(item: summary)
-                    .frame(width: 128)
+        ScrollView {
+            BrowserToolbarScrollMarker(
+                coordinateSpaceName: DetailPageLayout.coordinateSpaceName
+            )
+            HStack(alignment: .top, spacing: 26) {
+                DetailPosterView(summary: summary)
+                    .frame(width: DetailPageLayout.posterWidth)
 
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 12) {
                     Text(summary.title)
-                        .font(.title)
-                    Text("来源：\(summary.siteName)")
+                        .font(.system(size: 30, weight: .bold))
+                        .lineLimit(3)
+                    Label(summary.siteName, systemImage: "network")
                         .foregroundColor(.secondary)
                     if let remarks = VideoCardMetadata.secondaryText(
                         from: summary.remarks
@@ -25,32 +36,26 @@ struct DetailLoadingView: View {
                             .foregroundColor(.secondary)
                     }
                     HStack(spacing: 10) {
-                        ProgressView()
-                            .controlSize(.small)
+                        AppActivityIndicator(size: .small)
                         Text("正在加载详情和播放线路…")
                             .foregroundColor(.secondary)
                     }
-                    .padding(.top, 8)
+                    .padding(.top, 12)
                 }
-                Spacer()
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding()
-
-            Divider()
-
-            VStack(spacing: 12) {
-                ProgressView()
-                Text("内容载入后会自动显示选集")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(maxWidth: DetailPageLayout.maximumContentWidth)
+            .padding(.horizontal, DetailPageLayout.horizontalPadding)
+            .padding(.vertical, 30)
+            .frame(maxWidth: .infinity, alignment: .top)
         }
-        .overlay(alignment: .topTrailing) {
-            DetailCloseButton {
-                state.dismissDetail()
+        .browserToolbarScrollSurface(named: DetailPageLayout.coordinateSpaceName)
+        .background(AppSurfacePalette.background.ignoresSafeArea())
+        .navigationTitle("")
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                DetailBackButton { state.dismissDetail() }
             }
-            .padding(14)
         }
     }
 }
@@ -63,7 +68,6 @@ struct DetailView: View {
     @State private var episodeSearchKeyword = ""
     @State private var episodeSortOrder: EpisodeSortOrder = .sourceOrder
     @State private var selectedRangeID: String?
-    @State private var episodeScrollRevision = 0
     @State private var preparedPresentations: [EpisodePresentation] = []
     @State private var preparedRangeOptions: [EpisodeRangeOption] = []
     @State private var isPreparingEpisodes = false
@@ -71,34 +75,65 @@ struct DetailView: View {
     @State private var showsFullSynopsis = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            detailHeader
+        ScrollView {
+            BrowserToolbarScrollMarker(
+                coordinateSpaceName: DetailPageLayout.coordinateSpaceName
+            )
+            VStack(alignment: .leading, spacing: 0) {
+                detailHero
 
-            Divider()
+                if !detailFacts.isEmpty {
+                    Divider()
+                        .padding(.horizontal, DetailPageLayout.horizontalPadding)
+                    detailFactStrip
+                }
 
-            if detail.playSources.isEmpty {
-                EmptyStateView(
-                    systemImage: "play.slash",
-                    title: "没有播放线路",
-                    message: "站点详情未提供可用分集。"
-                )
-            } else {
-                playbackBrowser
+                Divider()
+                    .padding(.horizontal, DetailPageLayout.horizontalPadding)
+
+                if detail.playSources.isEmpty {
+                    EmptyStateView(
+                        systemImage: "play.slash",
+                        title: "没有播放线路",
+                        message: "站点详情未提供可用分集。"
+                    )
+                    .frame(minHeight: 260)
+                } else {
+                    playbackBrowser
+                }
+            }
+            .frame(maxWidth: DetailPageLayout.maximumContentWidth)
+            .frame(maxWidth: .infinity, alignment: .top)
+            .padding(.bottom, 30)
+        }
+        .browserToolbarScrollSurface(named: DetailPageLayout.coordinateSpaceName)
+        .background(AppSurfacePalette.background.ignoresSafeArea())
+        .navigationTitle("")
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                DetailBackButton { state.dismissDetail() }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    Task { await state.toggleFavorite(detail) }
+                } label: {
+                    Label(
+                        isFavorite ? "取消收藏" : "收藏",
+                        systemImage: isFavorite ? "star.fill" : "star"
+                    )
+                }
+                .help(isFavorite ? "取消收藏" : "收藏影片")
+                .accessibilityLabel(isFavorite ? "取消收藏" : "收藏影片")
             }
         }
-        .overlay(alignment: .topTrailing) {
-            DetailCloseButton {
-                state.dismissDetail()
-            }
-            .padding(14)
-        }
-        .overlay {
-            if let prompt = state.cloudAuthorizationPrompt {
-                CloudAuthorizationView(prompt: prompt)
-                    .environmentObject(state)
+        .onAppear {
+            performInitialSelection()
+            // Report after SwiftUI has mounted the real detail tree and the
+            // main run loop gets its next display opportunity.
+            DispatchQueue.main.async {
+                state.recordDetailFirstRender(detail)
             }
         }
-        .onAppear(perform: performInitialSelection)
         .task(id: selectedSource?.id) {
             await prepareSelectedSourceEpisodes()
         }
@@ -111,28 +146,18 @@ struct DetailView: View {
             preparedPresentations = []
             preparedRangeOptions = []
             isPreparingEpisodes = true
-            resetEpisodeScroll()
-        }
-        .onChange(of: selectedRangeID) { _ in
-            resetEpisodeScroll()
-        }
-        .onChange(of: episodeSearchKeyword) { _ in
-            resetEpisodeScroll()
-        }
-        .onChange(of: episodeSortOrder) { _ in
-            resetEpisodeScroll()
         }
     }
 
-    private var detailHeader: some View {
-        HStack(alignment: .top, spacing: 18) {
-            VideoPosterView(item: detail.summary)
-                .frame(width: 128)
+    private var detailHero: some View {
+        HStack(alignment: .top, spacing: 26) {
+            DetailPosterView(summary: detail.summary)
+                .frame(width: DetailPageLayout.posterWidth)
 
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 12) {
                 Text(detail.summary.title)
-                    .font(.title2.weight(.semibold))
-                    .lineLimit(2)
+                    .font(.system(size: 30, weight: .bold))
+                    .lineLimit(3)
 
                 HStack(spacing: 7) {
                     DetailMetadataBadge(
@@ -153,34 +178,17 @@ struct DetailView: View {
                     }
                 }
 
-                if let actors = detail.actors?.trimmedNonEmpty {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("演员：\(actors)")
-                            .font(.callout)
-                            .lineLimit(showsAllActors ? nil : 2)
-                        if actors.count > 70 {
-                            DetailExpandButton(
-                                isExpanded: showsAllActors,
-                                expandTitle: "展开演员",
-                                collapseTitle: "收起演员"
-                            ) {
-                                showsAllActors.toggle()
-                            }
-                        }
-                    }
-                }
-
                 if let synopsis = detail.synopsis?.trimmedNonEmpty {
-                    VStack(alignment: .leading, spacing: 3) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Text(synopsis)
                             .font(.callout)
                             .foregroundColor(.secondary)
-                            .lineLimit(showsFullSynopsis ? nil : 4)
-                        if synopsis.count > 100 {
+                            .lineLimit(showsFullSynopsis ? nil : 3)
+                        if synopsis.count > 120 {
                             DetailExpandButton(
                                 isExpanded: showsFullSynopsis,
-                                expandTitle: "展开简介",
-                                collapseTitle: "收起简介"
+                                expandTitle: "更多",
+                                collapseTitle: "收起"
                             ) {
                                 showsFullSynopsis.toggle()
                             }
@@ -188,24 +196,59 @@ struct DetailView: View {
                     }
                 }
 
-                Button {
-                    Task { await state.toggleFavorite(detail) }
-                } label: {
-                    Label(
-                        isFavorite ? "已收藏" : "收藏",
-                        systemImage: isFavorite ? "star.fill" : "star"
-                    )
+                if let actors = displayActors {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("演员")
+                            .font(.callout.weight(.semibold))
+                        Text(actors)
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                            .lineLimit(showsAllActors ? nil : 2)
+                        if actors.count > 90 {
+                            DetailExpandButton(
+                                isExpanded: showsAllActors,
+                                expandTitle: "更多",
+                                collapseTitle: "收起"
+                            ) {
+                                showsAllActors.toggle()
+                            }
+                        }
+                    }
                 }
-                .buttonStyle(.bordered)
-                .tint(isFavorite ? .yellow : .accentColor)
-                .help(isFavorite ? "点击取消收藏" : "点击收藏")
+
+                Button(action: playPrimaryEpisode) {
+                    Label("播放", systemImage: "play.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(primaryEpisode == nil)
+                .help(primaryEpisode == nil ? "没有可播放分集" : "播放首个可用分集")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-
-            Spacer(minLength: 34)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 18)
+        .padding(.horizontal, DetailPageLayout.horizontalPadding)
+        .padding(.vertical, 26)
+    }
+
+    private var detailFactStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 0) {
+                ForEach(Array(detailFacts.enumerated()), id: \.element.id) {
+                    index, fact in
+                    DetailFactCell(fact: fact)
+                    if index < detailFacts.count - 1 {
+                        Divider()
+                            .frame(height: 54)
+                    }
+                }
+            }
+            .padding(.vertical, 16)
+            .padding(.horizontal, DetailPageLayout.horizontalPadding)
+        }
+    }
+
+    private var displayActors: String? {
+        SpiderDisplayTextNormalizer.people(detail.actors)
     }
 
     private var playbackBrowser: some View {
@@ -213,7 +256,7 @@ struct DetailView: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text("播放线路")
-                        .font(.headline)
+                        .font(.title3.weight(.semibold))
                     Text("共 \(detail.playSources.count) 条")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -271,15 +314,16 @@ struct DetailView: View {
                     )
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 14)
-            .padding(.bottom, 12)
+            .padding(.horizontal, DetailPageLayout.horizontalPadding)
+            .padding(.top, 22)
+            .padding(.bottom, 16)
 
             Divider()
+                .padding(.horizontal, DetailPageLayout.horizontalPadding)
 
             episodeContent
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     @ViewBuilder
@@ -324,13 +368,12 @@ struct DetailView: View {
     private var episodeContent: some View {
         if isPreparingEpisodes {
             VStack(spacing: 10) {
-                ProgressView()
-                    .controlSize(.small)
+                AppActivityIndicator(size: .small)
                 Text("正在整理 \(selectedSource?.episodes.count ?? 0) 集…")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(maxWidth: .infinity, minHeight: 180)
         } else if filteredPresentations.isEmpty {
             EmptyStateView(
                 systemImage: "magnifyingglass",
@@ -338,48 +381,68 @@ struct DetailView: View {
                 message: "请更换关键词或选择其他分集区间。"
             )
         } else {
-            ScrollViewReader { episodeProxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        Color.clear
-                            .frame(height: 0)
-                            .id(DetailEpisodeScrollTarget.top)
-
-                        if !regularPresentations.isEmpty {
-                            EpisodeSection(
-                                title: "剧集",
-                                episodes: regularPresentations,
-                                onPlay: playSelectedEpisode
-                            )
-                        }
-
-                        if !otherPresentations.isEmpty {
-                            EpisodeSection(
-                                title: isSingleEpisode
-                                    ? "播放"
-                                    : regularPresentations.isEmpty ? "播放资源" : "其他资源",
-                                episodes: otherPresentations,
-                                onPlay: playSelectedEpisode
-                            )
-                        }
-                    }
-                    .padding(20)
+            VStack(alignment: .leading, spacing: 18) {
+                if !regularPresentations.isEmpty {
+                    EpisodeSection(
+                        title: "剧集",
+                        episodes: regularPresentations,
+                        onPlay: playSelectedEpisode
+                    )
                 }
-                .padding(.top, 8)
-                .onChange(of: episodeScrollRevision) { _ in
-                    DispatchQueue.main.async {
-                        var transaction = Transaction()
-                        transaction.disablesAnimations = true
-                        withTransaction(transaction) {
-                            episodeProxy.scrollTo(
-                                DetailEpisodeScrollTarget.top,
-                                anchor: .top
-                            )
-                        }
-                    }
+
+                if !otherPresentations.isEmpty {
+                    EpisodeSection(
+                        title: isSingleEpisode
+                            ? "播放"
+                            : regularPresentations.isEmpty ? "播放资源" : "其他资源",
+                        episodes: otherPresentations,
+                        onPlay: playSelectedEpisode
+                    )
                 }
             }
+            .padding(.horizontal, DetailPageLayout.horizontalPadding)
+            .padding(.top, 18)
+            .padding(.bottom, 24)
         }
+    }
+
+    private var detailFacts: [DetailFact] {
+        var facts = [
+            DetailFact(
+                title: "来源",
+                value: detail.summary.siteName,
+                systemImage: "network"
+            )
+        ]
+        if let year = detail.summary.year?.trimmedNonEmpty {
+            facts.append(
+                DetailFact(title: "年份", value: year, systemImage: "calendar")
+            )
+        }
+        if let category = detail.summary.categoryName?.trimmedNonEmpty {
+            facts.append(
+                DetailFact(title: "类型", value: category, systemImage: "tag")
+            )
+        }
+        if let remarks = VideoCardMetadata.secondaryText(
+            from: detail.summary.remarks
+        ) {
+            facts.append(
+                DetailFact(
+                    title: "状态",
+                    value: remarks,
+                    systemImage: "text.badge.checkmark"
+                )
+            )
+        }
+        facts.append(
+            DetailFact(
+                title: "线路",
+                value: "\(detail.playSources.count)",
+                systemImage: "point.3.connected.trianglepath.dotted"
+            )
+        )
+        return facts
     }
 
     private var selectedSource: PlaySource? {
@@ -431,6 +494,10 @@ struct DetailView: View {
         state.favorites.contains { $0.id == detail.summary.id }
     }
 
+    private var primaryEpisode: PlayEpisode? {
+        selectedSource?.episodes.first
+    }
+
     private func performInitialSelection() {
         guard !detail.playSources.isEmpty else { return }
         if let index = detail.playSources.firstIndex(where: {
@@ -440,10 +507,6 @@ struct DetailView: View {
         } else {
             selectedSourceIndex = 0
         }
-    }
-
-    private func resetEpisodeScroll() {
-        episodeScrollRevision &+= 1
     }
 
     @MainActor
@@ -478,6 +541,12 @@ struct DetailView: View {
         play(source: source, episode: presentation.episode)
     }
 
+    private func playPrimaryEpisode() {
+        guard let source = selectedSource,
+              let episode = source.episodes.first else { return }
+        play(source: source, episode: episode)
+    }
+
     private func play(source: PlaySource, episode: PlayEpisode) {
         Task {
             await state.startPlayback(
@@ -489,43 +558,51 @@ struct DetailView: View {
     }
 }
 
-private struct DetailCloseButton: View {
+private struct DetailBackButton: View {
     let action: () -> Void
-    @State private var isHovering = false
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "xmark")
-                .font(.system(size: 13, weight: .semibold))
-                .frame(width: 30, height: 30)
-                .contentShape(Circle())
+            Label("返回", systemImage: "chevron.left")
         }
-        .buttonStyle(.plain)
-        .foregroundColor(isHovering ? .white : .primary)
-        .background {
-            Circle()
-                .fill(
-                    isHovering
-                        ? Color.accentColor
-                        : Color(nsColor: .windowBackgroundColor).opacity(0.92)
-                )
+        .help("返回上一页")
+        .accessibilityLabel("返回上一页")
+    }
+}
+
+private struct DetailPosterView: View {
+    let summary: VideoSummary
+
+    var body: some View {
+        VideoPosterView(item: summary)
+            .compositingGroup()
+            .shadow(color: .black.opacity(0.10), radius: 3, y: 2)
+            .shadow(color: .black.opacity(0.20), radius: 15, y: 9)
+    }
+}
+
+private struct DetailFact: Identifiable {
+    let title: String
+    let value: String
+    let systemImage: String
+
+    var id: String { "\(title):\(value)" }
+}
+
+private struct DetailFactCell: View {
+    let fact: DetailFact
+
+    var body: some View {
+        VStack(spacing: 5) {
+            Label(fact.title, systemImage: fact.systemImage)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Text(fact.value)
+                .font(.headline)
+                .lineLimit(1)
         }
-        .overlay {
-            Circle()
-                .stroke(
-                    isHovering
-                        ? Color.accentColor.opacity(0.65)
-                        : Color.secondary.opacity(0.2),
-                    lineWidth: 1
-                )
-        }
-        .shadow(color: .black.opacity(isHovering ? 0.18 : 0.1), radius: 7, y: 2)
-        .scaleEffect(isHovering ? 1.06 : 1)
-        .animation(.easeOut(duration: 0.12), value: isHovering)
-        .onHover { isHovering = $0 }
-        .keyboardShortcut(.cancelAction)
-        .help("关闭详情")
-        .accessibilityLabel("关闭详情")
+        .frame(width: 154)
+        .frame(minHeight: 54)
     }
 }
 
@@ -881,10 +958,6 @@ enum EpisodeRangePickerPolicy {
         guard options.indices.contains(target) else { return selectedID }
         return options[target].id
     }
-}
-
-enum DetailEpisodeScrollTarget {
-    static let top = "detail-episode-scroll-top"
 }
 
 private struct EpisodeSection: View {

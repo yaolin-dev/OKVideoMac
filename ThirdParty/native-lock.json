@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "release": "OKVideoMac 0.3.41 (62)",
+  "release": "OKVideoMac 0.4.0 (94)",
   "target": {
     "architecture": "arm64",
     "deployment_target": "12.0",
@@ -46,7 +46,7 @@
     {
       "component": "libass",
       "version": "0.17.5",
-      "upstream": "https://github.com/libass/libass/releases/download/0.17.5/libass-0.17.5.tar.gz",
+      "upstream": "https://github.com/libass/libass/archive/refs/tags/0.17.5.tar.gz",
       "source_sha256": "fa286fc9ee1ba3b932703a3df7b8474d01dc8abe29ec69b6fa68781dc4bf7acc",
       "license": "ISC",
       "build_system": "Autotools",
@@ -196,7 +196,7 @@
     {
       "component": "zlib",
       "version": "1.3.2",
-      "upstream": "https://www.zlib.net/zlib-1.3.2.tar.gz",
+      "upstream": "https://www.zlib.net/zlib-1.3.2.tar.xz",
       "source_sha256": "d7a0654783a4da529d1bb793b7ad9c3318020af77667bcae35f95d0e42a792f3",
       "license": "Zlib",
       "build_system": "CMake via MacPorts",

@@ -7,6 +7,11 @@ streams, with a SwiftUI interface and libmpv-based playback. The current public
 release is **0.3.41 (Build 65)** for Apple Silicon Macs running macOS 12 or
 later.
 
+The upcoming release candidate is **0.4.0 (Build 94)**. It remains Apple
+Silicon-only and requires macOS 12 or later. Its final public DMG and source
+set will be rebuilt from the exact merge commit after RC approval; the current
+0.3.41 download remains the public release until then.
+
 ## Highlights
 
 - Native macOS navigation, search, history, favorites, and playback UI
@@ -14,6 +19,8 @@ later.
 - libmpv playback for on-demand video and live streams
 - Selected QuickJS and CatVod/CatPaw-style Node video interfaces
 - An optional Android Bridge for selected Java/Dex `csp_` providers
+- Structured cloud authorization recovery, safer Quark transfer-folder reuse,
+  and native macOS configuration sheets in the 0.4.0 candidate
 
 Compatibility is determined primarily by source format, site type, runtime,
 API schema, parsing requirements, and media behavior—not by an ecosystem
@@ -89,6 +96,12 @@ remain available as a
 [Historical Build 62 Release Readiness Record](Docs/IMMUTABLE_RELEASE_READINESS.md).
 Those historical candidate records are not the current v0.3.41 release state.
 
+For 0.4.0, `package-app.sh` creates a Developer ID-signed DMG containing only
+`OKVideoMac.app` and `Applications -> /Applications`, then binds that DMG,
+SBOMs, notices, and corresponding-source archives to one exact clean Git
+commit. Apple notarization, staple, Gatekeeper, tag, and public upload remain
+separate release gates and must not be claimed before they run successfully.
+
 ## Content and configuration
 
 OKVideoMac does not include third-party video sources, accounts, cookies,
@@ -102,6 +115,8 @@ are authorized to access.
 - [Android Bridge Setup](OKVideoMac/macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP.md)
 - [Build from source](OKVideoMac/macOS/OKVideoMac/Docs/BUILDING.md)
 - [Source release process](Docs/SOURCE_RELEASE_PROCESS.md)
+- [0.4.0 release notes](Docs/RELEASE_NOTES_0.4.0.md)
+- [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 

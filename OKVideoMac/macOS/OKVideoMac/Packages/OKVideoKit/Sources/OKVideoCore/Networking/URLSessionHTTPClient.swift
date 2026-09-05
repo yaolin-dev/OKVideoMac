@@ -47,7 +47,16 @@ public final class URLSessionHTTPClient: HTTPClient {
             urlRequest.setValue(value, forHTTPHeaderField: key)
         }
 
-        let redirectDelegate = RedirectDelegate(maximumRedirects: request.maximumRedirects)
+        var redirectedHeaders = HTTPHeaders()
+        for field in request.redirectedHeaderFields {
+            if let value = request.headers[field] {
+                redirectedHeaders[field] = value
+            }
+        }
+        let redirectDelegate = RedirectDelegate(
+            maximumRedirects: request.maximumRedirects,
+            redirectedHeaders: redirectedHeaders
+        )
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await session.data(for: urlRequest, delegate: redirectDelegate)
@@ -138,8 +147,9 @@ public final class URLSessionHTTPClient: HTTPClient {
     }
 }
 
-private final class RedirectDelegate: NSObject, URLSessionTaskDelegate {
+final class RedirectDelegate: NSObject, URLSessionTaskDelegate {
     private let maximumRedirects: Int
+    private let redirectedHeaders: HTTPHeaders
     private let lock = NSLock()
     private var redirectCount = 0
     private var redirectHops: [HTTPRedirectHop] = []
@@ -156,8 +166,35 @@ private final class RedirectDelegate: NSObject, URLSessionTaskDelegate {
         return redirectHops
     }
 
-    init(maximumRedirects: Int) {
+    init(
+        maximumRedirects: Int,
+        redirectedHeaders: HTTPHeaders = [:]
+    ) {
         self.maximumRedirects = max(0, maximumRedirects)
+        self.redirectedHeaders = redirectedHeaders
+    }
+
+    func preparedRedirectRequest(
+        _ request: URLRequest,
+        originalURL: URL?
+    ) -> URLRequest {
+        var redirectedRequest = request
+        for (field, value) in redirectedHeaders.dictionary {
+            redirectedRequest.setValue(value, forHTTPHeaderField: field)
+        }
+        let redirectedURL = request.url
+        let changedOrigin = originalURL?.scheme?.caseInsensitiveCompare(
+            redirectedURL?.scheme ?? ""
+        ) != .orderedSame || originalURL?.host?.caseInsensitiveCompare(
+            redirectedURL?.host ?? ""
+        ) != .orderedSame || originalURL?.port != redirectedURL?.port
+        if changedOrigin {
+            // Provider media headers may be explicitly preserved, but
+            // credentials must never cross an origin boundary.
+            redirectedRequest.setValue(nil, forHTTPHeaderField: "Authorization")
+            redirectedRequest.setValue(nil, forHTTPHeaderField: "Proxy-Authorization")
+        }
+        return redirectedRequest
     }
 
     func urlSession(
@@ -184,21 +221,11 @@ private final class RedirectDelegate: NSObject, URLSessionTaskDelegate {
             completionHandler(nil)
             return
         }
-        var redirectedRequest = request
-        let originalURL = task.originalRequest?.url
-        let redirectedURL = request.url
-        let changedOrigin = originalURL?.scheme?.caseInsensitiveCompare(
-            redirectedURL?.scheme ?? ""
-        ) != .orderedSame || originalURL?.host?.caseInsensitiveCompare(
-            redirectedURL?.host ?? ""
-        ) != .orderedSame || originalURL?.port != redirectedURL?.port
-        if changedOrigin {
-            // URLSession normally removes credentials on a cross-origin
-            // redirect. Enforce that boundary explicitly because remote Node
-            // bundles commonly redirect to public object storage.
-            redirectedRequest.setValue(nil, forHTTPHeaderField: "Authorization")
-            redirectedRequest.setValue(nil, forHTTPHeaderField: "Proxy-Authorization")
-        }
-        completionHandler(redirectedRequest)
+        completionHandler(
+            preparedRedirectRequest(
+                request,
+                originalURL: task.originalRequest?.url
+            )
+        )
     }
 }

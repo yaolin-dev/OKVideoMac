@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 
 struct PlayerView: View {
     @EnvironmentObject private var state: AppState
+    @ObservedObject private var playerSnapshotState: PlayerSnapshotState
     @State private var scrubPosition: Double?
     @State private var controlsVisible = true
     @State private var controlsHovering = false
@@ -24,7 +25,18 @@ struct PlayerView: View {
     @State private var progressHoverFraction: Double?
     @State private var lastLiveChannelID: String?
     @State private var holdsPreviousLiveFrame = false
+    @State private var playbackActivityOverlayVisible = false
+    @State private var playbackActivityOverlayShownAt: Date?
+    @State private var playbackActivityOverlayTask: Task<Void, Never>?
     let onWindowChromeRestored: () -> Void
+
+    init(
+        playerSnapshotState: PlayerSnapshotState,
+        onWindowChromeRestored: @escaping () -> Void
+    ) {
+        self.playerSnapshotState = playerSnapshotState
+        self.onWindowChromeRestored = onWindowChromeRestored
+    }
 
     private let speeds: [Double] = [0.5, 0.75, 1, 1.25, 1.5, 2]
     private let utilityIconSize: CGFloat = 19
@@ -61,7 +73,10 @@ struct PlayerView: View {
             }
 
             playbackStatusOverlay
-                .allowsHitTesting(false)
+                .allowsHitTesting(
+                    state.hasHistoryPlaybackChoices
+                        || (isFailed && state.canRetryHistoryPlayback)
+                )
 
             if state.isLivePlayback,
                let notice = state.livePlaybackNotice {
@@ -121,7 +136,10 @@ struct PlayerView: View {
                 isLivePlayback: state.isLivePlayback,
                 controlsVisible: controlsVisible,
                 title: playbackDisplayTitle,
-                videoAspectRatio: playerWindowAspectRatio,
+                // Media changes are rendered inside the existing viewport.
+                // Do not resize or move the user's window when late metadata,
+                // a new episode, or a different route reports another ratio.
+                videoAspectRatio: nil,
                 onRestore: onWindowChromeRestored,
                 onFullScreenChange: { isWindowFullScreen = $0 }
             )
@@ -132,6 +150,9 @@ struct PlayerView: View {
         .onAppear {
             lastLiveChannelID = state.livePlaybackChannel?.id
             revealControls()
+            updatePlaybackActivityOverlay(
+                isActive: hasTransientPlaybackActivity
+            )
         }
         .onDisappear {
             hideControlsTask?.cancel()
@@ -142,9 +163,16 @@ struct PlayerView: View {
             isLiveVolumeHovering = false
             activeUtilityPanel = nil
             inspectedPlayerEpisode = nil
+            playbackActivityOverlayTask?.cancel()
+            playbackActivityOverlayTask = nil
+            playbackActivityOverlayVisible = false
+            playbackActivityOverlayShownAt = nil
         }
         .onChange(of: state.playerSnapshot.status) { _ in
             revealControls()
+        }
+        .onChange(of: hasTransientPlaybackActivity) { isActive in
+            updatePlaybackActivityOverlay(isActive: isActive)
         }
         .onChange(of: state.livePlaybackChannel?.id) { channelID in
             handleLiveChannelChange(channelID)
@@ -164,6 +192,9 @@ struct PlayerView: View {
             if activeUtilityPanel == .episodes {
                 alignPlayerEpisodePageWithCurrentEpisode()
             }
+        }
+        .onChange(of: state.shortcutPlayerEscapeRequest) { _ in
+            handleEscapeShortcut()
         }
         .animation(
             .easeInOut(duration: 0.22),
@@ -339,7 +370,6 @@ struct PlayerView: View {
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .keyboardShortcut(.space, modifiers: [])
             .help(isPaused ? "播放" : "暂停")
             .modifier(PlayerControlHoverEffect())
 
@@ -547,15 +577,6 @@ struct PlayerView: View {
         .joined(separator: " · ")
     }
 
-    private var playerWindowAspectRatio: Double? {
-        PlayerWindowAspectPolicy.aspectRatio(
-            isLivePlayback: state.isLivePlayback,
-            override: state.playerAspectRatio,
-            videoWidth: state.playerSnapshot.videoWidth,
-            videoHeight: state.playerSnapshot.videoHeight
-        )
-    }
-
     private func episodePanelDisplayName(
         _ presentation: EpisodePresentation
     ) -> String {
@@ -576,7 +597,8 @@ struct PlayerView: View {
                 .shadow(color: .black.opacity(0.82), radius: 4, y: 1)
 
             HStack(spacing: 12) {
-                if state.playbackResolutionState != .playing {
+                if state.playbackResolutionState != .playing,
+                   !shouldShowStatusOverlay {
                     statusPill
                         .layoutPriority(1)
                 }
@@ -594,11 +616,7 @@ struct PlayerView: View {
     private var statusPill: some View {
         HStack(spacing: 7) {
             if !isFailed {
-                ProgressView()
-                    .controlSize(.mini)
-                    .progressViewStyle(
-                        CircularProgressViewStyle(tint: .white)
-                    )
+                AppActivityIndicator(size: .mini, tint: .white)
             }
             Text(state.playbackStageDescription)
                 .lineLimit(1)
@@ -622,19 +640,7 @@ struct PlayerView: View {
     @ViewBuilder
     private var playbackStatusOverlay: some View {
         if shouldShowStatusOverlay {
-            VStack(spacing: 12) {
-                if isFailed {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 34))
-                        .foregroundColor(.orange)
-                } else {
-                    ProgressView()
-                        .controlSize(.large)
-                        .progressViewStyle(
-                            CircularProgressViewStyle(tint: .white)
-                        )
-                }
-
+            VStack(spacing: 8) {
                 Text(state.playbackStageDescription)
                     .font(.headline)
                 Text(state.playerNetworkSpeedDescription)
@@ -658,12 +664,76 @@ struct PlayerView: View {
                         .lineLimit(5)
                         .frame(maxWidth: 560)
                 }
+
+                if state.hasHistoryPlaybackChoices {
+                    Text(state.playbackFailureSummary ?? "请选择要恢复的线路和分集")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.72))
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 620)
+
+                    ScrollView {
+                        VStack(spacing: 8) {
+                            ForEach(state.historyPlaybackChoices) { choice in
+                                Button {
+                                    state.chooseHistoryPlayback(choice.id)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(choice.title)
+                                            .font(.callout.weight(.semibold))
+                                            .lineLimit(1)
+                                        Text(choice.subtitle)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: 620, maxHeight: 230)
+
+                    Button("取消恢复") {
+                        state.cancelHistoryPlaybackChoices()
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                if isFailed, state.canRetryHistoryPlayback {
+                    HStack(spacing: 10) {
+                        Button("重试") {
+                            state.retryHistoryPlayback()
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button("返回历史") {
+                            state.returnToHistoryAfterPlaybackFailure()
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .controlSize(.regular)
+                    .padding(.top, 2)
+                }
+
+                if isFailed,
+                   state.canOpenNodeConfigurationForPlaybackFailure {
+                    Button("打开网盘授权配置") {
+                        state.openNodeConfigurationForPlaybackFailure()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                    .padding(.top, 2)
+                }
             }
             .foregroundColor(.white)
-            .padding(.horizontal, 22)
-            .padding(.vertical, 18)
-            .frame(maxWidth: 500)
-            .shadow(color: .black.opacity(0.72), radius: 3, y: 1)
+            .padding(.horizontal, 24)
+            .frame(maxWidth: 600)
+            .shadow(color: .black.opacity(0.95), radius: 4, y: 1)
+            .transition(.opacity)
         }
     }
 
@@ -671,16 +741,6 @@ struct PlayerView: View {
         VStack(spacing: 2) {
             progressControls
                 .padding(.horizontal, 3)
-
-            if case .buffering = state.playerSnapshot.status {
-                ProgressView(
-                    value: state.playerSnapshot.bufferedPercent,
-                    total: 100
-                )
-                .tint(playerAccentColor)
-                .controlSize(.mini)
-                .frame(height: 2)
-            }
 
             ZStack {
                 HStack(spacing: 12) {
@@ -720,12 +780,15 @@ struct PlayerView: View {
     }
 
     private var progressControls: some View {
-        Slider(
+        PlayerTimelineControl(
             value: Binding(
                 get: { displayedPosition },
                 set: { scrubPosition = $0 }
             ),
-            in: 0...max(state.playerSnapshot.duration, 1),
+            total: max(state.playerSnapshot.duration, 1),
+            bufferedPercent: state.playerSnapshot.bufferedPercent,
+            accentColor: playerAccentColor,
+            isEmphasized: isProgressHovering,
             onEditingChanged: { editing in
                 if editing {
                     keepControlsVisible()
@@ -735,10 +798,8 @@ struct PlayerView: View {
                 }
             }
         )
-        .tint(playerAccentColor)
-        .controlSize(.mini)
+        .disabled(!state.canSeekPlayback)
         .frame(height: 12)
-        .scaleEffect(x: 1, y: isProgressHovering ? 1.55 : 1)
         .shadow(
             color: playerAccentColor.opacity(isProgressHovering ? 0.42 : 0),
             radius: isProgressHovering ? 5 : 0
@@ -894,7 +955,8 @@ struct PlayerView: View {
 
             playerIconButton(
                 systemImage: "gobackward.10",
-                help: "快退 10 秒"
+                help: state.canSeekPlayback ? "快退 10 秒" : "当前线路不支持跳转",
+                disabled: !state.canSeekPlayback
             ) {
                 Task { await state.seek(by: -10) }
             }
@@ -912,12 +974,12 @@ struct PlayerView: View {
             }
             .buttonStyle(.plain)
             .foregroundColor(Color.black.opacity(0.86))
-            .keyboardShortcut(.space, modifiers: [])
             .help(isPaused ? "播放" : "暂停")
 
             playerIconButton(
                 systemImage: "goforward.10",
-                help: "快进 10 秒"
+                help: state.canSeekPlayback ? "快进 10 秒" : "当前线路不支持跳转",
+                disabled: !state.canSeekPlayback
             ) {
                 Task { await state.seek(by: 10) }
             }
@@ -1032,8 +1094,7 @@ struct PlayerView: View {
 
                 if state.isPlayerEpisodeListPreparing {
                     HStack(spacing: 9) {
-                        ProgressView()
-                            .controlSize(.small)
+                        AppActivityIndicator(size: .small, tint: .white)
                         Text("正在整理分集…")
                             .font(.caption)
                             .foregroundColor(.white.opacity(0.62))
@@ -1643,10 +1704,67 @@ struct PlayerView: View {
             break
         }
         switch state.playerSnapshot.status {
-        case .loading, .buffering:
+        case .loading:
             return true
         default:
-            return false
+            return playbackActivityOverlayVisible
+        }
+    }
+
+    private var hasTransientPlaybackActivity: Bool {
+        PlayerActivityOverlayPolicy.isActive(
+            snapshot: state.playerSnapshot
+        )
+    }
+
+    private func updatePlaybackActivityOverlay(isActive: Bool) {
+        playbackActivityOverlayTask?.cancel()
+        playbackActivityOverlayTask = nil
+
+        if isActive {
+            guard !playbackActivityOverlayVisible else { return }
+            playbackActivityOverlayTask = Task { @MainActor in
+                do {
+                    try await Task.sleep(
+                        nanoseconds: PlayerActivityOverlayPolicy
+                            .presentationDelayNanoseconds
+                    )
+                    try Task.checkCancellation()
+                    guard hasTransientPlaybackActivity else { return }
+                    playbackActivityOverlayVisible = true
+                    playbackActivityOverlayShownAt = Date()
+                } catch {
+                    return
+                }
+            }
+            return
+        }
+
+        guard playbackActivityOverlayVisible else {
+            playbackActivityOverlayShownAt = nil
+            return
+        }
+        let elapsed = playbackActivityOverlayShownAt.map {
+            Date().timeIntervalSince($0)
+        } ?? PlayerActivityOverlayPolicy.minimumVisibleDuration
+        let remaining = max(
+            0,
+            PlayerActivityOverlayPolicy.minimumVisibleDuration - elapsed
+        )
+        playbackActivityOverlayTask = Task { @MainActor in
+            do {
+                if remaining > 0 {
+                    try await Task.sleep(
+                        nanoseconds: UInt64(remaining * 1_000_000_000)
+                    )
+                }
+                try Task.checkCancellation()
+                guard !hasTransientPlaybackActivity else { return }
+                playbackActivityOverlayVisible = false
+                playbackActivityOverlayShownAt = nil
+            } catch {
+                return
+            }
         }
     }
 
@@ -1736,7 +1854,7 @@ struct PlayerView: View {
     }
 
     private func toggleFullScreen() {
-        (NSApp.keyWindow ?? NSApp.mainWindow)?.toggleFullScreen(nil)
+        state.togglePlayerFullScreen()
     }
 
     private func handleSurfaceDoubleClick() {
@@ -1745,6 +1863,17 @@ struct PlayerView: View {
             activeUtilityPanel = nil
         }
         toggleFullScreen()
+    }
+
+    private func handleEscapeShortcut() {
+        if activeUtilityPanel != nil {
+            inspectedPlayerEpisode = nil
+            activeUtilityPanel = nil
+            return
+        }
+        if isWindowFullScreen {
+            toggleFullScreen()
+        }
     }
 
     private func trackMenu(
@@ -2359,6 +2488,23 @@ enum PlayerControlVisibilityPolicy {
     }
 }
 
+enum PlayerActivityOverlayPolicy {
+    /// Avoid flashing an indicator for seeks that complete within one or two
+    /// rendered frames, while still acknowledging a real network/decoder wait.
+    static let presentationDelayNanoseconds: UInt64 = 200_000_000
+    static let minimumVisibleDuration: TimeInterval = 0.30
+
+    static func isActive(snapshot: PlayerSnapshot) -> Bool {
+        if snapshot.isSeeking || snapshot.isPausedForCache {
+            return true
+        }
+        if case .buffering = snapshot.status {
+            return true
+        }
+        return false
+    }
+}
+
 enum LiveSwitchLoadingIndicatorPolicy {
     static func shouldKeepPreviousFrameClean(
         isLivePlayback: Bool,
@@ -2872,53 +3018,14 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                   aspectRatio > 0,
                   !window.styleMask.contains(.fullScreen),
                   !window.inLiveResize else { return }
-
+            // An episode or route can publish dimensions after playback has
+            // already started. Only update the constraint used for future
+            // manual resizes; never move or resize the current outer frame.
+            // mpv letterboxes the media inside the unchanged viewport.
             window.contentAspectRatio = NSSize(
                 width: aspectRatio,
                 height: 1
             )
-
-            let contentRect = window.contentRect(forFrameRect: window.frame)
-            let visibleFrame = window.screen?.visibleFrame
-            let chromeWidth = max(0, window.frame.width - contentRect.width)
-            let chromeHeight = max(0, window.frame.height - contentRect.height)
-            let maximumContentSize = NSSize(
-                width: max(
-                    1,
-                    (visibleFrame?.width ?? .greatestFiniteMagnitude)
-                        - chromeWidth
-                ),
-                height: max(
-                    1,
-                    (visibleFrame?.height ?? .greatestFiniteMagnitude)
-                        - chromeHeight
-                )
-            )
-            guard let targetContentSize = PlayerWindowAspectPolicy.contentSize(
-                current: contentRect.size,
-                aspectRatio: aspectRatio,
-                minimum: window.contentMinSize,
-                maximum: maximumContentSize
-            ) else { return }
-
-            var targetFrame = window.frameRect(
-                forContentRect: NSRect(origin: .zero, size: targetContentSize)
-            )
-            targetFrame.origin = NSPoint(
-                x: window.frame.midX - targetFrame.width / 2,
-                y: window.frame.midY - targetFrame.height / 2
-            )
-            if let visibleFrame {
-                targetFrame.origin.x = min(
-                    max(targetFrame.origin.x, visibleFrame.minX),
-                    visibleFrame.maxX - targetFrame.width
-                )
-                targetFrame.origin.y = min(
-                    max(targetFrame.origin.y, visibleFrame.minY),
-                    visibleFrame.maxY - targetFrame.height
-                )
-            }
-            window.setFrame(targetFrame, display: false)
         }
 
         private static func restoreWhenWindowIsStable(
@@ -3103,17 +3210,12 @@ enum PlayerWindowMutationPolicy {
 }
 
 enum PlayerWindowAspectPolicy {
-    static let liveAspectRatio = 16.0 / 9.0
-
     static func aspectRatio(
         isLivePlayback: Bool,
         override: String?,
         videoWidth: Int,
         videoHeight: Int
     ) -> Double? {
-        if isLivePlayback {
-            return liveAspectRatio
-        }
         if let override,
            let ratio = parsedAspectRatio(override) {
             return ratio
@@ -3201,6 +3303,153 @@ enum PlayerProgressHoverPolicy {
         let half = min(max(tooltipWidth / 2, 0), width / 2)
         let raw = CGFloat(min(1, max(0, fraction))) * width
         return min(max(raw, half), width - half)
+    }
+}
+
+enum PlayerTimelinePolicy {
+    static func fraction(value: Double, total: Double) -> Double {
+        guard value.isFinite,
+              total.isFinite,
+              total > 0 else { return 0 }
+        return min(1, max(0, value / total))
+    }
+
+    static func bufferedFraction(percent: Double) -> Double {
+        guard percent.isFinite else { return 0 }
+        return min(1, max(0, percent / 100))
+    }
+
+    static func value(fraction: Double, total: Double) -> Double {
+        guard fraction.isFinite,
+              total.isFinite,
+              total > 0 else { return 0 }
+        return min(1, max(0, fraction)) * total
+    }
+
+    static func fraction(
+        x: CGFloat,
+        width: CGFloat,
+        horizontalInset: CGFloat
+    ) -> Double {
+        guard x.isFinite,
+              width.isFinite,
+              horizontalInset.isFinite else { return 0 }
+        let inset = min(max(horizontalInset, 0), max(width / 2, 0))
+        let trackWidth = width - (inset * 2)
+        guard trackWidth > 0 else { return 0 }
+        return min(1, max(0, Double((x - inset) / trackWidth)))
+    }
+}
+
+private struct PlayerTimelineControl: View {
+    @Binding var value: Double
+    let total: Double
+    let bufferedPercent: Double
+    let accentColor: Color
+    let isEmphasized: Bool
+    let onEditingChanged: (Bool) -> Void
+
+    @State private var isEditing = false
+
+    private let thumbDiameter: CGFloat = 12
+
+    var body: some View {
+        GeometryReader { geometry in
+            let playedFraction = PlayerTimelinePolicy.fraction(
+                value: value,
+                total: total
+            )
+            let bufferedFraction = PlayerTimelinePolicy.bufferedFraction(
+                percent: bufferedPercent
+            )
+            let horizontalInset = thumbDiameter / 2
+            let trackWidth = max(geometry.size.width - thumbDiameter, 0)
+            let trackHeight: CGFloat = isEmphasized ? 6 : 4
+            let playedWidth = trackWidth * CGFloat(playedFraction)
+            let bufferedWidth = trackWidth * CGFloat(bufferedFraction)
+            let thumbX = horizontalInset + playedWidth
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.18))
+                    .frame(width: trackWidth, height: trackHeight)
+                    .offset(x: horizontalInset)
+
+                Capsule()
+                    .fill(Color.white.opacity(0.40))
+                    .frame(width: bufferedWidth, height: trackHeight)
+                    .offset(x: horizontalInset)
+
+                Capsule()
+                    .fill(accentColor)
+                    .frame(width: playedWidth, height: trackHeight)
+                    .offset(x: horizontalInset)
+
+                Circle()
+                    .fill(Color.white)
+                    .overlay {
+                        Circle()
+                            .stroke(accentColor.opacity(0.82), lineWidth: 1.5)
+                    }
+                    .frame(width: thumbDiameter, height: thumbDiameter)
+                    .shadow(color: .black.opacity(0.48), radius: 2, y: 1)
+                    .position(x: thumbX, y: geometry.size.height / 2)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { gesture in
+                        if !isEditing {
+                            isEditing = true
+                            onEditingChanged(true)
+                        }
+                        let fraction = PlayerTimelinePolicy.fraction(
+                            x: gesture.location.x,
+                            width: geometry.size.width,
+                            horizontalInset: horizontalInset
+                        )
+                        value = PlayerTimelinePolicy.value(
+                            fraction: fraction,
+                            total: total
+                        )
+                    }
+                    .onEnded { _ in
+                        finishEditing()
+                    }
+            )
+        }
+        .accessibilityElement()
+        .accessibilityLabel("播放进度")
+        .accessibilityValue(
+            "\(Int((PlayerTimelinePolicy.fraction(value: value, total: total) * 100).rounded()))%"
+        )
+        .accessibilityAdjustableAction { direction in
+            let step = min(max(total * 0.01, 5), 30)
+            switch direction {
+            case .increment:
+                adjustValue(by: step)
+            case .decrement:
+                adjustValue(by: -step)
+            @unknown default:
+                break
+            }
+        }
+        .onDisappear {
+            finishEditing()
+        }
+    }
+
+    private func adjustValue(by offset: Double) {
+        onEditingChanged(true)
+        value = min(max(value + offset, 0), max(total, 0))
+        onEditingChanged(false)
+    }
+
+    private func finishEditing() {
+        guard isEditing else { return }
+        isEditing = false
+        onEditingChanged(false)
     }
 }
 

@@ -209,13 +209,19 @@ vapoursynth=disabled
 libavdevice=disabled
 plain-gl=enabled
 gl=enabled
-videotoolbox-gl=disabled
+cocoa=enabled
+gl-cocoa=enabled
+videotoolbox-gl=enabled
+swift-build=disabled
 coreaudio=enabled
 ```
 
 这显著降低了“播放器自行加载第三方插件/脚本/外部 codec”的风险。FFmpeg 以
 dylib 链嵌入，不存在 App 运行时启动 `ffmpeg` executable 的路径。VideoToolbox、
-CoreMedia、AVFoundation、AudioToolbox、CoreAudio 等是 Apple 系统 framework。
+CoreMedia、AVFoundation、AudioToolbox、CoreAudio、OpenGL 和 CoreVideo 等是
+Apple 系统 framework。Cocoa 仅用于 VideoToolbox 与 OpenGL 的原生 IOSurface
+互操作；随补丁关闭了 upstream Swift App 生命周期和剪贴板后端，宿主窗口仍完全
+由 OKVideoMac 管理。
 
 ### 4.2 最终依赖链
 

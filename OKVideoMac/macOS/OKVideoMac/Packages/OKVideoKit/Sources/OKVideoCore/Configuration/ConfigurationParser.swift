@@ -23,10 +23,11 @@ public struct ConfigurationParser {
         }
 
         do {
-            try JSONDuplicateKeyDetector.validate(data)
+            let normalized = try TVBoxJSONNormalizer.normalize(data)
+            try JSONDuplicateKeyDetector.validate(normalized)
             var configuration = try decoder.decode(
                 FongMiConfiguration.self,
-                from: data
+                from: normalized
             )
             // The Android FongMi ecosystem commonly uses repeated site keys
             // for announcement/separator entries. Its runtime map keeps the

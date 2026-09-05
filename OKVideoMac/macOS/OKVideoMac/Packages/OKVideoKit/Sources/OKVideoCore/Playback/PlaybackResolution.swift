@@ -50,6 +50,16 @@ public struct PlaybackResolutionRequest: Equatable, Sendable {
     }
 }
 
+public enum MediaTransportProfile: Equatable, Sendable {
+    /// Ordinary native/direct playback. Existing buffering and startup
+    /// behavior remains unchanged for this profile.
+    case standard
+    /// Media produced by a TVBox/CatVod Java spider. These URLs often sit
+    /// behind a provider-owned loopback relay and need bounded per-file cache
+    /// and event-driven startup/seek handling.
+    case tvBox
+}
+
 public struct ResolvedMedia: Equatable, Sendable {
     public var url: URL
     public var headers: HTTPHeaders
@@ -59,6 +69,8 @@ public struct ResolvedMedia: Equatable, Sendable {
     public var sourceName: String
     public var episodeName: String
     public var parserName: String?
+    public var transportProfile: MediaTransportProfile
+    public var transferReceipt: TransferReceipt?
 
     public init(
         url: URL,
@@ -68,7 +80,9 @@ public struct ResolvedMedia: Equatable, Sendable {
         siteKey: String,
         sourceName: String,
         episodeName: String,
-        parserName: String? = nil
+        parserName: String? = nil,
+        transportProfile: MediaTransportProfile = .standard,
+        transferReceipt: TransferReceipt? = nil
     ) {
         self.url = url
         self.headers = headers
@@ -78,6 +92,8 @@ public struct ResolvedMedia: Equatable, Sendable {
         self.sourceName = sourceName
         self.episodeName = episodeName
         self.parserName = parserName
+        self.transportProfile = transportProfile
+        self.transferReceipt = transferReceipt
     }
 }
 
@@ -166,53 +182,88 @@ public struct DefaultMediaProbe: MediaProbe {
         // length. libmpv handles this server correctly, so let the player do
         // the authoritative load check for this one controlled loopback
         // endpoint instead of rejecting every original-quality line here.
-        if Self.isAndroidCloudOriginalProxy(url)
-            || Self.isNodeRuntimeMediaProxy(url) {
+        if Self.isAndroidCloudOriginalProxy(url) {
             return true
         }
 
-        do {
-            let response = try await httpClient.send(
-                HTTPRequest(
-                    url: url,
-                    method: .head,
-                    headers: headers,
-                    timeout: 10,
-                    maximumResponseBytes: 1_024,
-                    retryPolicy: .none
-                )
-            )
-            return Self.looksLikeMedia(response)
-                || MediaURLClassifier.isDirectMediaURL(url.absoluteString)
-        } catch let error as HTTPClientError {
-            switch error {
-            case .statusCode, .invalidResponse:
-                break
-            default:
-                throw error
-            }
-        }
+        let isAndroidBridgeSession = Self.isAndroidBridgeMediaSession(url)
+        let isNodeRuntimeProxy = Self.isNodeRuntimeMediaProxy(url)
 
         var probeHeaders = headers
-        probeHeaders["Range"] = "bytes=0-65535"
+        // A single bounded byte request proves both reachability and body
+        // shape. HEAD is frequently unsupported by cloud proxies and doing
+        // both requests doubles startup latency without adding evidence.
+        probeHeaders["Range"] = "bytes=0-16383"
         do {
             let response = try await httpClient.send(
                 HTTPRequest(
                     url: url,
                     headers: probeHeaders,
-                    timeout: 10,
-                    maximumResponseBytes: 512 * 1_024,
-                    retryPolicy: .none
+                    timeout: 8,
+                    maximumResponseBytes: 128 * 1_024,
+                    maximumRedirects: 4,
+                    retryPolicy: .none,
+                    allowsNonSuccessfulStatus: true
                 )
             )
-            return Self.looksLikeMedia(response)
-                || MediaURLClassifier.isDirectMediaURL(url.absoluteString)
+            if !(200...299).contains(response.statusCode),
+               isAndroidBridgeSession,
+               let bridgeFailure = Self.androidBridgeFailure(response) {
+                throw AppError.playback(bridgeFailure)
+            }
+            switch response.statusCode {
+            case 200...299:
+                break
+            case 401, 403:
+                throw AppError.playback("媒体授权已失效，请重新登录网盘")
+            case 404, 410:
+                throw AppError.playback("临时播放地址或分享已失效，请重新解析")
+            default:
+                throw AppError.playback(
+                    "媒体线路返回 HTTP 状态码 \(response.statusCode)"
+                )
+            }
+            let valid = Self.looksLikeMediaBytes(response)
+            if !valid, isNodeRuntimeProxy || isAndroidBridgeSession {
+                throw AppError.playback(
+                    "网盘播放地址没有返回真实媒体数据"
+                )
+            }
+            return valid
         } catch HTTPClientError.responseTooLarge
-                    where MediaURLClassifier.isDirectMediaURL(url.absoluteString) {
+                    where MediaURLClassifier.isDirectMediaURL(url.absoluteString)
+                        || isAndroidBridgeSession
+                        || isNodeRuntimeProxy {
             // Some VOD providers ignore Range and return a complete, very large
             // media playlist. Receiving more than the probe limit still proves
             // that the direct media endpoint is reachable.
             return true
+        }
+    }
+
+    private static func androidBridgeFailure(
+        _ response: HTTPResponse
+    ) -> String? {
+        guard response.body.count <= 64 * 1_024,
+              let object = try? JSONSerialization.jsonObject(with: response.body)
+                as? [String: Any],
+              let error = object["error"] as? String else {
+            return nil
+        }
+        let message = error.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else { return nil }
+        switch message {
+        case "TVBox local proxy is not ready",
+             "TVBox local proxy port is unavailable":
+            return "TVBox 本地代理未就绪"
+        case "Spider internal proxy failed",
+             "Invalid Spider proxy response",
+             "Provider media proxy failed":
+            return "Spider 内部代理处理失败"
+        case "Media session expired or missing":
+            return "播放会话已过期，请重新解析"
+        default:
+            return message
         }
     }
 
@@ -223,6 +274,29 @@ public struct DefaultMediaProbe: MediaProbe {
             || contentType.contains("mpegurl")
             || contentType.contains("dash+xml")
             || contentType.contains("octet-stream")
+    }
+
+    private static func looksLikeMediaBytes(_ response: HTTPResponse) -> Bool {
+        guard !response.body.isEmpty else { return false }
+        let contentType = response.headers["Content-Type"]?.lowercased() ?? ""
+        if contentType.contains("json")
+            || contentType.contains("text/html")
+            || contentType.contains("application/xhtml") {
+            return false
+        }
+        let prefix = response.body.prefix(512)
+        if let text = String(data: prefix, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+           text.hasPrefix("{")
+            || text.hasPrefix("[")
+            || text.hasPrefix("<!doctype html")
+            || text.hasPrefix("<html") {
+            return false
+        }
+        return looksLikeMedia(response)
+            || response.statusCode == 206
+            || contentType.isEmpty
     }
 
     static func isAndroidCloudOriginalProxy(_ url: URL) -> Bool {
@@ -250,8 +324,21 @@ public struct DefaultMediaProbe: MediaProbe {
               url.port != nil else {
             return false
         }
+        guard !isAndroidBridgeMediaSession(url) else { return false }
         return (url.path.hasPrefix("/spider/") && url.path.contains("/proxy"))
             || url.path.hasPrefix("/proxy/")
+    }
+
+    static func isAndroidBridgeMediaSession(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "http",
+              ["127.0.0.1", "localhost", "::1"].contains(
+                url.host?.lowercased() ?? ""
+              ),
+              url.port == 19_978 else {
+            return false
+        }
+        return url.path.hasPrefix("/proxy/media/")
+            || url.path.hasPrefix("/v1/media-sessions/")
     }
 }
 
@@ -385,6 +472,11 @@ public struct PlaybackResolver {
                 options.append((nil, candidate.result.url))
             }
             options.append(contentsOf: parserOrder.map { ($0, candidate.result.url) })
+            if options.isEmpty, candidate.result.needsParsing {
+                failureMessages.append(
+                    "\(candidate.sourceName)/解析：线路返回待解析地址，但当前配置没有可用解析器"
+                )
+            }
 
             for (parser, inputURL) in options {
                 guard attemptNumber < request.maximumAttempts else {
@@ -437,9 +529,24 @@ public struct PlaybackResolver {
                             format: candidate.result.format
                         )
                     }
+                    guard MediaURLClassifier.isSupportedAbsoluteMediaURL(
+                        parsed.url
+                    ) else {
+                        throw AppError.parsing(
+                            "播放器拒绝了非绝对或不受支持的媒体地址"
+                        )
+                    }
                     continuation.yield(.state(.validating))
-                    guard try await mediaProbe.validate(url: parsed.url, headers: parsed.headers) else {
-                        throw AppError.parsing("媒体探测未通过")
+                    let requiresPreflight = parser != nil
+                        || candidate.result.validationPolicy
+                            != .playerAuthoritative
+                    if requiresPreflight {
+                        guard try await mediaProbe.validate(
+                            url: parsed.url,
+                            headers: parsed.headers
+                        ) else {
+                            throw AppError.parsing("媒体探测未通过")
+                        }
                     }
                     let resolved = ResolvedMedia(
                         url: parsed.url,
@@ -449,11 +556,38 @@ public struct PlaybackResolver {
                         siteKey: candidate.siteKey,
                         sourceName: candidate.sourceName,
                         episodeName: candidate.episodeName,
-                        parserName: parser?.name
+                        parserName: parser?.name,
+                        transferReceipt: candidate.result.transferReceipt
                     )
                     continuation.yield(.state(.loading))
                     if let mediaLoader {
-                        try await mediaLoader(resolved, attempt)
+                        do {
+                            try await mediaLoader(resolved, attempt)
+                        } catch {
+                            if candidate.result.validationPolicy
+                                == .playerAuthoritative,
+                               DefaultMediaProbe.isAndroidBridgeMediaSession(
+                                parsed.url
+                               ) {
+                                do {
+                                    let reachable = try await mediaProbe.validate(
+                                        url: parsed.url,
+                                        headers: parsed.headers
+                                    )
+                                    if !reachable {
+                                        throw AppError.playback(
+                                            "Android 内部播放代理没有返回媒体数据"
+                                        )
+                                    }
+                                } catch {
+                                    throw AppError.playback(
+                                        "Android 内部播放代理无法取得上游媒体："
+                                            + error.localizedDescription
+                                    )
+                                }
+                            }
+                            throw error
+                        }
                         continuation.yield(.state(.playing))
                     }
                     continuation.yield(.resolved(resolved))

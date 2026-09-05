@@ -83,6 +83,13 @@ if [[ "$NOTARIZE" -eq 1 && -z "${OKVIDEOMAC_NOTARY_PROFILE:-}" ]]; then
   echo "--notarize requires OKVIDEOMAC_NOTARY_PROFILE." >&2
   exit 2
 fi
+if [[ "$NOTARIZE" -eq 1 ]] &&
+   ! xcrun notarytool history \
+     --keychain-profile "$OKVIDEOMAC_NOTARY_PROFILE" \
+     --output-format json >/dev/null 2>&1; then
+  echo "notary profile unavailable: $OKVIDEOMAC_NOTARY_PROFILE" >&2
+  exit 2
+fi
 
 "$SCRIPT_DIR/check-doc-status.sh"
 
@@ -196,7 +203,11 @@ xcodebuild \
   -configuration Release \
   -destination 'platform=macOS,arch=arm64' \
   -derivedDataPath "$DERIVED_DATA" \
+  ARCHS=arm64 \
+  ONLY_ACTIVE_ARCH=YES \
+  EXCLUDED_ARCHS=x86_64 \
   CODE_SIGNING_ALLOWED=NO \
+  ENABLE_CODE_COVERAGE=NO \
   clean build
 
 if [[ ! -d "$APP_SOURCE" ]]; then
@@ -207,6 +218,10 @@ fi
 rm -rf "$APP_DESTINATION"
 mkdir -p "$ARTIFACTS"
 cp -R "$APP_SOURCE" "$APP_DESTINATION"
+# Xcode keeps DWARF sections in the unsigned Release executable even when it
+# also emits an external dSYM. Strip those sections before signing so absolute
+# build paths cannot leak into the distributable App; runtime symbols remain.
+/usr/bin/strip -S "$EXECUTABLE"
 APP_VERSION="$(
   /usr/libexec/PlistBuddy \
     -c 'Print :CFBundleShortVersionString' \
@@ -222,6 +237,14 @@ if [[ -z "$APP_VERSION" || -z "$APP_BUILD" ]]; then
   exit 1
 fi
 ARCHIVE="$ARTIFACTS/OKVideoMac-${APP_VERSION}-macOS-arm64.zip"
+DMG="$ARTIFACTS/OKVideoMac-${APP_VERSION}.dmg"
+DMG_STAGING=""
+cleanup_dmg_staging() {
+  if [[ -n "$DMG_STAGING" && -d "$DMG_STAGING" ]]; then
+    rm -rf "$DMG_STAGING"
+  fi
+}
+trap cleanup_dmg_staging EXIT
 SOURCE_RELEASE_BASE="OKVideoMac-${APP_VERSION}-build${APP_BUILD}"
 SOURCE_RELEASE_INDEX="$SOURCE_RELEASE_DIR/${SOURCE_RELEASE_BASE}-SOURCE_RELEASE_INDEX.json"
 source_release_arguments=(
@@ -332,6 +355,11 @@ if [[ ! -f "$APP_DESTINATION/Contents/Resources/LICENSE" ]] ||
   echo "License resources are missing from the built app." >&2
   exit 1
 fi
+
+# The Swift player and C bridge evolve together. Rebuild the lightweight
+# bridge on every package so a stale native artifact can never satisfy a mere
+# file-exists check while missing symbols required by the current executable.
+"$SCRIPT_DIR/build-mpv-bridge.sh"
 
 LIBMPV_PATH="$(find "$LIBMPV_ROOT" -name 'libmpv*.dylib' -type f | head -n 1)"
 if [[ -z "$LIBMPV_PATH" ]]; then
@@ -521,38 +549,91 @@ create_archive() {
   )
 }
 
+create_dmg() {
+  DMG_STAGING="$(mktemp -d "$OKVIDEOMAC_BUILD_ROOT/DMG-Staging.XXXXXX")"
+  cp -R "$APP_DESTINATION" "$DMG_STAGING/OKVideoMac.app"
+  ln -s /Applications "$DMG_STAGING/Applications"
+  rm -f "$DMG" "$DMG.sha256"
+  hdiutil create \
+    -volname "OKVideoMac ${APP_VERSION}" \
+    -srcfolder "$DMG_STAGING" \
+    -fs HFS+ \
+    -format UDZO \
+    -ov \
+    "$DMG"
+  rm -rf "$DMG_STAGING"
+  DMG_STAGING=""
+
+  dmg_signing_arguments=(
+    --force
+    --sign "$SIGN_IDENTITY"
+    "$TIMESTAMP_ARGUMENT"
+  )
+  codesign "${dmg_signing_arguments[@]}" "$DMG"
+  (
+    cd "$ARTIFACTS"
+    shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256"
+  )
+  "$SCRIPT_DIR/verify-dmg.sh" \
+    --mode "$PACKAGE_MODE" \
+    --source-index "$SOURCE_RELEASE_INDEX" \
+    --apk "$ANDROID_BRIDGE_APK" \
+    "$DMG"
+}
+
 create_archive
+create_dmg
 if [[ "$NOTARIZE" -eq 1 ]]; then
-  xcrun notarytool submit "$ARCHIVE" \
+  NOTARY_RESULT="$ARTIFACTS/OKVideoMac-${APP_VERSION}-notarization.json"
+  xcrun notarytool submit "$DMG" \
     --keychain-profile "$OKVIDEOMAC_NOTARY_PROFILE" \
-    --wait
-  xcrun stapler staple "$APP_DESTINATION"
-  xcrun stapler validate "$APP_DESTINATION"
-  "$SCRIPT_DIR/verify-release-signing.sh" \
+    --wait \
+    --output-format json > "$NOTARY_RESULT"
+  NOTARY_STATUS="$(python3 - "$NOTARY_RESULT" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    print(json.load(source).get("status", ""))
+PY
+)"
+  if [[ "$NOTARY_STATUS" != "Accepted" ]]; then
+    echo "Apple notarization did not return Accepted: ${NOTARY_STATUS:-missing}" >&2
+    exit 1
+  fi
+  xcrun stapler staple "$DMG"
+  xcrun stapler validate "$DMG"
+  codesign --verify --strict --verbose=4 "$DMG"
+  "$SCRIPT_DIR/verify-dmg.sh" \
     --mode distribution \
+    --source-index "$SOURCE_RELEASE_INDEX" \
+    --apk "$ANDROID_BRIDGE_APK" \
     --require-gatekeeper \
-    "$APP_DESTINATION"
-  create_archive
+    "$DMG"
+  (
+    cd "$ARTIFACTS"
+    shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256"
+  )
 elif [[ "$PACKAGE_MODE" == "distribution" ]]; then
   echo "Notarization step not executed because credentials were not requested."
 fi
 
-# Bind the final (possibly notarized) binary ZIP to the already embedded
-# source-side index. This outer manifest cannot be embedded in the App without
-# creating a circular ZIP/signature hash.
+# Preserve the established ZIP source/binary identity check: it verifies the
+# embedded source index and APK byte-for-byte. The final public DMG is added as
+# an outer release artifact and is independently checked by verify-dmg.sh.
 "$SCRIPT_DIR/create-source-release.sh" \
   --output-dir "$SOURCE_RELEASE_DIR" \
   --cache-dir "$SOURCE_RELEASE_CACHE" \
   --commit HEAD \
   --apk "$ANDROID_BRIDGE_APK" \
   --binary "$ARCHIVE" \
+  --release-artifact "$DMG" \
   --sbom "$SBOM_DIR/OKVideoMac-macOS.spdx.json" \
   --sbom "$SBOM_DIR/OKVideoMac-macOS.cdx.json" \
   --sbom "$SBOM_DIR/OKVideoMac-Android.spdx.json" \
   --sbom "$SBOM_DIR/OKVideoMac-Android.cdx.json" \
   --offline
 
-# This second pass covers the final, possibly stapled ZIP and every adjacent
+# This second pass covers the final, possibly stapled DMG and every adjacent
 # manifest/SBOM-bound source artifact. It runs after the last mutating step.
 final_sensitive_scan_arguments=(
   "$SOURCE_RELEASE_DIR"
@@ -567,5 +648,6 @@ PYTHONDONTWRITEBYTECODE=1 python3 \
   "${final_sensitive_scan_arguments[@]}"
 
 echo "Packaged app: $APP_DESTINATION"
-echo "Archive: $ARCHIVE"
+echo "Internal archive: $ARCHIVE"
+echo "Public DMG: $DMG"
 echo "Source release: $SOURCE_RELEASE_DIR"

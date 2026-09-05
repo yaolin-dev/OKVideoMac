@@ -1,7 +1,7 @@
 # Compatibility
 
-- 对照版本：0.3.41（Build 65）
-- 最近更新：2026-08-17
+- 对照版本：0.4.0（Build 94）
+- 最近更新：2026-09-01
 - 当前交付目标：Apple Silicon / arm64 / macOS 12.0+
 
 ## 概述
@@ -80,6 +80,11 @@ type 3 站点在解析到 HTTP(S) `.js` 脚本时进入 QuickJS。当前 Provide
 `search` 和 `play`。根级 `sites` 和 `video.sites` 均可归一化；冷启动和并发调用
 共享 runtime readiness。
 
+`indexs == 1` 的首页卡片按协议直接进入搜索，不先请求详情。Node 聚合搜索共享
+runtime 执行槽且每站只请求第一页；Jar/Dex Provider 保持独立策略。播放尊重
+Spider 返回的清晰度顺序或显式位置，不按“原画”名称擅自绕过 Provider relay；
+远程跳转统一使用 mpv 的绝对关键帧命令，并以 mpv 的 seek 完成事件确认结果。
+
 这是受支持 CatVod/CatPaw 风格 Node 视频接口的一个兼容子集，不表示支持任意 Node
 Spider、完整 CatPawOpen 应用协议或其他内容模块。远程 bundle 具有 Node 完整能力，
 只应加载可信配置。
@@ -137,6 +142,10 @@ EPG URL 执行链。
 | parser type 3 | Unsupported | 配置可读取，但 PlaybackResolver 不执行 |
 | parser type 4 | Unsupported | 配置可读取，但 PlaybackResolver 不执行 |
 | `parse:<name>` / `json:<url>` | Supported | 显式选择已支持的解析路径 |
+
+Android/Dex Provider 返回的远程 HTTP(S) 媒体及其播放 Header 直接交给 libmpv，
+由播放器负责 CDN Range、重试与跳转；只有 Provider 位于 Android 内部的 loopback
+媒体服务才通过具备作用域的 Bridge 会话转发。
 
 最终播放依赖 libmpv、系统可用 codec、媒体服务器、Headers/Cookies 和源本身行为。
 OKVideoMac 不提供 DRM 绕过。
@@ -213,7 +222,7 @@ OKVideoMac 实现了 CatVod/CatPaw 风格 Node 视频接口的兼容子集，包
 - CMS XML 核心 class/list 映射；
 - FongMi 包装配置和 type 4 参数编码；
 - QuickJS 方法与参数映射；
-- Node `video.sites` 归一化和视频 home route；
+- Node `video.sites` 归一化、`indexs` 首页路由、聚合搜索限流和播放 Range 选择；
 - Android Bridge 方法/代理映射；
 - M3U/TXT/JSON 直播解析；
 - XMLTV/gzip/缓存；
@@ -255,6 +264,7 @@ OKVideoMac 实现了 CatVod/CatPaw 风格 Node 视频接口的兼容子集，包
 | 本地 Hardened Runtime 包 | Supported | ad-hoc 签名，仅主 App 使用开发期 Library Validation 例外 |
 | Developer ID 分发 | Supported | 0.3.41（Build 65）正式 DMG 已使用 Developer ID Application 签名，Hardened Runtime、secure timestamp 与权限边界验证通过 |
 | Notarization / Staple / Gatekeeper | Supported | 0.3.41（Build 65）App 与 DMG 的 Apple notarization、staple 和 Gatekeeper 验证通过 |
+| 0.4.0（Build 94）RC | Candidate | DMG、源码绑定和验证链已纳入 `package-app.sh`；分支产物仅作 RC 验证，正式发布需从合并后的 `main` exact commit 重新构建并完成 Apple 公证 |
 | App Sandbox | Not Applicable | 当前为 Developer ID 外部分发目标；Sandbox 与 Hardened Runtime 是不同边界 |
 
 ## 明确不提供

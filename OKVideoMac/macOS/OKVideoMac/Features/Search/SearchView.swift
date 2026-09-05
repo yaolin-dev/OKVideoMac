@@ -1,163 +1,210 @@
+import AppKit
 import SwiftUI
 import OKVideoCore
 
 struct SearchView: View {
     @EnvironmentObject private var state: AppState
+    @StateObject private var presentationCache = SearchResultPresentationCache()
     @State private var sortOrder: SearchResultSortOrder = .relevance
     @AppStorage(SearchDisplayPreferences.mergesDuplicateTitlesKey)
     private var mergesDuplicateTitles = true
     @State private var sourceSelectionCluster: SearchResultCluster?
     @State private var showingSearchScope = false
+    private let resultsScrollCoordinateSpace = "search-results-scroll"
 
     var body: some View {
-        VStack(spacing: 0) {
-            if let folder = state.currentSearchFolder {
-                SearchFolderBrowser(
-                    page: folder,
-                    path: state.searchFolderPath
-                )
-                .environmentObject(state)
-            } else if state.searchResults.isEmpty {
-                VStack(spacing: 12) {
-                    EmptyStateView(
-                        systemImage: "magnifyingglass",
-                        title: emptyStateTitle,
-                        message: emptyStateMessage
-                    )
-                    if !state.searchFailures.isEmpty {
-                        SearchFailureSummary(
-                            failures: state.searchFailures
+        GeometryReader { proxy in
+            let toolbarLayout = SearchToolbarLayoutPolicy.layout(
+                contentWidth: proxy.size.width
+            )
+            searchContent
+                .navigationTitle("")
+                .background(AppSurfacePalette.background.ignoresSafeArea())
+                .toolbar {
+                    ToolbarItem(placement: .navigation) {
+                        SearchToolbarLeadingItem(
+                            title: toolbarTitle,
+                            backHelp: state.homeSearchBackHelp,
+                            onBack: {
+                                _ = state.performSearchBackAction()
+                            }
                         )
-                        .padding(.horizontal)
-                        .padding(.bottom)
+                    }
+                    ToolbarItem(placement: .principal) {
+                        Spacer(minLength: 0)
+                            .frame(maxWidth: .infinity)
+                            .accessibilityHidden(true)
+                    }
+                    ToolbarItemGroup(placement: .primaryAction) {
+                        if state.currentSearchFolder == nil {
+                            searchScopeButton()
+                            searchMergeControl(layout: toolbarLayout)
+                            searchSortControl(layout: toolbarLayout)
+                        }
+                        SearchToolbarStatusView(
+                            layout: toolbarLayout,
+                            isSearching: state.isSearching,
+                            firstPageCompleted: state.searchFirstPageCompletedSiteCount,
+                            completed: state.searchCompletedSiteCount,
+                            total: state.searchTotalSiteCount,
+                            termination: state.searchTermination,
+                            resultCount: state.searchResults.count,
+                            outcomes: Array(state.searchSiteOutcomes.values),
+                            runtimeNotice: state.searchRuntimeProfileNotice,
+                            maximumRetainedCandidates:
+                                state.searchMaximumRetainedCandidates,
+                            maximumResultsPerSite:
+                                state.searchMaximumResultsPerSite,
+                            didDiscardCandidates:
+                                state.searchDidDiscardCandidates,
+                            onCancel: state.cancelSearch
+                        )
                     }
                 }
-            } else {
-                searchResults
-            }
-        }
-        .navigationTitle("搜索结果")
-        .background(AppSurfacePalette.background.ignoresSafeArea())
-        .toolbar {
-            ToolbarItemGroup {
-                searchToolbar
-            }
-        }
-        .onDisappear {
-            state.cancelSearch()
-        }
-        .overlay {
-            if let cluster = sourceSelectionCluster {
-                SearchSourcePicker(
-                    cluster: cluster,
-                    onSelect: openSearchSource,
-                    onDismiss: { sourceSelectionCluster = nil }
+                .overlay {
+                    if let cluster = sourceSelectionCluster {
+                        SearchSourcePicker(
+                            cluster: cluster,
+                            onSelect: openSearchSource,
+                            onDismiss: { sourceSelectionCluster = nil }
+                        )
+                        .transition(
+                            .opacity.combined(with: .scale(scale: 0.98))
+                        )
+                    }
+                }
+                .animation(
+                    .easeOut(duration: 0.14),
+                    value: sourceSelectionCluster?.id
                 )
-                .transition(.opacity.combined(with: .scale(scale: 0.98)))
-            }
+                .transaction { transaction in
+                    // Toolbar state changes replace symbols and text inside
+                    // fixed slots; they never insert or remove AppKit items.
+                    transaction.disablesAnimations = true
+                }
         }
-        .animation(.easeOut(duration: 0.14), value: sourceSelectionCluster?.id)
     }
 
     @ViewBuilder
-    private var searchToolbar: some View {
-        Button {
-            state.returnFromSearchToHome()
-        } label: {
-            Label("返回首页", systemImage: "chevron.left")
+    private var searchContent: some View {
+        if let folder = state.currentSearchFolder {
+            SearchFolderBrowser(
+                page: folder,
+                path: state.searchFolderPath
+            )
+            .environmentObject(state)
+        } else if state.searchResults.isEmpty {
+            EmptyStateView(
+                systemImage: "magnifyingglass",
+                title: emptyStateTitle,
+                message: emptyStateMessage
+            )
+        } else {
+            searchResults
         }
-        .help("返回首页")
+    }
 
-        TextField("搜索影视内容", text: $state.searchKeyword)
-            .textFieldStyle(.roundedBorder)
-            .onSubmit { state.search(state.searchKeyword) }
-            .frame(minWidth: 240, idealWidth: 420, maxWidth: 560)
+    private var toolbarTitle: String {
+        state.currentSearchFolder?.folder.title ?? "搜索结果"
+    }
 
+    @ViewBuilder
+    private func searchScopeButton() -> some View {
         Button {
             showingSearchScope.toggle()
         } label: {
-            Label(state.searchScopeSummary, systemImage: "checklist")
+            Image(systemName: "line.3.horizontal.decrease.circle")
         }
+        .primaryToolbarIconControl()
         .help("选择本次搜索使用的站点")
+        .accessibilityLabel("搜索范围：\(state.searchScopeSummary)")
         .popover(isPresented: $showingSearchScope, arrowEdge: .bottom) {
             SearchScopePopover()
                 .environmentObject(state)
         }
+    }
 
-        Button {
-            state.search(state.searchKeyword)
-        } label: {
-            Label("搜索", systemImage: "magnifyingglass")
+    private func searchMergeControl(
+        layout: SearchToolbarLayout
+    ) -> some View {
+        Picker("重复影片", selection: $mergesDuplicateTitles) {
+            Text("合并重复")
+                .tag(true)
+            Text("分别显示")
+                .tag(false)
         }
-        .disabled(
-            state.searchKeyword
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .isEmpty
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .controlSize(.regular)
+        .frame(
+            width: layout.mergeWidth,
+            height: PrimaryToolbarMetrics.itemHeight
         )
+        .help(
+            mergesDuplicateTitles
+                ? "将片名和年份相同的跨站结果合并为一张卡片"
+                : "按来源分别显示搜索结果"
+        )
+        .accessibilityLabel("重复影片显示方式")
+        .accessibilityValue(
+            mergesDuplicateTitles ? "合并重复影片" : "按来源分别显示"
+        )
+    }
 
-        if state.isSearching {
-            Button {
-                state.cancelSearch()
-            } label: {
-                Label("停止", systemImage: "stop.fill")
+    @ViewBuilder
+    private func searchSortControl(
+        layout: SearchToolbarLayout
+    ) -> some View {
+        Picker("排序", selection: $sortOrder) {
+            ForEach(SearchResultSortOrder.allCases) { option in
+                Text(option.toolbarTitle).tag(option)
             }
-            .help("停止当前搜索")
-
-            SearchProgressIndicator(
-                completed: state.searchCompletedSiteCount,
-                total: state.searchTotalSiteCount
-            )
         }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .controlSize(.regular)
+        .frame(
+            width: layout.sortWidth,
+            height: PrimaryToolbarMetrics.itemHeight
+        )
+        .help("排序：\(sortOrder.title)")
     }
 
     private var searchResults: some View {
-        HSplitView {
-            SearchSiteSidebar(
-                options: state.searchSiteOptions,
-                selectedKey: state.selectedSearchSiteKey,
-                totalCount: state.searchResults.count
-            ) { key in
-                state.selectSearchSite(key)
-            }
-            .frame(minWidth: 180, idealWidth: 210, maxWidth: 260)
+        let clusters = presentedClusters
+        return ScrollView {
+            BrowserToolbarScrollMarker(
+                coordinateSpaceName: resultsScrollCoordinateSpace
+            )
+            VStack(alignment: .leading, spacing: 0) {
+                SearchSourceNavigation(
+                    options: state.searchSiteOptions,
+                    selectedKey: state.selectedSearchSiteKey,
+                    totalCount: state.searchResults.count
+                ) { key in
+                    state.selectSearchSite(key)
+                }
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    SearchResultToolbar(
-                        title: selectedResultTitle,
-                        resultCount: presentedClusters.count,
-                        rawResultCount: visibleRawResults.count,
-                        completedSiteCount: state.searchCompletedSiteCount,
-                        totalSiteCount: state.searchTotalSiteCount,
-                        resultSiteCount: state.searchSiteOptions.count,
-                        isSearching: state.isSearching,
-                        sortOrder: $sortOrder,
-                        mergesDuplicateTitles: $mergesDuplicateTitles
-                    )
-
-                    if !state.searchFailures.isEmpty {
-                        SearchFailureSummary(
-                            failures: state.searchFailures
-                        )
-                    }
-                    SearchClusterGrid(
-                        clusters: presentedClusters
-                    ) { cluster in
-                        if SearchClusterOpenPolicy.requiresSourceSelection(cluster) {
-                            sourceSelectionCluster = cluster
-                        } else if let summary = cluster.primary {
-                            state.openSearchResult(summary)
-                        }
-                    } onSelectSource: { summary in
+                SearchClusterGrid(
+                    clusters: clusters
+                ) { cluster in
+                    if SearchClusterOpenPolicy.requiresSourceSelection(cluster) {
+                        sourceSelectionCluster = cluster
+                    } else if let summary = cluster.primary {
                         state.openSearchResult(summary)
                     }
+                } onSelectSource: { summary in
+                    state.openSearchResult(summary)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding()
+                .padding(.horizontal, HomeBrowseGridMetrics.contentPadding)
+                // Search has no permanent status/error row. Eight points from
+                // the card plus sixteen here create the approved 24-point gap
+                // between the navigation separator and visible posters.
+                .padding(.top, 16)
+                .padding(.bottom, HomeBrowseGridMetrics.contentPadding)
             }
-            .frame(minWidth: 480)
-            .background(AppSurfacePalette.background)
         }
+        .browserToolbarScrollSurface(named: resultsScrollCoordinateSpace)
         .background(AppSurfacePalette.background)
     }
 
@@ -169,20 +216,12 @@ struct SearchView: View {
     }
 
     private var presentedClusters: [SearchResultCluster] {
-        SearchResultPresentation.clusters(
+        presentationCache.clusters(
             from: visibleRawResults,
-            keyword: state.searchKeyword,
+            keyword: state.activeSearchKeyword,
             mergesDuplicates: mergesDuplicateTitles,
             sortOrder: sortOrder
         )
-    }
-
-    private var selectedResultTitle: String {
-        guard let key = state.selectedSearchSiteKey,
-              let option = state.searchSiteOptions.first(where: { $0.key == key }) else {
-            return "全部结果"
-        }
-        return option.name
     }
 
     private func openSearchSource(_ summary: VideoSummary) {
@@ -191,134 +230,625 @@ struct SearchView: View {
     }
 
     private var emptyStateTitle: String {
-        if state.searchKeyword.isEmpty {
+        if state.activeSearchKeyword.isEmpty {
             return "搜索影视内容"
         }
         return state.isSearching ? "正在搜索" : "暂无结果"
     }
 
     private var emptyStateMessage: String {
-        if state.searchKeyword.isEmpty {
+        if state.activeSearchKeyword.isEmpty {
             return "输入关键词后将并发搜索当前范围内已启用的站点。"
         }
         if state.isSearching {
-            return "已完成 \(state.searchCompletedSiteCount)/"
-                + "\(state.searchTotalSiteCount) 个站点，结果会增量显示。"
+            return "首批已完成 \(state.searchFirstPageCompletedSiteCount)/"
+                + "\(state.searchTotalSiteCount) 个站点；站点处理已结束 "
+                + "\(state.searchCompletedSiteCount)/"
+                + "\(state.searchTotalSiteCount)，结果会增量显示。"
         }
         return state.searchFailures.isEmpty
-            ? "当前搜索范围内没有站点返回匹配内容。"
+            ? emptyCompletionMessage
             : "\(state.searchFailures.count) 个站点搜索失败，"
                 + "其余站点没有返回结果。"
     }
+
+    private var emptyCompletionMessage: String {
+        switch state.searchTermination {
+        case .deadlineReached:
+            return "首轮搜索已完成；后台补页已到达时间上限。"
+        case .cancelled:
+            return "搜索已停止。"
+        case .supersededByNewSearch:
+            return "本次搜索已被新搜索替代。"
+        default:
+            return "当前搜索范围内没有站点返回匹配内容。"
+        }
+    }
 }
 
-private struct SearchSiteSidebar: View {
+enum SearchToolbarLayout: Equatable, Sendable {
+    case expanded
+    case compact
+    case minimal
+
+    var mergeWidth: CGFloat {
+        switch self {
+        case .expanded: return 126
+        case .compact: return 112
+        case .minimal: return 102
+        }
+    }
+
+    var sortWidth: CGFloat {
+        switch self {
+        case .expanded: return 112
+        case .compact: return 100
+        case .minimal: return 90
+        }
+    }
+
+    var statusWidth: CGFloat {
+        switch self {
+        case .expanded: return 226
+        case .compact: return 166
+        case .minimal: return 104
+        }
+    }
+}
+
+enum SearchToolbarLayoutPolicy {
+    static func layout(contentWidth: CGFloat) -> SearchToolbarLayout {
+        if contentWidth >= 1_050 { return .expanded }
+        if contentWidth >= 760 { return .compact }
+        return .minimal
+    }
+}
+
+private struct SearchToolbarLeadingItem: View {
+    let title: String
+    let backHelp: String
+    let onBack: () -> Void
+
+    var body: some View {
+        HStack(spacing: PrimaryToolbarMetrics.itemSpacing) {
+            Button(action: onBack) {
+                Image(systemName: "chevron.backward")
+            }
+            .primaryToolbarIconControl()
+            .fixedSize()
+            .help(backHelp)
+            .accessibilityLabel(backHelp)
+            .accessibilityIdentifier("search.back")
+
+            BrowserToolbarTitle(title)
+                .lineLimit(1)
+        }
+        .frame(height: PrimaryToolbarMetrics.itemHeight)
+    }
+}
+
+struct SearchSourceNavigationCandidate: Equatable, Identifiable, Sendable {
+    let id: String
+    let width: CGFloat
+}
+
+struct SearchSourceNavigationPartition: Equatable, Sendable {
+    let visibleIDs: [String]
+    let hiddenIDs: [String]
+}
+
+enum SearchSourceNavigationLayoutPolicy {
+    static let spacing = BrowseSegmentedNavigationMetrics.separatorWidth
+
+    static func partition(
+        candidates: [SearchSourceNavigationCandidate],
+        selectedID: String,
+        availableWidth: CGFloat
+    ) -> SearchSourceNavigationPartition {
+        guard !candidates.isEmpty else {
+            return SearchSourceNavigationPartition(
+                visibleIDs: [],
+                hiddenIDs: []
+            )
+        }
+
+        let availableWidth = BrowseSegmentedNavigationMetrics
+            .innerAvailableWidth(availableWidth)
+        let allWidth = candidates.reduce(0) { $0 + $1.width }
+            + spacing * CGFloat(max(0, candidates.count - 1))
+        if allWidth <= availableWidth {
+            return SearchSourceNavigationPartition(
+                visibleIDs: candidates.map(\.id),
+                hiddenIDs: []
+            )
+        }
+
+        let tabBudget = max(
+            0,
+            availableWidth
+                - BrowseSegmentedNavigationMetrics.moreWidth
+                - spacing
+        )
+        var visible = [candidates[0].id]
+        var consumed = candidates[0].width
+
+        for candidate in candidates.dropFirst() {
+            let proposed = consumed + spacing + candidate.width
+            guard proposed <= tabBudget else { break }
+            visible.append(candidate.id)
+            consumed = proposed
+        }
+
+        if !visible.contains(selectedID),
+           let selected = candidates.first(where: { $0.id == selectedID }) {
+            while visible.count > 1,
+                  consumed + spacing + selected.width > tabBudget {
+                guard let removedID = visible.popLast(),
+                      let removed = candidates.first(where: {
+                          $0.id == removedID
+                      }) else {
+                    break
+                }
+                consumed -= spacing + removed.width
+            }
+            if consumed + spacing + selected.width <= tabBudget {
+                visible.append(selected.id)
+            } else {
+                // On a narrow window the active source is more useful than
+                // keeping “all results” visible. The latter remains in More.
+                visible = [selected.id]
+            }
+        }
+
+        let visibleSet = Set(visible)
+        return SearchSourceNavigationPartition(
+            visibleIDs: visible,
+            hiddenIDs: candidates.compactMap {
+                visibleSet.contains($0.id) ? nil : $0.id
+            }
+        )
+    }
+}
+
+private struct SearchSourceNavigation: View {
+    private static let allResultsID = "__all-search-results__"
+
     let options: [SearchSiteOption]
     let selectedKey: String?
     let totalCount: Int
     let onSelect: (String?) -> Void
 
-    var body: some View {
-        VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("结果来源")
-                    .font(.headline)
-                Text("\(options.count) 个站点有结果")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 16)
-
-            Divider()
-
-            ScrollView {
-                LazyVStack(spacing: 6) {
-                    sourceButton(
-                        key: nil,
-                        name: "全部搜索结果",
-                        count: totalCount,
-                        systemImage: "rectangle.stack"
-                    )
-                    ForEach(options) { option in
-                        sourceButton(
-                            key: option.key,
-                            name: option.name,
-                            count: option.resultCount,
-                            systemImage: "network"
-                        )
-                    }
-                }
-                .padding(10)
-            }
-        }
-        .background(AppSurfacePalette.background)
+    private var selectedID: String {
+        selectedKey ?? Self.allResultsID
     }
 
-    private func sourceButton(
-        key: String?,
-        name: String,
-        count: Int,
-        systemImage: String
-    ) -> some View {
-        let isSelected = selectedKey == key
-        return Button {
-            onSelect(key)
-        } label: {
-            HStack(spacing: 9) {
-                Image(systemName: systemImage)
-                    .frame(width: 22)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(name)
-                        .font(.callout.weight(.semibold))
-                        .lineLimit(1)
-                    Text("\(count) 项")
-                        .font(.caption2)
-                        .foregroundColor(
-                            isSelected ? .white.opacity(0.8) : .secondary
-                        )
-                }
-                Spacer(minLength: 4)
-                if isSelected {
-                    Image(systemName: "checkmark.circle.fill")
-                }
-            }
-            .foregroundColor(isSelected ? .white : .primary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(isSelected ? Color.accentColor : Color.clear)
+    private var items: [Item] {
+        [
+            Item(
+                id: Self.allResultsID,
+                key: nil,
+                title: "全部结果",
+                count: totalCount
             )
-            .contentShape(Rectangle())
+        ] + options.map {
+            Item(id: $0.key, key: $0.key, title: $0.name, count: $0.resultCount)
         }
-        .buttonStyle(.plain)
-        .appInteractiveHover(cornerRadius: 9, selected: isSelected)
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let currentItems = items
+            let partition = SearchSourceNavigationLayoutPolicy.partition(
+                candidates: currentItems.map {
+                    SearchSourceNavigationCandidate(
+                        id: $0.id,
+                        width: Self.measuredWidth(for: $0.title)
+                    )
+                },
+                selectedID: selectedID,
+                availableWidth: max(
+                    0,
+                    proxy.size.width
+                        - HomeBrowseGridMetrics.contentPadding * 2
+                        - HomeBrowseGridMetrics.categoryLeadingInset
+                )
+            )
+            let byID = Dictionary(uniqueKeysWithValues: currentItems.map {
+                ($0.id, $0)
+            })
+
+            HStack(spacing: 0) {
+                BrowseSegmentedNavigationContainer {
+                    ForEach(
+                        Array(partition.visibleIDs.enumerated()),
+                        id: \.element
+                    ) { index, id in
+                        if index > 0 {
+                            BrowseSegmentedNavigationDivider()
+                        }
+                        if let item = byID[id] {
+                            sourceButton(item)
+                        }
+                    }
+
+                    if !partition.hiddenIDs.isEmpty {
+                        BrowseSegmentedNavigationDivider()
+                        Menu {
+                            ForEach(partition.hiddenIDs, id: \.self) { id in
+                                if let item = byID[id] {
+                                    Button {
+                                        onSelect(item.key)
+                                    } label: {
+                                        HStack {
+                                            Text(item.title)
+                                            Spacer()
+                                            Text("\(item.count)")
+                                        }
+                                    }
+                                }
+                            }
+                        } label: {
+                            BrowseSegmentedMoreLabel()
+                        }
+                        .menuIndicator(.hidden)
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("显示另外 \(partition.hiddenIDs.count) 个结果来源")
+                    }
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(.leading, HomeBrowseGridMetrics.contentPadding
+                + HomeBrowseGridMetrics.categoryLeadingInset)
+            .padding(.trailing, HomeBrowseGridMetrics.contentPadding)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(height: BrowseSegmentedNavigationMetrics.rowHeight)
+        .overlay(alignment: .bottom) {
+            BrowseSegmentedNavigationBottomDivider()
+        }
+    }
+
+    private func sourceButton(_ item: Item) -> some View {
+        Button {
+            onSelect(item.key)
+        } label: {
+            BrowseSegmentedNavigationLabel(
+                title: item.title,
+                isSelected: item.id == selectedID
+            )
+        }
+        .buttonStyle(
+            BrowseSegmentedNavigationButtonStyle(
+                isSelected: item.id == selectedID
+            )
+        )
+        .help("\(item.title)，\(item.count) 项")
+        .accessibilityLabel("\(item.title)，\(item.count) 项")
+    }
+
+    private static func measuredWidth(for title: String) -> CGFloat {
+        let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        return BrowseSegmentedNavigationMetrics.segmentWidth(
+            textWidth: (title as NSString)
+                .size(withAttributes: [.font: font])
+                .width
+        )
+    }
+
+    private struct Item: Identifiable {
+        let id: String
+        let key: String?
+        let title: String
+        let count: Int
     }
 }
 
-private struct SearchProgressIndicator: View {
+struct SearchToolbarStatusPresentation: Equatable, Sendable {
+    enum Phase: Equatable, Sendable {
+        case preparing
+        case searching
+        case completed
+        case stopped
+    }
+
+    let phase: Phase
+    let text: String
+    let accessibilityValue: String
+}
+
+enum SearchToolbarStatusPolicy {
+    static func presentation(
+        layout: SearchToolbarLayout,
+        isSearching: Bool,
+        firstPageCompleted: Int,
+        completed: Int,
+        total: Int,
+        termination: MultiSiteSearchTermination?
+    ) -> SearchToolbarStatusPresentation {
+        guard total > 0 else {
+            if termination == .cancelled
+                || termination == .supersededByNewSearch {
+                return SearchToolbarStatusPresentation(
+                    phase: .stopped,
+                    text: "已停止",
+                    accessibilityValue: "搜索已停止"
+                )
+            }
+            return SearchToolbarStatusPresentation(
+                phase: .preparing,
+                text: "准备搜索",
+                accessibilityValue: "正在准备搜索"
+            )
+        }
+
+        let phase: SearchToolbarStatusPresentation.Phase
+        if isSearching {
+            phase = .searching
+        } else if termination == .cancelled
+            || termination == .supersededByNewSearch {
+            phase = .stopped
+        } else {
+            phase = .completed
+        }
+
+        let text: String
+        switch (layout, phase) {
+        case (.expanded, .searching):
+            text = "首批 \(firstPageCompleted)/\(total) · 已结束 \(completed)/\(total)"
+        case (.expanded, .completed):
+            text = "✓ 已完成 \(completed)/\(total)"
+        case (.expanded, .stopped):
+            text = "已停止 \(completed)/\(total)"
+        case (.compact, .searching):
+            text = "已结束 \(completed)/\(total)"
+        case (.compact, .completed):
+            text = "✓ 已完成 \(completed)/\(total)"
+        case (.compact, .stopped):
+            text = "已停止 \(completed)/\(total)"
+        case (.minimal, .stopped):
+            text = "已停止"
+        case (.minimal, _):
+            text = "\(completed)/\(total)"
+        case (_, .preparing):
+            text = "准备搜索"
+        }
+
+        let accessibilityValue: String
+        switch phase {
+        case .preparing:
+            accessibilityValue = "正在准备搜索"
+        case .searching:
+            accessibilityValue = "首批已完成 \(firstPageCompleted) / \(total) 个站点，站点处理已结束 \(completed) / \(total) 个站点"
+        case .completed:
+            accessibilityValue = "搜索已完成，共处理 \(completed) / \(total) 个站点"
+        case .stopped:
+            accessibilityValue = "搜索已停止，共处理 \(completed) / \(total) 个站点"
+        }
+
+        return SearchToolbarStatusPresentation(
+            phase: phase,
+            text: text,
+            accessibilityValue: accessibilityValue
+        )
+    }
+}
+
+private struct SearchToolbarStatusView: View {
+    let layout: SearchToolbarLayout
+    let isSearching: Bool
+    let firstPageCompleted: Int
     let completed: Int
     let total: Int
+    let termination: MultiSiteSearchTermination?
+    let resultCount: Int
+    let outcomes: [SearchSiteOutcome]
+    let runtimeNotice: String?
+    let maximumRetainedCandidates: Int
+    let maximumResultsPerSite: Int
+    let didDiscardCandidates: Bool
+    let onCancel: () -> Void
 
-    private var progress: Double {
-        guard total > 0 else { return 0 }
-        return min(1, Double(completed) / Double(total))
+    @State private var showingDetails = false
+
+    private var presentation: SearchToolbarStatusPresentation {
+        SearchToolbarStatusPolicy.presentation(
+            layout: layout,
+            isSearching: isSearching,
+            firstPageCompleted: firstPageCompleted,
+            completed: completed,
+            total: total,
+            termination: termination
+        )
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text("正在搜索 \(completed) / \(total)")
-                .font(.caption2.monospacedDigit())
-                .foregroundColor(.secondary)
-            ProgressView(value: progress)
-                .progressViewStyle(.linear)
+        HStack(spacing: 6) {
+            Button {
+                showingDetails.toggle()
+            } label: {
+                HStack(spacing: 6) {
+                    statusSymbol
+                    Text(presentation.text)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("查看搜索进度详情")
+            .accessibilityLabel("搜索进度")
+            .accessibilityValue(presentation.accessibilityValue)
+            .popover(isPresented: $showingDetails, arrowEdge: .bottom) {
+                SearchProgressDetailsPopover(
+                    presentation: presentation,
+                    resultCount: resultCount,
+                    outcomes: outcomes,
+                    runtimeNotice: runtimeNotice,
+                    maximumRetainedCandidates: maximumRetainedCandidates,
+                    maximumResultsPerSite: maximumResultsPerSite,
+                    didDiscardCandidates: didDiscardCandidates
+                )
+            }
+
+            Button(action: onCancel) {
+                Image(systemName: "xmark.circle.fill")
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.borderless)
+            .opacity(isSearching ? 1 : 0)
+            .allowsHitTesting(isSearching)
+            .accessibilityHidden(!isSearching)
+            .help("停止搜索")
         }
-        .frame(width: 132)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("搜索进度")
-        .accessibilityValue("已完成 \(completed) / \(total) 个站点")
+        .frame(
+            width: layout.statusWidth,
+            height: PrimaryToolbarMetrics.itemHeight,
+            alignment: .trailing
+        )
+    }
+
+    @ViewBuilder
+    private var statusSymbol: some View {
+        if presentation.phase == .searching {
+            ProgressView()
+                .controlSize(.small)
+                .frame(width: 16, height: 16)
+        } else {
+            Image(systemName: statusSymbolName)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.secondary)
+                .frame(width: 16, height: 16)
+        }
+    }
+
+    private var statusSymbolName: String {
+        switch presentation.phase {
+        case .preparing: return "magnifyingglass"
+        case .searching: return "circle.dotted"
+        case .completed: return "checkmark.circle.fill"
+        case .stopped: return "pause.circle.fill"
+        }
+    }
+}
+
+private struct SearchProgressDetailsPopover: View {
+    let presentation: SearchToolbarStatusPresentation
+    let resultCount: Int
+    let outcomes: [SearchSiteOutcome]
+    let runtimeNotice: String?
+    let maximumRetainedCandidates: Int
+    let maximumResultsPerSite: Int
+    let didDiscardCandidates: Bool
+
+    private var orderedOutcomes: [SearchSiteOutcome] {
+        outcomes.sorted {
+            $0.siteKey.localizedStandardCompare($1.siteKey)
+                == .orderedAscending
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: headerSymbol)
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("搜索状态")
+                        .font(.headline)
+                    Text(presentation.accessibilityValue)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+
+            Text("当前已显示 \(resultCount) 条结果")
+                .font(.callout)
+
+            if let runtimeNotice, !runtimeNotice.isEmpty {
+                detailRow(
+                    systemImage: "person.crop.circle.badge.exclamationmark",
+                    text: runtimeNotice
+                )
+            }
+
+            if didDiscardCandidates {
+                detailRow(
+                    systemImage: "line.3.horizontal.decrease.circle",
+                    text: retentionSummary
+                )
+            }
+
+            if !orderedOutcomes.isEmpty {
+                Divider()
+                Text("站点详情")
+                    .font(.subheadline.weight(.semibold))
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 9) {
+                        ForEach(orderedOutcomes, id: \.siteKey) { outcome in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(outcome.title)
+                                    .font(.caption.weight(.medium))
+                                if let detail = outcome.detail {
+                                    Text(detail)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+                .frame(maxHeight: 230)
+            }
+        }
+        .padding(16)
+        .frame(width: 380)
+    }
+
+    private var headerSymbol: String {
+        switch presentation.phase {
+        case .preparing: return "magnifyingglass"
+        case .searching: return "arrow.triangle.2.circlepath"
+        case .completed: return "checkmark.circle.fill"
+        case .stopped: return "pause.circle.fill"
+        }
+    }
+
+    private var retentionSummary: String {
+        if maximumRetainedCandidates == .max,
+           maximumResultsPerSite == .max {
+            return "完整保留各站结果"
+        }
+        return "已按相关度保留结果；总量上限 \(maximumRetainedCandidates)，每站上限 \(maximumResultsPerSite)"
+    }
+
+    private func detailRow(systemImage: String, text: String) -> some View {
+        Label {
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } icon: {
+            Image(systemName: systemImage)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private extension SearchSiteOutcome {
+    var siteKey: String {
+        switch self {
+        case .success(let siteKey, _, _): return siteKey
+        case .failure(let failure): return failure.siteKey
+        case .cancelled(let siteKey, _): return siteKey
+        }
     }
 }
 
@@ -382,7 +912,7 @@ struct SearchScopeEditorContent: View {
                 }
                 .controlSize(.small)
             } else {
-                Text("配置新增可搜索站点后会自动加入范围。")
+                Text("当前目录中所有可运行站点都会发起搜索，包括源中标记为停用的站点；如需排除请切换到自定义。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -407,7 +937,7 @@ struct SearchScopeEditorContent: View {
             ? option.isSearchable
             : selectedKeys.contains(option.key)
         return Button {
-            guard mode == .custom, option.isSearchable else { return }
+            guard option.isSearchable, mode == .custom else { return }
             if selectedKeys.contains(option.key) {
                 selectedKeys.remove(option.key)
             } else {
@@ -428,6 +958,14 @@ struct SearchScopeEditorContent: View {
                         Text(reason)
                             .font(.caption2)
                             .foregroundColor(.secondary)
+                    } else if option.isUserDisabled {
+                        Text(
+                            mode == .all
+                                ? "源中已停用 · 全部模式仍会搜索"
+                                : "源中已停用 · 可为搜索单独启用"
+                        )
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
                     }
                 }
                 Spacer()
@@ -445,7 +983,7 @@ struct SearchScopeEditorContent: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(mode == .all || !option.isSearchable)
+        .disabled(!option.isSearchable || mode == .all)
         .appInteractiveHover(cornerRadius: 8, selected: isSelected)
     }
 }
@@ -510,7 +1048,7 @@ private struct SearchScopePopover: View {
                         guard saved else { return }
                         dismiss()
                         if shouldRestart {
-                            state.search(state.searchKeyword)
+                            state.search(state.activeSearchKeyword)
                         }
                     }
                 }
@@ -527,59 +1065,8 @@ private struct SearchScopePopover: View {
     }
 }
 
-private struct SearchResultToolbar: View {
-    let title: String
-    let resultCount: Int
-    let rawResultCount: Int
-    let completedSiteCount: Int
-    let totalSiteCount: Int
-    let resultSiteCount: Int
-    let isSearching: Bool
-    @Binding var sortOrder: SearchResultSortOrder
-    @Binding var mergesDuplicateTitles: Bool
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 14) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.title3.weight(.semibold))
-                Text(summary)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            Spacer(minLength: 12)
-
-            Toggle("合并重复影片", isOn: $mergesDuplicateTitles)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .help("将片名和年份相同的跨站结果合并为一张卡片")
-
-            Picker("排序", selection: $sortOrder) {
-                ForEach(SearchResultSortOrder.allCases) { option in
-                    Text(option.title).tag(option)
-                }
-            }
-            .pickerStyle(.menu)
-            .frame(width: 132)
-        }
-        .padding(.horizontal, 2)
-    }
-
-    private var summary: String {
-        let resultSummary = mergesDuplicateTitles
-            ? "\(resultCount) 部影片 · \(rawResultCount) 条来源结果"
-            : "\(rawResultCount) 条结果"
-        if isSearching {
-            return "\(resultSummary) · 已搜索 \(completedSiteCount) / \(totalSiteCount) 个站点"
-        }
-        return "\(resultSummary) · \(resultSiteCount) 个站点有结果"
-    }
-}
-
 private struct SearchFolderBrowser: View {
     @EnvironmentObject private var state: AppState
-    @State private var isBackHovered = false
     let page: SearchFolderPage
     let path: [SearchFolderPage]
     private let folderScrollCoordinateSpace = "search-folder-scroll"
@@ -587,36 +1074,6 @@ private struct SearchFolderBrowser: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Button {
-                    state.navigateBackSearchFolder()
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 12, weight: .semibold))
-                        Text(path.count > 1 ? "上一级" : "返回搜索结果")
-                            .font(.callout.weight(.medium))
-                    }
-                    .foregroundStyle(
-                        isBackHovered ? Color.accentColor : Color.secondary
-                    )
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .background {
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(
-                                Color.primary.opacity(isBackHovered ? 0.07 : 0)
-                            )
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .onHover { isBackHovered = $0 }
-                .animation(.easeOut(duration: 0.14), value: isBackHovered)
-                .help(path.count > 1 ? "返回上一级目录" : "返回全部搜索结果")
-
-                Divider()
-                    .frame(height: 18)
-
                 Image(systemName: "folder.fill")
                     .foregroundColor(.accentColor)
                 Text(path.map { $0.folder.title }.joined(separator: " / "))
@@ -626,8 +1083,7 @@ private struct SearchFolderBrowser: View {
                 Spacer()
 
                 if page.isLoading {
-                    ProgressView()
-                        .controlSize(.small)
+                    AppActivityIndicator(size: .small)
                 }
                 Text(page.folder.siteName)
                     .font(.caption)
@@ -655,7 +1111,7 @@ private struct SearchFolderBrowser: View {
                 }
             }
         } else if page.isLoading, page.items.isEmpty {
-            ProgressView("正在展开网盘目录…")
+            AppActivityLabel("正在展开网盘目录…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if page.items.isEmpty {
             EmptyStateView(
@@ -710,18 +1166,7 @@ private struct SearchFolderGrid: View {
                     onSelect(item)
                 } label: {
                     VStack(alignment: .leading, spacing: 7) {
-                        if item.isFolder {
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 8)
-                                    .fill(Color.accentColor.opacity(0.1))
-                                Image(systemName: "folder.fill")
-                                    .font(.system(size: 48))
-                                    .foregroundColor(.accentColor)
-                            }
-                            .aspectRatio(2 / 3, contentMode: .fit)
-                        } else {
-                            VideoPosterView(item: item)
-                        }
+                        VideoPosterView(item: item)
                         Text(item.title)
                             .font(.headline)
                             .lineLimit(2)
@@ -752,49 +1197,36 @@ private struct SearchFolderGrid: View {
     }
 }
 
-private struct SearchFailureSummary: View {
-    let failures: [SearchFailure]
-
-    var body: some View {
-        DisclosureGroup {
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(
-                    Array(failures.enumerated()),
-                    id: \.offset
-                ) { _, failure in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(failure.siteName)
-                            .font(.caption.bold())
-                        Text(failure.message)
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .textSelection(.enabled)
-                    }
-                }
-            }
-            .padding(.top, 8)
-        } label: {
-            HStack(spacing: 7) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundColor(.orange)
-                Text("\(failures.count) 个站点未响应")
-                    .fontWeight(.medium)
-                Text("其他结果仍可使用")
-                    .foregroundColor(.secondary)
-                Spacer()
-                Text("查看详情")
-                    .foregroundColor(.secondary)
-            }
+private extension SearchSiteOutcome {
+    var title: String {
+        switch self {
+        case .success(_, let siteName, let resultCount):
+            return resultCount == 0
+                ? "\(siteName) · 搜索成功但结果为空"
+                : "\(siteName) · 搜索成功并返回 \(resultCount) 条"
+        case .failure(let failure):
+            return "\(failure.siteName) · \(failure.categoryTitle)"
+        case .cancelled(_, let siteName):
+            return "\(siteName) · 用户取消"
         }
-        .font(.caption)
-        .foregroundColor(.primary)
-        .padding(.horizontal, 11)
-        .padding(.vertical, 8)
-        .background(Color.orange.opacity(0.07))
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(Color.orange.opacity(0.2), lineWidth: 1)
+    }
+
+    var detail: String? {
+        guard case .failure(let failure) = self else { return nil }
+        return failure.message
+    }
+}
+
+private extension SearchFailure {
+    var categoryTitle: String {
+        switch category {
+        case .unsupportedRoute: return "未提供搜索路由"
+        case .configurationRequired: return "需要配置或登录"
+        case .scriptError: return "脚本错误"
+        case .upstreamUnavailable: return "上游不可用"
+        case .timeout: return "搜索超时"
+        case .transport: return "网络连接失败"
+        case .provider: return "站点返回错误"
         }
     }
 }
@@ -815,10 +1247,59 @@ enum SearchResultSortOrder: String, CaseIterable, Identifiable {
         case .title: return "片名排序"
         }
     }
+
+    var toolbarTitle: String {
+        switch self {
+        case .relevance: return "相关度"
+        case .sourceCount: return "来源数"
+        case .newest: return "最新"
+        case .title: return "片名"
+        }
+    }
 }
 
 enum SearchDisplayPreferences {
     static let mergesDuplicateTitlesKey = "search.mergesDuplicateTitles"
+}
+
+final class SearchResultPresentationCache: ObservableObject {
+    private struct Input: Equatable {
+        let items: [VideoSummary]
+        let keyword: String
+        let mergesDuplicates: Bool
+        let sortOrder: SearchResultSortOrder
+    }
+
+    private var lastInput: Input?
+    private var lastClusters: [SearchResultCluster] = []
+    private(set) var computationCount = 0
+
+    func clusters(
+        from items: [VideoSummary],
+        keyword: String,
+        mergesDuplicates: Bool,
+        sortOrder: SearchResultSortOrder
+    ) -> [SearchResultCluster] {
+        let input = Input(
+            items: items,
+            keyword: keyword,
+            mergesDuplicates: mergesDuplicates,
+            sortOrder: sortOrder
+        )
+        if input == lastInput {
+            return lastClusters
+        }
+        let clusters = SearchResultPresentation.clusters(
+            from: items,
+            keyword: keyword,
+            mergesDuplicates: mergesDuplicates,
+            sortOrder: sortOrder
+        )
+        lastInput = input
+        lastClusters = clusters
+        computationCount += 1
+        return clusters
+    }
 }
 
 enum SearchClusterOpenPolicy {
@@ -863,11 +1344,9 @@ enum SearchResultPresentation {
     ) -> Bool {
         switch sortOrder {
         case .relevance:
-            let leftScore = relevanceScore(lhs.element.title, keyword: keyword)
-            let rightScore = relevanceScore(rhs.element.title, keyword: keyword)
-            return leftScore == rightScore
-                ? lhs.offset < rhs.offset
-                : leftScore > rightScore
+            // MultiSiteSearch is the single semantic owner of relevance.
+            // Clustering preserves its retained-pool order.
+            return lhs.offset < rhs.offset
         case .sourceCount:
             return lhs.element.sources.count == rhs.element.sources.count
                 ? lhs.offset < rhs.offset
@@ -886,26 +1365,6 @@ enum SearchResultPresentation {
                 ? lhs.offset < rhs.offset
                 : comparison == .orderedAscending
         }
-    }
-
-    private static func relevanceScore(_ title: String, keyword: String) -> Int {
-        let foldedTitle = folded(title)
-        let foldedKeyword = folded(keyword)
-        guard !foldedKeyword.isEmpty else { return 0 }
-        if foldedTitle == foldedKeyword { return 3 }
-        if foldedTitle.hasPrefix(foldedKeyword) { return 2 }
-        if foldedTitle.contains(foldedKeyword) { return 1 }
-        return 0
-    }
-
-    private static func folded(_ value: String) -> String {
-        value
-            .folding(
-                options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
-                locale: .current
-            )
-            .precomposedStringWithCanonicalMapping
-            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func yearValue(_ year: String?) -> Int {
@@ -990,7 +1449,8 @@ private struct SearchClusterCell: View {
                 .font(.caption2)
                 .foregroundColor(.secondary)
         }
-        .contentShape(Rectangle())
+        .padding(8)
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private func sourceDescription(primary: VideoSummary) -> String {

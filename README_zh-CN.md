@@ -6,6 +6,10 @@ OKVideoMac 是一款原生 macOS 客户端，支持可配置的视频 Provider �
 采用 SwiftUI 界面并基于 libmpv 播放。当前公开版本为面向 macOS 12 或更高版本
 Apple Silicon Mac 的 **0.3.41（Build 65）**。
 
+即将发布的候选版本是 **0.4.0（Build 94）**，仍仅支持 Apple Silicon，最低
+系统为 macOS 12。RC 获得确认后，正式 DMG 和源码集将从合并后的 exact commit
+重新构建；在此之前，0.3.41 仍是当前公开版本。
+
 ## 亮点
 
 - 原生 macOS 导航、搜索、历史记录、收藏和播放界面
@@ -13,6 +17,8 @@ Apple Silicon Mac 的 **0.3.41（Build 65）**。
 - 使用 libmpv 播放点播视频和直播流
 - 支持符合当前接口的部分 QuickJS 和 CatVod/CatPaw 风格 Node 视频源
 - 为部分 Java/Dex `csp_` Provider 提供可选的 Android Bridge
+- 0.4.0 候选新增结构化网盘授权恢复、更安全的夸克转存目录复用和原生 macOS
+  配置 Sheet
 
 兼容性主要取决于源格式、站点类型、运行时、API 结构、解析要求和媒体行为，而
 不是生态品牌。能够使用部分 TVBox、FongMi、MiraPlay 或 CatPawOpen 生态中的源，
@@ -80,6 +86,11 @@ Build 62 和 Build 63 是更早的公开发布前候选；Build 64 保留为上�
 [Build 62 历史发布准备记录](Docs/IMMUTABLE_RELEASE_READINESS.md)中；该快照及
 其他历史候选记录都不是当前 v0.3.41 的发布状态。
 
+0.4.0 的 `package-app.sh` 会生成只包含 `OKVideoMac.app` 与
+`Applications -> /Applications` 的 Developer ID 签名 DMG，并把该 DMG、SBOM、
+第三方声明和对应源码归档绑定到同一个干净 Git commit。Apple 公证、staple、
+Gatekeeper、Tag 和公开上传是独立门禁，实际成功前不会宣称已经完成。
+
 ## 内容与配置
 
 OKVideoMac 不内置第三方视频源、账号、Cookie、解析地址或 DRM 密钥。请仅使用
@@ -92,6 +103,8 @@ OKVideoMac 不内置第三方视频源、账号、Cookie、解析地址或 DRM �
 - [Android Bridge 设置](OKVideoMac/macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP_zh-CN.md)
 - [从源码构建](OKVideoMac/macOS/OKVideoMac/Docs/BUILDING.md)
 - [源码发布流程](Docs/SOURCE_RELEASE_PROCESS.md)
+- [0.4.0 发布说明](Docs/RELEASE_NOTES_0.4.0.md)
+- [更新日志](CHANGELOG.md)
 - [参与贡献](CONTRIBUTING.md)
 - [安全政策](SECURITY.md)
 

@@ -27,13 +27,21 @@ public final class StandardSiteProvider: SiteProvider {
 
     public func home() async throws -> SiteHome {
         let response = try await request(parameters: [:])
+        let summaries = UpstreamResponseDecoder.summaries(
+            from: response.videos,
+            site: site,
+            baseURL: configurationBaseURL
+        )
         return SiteHome(
-            categories: filteredCategories(response.categories),
-            recommendations: UpstreamResponseDecoder.summaries(
-                from: response.videos,
-                site: site,
-                baseURL: configurationBaseURL
-            )
+            categories: filteredCategories(response.categories).filter {
+                $0.resolvedContentKind != .unsupported
+            },
+            recommendations: summaries.filter {
+                $0.resolvedContentKind == .media
+            },
+            actionItems: summaries.filter {
+                $0.resolvedContentKind == .action
+            }.map(SiteActionItem.init(summary:))
         )
     }
 
@@ -62,7 +70,7 @@ public final class StandardSiteProvider: SiteProvider {
 
         let response = try await request(parameters: parameters)
         return VideoPage(
-            items: UpstreamResponseDecoder.summaries(
+            items: UpstreamResponseDecoder.mediaSummaries(
                 from: response.videos,
                 site: site,
                 baseURL: configurationBaseURL
@@ -89,7 +97,7 @@ public final class StandardSiteProvider: SiteProvider {
     }
 
     public func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
-        guard site.searchable == 1 else {
+        guard site.searchable != 0 else {
             return VideoPage(items: [], pagination: Pagination(page: page, pageCount: 0))
         }
         if quick, site.quickSearch != 1 {
@@ -105,7 +113,7 @@ public final class StandardSiteProvider: SiteProvider {
         }
         let response = try await request(parameters: parameters)
         return VideoPage(
-            items: UpstreamResponseDecoder.summaries(
+            items: UpstreamResponseDecoder.mediaSummaries(
                 from: response.videos,
                 site: site,
                 baseURL: configurationBaseURL
@@ -215,11 +223,13 @@ public enum MediaURLClassifier {
     private static let directExtensions = [
         "m3u8", "mp4", "mkv", "webm", "mov", "flv", "ts", "mpd", "mp3", "m4a", "aac"
     ]
+    private static let supportedNetworkSchemes: Set<String> = [
+        "http", "https", "rtsp", "rtmp", "rtmps", "rtp", "udp"
+    ]
 
     public static func isDirectMediaURL(_ value: String) -> Bool {
         guard let url = URL(string: value),
-              let scheme = url.scheme?.lowercased(),
-              ["http", "https", "file"].contains(scheme) else {
+              isSupportedAbsoluteMediaURL(url) else {
             return false
         }
         let pathExtension = url.pathExtension.lowercased()
@@ -228,6 +238,26 @@ public enum MediaURLClassifier {
         }
         let lowered = value.lowercased()
         return lowered.contains(".m3u8?") || lowered.contains(".mpd?")
+    }
+
+    /// Validates the final hand-off contract shared by providers and the
+    /// player. Extensionless streams and MPV's supported network protocols
+    /// remain valid, but relative strings, provider error text and app-internal
+    /// locator tokens never reach mpv.
+    public static func isSupportedAbsoluteMediaURL(_ value: String) -> Bool {
+        guard let url = URL(string: value) else { return false }
+        return isSupportedAbsoluteMediaURL(url)
+    }
+
+    public static func isSupportedAbsoluteMediaURL(_ url: URL) -> Bool {
+        switch url.scheme?.lowercased() {
+        case let scheme? where supportedNetworkSchemes.contains(scheme):
+            return url.host?.isEmpty == false
+        case "file":
+            return url.isFileURL && url.path.hasPrefix("/")
+        default:
+            return false
+        }
     }
 }
 

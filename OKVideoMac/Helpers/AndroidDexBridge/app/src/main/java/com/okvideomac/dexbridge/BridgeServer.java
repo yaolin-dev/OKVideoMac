@@ -1,8 +1,10 @@
 package com.okvideomac.dexbridge;
 
 import android.content.Context;
+import android.content.pm.PackageInfo;
 import android.util.Log;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
@@ -11,21 +13,34 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import okhttp3.OkHttpClient;
+import okhttp3.Call;
 import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.ResponseBody;
@@ -34,13 +49,35 @@ final class BridgeServer {
     static final int PORT = 9978;
     private static final String TAG = "OKVideoDexBridge";
     private static final int MAX_BODY_BYTES = 8 * 1024 * 1024;
-    private static final int MAX_CREDENTIAL_BODY_BYTES = 72 * 1024;
     // The Mac client can issue 20 provider calls at once. Keep additional
     // workers available for health, authorization UI, and playback proxy
     // requests so a saturated search cannot make the bridge appear dead.
-    private static final int CLIENT_THREAD_COUNT = 32;
-    private static final ExecutorService CLIENTS =
-            Executors.newFixedThreadPool(CLIENT_THREAD_COUNT);
+    private static final int PROVIDER_THREAD_COUNT = 24;
+    private static final int MEDIA_THREAD_COUNT = 12;
+    // Connection/control work is isolated from provider invocations and
+    // long-lived movie streams. A slow stream can no longer consume every
+    // health/state/cancel worker.
+    private static final ExecutorService CONNECTIONS =
+            Executors.newCachedThreadPool();
+    private static final ExecutorService PROVIDER_WORKERS =
+            Executors.newFixedThreadPool(PROVIDER_THREAD_COUNT);
+    private static final ExecutorService MEDIA_WORKERS =
+            Executors.newFixedThreadPool(MEDIA_THREAD_COUNT);
+    private static final Map<String, Future<?>> INTERACTION_WORKERS =
+            new ConcurrentHashMap<>();
+    private static final Map<String, InteractionWorkerExit> INTERACTION_EXITS =
+            new ConcurrentHashMap<>();
+    /**
+     * Serializes the registry's latest pointer, the UI owner, and the one
+     * cancellable provider invocation associated with an interaction.
+     *
+     * <p>Those three pieces used to be updated independently. A duplicate
+     * /invoke could overwrite the tracked Future while both provider calls
+     * continued to run, and an A -> B race could install A's worker after B
+     * had already released it. Keeping the lifecycle transition and worker
+     * claim under one lock makes retry and supersede behavior deterministic.</p>
+     */
+    private static final Object INTERACTION_LIFECYCLE_LOCK = new Object();
     private static final OkHttpClient MEDIA_CLIENT = new OkHttpClient.Builder()
             .followRedirects(true)
             .followSslRedirects(true)
@@ -51,11 +88,30 @@ final class BridgeServer {
             .readTimeout(0, TimeUnit.MILLISECONDS)
             .writeTimeout(15, TimeUnit.SECONDS)
             .build();
+    // Provider-owned sessions follow redirects explicitly so credential and
+    // custom provider headers can be stripped before crossing an origin
+    // boundary. OkHttp's automatic redirect handling removes Authorization,
+    // but intentionally retains caller-supplied Cookie/custom headers.
+    private static final OkHttpClient SESSION_MEDIA_CLIENT =
+            new OkHttpClient.Builder()
+                    .followRedirects(false)
+                    .followSslRedirects(false)
+                    .retryOnConnectionFailure(true)
+                    .connectTimeout(15, TimeUnit.SECONDS)
+                    .readTimeout(0, TimeUnit.MILLISECONDS)
+                    .writeTimeout(15, TimeUnit.SECONDS)
+                    .build();
+    private static final int MAX_MEDIA_REDIRECTS = 10;
+    // A smaller relay buffer notices an abandoned mpv Range request sooner
+    // and bounds the bytes copied after a large seek supersedes the request.
+    private static final int MEDIA_COPY_BUFFER_BYTES = 64 * 1024;
     private static final String[] FORWARDED_MEDIA_REQUEST_HEADERS = {
             "range",
+            "if-range",
             "user-agent",
             "referer",
             "cookie",
+            "authorization",
             "origin",
             "accept",
             "accept-language"
@@ -68,18 +124,46 @@ final class BridgeServer {
             "ETag",
             "Last-Modified"
     };
+    /**
+     * Listener lifecycle is independent from the Activity lifecycle.  In
+     * particular, a failed bind must not leave the process permanently
+     * looking "started": the Mac retries by delivering a new intent to the
+     * already-existing BridgeActivity.
+     */
+    private static final Object SERVER_LIFECYCLE_LOCK = new Object();
     private static volatile boolean started;
+    private static volatile boolean starting;
+    private static volatile ServerSocket listener;
+    private static long listenerGeneration;
     private static volatile String runtimeGeneration = "";
 
     private BridgeServer() {
     }
 
-    static synchronized void start(Context context) {
-        if (started) return;
-        com.github.catvod.Proxy.set(PORT);
-        started = true;
+    static void start(Context context) {
+        final Context application = context.getApplicationContext();
+        final long generation;
+        synchronized (SERVER_LIFECYCLE_LOCK) {
+            ServerSocket active = listener;
+            if (started && active != null && !active.isClosed()) return;
+            if (starting) return;
+            started = false;
+            starting = true;
+            generation = ++listenerGeneration;
+        }
+        // CatVod/FongMi Spider code calls Proxy.getUrl() while playerContent
+        // is still resolving. Its process-local endpoint must therefore be
+        // available before any secure Mac media session can exist.
+        try {
+            FongMiCompatProxyServer.ensureStarted(application);
+        } catch (IOException error) {
+            // playerContent performs one bounded, synchronous recovery. Keep
+            // the RPC listener available so the Mac receives that classified
+            // failure instead of treating the entire Android runtime as dead.
+            Log.e(TAG, "TVBox compatibility proxy unavailable", error);
+        }
         Thread thread = new Thread(
-                () -> serve(context.getApplicationContext()),
+                () -> serve(application, generation),
                 "okvideo-dex-rpc"
         );
         thread.setDaemon(false);
@@ -90,20 +174,90 @@ final class BridgeServer {
         runtimeGeneration = generation == null ? "" : generation;
     }
 
-    private static void serve(Context context) {
-        try (ServerSocket server = new ServerSocket(
-                PORT,
-                64,
-                InetAddress.getByName("127.0.0.1")
-        )) {
+    private static void serve(Context context, long generation) {
+        ServerSocket server = null;
+        try {
+            server = new ServerSocket(
+                    PORT,
+                    64,
+                    InetAddress.getByName("127.0.0.1")
+            );
+            synchronized (SERVER_LIFECYCLE_LOCK) {
+                if (generation != listenerGeneration) {
+                    closeQuietly(server);
+                    return;
+                }
+                listener = server;
+                started = true;
+                starting = false;
+                SERVER_LIFECYCLE_LOCK.notifyAll();
+            }
             Log.i(TAG, "Listening on 127.0.0.1:" + PORT);
             while (!server.isClosed()) {
                 Socket socket = server.accept();
-                CLIENTS.execute(() -> handle(context, socket));
+                synchronized (SERVER_LIFECYCLE_LOCK) {
+                    if (generation != listenerGeneration) {
+                        closeQuietly(socket);
+                        break;
+                    }
+                }
+                CONNECTIONS.execute(() -> handle(context, socket));
             }
         } catch (Throwable error) {
+            synchronized (SERVER_LIFECYCLE_LOCK) {
+                if (generation == listenerGeneration) {
+                    Log.e(TAG, "RPC server stopped", error);
+                }
+            }
+        } finally {
+            closeQuietly(server);
+            synchronized (SERVER_LIFECYCLE_LOCK) {
+                if (generation == listenerGeneration) {
+                    if (listener == server) listener = null;
+                    started = false;
+                    starting = false;
+                    SERVER_LIFECYCLE_LOCK.notifyAll();
+                }
+            }
+        }
+    }
+
+    static boolean listenerReadyForTests() {
+        ServerSocket active = listener;
+        return started && active != null && !active.isClosed();
+    }
+
+    static boolean listenerStartingForTests() {
+        return starting;
+    }
+
+    static void stopListenerForTests() {
+        ServerSocket active;
+        synchronized (SERVER_LIFECYCLE_LOCK) {
+            listenerGeneration++;
+            active = listener;
+            listener = null;
             started = false;
-            Log.e(TAG, "RPC server stopped", error);
+            starting = false;
+            SERVER_LIFECYCLE_LOCK.notifyAll();
+        }
+        closeQuietly(active);
+        FongMiCompatProxyServer.stopForTests();
+    }
+
+    private static void closeQuietly(ServerSocket socket) {
+        if (socket == null) return;
+        try {
+            socket.close();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void closeQuietly(Socket socket) {
+        if (socket == null) return;
+        try {
+            socket.close();
+        } catch (Throwable ignored) {
         }
     }
 
@@ -122,30 +276,252 @@ final class BridgeServer {
                 Map<String, String> headers = readHeaders(input);
                 String method = request[0].toUpperCase(Locale.ROOT);
                 String target = request[1];
-                if ("GET".equals(method) && "/health".equals(target)) {
+                String path = requestPath(target);
+                if ("GET".equals(method) && "/health".equals(path)) {
                     JSONObject health = new JSONObject();
                     health.put("ok", true);
-                    health.put("version", "0.3.15");
+                    health.put(
+                            "version",
+                            context.getPackageManager()
+                                    .getPackageInfo(context.getPackageName(), 0)
+                                    .versionName
+                    );
                     health.put("generation", runtimeGeneration);
+                    health.put("interactionSchemaVersion", 5);
+                    health.put(
+                            "interactionCapabilities",
+                            new JSONArray()
+                                    .put("scopedActionSession")
+                                    .put("separateReturnSurfaceEvents")
+                                    .put("playbackUIHandoff")
+                                    .put("requestScopedSurfaceLease")
+                                    .put("explicitUserCompletion")
+                                    .put("sessionDialogBounds")
+                                    .put("sessionDialogStack")
+                                    .put("sessionLogicalDialogLayers")
+                                    .put("dialogCaptureGuardBand")
+                                    .put("dialogCropPassthrough")
+                                    .put("fullSurfaceFallback")
+                                    .put("dialogUnicodeInput")
+                    );
+                    health.put(
+                            "tvboxProxyReady",
+                            FongMiCompatProxyServer.ready()
+                    );
+                    health.put(
+                            "uiCapabilities",
+                            new JSONArray()
+                                    .put("hierarchy")
+                                    .put("geometry")
+                                    .put("toggleState")
+                                    .put("pickerState")
+                                    .put("sliderState")
+                                    .put("secureInputRedaction")
+                    );
                     writeJSON(output, 200, health);
+                    return;
+                }
+                if ("GET".equals(method)
+                        && "/v1/runtime/continuity".equals(path)) {
+                    PackageInfo packageInfo = context.getPackageManager()
+                            .getPackageInfo(context.getPackageName(), 0);
+                    JSONObject continuity = new JSONObject();
+                    continuity.put("ok", true);
+                    continuity.put("runtimeSchemaVersion", 1);
+                    continuity.put("applicationId", context.getPackageName());
+                    continuity.put("versionCode", packageInfo.versionCode);
+                    continuity.put("firstInstallTime", packageInfo.firstInstallTime);
+                    continuity.put("lastUpdateTime", packageInfo.lastUpdateTime);
+                    continuity.put("uid", context.getApplicationInfo().uid);
+                    continuity.put(
+                            "dataDirectoryFingerprint",
+                            sha256(context.getApplicationInfo().dataDir)
+                    );
+                    continuity.put(
+                            "authorizationStorageFingerprint",
+                            BridgeAuthorizationStorageFingerprint.capture(context)
+                    );
+                    writeJSON(output, 200, continuity);
+                    return;
+                }
+                if (path.startsWith("/proxy/media/")
+                        && ("GET".equals(method) || "HEAD".equals(method))) {
+                    runMedia(() -> writeSessionMedia(
+                                context,
+                                output,
+                                path.substring("/proxy/media/".length()),
+                                headers,
+                                "HEAD".equals(method)
+                    ));
+                    return;
+                }
+                if (path.startsWith("/v1/media-sessions/")
+                        && ("GET".equals(method) || "HEAD".equals(method))) {
+                    runMedia(() -> writeSessionMedia(
+                                context,
+                                output,
+                                path.substring("/v1/media-sessions/".length()),
+                                headers,
+                                "HEAD".equals(method)
+                    ));
                     return;
                 }
                 if (target.startsWith("/v1/media?")
                         && ("GET".equals(method) || "HEAD".equals(method))) {
-                    writeDirectMedia(
+                    runMedia(() -> writeDirectMedia(
+                                output,
+                                parseQuery(target).get("url"),
+                                headers,
+                                "HEAD".equals(method)
+                    ));
+                    return;
+                }
+                if ("POST".equals(method) && "/v1/interactions".equals(path)) {
+                    JSONObject payload = readJSONPayload(input, headers, MAX_BODY_BYTES);
+                    String interactionID = beginAndActivateInteraction(
+                            context,
+                            payload.optString("interactionID", ""),
+                            payload.optString("kind", "configuration"),
+                            payload.optString("method", "")
+                    );
+                    if (!acceptsInvocation(interactionID)) {
+                        writeJSON(
+                                output,
+                                409,
+                                staleInteraction(interactionID)
+                        );
+                        return;
+                    }
+                    writeJSON(output, 200, BridgeInteractionRegistry.state(interactionID));
+                    return;
+                }
+                String stateInteraction = interactionID(path, "/state");
+                if ("GET".equals(method) && stateInteraction != null) {
+                    writeJSON(
                             output,
-                            parseQuery(target).get("url"),
-                            headers,
-                            "HEAD".equals(method)
+                            200,
+                            withProviderOwner(
+                                    BridgeActivity.uiState(
+                                            context,
+                                            stateInteraction
+                                    ),
+                                    stateInteraction
+                            )
                     );
                     return;
                 }
-                if ("GET".equals(method) && "/v1/ui/state".equals(target)) {
-                    writeJSON(output, 200, BridgeActivity.uiState());
+                String eventsInteraction = interactionID(path, "/events");
+                if ("GET".equals(method) && eventsInteraction != null) {
+                    writeJSON(
+                            output,
+                            200,
+                            BridgeInteractionRegistry.events(
+                                    eventsInteraction,
+                                    eventSequenceAfter(target)
+                            )
+                    );
                     return;
                 }
-                if ("GET".equals(method) && "/v1/ui/snapshot".equals(target)) {
-                    writeBytes(output, 200, "image/png", BridgeActivity.snapshotUI());
+                String textInteraction = interactionID(path, "/text");
+                if ("POST".equals(method) && textInteraction != null) {
+                    JSONObject payload = readJSONPayload(
+                            input,
+                            headers,
+                            MAX_BODY_BYTES
+                    );
+                    boolean accepted = BridgeActionActivity.commitTextIfOwnedBy(
+                            textInteraction,
+                            payload.optString("windowID", ""),
+                            payload.optLong("windowRevision", 0L),
+                            payload.optString("text", "")
+                    );
+                    JSONObject state = withProviderOwner(
+                            BridgeActivity.uiState(context, textInteraction),
+                            textInteraction
+                    );
+                    state.put("textAccepted", accepted);
+                    writeJSON(output, accepted ? 200 : 409, state);
+                    return;
+                }
+                String cancelInteraction = interactionID(path, "/cancel");
+                if ("POST".equals(method) && cancelInteraction != null) {
+                    String cancelReason = headers.get(
+                            "x-okvideo-cancel-reason"
+                    );
+                    BridgeInteractionRegistry.cancel(
+                            cancelInteraction,
+                            cancelReason == null
+                                    ? "hostRequested"
+                                    : cancelReason
+                    );
+                    boolean dismissed = releaseTerminalInteraction(
+                            context,
+                            cancelInteraction
+                    );
+                    boolean workerStopped = awaitInteractionWorkerStopped(
+                            cancelInteraction,
+                            1_500L
+                    );
+                    JSONObject state = BridgeInteractionRegistry.state(
+                            cancelInteraction
+                    );
+                    state.put("dismissed", dismissed);
+                    state.put("workerStopped", workerStopped);
+                    state.put("requiresBridgeRestart", !workerStopped);
+                    writeJSON(
+                            output,
+                            200,
+                            state
+                    );
+                    return;
+                }
+                String completeInteraction = interactionID(path, "/complete");
+                if ("POST".equals(method) && completeInteraction != null) {
+                    JSONObject state = BridgeInteractionRegistry
+                            .confirmCompleted(completeInteraction);
+                    if (state.optBoolean("terminal", false)) {
+                        boolean dismissed = releaseTerminalInteraction(
+                                context,
+                                completeInteraction
+                        );
+                        state = BridgeInteractionRegistry.state(
+                                completeInteraction
+                        );
+                        state.put("dismissed", dismissed);
+                        state.put("confirmationAccepted", true);
+                    }
+                    writeJSON(output, 200, state);
+                    return;
+                }
+                if ("GET".equals(method) && "/v1/ui/state".equals(path)) {
+                    String latest = BridgeInteractionRegistry.latestID();
+                    writeJSON(
+                            output,
+                            200,
+                            withProviderOwner(
+                                    BridgeActivity.uiState(context, latest),
+                                    latest
+                            )
+                    );
+                    return;
+                }
+                if ("POST".equals(method) && "/v1/ui/dismiss".equals(path)) {
+                    String latest = BridgeInteractionRegistry.latestID();
+                    JSONObject state = BridgeActivity.dismissUI(
+                            context,
+                            latest
+                    );
+                    boolean workerStopped = awaitInteractionWorkerStopped(
+                            latest,
+                            1_500L
+                    );
+                    state.put("workerStopped", workerStopped);
+                    state.put("requiresBridgeRestart", !workerStopped);
+                    writeJSON(
+                            output,
+                            200,
+                            state
+                    );
                     return;
                 }
                 if (target.startsWith("/proxy")
@@ -153,71 +529,55 @@ final class BridgeServer {
                         || "HEAD".equals(method)
                         || "POST".equals(method))) {
                     Map<String, String> params = parseQuery(target);
-                    params.putAll(headers);
-                    Object[] response = DexSpiderRegistry.get(context).proxy(params);
-                    writeProxy(output, response, "HEAD".equals(method));
-                    return;
-                }
-                if ("POST".equals(method) && "/v1/ui/submit".equals(target)) {
-                    int length = parseLength(headers.get("content-length"));
-                    if (length < 0 || length > MAX_BODY_BYTES) {
-                        writeJSON(output, 413, failure("Invalid request size"));
-                        return;
-                    }
-                    JSONObject payload = new JSONObject(
-                            new String(readExactly(input, length), StandardCharsets.UTF_8)
-                    );
-                    writeJSON(
-                            output,
-                            200,
-                            BridgeActivity.submitUI(
-                                    payload.optString("text", null),
-                                    payload.optString("button", ""),
-                                    payload.has("controlID")
-                                            && !payload.isNull("controlID")
-                                            ? payload.optString("controlID", null)
-                                            : null
-                            )
-                    );
-                    return;
-                }
-                if ("POST".equals(method) && "/v1/auth/push".equals(target)) {
-                    String contentType = headers.get("content-type");
-                    if (contentType == null
-                            || !contentType.toLowerCase(Locale.ROOT)
-                            .startsWith("application/json")) {
+                    String mediaSessionID = params.remove("mediaSessionID");
+                    BridgeMediaSessionRegistry.Session mediaSession =
+                            BridgeMediaSessionRegistry.get(mediaSessionID);
+                    if (mediaSession == null) {
                         writeJSON(
                                 output,
-                                415,
-                                failure("Content-Type must be application/json")
+                                410,
+                                failure("Media session expired or missing")
                         );
                         return;
                     }
-                    int length = parseLength(headers.get("content-length"));
-                    if (length <= 0 || length > MAX_CREDENTIAL_BODY_BYTES) {
-                        writeJSON(output, 413, failure("Invalid request size"));
+                    if (mediaSession.owner == null) {
+                        writeJSON(
+                                output,
+                                409,
+                                failure("Media session has no provider owner")
+                        );
                         return;
                     }
-                    JSONObject payload = new JSONObject(
-                            new String(readExactly(input, length), StandardCharsets.UTF_8)
+                    params.putAll(headers);
+                    Object[] response = runProvider(
+                            () -> DexSpiderRegistry.get(context).proxy(
+                                    mediaSession.owner,
+                                    params
+                            )
                     );
-                    boolean accepted = DexSpiderRegistry.get(context)
-                            .submitCloudCredential(
-                                    payload.optString("provider", ""),
-                                    payload.optString("credential", "")
-                            );
-                    if (!accepted) {
+                    Log.i(
+                            TAG,
+                            "Spider proxy request="
+                                    + UUID.randomUUID().toString().substring(0, 8)
+                                    + " status="
+                                    + (response != null && response.length > 0
+                                            ? String.valueOf(response[0])
+                                            : "missing")
+                                    + " range=" + headers.containsKey("range")
+                                    + " cookie=" + headers.containsKey("cookie")
+                                    + " referer=" + headers.containsKey("referer")
+                                    + " authorization="
+                                    + headers.containsKey("authorization")
+                    );
+                    if (!validProxyResponse(response)) {
                         writeJSON(
                                 output,
                                 502,
-                                failure("Cloud credential handler rejected the request")
+                                failure("Spider internal proxy failed")
                         );
                         return;
                     }
-                    JSONObject response = new JSONObject();
-                    response.put("ok", true);
-                    response.put("accepted", true);
-                    writeJSON(output, 200, response);
+                    writeProxy(output, response, "HEAD".equals(method));
                     return;
                 }
                 if (!"POST".equals(method) || !"/v1/invoke".equals(target)) {
@@ -231,22 +591,474 @@ final class BridgeServer {
                 }
                 byte[] body = readExactly(input, length);
                 JSONObject payload = new JSONObject(new String(body, StandardCharsets.UTF_8));
-                Object result = DexSpiderRegistry.get(context).invoke(payload);
+                String interactionID = payload.optString("interactionID", "").trim();
+                boolean interactive = payload.optBoolean(
+                        "monitorsAuthorization",
+                        false
+                ) || !interactionID.isEmpty();
+                if (interactive) {
+                    interactionID = beginAndActivateInteraction(
+                            context,
+                            interactionID,
+                            payload.optString(
+                                    "interactionKind",
+                                    payload.optString("actionType", "configuration")
+                            ),
+                            payload.optString("method", "")
+                    );
+                    if (!acceptsInvocation(interactionID)) {
+                        writeJSON(
+                                output,
+                                409,
+                                staleInteraction(interactionID)
+                        );
+                        return;
+                    }
+                    payload.put("interactionID", interactionID);
+                }
+                Object result;
+                Future<Object> invocation = null;
+                try {
+                    final JSONObject invokePayload = payload;
+                    if (interactive) {
+                        invocation = claimInteractionWorker(
+                                interactionID,
+                                () -> DexSpiderRegistry.get(context).invoke(
+                                        invokePayload
+                                )
+                        );
+                        if (invocation == null) {
+                            writeJSON(
+                                    output,
+                                    409,
+                                    staleInteraction(interactionID)
+                            );
+                            return;
+                        }
+                    } else {
+                        invocation = PROVIDER_WORKERS.submit(
+                                () -> DexSpiderRegistry.get(context).invoke(
+                                        invokePayload
+                                )
+                        );
+                    }
+                    result = await(invocation);
+                    if (interactive) {
+                        boolean playback = "play".equals(
+                                payload.optString("method", "")
+                        );
+                        String providerMessage =
+                                DexSpiderRegistry.providerMessage(result);
+                        if (!providerMessage.isEmpty()) {
+                            BridgeInteractionRegistry.recordEvent(
+                                    interactionID,
+                                    "providerMessage",
+                                    providerMessage
+                            );
+                        }
+                        JSONObject returned = !playback
+                                || providerMessage.isEmpty()
+                                ? BridgeInteractionRegistry.invocationReturned(
+                                        interactionID,
+                                        isTerminalPlaybackResult(payload, result)
+                                )
+                                : BridgeInteractionRegistry.failedProviderMessage(
+                                        interactionID,
+                                        providerMessage
+                                );
+                        // A newer ActionSession may supersede this provider
+                        // after the worker has produced a value but before the
+                        // RPC thread publishes it. Never leak that late return
+                        // into the new session (or back to a retrying client).
+                        if (!returned.optBoolean("returnAccepted", false)) {
+                            writeJSON(
+                                    output,
+                                    409,
+                                    staleInteraction(interactionID)
+                            );
+                            return;
+                        }
+                        if (returned.optBoolean("terminal", false)) {
+                            releaseTerminalInteraction(context, interactionID);
+                        }
+                    }
+                } catch (CancellationException error) {
+                    if (interactive) {
+                        BridgeInteractionRegistry.cancel(
+                                interactionID,
+                                "workerCancelled"
+                        );
+                        releaseTerminalInteraction(context, interactionID);
+                    }
+                    throw error;
+                } catch (Throwable error) {
+                    if (interactive) {
+                        if (!BridgeInteractionRegistry.terminal(interactionID)) {
+                            BridgeInteractionRegistry.failed(
+                                    interactionID,
+                                    safeMessage(error)
+                            );
+                        }
+                        releaseTerminalInteraction(context, interactionID);
+                    }
+                    throw error;
+                }
                 JSONObject response = new JSONObject();
                 response.put("ok", true);
                 response.put("result", result);
+                if (interactive) {
+                    response.put("interactionID", interactionID);
+                    response.put(
+                            "interaction",
+                            BridgeInteractionRegistry.state(interactionID)
+                    );
+                }
                 writeJSON(output, 200, response);
             } catch (Throwable error) {
+                if (error instanceof MediaResponseCommittedException) {
+                    MediaResponseCommittedException committed =
+                            (MediaResponseCommittedException) error;
+                    Throwable cause = committed.getCause();
+                    Log.w(
+                            TAG,
+                            "Media relay ended after response started"
+                                    + " category=" + committed.category
+                                    + " bytes=" + committed.bytesWritten
+                                    + " error="
+                                    + (cause == null
+                                    ? error.getClass().getSimpleName()
+                                    : cause.getClass().getSimpleName())
+                    );
+                    return;
+                }
                 Log.e(TAG, "RPC request failed", error);
                 writeJSON(output, 500, failure(safeMessage(error)));
             }
         } catch (Throwable error) {
-            Log.e(TAG, "RPC connection failed", error);
+            if (isClientDisconnect(error)) {
+                Log.d(
+                        TAG,
+                        "RPC client disconnected: "
+                                + error.getClass().getSimpleName()
+                );
+            } else {
+                Log.e(TAG, "RPC connection failed", error);
+            }
         }
     }
 
-    private static Map<String, String> parseQuery(String target) {
-        Map<String, String> values = new HashMap<>();
+    private static boolean isClientDisconnect(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            if (current instanceof EOFException
+                    || current instanceof SocketException) {
+                return true;
+            }
+            String message = current.getMessage();
+            if (message != null) {
+                String normalized = message.toLowerCase(Locale.ROOT);
+                if (normalized.contains("broken pipe")
+                        || normalized.contains("connection reset")
+                        || normalized.contains("socket closed")) {
+                    return true;
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private static String sha256(String value) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] bytes = digest.digest(
+                    (value == null ? "" : value).getBytes(StandardCharsets.UTF_8)
+            );
+            StringBuilder output = new StringBuilder(64);
+            for (byte item : bytes) {
+                output.append(String.format("%02x", item & 0xff));
+            }
+            return output.toString();
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private static JSONObject readJSONPayload(
+            BufferedInputStream input,
+            Map<String, String> headers,
+            int maximum
+    ) throws Exception {
+        int length = parseLength(headers.get("content-length"));
+        if (length < 0 || length > maximum) {
+            throw new IOException("Invalid request size");
+        }
+        if (length == 0) return new JSONObject();
+        return new JSONObject(
+                new String(readExactly(input, length), StandardCharsets.UTF_8)
+        );
+    }
+
+    static boolean isTerminalPlaybackResult(
+            JSONObject payload,
+            Object result
+    ) {
+        return payload != null
+                && "play".equals(payload.optString("method", ""))
+                && DexSpiderRegistry.isPlayableResult(result);
+    }
+
+    private static boolean acceptsInvocation(String interactionID) {
+        return BridgeInteractionRegistry.ownsLatest(interactionID)
+                && !BridgeInteractionRegistry.terminal(interactionID);
+    }
+
+    private static JSONObject staleInteraction(String interactionID) {
+        JSONObject result = BridgeInteractionRegistry.state(interactionID);
+        try {
+            result.put("ok", false);
+            result.put("error", "Interaction is no longer current");
+        } catch (Throwable ignored) {
+        }
+        return result;
+    }
+
+    static String beginAndActivateInteraction(
+            Context context,
+            String requestedInteractionID,
+            String kind,
+            String method
+    ) {
+        synchronized (INTERACTION_LIFECYCLE_LOCK) {
+            String previous = BridgeInteractionRegistry.latestID();
+            String current = BridgeInteractionRegistry.begin(
+                    requestedInteractionID,
+                    kind,
+                    method
+            );
+            if (!acceptsInvocation(current)) return current;
+            if (!previous.equals(current)) {
+                if (!previous.isEmpty()) {
+                    releaseInteractionResourcesLocked(context, previous);
+                }
+                BridgeActivity.beginInteraction(current);
+            }
+            return current;
+        }
+    }
+
+    /** Claims the one provider invocation for an interaction. */
+    @SuppressWarnings("unchecked")
+    static Future<Object> claimInteractionWorker(
+            String interactionID,
+            Callable<Object> operation
+    ) {
+        String id = interactionID == null ? "" : interactionID.trim();
+        if (id.isEmpty() || operation == null) return null;
+        synchronized (INTERACTION_LIFECYCLE_LOCK) {
+            if (!acceptsInvocation(id)) return null;
+            Future<?> existing = INTERACTION_WORKERS.get(id);
+            if (existing != null) return (Future<Object>) existing;
+            InteractionWorkerExit exit = new InteractionWorkerExit();
+            FutureTask<Object> claimed = new FutureTask<>(() -> {
+                if (!exit.begin()) throw new CancellationException(
+                        "Interaction cancelled before provider invocation"
+                );
+                try {
+                    return operation.call();
+                } finally {
+                    exit.finish();
+                }
+            });
+            INTERACTION_EXITS.put(id, exit);
+            INTERACTION_WORKERS.put(id, claimed);
+            PROVIDER_WORKERS.execute(claimed);
+            return claimed;
+        }
+    }
+
+    static void trackInteractionWorker(
+            String interactionID,
+            Future<?> worker
+    ) {
+        String id = interactionID == null ? "" : interactionID.trim();
+        if (!id.isEmpty() && worker != null) {
+            synchronized (INTERACTION_LIFECYCLE_LOCK) {
+                INTERACTION_WORKERS.putIfAbsent(id, worker);
+            }
+        }
+    }
+
+    static boolean cancelInteractionWorker(String interactionID) {
+        String id = interactionID == null ? "" : interactionID.trim();
+        synchronized (INTERACTION_LIFECYCLE_LOCK) {
+            return cancelInteractionWorkerLocked(id);
+        }
+    }
+
+    static boolean hasTrackedInteractionWorker(String interactionID) {
+        String id = interactionID == null ? "" : interactionID.trim();
+        synchronized (INTERACTION_LIFECYCLE_LOCK) {
+            return !id.isEmpty() && INTERACTION_WORKERS.containsKey(id);
+        }
+    }
+
+    static boolean awaitInteractionWorkerStopped(
+            String interactionID,
+            long timeoutMilliseconds
+    ) {
+        String id = interactionID == null ? "" : interactionID.trim();
+        InteractionWorkerExit exit = INTERACTION_EXITS.get(id);
+        if (exit == null) return true;
+        boolean stopped = exit.await(Math.max(0L, timeoutMilliseconds));
+        if (stopped) INTERACTION_EXITS.remove(id, exit);
+        return stopped;
+    }
+
+    static boolean releaseTerminalInteraction(
+            Context context,
+            String interactionID
+    ) {
+        String id = interactionID == null ? "" : interactionID.trim();
+        if (id.isEmpty() || !BridgeInteractionRegistry.terminal(id)) {
+            return false;
+        }
+        boolean released;
+        synchronized (INTERACTION_LIFECYCLE_LOCK) {
+            released = releaseInteractionResourcesLocked(context, id);
+        }
+        // Completed workers leave immediately. Remove their exit tracker here;
+        // cancelled-but-still-running workers remain observable by /cancel.
+        awaitInteractionWorkerStopped(id, 0L);
+        return released;
+    }
+
+    private static boolean releaseInteractionResourcesLocked(
+            Context context,
+            String interactionID
+    ) {
+        String id = interactionID == null ? "" : interactionID.trim();
+        if (id.isEmpty()) return false;
+        boolean workerReleased = cancelInteractionWorkerLocked(id);
+        boolean uiReleased = false;
+        try {
+            uiReleased = BridgeActivity.releaseTerminalUI(context, id);
+        } catch (Throwable error) {
+            Log.w(
+                    TAG,
+                    "Unable to release terminal interaction="
+                            + shortHash(id)
+                            + " error="
+                            + error.getClass().getSimpleName()
+            );
+        }
+        BridgeProviderOwnerRegistry.releaseInteraction(id);
+        return workerReleased || uiReleased;
+    }
+
+    private static boolean cancelInteractionWorkerLocked(String id) {
+        Future<?> worker = INTERACTION_WORKERS.remove(id);
+        if (worker == null) return false;
+        if (worker.isDone()) return true;
+        boolean cancelled = worker.cancel(true) || worker.isCancelled();
+        InteractionWorkerExit exit = INTERACTION_EXITS.get(id);
+        if (cancelled && exit != null) exit.cancelBeforeStart();
+        return cancelled;
+    }
+
+    /** Tracks the real callable lifetime, not merely Future cancellation. */
+    private static final class InteractionWorkerExit {
+        private static final int QUEUED = 0;
+        private static final int STARTED = 1;
+        private static final int CANCELLED_BEFORE_START = 2;
+        private static final int FINISHED = 3;
+        private final AtomicInteger lifecycle = new AtomicInteger(QUEUED);
+        private final CountDownLatch finished = new CountDownLatch(1);
+
+        boolean begin() {
+            return lifecycle.compareAndSet(QUEUED, STARTED);
+        }
+
+        void finish() {
+            if (lifecycle.getAndSet(FINISHED) != FINISHED) {
+                finished.countDown();
+            }
+        }
+
+        void cancelBeforeStart() {
+            if (lifecycle.compareAndSet(QUEUED, CANCELLED_BEFORE_START)) {
+                finished.countDown();
+            }
+        }
+
+        boolean await(long timeoutMilliseconds) {
+            try {
+                return timeoutMilliseconds == 0L
+                        ? finished.getCount() == 0L
+                        : finished.await(timeoutMilliseconds, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+    }
+
+    private static <T> T runProvider(ThrowingSupplier<T> operation)
+            throws Exception {
+        return await(PROVIDER_WORKERS.submit(operation::get));
+    }
+
+    private static void runMedia(ThrowingAction operation) throws Exception {
+        await(MEDIA_WORKERS.submit(() -> {
+            operation.run();
+            return null;
+        }));
+    }
+
+    private static <T> T await(Future<T> future) throws Exception {
+        try {
+            return future.get();
+        } catch (InterruptedException error) {
+            future.cancel(true);
+            Thread.currentThread().interrupt();
+            throw error;
+        } catch (ExecutionException error) {
+            Throwable cause = error.getCause();
+            if (cause instanceof Exception) throw (Exception) cause;
+            if (cause instanceof Error) throw (Error) cause;
+            throw new IOException("Worker failed");
+        }
+    }
+
+    @FunctionalInterface
+    private interface ThrowingSupplier<T> {
+        T get() throws Exception;
+    }
+
+    @FunctionalInterface
+    private interface ThrowingAction {
+        void run() throws Exception;
+    }
+
+    static String requestPath(String target) {
+        int marker = target.indexOf('?');
+        return marker < 0 ? target : target.substring(0, marker);
+    }
+
+    private static String interactionID(String path, String suffix) {
+        String prefix = "/v1/interactions/";
+        if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+        String id = path.substring(prefix.length(), path.length() - suffix.length());
+        if (id.isEmpty() || id.indexOf('/') >= 0) return null;
+        try {
+            return URLDecoder.decode(id, "UTF-8");
+        } catch (Throwable ignored) {
+            return id;
+        }
+    }
+
+    static Map<String, String> parseQuery(String target) {
+        Map<String, String> values = new LinkedHashMap<>();
         int marker = target.indexOf('?');
         if (marker < 0 || marker + 1 >= target.length()) return values;
         String query = target.substring(marker + 1);
@@ -267,7 +1079,17 @@ final class BridgeServer {
         return values;
     }
 
-    private static Map<String, String> readHeaders(BufferedInputStream input)
+    private static long eventSequenceAfter(String target) {
+        String raw = parseQuery(target).get("after");
+        if (raw == null || raw.trim().isEmpty()) return 0L;
+        try {
+            return Math.max(0L, Long.parseLong(raw.trim()));
+        } catch (NumberFormatException ignored) {
+            return 0L;
+        }
+    }
+
+    static Map<String, String> readHeaders(BufferedInputStream input)
             throws IOException {
         Map<String, String> headers = new HashMap<>();
         while (true) {
@@ -282,7 +1104,7 @@ final class BridgeServer {
         }
     }
 
-    private static String readLine(BufferedInputStream input) throws IOException {
+    static String readLine(BufferedInputStream input) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         int previous = -1;
         while (bytes.size() < 8_192) {
@@ -299,7 +1121,7 @@ final class BridgeServer {
         throw new IOException("Header line is too long");
     }
 
-    private static byte[] readExactly(BufferedInputStream input, int count)
+    static byte[] readExactly(BufferedInputStream input, int count)
             throws IOException {
         byte[] value = new byte[count];
         int offset = 0;
@@ -311,7 +1133,7 @@ final class BridgeServer {
         return value;
     }
 
-    private static int parseLength(String value) {
+    static int parseLength(String value) {
         try {
             return value == null ? 0 : Integer.parseInt(value);
         } catch (NumberFormatException error) {
@@ -319,7 +1141,7 @@ final class BridgeServer {
         }
     }
 
-    private static JSONObject failure(String message) {
+    static JSONObject failure(String message) {
         JSONObject value = new JSONObject();
         try {
             value.put("ok", false);
@@ -327,6 +1149,24 @@ final class BridgeServer {
         } catch (Throwable ignored) {
         }
         return value;
+    }
+
+    private static JSONObject withProviderOwner(
+            JSONObject state,
+            String interactionID
+    ) {
+        JSONObject output = state == null ? new JSONObject() : state;
+        JSONObject owner = BridgeProviderOwnerRegistry.state(interactionID);
+        if (owner == null) return output;
+        try {
+            java.util.Iterator<String> keys = owner.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                output.put(key, owner.opt(key));
+            }
+        } catch (Throwable ignored) {
+        }
+        return output;
     }
 
     private static String safeMessage(Throwable error) {
@@ -337,6 +1177,304 @@ final class BridgeServer {
         return error.getClass().getSimpleName() + ": " + message;
     }
 
+    private static void writeSessionMedia(
+            Context context,
+            BufferedOutputStream output,
+            String sessionID,
+            Map<String, String> clientHeaders,
+            boolean headersOnly
+    ) throws IOException {
+        BridgeMediaSessionRegistry.Session session =
+                BridgeMediaSessionRegistry.get(sessionID);
+        if (session == null) {
+            writeJSON(output, 410, failure("Media session expired or missing"));
+            return;
+        }
+        String requestID = UUID.randomUUID().toString().substring(0, 8);
+        LinkedHashMap<String, String> forwarded = new LinkedHashMap<>();
+
+        // Ordinary player preferences may be inherited from the client, but
+        // provider authorization remains authoritative and never leaves this
+        // process. Range is intentionally client-owned for seeking.
+        for (String name : FORWARDED_MEDIA_REQUEST_HEADERS) {
+            String value = clientHeaders.get(name);
+            if (value != null && !value.trim().isEmpty()) {
+                forwarded.put(name, value);
+            }
+        }
+        for (Map.Entry<String, String> entry
+                : session.headerSnapshot().entrySet()) {
+            putHeaderIgnoreCase(
+                    forwarded,
+                    entry.getKey(),
+                    entry.getValue()
+            );
+        }
+        String range = clientHeaders.get("range");
+        if (range != null && !range.trim().isEmpty()) {
+            putHeaderIgnoreCase(forwarded, "Range", range);
+        }
+        URI providerProxy = providerProxyURI(session.upstreamURL);
+        if (providerProxy != null) {
+            if (session.owner == null) {
+                writeJSON(
+                        output,
+                        409,
+                        failure("Media session has no provider owner")
+                );
+                return;
+            }
+            Map<String, String> params = parseQuery(
+                    providerProxy.getRawPath()
+                            + (providerProxy.getRawQuery() == null
+                            ? ""
+                            : "?" + providerProxy.getRawQuery())
+            );
+            // NanoHTTPD exposes request-header keys in lower case. Preserve
+            // that CatVod contract when a secure 9978 session calls the exact
+            // Spider proxy directly after its short playerContent lease ends.
+            for (Map.Entry<String, String> entry : forwarded.entrySet()) {
+                params.put(
+                        entry.getKey().toLowerCase(Locale.ROOT),
+                        entry.getValue()
+                );
+            }
+            Object[] response;
+            try {
+                response = runProvider(
+                        () -> DexSpiderRegistry.get(context)
+                                .proxy(session.owner, params)
+                );
+            } catch (Exception error) {
+                writeJSON(
+                        output,
+                        502,
+                        failure("Spider internal proxy failed")
+                );
+                return;
+            }
+            if (!validProxyResponse(response)) {
+                writeJSON(
+                        output,
+                        502,
+                        failure("Spider internal proxy failed")
+                );
+                return;
+            }
+            writeProxy(output, response, headersOnly);
+            return;
+        }
+        final SessionMediaResponse mediaResponse;
+        try {
+            URI upstream = requireSessionMediaURI(session.upstreamURL);
+            mediaResponse = executeSessionMedia(
+                    upstream,
+                    forwarded,
+                    headersOnly
+            );
+        } catch (IOException | IllegalArgumentException error) {
+            Log.w(
+                    TAG,
+                    "Media session request=" + requestID
+                            + " session=" + shortHash(session.id)
+                            + " status=transport_error"
+                            + " error=" + error.getClass().getSimpleName()
+                            + " method=" + (headersOnly ? "HEAD" : "GET")
+                            + " range=" + hasHeaderIgnoreCase(forwarded, "range")
+                            + " headers=" + redactedHeaderNames(forwarded)
+            );
+            writeJSON(output, 502, failure("Upstream media request failed"));
+            return;
+        }
+        try (Response response = mediaResponse.response) {
+            Log.i(
+                    TAG,
+                    "Media session request=" + requestID
+                            + " session=" + shortHash(session.id)
+                            + " hostHash=" + shortHash(
+                                    mediaResponse.upstream.getHost()
+                                            .toLowerCase(Locale.ROOT)
+                            )
+                            + " status=" + response.code()
+                            + " redirects=" + mediaResponse.redirects
+                            + " method=" + (headersOnly ? "HEAD" : "GET")
+                            + " range=" + hasHeaderIgnoreCase(
+                                    mediaResponse.headers,
+                                    "range"
+                            )
+                            + " headers=" + redactedHeaderNames(
+                                    mediaResponse.headers
+                            )
+            );
+            // Preserve the upstream response boundary. If a cloud CDN closes
+            // a range early, libmpv must observe that EOF and issue its own
+            // next Range request. Reassembling ranges inside the bridge can
+            // deadlock playback when a signed CDN rejects a continuation.
+            try {
+                writeMediaResponse(output, response, headersOnly);
+            } catch (IOException error) {
+                // Closing the response eventually releases the body, but an
+                // explicit cancel stops the upstream transfer immediately
+                // when mpv abandons an old Range request during seeking.
+                mediaResponse.call.cancel();
+                throw error;
+            }
+        }
+    }
+
+    private static URI providerProxyURI(String rawURL) {
+        try {
+            URI value = requireHTTPMediaURI(rawURL);
+            String host = value.getHost().toLowerCase(Locale.ROOT);
+            boolean loopback = "localhost".equals(host)
+                    || "127.0.0.1".equals(host)
+                    || "::1".equals(host);
+            String path = value.getPath() == null ? "" : value.getPath();
+            return loopback
+                    && (value.getPort() == BridgeServer.PORT
+                    || FongMiCompatProxyServer.owns(value))
+                    && ("/proxy".equals(path) || path.startsWith("/proxy/"))
+                    && !path.startsWith("/proxy/media/")
+                    ? value
+                    : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static SessionMediaResponse executeSessionMedia(
+            URI initialUpstream,
+            Map<String, String> initialHeaders,
+            boolean headersOnly
+    ) throws IOException {
+        URI upstream = initialUpstream;
+        LinkedHashMap<String, String> headers = new LinkedHashMap<>(
+                initialHeaders
+        );
+        int redirects = 0;
+        while (true) {
+            Request.Builder request = new Request.Builder()
+                    .url(upstream.toString());
+            for (Map.Entry<String, String> entry : headers.entrySet()) {
+                request.header(entry.getKey(), entry.getValue());
+            }
+            // Avoid transparent gzip conversion so range offsets always
+            // describe the exact bytes delivered to the player.
+            request.header("Accept-Encoding", "identity");
+            if (headersOnly) request.head(); else request.get();
+
+            Call call = SESSION_MEDIA_CLIENT.newCall(request.build());
+            Response response = call.execute();
+            String location = response.header("Location");
+            if (!isRedirect(response.code())
+                    || location == null
+                    || location.trim().isEmpty()) {
+                return new SessionMediaResponse(
+                        response,
+                        call,
+                        upstream,
+                        headers,
+                        redirects
+                );
+            }
+            if (redirects >= MAX_MEDIA_REDIRECTS) {
+                response.close();
+                throw new IOException("Too many upstream media redirects");
+            }
+
+            final URI redirected;
+            try {
+                redirected = requireSessionMediaURI(
+                        upstream.resolve(location).toString()
+                );
+            } catch (IllegalArgumentException ignored) {
+                response.close();
+                // A parser exception may include the signed Location value.
+                throw new IOException("Invalid upstream media redirect");
+            } catch (IOException error) {
+                response.close();
+                throw error;
+            }
+            response.close();
+            redirects++;
+            if (!sameOrigin(initialUpstream, redirected)) {
+                stripCrossOriginProviderHeaders(headers);
+            }
+            upstream = redirected;
+        }
+    }
+
+    private static boolean isRedirect(int status) {
+        return status == 300
+                || status == 301
+                || status == 302
+                || status == 303
+                || status == 307
+                || status == 308;
+    }
+
+    private static boolean sameOrigin(URI left, URI right) {
+        return left.getScheme().equalsIgnoreCase(right.getScheme())
+                && left.getHost().equalsIgnoreCase(right.getHost())
+                && effectivePort(left) == effectivePort(right);
+    }
+
+    private static int effectivePort(URI uri) {
+        return uri.getPort() < 0 ? defaultPort(uri) : uri.getPort();
+    }
+
+    private static void stripCrossOriginProviderHeaders(
+            Map<String, String> headers
+    ) {
+        headers.entrySet().removeIf(entry -> {
+            String name = entry.getKey().toLowerCase(Locale.ROOT);
+            // These are ordinary representation/request preferences. Referer
+            // and Origin are intentionally retained because many media CDNs
+            // validate the provider page across an origin boundary. Cookies,
+            // Authorization and arbitrary token headers never cross it.
+            return !("range".equals(name)
+                    || "if-range".equals(name)
+                    || "user-agent".equals(name)
+                    || "referer".equals(name)
+                    || "origin".equals(name)
+                    || "accept".equals(name)
+                    || "accept-language".equals(name));
+        });
+    }
+
+    private static final class SessionMediaResponse {
+        final Response response;
+        final Call call;
+        final URI upstream;
+        final Map<String, String> headers;
+        final int redirects;
+
+        SessionMediaResponse(
+                Response response,
+                Call call,
+                URI upstream,
+                Map<String, String> headers,
+                int redirects
+        ) {
+            this.response = response;
+            this.call = call;
+            this.upstream = upstream;
+            this.headers = new LinkedHashMap<>(headers);
+            this.redirects = redirects;
+        }
+    }
+
+    private static Map<String, String> mediaResponseHeaders(Response response) {
+        Map<String, String> responseHeaders = new LinkedHashMap<>();
+        for (String name : FORWARDED_MEDIA_RESPONSE_HEADERS) {
+            String value = response.header(name);
+            if (value != null && !value.trim().isEmpty()) {
+                responseHeaders.put(name, value);
+            }
+        }
+        return responseHeaders;
+    }
+
     private static void writeDirectMedia(
             BufferedOutputStream output,
             String rawURL,
@@ -344,11 +1482,15 @@ final class BridgeServer {
             boolean headersOnly
     ) throws IOException {
         URI upstream = requireRemoteMediaURI(rawURL);
+        String requestID = UUID.randomUUID().toString().substring(0, 8);
         Request.Builder request = new Request.Builder().url(upstream.toString());
+        StringBuilder forwardedNames = new StringBuilder();
         for (String name : FORWARDED_MEDIA_REQUEST_HEADERS) {
             String value = clientHeaders.get(name);
             if (value != null && !value.trim().isEmpty()) {
                 request.header(name, value);
+                if (forwardedNames.length() > 0) forwardedNames.append(',');
+                forwardedNames.append(name);
             }
         }
         // Avoid OkHttp's transparent gzip conversion. Byte offsets and
@@ -360,53 +1502,111 @@ final class BridgeServer {
             request.get();
         }
 
-        try (Response response = MEDIA_CLIENT.newCall(request.build()).execute()) {
-            ResponseBody responseBody = response.body();
-            String contentType = response.header(
-                    "Content-Type",
-                    "application/octet-stream"
+        final Response mediaResponse;
+        final Call mediaCall = MEDIA_CLIENT.newCall(request.build());
+        try {
+            mediaResponse = mediaCall.execute();
+        } catch (IOException error) {
+            Log.w(
+                    TAG,
+                    "Media request=" + requestID
+                            + " hostHash=" + shortHash(
+                                    upstream.getHost().toLowerCase(Locale.ROOT)
+                            )
+                            + " status=transport_error"
+                            + " error=" + error.getClass().getSimpleName()
+                            + " method=" + (headersOnly ? "HEAD" : "GET")
+                            + " headers=" + forwardedNames
             );
-            Map<String, String> responseHeaders = new LinkedHashMap<>();
-            for (String name : FORWARDED_MEDIA_RESPONSE_HEADERS) {
-                String value = response.header(name);
-                if (value != null && !value.trim().isEmpty()) {
-                    responseHeaders.put(name, value);
-                }
+            writeJSON(output, 502, failure("Upstream media request failed"));
+            return;
+        }
+        try (Response response = mediaResponse) {
+            Log.i(
+                    TAG,
+                    "Media request=" + requestID
+                            + " hostHash=" + Integer.toHexString(
+                                    upstream.getHost().toLowerCase(Locale.ROOT).hashCode()
+                            )
+                            + " status=" + response.code()
+                            + " method=" + (headersOnly ? "HEAD" : "GET")
+                            + " headers=" + forwardedNames
+            );
+            try {
+                writeMediaResponse(output, response, headersOnly);
+            } catch (IOException error) {
+                mediaCall.cancel();
+                throw error;
             }
-            writeProxy(
-                    output,
-                    new Object[] {
-                            response.code(),
-                            contentType,
-                            responseBody == null
-                                    ? new ByteArrayInputStream(new byte[0])
-                                    : responseBody.byteStream(),
-                            responseHeaders
-                    },
-                    headersOnly
-            );
         }
     }
 
+    private static void writeMediaResponse(
+            BufferedOutputStream output,
+            Response response,
+            boolean headersOnly
+    ) throws IOException {
+        ResponseBody responseBody = response.body();
+        String contentType = response.header(
+                "Content-Type",
+                "application/octet-stream"
+        );
+        writeProxy(
+                output,
+                new Object[] {
+                        response.code(),
+                        contentType,
+                        responseBody == null
+                                ? new ByteArrayInputStream(new byte[0])
+                                : responseBody.byteStream(),
+                        mediaResponseHeaders(response)
+                },
+                headersOnly
+        );
+    }
+
+    private static boolean hasHeaderIgnoreCase(
+            Map<String, String> headers,
+            String expected
+    ) {
+        for (String name : headers.keySet()) {
+            if (name.equalsIgnoreCase(expected)) return true;
+        }
+        return false;
+    }
+
+    private static void putHeaderIgnoreCase(
+            Map<String, String> headers,
+            String name,
+            String value
+    ) {
+        String matched = null;
+        for (String existing : headers.keySet()) {
+            if (existing.equalsIgnoreCase(name)) {
+                matched = existing;
+                break;
+            }
+        }
+        if (matched != null) headers.remove(matched);
+        headers.put(name, value);
+    }
+
+    private static String redactedHeaderNames(Map<String, String> headers) {
+        StringBuilder output = new StringBuilder();
+        for (String name : headers.keySet()) {
+            if (output.length() > 0) output.append(',');
+            output.append(name.toLowerCase(Locale.ROOT));
+        }
+        return output.toString();
+    }
+
+    private static String shortHash(String value) {
+        return Integer.toHexString(value == null ? 0 : value.hashCode());
+    }
+
     private static URI requireRemoteMediaURI(String rawURL) throws IOException {
-        if (rawURL == null || rawURL.trim().isEmpty()) {
-            throw new IOException("Missing media URL");
-        }
-        final URI value;
-        try {
-            value = URI.create(rawURL.trim());
-        } catch (IllegalArgumentException error) {
-            throw new IOException("Invalid media URL", error);
-        }
-        String scheme = value.getScheme();
+        URI value = requireHTTPMediaURI(rawURL);
         String host = value.getHost();
-        if (scheme == null
-                || !("http".equalsIgnoreCase(scheme)
-                || "https".equalsIgnoreCase(scheme))
-                || host == null
-                || host.trim().isEmpty()) {
-            throw new IOException("Media URL must be remote HTTP(S)");
-        }
         String normalizedHost = host.toLowerCase(Locale.ROOT);
         if ("localhost".equals(normalizedHost)
                 || "127.0.0.1".equals(normalizedHost)
@@ -416,7 +1616,76 @@ final class BridgeServer {
         return value;
     }
 
-    private static void writeProxy(
+    private static URI requireSessionMediaURI(String rawURL) throws IOException {
+        URI value = requireHTTPMediaURI(rawURL);
+        String normalizedHost = value.getHost().toLowerCase(Locale.ROOT);
+        boolean loopback = "localhost".equals(normalizedHost)
+                || "127.0.0.1".equals(normalizedHost)
+                || "::1".equals(normalizedHost);
+        if (!loopback) return value;
+        int port = value.getPort() < 0 ? defaultPort(value) : value.getPort();
+        String path = value.getPath() == null ? "" : value.getPath();
+        if (port == PORT
+                && (path.startsWith("/proxy/media/")
+                || path.startsWith("/v1/media-sessions/")
+                || "/v1/media".equals(path))) {
+            throw new IOException("Recursive media session URL is not allowed");
+        }
+        return value;
+    }
+
+    private static URI requireHTTPMediaURI(String rawURL) throws IOException {
+        if (rawURL == null || rawURL.trim().isEmpty()) {
+            throw new IOException("Missing media URL");
+        }
+        final URI value;
+        try {
+            value = URI.create(rawURL.trim());
+        } catch (IllegalArgumentException ignored) {
+            // Do not retain the parser exception as a cause: its message can
+            // contain the complete signed URL, which must not enter logcat.
+            throw new IOException("Invalid media URL");
+        }
+        String scheme = value.getScheme();
+        String host = value.getHost();
+        if (scheme == null
+                || !("http".equalsIgnoreCase(scheme)
+                || "https".equalsIgnoreCase(scheme))
+                || host == null
+                || host.trim().isEmpty()) {
+            throw new IOException("Media URL must be HTTP(S)");
+        }
+        return value;
+    }
+
+    private static int defaultPort(URI uri) {
+        return "https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80;
+    }
+
+    private static void appendForwardedProxyHeaders(
+            StringBuilder output,
+            Map<?, ?> headers
+    ) {
+        if (headers == null) return;
+        for (Object entryObject : headers.entrySet()) {
+            Map.Entry<?, ?> entry = (Map.Entry<?, ?>) entryObject;
+            String name = String.valueOf(entry.getKey());
+            String lower = name.toLowerCase(Locale.ROOT);
+            if ("content-length".equals(lower)
+                    || "transfer-encoding".equals(lower)
+                    || "connection".equals(lower)
+                    || name.indexOf('\r') >= 0
+                    || name.indexOf('\n') >= 0) {
+                continue;
+            }
+            String value = String.valueOf(entry.getValue());
+            if (value.indexOf('\r') < 0 && value.indexOf('\n') < 0) {
+                output.append(name).append(": ").append(value).append("\r\n");
+            }
+        }
+    }
+
+    static void writeProxy(
             BufferedOutputStream output,
             Object[] response,
             boolean headersOnly
@@ -441,43 +1710,97 @@ final class BridgeServer {
                 .append("Transfer-Encoding: chunked\r\n")
                 .append("Connection: close\r\n");
         if (response.length > 3 && response[3] instanceof Map) {
-            for (Object entryObject : ((Map<?, ?>) response[3]).entrySet()) {
-                Map.Entry<?, ?> entry = (Map.Entry<?, ?>) entryObject;
-                String name = String.valueOf(entry.getKey());
-                String lower = name.toLowerCase(Locale.ROOT);
-                if ("content-length".equals(lower)
-                        || "transfer-encoding".equals(lower)
-                        || "connection".equals(lower)
-                        || name.indexOf('\r') >= 0
-                        || name.indexOf('\n') >= 0) {
-                    continue;
-                }
-                String value = String.valueOf(entry.getValue());
-                if (value.indexOf('\r') < 0 && value.indexOf('\n') < 0) {
-                    rawHeaders.append(name).append(": ").append(value).append("\r\n");
-                }
-            }
+            appendForwardedProxyHeaders(
+                    rawHeaders,
+                    (Map<?, ?>) response[3]
+            );
         }
         rawHeaders.append("\r\n");
-        output.write(rawHeaders.toString().getBytes(StandardCharsets.US_ASCII));
-        try (java.io.InputStream stream = body) {
-            if (!headersOnly) {
-                byte[] buffer = new byte[16_384];
-                int count;
-                while ((count = stream.read(buffer)) != -1) {
-                    if (count == 0) continue;
-                    output.write(Integer.toHexString(count).getBytes(StandardCharsets.US_ASCII));
-                    output.write("\r\n".getBytes(StandardCharsets.US_ASCII));
-                    output.write(buffer, 0, count);
-                    output.write("\r\n".getBytes(StandardCharsets.US_ASCII));
+        long bytesWritten = 0L;
+        try {
+            output.write(
+                    rawHeaders.toString().getBytes(StandardCharsets.US_ASCII)
+            );
+            try (InputStream stream = body) {
+                if (!headersOnly) {
+                    byte[] buffer = new byte[MEDIA_COPY_BUFFER_BYTES];
+                    int count;
+                    try {
+                        while ((count = stream.read(buffer)) != -1) {
+                            if (count == 0) continue;
+                            output.write(
+                                    Integer.toHexString(count).getBytes(
+                                            StandardCharsets.US_ASCII
+                                    )
+                            );
+                            output.write("\r\n".getBytes(StandardCharsets.US_ASCII));
+                            output.write(buffer, 0, count);
+                            output.write("\r\n".getBytes(StandardCharsets.US_ASCII));
+                            bytesWritten += count;
+                        }
+                    } catch (IOException upstreamFailure) {
+                        if (bytesWritten <= 0L) throw upstreamFailure;
+                        // OkHttp reports a ProtocolException when a provider
+                        // closes a nominal range before its declared length.
+                        // The response headers are already committed, so an
+                        // HTTP error is impossible. Close our chunked body
+                        // cleanly: libmpv can then observe a short range and
+                        // issue its own continuation request instead of seeing
+                        // a malformed chunk stream and `loading failed`.
+                        output.write(
+                                "0\r\n\r\n".getBytes(
+                                        StandardCharsets.US_ASCII
+                                )
+                        );
+                        output.flush();
+                        throw new MediaResponseCommittedException(
+                                upstreamFailure,
+                                bytesWritten,
+                                "truncated_upstream"
+                        );
+                    }
                 }
+                output.write("0\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+                output.flush();
             }
-            output.write("0\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
-            output.flush();
+        } catch (MediaResponseCommittedException error) {
+            throw error;
+        } catch (IOException error) {
+            throw new MediaResponseCommittedException(
+                    error,
+                    bytesWritten,
+                    bytesWritten > 0L
+                            ? "client_transport_interrupted"
+                            : "relay_setup_failed"
+            );
         }
     }
 
-    private static void writeJSON(
+    private static boolean validProxyResponse(Object[] response) {
+        return response != null
+                && response.length >= 3
+                && response[0] instanceof Integer
+                && response[1] instanceof String
+                && response[2] instanceof InputStream;
+    }
+
+    private static final class MediaResponseCommittedException
+            extends IOException {
+        final long bytesWritten;
+        final String category;
+
+        MediaResponseCommittedException(
+                IOException cause,
+                long bytesWritten,
+                String category
+        ) {
+            super("Media response ended after headers were committed", cause);
+            this.bytesWritten = bytesWritten;
+            this.category = category == null ? "relay_failed" : category;
+        }
+    }
+
+    static void writeJSON(
             BufferedOutputStream output,
             int status,
             JSONObject object

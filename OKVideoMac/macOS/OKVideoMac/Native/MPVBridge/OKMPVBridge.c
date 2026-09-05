@@ -250,6 +250,26 @@ int okmpv_set_property_string(
     return mpv_set_property_string(client->handle, name, value);
 }
 
+int okmpv_get_property_string(
+    OKMPVClient *client,
+    const char *name,
+    char *value,
+    int value_capacity
+) {
+    if (client == NULL || client->handle == NULL || name == NULL ||
+        value == NULL || value_capacity < 1) {
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+    char *property = mpv_get_property_string(client->handle, name);
+    if (property == NULL) {
+        value[0] = '\0';
+        return MPV_ERROR_PROPERTY_UNAVAILABLE;
+    }
+    copy_string(value, (size_t)value_capacity, property);
+    mpv_free(property);
+    return 0;
+}
+
 int okmpv_set_property_double(
     OKMPVClient *client,
     const char *name,
@@ -521,6 +541,7 @@ int okmpv_render_create(
     OKMPVClient *client,
     OKMPVGetProcAddress get_proc_address,
     void *get_proc_address_context,
+    int advanced_control,
     OKMPVRenderContext **output
 ) {
     if (client == NULL || client->handle == NULL || get_proc_address == NULL ||
@@ -541,9 +562,11 @@ int okmpv_render_create(
         .get_proc_address_ctx = get_proc_address_context
     };
     const char *api_type = MPV_RENDER_API_TYPE_OPENGL;
+    int use_advanced_control = advanced_control != 0;
     mpv_render_param parameters[] = {
         {MPV_RENDER_PARAM_API_TYPE, (void *)api_type},
         {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &open_gl},
+        {MPV_RENDER_PARAM_ADVANCED_CONTROL, &use_advanced_control},
         {MPV_RENDER_PARAM_INVALID, NULL}
     };
     int result = mpv_render_context_create(
@@ -604,6 +627,22 @@ int okmpv_render(
         {MPV_RENDER_PARAM_INVALID, NULL}
     };
     return mpv_render_context_render(render_context->context, parameters);
+}
+
+int okmpv_render_skip(OKMPVRenderContext *render_context) {
+    if (render_context == NULL || render_context->context == NULL) {
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+    int skip = 1;
+    mpv_render_param parameters[] = {
+        {MPV_RENDER_PARAM_SKIP_RENDERING, &skip},
+        {MPV_RENDER_PARAM_INVALID, NULL}
+    };
+    int result = mpv_render_context_render(render_context->context, parameters);
+    if (result >= 0) {
+        mpv_render_context_report_swap(render_context->context);
+    }
+    return result;
 }
 
 void okmpv_render_report_swap(OKMPVRenderContext *render_context) {

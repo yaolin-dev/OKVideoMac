@@ -200,10 +200,20 @@ private struct LoadedImageData: Sendable {
     let origin: ImageDataOrigin
 }
 
+private struct InFlightImageDataLoad {
+    let id: UUID
+    let task: Task<Data, Error>
+}
+
+private struct InFlightImageLoad {
+    let id: UUID
+    let task: Task<Void, Error>
+}
+
 actor ImageDataRepository {
     private let cacheDirectory: URL
     private let httpClient: HTTPClient
-    private var inFlight: [URL: Task<Data, Error>] = [:]
+    private var inFlight: [URL: InFlightImageDataLoad] = [:]
 
     init(cacheDirectory: URL, httpClient: HTTPClient) throws {
         self.cacheDirectory = cacheDirectory
@@ -241,26 +251,90 @@ actor ImageDataRepository {
     }
 
     func downloadedData(for url: URL) async throws -> Data {
-        if let task = inFlight[url] {
-            return try await task.value
+        if let load = inFlight[url] {
+            return try await load.task.value
         }
 
+        let loadID = UUID()
         let task = Task<Data, Error> {
             let imageRequest = InlineImageRequest.parse(url)
-            let response = try await httpClient.send(
-                HTTPRequest(
+            do {
+                return try await sendImageRequest(
                     url: imageRequest.url,
-                    headers: imageRequest.headers,
-                    timeout: 20,
-                    maximumResponseBytes: 10 * 1_024 * 1_024,
-                    retryPolicy: HTTPRetryPolicy(maximumRetries: 1)
+                    headers: imageRequest.headers
                 )
-            )
-            return response.body
+            } catch let error as HTTPClientError {
+                guard case .statusCode(let statusCode) = error,
+                      [401, 403, 418].contains(statusCode),
+                      !Self.hasReferer(in: imageRequest.headers),
+                      let referer = Self.sameOriginReferer(
+                        for: imageRequest.url
+                      ) else {
+                    throw error
+                }
+                var fallbackHeaders = imageRequest.headers
+                fallbackHeaders["Referer"] = referer
+                // This is the only compatibility fallback. If it fails, the
+                // HTTP client's original typed error (including status code)
+                // is propagated unchanged.
+                return try await sendImageRequest(
+                    url: imageRequest.url,
+                    headers: fallbackHeaders
+                )
+            }
         }
-        inFlight[url] = task
-        defer { inFlight[url] = nil }
+        inFlight[url] = InFlightImageDataLoad(id: loadID, task: task)
+        defer {
+            if inFlight[url]?.id == loadID {
+                inFlight[url] = nil
+            }
+        }
         return try await task.value
+    }
+
+    private func sendImageRequest(
+        url: URL,
+        headers: HTTPHeaders
+    ) async throws -> Data {
+        let response = try await httpClient.send(
+            HTTPRequest(
+                url: url,
+                headers: headers,
+                timeout: 20,
+                maximumResponseBytes: 10 * 1_024 * 1_024,
+                retryPolicy: HTTPRetryPolicy(maximumRetries: 0)
+            )
+        )
+        return response.body
+    }
+
+    private static func hasReferer(in headers: HTTPHeaders) -> Bool {
+        guard let value = headers["Referer"] else {
+            return false
+        }
+        return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func sameOriginReferer(for url: URL) -> String? {
+        guard let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              let host = url.host?.lowercased(),
+              !["127.0.0.1", "localhost", "::1"].contains(host) else {
+            return nil
+        }
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = host
+        components.port = url.port
+        components.path = "/"
+        return components.url?.absoluteString
+    }
+
+    func cancelInFlightLoads() {
+        for load in inFlight.values {
+            load.task.cancel()
+        }
+        inFlight.removeAll()
     }
 
     func persistValidatedData(_ data: Data, for url: URL) throws {
@@ -305,7 +379,7 @@ actor ImageDataRepository {
 final class ImageRepository: Sendable {
     private let dataRepository: ImageDataRepository
     @MainActor private let memoryCache = ImageMemoryCache()
-    @MainActor private var inFlightImages: [URL: Task<Void, Error>] = [:]
+    @MainActor private var inFlightImages: [URL: InFlightImageLoad] = [:]
 
     init(dataRepository: ImageDataRepository) {
         self.dataRepository = dataRepository
@@ -321,16 +395,21 @@ final class ImageRepository: Sendable {
         if let cached = cachedImage(for: url) {
             return cached
         }
-        if let task = inFlightImages[url] {
-            try await task.value
+        if let load = inFlightImages[url] {
+            try await load.task.value
             return try cachedImageAfterLoad(for: url)
         }
 
+        let loadID = UUID()
         let task = Task { @MainActor in
             try await loadAndCacheImage(for: url)
         }
-        inFlightImages[url] = task
-        defer { inFlightImages[url] = nil }
+        inFlightImages[url] = InFlightImageLoad(id: loadID, task: task)
+        defer {
+            if inFlightImages[url]?.id == loadID {
+                inFlightImages[url] = nil
+            }
+        }
         try await task.value
         return try cachedImageAfterLoad(for: url)
     }
@@ -342,12 +421,22 @@ final class ImageRepository: Sendable {
     }
 
     @MainActor
+    func cancelInFlightLoads() async {
+        for load in inFlightImages.values {
+            load.task.cancel()
+        }
+        inFlightImages.removeAll()
+        await dataRepository.cancelInFlightLoads()
+    }
+
+    @MainActor
     private func loadAndCacheImage(for url: URL) async throws {
         if cachedImage(for: url) != nil {
             return
         }
 
         var loaded = try await dataRepository.data(for: url)
+        try Task.checkCancellation()
         if cachedImage(for: url) != nil {
             return
         }
@@ -358,6 +447,7 @@ final class ImageRepository: Sendable {
                 data: try await dataRepository.downloadedData(for: url),
                 origin: .network
             )
+            try Task.checkCancellation()
             if cachedImage(for: url) != nil {
                 return
             }

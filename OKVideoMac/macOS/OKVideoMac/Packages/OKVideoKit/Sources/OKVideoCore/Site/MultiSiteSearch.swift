@@ -1,35 +1,193 @@
 import Foundation
 
+public enum SearchFailureCategory: String, Equatable, Sendable {
+    case unsupportedRoute
+    case configurationRequired
+    case scriptError
+    case upstreamUnavailable
+    case timeout
+    case transport
+    case provider
+}
+
 public struct SearchFailure: Equatable, Sendable {
     public var siteKey: String
     public var siteName: String
     public var message: String
+    public var category: SearchFailureCategory
+    public var isRetryable: Bool
 
-    public init(siteKey: String, siteName: String, message: String) {
+    public init(
+        siteKey: String,
+        siteName: String,
+        message: String,
+        category: SearchFailureCategory? = nil,
+        isRetryable: Bool = false
+    ) {
         self.siteKey = siteKey
         self.siteName = siteName
         self.message = message
+        self.category = category ?? Self.classify(message)
+        self.isRetryable = isRetryable
+    }
+
+    public static func classify(_ message: String) -> SearchFailureCategory {
+        let value = message.lowercased()
+        if value.contains("route post:")
+            && value.contains("/search")
+            && value.contains("not found") {
+            return .unsupportedRoute
+        }
+        if value.contains("未登录") || value.contains("登录")
+            || value.contains("cookie") || value.contains("token")
+            || value.contains("账号") || value.contains("挂载") {
+            return .configurationRequired
+        }
+        if value.contains("typeerror") || value.contains("referenceerror")
+            || value.contains("cannot read properties")
+            || value.contains("is not a function") {
+            return .scriptError
+        }
+        if value.contains("搜索超时") || value.contains("timed out")
+            || value.contains("timeout") || value.contains("超时") {
+            return .timeout
+        }
+        if value.contains("econn") || value.contains("network")
+            || value.contains("dns") || value.contains("连接") {
+            return .transport
+        }
+        if value.contains("上游") || value.contains("http 5")
+            || value.contains("http 状态码 5") || value.contains("bad gateway") {
+            return .upstreamUnavailable
+        }
+        return .provider
+    }
+}
+
+/// A provider can publish an exact search failure classification without
+/// forcing the aggregate scheduler to reverse-engineer HTTP status codes or
+/// JavaScript exceptions from a localized message.
+public struct SiteSearchError: Error, LocalizedError, Equatable, Sendable {
+    public var message: String
+    public var category: SearchFailureCategory
+    public var isRetryable: Bool
+
+    public init(
+        _ message: String,
+        category: SearchFailureCategory,
+        isRetryable: Bool = false
+    ) {
+        self.message = message
+        self.category = category
+        self.isRetryable = isRetryable
+    }
+
+    public var errorDescription: String? { message }
+}
+
+public enum MultiSiteSearchTermination: String, Equatable, Sendable {
+    case completed
+    case completedWithProviderFailures
+    case deadlineReached
+    case cancelled
+    case supersededByNewSearch
+}
+
+public struct MultiSiteSearchSnapshot: Equatable, Sendable {
+    public var items: [VideoSummary]
+    public var receivedCandidateCount: Int
+    public var maximumRetainedCandidates: Int
+    public var maximumResultsPerSite: Int
+    public var didDiscardCandidates: Bool
+
+    public init(
+        items: [VideoSummary],
+        receivedCandidateCount: Int,
+        maximumRetainedCandidates: Int,
+        maximumResultsPerSite: Int,
+        didDiscardCandidates: Bool
+    ) {
+        self.items = items
+        self.receivedCandidateCount = receivedCandidateCount
+        self.maximumRetainedCandidates = maximumRetainedCandidates
+        self.maximumResultsPerSite = maximumResultsPerSite
+        self.didDiscardCandidates = didDiscardCandidates
     }
 }
 
 public enum MultiSiteSearchEvent: Equatable, Sendable {
-    case results(siteKey: String, items: [VideoSummary])
+    case snapshot(MultiSiteSearchSnapshot)
     case failure(SearchFailure)
-    case completed
+    case siteOutcome(SearchSiteOutcome)
+    case siteFirstPageCompleted(siteKey: String)
+    case siteCompleted(siteKey: String)
+    case finished(MultiSiteSearchTermination)
 }
 
-private enum SiteSearchOutcome: Sendable {
-    case results([VideoSummary])
-    case failure(String)
+/// Lets a provider route aggregate-search traffic through transport resources
+/// that are isolated from user-interactive requests. Ordinary `search` calls
+/// keep their existing semantics and remain on the provider's default lane.
+public protocol AggregateSearchProviding {
+    func aggregateSearch(
+        keyword: String,
+        page: Int,
+        quick: Bool
+    ) async throws -> VideoPage
+}
+
+public enum SearchSiteOutcome: Equatable, Sendable {
+    case success(siteKey: String, siteName: String, resultCount: Int)
+    case failure(SearchFailure)
+    case cancelled(siteKey: String, siteName: String)
+
+    public var siteKey: String {
+        switch self {
+        case .success(let siteKey, _, _), .cancelled(let siteKey, _):
+            return siteKey
+        case .failure(let failure):
+            return failure.siteKey
+        }
+    }
+}
+
+/// Per-provider aggregate-search limits. Providers that share one runtime can
+/// use a common group to avoid flooding that runtime without slowing unrelated
+/// native/Jar/Dex providers.
+public struct MultiSiteSearchProviderPolicy: Equatable, Sendable {
+    public var concurrencyGroup: String?
+    public var maximumGroupConcurrency: Int?
+    public var maximumPagesPerSite: Int?
+
+    public init(
+        concurrencyGroup: String? = nil,
+        maximumGroupConcurrency: Int? = nil,
+        maximumPagesPerSite: Int? = nil
+    ) {
+        self.concurrencyGroup = concurrencyGroup
+        self.maximumGroupConcurrency = maximumGroupConcurrency.map { max(1, $0) }
+        self.maximumPagesPerSite = maximumPagesPerSite.map { max(1, $0) }
+    }
+}
+
+private enum PageSearchOutcome: Sendable {
+    case page(VideoPage, keyword: String)
+    case failure(PageSearchFailure)
+    case deadlineReached
     case cancelled
 }
 
-private actor FirstSiteSearchOutcome {
-    private var bufferedOutcome: SiteSearchOutcome?
-    private var waiter: CheckedContinuation<SiteSearchOutcome, Never>?
+private struct PageSearchFailure: Sendable {
+    var message: String
+    var category: SearchFailureCategory
+    var isRetryable: Bool
+}
+
+private actor FirstPageSearchOutcome {
+    private var bufferedOutcome: PageSearchOutcome?
+    private var waiter: CheckedContinuation<PageSearchOutcome, Never>?
     private var isResolved = false
 
-    func wait() async -> SiteSearchOutcome {
+    func wait() async -> PageSearchOutcome {
         if let bufferedOutcome {
             self.bufferedOutcome = nil
             return bufferedOutcome
@@ -39,7 +197,7 @@ private actor FirstSiteSearchOutcome {
         }
     }
 
-    func resolve(_ outcome: SiteSearchOutcome) {
+    func resolve(_ outcome: PageSearchOutcome) {
         guard !isResolved else { return }
         isResolved = true
         if let waiter {
@@ -51,73 +209,790 @@ private actor FirstSiteSearchOutcome {
     }
 }
 
+private struct InitialPageResult: Sendable {
+    var providerIndex: Int
+    var outcome: PageSearchOutcome
+}
+
+private struct RetriableInitialFailure: Sendable {
+    var providerIndex: Int
+}
+
+private struct BackgroundSearchState: Sendable {
+    var providerIndex: Int
+    var keyword: String
+    var nextPage: Int
+    var explicitPageCount: Int?
+    var seenIDs: Set<String>
+    var candidateCount: Int
+    var relevance: FirstPageRelevance
+}
+
+private struct BackgroundSearchResult: Sendable {
+    var providerIndex: Int
+    var items: [VideoSummary]
+    var failure: PageSearchFailure?
+    var reachedDeadline: Bool
+}
+
+private struct FirstPageRelevance: Comparable, Sendable {
+    var exactCount = 0
+    var prefixCount = 0
+    var containsCount = 0
+    var totalCount = 0
+
+    static func < (lhs: Self, rhs: Self) -> Bool {
+        if lhs.exactCount != rhs.exactCount {
+            return lhs.exactCount < rhs.exactCount
+        }
+        if lhs.prefixCount != rhs.prefixCount {
+            return lhs.prefixCount < rhs.prefixCount
+        }
+        if lhs.containsCount != rhs.containsCount {
+            return lhs.containsCount < rhs.containsCount
+        }
+        return lhs.totalCount < rhs.totalCount
+    }
+}
+
+private enum SearchMatchTier: Int, Comparable, Sendable {
+    case unrelated = 0
+    case relaxedContains = 1
+    case strictContains = 2
+    case relaxedPrefix = 3
+    case strictPrefix = 4
+    case relaxedExact = 5
+    case strictExact = 6
+
+    static func < (lhs: Self, rhs: Self) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
+}
+
+private struct RetainedSearchCandidate: Sendable {
+    var item: VideoSummary
+    var tier: SearchMatchTier
+    var arrivalOrder: Int
+}
+
+private struct SearchCandidatePool: Sendable {
+    let keyword: String
+    let maximumRetainedCandidates: Int
+    let maximumResultsPerSite: Int
+
+    private var candidates: [String: RetainedSearchCandidate] = [:]
+    private var siteCounts: [String: Int] = [:]
+    private var seenCandidateIDs: Set<String> = []
+    private var nextArrivalOrder = 0
+    private(set) var receivedCandidateCount = 0
+    private(set) var didDiscardCandidates = false
+
+    init(
+        keyword: String,
+        maximumRetainedCandidates: Int,
+        maximumResultsPerSite: Int
+    ) {
+        self.keyword = keyword
+        self.maximumRetainedCandidates = maximumRetainedCandidates
+        self.maximumResultsPerSite = maximumResultsPerSite
+    }
+
+    var snapshot: MultiSiteSearchSnapshot {
+        MultiSiteSearchSnapshot(
+            items: candidates.values.sorted(by: orderedBefore).map(\.item),
+            receivedCandidateCount: receivedCandidateCount,
+            maximumRetainedCandidates: maximumRetainedCandidates,
+            maximumResultsPerSite: maximumResultsPerSite,
+            didDiscardCandidates: didDiscardCandidates
+        )
+    }
+
+    mutating func ingest(_ items: [VideoSummary]) -> Bool {
+        let previousIDs = Set(candidates.keys)
+        let wasDiscarding = didDiscardCandidates
+
+        receivedCandidateCount += items.count
+        for item in items {
+            let candidateID = item.id
+            guard seenCandidateIDs.insert(candidateID).inserted else { continue }
+
+            let candidate = RetainedSearchCandidate(
+                item: item,
+                tier: Self.matchTier(title: item.title, keyword: keyword),
+                arrivalOrder: nextArrivalOrder
+            )
+            nextArrivalOrder += 1
+            retain(candidate, id: candidateID)
+        }
+
+        return previousIDs != Set(candidates.keys)
+            || wasDiscarding != didDiscardCandidates
+    }
+
+    func retainedCount(for siteKey: String) -> Int {
+        siteCounts[siteKey, default: 0]
+    }
+
+    private mutating func retain(
+        _ incoming: RetainedSearchCandidate,
+        id: String
+    ) {
+        let siteKey = incoming.item.siteKey
+        let incomingSiteCount = siteCounts[siteKey, default: 0]
+
+        if incomingSiteCount >= maximumResultsPerSite {
+            guard let worstSameSite = worstCandidateID(siteKey: siteKey),
+                  let retained = candidates[worstSameSite],
+                  incoming.tier > retained.tier else {
+                didDiscardCandidates = true
+                return
+            }
+            removeCandidate(id: worstSameSite)
+            insertCandidate(incoming, id: id)
+            didDiscardCandidates = true
+            return
+        }
+
+        if candidates.count < maximumRetainedCandidates {
+            insertCandidate(incoming, id: id)
+            return
+        }
+
+        guard let worstID = worstCandidateID(),
+              let worst = candidates[worstID] else {
+            didDiscardCandidates = true
+            return
+        }
+        let worstSiteCount = siteCounts[worst.item.siteKey, default: 0]
+        let improvesRelevance = incoming.tier > worst.tier
+        let improvesDiversity = incoming.tier == worst.tier
+            && incomingSiteCount + 1 < worstSiteCount
+        guard improvesRelevance || improvesDiversity else {
+            didDiscardCandidates = true
+            return
+        }
+
+        removeCandidate(id: worstID)
+        insertCandidate(incoming, id: id)
+        didDiscardCandidates = true
+    }
+
+    private mutating func insertCandidate(
+        _ candidate: RetainedSearchCandidate,
+        id: String
+    ) {
+        candidates[id] = candidate
+        siteCounts[candidate.item.siteKey, default: 0] += 1
+    }
+
+    private mutating func removeCandidate(id: String) {
+        guard let removed = candidates.removeValue(forKey: id) else { return }
+        let siteKey = removed.item.siteKey
+        let count = siteCounts[siteKey, default: 0] - 1
+        if count > 0 {
+            siteCounts[siteKey] = count
+        } else {
+            siteCounts.removeValue(forKey: siteKey)
+        }
+    }
+
+    private func worstCandidateID(siteKey: String? = nil) -> String? {
+        candidates.lazy
+            .filter { siteKey == nil || $0.value.item.siteKey == siteKey }
+            .min { lhs, rhs in
+                worseThan(lhs.value, rhs.value)
+            }?
+            .key
+    }
+
+    private func worseThan(
+        _ lhs: RetainedSearchCandidate,
+        _ rhs: RetainedSearchCandidate
+    ) -> Bool {
+        if lhs.tier != rhs.tier {
+            return lhs.tier < rhs.tier
+        }
+        let lhsSiteCount = siteCounts[lhs.item.siteKey, default: 0]
+        let rhsSiteCount = siteCounts[rhs.item.siteKey, default: 0]
+        if lhsSiteCount != rhsSiteCount {
+            return lhsSiteCount > rhsSiteCount
+        }
+        return lhs.arrivalOrder > rhs.arrivalOrder
+    }
+
+    private func orderedBefore(
+        _ lhs: RetainedSearchCandidate,
+        _ rhs: RetainedSearchCandidate
+    ) -> Bool {
+        if lhs.tier != rhs.tier {
+            return lhs.tier > rhs.tier
+        }
+        return lhs.arrivalOrder < rhs.arrivalOrder
+    }
+
+    static func relevance(
+        of items: [VideoSummary],
+        keyword: String
+    ) -> FirstPageRelevance {
+        var relevance = FirstPageRelevance(totalCount: items.count)
+        for item in items {
+            switch matchTier(title: item.title, keyword: keyword) {
+            case .strictExact, .relaxedExact:
+                relevance.exactCount += 1
+            case .strictPrefix, .relaxedPrefix:
+                relevance.prefixCount += 1
+            case .strictContains, .relaxedContains:
+                relevance.containsCount += 1
+            case .unrelated:
+                break
+            }
+        }
+        return relevance
+    }
+
+    private static func matchTier(
+        title: String,
+        keyword: String
+    ) -> SearchMatchTier {
+        let strictTitle = SearchTitleNormalizer.strictKey(title)
+        let strictKeyword = SearchTitleNormalizer.strictKey(keyword)
+        guard !strictKeyword.isEmpty else { return .unrelated }
+        if strictTitle == strictKeyword { return .strictExact }
+        if strictTitle.hasPrefix(strictKeyword) { return .strictPrefix }
+        if strictTitle.contains(strictKeyword) { return .strictContains }
+
+        let relaxedTitle = SearchTitleNormalizer.comparisonKey(title)
+        let relaxedKeyword = SearchTitleNormalizer.comparisonKey(keyword)
+        guard !relaxedKeyword.isEmpty else { return .unrelated }
+        if relaxedTitle == relaxedKeyword { return .relaxedExact }
+        if relaxedTitle.hasPrefix(relaxedKeyword) { return .relaxedPrefix }
+        if relaxedTitle.contains(relaxedKeyword) { return .relaxedContains }
+        return .unrelated
+    }
+
+    static func hasMeaningfulMatch(
+        in items: [VideoSummary],
+        keyword: String
+    ) -> Bool {
+        items.contains { matchTier(title: $0.title, keyword: keyword) != .unrelated }
+    }
+}
+
 public struct MultiSiteSearch {
     public let maximumConcurrency: Int
     public let siteTimeout: TimeInterval
+    public let overallDeadline: TimeInterval
     public let maximumPagesPerSite: Int
     public let maximumResultsPerSite: Int
+    public let maximumRetainedCandidates: Int
+    public let maximumDeepPageSites: Int
 
     public init(
         maximumConcurrency: Int = 20,
-        siteTimeout: TimeInterval = 30,
-        maximumPagesPerSite: Int = 10,
-        maximumResultsPerSite: Int = 500
+        siteTimeout: TimeInterval = 20,
+        overallDeadline: TimeInterval = 25,
+        maximumPagesPerSite: Int = 3,
+        maximumResultsPerSite: Int = .max,
+        maximumRetainedCandidates: Int = .max,
+        maximumDeepPageSites: Int = 12
     ) {
         self.maximumConcurrency = max(1, maximumConcurrency)
         self.siteTimeout = max(0.05, siteTimeout)
+        self.overallDeadline = max(0.05, overallDeadline)
         self.maximumPagesPerSite = max(1, maximumPagesPerSite)
         self.maximumResultsPerSite = max(1, maximumResultsPerSite)
+        self.maximumRetainedCandidates = max(1, maximumRetainedCandidates)
+        self.maximumDeepPageSites = max(0, maximumDeepPageSites)
     }
 
     public func search(
         providers: [SiteProvider],
         keyword: String,
-        quick: Bool = false
+        quick: Bool = false,
+        providerPolicies: [String: MultiSiteSearchProviderPolicy] = [:]
     ) -> AsyncStream<MultiSiteSearchEvent> {
         AsyncStream { continuation in
             let task = Task {
-                // FongMi's Site.isSearchable() is true only for value 1.
-                // Value 2 represents a user-disabled search site.
-                let enabled = providers.filter { $0.site.searchable == 1 }
-                await withTaskGroup(of: MultiSiteSearchEvent.self) { group in
-                    var nextIndex = 0
-                    let initialCount = min(maximumConcurrency, enabled.count)
-                    for _ in 0..<initialCount {
-                        let provider = enabled[nextIndex]
-                        nextIndex += 1
-                        group.addTask {
-                            await searchEvent(
-                                provider: provider,
-                                keyword: keyword,
-                                quick: quick
-                            )
+                defer { continuation.finish() }
+                // `searchable == 2` is FongMi's user-disabled state, not an
+                // unsupported protocol capability. The caller decides whether
+                // that site was explicitly re-enabled for this search.
+                let enabled = providers
+                var pool = SearchCandidatePool(
+                    keyword: keyword,
+                    maximumRetainedCandidates: maximumRetainedCandidates,
+                    maximumResultsPerSite: maximumResultsPerSite
+                )
+                var backgroundStates: [BackgroundSearchState] = []
+                var providerFailureCount = 0
+                var reachedDeadline = false
+                var retriableInitialFailures: [RetriableInitialFailure] = []
+                var siteResultCounts: [String: Int] = [:]
+
+                // Page one is progressive, but bounded. Providers sharing a
+                // constrained runtime (for example CatPawOpen's Node process)
+                // can declare a tighter group limit while unrelated providers
+                // retain the normal desktop concurrency budget.
+                await withTaskGroup(of: InitialPageResult.self) { group in
+                    var pendingIndexes = Array(enabled.indices)
+                    var activeCount = 0
+                    var activeGroupCounts: [String: Int] = [:]
+
+                    func canStart(_ index: Int) -> Bool {
+                        guard activeCount < maximumConcurrency else { return false }
+                        guard let policy = providerPolicies[enabled[index].site.key],
+                              let groupKey = policy.concurrencyGroup,
+                              let groupLimit = policy.maximumGroupConcurrency else {
+                            return true
+                        }
+                        return activeGroupCounts[groupKey, default: 0] < groupLimit
+                    }
+
+                    func recordStarted(_ index: Int) {
+                        activeCount += 1
+                        guard let groupKey = providerPolicies[
+                            enabled[index].site.key
+                        ]?.concurrencyGroup else { return }
+                        activeGroupCounts[groupKey, default: 0] += 1
+                    }
+
+                    func recordFinished(_ index: Int) {
+                        activeCount = max(0, activeCount - 1)
+                        guard let groupKey = providerPolicies[
+                            enabled[index].site.key
+                        ]?.concurrencyGroup else { return }
+                        let remaining = activeGroupCounts[groupKey, default: 0] - 1
+                        if remaining > 0 {
+                            activeGroupCounts[groupKey] = remaining
+                        } else {
+                            activeGroupCounts.removeValue(forKey: groupKey)
                         }
                     }
 
-                    // Keep a moving window of work. The old chunked scheduler
-                    // waited for the slowest site in each batch before it
-                    // started any later sites, which caused visible 4/32
-                    // stalls even when most providers were responsive.
-                    while let event = await group.next() {
-                        guard !Task.isCancelled else { break }
-                        continuation.yield(event)
-                        if nextIndex < enabled.count {
-                            let provider = enabled[nextIndex]
-                            nextIndex += 1
+                    func scheduleAvailable() {
+                        while activeCount < maximumConcurrency,
+                              let pendingPosition = pendingIndexes.firstIndex(
+                                where: canStart
+                              ) {
+                            let index = pendingIndexes.remove(at: pendingPosition)
+                            recordStarted(index)
                             group.addTask {
-                                await searchEvent(
-                                    provider: provider,
-                                    keyword: keyword,
-                                    quick: quick
+                                InitialPageResult(
+                                    providerIndex: index,
+                                    outcome: await initialPageOutcome(
+                                        provider: enabled[index],
+                                        keyword: keyword,
+                                        quick: quick
+                                    )
                                 )
                             }
                         }
                     }
+
+                    scheduleAvailable()
+
+                    while let result = await group.next() {
+                        recordFinished(result.providerIndex)
+                        guard !Task.isCancelled else {
+                            group.cancelAll()
+                            break
+                        }
+                        let provider = enabled[result.providerIndex]
+                        switch result.outcome {
+                        case .page(let page, let resolvedKeyword):
+                            let items = Self.deduplicatedWithinSite(page.items)
+                            siteResultCounts[provider.site.key] = items.count
+                            if pool.ingest(items) {
+                                continuation.yield(.snapshot(pool.snapshot))
+                            }
+                            let pageCount = page.pagination.pageCount.flatMap {
+                                $0 > 0 ? $0 : nil
+                            }
+                            let hasDeclaredNextPage = pageCount.map { $0 > 1 } ?? true
+                            let providerMaximumPages = providerPolicies[
+                                provider.site.key
+                            ]?.maximumPagesPerSite ?? maximumPagesPerSite
+                            if !items.isEmpty,
+                               hasDeclaredNextPage,
+                               providerMaximumPages > 1,
+                               pool.retainedCount(for: provider.site.key)
+                                    < maximumResultsPerSite {
+                                backgroundStates.append(
+                                    BackgroundSearchState(
+                                        providerIndex: result.providerIndex,
+                                        keyword: resolvedKeyword,
+                                        nextPage: 2,
+                                        explicitPageCount: pageCount,
+                                        seenIDs: Set(items.map(\.id)),
+                                        candidateCount: min(
+                                            items.count,
+                                            maximumResultsPerSite
+                                        ),
+                                        relevance: SearchCandidatePool.relevance(
+                                            of: items,
+                                            keyword: resolvedKeyword
+                                        )
+                                    )
+                                )
+                            } else {
+                                continuation.yield(
+                                    .siteOutcome(
+                                        .success(
+                                            siteKey: provider.site.key,
+                                            siteName: provider.site.name,
+                                            resultCount: items.count
+                                        )
+                                    )
+                                )
+                                continuation.yield(
+                                    .siteCompleted(siteKey: provider.site.key)
+                                )
+                            }
+                        case .failure(let failure):
+                            if failure.isRetryable {
+                                retriableInitialFailures.append(
+                                    RetriableInitialFailure(
+                                        providerIndex: result.providerIndex
+                                    )
+                                )
+                            } else {
+                                providerFailureCount += 1
+                                let searchFailure = SearchFailure(
+                                    siteKey: provider.site.key,
+                                    siteName: provider.site.name,
+                                    message: failure.message,
+                                    category: failure.category
+                                )
+                                continuation.yield(
+                                    .failure(searchFailure)
+                                )
+                                continuation.yield(.siteOutcome(.failure(searchFailure)))
+                                continuation.yield(
+                                    .siteCompleted(siteKey: provider.site.key)
+                                )
+                            }
+                        case .deadlineReached:
+                            reachedDeadline = true
+                            continuation.yield(
+                                .siteCompleted(siteKey: provider.site.key)
+                            )
+                        case .cancelled:
+                            break
+                        }
+
+                        if case .cancelled = result.outcome {
+                            // Cancelled work is not reported as completed.
+                        } else {
+                            continuation.yield(
+                                .siteFirstPageCompleted(siteKey: provider.site.key)
+                            )
+                        }
+                        scheduleAvailable()
+                    }
                 }
-                if !Task.isCancelled {
-                    continuation.yield(.completed)
+
+                guard !Task.isCancelled else {
+                    continuation.yield(.finished(.cancelled))
+                    return
                 }
-                continuation.finish()
+
+                // Retry only transient page-one failures, and only after every
+                // enabled site has received its first request opportunity.
+                // This prevents a flaky provider from occupying a worker while
+                // fast providers are still waiting to start.
+                if !retriableInitialFailures.isEmpty {
+                    await withTaskGroup(of: InitialPageResult.self) { group in
+                        var pendingIndexes = retriableInitialFailures.map(
+                            \.providerIndex
+                        )
+                        var activeCount = 0
+                        var activeGroupCounts: [String: Int] = [:]
+
+                        func canStart(_ index: Int) -> Bool {
+                            guard activeCount < maximumConcurrency else {
+                                return false
+                            }
+                            guard let policy = providerPolicies[
+                                enabled[index].site.key
+                            ],
+                            let groupKey = policy.concurrencyGroup,
+                            let groupLimit = policy.maximumGroupConcurrency else {
+                                return true
+                            }
+                            return activeGroupCounts[groupKey, default: 0]
+                                < groupLimit
+                        }
+
+                        func recordStarted(_ index: Int) {
+                            activeCount += 1
+                            guard let groupKey = providerPolicies[
+                                enabled[index].site.key
+                            ]?.concurrencyGroup else { return }
+                            activeGroupCounts[groupKey, default: 0] += 1
+                        }
+
+                        func recordFinished(_ index: Int) {
+                            activeCount = max(0, activeCount - 1)
+                            guard let groupKey = providerPolicies[
+                                enabled[index].site.key
+                            ]?.concurrencyGroup else { return }
+                            let remaining = activeGroupCounts[
+                                groupKey,
+                                default: 0
+                            ] - 1
+                            if remaining > 0 {
+                                activeGroupCounts[groupKey] = remaining
+                            } else {
+                                activeGroupCounts.removeValue(forKey: groupKey)
+                            }
+                        }
+
+                        func scheduleAvailable() {
+                            while activeCount < maximumConcurrency,
+                                  let position = pendingIndexes.firstIndex(
+                                    where: canStart
+                                  ) {
+                                let index = pendingIndexes.remove(at: position)
+                                recordStarted(index)
+                                group.addTask {
+                                    InitialPageResult(
+                                        providerIndex: index,
+                                        outcome: await initialPageOutcome(
+                                            provider: enabled[index],
+                                            keyword: keyword,
+                                            quick: quick
+                                        )
+                                    )
+                                }
+                            }
+                        }
+
+                        scheduleAvailable()
+                        while let result = await group.next() {
+                            recordFinished(result.providerIndex)
+                            guard !Task.isCancelled else {
+                                group.cancelAll()
+                                break
+                            }
+                            let provider = enabled[result.providerIndex]
+                            switch result.outcome {
+                            case .page(let page, let resolvedKeyword):
+                                let items = Self.deduplicatedWithinSite(page.items)
+                                siteResultCounts[provider.site.key] = items.count
+                                if pool.ingest(items) {
+                                    continuation.yield(.snapshot(pool.snapshot))
+                                }
+                                let pageCount = page.pagination.pageCount.flatMap {
+                                    $0 > 0 ? $0 : nil
+                                }
+                                let providerMaximumPages = providerPolicies[
+                                    provider.site.key
+                                ]?.maximumPagesPerSite ?? maximumPagesPerSite
+                                if !items.isEmpty,
+                                   pageCount.map({ $0 > 1 }) ?? true,
+                                   providerMaximumPages > 1,
+                                   pool.retainedCount(for: provider.site.key)
+                                    < maximumResultsPerSite {
+                                    backgroundStates.append(
+                                        BackgroundSearchState(
+                                            providerIndex: result.providerIndex,
+                                            keyword: resolvedKeyword,
+                                            nextPage: 2,
+                                            explicitPageCount: pageCount,
+                                            seenIDs: Set(items.map(\.id)),
+                                            candidateCount: min(
+                                                items.count,
+                                                maximumResultsPerSite
+                                            ),
+                                            relevance: SearchCandidatePool.relevance(
+                                                of: items,
+                                                keyword: resolvedKeyword
+                                            )
+                                        )
+                                    )
+                                } else {
+                                    continuation.yield(
+                                        .siteOutcome(
+                                            .success(
+                                                siteKey: provider.site.key,
+                                                siteName: provider.site.name,
+                                                resultCount: items.count
+                                            )
+                                        )
+                                    )
+                                    continuation.yield(
+                                        .siteCompleted(siteKey: provider.site.key)
+                                    )
+                                }
+                            case .failure(let failure):
+                                providerFailureCount += 1
+                                let searchFailure = SearchFailure(
+                                    siteKey: provider.site.key,
+                                    siteName: provider.site.name,
+                                    message: failure.message,
+                                    category: failure.category,
+                                    isRetryable: failure.isRetryable
+                                )
+                                continuation.yield(
+                                    .failure(searchFailure)
+                                )
+                                continuation.yield(.siteOutcome(.failure(searchFailure)))
+                                continuation.yield(
+                                    .siteCompleted(siteKey: provider.site.key)
+                                )
+                            case .deadlineReached:
+                                reachedDeadline = true
+                                continuation.yield(
+                                    .siteCompleted(siteKey: provider.site.key)
+                                )
+                            case .cancelled:
+                                break
+                            }
+                            scheduleAvailable()
+                        }
+                    }
+                }
+
+                // Every eligible provider gets an independent first-page
+                // timeout and therefore a real request opportunity. The
+                // aggregate deadline only bounds optional background paging;
+                // slow providers cannot consume the budget before queued
+                // providers have even started.
+                let deadline = Date().addingTimeInterval(overallDeadline)
+
+                if !reachedDeadline,
+                   maximumDeepPageSites > 0,
+                   deadline.timeIntervalSinceNow > 0 {
+                    let selectedStates = backgroundStates
+                        .sorted { lhs, rhs in
+                            if lhs.relevance != rhs.relevance {
+                                return lhs.relevance > rhs.relevance
+                            }
+                            return lhs.providerIndex < rhs.providerIndex
+                        }
+                        .prefix(min(maximumDeepPageSites, maximumConcurrency))
+
+                    let selectedProviderIndexes = Set(
+                        selectedStates.map(\.providerIndex)
+                    )
+                    for state in backgroundStates
+                        where !selectedProviderIndexes.contains(state.providerIndex) {
+                        let provider = enabled[state.providerIndex]
+                        continuation.yield(
+                            .siteOutcome(
+                                .success(
+                                    siteKey: provider.site.key,
+                                    siteName: provider.site.name,
+                                    resultCount: siteResultCounts[
+                                        provider.site.key,
+                                        default: 0
+                                    ]
+                                )
+                            )
+                        )
+                        continuation.yield(
+                            .siteCompleted(
+                                siteKey: enabled[state.providerIndex].site.key
+                            )
+                        )
+                    }
+
+                    await withTaskGroup(of: BackgroundSearchResult.self) { group in
+                        for state in selectedStates {
+                            group.addTask {
+                                await searchBackgroundPages(
+                                    state: state,
+                                    providers: enabled,
+                                    quick: quick,
+                                    deadline: deadline,
+                                    providerPolicies: providerPolicies
+                                )
+                            }
+                        }
+
+                        while let result = await group.next() {
+                            guard !Task.isCancelled else {
+                                group.cancelAll()
+                                break
+                            }
+                            let provider = enabled[result.providerIndex]
+                            if pool.ingest(result.items) {
+                                continuation.yield(.snapshot(pool.snapshot))
+                            }
+                            siteResultCounts[provider.site.key, default: 0]
+                                += result.items.count
+                            if let failure = result.failure {
+                                providerFailureCount += 1
+                                let searchFailure = SearchFailure(
+                                    siteKey: provider.site.key,
+                                    siteName: provider.site.name,
+                                    message: failure.message,
+                                    category: failure.category
+                                )
+                                continuation.yield(.failure(searchFailure))
+                                continuation.yield(.siteOutcome(.failure(searchFailure)))
+                            } else {
+                                continuation.yield(
+                                    .siteOutcome(
+                                        .success(
+                                            siteKey: provider.site.key,
+                                            siteName: provider.site.name,
+                                            resultCount: siteResultCounts[
+                                                provider.site.key,
+                                                default: 0
+                                            ]
+                                        )
+                                    )
+                                )
+                            }
+                            reachedDeadline = reachedDeadline || result.reachedDeadline
+                            continuation.yield(
+                                .siteCompleted(siteKey: provider.site.key)
+                            )
+                        }
+                    }
+                } else {
+                    for state in backgroundStates {
+                        let provider = enabled[state.providerIndex]
+                        continuation.yield(
+                            .siteOutcome(
+                                .success(
+                                    siteKey: provider.site.key,
+                                    siteName: provider.site.name,
+                                    resultCount: siteResultCounts[
+                                        provider.site.key,
+                                        default: 0
+                                    ]
+                                )
+                            )
+                        )
+                        continuation.yield(
+                            .siteCompleted(
+                                siteKey: enabled[state.providerIndex].site.key
+                            )
+                        )
+                    }
+                }
+
+                guard !Task.isCancelled else {
+                    continuation.yield(.finished(.cancelled))
+                    return
+                }
+                if deadline.timeIntervalSinceNow <= 0 {
+                    reachedDeadline = true
+                }
+                if pool.receivedCandidateCount > 0 {
+                    continuation.yield(.snapshot(pool.snapshot))
+                }
+                let termination: MultiSiteSearchTermination
+                if reachedDeadline {
+                    termination = .deadlineReached
+                } else if providerFailureCount > 0 {
+                    termination = .completedWithProviderFailures
+                } else {
+                    termination = .completed
+                }
+                continuation.yield(.finished(termination))
             }
             continuation.onTermination = { _ in
                 task.cancel()
@@ -125,46 +1000,160 @@ public struct MultiSiteSearch {
         }
     }
 
-    private func searchEvent(
+    private func initialPageOutcome(
         provider: SiteProvider,
         keyword: String,
         quick: Bool
-    ) async -> MultiSiteSearchEvent {
-        let outcome = await searchWithTimeout(
-            provider: provider,
-            keyword: keyword,
-            quick: quick,
-            timeout: Self.effectiveSiteTimeout(
-                base: siteTimeout,
-                capability: provider.capability
-            )
+    ) async -> PageSearchOutcome {
+        let plan = SearchQueryPlan(keyword)
+        let providerTimeout = Self.effectiveSiteTimeout(
+            base: siteTimeout,
+            capability: provider.capability
         )
-        switch outcome {
-        case .results(let items):
-            return .results(
-                siteKey: provider.site.key,
-                items: items
+        let siteDeadline = Date().addingTimeInterval(providerTimeout)
+        let remaining = siteDeadline.timeIntervalSinceNow
+        guard remaining > 0 else { return .deadlineReached }
+        let originalOutcome = await searchPageWithTimeout(
+            provider: provider,
+            keyword: plan.original,
+            page: 1,
+            quick: quick,
+            timeout: remaining,
+            deadlineLimited: false
+        )
+        guard case .page(let originalPage, _) = originalOutcome,
+              let fallback = plan.fallback,
+              originalPage.items.isEmpty
+                || !SearchCandidatePool.hasMeaningfulMatch(
+                    in: originalPage.items,
+                    keyword: plan.original
+                ) else {
+            return originalOutcome
+        }
+
+        let fallbackRemaining = siteDeadline.timeIntervalSinceNow
+        guard fallbackRemaining > 0 else { return originalOutcome }
+        let fallbackOutcome = await searchPageWithTimeout(
+            provider: provider,
+            keyword: fallback,
+            page: 1,
+            quick: quick,
+            timeout: fallbackRemaining,
+            deadlineLimited: false
+        )
+        switch fallbackOutcome {
+        case .page(let fallbackPage, _):
+            var seenIDs = Set<String>()
+            let mergedItems = (originalPage.items + fallbackPage.items).filter {
+                seenIDs.insert($0.id).inserted
+            }
+            return .page(
+                VideoPage(
+                    items: mergedItems,
+                    pagination: fallbackPage.pagination
+                ),
+                keyword: fallback
             )
         case .cancelled:
-            return .failure(
-                SearchFailure(
-                    siteKey: provider.site.key,
-                    siteName: provider.site.name,
-                    message: "已取消"
-                )
-            )
-        case .failure(let message):
-            return .failure(
-                SearchFailure(
-                    siteKey: provider.site.key,
-                    siteName: provider.site.name,
-                    message: message
-                )
-            )
+            return .cancelled
+        case .failure, .deadlineReached:
+            return originalOutcome
         }
     }
 
-    private static func deduplicatedWithinSite(_ items: [VideoSummary]) -> [VideoSummary] {
+    private func searchBackgroundPages(
+        state initialState: BackgroundSearchState,
+        providers: [SiteProvider],
+        quick: Bool,
+        deadline: Date,
+        providerPolicies: [String: MultiSiteSearchProviderPolicy]
+    ) async -> BackgroundSearchResult {
+        var state = initialState
+        let provider = providers[state.providerIndex]
+        var collected: [VideoSummary] = []
+
+        let providerMaximumPages = providerPolicies[
+            provider.site.key
+        ]?.maximumPagesPerSite ?? maximumPagesPerSite
+        searchLoop: while state.nextPage <= providerMaximumPages,
+                          state.candidateCount < maximumResultsPerSite,
+                          !Task.isCancelled {
+            if let pageCount = state.explicitPageCount,
+               pageCount > 0,
+               state.nextPage > pageCount {
+                break
+            }
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else {
+                return BackgroundSearchResult(
+                    providerIndex: state.providerIndex,
+                    items: collected,
+                    failure: nil,
+                    reachedDeadline: true
+                )
+            }
+            let providerTimeout = Self.effectiveSiteTimeout(
+                base: siteTimeout,
+                capability: provider.capability
+            )
+            switch await searchPageWithTimeout(
+                provider: provider,
+                keyword: state.keyword,
+                page: state.nextPage,
+                quick: quick,
+                timeout: min(providerTimeout, remaining),
+                deadlineLimited: remaining <= providerTimeout
+            ) {
+            case .page(let page, _):
+                guard !page.items.isEmpty else { break searchLoop }
+                var newItems: [VideoSummary] = []
+                for item in page.items where state.seenIDs.insert(item.id).inserted {
+                    newItems.append(item)
+                    state.candidateCount += 1
+                    if state.candidateCount >= maximumResultsPerSite { break }
+                }
+                guard !newItems.isEmpty else { break searchLoop }
+                collected.append(contentsOf: newItems)
+                if let pageCount = page.pagination.pageCount,
+                   pageCount > 0 {
+                    state.explicitPageCount = pageCount
+                }
+                state.nextPage += 1
+            case .failure(let failure):
+                return BackgroundSearchResult(
+                    providerIndex: state.providerIndex,
+                    items: collected,
+                    failure: failure,
+                    reachedDeadline: false
+                )
+            case .deadlineReached:
+                return BackgroundSearchResult(
+                    providerIndex: state.providerIndex,
+                    items: collected,
+                    failure: nil,
+                    reachedDeadline: true
+                )
+            case .cancelled:
+                return BackgroundSearchResult(
+                    providerIndex: state.providerIndex,
+                    items: [],
+                    failure: nil,
+                    reachedDeadline: false
+                )
+            }
+        }
+
+        return BackgroundSearchResult(
+            providerIndex: state.providerIndex,
+            items: collected,
+            failure: nil,
+            reachedDeadline: false
+        )
+    }
+
+    private static func deduplicatedWithinSite(
+        _ items: [VideoSummary]
+    ) -> [VideoSummary] {
         var seen = Set<String>()
         return items.filter { seen.insert($0.id).inserted }
     }
@@ -173,83 +1162,88 @@ public struct MultiSiteSearch {
         base: TimeInterval,
         capability: SiteCapability
     ) -> TimeInterval {
-        // The Android bridge allows up to roughly 70 seconds for a Java/Dex
-        // invocation. Keep that exception local to the bridge: JavaScript
-        // and local Node providers use the generic timeout so a hung HTTP
-        // search cannot leave aggregate progress parked for 75 seconds.
         switch capability {
         case .javaDexSpider:
-            return max(base, 75)
+            return min(max(base, 30), 45)
         default:
             return base
         }
     }
 
-    private func searchWithTimeout(
+    private func searchPageWithTimeout(
         provider: SiteProvider,
         keyword: String,
+        page: Int,
         quick: Bool,
-        timeout: TimeInterval
-    ) async -> SiteSearchOutcome {
+        timeout: TimeInterval,
+        deadlineLimited: Bool
+    ) async -> PageSearchOutcome {
         guard !Task.isCancelled else { return .cancelled }
 
-        let firstOutcome = FirstSiteSearchOutcome()
+        let firstOutcome = FirstPageSearchOutcome()
         let providerTask = Task {
             do {
-                var pageNumber = 1
-                var collected: [VideoSummary] = []
-                var seen = Set<String>()
-
-                while pageNumber <= maximumPagesPerSite,
-                      collected.count < maximumResultsPerSite {
-                    try Task.checkCancellation()
-                    let page = try await provider.search(
+                let result: VideoPage
+                if let aggregateProvider = provider as? AggregateSearchProviding {
+                    result = try await aggregateProvider.aggregateSearch(
                         keyword: keyword,
-                        page: pageNumber,
+                        page: page,
                         quick: quick
                     )
-                    guard !page.items.isEmpty else { break }
-
-                    var newItemCount = 0
-                    for item in page.items where seen.insert(item.id).inserted {
-                        collected.append(item)
-                        newItemCount += 1
-                        if collected.count >= maximumResultsPerSite { break }
-                    }
-
-                    // A number of JavaScript sources omit pagecount or always
-                    // report it as 0/1. Probe the next page once in that case;
-                    // sources which ignore pg stop immediately because they
-                    // return no new IDs. An explicit larger pagecount remains
-                    // authoritative.
-                    guard newItemCount > 0 else { break }
-                    if let pageCount = page.pagination.pageCount,
-                       pageCount > 1,
-                       pageNumber >= pageCount {
-                        break
-                    }
-                    pageNumber += 1
+                } else {
+                    result = try await provider.search(
+                        keyword: keyword,
+                        page: page,
+                        quick: quick
+                    )
                 }
-
-                await firstOutcome.resolve(.results(collected))
+                await firstOutcome.resolve(.page(result, keyword: keyword))
             } catch is CancellationError {
                 await firstOutcome.resolve(.cancelled)
+            } catch let error as SiteSearchError {
+                await firstOutcome.resolve(
+                    .failure(
+                        PageSearchFailure(
+                            message: error.message,
+                            category: error.category,
+                            isRetryable: error.isRetryable
+                        )
+                    )
+                )
             } catch {
-                await firstOutcome.resolve(.failure(error.localizedDescription))
+                let message = error.localizedDescription
+                await firstOutcome.resolve(
+                    .failure(
+                        PageSearchFailure(
+                            message: message,
+                            category: SearchFailure.classify(message),
+                            isRetryable: false
+                        )
+                    )
+                )
             }
         }
         let timeoutTask = Task {
             do {
                 let nanoseconds = UInt64(
-                    min(timeout, 300) * 1_000_000_000
+                    min(max(timeout, 0.01), 300) * 1_000_000_000
                 )
                 try await Task.sleep(nanoseconds: nanoseconds)
-                await firstOutcome.resolve(
-                    .failure("搜索超时（\(Int(timeout)) 秒）")
-                )
+                if deadlineLimited {
+                    await firstOutcome.resolve(.deadlineReached)
+                } else {
+                    await firstOutcome.resolve(
+                        .failure(
+                            PageSearchFailure(
+                                message: "搜索超时（\(max(1, Int(timeout))) 秒）",
+                                category: .timeout,
+                                isRetryable: false
+                            )
+                        )
+                    )
+                }
             } catch {
-                // The winning provider result or parent cancellation stops
-                // this timer. It must not overwrite the first outcome.
+                // Winning provider result or cancellation stops this timer.
             }
         }
 

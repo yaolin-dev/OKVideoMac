@@ -2,6 +2,63 @@ import CryptoKit
 import Foundation
 import OKVideoCore
 
+/// Stable identity for the host-visible CatPaw configuration. CatPaw's raw
+/// module groups also publish listener-bound website URLs, so they are a
+/// transport document rather than a semantic revision. The normalized root
+/// catalogue is the App's provider contract and already carries bundle,
+/// profile, module and site identities; hash that contract explicitly and
+/// publish the result with the configuration.
+enum NodeConfigurationSemanticIdentity {
+    static let fieldName = "okNodeSemanticRevision"
+
+    private static let runtimeProjectionKeys = Set([
+        "video", "read", "comic", "music", "pan", "danmaku"
+    ])
+
+    static func revision(in data: Data) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: data)
+            as? [String: Any] else {
+            return nil
+        }
+        if let embedded = root[fieldName] as? String,
+           isSHA256(embedded) {
+            return embedded.lowercased()
+        }
+        return try? make(from: root)
+    }
+
+    static func make(from root: [String: Any]) throws -> String {
+        guard let sites = root["sites"] as? [[String: Any]],
+              root["okCatPawModuleCounts"] is [String: Any],
+              sites.allSatisfy({ site in
+                  site["okNodeRuntime"] as? Bool == true
+                      && (site["okNodeSiteIdentity"] as? String)?.isEmpty == false
+              }) else {
+            throw AppError.configuration("Node 配置缺少稳定的模块身份")
+        }
+
+        var semanticRoot = root
+        semanticRoot.removeValue(forKey: fieldName)
+        for key in runtimeProjectionKeys {
+            semanticRoot.removeValue(forKey: key)
+        }
+        let canonical = try JSONSerialization.data(
+            withJSONObject: semanticRoot,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+        return SHA256.hash(data: canonical).map {
+            String(format: "%02x", $0)
+        }.joined()
+    }
+
+    private static func isSHA256(_ value: String) -> Bool {
+        value.count == 64 && value.unicodeScalars.allSatisfy {
+            CharacterSet(charactersIn: "0123456789abcdefABCDEF")
+                .contains($0)
+        }
+    }
+}
+
 enum NodeDiagnosticCategory: String, Codable, Equatable, Sendable {
     case transport
     case trust
@@ -39,6 +96,11 @@ enum NodeDiagnosticCode: String, Codable, Equatable, Sendable {
     case cacheMigrationSucceeded = "NODE_CACHE_MIGRATION_SUCCEEDED"
     case cacheMigrationFailed = "NODE_CACHE_MIGRATION_FAILED"
     case runtimeLaunchStarted = "NODE_RUNTIME_LAUNCH_STARTED"
+    case runtimeContractDetected = "NODE_RUNTIME_CONTRACT_DETECTED"
+    case runtimeHostAdapterReady = "NODE_RUNTIME_HOST_ADAPTER_READY"
+    case runtimeConfigurationValidated = "NODE_RUNTIME_CONFIGURATION_VALIDATED"
+    case runtimeListenerObserved = "NODE_RUNTIME_LISTENER_OBSERVED"
+    case runtimeCapabilityValidated = "NODE_RUNTIME_CAPABILITY_VALIDATED"
     case runtimeStartRequested = "NODE_RUNTIME_START_REQUESTED"
     case runtimeStartupJoined = "NODE_RUNTIME_STARTUP_JOINED"
     case runtimeReadinessWaiting = "NODE_RUNTIME_READINESS_WAITING"
@@ -362,7 +424,9 @@ final class NodeDiagnosticLogWriter: @unchecked Sendable {
 
     private func writeNodeLine(_ data: Data) {
         let raw = String(decoding: data, as: UTF8.self)
-        let sanitized = String(LogRedactor.text(raw).prefix(64 * 1_024))
+        let sanitized = String(
+            Self.sanitizedNodeOutput(raw).prefix(64 * 1_024)
+        )
         write(
             NodeDiagnosticEvent(
                 category: .spiderSite,
@@ -370,6 +434,27 @@ final class NodeDiagnosticLogWriter: @unchecked Sendable {
                 code: .spiderOutput,
                 message: sanitized
             )
+        )
+    }
+
+    /// Runtime proxy URLs may carry an opaque, encoded request context in a
+    /// query item whose name is chosen by the third-party bundle. Generic log
+    /// redaction cannot safely enumerate those names, so diagnostic output
+    /// retains the proxy route while dropping its entire query capability.
+    private static func sanitizedNodeOutput(_ raw: String) -> String {
+        LogRedactor.text(redactingRuntimeProxyQueries(in: raw))
+    }
+
+    private static func redactingRuntimeProxyQueries(in text: String) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?i)(/proxy/[^?\s<>\"']+)\?[^\s<>\"']+"#
+        ) else {
+            return text
+        }
+        return regex.stringByReplacingMatches(
+            in: text,
+            range: NSRange(text.startIndex..., in: text),
+            withTemplate: "$1?<redacted>"
         )
     }
 
@@ -511,6 +596,13 @@ enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
     case nodeLaunchFailed(String)
     case nodeExitedUnexpectedly(String)
     case endpointUnavailable(String)
+    case unsupportedHostContract
+    case configurationContractInvalid
+    case companionConfigurationSyntaxUnsupported
+    case hostCapabilityUnavailable
+    case portAllocationFailed
+    case loopbackEnforcementFailed
+    case contractBReadinessFailed
 
     var errorDescription: String? {
         switch self {
@@ -540,6 +632,20 @@ enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
             return "Node 运行进程意外退出：\(detail)"
         case .endpointUnavailable(let detail):
             return "Node 服务端点不可用：\(detail)"
+        case .unsupportedHostContract:
+            return "Node 运行协议不受支持"
+        case .configurationContractInvalid:
+            return "Node 配置不是安全的 JSON 对象，或超出大小/深度限制"
+        case .companionConfigurationSyntaxUnsupported:
+            return "Node 配套 index.config.js 包含不受支持的语法；仅允许静态 JSON 兼容对象"
+        case .hostCapabilityUnavailable:
+            return "Node 宿主能力初始化失败"
+        case .portAllocationFailed:
+            return "Node 本地服务端口分配失败"
+        case .loopbackEnforcementFailed:
+            return "Node 本地服务未通过回环地址安全校验"
+        case .contractBReadinessFailed:
+            return "Node 本地服务能力校验失败"
         }
     }
 
@@ -573,13 +679,63 @@ enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
             return .init(category: .cache, code: .cacheMigrationFailed)
         case .invalidCacheMetadata:
             return .init(category: .cache, code: .cacheInvalidMetadata)
-        case .bundledNodeMissing, .invalidNodeEnvironment, .nodeLaunchFailed:
+        case .bundledNodeMissing, .invalidNodeEnvironment, .nodeLaunchFailed,
+             .unsupportedHostContract, .configurationContractInvalid,
+             .companionConfigurationSyntaxUnsupported,
+             .hostCapabilityUnavailable, .portAllocationFailed,
+             .loopbackEnforcementFailed, .contractBReadinessFailed:
             return .init(category: .runtime, code: .runtimeLaunchFailed)
         case .nodeExitedUnexpectedly:
             return .init(category: .runtime, code: .runtimeExited)
         case .endpointUnavailable:
             return .init(category: .runtime, code: .runtimeUnavailable)
         }
+    }
+}
+
+struct NodeBundleDeterministicPatch: Equatable, Sendable {
+    static let quarkLifecycleV2 = NodeBundleDeterministicPatch(
+        identifier: "catpaw-quark-lifecycle-v2",
+        requestedChecksumURL: URL(
+            string: "https://raw.githubusercontent.com/Darklessing/catvod/refs/heads/main/douer/index.js.md5"
+        )!,
+        immutableChecksumURL: URL(
+            string: "https://raw.githubusercontent.com/Darklessing/catvod/c47d135469d4a32a4178531ce1b8f4e2e936f0b8/douer/index.js.md5"
+        )!,
+        immutableScriptURL: URL(
+            string: "https://raw.githubusercontent.com/Darklessing/catvod/c47d135469d4a32a4178531ce1b8f4e2e936f0b8/douer/index.js"
+        )!,
+        inputSHA256: "0ad3ed101dc961e6d73b758a5089ac1e10a12d27666468436e1fff2e39df01cc",
+        outputSHA256: "21de5bd519f056199688fa4be265b6ac42a549a1cd8d256a248e18cafd856371",
+        patchResourceName: "catpaw-quark-lifecycle.patch",
+        patchResourceSHA256: "8ff76dde6c944de760fc5a0df52fe1bf9c5ebbc7eb00062115cbbef0a76dac91",
+        moduleResourceName: "catpaw-quark-transfer-lifecycle",
+        moduleResourceSHA256: "e0cb843d5c84fec74f17594e937287b2cd8bbcda746d981013d55cb5978dabf4",
+        legacyCacheKeys: [
+            // Cache identity of the formerly unpinned refs/heads/main URL.
+            // Migration still requires the exact fixed input SHA before the
+            // patch is applied; an updated main cache is rejected.
+            "28bb4a27df65c977b31ca64b04eb6effe82958b245ed7900f151dcf2c1d3a110"
+        ]
+    )
+
+    let identifier: String
+    let requestedChecksumURL: URL
+    let immutableChecksumURL: URL
+    let immutableScriptURL: URL
+    let inputSHA256: String
+    let outputSHA256: String
+    let patchResourceName: String
+    let patchResourceSHA256: String
+    let moduleResourceName: String
+    let moduleResourceSHA256: String
+    let legacyCacheKeys: [String]
+
+    static func matching(_ checksumURL: URL) -> Self? {
+        let normalized = checksumURL.absoluteString
+        return normalized == quarkLifecycleV2.requestedChecksumURL.absoluteString
+            ? quarkLifecycleV2
+            : nil
     }
 }
 
@@ -592,10 +748,21 @@ struct NodeBundleSourceDescriptor: Equatable, Sendable {
     let authorizationHeader: String?
     let sourceID: String?
     let declaredVersion: String?
+    let expectedInputSHA256: String?
     let expectedSHA256: String?
+    let deterministicPatch: NodeBundleDeterministicPatch?
     let pinIdentity: String
     let cacheKey: String
     let legacyCacheKey: String
+    let fallbackCacheKeys: [String]
+
+    var companionConfigurationScriptURL: URL? {
+        Self.companionConfigurationURL(for: scriptURL, checksum: false)
+    }
+
+    var companionConfigurationChecksumURL: URL? {
+        Self.companionConfigurationURL(for: scriptURL, checksum: true)
+    }
 
     static func supports(_ url: URL) -> Bool {
         guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
@@ -631,8 +798,8 @@ struct NodeBundleSourceDescriptor: Equatable, Sendable {
                 "Node 资源 URL fragment 中的 sha256 必须是 64 位十六进制"
             )
         }
-        let sourceID = Self.nonEmptyFragmentValue(fragmentValues["source"])
-        let declaredVersion = Self.nonEmptyFragmentValue(fragmentValues["version"])
+        let requestedSourceID = Self.nonEmptyFragmentValue(fragmentValues["source"])
+        let requestedVersion = Self.nonEmptyFragmentValue(fragmentValues["version"])
         components.fragment = nil
 
         // Credentials must never travel over cleartext HTTP. Existing source
@@ -643,17 +810,8 @@ struct NodeBundleSourceDescriptor: Equatable, Sendable {
         }
         components.user = nil
         components.password = nil
-        guard let checksumURL = components.url else {
+        guard let requestedChecksumURL = components.url else {
             throw AppError.configuration("Node 资源校验地址无效")
-        }
-
-        let checksumPath = components.percentEncodedPath
-        guard checksumPath.lowercased().hasSuffix(".md5") else {
-            throw AppError.configuration("Node 资源校验地址缺少 .md5 后缀")
-        }
-        components.percentEncodedPath = String(checksumPath.dropLast(4))
-        guard let scriptURL = components.url else {
-            throw AppError.configuration("Node 资源脚本地址无效")
         }
 
         let authorizationHeader: String?
@@ -664,13 +822,56 @@ struct NodeBundleSourceDescriptor: Equatable, Sendable {
             authorizationHeader = nil
         }
 
+        let deterministicPatch = NodeBundleDeterministicPatch.matching(
+            requestedChecksumURL
+        )
+        if let deterministicPatch,
+           let expectedSHA256,
+           expectedSHA256 != deterministicPatch.inputSHA256 {
+            throw AppError.configuration(
+                "CatPaw 固定输入的显式 SHA-256 与当前发布版本不一致"
+            )
+        }
+
+        let checksumURL: URL
+        let scriptURL: URL
+        let sourceID: String?
+        let declaredVersion: String?
+        let expectedInputSHA256: String?
+        let executionSHA256: String?
+        if let deterministicPatch {
+            checksumURL = deterministicPatch.immutableChecksumURL
+            scriptURL = deterministicPatch.immutableScriptURL
+            sourceID = requestedSourceID ?? "darklessing-catvod"
+            declaredVersion = requestedVersion ?? deterministicPatch.identifier
+            expectedInputSHA256 = deterministicPatch.inputSHA256
+            executionSHA256 = deterministicPatch.outputSHA256
+        } else {
+            let checksumPath = components.percentEncodedPath
+            guard checksumPath.lowercased().hasSuffix(".md5") else {
+                throw AppError.configuration("Node 资源校验地址缺少 .md5 后缀")
+            }
+            components.percentEncodedPath = String(checksumPath.dropLast(4))
+            guard let resolvedScriptURL = components.url else {
+                throw AppError.configuration("Node 资源脚本地址无效")
+            }
+            checksumURL = requestedChecksumURL
+            scriptURL = resolvedScriptURL
+            sourceID = requestedSourceID
+            declaredVersion = requestedVersion
+            expectedInputSHA256 = expectedSHA256
+            executionSHA256 = expectedSHA256
+        }
+
         self.originalURL = url
         self.checksumURL = checksumURL
         self.scriptURL = scriptURL
         self.authorizationHeader = authorizationHeader
         self.sourceID = sourceID
         self.declaredVersion = declaredVersion
-        self.expectedSHA256 = expectedSHA256
+        self.expectedInputSHA256 = expectedInputSHA256
+        self.expectedSHA256 = executionSHA256
+        self.deterministicPatch = deterministicPatch
         pinIdentity = [
             "request=\(checksumURL.absoluteString)",
             "source=\(sourceID ?? "-")",
@@ -680,7 +881,7 @@ struct NodeBundleSourceDescriptor: Equatable, Sendable {
             Data(
                 ([
                     pinIdentity,
-                    "pin=\(expectedSHA256 ?? "-")",
+                    "pin=\(executionSHA256 ?? "-")",
                     "authorization=\(authorizationHeader ?? "-")"
                 ].joined(separator: "\n"))
                     .utf8
@@ -692,6 +893,7 @@ struct NodeBundleSourceDescriptor: Equatable, Sendable {
                     .utf8
             )
         )
+        fallbackCacheKeys = deterministicPatch?.legacyCacheKeys ?? []
     }
 
     private static func fragmentValues(_ fragment: String?) -> [String: String] {
@@ -709,8 +911,79 @@ struct NodeBundleSourceDescriptor: Equatable, Sendable {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    private static func companionConfigurationURL(
+        for scriptURL: URL,
+        checksum: Bool
+    ) -> URL? {
+        guard var components = URLComponents(
+            url: scriptURL,
+            resolvingAgainstBaseURL: false
+        ) else { return nil }
+        let path = components.percentEncodedPath
+        guard path.lowercased().hasSuffix(".js") else { return nil }
+        components.percentEncodedPath = String(path.dropLast(3))
+            + ".config.js"
+            + (checksum ? ".md5" : "")
+        return components.url
+    }
+
     private static func sha256Hex(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+struct NodeRuntimeProfileNamespace: Equatable, Sendable {
+    let configurationIdentity: String
+    let sourceIdentity: String
+    let publisherIdentity: String
+    let storageKey: String
+
+    init(
+        configurationID: UUID?,
+        descriptor: NodeBundleSourceDescriptor
+    ) {
+        configurationIdentity = configurationID?.uuidString.lowercased()
+            ?? "unassigned"
+        sourceIdentity = descriptor.checksumURL.absoluteString
+        publisherIdentity = descriptor.sourceID?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).nonEmptyProfileValue ?? Self.originIdentity(for: descriptor.checksumURL)
+        storageKey = Self.sha256Hex(
+            Data(
+                [
+                    configurationIdentity,
+                    sourceIdentity,
+                    publisherIdentity
+                ]
+                    .joined(separator: "\u{0}")
+                    .utf8
+            )
+        )
+    }
+
+    static func originIdentityForMigration(sourceURLString: String?) -> String {
+        guard let sourceURLString, let url = URL(string: sourceURLString) else {
+            return "unknown-publisher"
+        }
+        return originIdentity(for: url)
+    }
+
+    private static func originIdentity(for url: URL) -> String {
+        var components = URLComponents()
+        components.scheme = url.scheme?.lowercased()
+        components.host = url.host?.lowercased()
+        components.port = url.port
+        return components.string ?? url.host?.lowercased() ?? "unknown-publisher"
+    }
+
+    private static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+private extension String {
+    var nonEmptyProfileValue: String? {
+        isEmpty ? nil : self
     }
 }
 
@@ -738,13 +1011,236 @@ enum NodeRuntimeStatus: Equatable, Sendable {
     case failed(String)
 }
 
+struct NodeRuntimePlaybackLease: Equatable, Sendable {
+    fileprivate let id: UUID
+    fileprivate let processGeneration: UUID
+}
+
+enum NodeTransferLifecycleStatus: String, Codable, Equatable, Sendable {
+    case leased
+    case cleaned
+    case alreadyMissing
+    case stillInUse
+    case retryScheduled
+    case permanentFailure
+    case receiptNotFound
+    case accountUnavailable
+}
+
+struct NodeTransferLifecycleResult: Codable, Equatable, Sendable {
+    let status: NodeTransferLifecycleStatus
+    let receiptID: UUID?
+}
+
+enum NodeTransferCleanupReason: String, Sendable {
+    case staleGeneration
+    case resolutionFailed
+    case playerLoadFailed
+    case mediaReleased
+    case playerClosed
+    case appShutdown
+}
+
+enum NodeRuntimePlaybackLeasePolicy {
+    static func owns(
+        _ mediaSession: PlaybackMediaSession,
+        serviceBaseURL: URL
+    ) -> Bool {
+        guard mediaSession.transport == .providerLoopback,
+              mediaSession.resourceReference.providerKind
+                .hasPrefix("node-http-spider"),
+              let mediaURL = URL(string: mediaSession.mediaURL),
+              mediaURL.scheme?.lowercased() == serviceBaseURL.scheme?.lowercased(),
+              mediaURL.port == serviceBaseURL.port,
+              ["127.0.0.1", "localhost", "::1"].contains(
+                  mediaURL.host?.lowercased() ?? ""
+              ),
+              ["127.0.0.1", "localhost", "::1"].contains(
+                  serviceBaseURL.host?.lowercased() ?? ""
+              ) else {
+            return false
+        }
+        return mediaURL.path.hasPrefix("/spider/")
+            || mediaURL.path.hasPrefix("/proxy/")
+            || mediaURL.path.hasPrefix("/__okvideo/baidu-media/")
+    }
+}
+
+enum NodeBundleStartupStrategy: Equatable, Sendable {
+    /// Preserve the update-oriented behavior used by explicit imports: try the
+    /// publisher first, then fall back to the validated on-disk bundle.
+    case remoteFirst
+
+    /// Never wait for publisher I/O. This is used when restoring a previously
+    /// imported configuration so its validated cache can become useful
+    /// immediately; a separate background refresh revalidates the publisher.
+    case cacheOnly
+}
+
+enum NodeRuntimeStartupPreemptionPolicy {
+    static func shouldPreempt(
+        current: NodeBundleStartupStrategy?,
+        incoming: NodeBundleStartupStrategy
+    ) -> Bool {
+        incoming == .cacheOnly && current == .remoteFirst
+    }
+}
+
 struct NodeBundleCacheSnapshot: Equatable, Sendable {
     let cacheKey: String
     let sha256: String
     let trustState: NodeBundleTrustState
 }
 
+struct NodeProfileRevisionSnapshot: Equatable, Sendable {
+    let storageKey: String
+    let revision: String
+}
+
+enum CatPawModuleKind: String, CaseIterable, Codable, Sendable {
+    case video
+    case read
+    case comic
+    case music
+    case pan
+
+    var localizedName: String {
+        switch self {
+        case .video: return "影视"
+        case .read: return "小说"
+        case .comic: return "漫画"
+        case .music: return "音乐"
+        case .pan: return "网盘"
+        }
+    }
+}
+
+struct CatPawModuleDescriptor: Equatable, Sendable {
+    let moduleKind: CatPawModuleKind
+    let siteKey: String
+    let displayName: String
+    let spiderType: Int
+    let apiPath: String
+    let enabled: Bool
+    let searchable: Int?
+    let capabilities: Set<String>
+    let metadata: JSONValue
+}
+
+enum CatPawModuleCatalog {
+    static func descriptors(in root: [String: Any]) -> [CatPawModuleDescriptor] {
+        CatPawModuleKind.allCases.flatMap { kind in
+            rawSites(in: root, kind: kind).compactMap { raw in
+                descriptor(from: raw, kind: kind)
+            }
+        }
+    }
+
+    private static func rawSites(
+        in root: [String: Any],
+        kind: CatPawModuleKind
+    ) -> [[String: Any]] {
+        if kind == .video, let sites = siteArray(root["sites"]) {
+            return sites
+        }
+        guard let module = root[kind.rawValue] as? [String: Any] else {
+            return []
+        }
+        return siteArray(module["sites"]) ?? []
+    }
+
+    private static func siteArray(_ value: Any?) -> [[String: Any]]? {
+        if let sites = value as? [[String: Any]] { return sites }
+        if let container = value as? [String: Any] {
+            if let sites = container["list"] as? [[String: Any]] {
+                return sites
+            }
+            if let sites = container["sites"] as? [[String: Any]] {
+                return sites
+            }
+        }
+        return nil
+    }
+
+    private static func descriptor(
+        from raw: [String: Any],
+        kind: CatPawModuleKind
+    ) -> CatPawModuleDescriptor? {
+        let key = string(raw["key"] ?? raw["id"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return nil }
+        let displayName = string(raw["name"] ?? raw["title"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let capabilities = stringArray(
+            raw["capabilities"] ?? raw["okNodeCapabilities"]
+        )
+        let metadata = (try? JSONSerialization.data(
+            withJSONObject: raw,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )).flatMap { try? JSONDecoder().decode(JSONValue.self, from: $0) }
+            ?? .object([:])
+        return CatPawModuleDescriptor(
+            moduleKind: kind,
+            siteKey: key,
+            displayName: displayName.isEmpty ? key : displayName,
+            spiderType: integer(raw["type"]) ?? defaultType(for: kind),
+            apiPath: string(raw["api"]),
+            enabled: boolean(raw["enable"] ?? raw["enabled"]) ?? true,
+            searchable: integer(raw["searchable"]),
+            capabilities: Set(capabilities),
+            metadata: metadata
+        )
+    }
+
+    private static func defaultType(for kind: CatPawModuleKind) -> Int {
+        switch kind {
+        case .video: return 3
+        case .read: return 10
+        case .comic: return 20
+        case .music: return 30
+        case .pan: return 40
+        }
+    }
+
+    private static func string(_ value: Any?) -> String {
+        value as? String ?? ""
+    }
+
+    private static func integer(_ value: Any?) -> Int? {
+        if let value = value as? NSNumber { return value.intValue }
+        if let value = value as? String { return Int(value) }
+        return nil
+    }
+
+    private static func boolean(_ value: Any?) -> Bool? {
+        if let value = value as? Bool { return value }
+        if let value = value as? NSNumber { return value.boolValue }
+        if let value = value as? String {
+            switch value.lowercased() {
+            case "true", "1": return true
+            case "false", "0": return false
+            default: return nil
+            }
+        }
+        return nil
+    }
+
+    private static func stringArray(_ value: Any?) -> [String] {
+        if let values = value as? [String] { return values }
+        if let value = value as? String { return [value] }
+        return []
+    }
+}
+
 actor NodeBundleRuntimeService {
+    private struct CompanionConfiguration: Sendable {
+        let data: Data
+        let md5: String
+        let sha256: String
+        let finalChecksumURL: URL
+        let finalScriptURL: URL
+    }
+
     private struct CachedBundle: Sendable {
         let sourceID: String?
         let cacheKey: String
@@ -756,16 +1252,25 @@ actor NodeBundleRuntimeService {
         let finalScriptURL: URL
         let runtimeDirectory: URL
         let trustState: NodeBundleTrustState
+        let configurationData: Data?
+        let deterministicPatch: NodeBundleDeterministicPatch?
     }
 
     private enum StartupSource: Sendable {
-        case descriptor(NodeBundleSourceDescriptor)
-        case cached(CachedBundle)
+        case descriptor(NodeBundleSourceDescriptor, NodeRuntimeProfileNamespace)
+        case cached(CachedBundle, NodeRuntimeProfileNamespace)
 
         var cacheKey: String {
             switch self {
-            case .descriptor(let descriptor): descriptor.cacheKey
-            case .cached(let bundle): bundle.cacheKey
+            case .descriptor(let descriptor, _): descriptor.cacheKey
+            case .cached(let bundle, _): bundle.cacheKey
+            }
+        }
+
+        var profileNamespace: NodeRuntimeProfileNamespace {
+            switch self {
+            case .descriptor(_, let namespace), .cached(_, let namespace):
+                return namespace
             }
         }
     }
@@ -777,6 +1282,34 @@ actor NodeBundleRuntimeService {
         let md5: String
         let sha256: String
         let trustState: NodeBundleTrustState?
+        let configurationMD5: String?
+        let configurationSHA256: String?
+        let finalConfigurationChecksumURL: URL?
+        let finalConfigurationScriptURL: URL?
+
+        init(
+            pinIdentity: String,
+            finalChecksumURL: URL,
+            finalScriptURL: URL,
+            md5: String,
+            sha256: String,
+            trustState: NodeBundleTrustState?,
+            configurationMD5: String? = nil,
+            configurationSHA256: String? = nil,
+            finalConfigurationChecksumURL: URL? = nil,
+            finalConfigurationScriptURL: URL? = nil
+        ) {
+            self.pinIdentity = pinIdentity
+            self.finalChecksumURL = finalChecksumURL
+            self.finalScriptURL = finalScriptURL
+            self.md5 = md5
+            self.sha256 = sha256
+            self.trustState = trustState
+            self.configurationMD5 = configurationMD5
+            self.configurationSHA256 = configurationSHA256
+            self.finalConfigurationChecksumURL = finalConfigurationChecksumURL
+            self.finalConfigurationScriptURL = finalConfigurationScriptURL
+        }
     }
 
     private static let maximumScriptSize = 16 * 1_024 * 1_024
@@ -793,6 +1326,11 @@ actor NodeBundleRuntimeService {
     private let diagnosticLogRetainedFileCount: Int
     private let readinessTimeout: TimeInterval
     private let readinessPollInterval: TimeInterval
+    /// Stable for this App process and deliberately changes on the next App
+    /// launch. Node restarts within the same process retain it, allowing the
+    /// ledger to distinguish a live mpv lease from a lease abandoned by an
+    /// App crash.
+    private let transferOwnerSessionID = UUID()
     private let sharedStartup = SharedNodeRuntimeStartup<URL>()
 
     private var process: Process?
@@ -800,16 +1338,29 @@ actor NodeBundleRuntimeService {
     private var activeDiagnosticWriter: NodeDiagnosticLogWriter?
     private var diagnosticWriters: [String: NodeDiagnosticLogWriter] = [:]
     private var activeBundleCacheKey: String?
+    private var activeProfileStorageKey: String?
+    private var activeProfileURL: URL?
+    private var activeRuntimeContract: NodeRuntimeContractKind?
+    private var activeContractCleanupURLs: [URL] = []
     private var serviceBaseURL: URL?
     private var status: NodeRuntimeStatus = .stopped
     private var statusContinuations: [UUID: AsyncStream<NodeRuntimeStatus>.Continuation] = [:]
+    private var profileRevisionContinuations:
+        [UUID: AsyncStream<NodeProfileRevisionSnapshot>.Continuation] = [:]
     private var desiredBundle: CachedBundle?
+    private var desiredProfileNamespace: NodeRuntimeProfileNamespace?
     private var processGeneration = UUID()
     private var restartTask: Task<Void, Never>?
     private var healthMonitorTask: Task<Void, Never>?
+    private var profileMonitorTask: Task<Void, Never>?
+    private var lastProfileRevisionSnapshot: NodeProfileRevisionSnapshot?
     private var restartAttempt = 0
     private var startupCacheKey: String?
+    private var startupProfileStorageKey: String?
     private var startupGeneration: UUID?
+    private var startupStrategy: NodeBundleStartupStrategy?
+    private var playbackLeases: [UUID: NodeRuntimePlaybackLease] = [:]
+    private var stopRequestedAfterPlayback = false
 
     static let restartDelays: [TimeInterval] = [1, 2, 5]
 
@@ -892,8 +1443,52 @@ actor NodeBundleRuntimeService {
         NodeBundleSourceDescriptor.supports(url)
     }
 
-    func loadConfiguration(from sourceURL: URL) async throws -> LoadedConfiguration {
-        let baseURL = try await ensureReady(from: sourceURL)
+    func loadConfiguration(
+        from sourceURL: URL,
+        configurationID: UUID? = nil,
+        startupStrategy: NodeBundleStartupStrategy = .remoteFirst
+    ) async throws -> LoadedConfiguration {
+        let baseURL = try await ensureReady(
+            from: sourceURL,
+            configurationID: configurationID,
+            startupStrategy: startupStrategy
+        )
+        return try await loadConfiguration(
+            from: sourceURL,
+            baseURL: baseURL
+        )
+    }
+
+    /// Revalidates the publisher without delaying cache restoration. A changed
+    /// bundle is restarted from the newly validated cache; an unchanged bundle
+    /// keeps its current loopback endpoint.
+    func refreshConfiguration(
+        from sourceURL: URL,
+        configurationID: UUID? = nil
+    ) async throws -> LoadedConfiguration {
+        let descriptor = try NodeBundleSourceDescriptor(url: sourceURL)
+        let namespace = NodeRuntimeProfileNamespace(
+            configurationID: configurationID,
+            descriptor: descriptor
+        )
+        let refreshedBundle = try await downloadBundle(descriptor)
+        try Task.checkCancellation()
+        try validateBundleForExecution(refreshedBundle)
+        let baseURL = try await ensureReady(
+            source: .cached(refreshedBundle, namespace),
+            automaticRestart: false
+        )
+        try Task.checkCancellation()
+        return try await loadConfiguration(
+            from: sourceURL,
+            baseURL: baseURL
+        )
+    }
+
+    private func loadConfiguration(
+        from sourceURL: URL,
+        baseURL: URL
+    ) async throws -> LoadedConfiguration {
         try Task.checkCancellation()
         let configURL = baseURL.appendingPathComponent("config")
         let response = try await localHTTPClient.send(
@@ -905,7 +1500,31 @@ actor NodeBundleRuntimeService {
             )
         )
         try Task.checkCancellation()
-        let normalized = try Self.normalizeConfiguration(response.body)
+        // CatPawOpen's `/config` intentionally contains only currently enabled
+        // sites. `/full-config` is the authoritative capability catalogue used
+        // by its own settings UI. Read it best-effort so user-disabled and
+        // dynamically configured AList/TG providers remain discoverable
+        // without making that optional endpoint a readiness requirement.
+        let fullConfigResponse = try? await localHTTPClient.send(
+            HTTPRequest(
+                url: baseURL.appendingPathComponent("full-config"),
+                timeout: 5,
+                maximumResponseBytes: Self.maximumConfigurationSize,
+                maximumRedirects: 0,
+                retryPolicy: .none
+            )
+        )
+        let catalogData = fullConfigResponse.flatMap { response in
+            (200..<300).contains(response.statusCode) ? response.body : nil
+        }
+        let normalized = try Self.normalizeConfiguration(
+            response.body,
+            catalogData: catalogData,
+            bundleIdentity: activeBundleCacheKey,
+            profileIdentity: activeProfileStorageKey,
+            profileRevision: Self.profileRevision(at: activeProfileURL),
+            supportsHostMessageBridge: activeRuntimeContract == .hostIntegrated
+        )
         try Task.checkCancellation()
         let parsed = try ConfigurationParser().parse(normalized)
         try Task.checkCancellation()
@@ -918,29 +1537,178 @@ actor NodeBundleRuntimeService {
         )
     }
 
-    /// Returns only after the selected bundle's localhost `/health` endpoint
-    /// has answered with the expected runtime identity. Every Node business
-    /// request uses this point-of-use barrier; process existence alone is not
-    /// considered ready.
-    func ensureReady(from sourceURL: URL) async throws -> URL {
+    /// Returns only after the selected contract's readiness policy succeeds.
+    /// Contract A retains its `/health` identity check; Contract B requires an
+    /// observed managed listener plus a validated loopback `/config` capability.
+    func ensureReady(
+        from sourceURL: URL,
+        configurationID: UUID? = nil,
+        startupStrategy: NodeBundleStartupStrategy = .remoteFirst
+    ) async throws -> URL {
         let descriptor = try NodeBundleSourceDescriptor(url: sourceURL)
+        let profileNamespace = NodeRuntimeProfileNamespace(
+            configurationID: configurationID,
+            descriptor: descriptor
+        )
         return try await ensureReady(
-            source: .descriptor(descriptor),
-            automaticRestart: false
+            source: .descriptor(descriptor, profileNamespace),
+            automaticRestart: false,
+            startupStrategy: startupStrategy
         )
     }
 
-    func stop() async {
+    func stop(force: Bool = false) async {
+        if !force, !playbackLeases.isEmpty {
+            // CatPaw HLS manifests, segments and keys continue to call the
+            // provider-owned runtime after `/play` returns. Defer ordinary
+            // configuration teardown until the player releases its lease.
+            stopRequestedAfterPlayback = true
+            return
+        }
+        stopRequestedAfterPlayback = false
+        playbackLeases.removeAll()
         restartTask?.cancel()
         restartTask = nil
         healthMonitorTask?.cancel()
         healthMonitorTask = nil
+        profileMonitorTask?.cancel()
+        profileMonitorTask = nil
         startupGeneration = nil
         startupCacheKey = nil
+        startupProfileStorageKey = nil
+        startupStrategy = nil
         await sharedStartup.cancel()
         desiredBundle = nil
+        desiredProfileNamespace = nil
         restartAttempt = 0
         stopProcess(publishing: .stopped)
+    }
+
+    func acquirePlaybackLease(
+        for mediaSession: PlaybackMediaSession
+    ) -> NodeRuntimePlaybackLease? {
+        guard process?.isRunning == true,
+              let serviceBaseURL,
+              NodeRuntimePlaybackLeasePolicy.owns(
+                  mediaSession,
+                  serviceBaseURL: serviceBaseURL
+              ) else {
+            return nil
+        }
+        let lease = NodeRuntimePlaybackLease(
+            id: UUID(),
+            processGeneration: processGeneration
+        )
+        playbackLeases[lease.id] = lease
+        return lease
+    }
+
+    func releasePlaybackLease(_ lease: NodeRuntimePlaybackLease) async {
+        guard playbackLeases[lease.id] == lease else { return }
+        playbackLeases[lease.id] = nil
+        guard playbackLeases.isEmpty, stopRequestedAfterPlayback else { return }
+        await stop(force: true)
+    }
+
+    func acquireTransferLease(
+        receiptID: UUID
+    ) async -> NodeTransferLifecycleResult {
+        await invokeTransferLifecycle(
+            route: "acquire",
+            receiptID: receiptID,
+            reason: nil
+        )
+    }
+
+    func releaseTransferLease(
+        receiptID: UUID,
+        reason: NodeTransferCleanupReason = .mediaReleased
+    ) async -> NodeTransferLifecycleResult {
+        await invokeTransferLifecycle(
+            route: "release",
+            receiptID: receiptID,
+            reason: reason
+        )
+    }
+
+    func cleanupTransfer(
+        receiptID: UUID,
+        reason: NodeTransferCleanupReason
+    ) async -> NodeTransferLifecycleResult {
+        await invokeTransferLifecycle(
+            route: "cleanup",
+            receiptID: receiptID,
+            reason: reason
+        )
+    }
+
+    private func invokeTransferLifecycle(
+        route: String,
+        receiptID: UUID,
+        reason: NodeTransferCleanupReason?
+    ) async -> NodeTransferLifecycleResult {
+        guard activeRuntimeContract == .hostIntegrated,
+              let serviceBaseURL else {
+            return NodeTransferLifecycleResult(
+                status: .accountUnavailable,
+                receiptID: receiptID
+            )
+        }
+        var object: [String: Any] = [
+            "receiptID": receiptID.uuidString.lowercased()
+        ]
+        if let reason { object["reason"] = reason.rawValue }
+        guard let body = try? JSONSerialization.data(withJSONObject: object) else {
+            return NodeTransferLifecycleResult(
+                status: .permanentFailure,
+                receiptID: receiptID
+            )
+        }
+        do {
+            let response = try await localHTTPClient.send(
+                HTTPRequest(
+                    url: serviceBaseURL.appendingPathComponent(
+                        "__okvideo/transfers/\(route)"
+                    ),
+                    method: .post,
+                    headers: ["Content-Type": "application/json"],
+                    body: body,
+                    timeout: 15,
+                    maximumResponseBytes: 64 * 1_024,
+                    maximumRedirects: 0,
+                    retryPolicy: .none,
+                    allowsNonSuccessfulStatus: true
+                )
+            )
+            guard (200...299).contains(response.statusCode) else {
+                return NodeTransferLifecycleResult(
+                    status: response.statusCode == 404
+                        ? .receiptNotFound
+                        : .retryScheduled,
+                    receiptID: receiptID
+                )
+            }
+            let decoded = try JSONDecoder().decode(
+                NodeTransferLifecycleResult.self,
+                from: response.body
+            )
+            guard decoded.receiptID == nil || decoded.receiptID == receiptID else {
+                return NodeTransferLifecycleResult(
+                    status: .permanentFailure,
+                    receiptID: receiptID
+                )
+            }
+            return decoded
+        } catch {
+            return NodeTransferLifecycleResult(
+                status: .retryScheduled,
+                receiptID: receiptID
+            )
+        }
+    }
+
+    func activePlaybackLeaseCountForTesting() -> Int {
+        playbackLeases.count
     }
 
     func recordDiagnosticEvent(_ event: NodeDiagnosticEvent) {
@@ -958,13 +1726,92 @@ actor NodeBundleRuntimeService {
         }
     }
 
+    func profileRevisionUpdates() -> AsyncStream<NodeProfileRevisionSnapshot> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            profileRevisionContinuations[id] = continuation
+            if let lastProfileRevisionSnapshot {
+                continuation.yield(lastProfileRevisionSnapshot)
+            }
+            continuation.onTermination = { [weak self] _ in
+                Task { await self?.removeProfileRevisionContinuation(id) }
+            }
+        }
+    }
+
+    @discardableResult
+    func importProfile(
+        _ data: Data,
+        from sourceURL: URL,
+        configurationID: UUID
+    ) async throws -> NodeProfileRevisionSnapshot {
+        try ContractBConfigBuilder.validate(data)
+        let descriptor = try NodeBundleSourceDescriptor(url: sourceURL)
+        let namespace = NodeRuntimeProfileNamespace(
+            configurationID: configurationID,
+            descriptor: descriptor
+        )
+        _ = try await ensureReady(
+            source: .descriptor(descriptor, namespace),
+            automaticRestart: false
+        )
+        guard playbackLeases.isEmpty else {
+            throw NodeBundleRuntimeError.endpointUnavailable(
+                "CatPaw 播放仍在使用当前 Runtime，请关闭播放器后再导入 profile"
+            )
+        }
+        guard let bundle = desiredBundle else {
+            throw NodeBundleRuntimeError.endpointUnavailable(
+                "Node Runtime 尚未准备好"
+            )
+        }
+        let bundleData = try Data(
+            contentsOf: bundle.scriptURL,
+            options: .mappedIfSafe
+        )
+        guard try NodeRuntimeContractDetector.detect(
+            validatedBundleData: bundleData
+        ) == .hostIntegrated else {
+            throw NodeBundleRuntimeError.configurationContractInvalid
+        }
+        let profileURL = try contractBProfileURL(
+            for: namespace,
+            currentBundle: bundle
+        )
+        try data.write(to: profileURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: profileURL.path
+        )
+
+        restartTask?.cancel()
+        restartTask = nil
+        stopProcess(publishing: .starting)
+        _ = try await ensureReady(
+            source: .cached(bundle, namespace),
+            automaticRestart: false
+        )
+        let snapshot = NodeProfileRevisionSnapshot(
+            storageKey: namespace.storageKey,
+            revision: Self.profileRevision(at: profileURL)
+        )
+        publishProfileRevision(snapshot)
+        return snapshot
+    }
+
     func currentStatus() -> NodeRuntimeStatus {
         status
     }
 
-    func prepareBundleForTesting(from sourceURL: URL) async throws -> NodeBundleCacheSnapshot {
+    func prepareBundleForTesting(
+        from sourceURL: URL,
+        startupStrategy: NodeBundleStartupStrategy = .remoteFirst
+    ) async throws -> NodeBundleCacheSnapshot {
         let descriptor = try NodeBundleSourceDescriptor(url: sourceURL)
-        let bundle = try await obtainBundle(descriptor)
+        let bundle = try await obtainBundle(
+            descriptor,
+            startupStrategy: startupStrategy
+        )
         return NodeBundleCacheSnapshot(
             cacheKey: descriptor.cacheKey,
             sha256: bundle.sha256,
@@ -972,35 +1819,173 @@ actor NodeBundleRuntimeService {
         )
     }
 
-    static func normalizeConfiguration(_ data: Data) throws -> Data {
+    static func normalizeConfiguration(
+        _ data: Data,
+        catalogData: Data? = nil,
+        bundleIdentity: String? = nil,
+        profileIdentity: String? = nil,
+        profileRevision: String? = nil,
+        supportsHostMessageBridge: Bool = false
+    ) throws -> Data {
         guard var root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw AppError.configuration("Node 服务的 /config 未返回 JSON 对象")
         }
+        let activeDescriptors = CatPawModuleCatalog.descriptors(in: root)
+        guard !activeDescriptors.isEmpty else {
+            throw AppError.configuration(
+                "Node 服务的 /config 没有可识别的 video/read/comic/music/pan 模块"
+            )
+        }
+        let catalogRoot = catalogData.flatMap {
+            try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+        }
+        let catalogDescriptors = catalogRoot.map {
+            CatPawModuleCatalog.descriptors(in: $0)
+        } ?? []
 
-        var sites: [[String: Any]]
-        if let directSites = root["sites"] as? [[String: Any]] {
-            sites = directSites
-        } else if let video = root["video"] as? [String: Any],
-                  let videoSites = video["sites"] as? [[String: Any]] {
-            sites = videoSites
-            if root["danmaku"] == nil,
-               let danmaku = video["danmuSearchUrl"] as? String,
-               !danmaku.isEmpty {
-                root["danmaku"] = danmaku
-            }
-        } else {
-            throw AppError.configuration("Node 服务的 /config 缺少 video.sites")
+        if let video = root["video"] as? [String: Any],
+           root["danmaku"] == nil,
+           let danmaku = video["danmuSearchUrl"] as? String,
+           !danmaku.isEmpty {
+            root["danmaku"] = danmaku
         }
 
-        sites = sites.map { rawSite in
-            var site = rawSite
+        func rawMetadata(
+            _ descriptor: CatPawModuleDescriptor
+        ) -> [String: Any] {
+            guard let data = try? JSONEncoder().encode(descriptor.metadata),
+                  let object = try? JSONSerialization.jsonObject(with: data)
+                    as? [String: Any] else {
+                return [:]
+            }
+            return object
+        }
+
+        func scopedIdentity(
+            kind: CatPawModuleKind,
+            key: String
+        ) -> String {
+            let value = [
+                bundleIdentity ?? "unknown-bundle",
+                profileRevision ?? "unconfigured",
+                kind.rawValue,
+                key
+            ].joined(separator: "\u{0}")
+            return SHA256.hash(data: Data(value.utf8))
+                .map { String(format: "%02x", $0) }
+                .joined()
+        }
+
+        func decoratedVideoSite(
+            _ descriptor: CatPawModuleDescriptor,
+            catalogDisabled: Bool
+        ) -> [String: Any] {
+            var site = rawMetadata(descriptor)
+            site["key"] = descriptor.siteKey
+            site["name"] = descriptor.displayName
+            site["type"] = descriptor.spiderType
+            site["api"] = descriptor.apiPath
             site["okNodeRuntime"] = true
-            if site["hide"] == nil, let enabled = site["enable"] as? Bool, !enabled {
+            site["okNodeModuleKind"] = CatPawModuleKind.video.rawValue
+            site["okNodeSpiderType"] = descriptor.spiderType
+            site["okNodeHostMessageBridge"] = supportsHostMessageBridge
+            let indexValue: Int
+            if let value = site["indexs"] as? NSNumber {
+                indexValue = value.intValue
+            } else if let value = site["indexs"] as? Int {
+                indexValue = value
+            } else {
+                indexValue = 0
+            }
+            site["okNodeNavigationMode"] = indexValue == 1
+                ? "discovery"
+                : "detail"
+            site["okNodeSiteIdentity"] = scopedIdentity(
+                kind: .video,
+                key: descriptor.siteKey
+            )
+            let publishedCapabilities = (
+                (site["okNodeCapabilities"] as? [Any])?
+                    .compactMap { $0 as? String }
+                ?? (site["capabilities"] as? [Any])?
+                    .compactMap { $0 as? String }
+                ?? descriptor.capabilities.sorted()
+            )
+            if !publishedCapabilities.isEmpty {
+                let supportsSearch = descriptor.capabilities.contains("search")
+                site["okNodeCapabilities"] = publishedCapabilities
+                site["okNodeSearchCapabilityState"] = supportsSearch
+                    ? "supported"
+                    : "unsupported"
+                site["searchable"] = descriptor.searchable
+                    ?? (supportsSearch ? 1 : 0)
+            } else if let searchable = descriptor.searchable {
+                site["searchable"] = searchable
+                site["okNodeSearchCapabilityState"] = searchable == 0
+                    ? "unsupported"
+                    : "supported"
+                site["okNodeCapabilities"] = searchable == 0
+                    ? []
+                    : ["search"]
+            } else {
+                site["searchable"] = 1
+                site["okNodeSearchCapabilityState"] = "unknown"
+                site.removeValue(forKey: "okNodeCapabilities")
+            }
+            if let bundleIdentity {
+                site["okNodeBundleIdentity"] = bundleIdentity
+            }
+            if let profileIdentity {
+                site["okNodeProfileIdentity"] = profileIdentity
+            }
+            if let profileRevision {
+                site["okNodeProfileRevision"] = profileRevision
+            }
+            if !descriptor.enabled || catalogDisabled {
                 site["hide"] = 1
+            }
+            if catalogDisabled {
+                site["okNodeCatalogDisabled"] = true
+                let searchable = (site["searchable"] as? NSNumber)?.intValue ?? 0
+                if searchable != 0 { site["searchable"] = 2 }
             }
             return site
         }
+
+        var sites: [[String: Any]] = activeDescriptors
+            .filter { $0.moduleKind == .video }
+            .map { decoratedVideoSite($0, catalogDisabled: false) }
+        var knownVideoKeys = Set(
+            activeDescriptors.lazy
+                .filter { $0.moduleKind == .video }
+                .map(\.siteKey)
+        )
+        for descriptor in catalogDescriptors where descriptor.moduleKind == .video {
+            guard knownVideoKeys.insert(descriptor.siteKey).inserted else {
+                continue
+            }
+            sites.append(decoratedVideoSite(descriptor, catalogDisabled: true))
+        }
+
+        // The macOS product intentionally exposes only video modules. Keep
+        // parsing every descriptor so runtime diagnostics remain accurate,
+        // but do not turn read/comic/music/pan modules into host sites or
+        // construct providers for content surfaces the app does not offer.
+        // Cloud-drive credentials, `/website` configuration and `/proxy/*`
+        // playback remain runtime-owned video dependencies and are not part
+        // of this catalogue filter.
+
+        root["okCatPawModuleCounts"] = Dictionary(
+            uniqueKeysWithValues: CatPawModuleKind.allCases.map { kind in
+                (
+                    kind.rawValue,
+                    activeDescriptors.filter { $0.moduleKind == kind }.count
+                )
+            }
+        )
         root["sites"] = sites
+        root[NodeConfigurationSemanticIdentity.fieldName] = try
+            NodeConfigurationSemanticIdentity.make(from: root)
 
         do {
             return try JSONSerialization.data(
@@ -1012,6 +1997,17 @@ actor NodeBundleRuntimeService {
                 "无法转换 Node 服务配置：\(error.localizedDescription)"
             )
         }
+    }
+
+    private static func profileRevision(at url: URL?) -> String {
+        guard let url,
+              let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+              data.count <= 1_024 * 1_024 else {
+            return "unconfigured"
+        }
+        return SHA256.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     static func md5Hex(_ data: Data) -> String {
@@ -1066,9 +2062,10 @@ actor NodeBundleRuntimeService {
         bundlePath: URL,
         runtimeDirectory: URL,
         temporaryDirectory: URL,
-        parentPID: Int32 = ProcessInfo.processInfo.processIdentifier
+        parentPID: Int32 = ProcessInfo.processInfo.processIdentifier,
+        contractAdditions: [String: String] = [:]
     ) throws -> [String: String] {
-        let environment = [
+        var environment = [
             "HOST": "127.0.0.1",
             "PORT": "0",
             "NODE_ENV": "production",
@@ -1080,6 +2077,24 @@ actor NodeBundleRuntimeService {
             "OKVIDEO_BUNDLE_PATH": bundlePath.path,
             "OKVIDEO_PARENT_PID": String(parentPID)
         ]
+        let allowedContractBNames = Set([
+            "DEV_HTTP_HOST",
+            "DEV_HTTP_PORT",
+            "OKVIDEO_CONTRACT_B_CONFIG_PATH",
+            "OKVIDEO_CONTRACT_B_STATE_PATH",
+            "OKVIDEO_CONTRACT_B_PROFILE_PATH",
+            "OKVIDEO_TRANSFER_PATCH_MODULE",
+            "OKVIDEO_TRANSFER_LEDGER_PATH",
+            "OKVIDEO_INSTALLATION_UUID",
+            "OKVIDEO_INSTALLATION_HMAC_KEY",
+            "OKVIDEO_TRANSFER_OWNER_SESSION_ID"
+        ])
+        guard Set(contractAdditions.keys).isSubset(of: allowedContractBNames) else {
+            throw NodeBundleRuntimeError.invalidNodeEnvironment(
+                "Contract 注入了未授权环境变量"
+            )
+        }
+        environment.merge(contractAdditions) { _, addition in addition }
         let forbiddenNames = environment.keys.filter {
             $0 == "NODE_OPTIONS"
                 || $0 == "NODE_PATH"
@@ -1131,9 +2146,21 @@ actor NodeBundleRuntimeService {
     }
 
     private func obtainBundle(
-        _ descriptor: NodeBundleSourceDescriptor
+        _ descriptor: NodeBundleSourceDescriptor,
+        startupStrategy: NodeBundleStartupStrategy = .remoteFirst
     ) async throws -> CachedBundle {
         let writer = diagnosticWriter(for: descriptor)
+        if startupStrategy == .cacheOnly {
+            if let cached = try cachedBundleIfAvailable(
+                descriptor,
+                writer: writer
+            ) {
+                return cached
+            }
+            throw NodeBundleRuntimeError.legacyCacheUnavailable(
+                "当前配置没有经过校验的本地 Node bundle 缓存"
+            )
+        }
         do {
             return try await downloadBundle(descriptor)
         } catch let downloadError {
@@ -1147,61 +2174,80 @@ actor NodeBundleRuntimeService {
                 .allowsCachedFallback == true
             guard allowsFallback else { throw downloadError }
 
-            let currentCache = cacheURL(for: descriptor.cacheKey)
-            if FileManager.default.fileExists(atPath: currentCache.path) {
-                do {
-                    let cached = try loadCachedBundle(descriptor, cacheURL: currentCache)
-                    writer.write(
-                        diagnosticEvent(
-                            category: .cache,
-                            severity: .info,
-                            code: .trustAccepted,
-                            message: "Validated current Node bundle cache",
-                            descriptor: descriptor,
-                            trustState: cached.trustState.diagnosticState
-                        )
-                    )
-                    return cached
-                } catch {
-                    record(
-                        error: error,
-                        context: .bundleTransport,
-                        descriptor: descriptor,
-                        writer: writer
-                    )
-                    // The first hardened build created the destination directory
-                    // before it knew whether metadata existed. Treat only a
-                    // completely empty directory as an interrupted cache write;
-                    // any executable/cache material must fail closed.
-                    let contents = try? FileManager.default.contentsOfDirectory(
-                        at: currentCache,
-                        includingPropertiesForKeys: nil
-                    )
-                    guard contents?.isEmpty == true else { throw error }
-                }
+            if let cached = try cachedBundleIfAvailable(
+                descriptor,
+                writer: writer
+            ) {
+                return cached
             }
+            throw NodeBundleRuntimeError.legacyCacheUnavailable(
+                "\(downloadError.localizedDescription)；当前与旧缓存均不可用"
+            )
+        }
+    }
+
+    /// Returns a fully revalidated current cache (or a safely migrated legacy
+    /// cache) without touching the network. A non-empty invalid cache fails
+    /// closed instead of being mistaken for a cache miss.
+    private func cachedBundleIfAvailable(
+        _ descriptor: NodeBundleSourceDescriptor,
+        writer: NodeDiagnosticLogWriter
+    ) throws -> CachedBundle? {
+        let currentCache = cacheURL(for: descriptor.cacheKey)
+        if FileManager.default.fileExists(atPath: currentCache.path) {
             do {
+                let cached = try loadCachedBundle(
+                    descriptor,
+                    cacheURL: currentCache
+                )
                 writer.write(
                     diagnosticEvent(
                         category: .cache,
                         severity: .info,
-                        code: .cacheLegacyDetected,
-                        message: "Legacy Node bundle cache migration requested",
-                        descriptor: descriptor
+                        code: .trustAccepted,
+                        message: "Validated current Node bundle cache",
+                        descriptor: descriptor,
+                        trustState: cached.trustState.diagnosticState
                     )
                 )
-                return try migrateLegacyCache(descriptor)
-            } catch NodeBundleRuntimeError.legacyCacheUnavailable(let detail) {
-                throw NodeBundleRuntimeError.legacyCacheUnavailable(
-                    "\(downloadError.localizedDescription)；\(detail)"
-                )
-            } catch let migrationError as NodeBundleRuntimeError {
-                throw migrationError
+                return cached
             } catch {
-                throw NodeBundleRuntimeError.legacyMigrationFailed(
-                    error.localizedDescription
+                record(
+                    error: error,
+                    context: .bundleTransport,
+                    descriptor: descriptor,
+                    writer: writer
                 )
+                // An empty destination can be left by an interrupted legacy
+                // migration. Any executable or metadata material must fail
+                // closed and must never be treated as an ordinary cache miss.
+                let contents = try? FileManager.default.contentsOfDirectory(
+                    at: currentCache,
+                    includingPropertiesForKeys: nil
+                )
+                guard contents?.isEmpty == true else { throw error }
             }
+        }
+
+        do {
+            writer.write(
+                diagnosticEvent(
+                    category: .cache,
+                    severity: .info,
+                    code: .cacheLegacyDetected,
+                    message: "Legacy Node bundle cache migration requested",
+                    descriptor: descriptor
+                )
+            )
+            return try migrateLegacyCache(descriptor)
+        } catch NodeBundleRuntimeError.legacyCacheUnavailable {
+            return nil
+        } catch let migrationError as NodeBundleRuntimeError {
+            throw migrationError
+        } catch {
+            throw NodeBundleRuntimeError.legacyMigrationFailed(
+                error.localizedDescription
+            )
         }
     }
 
@@ -1331,16 +2377,22 @@ actor NodeBundleRuntimeService {
             finalChecksumURL: checksumResponse.url,
             finalScriptURL: scriptResponse.url
         )
-        let actualMD5 = Self.md5Hex(scriptResponse.body)
-        guard actualMD5 == checksum else {
+        let inputMD5 = Self.md5Hex(scriptResponse.body)
+        guard inputMD5 == checksum else {
             throw NodeBundleRuntimeError.integrityRejected(
-                "上游 MD5 不匹配（期望 \(checksum)，实际 \(actualMD5)）"
+                "上游 MD5 不匹配（期望 \(checksum)，实际 \(inputMD5)）"
             )
         }
         guard String(data: scriptResponse.body, encoding: .utf8) != nil else {
             throw NodeBundleRuntimeError.integrityRejected("脚本不是有效 UTF-8")
         }
-        let actualSHA256 = Self.sha256Hex(scriptResponse.body)
+        let inputSHA256 = Self.sha256Hex(scriptResponse.body)
+        let executableData = try applyDeterministicPatchIfNeeded(
+            scriptResponse.body,
+            descriptor: descriptor
+        )
+        let actualMD5 = Self.md5Hex(executableData)
+        let actualSHA256 = Self.sha256Hex(executableData)
         if let knownHash = currentLegacyTOFUHash(descriptor), knownHash != actualSHA256 {
             writer.write(
                 diagnosticEvent(
@@ -1354,28 +2406,49 @@ actor NodeBundleRuntimeService {
                 )
             )
         }
+        // Preserve the established diagnostic ordering for unpinned HTTP
+        // sources: record a mismatch with an existing TOFU cache before the
+        // missing-pin rejection below. Deterministic patches independently
+        // verify their exact input before returning executableData.
+        try Self.validateTrustedSHA256(
+            expected: descriptor.expectedInputSHA256,
+            actual: inputSHA256,
+            requiresTrustedSHA256: requiresTrustedSHA256,
+            finalScriptURL: scriptResponse.url
+        )
         try Self.validateTrustedSHA256(
             expected: descriptor.expectedSHA256,
             actual: actualSHA256,
-            requiresTrustedSHA256: requiresTrustedSHA256,
+            requiresTrustedSHA256: requiresTrustedSHA256
+                || descriptor.deterministicPatch != nil,
             finalScriptURL: scriptResponse.url
         )
 
         let trustState: NodeBundleTrustState = descriptor.expectedSHA256 == nil
             ? .httpsTransport
             : .publisherSHA256
+        let companion = await downloadCompanionConfiguration(
+            descriptor,
+            headers: headers,
+            writer: writer
+        )
         let metadata = CacheMetadata(
             pinIdentity: descriptor.pinIdentity,
             finalChecksumURL: checksumResponse.url,
             finalScriptURL: scriptResponse.url,
-            md5: checksum,
+            md5: actualMD5,
             sha256: actualSHA256,
-            trustState: trustState
+            trustState: trustState,
+            configurationMD5: companion?.md5,
+            configurationSHA256: companion?.sha256,
+            finalConfigurationChecksumURL: companion?.finalChecksumURL,
+            finalConfigurationScriptURL: companion?.finalScriptURL
         )
         let cacheURL = try installCacheAtomically(
             descriptor: descriptor,
-            script: scriptResponse.body,
-            checksum: checksum,
+            script: executableData,
+            checksum: actualMD5,
+            configuration: companion?.data,
             metadata: metadata
         )
         let cached = try loadCachedBundle(descriptor, cacheURL: cacheURL)
@@ -1391,6 +2464,86 @@ actor NodeBundleRuntimeService {
             )
         )
         return cached
+    }
+
+    private func downloadCompanionConfiguration(
+        _ descriptor: NodeBundleSourceDescriptor,
+        headers: HTTPHeaders,
+        writer: NodeDiagnosticLogWriter
+    ) async -> CompanionConfiguration? {
+        guard let checksumURL = descriptor.companionConfigurationChecksumURL,
+              let scriptURL = descriptor.companionConfigurationScriptURL
+        else { return nil }
+        do {
+            let checksumResponse = try await sendBundleRequest(
+                HTTPRequest(
+                    url: checksumURL,
+                    headers: headers,
+                    timeout: 20,
+                    maximumResponseBytes: 256,
+                    retryPolicy: HTTPRetryPolicy(maximumRetries: 2),
+                    allowsNonSuccessfulStatus: true
+                )
+            )
+            guard (200...299).contains(checksumResponse.statusCode) else {
+                return nil
+            }
+            let checksum = try checksumResponse.text()
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard checksum.range(
+                of: "^[0-9a-f]{32}$",
+                options: .regularExpression
+            ) != nil else {
+                throw NodeBundleRuntimeError.integrityRejected(
+                    "上游 index.config.js.md5 格式无效"
+                )
+            }
+
+            let scriptResponse = try await sendBundleRequest(
+                HTTPRequest(
+                    url: scriptURL,
+                    headers: headers,
+                    timeout: 30,
+                    maximumResponseBytes: Self.maximumConfigurationSize,
+                    retryPolicy: HTTPRetryPolicy(maximumRetries: 2),
+                    allowsNonSuccessfulStatus: true
+                )
+            )
+            guard (200...299).contains(scriptResponse.statusCode) else {
+                return nil
+            }
+            guard Self.md5Hex(scriptResponse.body) == checksum else {
+                throw NodeBundleRuntimeError.integrityRejected(
+                    "上游 index.config.js MD5 不匹配"
+                )
+            }
+            _ = try Self.requiresTrustedSHA256(
+                finalChecksumURL: checksumResponse.url,
+                finalScriptURL: scriptResponse.url
+            )
+            let normalized = try ContractBCompanionConfigParser
+                .normalizedConfiguration(from: scriptResponse.body)
+            return CompanionConfiguration(
+                data: normalized,
+                md5: checksum,
+                sha256: Self.sha256Hex(normalized),
+                finalChecksumURL: checksumResponse.url,
+                finalScriptURL: scriptResponse.url
+            )
+        } catch {
+            // A companion is an optional extension to Contract B. Reject only
+            // the companion on transport, integrity, or static-grammar errors;
+            // the already verified executable bundle can still use the bounded
+            // minimum configuration.
+            record(
+                error: error,
+                context: .bundleTransport,
+                descriptor: descriptor,
+                writer: writer
+            )
+            return nil
+        }
     }
 
     private func sendBundleRequest(_ request: HTTPRequest) async throws -> HTTPResponse {
@@ -1411,12 +2564,106 @@ actor NodeBundleRuntimeService {
         }
     }
 
+    private func applyDeterministicPatchIfNeeded(
+        _ input: Data,
+        descriptor: NodeBundleSourceDescriptor
+    ) throws -> Data {
+        guard let patch = descriptor.deterministicPatch else { return input }
+        return try Self.applyDeterministicPatch(
+            input,
+            patch: patch,
+            finalScriptURL: descriptor.scriptURL
+        )
+    }
+
+    /// Kept internal so the integrity transform can be exercised without a
+    /// network request. Production descriptors still select the only shipped
+    /// patch and provide its immutable upstream URL.
+    static func applyDeterministicPatch(
+        _ input: Data,
+        patch: NodeBundleDeterministicPatch,
+        finalScriptURL: URL,
+        bundle: Bundle = .main
+    ) throws -> Data {
+        let inputSHA256 = Self.sha256Hex(input)
+        guard inputSHA256 == patch.inputSHA256 else {
+            throw NodeBundleRuntimeError.sha256Mismatch(
+                expected: patch.inputSHA256,
+                actual: inputSHA256,
+                finalURL: finalScriptURL
+            )
+        }
+        let patchURL = try Self.validatedNodePatchResourceURL(
+            named: patch.patchResourceName,
+            expectedSHA256: patch.patchResourceSHA256,
+            bundle: bundle
+        )
+        let patchData = try Data(contentsOf: patchURL, options: .mappedIfSafe)
+        var output = input
+        if output.last != 0x0A {
+            output.append(0x0A)
+        }
+        output.append(patchData)
+        guard output.count <= Self.maximumScriptSize else {
+            throw NodeBundleRuntimeError.integrityRejected(
+                "确定性补丁后的脚本超过 16 MiB 限制"
+            )
+        }
+        let outputSHA256 = Self.sha256Hex(output)
+        guard outputSHA256 == patch.outputSHA256 else {
+            throw NodeBundleRuntimeError.sha256Mismatch(
+                expected: patch.outputSHA256,
+                actual: outputSHA256,
+                finalURL: patchURL
+            )
+        }
+        _ = try Self.validatedNodePatchResourceURL(
+            named: patch.moduleResourceName,
+            expectedSHA256: patch.moduleResourceSHA256,
+            bundle: bundle
+        )
+        return output
+    }
+
+    private static func validatedNodePatchResourceURL(
+        named name: String,
+        expectedSHA256: String,
+        bundle: Bundle = .main
+    ) throws -> URL {
+        let candidates = [
+            bundle.url(
+                forResource: name,
+                withExtension: "js",
+                subdirectory: "NodePatches"
+            ),
+            bundle.url(forResource: name, withExtension: "js")
+        ].compactMap { $0 }
+        guard let resourceURL = candidates.first else {
+            throw NodeBundleRuntimeError.integrityRejected(
+                "应用内置 Node 补丁资源缺失"
+            )
+        }
+        let data = try Data(contentsOf: resourceURL, options: .mappedIfSafe)
+        let actualSHA256 = sha256Hex(data)
+        guard actualSHA256 == expectedSHA256 else {
+            throw NodeBundleRuntimeError.sha256Mismatch(
+                expected: expectedSHA256,
+                actual: actualSHA256,
+                finalURL: resourceURL
+            )
+        }
+        return resourceURL
+    }
+
     private func loadCachedBundle(
         _ descriptor: NodeBundleSourceDescriptor,
         cacheURL: URL
     ) throws -> CachedBundle {
         let scriptURL = cacheURL.appendingPathComponent("index.js")
         let checksumURL = cacheURL.appendingPathComponent("index.js.md5")
+        let configurationURL = cacheURL.appendingPathComponent(
+            "index.config.json"
+        )
         let metadataURL = cacheURL.appendingPathComponent("metadata.json")
         let metadata: CacheMetadata
         do {
@@ -1462,11 +2709,29 @@ actor NodeBundleRuntimeService {
         try Self.validateTrustedSHA256(
             expected: descriptor.expectedSHA256,
             actual: actualSHA256,
-            requiresTrustedSHA256: requiresTrustedSHA256,
+            requiresTrustedSHA256: requiresTrustedSHA256
+                || descriptor.deterministicPatch != nil,
             finalScriptURL: metadata.finalScriptURL
         )
         let trustState = metadata.trustState
             ?? (descriptor.expectedSHA256 == nil ? .httpsTransport : .publisherSHA256)
+        let configurationData: Data?
+        if let configurationSHA256 = metadata.configurationSHA256 {
+            let data = try Data(
+                contentsOf: configurationURL,
+                options: .mappedIfSafe
+            )
+            guard data.count <= Self.maximumConfigurationSize,
+                  Self.sha256Hex(data) == configurationSHA256 else {
+                throw NodeBundleRuntimeError.integrityRejected(
+                    "缓存 index.config.json SHA-256 不匹配"
+                )
+            }
+            try ContractBConfigBuilder.validate(data)
+            configurationData = data
+        } else {
+            configurationData = nil
+        }
         return CachedBundle(
             sourceID: descriptor.sourceID,
             cacheKey: descriptor.cacheKey,
@@ -1477,27 +2742,39 @@ actor NodeBundleRuntimeService {
             finalChecksumURL: metadata.finalChecksumURL,
             finalScriptURL: metadata.finalScriptURL,
             runtimeDirectory: try runtimeDirectory(for: descriptor),
-            trustState: trustState
+            trustState: trustState,
+            configurationData: configurationData,
+            deterministicPatch: descriptor.deterministicPatch
         )
     }
 
     private func migrateLegacyCache(
         _ descriptor: NodeBundleSourceDescriptor
     ) throws -> CachedBundle {
-        let legacyURL = cacheURL(for: descriptor.legacyCacheKey)
-        let scriptURL = legacyURL.appendingPathComponent("index.js")
-        let checksumURL = legacyURL.appendingPathComponent("index.js.md5")
-        guard FileManager.default.fileExists(atPath: scriptURL.path),
-              FileManager.default.fileExists(atPath: checksumURL.path) else {
+        let candidateKeys = [descriptor.legacyCacheKey]
+            + descriptor.fallbackCacheKeys
+        guard let legacyURL = candidateKeys
+            .map(cacheURL(for:))
+            .first(where: { candidate in
+                FileManager.default.fileExists(
+                    atPath: candidate.appendingPathComponent("index.js").path
+                )
+                    && FileManager.default.fileExists(
+                        atPath: candidate
+                            .appendingPathComponent("index.js.md5").path
+                    )
+            }) else {
             throw NodeBundleRuntimeError.legacyCacheUnavailable(
                 "旧缓存目录不存在或缺少 index.js/index.js.md5"
             )
         }
-        let data = try Data(contentsOf: scriptURL, options: .mappedIfSafe)
-        guard data.count <= Self.maximumScriptSize else {
+        let scriptURL = legacyURL.appendingPathComponent("index.js")
+        let checksumURL = legacyURL.appendingPathComponent("index.js.md5")
+        let inputData = try Data(contentsOf: scriptURL, options: .mappedIfSafe)
+        guard inputData.count <= Self.maximumScriptSize else {
             throw NodeBundleRuntimeError.integrityRejected("旧缓存超过 16 MiB 限制")
         }
-        guard String(data: data, encoding: .utf8) != nil else {
+        guard String(data: inputData, encoding: .utf8) != nil else {
             throw NodeBundleRuntimeError.integrityRejected("旧缓存脚本不是有效 UTF-8")
         }
         let checksum = try String(contentsOf: checksumURL, encoding: .utf8)
@@ -1509,38 +2786,54 @@ actor NodeBundleRuntimeService {
         ) != nil else {
             throw NodeBundleRuntimeError.integrityRejected("旧缓存 MD5 格式无效")
         }
-        let actualMD5 = Self.md5Hex(data)
-        guard checksum == actualMD5 else {
+        let inputMD5 = Self.md5Hex(inputData)
+        guard checksum == inputMD5 else {
             throw NodeBundleRuntimeError.legacyMD5Mismatch(
                 expected: checksum,
-                actual: actualMD5
+                actual: inputMD5
             )
         }
-        let actualSHA256 = Self.sha256Hex(data)
+        let inputSHA256 = Self.sha256Hex(inputData)
         let requiresPin = try Self.requiresTrustedSHA256(
             finalChecksumURL: descriptor.checksumURL,
             finalScriptURL: descriptor.scriptURL
         )
         try Self.validateTrustedSHA256(
+            expected: descriptor.expectedInputSHA256,
+            actual: inputSHA256,
+            requiresTrustedSHA256: requiresPin
+                || descriptor.deterministicPatch != nil,
+            finalScriptURL: descriptor.scriptURL
+        )
+        let data = try applyDeterministicPatchIfNeeded(
+            inputData,
+            descriptor: descriptor
+        )
+        let actualMD5 = Self.md5Hex(data)
+        let actualSHA256 = Self.sha256Hex(data)
+        try Self.validateTrustedSHA256(
             expected: descriptor.expectedSHA256,
             actual: actualSHA256,
-            requiresTrustedSHA256: requiresPin,
+            requiresTrustedSHA256: requiresPin
+                || descriptor.deterministicPatch != nil,
             finalScriptURL: descriptor.scriptURL
         )
         let metadata = CacheMetadata(
             pinIdentity: descriptor.pinIdentity,
             finalChecksumURL: descriptor.checksumURL,
             finalScriptURL: descriptor.scriptURL,
-            md5: checksum,
+            md5: actualMD5,
             sha256: actualSHA256,
-            trustState: .legacyTOFU
+            trustState: descriptor.deterministicPatch == nil
+                ? .legacyTOFU
+                : .publisherSHA256
         )
         let installedURL: URL
         do {
             installedURL = try installCacheAtomically(
                 descriptor: descriptor,
                 script: data,
-                checksum: checksum,
+                checksum: actualMD5,
                 metadata: metadata,
                 beforeCommit: migrationCommitHook
             )
@@ -1559,7 +2852,7 @@ actor NodeBundleRuntimeService {
                 code: .cacheMigrationSucceeded,
                 message: "Legacy Node bundle cache migration succeeded",
                 descriptor: descriptor,
-                trustState: .legacyTOFU
+                trustState: bundle.trustState.diagnosticState
             )
         )
         return bundle
@@ -1569,6 +2862,7 @@ actor NodeBundleRuntimeService {
         descriptor: NodeBundleSourceDescriptor,
         script: Data,
         checksum: String,
+        configuration: Data? = nil,
         metadata: CacheMetadata,
         beforeCommit: (() throws -> Void)? = nil
     ) throws -> URL {
@@ -1588,11 +2882,20 @@ actor NodeBundleRuntimeService {
         }
         let scriptURL = staging.appendingPathComponent("index.js")
         let checksumURL = staging.appendingPathComponent("index.js.md5")
+        let configurationURL = staging.appendingPathComponent(
+            "index.config.json"
+        )
         let metadataURL = staging.appendingPathComponent("metadata.json")
         try script.write(to: scriptURL, options: .atomic)
         try Data(checksum.utf8).write(to: checksumURL, options: .atomic)
+        if let configuration {
+            try ContractBConfigBuilder.validate(configuration)
+            try configuration.write(to: configurationURL, options: .atomic)
+        }
         try JSONEncoder().encode(metadata).write(to: metadataURL, options: .atomic)
-        for file in [scriptURL, checksumURL, metadataURL] {
+        var files = [scriptURL, checksumURL, metadataURL]
+        if configuration != nil { files.append(configurationURL) }
+        for file in files {
             try FileManager.default.setAttributes(
                 [.posixPermissions: 0o600],
                 ofItemAtPath: file.path
@@ -1735,6 +3038,255 @@ actor NodeBundleRuntimeService {
         return runtime
     }
 
+    private func contractBProfileURL(
+        for namespace: NodeRuntimeProfileNamespace,
+        currentBundle: CachedBundle
+    ) throws -> URL {
+        let profileDirectory = applicationSupportDirectory
+            .appendingPathComponent("NodeProfiles", isDirectory: true)
+            .appendingPathComponent(namespace.storageKey, isDirectory: true)
+        try secureDirectory(profileDirectory)
+        let profileURL = profileDirectory.appendingPathComponent(
+            "contract-b-profile.json"
+        )
+        if FileManager.default.fileExists(atPath: profileURL.path) {
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: profileURL.path
+            )
+            return profileURL
+        }
+
+        guard let legacy = try legacyProfileCandidate(
+            for: namespace,
+            currentBundle: currentBundle
+        ) else {
+            return profileURL
+        }
+        let data = try validatedProfileData(at: legacy.profileURL)
+        let backups = profileDirectory.appendingPathComponent(
+            "Backups",
+            isDirectory: true
+        )
+        try secureDirectory(backups)
+        let timestamp = Int(now().timeIntervalSince1970)
+        let backupURL = backups.appendingPathComponent(
+            "contract-b-profile-\(timestamp)-\(legacy.cacheKey.prefix(12)).json"
+        )
+        try data.write(to: backupURL, options: [.atomic])
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: backupURL.path
+        )
+        try data.write(to: profileURL, options: [.atomic])
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: profileURL.path
+        )
+        return profileURL
+    }
+
+    private func seedContractBDefaults(
+        _ defaults: Data,
+        profileURL: URL,
+        runtimeDirectory: URL
+    ) throws {
+        try ContractBConfigBuilder.validate(defaults)
+        let revision = Self.sha256Hex(defaults)
+        try mergeContractBDefaultsIfNeeded(
+            defaults,
+            into: profileURL,
+            markerURL: profileURL.deletingLastPathComponent()
+                .appendingPathComponent("publisher-defaults.sha256"),
+            revision: revision,
+            createsMissingTarget: true
+        )
+
+        let databaseURL = runtimeDirectory.appendingPathComponent(
+            "test0.db.json"
+        )
+        try mergeContractBDefaultsIfNeeded(
+            defaults,
+            into: databaseURL,
+            markerURL: runtimeDirectory.appendingPathComponent(
+                "publisher-defaults.sha256"
+            ),
+            revision: revision,
+            createsMissingTarget: false
+        )
+    }
+
+    private func mergeContractBDefaultsIfNeeded(
+        _ defaults: Data,
+        into targetURL: URL,
+        markerURL: URL,
+        revision: String,
+        createsMissingTarget: Bool
+    ) throws {
+        if let currentRevision = try? String(
+            contentsOf: markerURL,
+            encoding: .utf8
+        ).trimmingCharacters(in: .whitespacesAndNewlines),
+           currentRevision == revision {
+            return
+        }
+
+        let manager = FileManager.default
+        let output: Data
+        if manager.fileExists(atPath: targetURL.path) {
+            let values = try targetURL.resourceValues(forKeys: [
+                .isRegularFileKey,
+                .isSymbolicLinkKey,
+                .fileSizeKey
+            ])
+            guard values.isRegularFile == true,
+                  values.isSymbolicLink != true,
+                  let size = values.fileSize,
+                  size <= Self.maximumConfigurationSize else {
+                throw NodeBundleRuntimeError.configurationContractInvalid
+            }
+            output = try ContractBConfigBuilder.mergeDefaults(
+                defaults,
+                userValues: Data(contentsOf: targetURL, options: .mappedIfSafe)
+            )
+        } else {
+            guard createsMissingTarget else { return }
+            output = defaults
+        }
+
+        try output.write(to: targetURL, options: .atomic)
+        try manager.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: targetURL.path
+        )
+        try Data(revision.utf8).write(to: markerURL, options: .atomic)
+        try manager.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: markerURL.path
+        )
+    }
+
+    private struct LegacyProfileCandidate {
+        let profileURL: URL
+        let cacheKey: String
+        let modifiedAt: Date
+    }
+
+    private func legacyProfileCandidate(
+        for namespace: NodeRuntimeProfileNamespace,
+        currentBundle: CachedBundle
+    ) throws -> LegacyProfileCandidate? {
+        let manager = FileManager.default
+        let runtimeRoot = applicationSupportDirectory.appendingPathComponent(
+            "NodeRuntime",
+            isDirectory: true
+        )
+        guard let runtimeDirectories = try? manager.contentsOfDirectory(
+            at: runtimeRoot,
+            includingPropertiesForKeys: [
+                .isDirectoryKey,
+                .isSymbolicLinkKey,
+                .contentModificationDateKey
+            ],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+        var candidates: [LegacyProfileCandidate] = []
+        for directory in runtimeDirectories {
+            let values = try directory.resourceValues(forKeys: [
+                .isDirectoryKey,
+                .isSymbolicLinkKey,
+                .contentModificationDateKey
+            ])
+            guard values.isDirectory == true,
+                  values.isSymbolicLink != true else { continue }
+            let cacheKey = directory.lastPathComponent
+            let profileURL = directory.appendingPathComponent(
+                "contract-b-profile.json"
+            )
+            guard manager.fileExists(atPath: profileURL.path) else { continue }
+            let belongsToCurrentSource: Bool
+            if cacheKey == currentBundle.cacheKey {
+                belongsToCurrentSource = true
+            } else {
+                belongsToCurrentSource = legacyCacheMetadata(
+                    cacheKey: cacheKey,
+                    matches: namespace
+                )
+            }
+            guard belongsToCurrentSource,
+                  (try? validatedProfileData(at: profileURL)) != nil else {
+                continue
+            }
+            let profileValues = try profileURL.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            )
+            candidates.append(
+                LegacyProfileCandidate(
+                    profileURL: profileURL,
+                    cacheKey: cacheKey,
+                    modifiedAt: profileValues.contentModificationDate
+                        ?? values.contentModificationDate
+                        ?? .distantPast
+                )
+            )
+        }
+        return candidates.max { $0.modifiedAt < $1.modifiedAt }
+    }
+
+    private func legacyCacheMetadata(
+        cacheKey: String,
+        matches namespace: NodeRuntimeProfileNamespace
+    ) -> Bool {
+        let metadataURL = cacheURL(for: cacheKey)
+            .appendingPathComponent("metadata.json")
+        guard let data = try? Data(contentsOf: metadataURL),
+              let metadata = try? JSONDecoder().decode(
+                  CacheMetadata.self,
+                  from: data
+              ) else {
+            return false
+        }
+        let values = metadata.pinIdentity
+            .split(separator: "\n")
+            .reduce(into: [String: String]()) { result, line in
+                let components = line.split(
+                    separator: "=",
+                    maxSplits: 1,
+                    omittingEmptySubsequences: false
+                )
+                guard components.count == 2 else { return }
+                result[String(components[0])] = String(components[1])
+            }
+        let source = values["request"]
+        let publisher = values["source"].flatMap { $0 == "-" ? nil : $0 }
+            ?? NodeRuntimeProfileNamespace.originIdentityForMigration(
+                sourceURLString: source
+            )
+        return source == namespace.sourceIdentity
+            && publisher == namespace.publisherIdentity
+    }
+
+    private func validatedProfileData(at url: URL) throws -> Data {
+        let values = try url.resourceValues(forKeys: [
+            .isRegularFileKey,
+            .isSymbolicLinkKey,
+            .fileSizeKey
+        ])
+        guard values.isRegularFile == true,
+              values.isSymbolicLink != true,
+              let size = values.fileSize,
+              size <= 1_024 * 1_024 else {
+            throw NodeBundleRuntimeError.configurationContractInvalid
+        }
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        guard (try JSONSerialization.jsonObject(with: data)) is [String: Any] else {
+            throw NodeBundleRuntimeError.configurationContractInvalid
+        }
+        return data
+    }
+
     private func secureDirectory(_ directory: URL) throws {
         try FileManager.default.createDirectory(
             at: directory,
@@ -1747,29 +3299,153 @@ actor NodeBundleRuntimeService {
         )
     }
 
+    private func transferEnvironment(
+        for bundle: CachedBundle
+    ) throws -> [String: String] {
+        guard let patch = bundle.deterministicPatch else { return [:] }
+        let root = applicationSupportDirectory.appendingPathComponent(
+            "CloudTransfers",
+            isDirectory: true
+        )
+        try secureDirectory(root)
+        let installationUUID = try stableTransferIdentityValue(
+            at: root.appendingPathComponent("installation-id"),
+            validate: { UUID(uuidString: $0) != nil },
+            generate: { UUID().uuidString.lowercased() }
+        )
+        let hmacKey = try stableTransferIdentityValue(
+            at: root.appendingPathComponent("installation-hmac-key"),
+            validate: {
+                $0.range(
+                    of: "^[0-9a-f]{64}$",
+                    options: .regularExpression
+                ) != nil
+            },
+            generate: {
+                var generator = SystemRandomNumberGenerator()
+                let bytes = (0..<32).map { _ in
+                    UInt8.random(in: .min ... .max, using: &generator)
+                }
+                return bytes.map { String(format: "%02x", $0) }.joined()
+            }
+        )
+        let moduleURL = try Self.validatedNodePatchResourceURL(
+            named: patch.moduleResourceName,
+            expectedSHA256: patch.moduleResourceSHA256
+        )
+        return [
+            "OKVIDEO_TRANSFER_PATCH_MODULE": moduleURL.path,
+            "OKVIDEO_TRANSFER_LEDGER_PATH": root
+                .appendingPathComponent("ledger-v1.json")
+                .path,
+            "OKVIDEO_INSTALLATION_UUID": installationUUID,
+            "OKVIDEO_INSTALLATION_HMAC_KEY": hmacKey,
+            "OKVIDEO_TRANSFER_OWNER_SESSION_ID": transferOwnerSessionID
+                .uuidString.lowercased()
+        ]
+    }
+
+    private func stableTransferIdentityValue(
+        at url: URL,
+        validate: (String) -> Bool,
+        generate: () -> String
+    ) throws -> String {
+        if FileManager.default.fileExists(atPath: url.path) {
+            let values = try url.resourceValues(forKeys: [
+                .isRegularFileKey,
+                .isSymbolicLinkKey,
+                .fileSizeKey
+            ])
+            if values.isRegularFile == true,
+               values.isSymbolicLink != true,
+               let size = values.fileSize,
+               size <= 512,
+               let value = try? String(contentsOf: url, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               validate(value) {
+                return value.lowercased()
+            }
+            let preserved = url.deletingLastPathComponent()
+                .appendingPathComponent(
+                    "\(url.lastPathComponent).invalid-"
+                        + "\(Int(now().timeIntervalSince1970))-"
+                        + UUID().uuidString.lowercased()
+                )
+            try FileManager.default.moveItem(at: url, to: preserved)
+        }
+        let value = generate().lowercased()
+        guard validate(value) else {
+            throw NodeBundleRuntimeError.integrityRejected(
+                "应用安装身份生成失败"
+            )
+        }
+        try Data((value + "\n").utf8).write(to: url, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: url.path
+        )
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.synchronize()
+        try handle.close()
+        return value
+    }
+
     private func ensureReady(
         source: StartupSource,
-        automaticRestart: Bool
+        automaticRestart: Bool,
+        startupStrategy: NodeBundleStartupStrategy = .remoteFirst
     ) async throws -> URL {
         try Task.checkCancellation()
         let cacheKey = source.cacheKey
+        let profileStorageKey = source.profileNamespace.storageKey
         if activeBundleCacheKey == cacheKey,
+           activeProfileStorageKey == profileStorageKey,
            process?.isRunning == true,
            let serviceBaseURL,
            case .running(let publishedURL) = status,
-           publishedURL == serviceBaseURL {
+           publishedURL == serviceBaseURL,
+           activeRuntimeMatches(source) {
             return serviceBaseURL
         }
 
-        if let startupCacheKey, let generation = startupGeneration {
+        if process?.isRunning == true, !playbackLeases.isEmpty {
+            throw NodeBundleRuntimeError.endpointUnavailable(
+                "CatPaw 播放仍在使用当前 Runtime，请关闭播放器后再切换配置"
+            )
+        }
+
+        if let startupCacheKey,
+           let startupProfileStorageKey,
+           let generation = startupGeneration {
+            if NodeRuntimeStartupPreemptionPolicy.shouldPreempt(
+                current: self.startupStrategy,
+                incoming: startupStrategy
+            ) {
+                // A user-visible restoration must not join an update-oriented
+                // publisher request. Cancel the shared remote startup and let
+                // this request immediately validate and launch the cache.
+                startupGeneration = nil
+                self.startupCacheKey = nil
+                self.startupProfileStorageKey = nil
+                self.startupStrategy = nil
+                await sharedStartup.cancel()
+                try Task.checkCancellation()
+                return try await ensureReady(
+                    source: source,
+                    automaticRestart: automaticRestart,
+                    startupStrategy: startupStrategy
+                )
+            }
+            let joinsCurrentStartup = startupCacheKey == cacheKey
+                && startupProfileStorageKey == profileStorageKey
             recordStartupLifecycle(
                 code: .runtimeStartupJoined,
-                message: startupCacheKey == cacheKey
+                message: joinsCurrentStartup
                     ? "Joined existing Node runtime startup"
                     : "Waiting for another Node runtime startup to finish",
                 cacheKey: cacheKey
             )
-            if startupCacheKey == cacheKey {
+            if joinsCurrentStartup {
                 do {
                     let endpoint = try await sharedStartup.run(
                         sessionID: generation
@@ -1799,7 +3475,8 @@ actor NodeBundleRuntimeService {
             try Task.checkCancellation()
             return try await ensureReady(
                 source: source,
-                automaticRestart: automaticRestart
+                automaticRestart: automaticRestart,
+                startupStrategy: startupStrategy
             )
         }
 
@@ -1811,6 +3488,8 @@ actor NodeBundleRuntimeService {
         let generation = UUID()
         startupGeneration = generation
         startupCacheKey = cacheKey
+        startupProfileStorageKey = profileStorageKey
+        self.startupStrategy = startupStrategy
         recordStartupLifecycle(
             code: .runtimeStartRequested,
             message: automaticRestart
@@ -1832,7 +3511,8 @@ actor NodeBundleRuntimeService {
                 guard let self else { throw CancellationError() }
                 return try await self.performStartup(
                     source: source,
-                    generation: generation
+                    generation: generation,
+                    startupStrategy: startupStrategy
                 )
             }
             finishStartup(generation: generation)
@@ -1850,18 +3530,38 @@ actor NodeBundleRuntimeService {
         guard startupGeneration == generation else { return }
         startupGeneration = nil
         startupCacheKey = nil
+        startupProfileStorageKey = nil
+        startupStrategy = nil
+    }
+
+    private func activeRuntimeMatches(_ source: StartupSource) -> Bool {
+        switch source {
+        case .descriptor:
+            // A descriptor-based ordinary call is allowed to reuse the active
+            // process. Explicit publisher revalidation enters with `.cached`
+            // after downloading, where content equality is known.
+            return true
+        case .cached(let candidate, _):
+            guard let desiredBundle else { return false }
+            return desiredBundle.sha256 == candidate.sha256
+                && desiredBundle.configurationData == candidate.configurationData
+        }
     }
 
     private func performStartup(
         source: StartupSource,
-        generation: UUID
+        generation: UUID,
+        startupStrategy: NodeBundleStartupStrategy = .remoteFirst
     ) async throws -> URL {
         do {
             let bundle: CachedBundle
             switch source {
-            case .descriptor(let descriptor):
-                bundle = try await obtainBundle(descriptor)
-            case .cached(let cached):
+            case .descriptor(let descriptor, _):
+                bundle = try await obtainBundle(
+                    descriptor,
+                    startupStrategy: startupStrategy
+                )
+            case .cached(let cached, _):
                 bundle = cached
             }
             try Task.checkCancellation()
@@ -1869,13 +3569,28 @@ actor NodeBundleRuntimeService {
             guard startupGeneration == generation else {
                 throw CancellationError()
             }
+            guard playbackLeases.isEmpty else {
+                throw NodeBundleRuntimeError.endpointUnavailable(
+                    "CatPaw 播放仍在使用当前 Runtime，请关闭播放器后再更新"
+                )
+            }
             desiredBundle = bundle
+            desiredProfileNamespace = source.profileNamespace
             stopProcess(publishing: .starting)
-            let endpoint = try await startProcess(bundle)
+            let endpoint = try await startProcess(
+                bundle,
+                profileNamespace: source.profileNamespace
+            )
             guard startupGeneration == generation else {
                 throw CancellationError()
             }
             activeBundleCacheKey = bundle.cacheKey
+            activeProfileStorageKey = source.profileNamespace.storageKey
+            startProfileMonitor(
+                generation: processGeneration,
+                profileURL: activeProfileURL,
+                storageKey: source.profileNamespace.storageKey
+            )
             return endpoint
         } catch {
             if startupGeneration == generation {
@@ -1921,8 +3636,19 @@ actor NodeBundleRuntimeService {
         )
     }
 
-    private func startProcess(_ bundle: CachedBundle) async throws -> URL {
+    private func startProcess(
+        _ bundle: CachedBundle,
+        profileNamespace: NodeRuntimeProfileNamespace
+    ) async throws -> URL {
         try validateBundleForExecution(bundle)
+        let validatedBundleData = try Data(
+            contentsOf: bundle.scriptURL,
+            options: .mappedIfSafe
+        )
+        let contract = try NodeRuntimeContractDetector.detect(
+            validatedBundleData: validatedBundleData
+        )
+        activeRuntimeContract = contract
         let nodeExecutable = try nodeExecutableURL()
         let launcherURL = bundle.runtimeDirectory.appendingPathComponent("launcher.js")
         let writer = diagnosticWriters[bundle.cacheKey] ?? NodeDiagnosticLogWriter(
@@ -1939,7 +3665,73 @@ actor NodeBundleRuntimeService {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        try Data(Self.launcherScript.utf8).write(to: launcherURL, options: .atomic)
+        let profileURL = contract == .hostIntegrated
+            ? try contractBProfileURL(
+                for: profileNamespace,
+                currentBundle: bundle
+            )
+            : nil
+        if contract == .hostIntegrated,
+           let profileURL,
+           let configurationData = bundle.configurationData {
+            try seedContractBDefaults(
+                configurationData,
+                profileURL: profileURL,
+                runtimeDirectory: bundle.runtimeDirectory
+            )
+        }
+        activeProfileURL = profileURL
+        let launchPlan = try NodeRuntimeContractFactory.makePlan(
+            contract: contract,
+            runtimeDirectory: bundle.runtimeDirectory,
+            profileURL: profileURL,
+            configurationData: bundle.configurationData,
+            transferEnvironment: try transferEnvironment(for: bundle)
+        )
+        activeContractCleanupURLs = launchPlan.cleanupURLs
+        writer.write(
+            NodeDiagnosticEvent(
+                timestamp: now(),
+                category: .runtime,
+                severity: .info,
+                code: .runtimeContractDetected,
+                message: "Node runtime contract selected: \(contract.rawValue)",
+                sourceID: bundle.sourceID,
+                cacheKey: bundle.cacheKey,
+                trustState: bundle.trustState.diagnosticState
+            )
+        )
+        if contract == .hostIntegrated {
+            writer.write(
+                NodeDiagnosticEvent(
+                    timestamp: now(),
+                    category: .runtime,
+                    severity: .info,
+                    code: .runtimeConfigurationValidated,
+                message: bundle.configurationData == nil
+                    ? "Contract B fallback host configuration validated"
+                    : "Contract B publisher companion configuration validated",
+                    sourceID: bundle.sourceID,
+                    cacheKey: bundle.cacheKey
+                )
+            )
+            writer.write(
+                NodeDiagnosticEvent(
+                    timestamp: now(),
+                    category: .runtime,
+                    severity: .info,
+                    code: .runtimeHostAdapterReady,
+                    message: "Contract B bounded host adapter prepared",
+                    sourceID: bundle.sourceID,
+                    cacheKey: bundle.cacheKey,
+                    localPort: launchPlan.environmentAdditions["DEV_HTTP_PORT"].flatMap(Int.init)
+                )
+            )
+        }
+        try Data(launchPlan.launcherScript.utf8).write(
+            to: launcherURL,
+            options: .atomic
+        )
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o600],
             ofItemAtPath: launcherURL.path
@@ -1975,7 +3767,8 @@ actor NodeBundleRuntimeService {
         process.environment = try Self.sanitizedNodeEnvironment(
             bundlePath: bundle.scriptURL,
             runtimeDirectory: bundle.runtimeDirectory,
-            temporaryDirectory: temporaryDirectory
+            temporaryDirectory: temporaryDirectory,
+            contractAdditions: launchPlan.environmentAdditions
         )
         process.standardOutput = pipe
         process.standardError = pipe
@@ -2048,18 +3841,57 @@ actor NodeBundleRuntimeService {
                     "进程在服务就绪前提前退出"
                 )
             }
-            if let port = portCapture.port,
+            let port: Int?
+            switch launchPlan.contract {
+            case .service:
+                port = portCapture.port
+            case .hostIntegrated:
+                port = launchPlan.stateFileURL
+                    .flatMap(ContractBListenerState.readValidated(from:))?
+                    .port
+            }
+            if let port,
                let baseURL = URL(string: "http://127.0.0.1:\(port)/"),
-               await isHealthy(baseURL) {
+               await isReady(baseURL, policy: launchPlan.readinessPolicy) {
                 serviceBaseURL = baseURL
                 publish(.running(baseURL))
+                if launchPlan.contract == .hostIntegrated {
+                    writer.write(
+                        NodeDiagnosticEvent(
+                            timestamp: now(),
+                            category: .runtime,
+                            severity: .info,
+                            code: .runtimeListenerObserved,
+                            message: "Contract B managed configuration listener observed",
+                            sourceID: bundle.sourceID,
+                            cacheKey: bundle.cacheKey,
+                            nodePID: process.processIdentifier,
+                            localPort: port
+                        )
+                    )
+                    writer.write(
+                        NodeDiagnosticEvent(
+                            timestamp: now(),
+                            category: .runtime,
+                            severity: .info,
+                            code: .runtimeCapabilityValidated,
+                            message: "Contract B configuration capability validated",
+                            sourceID: bundle.sourceID,
+                            cacheKey: bundle.cacheKey,
+                            nodePID: process.processIdentifier,
+                            localPort: port
+                        )
+                    )
+                }
                 writer.write(
                     NodeDiagnosticEvent(
                         timestamp: now(),
                         category: .runtime,
                         severity: .info,
                         code: .runtimeReady,
-                        message: "Node runtime health check succeeded",
+                        message: launchPlan.contract == .service
+                            ? "Node runtime health check succeeded"
+                            : "Node runtime host capability check succeeded",
                         sourceID: bundle.sourceID,
                         cacheKey: bundle.cacheKey,
                         trustState: bundle.trustState.diagnosticState,
@@ -2067,7 +3899,11 @@ actor NodeBundleRuntimeService {
                         localPort: port
                     )
                 )
-                startHealthMonitor(generation: generation, baseURL: baseURL)
+                startHealthMonitor(
+                    generation: generation,
+                    baseURL: baseURL,
+                    readinessPolicy: launchPlan.readinessPolicy
+                )
                 return baseURL
             }
             try await Task.sleep(
@@ -2088,26 +3924,49 @@ actor NodeBundleRuntimeService {
                 cacheKey: bundle.cacheKey
             )
         )
+        if launchPlan.contract == .hostIntegrated {
+            throw NodeBundleRuntimeError.contractBReadinessFailed
+        }
         throw NodeBundleRuntimeError.nodeLaunchFailed("资源服务启动超时")
     }
 
-    private func isHealthy(_ baseURL: URL) async -> Bool {
+    private func isReady(
+        _ baseURL: URL,
+        policy: NodeRuntimeReadinessPolicy
+    ) async -> Bool {
         do {
+            let path: String
+            let maximumResponseBytes: Int
+            switch policy {
+            case .serviceHealthIdentity:
+                path = "health"
+                maximumResponseBytes = 1_024
+            case .hostIntegratedConfiguration:
+                path = "config"
+                maximumResponseBytes = Self.maximumConfigurationSize
+            }
             let response = try await localHTTPClient.send(
                 HTTPRequest(
-                    url: baseURL.appendingPathComponent("health"),
+                    url: baseURL.appendingPathComponent(path),
                     timeout: 2,
-                    maximumResponseBytes: 1_024,
+                    maximumResponseBytes: maximumResponseBytes,
                     maximumRedirects: 0,
                     retryPolicy: .none
                 )
             )
-            guard let object = try JSONSerialization.jsonObject(with: response.body)
-                as? [String: Any] else {
-                return false
+            switch policy {
+            case .serviceHealthIdentity:
+                guard let object = try JSONSerialization.jsonObject(with: response.body)
+                    as? [String: Any] else {
+                    return false
+                }
+                return object["ok"] as? Bool == true
+                    && object["name"] as? String == "CatVodSpiderios"
+            case .hostIntegratedConfiguration:
+                let normalized = try Self.normalizeConfiguration(response.body)
+                _ = try ConfigurationParser().parse(normalized)
+                return true
             }
-            return object["ok"] as? Bool == true
-                && object["name"] as? String == "CatVodSpiderios"
         } catch {
             return false
         }
@@ -2116,7 +3975,11 @@ actor NodeBundleRuntimeService {
     private func stopProcess(publishing newStatus: NodeRuntimeStatus?) {
         healthMonitorTask?.cancel()
         healthMonitorTask = nil
+        profileMonitorTask?.cancel()
+        profileMonitorTask = nil
         process?.terminationHandler = nil
+        playbackLeases.removeAll()
+        stopRequestedAfterPlayback = false
         if let process, process.isRunning {
             process.terminate()
         }
@@ -2125,6 +3988,10 @@ actor NodeBundleRuntimeService {
         outputPipe = nil
         process = nil
         activeBundleCacheKey = nil
+        activeProfileStorageKey = nil
+        activeProfileURL = nil
+        activeRuntimeContract = nil
+        removeActiveContractArtifacts()
         serviceBaseURL = nil
         if let newStatus {
             publish(newStatus)
@@ -2151,7 +4018,13 @@ actor NodeBundleRuntimeService {
         )
         outputPipe = nil
         process = nil
+        playbackLeases.removeAll()
+        stopRequestedAfterPlayback = false
         activeBundleCacheKey = nil
+        activeProfileStorageKey = nil
+        activeProfileURL = nil
+        activeRuntimeContract = nil
+        removeActiveContractArtifacts()
         serviceBaseURL = nil
         healthMonitorTask?.cancel()
         healthMonitorTask = nil
@@ -2167,14 +4040,28 @@ actor NodeBundleRuntimeService {
         scheduleRestart(reason: detail)
     }
 
-    private func startHealthMonitor(generation: UUID, baseURL: URL) {
+    private func removeActiveContractArtifacts() {
+        for url in activeContractCleanupURLs {
+            try? FileManager.default.removeItem(at: url)
+        }
+        activeContractCleanupURLs = []
+    }
+
+    private func startHealthMonitor(
+        generation: UUID,
+        baseURL: URL,
+        readinessPolicy: NodeRuntimeReadinessPolicy
+    ) {
         healthMonitorTask?.cancel()
         healthMonitorTask = Task { [weak self] in
             var consecutiveFailures = 0
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 guard !Task.isCancelled, let self else { return }
-                let healthy = await self.isHealthy(baseURL)
+                let healthy = await self.isHealthy(
+                    baseURL,
+                    policy: readinessPolicy
+                )
                 if healthy {
                     consecutiveFailures = 0
                 } else {
@@ -2186,6 +4073,89 @@ actor NodeBundleRuntimeService {
                 }
             }
         }
+    }
+
+    /// Startup validates the complete `/config` catalogue once. Runtime
+    /// liveness must use CatPawOpen's lightweight `/check`; reparsing a full
+    /// catalogue every five seconds is both wasteful and can trigger profile
+    /// work in third-party bundles. A precise 404 keeps compatibility with
+    /// legacy host-integrated bundles that predate `/check`.
+    private func isHealthy(
+        _ baseURL: URL,
+        policy: NodeRuntimeReadinessPolicy
+    ) async -> Bool {
+        guard policy == .hostIntegratedConfiguration else {
+            return await isReady(baseURL, policy: policy)
+        }
+        do {
+            let response = try await localHTTPClient.send(
+                HTTPRequest(
+                    url: baseURL.appendingPathComponent("check"),
+                    timeout: 2,
+                    maximumResponseBytes: 1_024,
+                    maximumRedirects: 0,
+                    retryPolicy: .none,
+                    allowsNonSuccessfulStatus: true
+                )
+            )
+            if response.statusCode == 404 {
+                return await isReady(
+                    baseURL,
+                    policy: .hostIntegratedConfiguration
+                )
+            }
+            guard (200...299).contains(response.statusCode),
+                  let object = try JSONSerialization.jsonObject(
+                    with: response.body
+                  ) as? [String: Any] else {
+                return false
+            }
+            if let running = object["run"] as? Bool { return running }
+            if let okay = object["ok"] as? Bool { return okay }
+            return false
+        } catch {
+            return false
+        }
+    }
+
+    private func startProfileMonitor(
+        generation: UUID,
+        profileURL: URL?,
+        storageKey: String
+    ) {
+        profileMonitorTask?.cancel()
+        guard let profileURL else { return }
+        let initial = NodeProfileRevisionSnapshot(
+            storageKey: storageKey,
+            revision: Self.profileRevision(at: profileURL)
+        )
+        publishProfileRevision(initial)
+        profileMonitorTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                await self.pollProfileRevision(
+                    generation: generation,
+                    profileURL: profileURL,
+                    storageKey: storageKey
+                )
+            }
+        }
+    }
+
+    private func pollProfileRevision(
+        generation: UUID,
+        profileURL: URL,
+        storageKey: String
+    ) {
+        guard generation == processGeneration,
+              activeProfileStorageKey == storageKey else { return }
+        publishProfileRevision(
+            NodeProfileRevisionSnapshot(
+                storageKey: storageKey,
+                revision: Self.profileRevision(at: profileURL)
+            )
+        )
     }
 
     private func handleHealthFailure(generation: UUID) {
@@ -2249,10 +4219,11 @@ actor NodeBundleRuntimeService {
         restartTask = nil
         guard case .restarting(let currentAttempt, _) = status,
               currentAttempt == attempt,
-              let bundle = desiredBundle else { return }
+              let bundle = desiredBundle,
+              let profileNamespace = desiredProfileNamespace else { return }
         do {
             _ = try await ensureReady(
-                source: .cached(bundle),
+                source: .cached(bundle, profileNamespace),
                 automaticRestart: true
             )
         } catch {
@@ -2268,8 +4239,20 @@ actor NodeBundleRuntimeService {
         }
     }
 
+    private func publishProfileRevision(_ snapshot: NodeProfileRevisionSnapshot) {
+        guard snapshot != lastProfileRevisionSnapshot else { return }
+        lastProfileRevisionSnapshot = snapshot
+        for continuation in profileRevisionContinuations.values {
+            continuation.yield(snapshot)
+        }
+    }
+
     private func removeStatusContinuation(_ id: UUID) {
         statusContinuations[id] = nil
+    }
+
+    private func removeProfileRevisionContinuation(_ id: UUID) {
+        profileRevisionContinuations[id] = nil
     }
 
     private func validateBundleForExecution(_ bundle: CachedBundle) throws {
@@ -2340,39 +4323,4 @@ actor NodeBundleRuntimeService {
         return Int(text[range])
     }
 
-    private static let launcherScript = #"""
-    'use strict';
-    const bundlePath = process.env.OKVIDEO_BUNDLE_PATH;
-    const parentPID = Number(process.env.OKVIDEO_PARENT_PID || 0);
-    let runtime = null;
-    let stopping = false;
-
-    async function shutdown(code) {
-      if (stopping) return;
-      stopping = true;
-      try {
-        if (runtime && typeof runtime.stop === 'function') await runtime.stop();
-      } catch (_) {}
-      process.exit(code);
-    }
-
-    process.on('SIGTERM', () => { void shutdown(0); });
-    process.on('SIGINT', () => { void shutdown(0); });
-    setInterval(() => {
-      if (!parentPID) return;
-      try { process.kill(parentPID, 0); }
-      catch (_) { void shutdown(0); }
-    }, 1000);
-
-    try {
-      runtime = require(bundlePath);
-      Promise.resolve(runtime.start()).catch((error) => {
-        console.error(error);
-        void shutdown(1);
-      });
-    } catch (error) {
-      console.error(error);
-      void shutdown(1);
-    }
-    """#
 }

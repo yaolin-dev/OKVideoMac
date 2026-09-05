@@ -7,6 +7,9 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @EnvironmentObject private var state: AppState
     @State private var posterCacheSize = "正在计算…"
+    @State private var pendingBackupImport: PortableBackupPreview?
+    @State private var isBackupBusy = false
+    @State private var backupOperationMessage: String?
 
     var body: some View {
         ZStack {
@@ -28,9 +31,25 @@ struct SettingsView: View {
                     .frame(minWidth: 590)
             }
         }
-        .navigationTitle("设置")
+        .navigationTitle("")
+        .toolbar {
+            PrimaryPageToolbarLeadingContent(title: "设置")
+        }
         .task {
             await refreshCacheSize()
+        }
+        .sheet(item: $pendingBackupImport) { preview in
+            PortableBackupImportPreviewSheet(
+                preview: preview,
+                cancel: {
+                    pendingBackupImport = nil
+                },
+                confirm: {
+                    pendingBackupImport = nil
+                    importPortableBackup(from: preview.fileURL)
+                }
+            )
+            .frame(width: 520, height: 390)
         }
     }
 
@@ -123,6 +142,8 @@ struct SettingsView: View {
             playbackSettings
         case .cache:
             cacheSettings
+        case .backup:
+            backupSettings
         case .advanced:
             advancedSettings
         }
@@ -160,6 +181,31 @@ struct SettingsView: View {
                     .pickerStyle(.segmented)
                     .frame(width: 270)
                 }
+            }
+
+            SettingsSectionTitle("窗口布局")
+            SettingsCard {
+                SettingsControlRow(
+                    icon: "macwindow",
+                    color: .teal,
+                    title: "主窗口",
+                    subtitle: "自动记住大小和位置；默认约为 1240 × 780"
+                ) {
+                    Button("恢复默认") {
+                        state.restoreDefaultWindowLayout(.mainWindow)
+                    }
+                    .help("将主窗口恢复到适合当前屏幕的默认大小并居中")
+                }
+
+                SettingsDivider()
+
+                PlayerWindowSettingsControl(
+                    preferences: state.playerWindowPreferences,
+                    setMode: state.setPlayerWindowMode,
+                    restoreDefault: {
+                        state.restoreDefaultWindowLayout(.playerWindow)
+                    }
+                )
             }
 
             SettingsSectionTitle("隐私与记录")
@@ -334,6 +380,95 @@ struct SettingsView: View {
         }
     }
 
+    private var backupSettings: some View {
+        SettingsPage(
+            title: "备份与恢复",
+            subtitle: "导出当前点播配置和对应的观看历史"
+        ) {
+            SettingsSectionTitle("当前可备份数据")
+            SettingsCard {
+                SettingsInfoRow(
+                    icon: "doc.badge.gearshape",
+                    color: .indigo,
+                    title: "当前点播配置",
+                    subtitle: state.activeConfigurationRecord == nil
+                        ? "尚未启用点播配置"
+                        : "包含最后一次成功加载的配置快照",
+                    value: state.activeConfigurationRecord?.name ?? "未设置"
+                )
+                SettingsDivider()
+                SettingsInfoRow(
+                    icon: "clock.arrow.circlepath",
+                    color: .blue,
+                    title: "对应观看历史",
+                    subtitle: "保留线路、分集、播放位置和观看时间",
+                    value: "\(state.history.count) 条"
+                )
+            }
+
+            SettingsSectionTitle("手动备份")
+            SettingsCard {
+                SettingsControlRow(
+                    icon: "square.and.arrow.up.fill",
+                    color: .teal,
+                    title: "导出当前配置与历史",
+                    subtitle: "生成经过版本校验的 .okvideobackup 文件"
+                ) {
+                    Button("导出…") {
+                        exportPortableBackup()
+                    }
+                    .disabled(
+                        isBackupBusy || state.activeConfigurationRecord == nil
+                    )
+                }
+                SettingsDivider()
+                SettingsControlRow(
+                    icon: "square.and.arrow.down.fill",
+                    color: .orange,
+                    title: "从备份恢复",
+                    subtitle: "导入前会预览内容并自动保存当前数据"
+                ) {
+                    Button("选择备份…") {
+                        choosePortableBackup()
+                    }
+                    .disabled(isBackupBusy)
+                }
+            }
+
+            if isBackupBusy || backupOperationMessage != nil {
+                SettingsSectionTitle("状态")
+                SettingsCard {
+                    HStack(spacing: 10) {
+                        if isBackupBusy {
+                            AppActivityIndicator(size: .small)
+                        } else {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                        }
+                        Text(
+                            isBackupBusy
+                                ? "正在校验和处理备份…"
+                                : backupOperationMessage ?? ""
+                        )
+                        .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                    .padding(16)
+                }
+            }
+
+            SettingsSectionTitle("安全说明")
+            SettingsCard {
+                Label(
+                    "备份不会额外导出钥匙串、网盘账号状态、二维码、临时播放地址或 Android 虚拟机数据。配置原文会随备份保存，可能包含私人源地址；文件未加密，请妥善保管。恢复后如网盘授权不可用，播放器会重新请求授权。",
+                    systemImage: "lock.shield.fill"
+                )
+                .foregroundColor(.secondary)
+                .padding(18)
+            }
+        }
+    }
+
     private var advancedSettings: some View {
         SettingsPage(
             title: "高级",
@@ -402,8 +537,7 @@ struct SettingsView: View {
                                         .foregroundColor(.secondary)
                                 }
                             } else {
-                                ProgressView()
-                                    .controlSize(.small)
+                                AppActivityIndicator(size: .small)
                             }
                         }
 
@@ -558,6 +692,159 @@ struct SettingsView: View {
                 )
             }
         }
+    }
+
+    private func exportPortableBackup() {
+        guard let record = state.activeConfigurationRecord else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.okVideoBackup]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = portableBackupFileName(for: record.name)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        isBackupBusy = true
+        backupOperationMessage = nil
+        Task { @MainActor in
+            defer { isBackupBusy = false }
+            do {
+                let preview = try await state.exportPortableBackup(to: url)
+                backupOperationMessage = "已导出“\(preview.configurationName)”和 \(preview.historyCount) 条历史记录。"
+            } catch {
+                state.presentedError = UserFacingError(
+                    title: "备份导出失败",
+                    message: error.localizedDescription
+                )
+            }
+        }
+    }
+
+    private func choosePortableBackup() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.okVideoBackup]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "检查备份"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        isBackupBusy = true
+        backupOperationMessage = nil
+        Task { @MainActor in
+            defer { isBackupBusy = false }
+            do {
+                pendingBackupImport = try await state.inspectPortableBackup(
+                    at: url
+                )
+            } catch {
+                state.presentedError = UserFacingError(
+                    title: "无法读取备份",
+                    message: error.localizedDescription
+                )
+            }
+        }
+    }
+
+    private func importPortableBackup(from url: URL) {
+        isBackupBusy = true
+        backupOperationMessage = nil
+        Task { @MainActor in
+            defer { isBackupBusy = false }
+            do {
+                let summary = try await state.importPortableBackup(from: url)
+                let safetyText = summary.safetyBackupURL == nil
+                    ? ""
+                    : " 导入前的数据已保存为安全备份。"
+                backupOperationMessage = "已恢复“\(summary.configurationName)”，检查 \(summary.historyCount) 条历史，写入或更新 \(summary.changedHistoryCount) 条。\(safetyText)"
+            } catch {
+                state.presentedError = UserFacingError(
+                    title: "备份恢复失败",
+                    message: error.localizedDescription
+                )
+            }
+        }
+    }
+
+    private func portableBackupFileName(for configurationName: String) -> String {
+        let invalid = CharacterSet(charactersIn: "/:\\?%*|\"<>")
+        let normalizedName = configurationName.components(separatedBy: invalid)
+            .joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeName = String(normalizedName.prefix(80))
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return "OKVideoMac-\(safeName.isEmpty ? "Backup" : safeName)-\(formatter.string(from: Date())).okvideobackup"
+    }
+}
+
+private struct PortableBackupImportPreviewSheet: View {
+    let preview: PortableBackupPreview
+    let cancel: () -> Void
+    let confirm: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 12) {
+                Image(systemName: "archivebox.fill")
+                    .font(.system(size: 28))
+                    .foregroundColor(.accentColor)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("确认恢复备份")
+                        .font(.title2.bold())
+                    Text("文件已经通过格式和完整性校验")
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            VStack(spacing: 0) {
+                previewRow("点播配置", value: preview.configurationName)
+                Divider()
+                previewRow("观看历史", value: "\(preview.historyCount) 条")
+                Divider()
+                previewRow(
+                    "导出版本",
+                    value: "\(preview.appVersion) (\(preview.appBuild))"
+                )
+                Divider()
+                previewRow(
+                    "导出时间",
+                    value: preview.createdAt.formatted(
+                        date: .abbreviated,
+                        time: .shortened
+                    )
+                )
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.primary.opacity(0.05))
+            )
+
+            Text("同一条历史会保留观看时间更新的记录；导入前会自动备份当前配置和历史。网盘账号授权不会被覆盖。")
+                .font(.callout)
+                .foregroundColor(.secondary)
+
+            Spacer()
+
+            HStack {
+                Spacer()
+                Button("取消", action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("导入并合并", action: confirm)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+    }
+
+    private func previewRow(_ title: String, value: String) -> some View {
+        HStack {
+            Text(title)
+                .foregroundColor(.secondary)
+            Spacer()
+            Text(value)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
     }
 }
 
@@ -847,8 +1134,7 @@ private struct LiveSourceSettingsPane: View {
         switch status {
         case .checking(let completed, let total):
             HStack(spacing: 6) {
-                ProgressView()
-                    .controlSize(.mini)
+                AppActivityIndicator(size: .mini)
                 Text("正在后台检测频道 \(completed)/\(total)")
             }
             .font(.caption2)
@@ -899,6 +1185,50 @@ private struct LiveSourceSettingsPane: View {
     }
 }
 
+private struct PlayerWindowSettingsControl: View {
+    @ObservedObject var preferences: PlayerWindowPreferenceStore
+    let setMode: (PlayerWindowMode) -> Void
+    let restoreDefault: () -> Void
+
+    var body: some View {
+        SettingsControlRow(
+            icon: "play.rectangle.on.rectangle.fill",
+            color: .purple,
+            title: "播放器窗口",
+            subtitle: subtitle
+        ) {
+            HStack(spacing: 10) {
+                Picker(
+                    "播放器窗口模式",
+                    selection: Binding(
+                        get: { preferences.preference.mode },
+                        set: setMode
+                    )
+                ) {
+                    ForEach(PlayerWindowMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 250)
+
+                Button("恢复默认", action: restoreDefault)
+                    .help("清除播放器窗口的大小、位置和模式记录")
+            }
+        }
+    }
+
+    private var subtitle: String {
+        switch preferences.preference.mode {
+        case .automaticAspect:
+            return "记住窗口位置和观看尺度；高度会随视频比例调整"
+        case .fixedFrame:
+            return "精确恢复上次的宽度和高度；不同比例可能出现黑边"
+        }
+    }
+}
+
 private extension SettingsPane {
     var title: String {
         switch self {
@@ -908,6 +1238,7 @@ private extension SettingsPane {
         case .liveSources: return "直播源"
         case .playback: return "视频"
         case .cache: return "缓存"
+        case .backup: return "备份与恢复"
         case .advanced: return "高级"
         }
     }
@@ -920,6 +1251,7 @@ private extension SettingsPane {
         case .liveSources: return "导入与管理直播源"
         case .playback: return "播放器与播放设置"
         case .cache: return "缓存与历史管理"
+        case .backup: return "配置与历史备份"
         case .advanced: return "诊断和运行信息"
         }
     }
@@ -932,6 +1264,7 @@ private extension SettingsPane {
         case .liveSources: return "dot.radiowaves.left.and.right"
         case .playback: return "play.rectangle.fill"
         case .cache: return "externaldrive.fill"
+        case .backup: return "archivebox.fill"
         case .advanced: return "slider.horizontal.3"
         }
     }
@@ -944,6 +1277,7 @@ private extension SettingsPane {
         case .liveSources: return .teal
         case .playback: return .pink
         case .cache: return .orange
+        case .backup: return .cyan
         case .advanced: return .green
         }
     }
@@ -973,6 +1307,7 @@ private struct SettingsPage<Content: View>: View {
     let title: String
     let subtitle: String
     let content: Content
+    private let scrollCoordinateSpace = "settings-page-scroll"
 
     init(
         title: String,
@@ -986,6 +1321,9 @@ private struct SettingsPage<Content: View>: View {
 
     var body: some View {
         ScrollView {
+            BrowserToolbarScrollMarker(
+                coordinateSpaceName: scrollCoordinateSpace
+            )
             VStack(alignment: .leading, spacing: 14) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title)
@@ -1001,6 +1339,7 @@ private struct SettingsPage<Content: View>: View {
             .frame(maxWidth: 840, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .top)
         }
+        .browserToolbarScrollSurface(named: scrollCoordinateSpace)
         .background(.thinMaterial)
     }
 }

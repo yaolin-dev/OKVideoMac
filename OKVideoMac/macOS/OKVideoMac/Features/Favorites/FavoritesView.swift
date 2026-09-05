@@ -1,11 +1,15 @@
+import AppKit
 import OKVideoPersistence
 import SwiftUI
 
 struct FavoritesView: View {
     @EnvironmentObject private var state: AppState
+    @Environment(\.primaryToolbarLayout) private var toolbarLayout
     @State private var isSelecting = false
     @State private var selectedIDs: Set<FavoriteRecord.ID> = []
     @State private var pendingDeletion: FavoriteDeletion?
+    @State private var focusedID: FavoriteRecord.ID?
+    private let scrollCoordinateSpace = "favorites-scroll"
 
     var body: some View {
         Group {
@@ -16,16 +20,15 @@ struct FavoritesView: View {
                     message: "在影片详情中选择收藏后会显示在这里。"
                 )
             } else {
-                List(state.favorites) { favorite in
-                    favoriteRow(favorite)
-                        .padding(.vertical, 4)
-                }
+                favoritesList
             }
         }
-        .navigationTitle("收藏")
+        .navigationTitle("")
         .toolbar {
-            ToolbarItemGroup {
-                if !state.favorites.isEmpty {
+            PrimaryPageToolbarLeadingContent(title: "收藏")
+            ToolbarItemGroup(placement: .primaryAction) {
+                if !state.isDetailPagePresented,
+                   !state.favorites.isEmpty {
                     favoriteManagementControls
                 }
             }
@@ -43,10 +46,39 @@ struct FavoritesView: View {
         }
         .onChange(of: state.favorites.map(\.id)) { availableIDs in
             selectedIDs.formIntersection(availableIDs)
+            if focusedID.map({ availableIDs.contains($0) }) != true {
+                focusedID = availableIDs.first
+            }
             if state.favorites.isEmpty {
                 isSelecting = false
             }
         }
+        .onAppear {
+            focusedID = focusedID ?? state.favorites.first?.id
+        }
+        .background {
+            AppKeyCommandMonitor(handler: handleKeyCommand)
+                .frame(width: 0, height: 0)
+        }
+    }
+
+    @ViewBuilder
+    private var favoritesList: some View {
+        ScrollView {
+            BrowserToolbarScrollMarker(
+                coordinateSpaceName: scrollCoordinateSpace
+            )
+            LazyVStack(spacing: 0) {
+                ForEach(state.favorites) { favorite in
+                    favoriteRow(favorite)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 8)
+                    Divider()
+                        .padding(.leading, isSelecting ? 56 : 20)
+                }
+            }
+        }
+        .browserToolbarScrollSurface(named: scrollCoordinateSpace)
     }
 
     @ViewBuilder
@@ -101,7 +133,11 @@ struct FavoritesView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .appInteractiveHover(cornerRadius: 10, selected: selectedIDs.contains(favorite.id))
+            .appInteractiveHover(
+                cornerRadius: 10,
+                selected: selectedIDs.contains(favorite.id)
+                    || focusedID == favorite.id
+            )
             .contextMenu {
                 Button(role: .destructive) {
                     pendingDeletion = .items([favorite.id])
@@ -128,41 +164,110 @@ struct FavoritesView: View {
     @ViewBuilder
     private var favoriteManagementControls: some View {
         if isSelecting {
-            Button(allItemsSelected ? "取消全选" : "全选") {
-                selectedIDs = allItemsSelected
-                    ? []
-                    : Set(state.favorites.map(\.id))
-            }
-
-            Button(role: .destructive) {
-                pendingDeletion = .items(selectedIDs)
-            } label: {
-                Label(
-                    selectedIDs.isEmpty
-                        ? "删除所选"
-                        : "删除所选（\(selectedIDs.count)）",
-                    systemImage: "trash"
-                )
-            }
-            .disabled(selectedIDs.isEmpty)
-
-            Button("完成") {
-                isSelecting = false
-                selectedIDs.removeAll()
+            switch toolbarLayout {
+            case .expanded, .compact:
+                selectAllButton
+                    .primaryToolbarIconControl(isSelected: allItemsSelected)
+                deleteSelectedButton
+                    .primaryToolbarIconControl(destructive: true)
+                finishSelectionButton
+                    .primaryToolbarTextControl()
+            case .minimal:
+                selectionManagementMenu
+                    .primaryToolbarMenuControl()
+                finishSelectionButton
+                    .primaryToolbarTextControl()
             }
         } else {
-            Button {
-                isSelecting = true
-            } label: {
-                Label("选择", systemImage: "checklist")
-            }
-
-            Button(role: .destructive) {
-                pendingDeletion = .all
-            } label: {
-                Label("清空收藏", systemImage: "trash")
+            switch toolbarLayout {
+            case .expanded, .compact:
+                beginSelectionButton
+                    .primaryToolbarIconControl()
+                clearAllButton
+                    .primaryToolbarIconControl(destructive: true)
+            case .minimal:
+                normalManagementMenu
+                    .primaryToolbarMenuControl()
             }
         }
+    }
+
+    private var selectAllButton: some View {
+        Button {
+            selectedIDs = allItemsSelected
+                ? []
+                : Set(state.favorites.map(\.id))
+        } label: {
+            Label(
+                allItemsSelected ? "取消全选" : "全选",
+                systemImage: allItemsSelected
+                    ? "checkmark.circle.badge.xmark"
+                    : "checkmark.circle"
+            )
+        }
+        .help(allItemsSelected ? "取消全选" : "全选")
+    }
+
+    private var deleteSelectedButton: some View {
+        Button(role: .destructive) {
+            pendingDeletion = .items(selectedIDs)
+        } label: {
+            Label(
+                selectedIDs.isEmpty
+                    ? "删除所选"
+                    : "删除所选（\(selectedIDs.count)）",
+                systemImage: "trash"
+            )
+        }
+        .disabled(selectedIDs.isEmpty)
+        .help(selectedIDs.isEmpty ? "请先选择收藏" : "删除所选收藏")
+    }
+
+    private var finishSelectionButton: some View {
+        Button("完成") {
+            isSelecting = false
+            selectedIDs.removeAll()
+        }
+    }
+
+    private var beginSelectionButton: some View {
+        Button {
+            isSelecting = true
+        } label: {
+            Label("选择", systemImage: "checklist")
+        }
+        .help("选择收藏")
+    }
+
+    private var clearAllButton: some View {
+        Button(role: .destructive) {
+            pendingDeletion = .all
+        } label: {
+            Label("清空收藏", systemImage: "trash")
+        }
+        .help("清空收藏")
+    }
+
+    private var selectionManagementMenu: some View {
+        Menu {
+            selectAllButton
+            deleteSelectedButton
+        } label: {
+            Label("选择操作", systemImage: "ellipsis.circle")
+                .labelStyle(.iconOnly)
+        }
+        .help("选择操作")
+    }
+
+    private var normalManagementMenu: some View {
+        Menu {
+            beginSelectionButton
+            clearAllButton
+        } label: {
+            Label("管理收藏", systemImage: "ellipsis.circle")
+                .labelStyle(.iconOnly)
+        }
+        .help("管理收藏")
     }
 
     private var allItemsSelected: Bool {
@@ -217,6 +322,55 @@ struct FavoritesView: View {
             selectedIDs.removeAll()
             isSelecting = false
         }
+    }
+
+    private func handleKeyCommand(_ event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(
+            [.command, .option, .control, .shift]
+        )
+        if modifiers == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "a" {
+            isSelecting = true
+            selectedIDs = Set(state.favorites.map(\.id))
+            return true
+        }
+        guard modifiers.isEmpty else { return false }
+        switch event.keyCode {
+        case 125:
+            moveFocus(by: 1)
+        case 126:
+            moveFocus(by: -1)
+        case 36, 76:
+            guard let focusedID,
+                  let item = state.favorites.first(where: {
+                      $0.id == focusedID
+                  }) else { return false }
+            if isSelecting {
+                toggleSelection(focusedID)
+            } else {
+                Task { await state.openFavorite(item) }
+            }
+        case 51, 117:
+            guard let focusedID else { return false }
+            pendingDeletion = .items(
+                isSelecting && !selectedIDs.isEmpty
+                    ? selectedIDs : [focusedID]
+            )
+        case 53:
+            guard isSelecting else { return false }
+            isSelecting = false
+            selectedIDs.removeAll()
+        default:
+            return false
+        }
+        return true
+    }
+
+    private func moveFocus(by offset: Int) {
+        let ids = state.favorites.map(\.id)
+        guard !ids.isEmpty else { return }
+        let currentIndex = focusedID.flatMap { ids.firstIndex(of: $0) } ?? 0
+        focusedID = ids[min(max(currentIndex + offset, 0), ids.count - 1)]
     }
 }
 

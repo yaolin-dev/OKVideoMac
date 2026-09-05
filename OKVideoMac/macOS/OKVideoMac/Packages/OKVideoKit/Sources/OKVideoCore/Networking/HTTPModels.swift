@@ -84,6 +84,12 @@ public struct HTTPRequest: Equatable, Sendable {
     public var timeout: TimeInterval
     public var maximumResponseBytes: Int
     public var maximumRedirects: Int
+    /// Header fields that must be explicitly reapplied to redirected
+    /// requests. URLSession may discard provider-required fields such as
+    /// Range, Referer, or User-Agent when a download crosses hosts.
+    /// Authorization and Proxy-Authorization are never forwarded across an
+    /// origin boundary even when requested here.
+    public var redirectedHeaderFields: Set<String>
     public var retryPolicy: HTTPRetryPolicy
     public var allowsNonSuccessfulStatus: Bool
 
@@ -95,6 +101,7 @@ public struct HTTPRequest: Equatable, Sendable {
         timeout: TimeInterval = 30,
         maximumResponseBytes: Int = 16 * 1_024 * 1_024,
         maximumRedirects: Int = 10,
+        redirectedHeaderFields: Set<String> = [],
         retryPolicy: HTTPRetryPolicy = .standard,
         allowsNonSuccessfulStatus: Bool = false
     ) {
@@ -105,6 +112,7 @@ public struct HTTPRequest: Equatable, Sendable {
         self.timeout = timeout
         self.maximumResponseBytes = maximumResponseBytes
         self.maximumRedirects = maximumRedirects
+        self.redirectedHeaderFields = redirectedHeaderFields
         self.retryPolicy = retryPolicy
         self.allowsNonSuccessfulStatus = allowsNonSuccessfulStatus
     }

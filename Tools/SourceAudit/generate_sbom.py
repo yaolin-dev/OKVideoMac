@@ -162,7 +162,11 @@ def android_inventory(lock: Path, cache: Path, apk: Path) -> list[dict[str, str]
         },
     ]
     for raw in lock.read_text(encoding="utf-8").splitlines():
-        if not raw or raw.startswith("#") or raw == "empty=":
+        # Gradle records every dependency-free configuration on the single
+        # metadata line `empty=<configuration,...>`.  The configuration list
+        # changes as Android Gradle Plugin tasks are exercised, but it never
+        # represents a Maven component and therefore must not enter the SBOM.
+        if not raw or raw.startswith("#") or raw.startswith("empty="):
             continue
         coordinate = raw.split("=", 1)[0]
         pieces = coordinate.split(":")

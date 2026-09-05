@@ -26,6 +26,12 @@ OKVideoKit 独立测试、arm64 Release 编译和 Android Release Bridge 离线�
 `package-app.sh` Gate；此前 Build 62/63 的 App、ZIP、签名或公证结果不能代替
 本次候选验证；Build 64 保留为上一版不可变公开发布。
 
+2026-09-05 的 0.4.0（Build 94）RC 自动门禁基线为：584 项 Xcode 测试中
+582 项通过、2 项按设计跳过，173 项 OKVideoKit 测试通过，30 项 Node / CatPaw /
+Quark 测试通过；Android Release assemble 与 lint 通过，JVM unit target 为
+`NO-SOURCE`。这些数字只描述该 exact RC commit，最终公开版本仍须从合并后的
+`main` exact commit 重新执行全部 Release gate。
+
 ## Current reproducibility caveats
 
 2026-08-13 的 fresh audit 遇到 Google Maven TLS handshake termination，且
@@ -133,13 +139,19 @@ Release packaging。新的发布 commit 仍须重新运行 package gate，不能
 - 拒绝非 arm64、桥接未指向 `@rpath/libmpv.dylib` 或无效签名；
 - 从精确 Git commit 生成 project/third-party/license 源码归档；
 - 把 source-side index 放入 App legal payload；
-- 输出可分发 zip、外部 binary/source manifest 和统一 SHA-256。
+- 输出内部 zip、标准 `OKVideoMac-VERSION.dmg`、外部 binary/source manifest、
+  四份 SBOM、第三方声明和统一 SHA-256；
+- DMG 只包含 `OKVideoMac.app` 与 `Applications -> /Applications`，并在只读挂载
+  后重新验证布局、App 版本、签名和 source index；
+- `distribution --notarize` 只向 Apple 提交最终 DMG，要求状态为 `Accepted`，
+  再 staple、验证 ticket 与 Gatekeeper。
 
 源码发行缓存默认位于
 `$OKVIDEOMAC_BUILD_ROOT/Downloads/SourceRelease`，产物位于
 `$OKVIDEOMAC_BUILD_ROOT/Artifacts/SourceRelease`。缓存预填后可设置
 `OKVIDEOMAC_SOURCE_RELEASE_OFFLINE=1` 强制离线校验。正式打包要求干净工作树；
 详见仓库根目录 `Docs/SOURCE_RELEASE_PROCESS.md`。
+DMG 的签名、公证和验证顺序见 `Docs/DMG_RELEASE_PROCESS.md`。
 
 App 通过运行时桥接载入 libmpv，因此主可执行文件不直接链接 mpv；验证脚本
 检查 `libOKMPVBridge.dylib` 的链接和整个 dylib 闭包。依赖或完整 Xcode 缺失

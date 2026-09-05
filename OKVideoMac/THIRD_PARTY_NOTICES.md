@@ -1,6 +1,6 @@
 # OKVideoMac Third-Party Notices
 
-This is the authoritative third-party index for OKVideoMac 0.3.41 (65). It
+This is the authoritative third-party index for OKVideoMac 0.4.0 (Build 94). It
 covers executable material actually shipped in the macOS App and its embedded
 Android APK. Third-party software remains under its original terms; the
 project's `GPL-3.0-only` license does not relicense it.
@@ -33,7 +33,7 @@ is in `Docs/BINARY_SOURCE_MAPPING.md`. License paths below are relative to
 | libc++ / libc++abi | MacPorts 11.1.0 | LLVM Project contributors | `Apache-2.0 WITH LLVM-exception` (with legacy code under the bundled notices) | Dynamic `libc++.1.0.dylib`, `libc++abi.1.dylib` | MacPorts receipt copies from its clang-11 input; that historical build input is incomplete, so provenance is partial | `LLVM-Apache-2.0-WITH-LLVM-exception.txt` |
 | QuickJS | 2025-09-13-2 | [bellard.org QuickJS](https://bellard.org/quickjs/); Fabrice Bellard and Charlie Gordon | `MIT` | Static archive force-loaded into dynamic `libOKQuickJS.dylib` | Upstream unmodified; project bridge is separate GPL project code; provenance verified | `QuickJS-MIT.txt` |
 | Node.js | 22.23.0 | [official Node.js v22.23.0 distribution](https://nodejs.org/download/release/v22.23.0/); Node.js contributors and bundled authors | `MIT` plus licenses reproduced in the distribution LICENSE | Separate executable process at `Resources/NodeRuntime/node` | Input binary is byte-identical to the official arm64 distribution; package step re-signs it without source modification | `Node.js-LICENSE.txt` |
-| OKMPVBridge / OKQuickJS bridge | 0.3.41 project source | OKVideoMac contributors | `GPL-3.0-only` | Project-built dynamic bridges | Project code; maps to the fixed release source commit | Project `LICENSE` |
+| OKMPVBridge / OKQuickJS bridge | 0.4.0 project source | OKVideoMac contributors | `GPL-3.0-only` | Project-built dynamic bridges | Project code; maps to the fixed release source commit | Project `LICENSE` |
 
 The FFmpeg 7.1.4 binaries report an LGPL configuration with
 `--enable-zlib --enable-bzlib --enable-iconv --enable-lzma` and without

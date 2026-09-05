@@ -4,22 +4,27 @@ Each formal OKVideoMac binary must be published with a source set produced by
 `macOS/OKVideoMac/Scripts/create-source-release.sh` from the exact release Git
 commit. Moving branches and `latest` URLs are not corresponding-source links.
 
-For the current 0.3.41 release (Build 65), the generated set is:
+For the 0.4.0 release candidate (Build 94), the generated set is:
 
-- `OKVideoMac-0.3.41-build65-source.tar.gz`
-- `OKVideoMac-0.3.41-build65-third-party-source.tar.gz`
-- `OKVideoMac-0.3.41-build65-licenses.tar.gz`
-- `OKVideoMac-0.3.41-build65-SOURCE_RELEASE_INDEX.json`
-- `OKVideoMac-0.3.41-build65-SOURCE_RELEASE_MANIFEST.json`
-- `OKVideoMac-0.3.41-build65-SHA256SUMS`
-- `OKVideoMac-0.3.41-macOS-arm64.zip` (copied beside the final manifest)
-- `OKVideoMac-0.3.41-AndroidDexBridge-release.apk`
+- `OKVideoMac-0.4.0-build94-source.tar.gz`
+- `OKVideoMac-0.4.0-build94-third-party-source.tar.gz`
+- `OKVideoMac-0.4.0-build94-licenses.tar.gz`
+- `OKVideoMac-0.4.0-build94-SOURCE_RELEASE_INDEX.json`
+- `OKVideoMac-0.4.0-build94-SOURCE_RELEASE_MANIFEST.json`
+- `OKVideoMac-0.4.0-build94-SHA256SUMS`
+- `OKVideoMac-0.4.0-macOS-arm64.zip` (internal identity/archive carrier)
+- `OKVideoMac-0.4.0.dmg` (the public binary bound by the final manifest)
+- `OKVideoMac-0.4.0-AndroidDexBridge-release.apk`
+- `THIRD_PARTY_NOTICES.md`
+- `RELEASE_NOTES_0.4.0.md`
 
-The current Build 65 release set also includes
-`OKVideoMac-0.3.41-macOS-arm64.dmg`, the macOS and Android SPDX/CycloneDX
+The Build 94 release set also includes the macOS and Android SPDX/CycloneDX
 files (`OKVideoMac-macOS.spdx.json`, `OKVideoMac-macOS.cdx.json`,
 `OKVideoMac-Android.spdx.json`, and `OKVideoMac-Android.cdx.json`), and the
-top-level `SHA256SUMS` that binds the release asset set.
+release-specific `OKVideoMac-0.4.0-build94-SHA256SUMS` that binds the release
+asset set. The ZIP remains the established internal `binary` identity carrier;
+it is not the public user download. The DMG is recorded separately as the
+public release artifact.
 
 The project archive is a deterministic `git archive` of the fixed commit. It
 contains OKVideoMac, OKVideoKit, Xcode/XcodeGen configuration, Android bridge
@@ -40,7 +45,7 @@ does not disguise exceptions: the missing original zlib 1.3.2 distfile and
 historical clang-11 input used by MacPorts libc++ remain explicit in the
 manifest and keep native provenance incomplete.
 
-For release 0.3.41 (65), the manifest records Xcode 16.2 and macOS SDK 15.2 as
+For release 0.4.0 (94), the manifest records Xcode 16.2 and macOS SDK 15.2 as
 the actual Phase 2 package builder. Xcode 14.2 remains the older supported
 macOS 12 baseline, but is not reported as the tool that produced this audited
 binary.
@@ -48,11 +53,15 @@ binary.
 The licenses archive contains the project license/notices, every retained
 third-party license, APK notices, change notices, and provenance documents.
 `SOURCE_RELEASE_INDEX.json` records the source-side mapping and is safe to
-embed in the signed App. After the App ZIP is final, rerun with `--binary` to
+embed in the signed App. After the ZIP and DMG are final, rerun with `--binary`
+for the ZIP and `--release-artifact` for the DMG to
 create the outer `SOURCE_RELEASE_MANIFEST.json` and `SHA256SUMS`; these bind the
 immutable binary and all source archives without creating a circular App hash.
-The generator copies the verified binary ZIP and APK into the same release
-directory and includes both in `SHA256SUMS`, so that directory is independently
+The generator preserves the existing ZIP validation: it verifies the embedded
+source index and APK byte-for-byte. `verify-dmg.sh` independently mounts the
+DMG read-only and verifies its exact two-item layout, App identity, signature,
+and embedded source index. The generator then copies the ZIP, DMG, and APK into
+the same release directory and includes all three in `SHA256SUMS`, so that directory is independently
 verifiable without relying on paths elsewhere on the build machine.
 Finalization fails unless the ZIP contains a byte-identical embedded source
 index and the same APK supplied to the manifest, preventing a same-version
@@ -70,7 +79,8 @@ OKVideoMac/macOS/OKVideoMac/Scripts/create-source-release.sh \
   --output-dir /path/to/release \
   --cache-dir /path/to/verified-source-cache \
   --commit HEAD \
-  --binary /path/to/OKVideoMac-0.3.41-macOS-arm64.zip
+  --binary /path/to/OKVideoMac-0.4.0-macOS-arm64.zip \
+  --release-artifact /path/to/OKVideoMac-0.4.0.dmg
 ```
 
 Use `--offline` for the second run or for an air-gapped release after every
@@ -78,8 +88,8 @@ locked input is present in the cache. The script fails on a dirty worktree,
 unknown commit, binary/version mismatch, unavailable input, or any checksum
 mismatch.
 
-The frozen Build 65 project source archive remains the exact tagged source
-snapshot. It intentionally retains any pre-finalization engineering records
-that used earlier Build 62 or Build 63 terminology. Those historical records,
-and the prior immutable Build 64 public release, do not redefine the current
-Build 65 binary, source-release, tag, or manifest identity.
+The Build 94 RC archive is generated from its exact clean candidate commit.
+After PR approval, the public source set and public DMG must be regenerated
+from the exact `main` merge commit; branch RC artifacts are verification
+evidence and must not be reused as the final v0.4.0 release. Historical Build
+62/63 records and the immutable 0.3.41 public release remain historical facts.

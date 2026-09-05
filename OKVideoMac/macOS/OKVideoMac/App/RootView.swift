@@ -1,10 +1,51 @@
 import AppKit
+import OKVideoCore
+import OKVideoPersistence
 import SwiftUI
 import WebKit
 
 enum AppSurfacePalette {
     static var background: Color {
-        Color(nsColor: .windowBackgroundColor)
+        // Keep the right-hand content canvas bright while leaving the native
+        // split-view titlebar untouched. In particular, this must not tint the
+        // independent sidebar titlebar or its system controls.
+        Color(nsColor: .textBackgroundColor)
+    }
+}
+
+enum AppSidebarMetrics {
+    static let minimumWidth: CGFloat = 224
+    static let idealWidth: CGFloat = 224
+    static let maximumWidth: CGFloat = 280
+    static let horizontalInset: CGFloat = 16
+    static let searchHeight: CGFloat = 32
+    static let rowHeight: CGFloat = 26
+    static let labelFontSize: CGFloat = 14
+    static let iconWidth: CGFloat = 18
+    static let iconTextSpacing: CGFloat = 8
+    static let rowContentMinimumWidth: CGFloat = 168
+}
+
+private struct BrowserWindowVibrancyBackground: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .underWindowBackground
+        view.blendingMode = .behindWindow
+        view.state = .followsWindowActiveState
+        view.isEmphasized = false
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        if view.material != .underWindowBackground {
+            view.material = .underWindowBackground
+        }
+        if view.blendingMode != .behindWindow {
+            view.blendingMode = .behindWindow
+        }
+        if view.state != .followsWindowActiveState {
+            view.state = .followsWindowActiveState
+        }
     }
 }
 
@@ -60,6 +101,78 @@ extension View {
                 cornerRadius: cornerRadius,
                 selected: selected,
                 destructive: destructive
+            )
+        )
+    }
+}
+
+enum SidebarRowHoverPolicy {
+    static let cornerRadius: CGFloat = 6
+    static let animationDuration: TimeInterval = 0.11
+    static let selectionBackgroundOpacity = 0.10
+
+    static func hoverOverlayOpacity(
+        isSelected: Bool,
+        isHovering: Bool,
+        isEnabled: Bool
+    ) -> Double {
+        guard isEnabled, isHovering else { return 0 }
+        return isSelected ? 0.04 : 0.06
+    }
+}
+
+/// A compact hover treatment for sidebar navigation rows. Selection remains
+/// owned by the native List whenever possible; this modifier only supplies a
+/// stable, layout-neutral hover overlay. Selection stays native so every row
+/// receives exactly the same width, height, and neutral sidebar appearance.
+struct SidebarRowHoverModifier: ViewModifier {
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovering = false
+
+    let isSelected: Bool
+
+    func body(content: Content) -> some View {
+        let hoverOpacity = SidebarRowHoverPolicy.hoverOverlayOpacity(
+            isSelected: isSelected,
+            isHovering: isHovering,
+            isEnabled: isEnabled
+        )
+
+        content
+            .background {
+                ZStack {
+                    if isSelected {
+                        RoundedRectangle(
+                            cornerRadius: SidebarRowHoverPolicy.cornerRadius,
+                            style: .continuous
+                        )
+                        .fill(
+                            Color.primary.opacity(
+                                SidebarRowHoverPolicy.selectionBackgroundOpacity
+                            )
+                        )
+                    }
+
+                    RoundedRectangle(
+                        cornerRadius: SidebarRowHoverPolicy.cornerRadius,
+                        style: .continuous
+                    )
+                    .fill(Color.primary.opacity(hoverOpacity))
+                }
+            }
+            .animation(
+                .easeOut(duration: SidebarRowHoverPolicy.animationDuration),
+                value: hoverOpacity
+            )
+            .onHover { isHovering = isEnabled && $0 }
+    }
+}
+
+extension View {
+    func sidebarRowHover(isSelected: Bool) -> some View {
+        modifier(
+            SidebarRowHoverModifier(
+                isSelected: isSelected
             )
         )
     }
@@ -145,12 +258,140 @@ extension View {
     }
 }
 
+enum AppConfigurationSheetScope: Equatable {
+    case browser
+    case player
+}
+
+enum AppConfigurationSheetPresentationKind: Equatable {
+    case category
+    case cloudAuthorization
+    case nodeConfiguration
+}
+
+enum AppConfigurationSheetPresentationPolicy {
+    static func kind(
+        hasCategory: Bool,
+        hasCloudAuthorization: Bool,
+        hasNodeConfiguration: Bool
+    ) -> AppConfigurationSheetPresentationKind? {
+        // Match the former overlay z-order while presenting only one native
+        // sheet. A provider-owned page supersedes an authorization surface,
+        // which in turn supersedes its configuration-category launcher.
+        if hasNodeConfiguration { return .nodeConfiguration }
+        if hasCloudAuthorization { return .cloudAuthorization }
+        if hasCategory { return .category }
+        return nil
+    }
+}
+
+struct AppConfigurationSheetModifier: ViewModifier {
+    @EnvironmentObject private var state: AppState
+    let scope: AppConfigurationSheetScope
+
+    func body(content: Content) -> some View {
+        content.sheet(isPresented: isPresented) {
+            AppConfigurationSheetHost(scope: scope)
+                .environmentObject(state)
+                // Every surface provides an explicit cancel action. Prevent
+                // AppKit's implicit dismissal from hiding request-owned state
+                // without cancelling the corresponding provider operation.
+                .interactiveDismissDisabled()
+        }
+    }
+
+    private var isPresented: Binding<Bool> {
+        Binding(
+            get: { presentationKind != nil },
+            set: { presented in
+                guard !presented else { return }
+                dismissActivePresentation()
+            }
+        )
+    }
+
+    private var presentationKind: AppConfigurationSheetPresentationKind? {
+        switch scope {
+        case .browser:
+            return AppConfigurationSheetPresentationPolicy.kind(
+                hasCategory: state.configurationCategoryPresentation != nil,
+                hasCloudAuthorization:
+                    state.mainWindowCloudAuthorizationPrompt != nil
+                        || state.detailCloudAuthorizationPrompt != nil,
+                hasNodeConfiguration:
+                    state.mainWindowNodeWebPresentation != nil
+                        || state.detailNodeWebPresentation != nil
+            )
+        case .player:
+            return AppConfigurationSheetPresentationPolicy.kind(
+                hasCategory: false,
+                hasCloudAuthorization:
+                    state.playerCloudAuthorizationPrompt != nil,
+                hasNodeConfiguration:
+                    state.playerNodeWebPresentation != nil
+            )
+        }
+    }
+
+    private func dismissActivePresentation() {
+        switch presentationKind {
+        case .nodeConfiguration:
+            state.cancelNodeConfiguration()
+        case .cloudAuthorization:
+            Task { await state.cancelCloudAuthorization() }
+        case .category:
+            state.closeConfigurationCategory()
+        case nil:
+            break
+        }
+    }
+}
+
+extension View {
+    func appConfigurationSheet(
+        scope: AppConfigurationSheetScope
+    ) -> some View {
+        modifier(AppConfigurationSheetModifier(scope: scope))
+    }
+}
+
+struct AppConfigurationSheetHost: View {
+    @EnvironmentObject private var state: AppState
+    let scope: AppConfigurationSheetScope
+
+    @ViewBuilder
+    var body: some View {
+        switch scope {
+        case .browser:
+            if let presentation = state.mainWindowNodeWebPresentation
+                ?? state.detailNodeWebPresentation {
+                NodeConfigurationView(presentation: presentation)
+            } else if let prompt = state.mainWindowCloudAuthorizationPrompt
+                ?? state.detailCloudAuthorizationPrompt {
+                CloudAuthorizationView(prompt: prompt)
+            } else if let presentation =
+                state.configurationCategoryPresentation {
+                ConfigurationCategoryView(presentation: presentation)
+            }
+        case .player:
+            if let presentation = state.playerNodeWebPresentation {
+                NodeConfigurationView(presentation: presentation)
+                    .environment(\.colorScheme, .dark)
+            } else if let prompt = state.playerCloudAuthorizationPrompt {
+                CloudAuthorizationView(prompt: prompt)
+                    .environment(\.colorScheme, .dark)
+            }
+        }
+    }
+}
+
 struct RootView: View {
     @EnvironmentObject private var state: AppState
+    @StateObject private var liveSession = LiveBrowserSession()
 
     var body: some View {
         ZStack {
-            AppSurfacePalette.background
+            BrowserWindowVibrancyBackground()
                 .ignoresSafeArea()
 
             browsingContent
@@ -162,41 +403,64 @@ struct RootView: View {
                 dismissButton: .default(Text("好"))
             )
         }
-        .sheet(
-            isPresented: Binding(
-                get: {
-                    state.selectedDetail != nil
-                        || state.pendingDetailSummary != nil
-                },
-                set: { if !$0 { state.dismissDetail() } }
-            )
-        ) {
-            if let detail = state.selectedDetail {
-                DetailView(detail: detail)
-                    .environmentObject(state)
-                    .frame(minWidth: 820, minHeight: 600)
-            } else if let summary = state.pendingDetailSummary {
-                DetailLoadingView(summary: summary)
-                    .environmentObject(state)
-                    .frame(minWidth: 820, minHeight: 600)
+        .appConfigurationSheet(scope: .browser)
+        .overlay(alignment: .bottom) {
+            if let status = state.siteActionStatus {
+                TransientSiteActionStatusView(status: status)
+                    .padding(.bottom, 22)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                .allowsHitTesting(false)
             }
         }
         .overlay {
-            if let prompt = state.cloudAuthorizationPrompt,
-               state.selectedDetail == nil {
-                CloudAuthorizationView(prompt: prompt)
+            if state.isQuickSwitcherPresented {
+                QuickSwitcherView()
                     .environmentObject(state)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    .zIndex(200)
             }
         }
         .overlay {
-            if let presentation = state.nodeWebPresentation {
-                NodeConfigurationView(presentation: presentation)
+            if state.isShortcutHelpPresented {
+                ShortcutHelpView()
                     .environmentObject(state)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    .zIndex(210)
             }
         }
+        .animation(
+            .easeOut(duration: 0.14),
+            value: state.isQuickSwitcherPresented
+        )
+        .animation(
+            .easeOut(duration: 0.14),
+            value: state.isShortcutHelpPresented
+        )
+        .animation(
+            .easeOut(duration: 0.18),
+            value: state.siteActionStatus?.id
+        )
         .background {
-            WindowCloseObserver {
-                Task { await state.closePlayer() }
+            ZStack {
+                WindowCloseObserver(
+                    onClose: {},
+                    onKeyChange: { isKey in
+                        state.setBrowserWindowKey(isKey)
+                    }
+                )
+                AppKeyCommandMonitor { event in
+                    let modifiers = event.modifierFlags.intersection(
+                        [.command, .option, .control, .shift]
+                    )
+                    guard modifiers.isEmpty, event.keyCode == 53 else {
+                        return false
+                    }
+                    // Do not let a held Escape key close the detail and then
+                    // route a repeated key-down to the search page beneath it.
+                    guard !event.isARepeat else { return true }
+                    return state.performBrowserEscapeShortcut()
+                }
+                .frame(width: 0, height: 0)
             }
         }
     }
@@ -204,27 +468,506 @@ struct RootView: View {
     @ViewBuilder
     private var browsingContent: some View {
         if #available(macOS 13.0, *) {
-            NavigationSplitView {
-                SidebarView()
-            } detail: {
-                SectionContentView()
-            }
+            ModernRootSplitView(liveSession: liveSession)
         } else {
             NavigationView {
-                SidebarView()
-                SectionContentView()
+                SidebarView(liveSession: liveSession)
+                SectionContentView(
+                    liveSession: liveSession,
+                    showsCollapsedSearch: false
+                )
             }
             .navigationViewStyle(.columns)
         }
     }
 }
 
+@available(macOS 13.0, *)
+private struct ModernRootSplitView: View {
+    @ObservedObject var liveSession: LiveBrowserSession
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
+    var body: some View {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            SidebarView(liveSession: liveSession)
+        } detail: {
+            SectionContentView(
+                liveSession: liveSession,
+                showsCollapsedSearch: columnVisibility == .detailOnly
+            )
+        }
+    }
+}
+
+private struct QuickSwitcherView: View {
+    @EnvironmentObject private var state: AppState
+    @State private var query = ""
+    @FocusState private var searchIsFocused: Bool
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.28)
+                .ignoresSafeArea()
+                .onTapGesture { state.dismissQuickSwitcher() }
+
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    Image(systemName: "command")
+                        .foregroundStyle(.secondary)
+                    TextField("切换配置、站点或直播源", text: $query)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 17))
+                        .focused($searchIsFocused)
+                        .onSubmit { activateFirstMatch() }
+                    Button {
+                        state.dismissQuickSwitcher()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .keyboardShortcut(.cancelAction)
+                    .help("关闭")
+                }
+                .padding(.horizontal, 16)
+                .frame(height: 52)
+
+                Divider()
+
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        if !matchingConfigurations.isEmpty {
+                            switcherHeader("点播配置")
+                            ForEach(matchingConfigurations) { configuration in
+                                switcherRow(
+                                    title: configuration.name,
+                                    subtitle: configuration.isActive
+                                        ? "当前配置" : nil,
+                                    systemImage: "square.stack.3d.up"
+                                ) {
+                                    state.dismissQuickSwitcher()
+                                    Task {
+                                        await state.activateConfiguration(
+                                            configuration.id
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        if !matchingSites.isEmpty {
+                            switcherHeader("点播站点")
+                            ForEach(matchingSites, id: \.key) { site in
+                                switcherRow(
+                                    title: site.name,
+                                    subtitle: site.key == state.selectedSiteKey
+                                        ? "当前站点" : nil,
+                                    systemImage: "play.rectangle"
+                                ) {
+                                    state.dismissQuickSwitcher()
+                                    state.selectSection(.home)
+                                    Task { await state.selectSite(site.key) }
+                                }
+                            }
+                        }
+
+                        if !matchingLiveSources.isEmpty {
+                            switcherHeader("直播源")
+                            ForEach(matchingLiveSources) { source in
+                                switcherRow(
+                                    title: source.name,
+                                    subtitle: "进入直播",
+                                    systemImage: "dot.radiowaves.left.and.right"
+                                ) {
+                                    state.dismissQuickSwitcher()
+                                    state.requestLiveSourceSelection(source.id)
+                                }
+                            }
+                        }
+
+                        if matchingConfigurations.isEmpty,
+                           matchingSites.isEmpty,
+                           matchingLiveSources.isEmpty {
+                            EmptyStateView(
+                                systemImage: "magnifyingglass",
+                                title: "没有匹配项目",
+                                message: "请尝试输入其他名称。"
+                            )
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 28)
+                        }
+                    }
+                    .padding(10)
+                }
+                .frame(maxHeight: 480)
+
+                Divider()
+                HStack {
+                    Text("输入名称筛选  ·  Return 打开首项  ·  Esc 关闭")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("⌘K")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 16)
+                .frame(height: 36)
+            }
+            .frame(width: 560)
+            .background(
+                Color(nsColor: .windowBackgroundColor),
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.24), radius: 28, y: 12)
+        }
+        .onAppear { searchIsFocused = true }
+    }
+
+    private var normalizedQuery: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var matchingConfigurations: [StoredConfiguration] {
+        state.configurations.filter { matches($0.name) }
+    }
+
+    private var matchingSites: [SiteConfiguration] {
+        state.supportedSites.filter { matches($0.name) || matches($0.key) }
+    }
+
+    private var matchingLiveSources: [StoredLiveSource] {
+        state.liveSources.filter { matches($0.name) }
+    }
+
+    private func matches(_ value: String) -> Bool {
+        normalizedQuery.isEmpty
+            || value.localizedCaseInsensitiveContains(normalizedQuery)
+    }
+
+    private func activateFirstMatch() {
+        if let configuration = matchingConfigurations.first {
+            state.dismissQuickSwitcher()
+            Task { await state.activateConfiguration(configuration.id) }
+        } else if let site = matchingSites.first {
+            state.dismissQuickSwitcher()
+            state.selectSection(.home)
+            Task { await state.selectSite(site.key) }
+        } else if let source = matchingLiveSources.first {
+            state.dismissQuickSwitcher()
+            state.requestLiveSourceSelection(source.id)
+        }
+    }
+
+    private func switcherHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 9)
+            .padding(.top, 8)
+            .padding(.bottom, 3)
+    }
+
+    private func switcherRow(
+        title: String,
+        subtitle: String?,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 11) {
+                Image(systemName: systemImage)
+                    .frame(width: 24)
+                    .foregroundStyle(Color.accentColor)
+                Text(title)
+                    .lineLimit(1)
+                Spacer(minLength: 12)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 42)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .appInteractiveHover(cornerRadius: 8)
+    }
+}
+
+private struct ShortcutHelpView: View {
+    @EnvironmentObject private var state: AppState
+
+    private let sections: [(String, [(String, String)])] = [
+        ("导航", [
+            ("⌘1…⌘5", "点播、直播、收藏、历史、设置"),
+            ("⌘F", "搜索"),
+            ("⌘K", "快速切换配置、站点或直播源"),
+            ("⌘L", "打开点播配置"),
+            ("⌘R", "刷新当前页面"),
+            ("⌘[", "返回"),
+            ("⌘.", "停止当前搜索"),
+            ("Esc", "停止搜索；再按返回进入前的页面")
+        ]),
+        ("播放器", [
+            ("Space", "播放或暂停"),
+            ("← / →", "快退或快进 10 秒"),
+            ("⇧← / ⇧→", "快退或快进 30 秒"),
+            ("⌥← / ⌥→", "上一集或下一集"),
+            ("↑ / ↓", "上一个或下一个直播频道"),
+            ("M", "静音"),
+            ("− / =", "音量减小或增大"),
+            ("C / A", "字幕开关 / 下一音轨"),
+            ("F", "进入或退出全屏"),
+            ("Esc", "关闭播放面板或退出全屏"),
+            ("⇧, / ⇧.", "降低或提高播放速度"),
+            ("⌘W", "关闭播放器窗口")
+        ]),
+        ("系统", [
+            ("⌘,", "打开设置"),
+            ("⌘/", "显示本快捷键列表")
+        ])
+    ]
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.28)
+                .ignoresSafeArea()
+                .onTapGesture { state.dismissShortcutHelp() }
+
+            VStack(spacing: 0) {
+                HStack {
+                    Label("键盘快捷键", systemImage: "keyboard")
+                        .font(.title3.weight(.semibold))
+                    Spacer()
+                    Button {
+                        state.dismissShortcutHelp()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .keyboardShortcut(.cancelAction)
+                }
+                .padding(18)
+
+                Divider()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        ForEach(Array(sections.enumerated()), id: \.offset) {
+                            _, section in
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(section.0)
+                                    .font(.headline)
+                                ForEach(
+                                    Array(section.1.enumerated()),
+                                    id: \.offset
+                                ) { _, shortcut in
+                                    HStack(alignment: .firstTextBaseline) {
+                                        Text(shortcut.0)
+                                            .font(.body.monospaced())
+                                            .frame(width: 110, alignment: .trailing)
+                                        Text(shortcut.1)
+                                            .foregroundStyle(.secondary)
+                                        Spacer()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(20)
+                }
+                .frame(maxHeight: 610)
+            }
+            .frame(width: 620)
+            .background(
+                Color(nsColor: .windowBackgroundColor),
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.24), radius: 28, y: 12)
+        }
+    }
+}
+
+private struct ConfigurationCategoryView: View {
+    @EnvironmentObject private var state: AppState
+    let presentation: ConfigurationCategoryPresentation
+
+    var body: some View {
+        card
+    }
+
+    private var card: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            content
+                .frame(minHeight: 300)
+            Divider()
+            footer
+        }
+        .frame(width: 680, height: 620)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "slider.horizontal.3")
+                .font(.title2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(presentation.title)
+                    .font(.headline)
+                Text("配置中心")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button {
+                refresh()
+            } label: {
+                Label("刷新", systemImage: "arrow.clockwise")
+            }
+            .disabled(refreshIsDisabled)
+        }
+        .padding(18)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if presentation.isLoading {
+            loadingContent
+        } else if let message = presentation.errorMessage {
+            errorContent(message)
+        } else {
+            actionList
+        }
+    }
+
+    private var loadingContent: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text("正在读取当前配置操作…")
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func errorContent(_ message: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.largeTitle)
+                .foregroundStyle(.orange)
+            Text(message)
+                .multilineTextAlignment(.center)
+            Button("重试") {
+                refresh()
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var actionList: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(Array(presentation.items.enumerated()), id: \.element.id) { index, item in
+                    ConfigurationCategoryRow(
+                        item: item,
+                        isDisabled: state.isConfigurationInteractionActive
+                    ) {
+                        Task { await state.performHomeAction(item) }
+                    }
+                    if index < presentation.items.count - 1 {
+                        Divider().padding(.leading, 56)
+                    }
+                }
+            }
+            .background(
+                Color(nsColor: .controlBackgroundColor),
+                in: RoundedRectangle(cornerRadius: 11)
+            )
+            .padding(18)
+        }
+    }
+
+    private var footer: some View {
+        HStack {
+            Text("关闭后会回到原来的内容页和浏览位置。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("关闭") {
+                state.closeConfigurationCategory()
+            }
+            .keyboardShortcut(.cancelAction)
+        }
+        .padding(18)
+    }
+
+    private var refreshIsDisabled: Bool {
+        presentation.isLoading || state.isConfigurationInteractionActive
+    }
+
+    private func refresh() {
+        Task { await state.refreshConfigurationCategory() }
+    }
+}
+
+private struct ConfigurationCategoryRow: View {
+    let item: SiteActionItem
+    let isDisabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                Image(systemName: "slider.horizontal.3")
+                    .frame(width: 24)
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.title)
+                        .foregroundStyle(.primary)
+                    if let remarks = item.remarks?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !remarks.isEmpty {
+                        Text(remarks)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+            .padding(.horizontal, 18)
+            .frame(minHeight: 58)
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+    }
+}
+
 enum PlayerSurfaceMountPolicy {
     static func shouldMount(
         isPlayerPresented: Bool,
+        isMountEnabled: Bool,
         hasRenderPlayer: Bool
     ) -> Bool {
-        isPlayerPresented && hasRenderPlayer
+        isPlayerPresented && isMountEnabled && hasRenderPlayer
     }
 }
 
@@ -235,95 +978,225 @@ enum PlayerSurfaceBackdropPolicy {
 }
 
 struct NodeConfigurationView: View {
-    @EnvironmentObject private var state: AppState
-    let presentation: NodeWebPresentation
+  @EnvironmentObject private var state: AppState
+  let presentation: NodeWebPresentation
+  @State private var pageState: NodeConfigurationPageState = .loading
 
-    var body: some View {
-        ZStack {
-            Color.black.opacity(0.52)
-                .ignoresSafeArea()
+  private var isVerifying: Bool {
+    presentation.lifecycleState == .verifying
+  }
 
-            VStack(spacing: 0) {
-                HStack(spacing: 12) {
-                    Image(systemName: "externaldrive.badge.person.crop")
-                        .font(.system(size: 23, weight: .semibold))
-                        .foregroundColor(.accentColor)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(presentation.title)
-                            .font(.headline)
-                        Text(presentation.message)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .lineLimit(2)
-                    }
-                    Spacer(minLength: 12)
-                    Button {
-                        state.refreshNodeConfigurationWebsite()
-                    } label: {
-                        Label("刷新", systemImage: "arrow.clockwise")
-                    }
-                }
-                .padding(.horizontal, 18)
-                .frame(height: 68)
+  private var isPlayerAuthorization: Bool {
+    if case .player = presentation.presentationTarget { return true }
+    return false
+  }
 
-                Divider()
-
-                NodeConfigurationWebView(
-                    url: presentation.url,
-                    revision: presentation.revision
-                )
-                .background(Color(nsColor: .textBackgroundColor))
-
-                Divider()
-
-                HStack(spacing: 12) {
-                    Label(
-                        "请用对应网盘 App 扫码，页面显示登录成功后再继续。",
-                        systemImage: "qrcode.viewfinder"
-                    )
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    Spacer()
-                    Button("关闭") {
-                        state.cancelNodeConfiguration()
-                    }
-                    Button {
-                        Task { await state.completeNodeConfigurationAndRetry() }
-                    } label: {
-                        Label("授权完成并重试", systemImage: "arrow.right.circle.fill")
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-                .padding(.horizontal, 18)
-                .frame(height: 64)
-            }
-            .frame(
-                minWidth: 820,
-                idealWidth: 1_040,
-                maxWidth: 1_160,
-                minHeight: 580,
-                idealHeight: 760,
-                maxHeight: 840
-            )
-            .background(.regularMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
-            }
-            .shadow(color: .black.opacity(0.35), radius: 36, y: 14)
-            .padding(26)
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack(spacing: 12) {
+        Image(systemName: "externaldrive.badge.person.crop")
+          .font(.system(size: 23, weight: .semibold))
+          .foregroundColor(.accentColor)
+        VStack(alignment: .leading, spacing: 3) {
+          Text(presentation.title)
+            .font(.headline)
+          Text(
+            presentation.message
+          )
+          .font(.caption)
+          .foregroundColor(.secondary)
+          .lineLimit(2)
         }
-        .zIndex(2_000)
+        Spacer(minLength: 12)
+        Button {
+          pageState = .loading
+          state.refreshNodeConfigurationWebsite()
+        } label: {
+          Label("刷新", systemImage: "arrow.clockwise")
+        }
+        .disabled(isVerifying)
+      }
+      .padding(.horizontal, 18)
+      .frame(height: 68)
+
+      Divider()
+
+      ZStack {
+        NodeConfigurationWebView(
+          url: presentation.url,
+          revision: presentation.revision,
+          preferredProviderID: presentation.preferredProviderID,
+          pageState: $pageState
+        )
+        .background(Color(nsColor: .textBackgroundColor))
+
+        switch pageState {
+        case .loading:
+          VStack(spacing: 12) {
+            AppActivityIndicator(size: .regular)
+            Text("正在打开配置页…")
+              .font(.callout.weight(.semibold))
+            Text("正在连接当前 CatPaw Runtime")
+              .font(.caption)
+              .foregroundColor(.secondary)
+          }
+          .padding(24)
+          .background(.regularMaterial)
+          .clipShape(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+          )
+        case .failed(let message):
+          VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+              .font(.system(size: 28, weight: .semibold))
+              .foregroundColor(.orange)
+            Text("配置页不可用")
+              .font(.headline)
+            Text(message)
+              .font(.caption)
+              .foregroundColor(.secondary)
+              .multilineTextAlignment(.center)
+              .frame(maxWidth: 420)
+            Button("重新加载") {
+              pageState = .loading
+              state.refreshNodeConfigurationWebsite()
+            }
+          }
+          .padding(28)
+          .background(.regularMaterial)
+          .clipShape(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+          )
+        case .ready:
+          EmptyView()
+        }
+      }
+
+      Divider()
+
+      HStack(spacing: 12) {
+        if isVerifying {
+          AppActivityIndicator(size: .small)
+        } else {
+          Image(systemName: footerSystemImage)
+            .foregroundColor(footerColor)
+        }
+        VStack(alignment: .leading, spacing: 2) {
+          Text(footerTitle)
+            .font(.caption.weight(.semibold))
+          if let status = presentation.status,
+            !status.trimmingCharacters(
+              in: .whitespacesAndNewlines
+            ).isEmpty
+          {
+            Text(status)
+              .font(.caption2)
+              .foregroundColor(.secondary)
+              .lineLimit(2)
+          }
+        }
+        Spacer()
+        Button("关闭") {
+          state.cancelNodeConfiguration()
+        }
+        .keyboardShortcut(.cancelAction)
+        Button {
+          Task { await state.completeNodeConfigurationAndRetry() }
+        } label: {
+          Label(
+            isPlayerAuthorization
+              ? "我已授权，立即验证"
+              : "应用配置并重试",
+            systemImage: "arrow.right.circle.fill"
+          )
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(isVerifying)
+      }
+      .padding(.horizontal, 18)
+      .frame(height: 64)
+    }
+    .frame(
+      minWidth: 820,
+      idealWidth: 1_040,
+      maxWidth: 1_160,
+      minHeight: 580,
+      idealHeight: 760,
+      maxHeight: 840
+    )
+    .background(Color(nsColor: .windowBackgroundColor))
+  }
+
+  private var footerTitle: String {
+    switch presentation.lifecycleState {
+    case .waiting:
+      return presentation.allowsAutomaticRetry
+        ? "正在等待授权完成信号"
+        : "请确认授权状态后手动验证"
+    case .saved:
+      return isPlayerAuthorization
+        ? "配置已保存，等待授权验证"
+        : "配置已保存"
+    case .verifying:
+      return "正在验证授权并恢复原请求"
+    case .needsManualRetry:
+      return "需要手动确认"
+    }
+  }
+
+  private var footerSystemImage: String {
+    switch presentation.lifecycleState {
+    case .waiting: return "qrcode.viewfinder"
+    case .saved: return "checkmark.circle.fill"
+    case .verifying: return "arrow.triangle.2.circlepath"
+    case .needsManualRetry: return "exclamationmark.triangle.fill"
+    }
+  }
+
+  private var footerColor: Color {
+    switch presentation.lifecycleState {
+    case .saved: return .green
+    case .needsManualRetry: return .orange
+    case .waiting, .verifying: return .accentColor
+    }
+  }
+}
+
+enum NodeConfigurationPageState: Equatable {
+    case loading
+    case ready
+    case failed(String)
+}
+
+enum NodeConfigurationNavigationPolicy {
+    static func isOwnedRuntimeURL(_ candidate: URL, origin: URL) -> Bool {
+        guard candidate.scheme?.lowercased() == "http",
+              origin.scheme?.lowercased() == "http",
+              let candidateHost = candidate.host?.lowercased(),
+              let originHost = origin.host?.lowercased(),
+              candidateHost == originHost else {
+            return false
+        }
+        return effectivePort(candidate) == effectivePort(origin)
+    }
+
+    private static func effectivePort(_ url: URL) -> Int? {
+        url.port ?? (url.scheme?.lowercased() == "http" ? 80 : nil)
     }
 }
 
 private struct NodeConfigurationWebView: NSViewRepresentable {
     let url: URL
     let revision: Int
+    let preferredProviderID: String?
+    @Binding var pageState: NodeConfigurationPageState
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(
+            origin: url,
+            preferredProviderID: preferredProviderID,
+            pageState: $pageState
+        )
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -333,18 +1206,110 @@ private struct NodeConfigurationWebView: NSViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         context.coordinator.lastRevision = revision
+        context.coordinator.origin = url
+        context.coordinator.preferredProviderID = preferredProviderID
         webView.load(URLRequest(url: url))
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.origin = url
+        context.coordinator.pageState = $pageState
+        if context.coordinator.preferredProviderID != preferredProviderID {
+            context.coordinator.preferredProviderID = preferredProviderID
+            context.coordinator.selectPreferredProvider(in: webView)
+        }
         guard context.coordinator.lastRevision != revision else { return }
         context.coordinator.lastRevision = revision
+        DispatchQueue.main.async {
+            context.coordinator.pageState.wrappedValue = .loading
+        }
         webView.load(URLRequest(url: url))
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var lastRevision = -1
+        var origin: URL
+        var preferredProviderID: String?
+        var pageState: Binding<NodeConfigurationPageState>
+
+        init(
+            origin: URL,
+            preferredProviderID: String?,
+            pageState: Binding<NodeConfigurationPageState>
+        ) {
+            self.origin = origin
+            self.preferredProviderID = preferredProviderID
+            self.pageState = pageState
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didStartProvisionalNavigation navigation: WKNavigation?
+        ) {
+            pageState.wrappedValue = .loading
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didFinish navigation: WKNavigation?
+        ) {
+            pageState.wrappedValue = .ready
+            selectPreferredProvider(in: webView)
+        }
+
+        func selectPreferredProvider(in webView: WKWebView) {
+            guard let preferredProviderID,
+                  CatPawCloudProvider(rawValue: preferredProviderID) != nil else {
+                return
+            }
+            let tabID = "account-tab-\(preferredProviderID)"
+            let script = """
+            (() => {
+              const tabID = \(Self.javaScriptString(tabID));
+              const select = () => {
+                const tab = document.getElementById(tabID);
+                if (!tab) return false;
+                tab.click();
+                return true;
+              };
+              if (select()) return true;
+              const observer = new MutationObserver(() => {
+                if (select()) observer.disconnect();
+              });
+              observer.observe(document.documentElement, {
+                childList: true,
+                subtree: true
+              });
+              setTimeout(() => observer.disconnect(), 5000);
+              return false;
+            })();
+            """
+            webView.evaluateJavaScript(script)
+        }
+
+        private static func javaScriptString(_ value: String) -> String {
+            let data = (try? JSONEncoder().encode(value)) ?? Data("\"\"".utf8)
+            return String(data: data, encoding: .utf8) ?? "\"\""
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didFail navigation: WKNavigation?,
+            withError error: Error
+        ) {
+            guard !Self.isCancellation(error) else { return }
+            pageState.wrappedValue = .failed(Self.message(for: error))
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didFailProvisionalNavigation navigation: WKNavigation?,
+            withError error: Error
+        ) {
+            guard !Self.isCancellation(error) else { return }
+            pageState.wrappedValue = .failed(Self.message(for: error))
+        }
 
         func webView(
             _ webView: WKWebView,
@@ -355,13 +1320,19 @@ private struct NodeConfigurationWebView: NSViewRepresentable {
                 decisionHandler(.cancel)
                 return
             }
-            if Self.isLocalNodeURL(url) {
+            if NodeConfigurationNavigationPolicy.isOwnedRuntimeURL(
+                url,
+                origin: origin
+            ) {
                 decisionHandler(.allow)
             } else if ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
                 NSWorkspace.shared.open(url)
                 decisionHandler(.cancel)
-            } else {
+            } else if url.scheme?.lowercased() == "about" {
                 decisionHandler(.allow)
+            } else {
+                NSWorkspace.shared.open(url)
+                decisionHandler(.cancel)
             }
         }
 
@@ -375,7 +1346,10 @@ private struct NodeConfigurationWebView: NSViewRepresentable {
                   let url = navigationAction.request.url else {
                 return nil
             }
-            if Self.isLocalNodeURL(url) {
+            if NodeConfigurationNavigationPolicy.isOwnedRuntimeURL(
+                url,
+                origin: origin
+            ) {
                 webView.load(URLRequest(url: url))
             } else {
                 NSWorkspace.shared.open(url)
@@ -383,20 +1357,29 @@ private struct NodeConfigurationWebView: NSViewRepresentable {
             return nil
         }
 
-        private static func isLocalNodeURL(_ url: URL) -> Bool {
-            ["127.0.0.1", "localhost", "::1"].contains(
-                url.host?.lowercased() ?? ""
-            )
+        private static func message(for error: Error) -> String {
+            let urlError = error as? URLError
+            if [.cannotConnectToHost, .networkConnectionLost, .cannotFindHost]
+                .contains(urlError?.code) {
+                return "Node 已重启或配置页地址已经失效，请关闭后重新打开配置入口。"
+            }
+            return "配置页加载失败：\(error.localizedDescription)"
+        }
+
+        private static func isCancellation(_ error: Error) -> Bool {
+            (error as? URLError)?.code == .cancelled
         }
     }
 }
 
 private struct WindowCloseObserver: NSViewRepresentable {
     let onClose: () -> Void
+    let onKeyChange: (Bool) -> Void
 
     func makeNSView(context: Context) -> WindowCloseObserverView {
         let view = WindowCloseObserverView()
         view.onClose = onClose
+        view.onKeyChange = onKeyChange
         return view
     }
 
@@ -405,246 +1388,1001 @@ private struct WindowCloseObserver: NSViewRepresentable {
         context: Context
     ) {
         nsView.onClose = onClose
+        nsView.onKeyChange = onKeyChange
     }
 }
 
 private final class WindowCloseObserverView: NSView {
     var onClose: (() -> Void)?
-    private var observer: NSObjectProtocol?
+    var onKeyChange: ((Bool) -> Void)?
+    private var observers: [NSObjectProtocol] = []
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if let observer {
-            NotificationCenter.default.removeObserver(observer)
-            self.observer = nil
-        }
+        removeObservers()
         guard let window else { return }
-        observer = NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification,
-            object: window,
-            queue: .main
-        ) { [weak self] _ in
-            self?.onClose?()
+        // Resizing while SwiftUI is mounting this representable can re-enter
+        // AppKit layout. Configure on the next run-loop turn, after the
+        // browser hierarchy has completed its current layout transaction.
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window, self.window === window else { return }
+            AppWindowLayoutPolicy.configure(window, target: .mainWindow)
+            BrowserWindowChromeController.configure(window)
+        }
+        onKeyChange?(window.isKeyWindow)
+        observers = [
+            NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                self?.onKeyChange?(false)
+                self?.onClose?()
+            },
+            NotificationCenter.default.addObserver(
+                forName: NSWindow.didBecomeKeyNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                self?.onKeyChange?(true)
+            },
+            NotificationCenter.default.addObserver(
+                forName: NSWindow.didResignKeyNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                self?.onKeyChange?(false)
+            }
+        ]
+    }
+
+    deinit {
+        removeObservers()
+    }
+
+    private func removeObservers() {
+        for observer in observers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        observers.removeAll()
+    }
+}
+
+struct AppKeyCommandMonitor: NSViewRepresentable {
+    let handler: (NSEvent) -> Bool
+
+    func makeNSView(context: Context) -> AppKeyCommandMonitorView {
+        let view = AppKeyCommandMonitorView()
+        view.handler = handler
+        return view
+    }
+
+    func updateNSView(
+        _ nsView: AppKeyCommandMonitorView,
+        context: Context
+    ) {
+        nsView.handler = handler
+    }
+}
+
+final class AppKeyCommandMonitorView: NSView {
+    var handler: ((NSEvent) -> Bool)?
+    private var monitor: Any?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        removeMonitor()
+        guard window != nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
+            [weak self] event in
+            guard let self,
+                  let window = self.window,
+                  window.isKeyWindow,
+                  event.window === window,
+                  (!Self.isEditingText(in: window) || event.keyCode == 53),
+                  self.handler?(event) == true else {
+                return event
+            }
+            return nil
         }
     }
 
     deinit {
-        if let observer {
-            NotificationCenter.default.removeObserver(observer)
+        removeMonitor()
+    }
+
+    private func removeMonitor() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
         }
+    }
+
+    private static func isEditingText(in window: NSWindow) -> Bool {
+        if window.firstResponder is NSTextField { return true }
+        guard let textView = window.firstResponder as? NSTextView else {
+            return false
+        }
+        return textView.isEditable || textView.isFieldEditor
+    }
+}
+
+private struct TransientSiteActionStatusView: View {
+    let status: TransientSiteActionStatus
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundColor(.green)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(status.title)
+                    .font(.caption.weight(.semibold))
+                Text(status.message)
+                    .font(.callout)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
+        .background(.regularMaterial, in: Capsule())
+        .overlay {
+            Capsule()
+                .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.18), radius: 12, y: 5)
+        .accessibilityElement(children: .combine)
     }
 }
 
 struct CloudAuthorizationView: View {
     @EnvironmentObject private var state: AppState
+    @State private var isTextEntryExpanded = false
     let prompt: CloudAuthorizationPrompt
 
     var body: some View {
-        ZStack {
-            Color.black.opacity(0.32)
-                .ignoresSafeArea()
-
-            VStack(alignment: .leading, spacing: 16) {
-                HStack {
-                    Label("网盘授权", systemImage: "externaldrive.badge.person.crop")
-                        .font(.title2.bold())
-                    Spacer()
-                    Button {
-                        Task { await state.refreshCloudAuthorization() }
-                    } label: {
-                        Label("刷新", systemImage: "arrow.clockwise")
-                    }
-                }
-
-                Text(prompt.title)
-                    .font(.headline)
-
-                if prompt.credentialPush {
-                    HStack(spacing: 12) {
-                        Image(systemName: "lock.shield.fill")
-                            .font(.system(size: 30))
-                            .foregroundColor(.accentColor)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("本机安全提交")
-                                .font(.headline)
-                            Text("凭据不会写入 Mac 配置，也不会通过局域网传输。")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.accentColor.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                } else if let data = prompt.snapshot,
-                   let image = NSImage(data: data) {
-                    Image(nsImage: image)
-                        .resizable()
-                        .interpolation(.none)
-                        .scaledToFit()
-                        .frame(width: 280, height: 280)
-                        .padding(14)
-                        .background(Color.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.secondary.opacity(0.18))
-                        }
-                        .frame(maxWidth: .infinity)
-                } else if prompt.phase == "qr" {
-                    HStack {
-                        Spacer()
-                        VStack(spacing: 10) {
-                            ProgressView()
-                            Text("正在生成二维码…")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        .frame(width: 280, height: 220)
-                        Spacer()
-                    }
-                }
-
-                if let status = prompt.status, !status.isEmpty {
-                    Text(status)
-                        .font(.callout)
-                        .foregroundColor(.secondary)
-                }
-
-                if prompt.hasTextInput {
-                    SecureField(
-                        inputPlaceholder,
-                        text: $state.cloudAuthorizationInput
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    Text("内容直接提交给本机 Java/Dex 插件，Mac 端不会另行保存。")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                if prompt.credentialPush {
-                    Button {
-                        Task { await state.submitCloudCredential() }
-                    } label: {
-                        Label("提交授权并重试播放", systemImage: "arrow.right.circle.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .disabled(
-                        state.cloudAuthorizationInput
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                            .isEmpty
-                    )
-                } else {
-                    LazyVGrid(
-                        columns: [
-                            GridItem(.adaptive(minimum: 130), spacing: 8)
-                        ],
-                        alignment: .leading,
-                        spacing: 8
-                    ) {
-                        ForEach(prompt.actions) { action in
-                            Button(action.title) {
-                                Task {
-                                    await state.submitCloudAuthorization(action: action)
-                                }
-                            }
-                            .disabled(
-                                prompt.hasTextInput
-                                    && action.title.uppercased() == "OK"
-                                    && state.cloudAuthorizationInput
-                                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                                        .isEmpty
-                            )
-                        }
-                    }
-                }
-
-                HStack {
-                    Spacer()
-                    Button("关闭") {
-                        state.cancelCloudAuthorization()
-                    }
-                }
-            }
-            .padding(22)
-            .frame(width: 520)
-            .background(.regularMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 14))
-            .shadow(radius: 24)
-            .padding()
+        GeometryReader { geometry in
+            authorizationCard(
+                maximumSurfaceHeight:
+                    CloudAuthorizationPresentationPolicy
+                        .maximumSurfaceHeight(
+                            containerHeight: geometry.size.height
+                        ),
+                availableSurfaceWidth:
+                    CloudAuthorizationPresentationPolicy
+                        .availableSurfaceWidth(
+                            containerWidth: geometry.size.width
+                        )
+            )
+            .padding(CloudAuthorizationPresentationPolicy.outerInset)
+            .frame(
+                maxWidth: .infinity,
+                maxHeight: .infinity,
+                alignment: .center
+            )
         }
-        .zIndex(1_000)
+        .frame(
+            minWidth: 520,
+            idealWidth: 820,
+            maxWidth: 900,
+            minHeight: 420,
+            idealHeight: 720,
+            maxHeight: 840
+        )
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
-    private var inputPlaceholder: String {
-        let title = prompt.title.lowercased()
-        if title.contains("token") || title.contains("阿里") {
-            return "粘贴阿里云盘 Token"
+    private func authorizationCard(
+        maximumSurfaceHeight: CGFloat,
+        availableSurfaceWidth: CGFloat
+    ) -> some View {
+        VStack(alignment: .leading, spacing: usesDialogCropLayout ? 12 : 16) {
+            HStack {
+                Label(
+                    isAuthorization
+                        ? "网盘授权"
+                        : "配置操作",
+                    systemImage: isAuthorization
+                        ? "externaldrive.badge.person.crop"
+                        : "slider.horizontal.3"
+                )
+                    .font(.title2.bold())
+                Spacer()
+                Button {
+                    Task { await state.refreshCloudAuthorization() }
+                } label: {
+                    Label("刷新", systemImage: "arrow.clockwise")
+                }
+                .disabled(isBusy || isTerminal)
+            }
+
+            Text(prompt.title)
+                .font(.headline)
+
+            if prompt.lifecyclePhase == .completed {
+                Label(
+                    isAuthorization ? "授权已完成" : "配置操作已完成",
+                    systemImage: "checkmark.circle.fill"
+                )
+                .font(.headline)
+                .foregroundColor(.green)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 18)
+            } else if prompt.lifecyclePhase == .failed {
+                Label(
+                    isAuthorization ? "授权尚未完成" : "配置操作尚未完成",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.headline)
+                .foregroundColor(.orange)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 18)
+            } else if let surfaceFrame {
+                VStack(spacing: 9) {
+                    AndroidActionSurfaceView(
+                        frame: surfaceFrame,
+                        disabled: isTerminal,
+                        maximumHeight: maximumSurfaceHeight,
+                        availableWidth: availableSurfaceWidth,
+                        onTap: { x, y in
+                            Task {
+                                await state.tapCloudAuthorizationSurface(
+                                    x: x,
+                                    y: y,
+                                    frame: surfaceFrame
+                                )
+                            }
+                        },
+                        onSwipe: { fromX, fromY, toX, toY in
+                            Task {
+                                await state.swipeCloudAuthorizationSurface(
+                                    fromX: fromX,
+                                    fromY: fromY,
+                                    toX: toX,
+                                    toY: toY,
+                                    frame: surfaceFrame
+                                )
+                            }
+                        }
+                    )
+                    .overlay(alignment: .topTrailing) {
+                        if isBusy {
+                            ProgressView()
+                                .controlSize(.small)
+                                .padding(8)
+                                .background(.regularMaterial, in: Circle())
+                                .padding(8)
+                                .accessibilityLabel(lifecycleStatus)
+                        }
+                    }
+                    HStack(spacing: 10) {
+                        Text("这是站点原生 Android 界面，可直接点击或拖动。")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Button {
+                            isTextEntryExpanded.toggle()
+                        } label: {
+                            Label(
+                                isTextEntryExpanded ? "收起输入" : "输入文字",
+                                systemImage: "keyboard"
+                            )
+                        }
+                        .disabled(isTerminal)
+                        Button {
+                            Task {
+                                await state.backCloudAuthorizationSurface(
+                                    frame: surfaceFrame
+                                )
+                            }
+                        } label: {
+                            Label("返回上一层", systemImage: "arrow.uturn.backward")
+                        }
+                        .disabled(isTerminal)
+                    }
+                }
+                if isTextEntryExpanded {
+                    HStack(spacing: 8) {
+                        TextField(
+                            "点击 Android 输入框后，可在这里发送文字",
+                            text: $state.cloudAuthorizationInput
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(isTerminal)
+                        Button("发送文字") {
+                            Task {
+                                await state.typeCloudAuthorizationSurfaceText(
+                                    frame: surfaceFrame
+                                )
+                            }
+                        }
+                        .disabled(
+                            isTerminal
+                                || state.cloudAuthorizationInput.isEmpty
+                        )
+                    }
+                }
+            } else if isBusy {
+                HStack(spacing: 10) {
+                    AppActivityIndicator(size: .small)
+                    Text(lifecycleStatus)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 18)
+            }
+
+            if let status = prompt.status,
+               !status.isEmpty {
+                Text(status)
+                    .font(.callout)
+                    .foregroundColor(.secondary)
+            }
+
+            HStack {
+                if prompt.allowsRetry {
+                    Button {
+                        Task { await state.retryCloudAuthorizationOperation() }
+                    } label: {
+                        Label("重试", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isBusy || prompt.lifecyclePhase == .completed)
+                }
+                if prompt.allowsCompletionConfirmation,
+                   !isTerminal {
+                    Button {
+                        Task {
+                            await state.confirmCloudAuthorizationCompletion()
+                        }
+                    } label: {
+                        Label("完成并刷新", systemImage: "checkmark.circle")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(prompt.lifecyclePhase == .submitting)
+                }
+                Spacer()
+                Button(isPlayerAuthorization ? "取消播放" : "关闭") {
+                    Task { await state.cancelCloudAuthorization() }
+                }
+                .keyboardShortcut(.cancelAction)
+            }
         }
-        if title.contains("百度") {
-            return "粘贴百度网盘 Cookie"
+        .padding(usesDialogCropLayout ? 18 : 22)
+        .frame(
+            minWidth: minimumCardWidth(
+                maximumSurfaceHeight: maximumSurfaceHeight,
+                availableSurfaceWidth: availableSurfaceWidth
+            ),
+            idealWidth: idealCardWidth(
+                maximumSurfaceHeight: maximumSurfaceHeight,
+                availableSurfaceWidth: availableSurfaceWidth
+            ),
+            maxWidth: maximumCardWidth(
+                maximumSurfaceHeight: maximumSurfaceHeight,
+                availableSurfaceWidth: availableSurfaceWidth
+            )
+        )
+        .onChange(of: prompt.interactionID) { _ in
+            isTextEntryExpanded = false
         }
-        return "粘贴网盘 Cookie 或 Token"
+    }
+
+    private var isAuthorization: Bool {
+        prompt.semantic.isAuthorization || isPlayerAuthorization
+    }
+
+    private var isPlayerAuthorization: Bool {
+        if case .player = prompt.presentationTarget { return true }
+        return false
+    }
+
+    private var isBusy: Bool {
+        prompt.lifecyclePhase.isBusy
+    }
+
+    private var isTerminal: Bool {
+        prompt.lifecyclePhase.isTerminal
+    }
+
+    private var surfaceFrame: AndroidActionSurfaceFrame? {
+        guard let frame = state.cloudAuthorizationSurfaceFrame,
+              frame.interactionID == prompt.interactionID else {
+            return nil
+        }
+        return frame
+    }
+
+    private var usesCompactSurfaceLayout: Bool {
+        guard let surfaceFrame else { return false }
+        return surfaceFrame.pixelHeight > surfaceFrame.pixelWidth
+    }
+
+    private var usesDialogCropLayout: Bool {
+        surfaceFrame?.presentationMode == .dialogCrop
+    }
+
+    private func minimumCardWidth(
+        maximumSurfaceHeight: CGFloat,
+        availableSurfaceWidth: CGFloat
+    ) -> CGFloat {
+        if usesDialogCropLayout {
+            return dialogCardWidth(
+                maximumSurfaceHeight: maximumSurfaceHeight,
+                availableSurfaceWidth: availableSurfaceWidth
+            )
+        }
+        return usesCompactSurfaceLayout ? 440 : 560
+    }
+
+    private func idealCardWidth(
+        maximumSurfaceHeight: CGFloat,
+        availableSurfaceWidth: CGFloat
+    ) -> CGFloat {
+        if usesDialogCropLayout {
+            return dialogCardWidth(
+                maximumSurfaceHeight: maximumSurfaceHeight,
+                availableSurfaceWidth: availableSurfaceWidth
+            )
+        }
+        return usesCompactSurfaceLayout ? 500 : 700
+    }
+
+    private func maximumCardWidth(
+        maximumSurfaceHeight: CGFloat,
+        availableSurfaceWidth: CGFloat
+    ) -> CGFloat {
+        if usesDialogCropLayout {
+            return dialogCardWidth(
+                maximumSurfaceHeight: maximumSurfaceHeight,
+                availableSurfaceWidth: availableSurfaceWidth
+            )
+        }
+        return usesCompactSurfaceLayout ? 580 : 780
+    }
+
+    private func dialogCardWidth(
+        maximumSurfaceHeight: CGFloat,
+        availableSurfaceWidth: CGFloat
+    ) -> CGFloat {
+        guard let surfaceFrame else {
+            return min(440, availableSurfaceWidth)
+        }
+        let surfaceSize = AndroidActionSurfacePresentationPolicy.preferredSize(
+            pixelWidth: surfaceFrame.pixelWidth,
+            pixelHeight: surfaceFrame.pixelHeight,
+            maximumHeight: maximumSurfaceHeight,
+            availableWidth: availableSurfaceWidth,
+            presentationMode: surfaceFrame.presentationMode
+        )
+        return CloudAuthorizationPresentationPolicy.dialogCardWidth(
+            surfaceWidth: surfaceSize.width,
+            availableSurfaceWidth: availableSurfaceWidth
+        )
+    }
+
+    private var lifecycleStatus: String {
+        switch prompt.lifecyclePhase {
+        case .invoking:
+            return "正在提交配置命令"
+        case .awaitingInterface:
+            return "正在等待下一步操作界面"
+        case .submitting:
+            return "正在提交当前操作"
+        case .processing:
+            return "正在等待站点确认结果"
+        case .presenting, .completed, .failed, .cancelled:
+            return ""
+        }
+    }
+
+}
+
+enum CloudAuthorizationPresentationPolicy {
+    static let outerInset: CGFloat = 30
+    static let cardHorizontalPadding: CGFloat = 44
+    private static let cardChromeAndMargins: CGFloat = 280
+    private static let maximumDialogLayoutWidth: CGFloat = 780
+
+    static func maximumSurfaceHeight(containerHeight: CGFloat) -> CGFloat {
+        min(
+            480,
+            max(200, containerHeight - cardChromeAndMargins)
+        )
+    }
+
+    static func availableSurfaceWidth(containerWidth: CGFloat) -> CGFloat {
+        min(
+            maximumDialogLayoutWidth,
+            max(
+                240,
+                containerWidth
+                    - outerInset * 2
+                    - cardHorizontalPadding
+            )
+        )
+    }
+
+    static func dialogCardWidth(
+        surfaceWidth: CGFloat,
+        availableSurfaceWidth: CGFloat
+    ) -> CGFloat {
+        min(
+            availableSurfaceWidth + cardHorizontalPadding,
+            max(440, surfaceWidth + cardHorizontalPadding)
+        )
+    }
+}
+
+enum AndroidActionSurfacePresentationPolicy {
+    static func preferredSize(
+        pixelWidth: Int,
+        pixelHeight: Int,
+        maximumHeight: CGFloat = 520,
+        availableWidth: CGFloat = 700,
+        presentationMode: AndroidActionSurfacePresentationMode = .fullDisplay
+    ) -> CGSize {
+        guard pixelWidth > 0, pixelHeight > 0 else {
+            return CGSize(width: 260, height: 260)
+        }
+        let ratio = CGFloat(pixelWidth) / CGFloat(pixelHeight)
+        let heightLimit = max(260, maximumHeight)
+        if presentationMode == .dialogCrop {
+            let widthLimit = max(1, availableWidth)
+            let proportionalLower = widthLimit * 0.65
+            let proportionalUpper = widthLimit * 0.80
+            let softTarget = min(
+                560,
+                max(480, widthLimit * 0.72)
+            )
+            let targetWidth = min(
+                proportionalUpper,
+                max(proportionalLower, softTarget)
+            )
+            let width = min(targetWidth, heightLimit * ratio)
+            return CGSize(width: width, height: width / ratio)
+        }
+        let targetHeight = min(
+            heightLimit,
+            max(260, 700 / max(0.2, ratio))
+        )
+        let width = min(max(1, availableWidth), 700, targetHeight * ratio)
+        return CGSize(width: width, height: width / ratio)
+    }
+}
+
+enum AndroidActionSurfaceGeometryPolicy {
+    static func fittedRect(
+        container: CGSize,
+        pixels: CGSize
+    ) -> CGRect {
+        guard container.width > 0,
+              container.height > 0,
+              pixels.width > 0,
+              pixels.height > 0 else {
+            return .zero
+        }
+        let scale = min(
+            container.width / pixels.width,
+            container.height / pixels.height
+        )
+        let size = CGSize(
+            width: pixels.width * scale,
+            height: pixels.height * scale
+        )
+        return CGRect(
+            x: (container.width - size.width) / 2,
+            y: (container.height - size.height) / 2,
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    static func pixelPoint(
+        location: CGPoint,
+        fittedRect: CGRect,
+        pixelWidth: Int,
+        pixelHeight: Int
+    ) -> (x: Int, y: Int)? {
+        guard fittedRect.width > 0,
+              fittedRect.height > 0,
+              pixelWidth > 0,
+              pixelHeight > 0,
+              fittedRect.contains(location) else {
+            return nil
+        }
+        let normalizedX = (location.x - fittedRect.minX) / fittedRect.width
+        let normalizedY = (location.y - fittedRect.minY) / fittedRect.height
+        return (
+            x: min(
+                pixelWidth - 1,
+                max(0, Int(normalizedX * CGFloat(pixelWidth)))
+            ),
+            y: min(
+                pixelHeight - 1,
+                max(0, Int(normalizedY * CGFloat(pixelHeight)))
+            )
+        )
+    }
+}
+
+/// Full-surface compatibility view for opaque FongMi/TVBox provider UI. It
+/// forwards geometry only; button names, QR images and window text remain
+/// provider-owned presentation and never select host behavior.
+private struct AndroidActionSurfaceView: View {
+    let frame: AndroidActionSurfaceFrame
+    let disabled: Bool
+    let maximumHeight: CGFloat
+    let availableWidth: CGFloat
+    let onTap: (Int, Int) -> Void
+    let onSwipe: (Int, Int, Int, Int) -> Void
+
+    var body: some View {
+        Group {
+            if let image = NSImage(data: frame.pngData) {
+                let preferredSize =
+                    AndroidActionSurfacePresentationPolicy.preferredSize(
+                        pixelWidth: frame.pixelWidth,
+                        pixelHeight: frame.pixelHeight,
+                        maximumHeight: maximumHeight,
+                        availableWidth: availableWidth,
+                        presentationMode: frame.presentationMode
+                    )
+                GeometryReader { geometry in
+                    let fitted = AndroidActionSurfaceGeometryPolicy.fittedRect(
+                        container: geometry.size,
+                        pixels: CGSize(
+                            width: frame.pixelWidth,
+                            height: frame.pixelHeight
+                        )
+                    )
+                    ZStack(alignment: .topLeading) {
+                        if frame.presentationMode == .fullDisplay {
+                            Color.black.opacity(0.82)
+                        }
+                        Image(nsImage: image)
+                            .resizable()
+                            .interpolation(.high)
+                            .frame(width: fitted.width, height: fitted.height)
+                            .offset(x: fitted.minX, y: fitted.minY)
+                    }
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                            .onEnded { value in
+                                submitGesture(
+                                    from: value.startLocation,
+                                    to: value.location,
+                                    fittedRect: fitted
+                                )
+                            }
+                    )
+                    .allowsHitTesting(!disabled)
+                }
+                .frame(
+                    width: preferredSize.width,
+                    height: preferredSize.height
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 11))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 11)
+                        .stroke(Color.secondary.opacity(0.28), lineWidth: 1)
+                }
+                .accessibilityLabel("站点 Android 配置界面")
+                .accessibilityHint("点击或拖动以操作；下方按钮可返回上一层")
+            } else {
+                Label(
+                    "Android 配置画面暂时不可用",
+                    systemImage: "rectangle.slash"
+                )
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 220)
+            }
+        }
+    }
+
+    private func submitGesture(
+        from startLocation: CGPoint,
+        to endLocation: CGPoint,
+        fittedRect: CGRect
+    ) {
+        guard let start = AndroidActionSurfaceGeometryPolicy.pixelPoint(
+                location: startLocation,
+                fittedRect: fittedRect,
+                pixelWidth: frame.pixelWidth,
+                pixelHeight: frame.pixelHeight
+              ),
+              let end = AndroidActionSurfaceGeometryPolicy.pixelPoint(
+                location: endLocation,
+                fittedRect: fittedRect,
+                pixelWidth: frame.pixelWidth,
+                pixelHeight: frame.pixelHeight
+              ) else {
+            return
+        }
+        let dx = endLocation.x - startLocation.x
+        let dy = endLocation.y - startLocation.y
+        if sqrt(dx * dx + dy * dy) < 7 {
+            onTap(end.x, end.y)
+        } else {
+            onSwipe(start.x, start.y, end.x, end.y)
+        }
     }
 }
 
 private struct SidebarView: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var navigation: AppNavigationState
-    @Environment(\.colorScheme) private var colorScheme
+    @ObservedObject var liveSession: LiveBrowserSession
 
-    private var selectionColor: Color {
-        if colorScheme == .dark {
-            return Color(red: 0.38, green: 0.40, blue: 0.72)
-        }
-        return Color(red: 0.29, green: 0.31, blue: 0.58)
-    }
+    private let primarySections: [AppSection] = [.home, .live]
+    private let personalSections: [AppSection] = [
+        .favorites,
+        .history,
+        .settings
+    ]
 
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 6) {
-                ForEach(AppSection.allCases) { section in
-                    sidebarButton(section)
+        VStack(spacing: 0) {
+            SidebarSearchControl(
+                text: searchText,
+                presentation: searchPresentation,
+                isEnabled: searchIsEnabled,
+                focusRequest: state.globalSearchFocusRequest,
+                onTextChange: handleSearchTextChange,
+                onSubmit: submitSearch
+            )
+            .frame(height: AppSidebarMetrics.searchHeight)
+            .padding(.horizontal, AppSidebarMetrics.horizontalInset)
+            .padding(.top, 10)
+            .padding(.bottom, 8)
+
+            List {
+                Section("浏览") {
+                    ForEach(primarySections) { section in
+                        sidebarNavigationRow(section)
+                    }
+                }
+
+                Section("资料库") {
+                    ForEach(personalSections) { section in
+                        sidebarNavigationRow(section)
+                    }
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.top, 14)
+            .listStyle(.sidebar)
+            .environment(\.defaultMinListRowHeight, AppSidebarMetrics.rowHeight)
         }
-        .frame(minWidth: 160)
-        .background(AppSurfacePalette.background.ignoresSafeArea())
         .modifier(SidebarColumnWidthModifier())
     }
 
-    private func sidebarButton(_ section: AppSection) -> some View {
+    private var searchPresentation: SidebarSearchPresentation {
+        SidebarSearchPresentationPolicy.presentation(
+            for: navigation.selectedSection
+        )
+    }
+
+    private var searchText: Binding<String> {
+        switch searchPresentation.kind {
+        case .video:
+            return $state.searchDraftKeyword
+        case .liveChannels:
+            return $liveSession.searchText
+        }
+    }
+
+    private var searchIsEnabled: Bool {
+        switch searchPresentation.kind {
+        case .video:
+            return !state.visibleSites.isEmpty
+        case .liveChannels:
+            return !state.liveSources.isEmpty
+        }
+    }
+
+    private func sidebarNavigationRow(_ section: AppSection) -> some View {
         let isSelected = navigation.selectedSection == section
         return Button {
             state.selectSection(section)
         } label: {
-            HStack(spacing: 11) {
-                Image(systemName: section.systemImage)
-                    .font(.system(size: 17, weight: .medium))
-                    .frame(width: 23)
-                    .foregroundColor(isSelected ? .white : .secondary)
-                Text(section.rawValue)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(isSelected ? .white : .primary)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 12)
-            .frame(maxWidth: .infinity)
-            .frame(height: 42)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isSelected ? selectionColor : Color.clear)
+            SidebarRowContent(
+                section: section,
+                isSelected: isSelected
             )
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
-        .appInteractiveHover(cornerRadius: 8, selected: isSelected)
         .accessibilityLabel(section.rawValue)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private func handleSearchTextChange(_ value: String) {
+        guard searchPresentation.kind == .video,
+              value.isEmpty else { return }
+        state.clearGlobalVideoSearch()
+    }
+
+    private func submitSearch() {
+        guard searchPresentation.kind == .video else { return }
+        let keyword = state.searchDraftKeyword
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !keyword.isEmpty else { return }
+        state.searchFromSidebar(keyword)
+    }
+}
+
+private struct SidebarRowContent: View {
+    let section: AppSection
+    let isSelected: Bool
+
+    var body: some View {
+        HStack(spacing: AppSidebarMetrics.iconTextSpacing) {
+            Image(systemName: section.systemImage)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundColor(Color(nsColor: .systemBlue))
+                .frame(width: AppSidebarMetrics.iconWidth, alignment: .center)
+
+            Text(section.rawValue)
+                .foregroundColor(.primary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+
+            Spacer(minLength: 0)
+        }
+            .font(.system(size: AppSidebarMetrics.labelFontSize, weight: .regular))
+            // A finite proposal avoids SwiftUI's sidebar table collapsing the
+            // text column to its truncation glyph when the split view restores
+            // a saved width. The row can still expand naturally with the list.
+            .frame(
+                minWidth: AppSidebarMetrics.rowContentMinimumWidth,
+                maxWidth: .infinity,
+                alignment: .leading
+            )
+            .frame(height: AppSidebarMetrics.rowHeight - 2)
+            .contentShape(Rectangle())
+            .sidebarRowHover(isSelected: isSelected)
+    }
+}
+
+private struct CollapsedSidebarSearchButton: View {
+    @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var navigation: AppNavigationState
+    @ObservedObject var liveSession: LiveBrowserSession
+    @State private var isPresented = false
+    @State private var popoverFocusRequest: UInt64 = 0
+
+    var body: some View {
+        Button {
+            popoverFocusRequest &+= 1
+            isPresented = true
+        } label: {
+            Label(searchPresentation.accessibilityLabel, systemImage: "magnifyingglass")
+                .labelStyle(.iconOnly)
+        }
+        .help("\(searchPresentation.help)（⌘F）")
+        .accessibilityLabel(searchPresentation.accessibilityLabel)
+        .disabled(!searchIsEnabled)
+        .popover(isPresented: $isPresented, arrowEdge: .top) {
+            SidebarSearchControl(
+                text: searchText,
+                presentation: searchPresentation,
+                isEnabled: searchIsEnabled,
+                focusRequest: state.globalSearchFocusRequest
+                    &+ popoverFocusRequest,
+                onTextChange: handleSearchTextChange,
+                onSubmit: submitSearch
+            )
+            .frame(width: 300, height: 28)
+            .padding(14)
+        }
+        .onChange(of: state.globalSearchFocusRequest) { _ in
+            popoverFocusRequest &+= 1
+            isPresented = true
+        }
+    }
+
+    private var searchPresentation: SidebarSearchPresentation {
+        SidebarSearchPresentationPolicy.presentation(
+            for: navigation.selectedSection
+        )
+    }
+
+    private var searchText: Binding<String> {
+        switch searchPresentation.kind {
+        case .video:
+            return $state.searchDraftKeyword
+        case .liveChannels:
+            return $liveSession.searchText
+        }
+    }
+
+    private var searchIsEnabled: Bool {
+        switch searchPresentation.kind {
+        case .video:
+            return !state.visibleSites.isEmpty
+        case .liveChannels:
+            return !state.liveSources.isEmpty
+        }
+    }
+
+    private func handleSearchTextChange(_ value: String) {
+        guard searchPresentation.kind == .video,
+              value.isEmpty else { return }
+        state.clearGlobalVideoSearch()
+    }
+
+    private func submitSearch() {
+        defer { isPresented = false }
+        guard searchPresentation.kind == .video else { return }
+        let keyword = state.searchDraftKeyword
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !keyword.isEmpty else { return }
+        state.searchFromSidebar(keyword)
+    }
+}
+
+private struct SidebarSearchControl: NSViewRepresentable {
+    @Binding var text: String
+    let presentation: SidebarSearchPresentation
+    let isEnabled: Bool
+    let focusRequest: UInt64
+    let onTextChange: (String) -> Void
+    let onSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NSSearchField {
+        let field = NSSearchField()
+        field.controlSize = .regular
+        field.font = NSFont.systemFont(ofSize: 14)
+        field.sendsSearchStringImmediately = false
+        field.sendsWholeSearchString = true
+        field.delegate = context.coordinator
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.submit(_:))
+        return field
+    }
+
+    func updateNSView(_ field: NSSearchField, context: Context) {
+        context.coordinator.parent = self
+        field.placeholderString = presentation.placeholder
+        field.setAccessibilityLabel(presentation.accessibilityLabel)
+        field.toolTip = presentation.help
+        field.isEnabled = isEnabled
+        if field.stringValue != text {
+            field.stringValue = text
+        }
+        guard focusRequest > 0,
+              context.coordinator.lastFocusRequest != focusRequest else {
+            return
+        }
+        context.coordinator.lastFocusRequest = focusRequest
+        DispatchQueue.main.async {
+            guard let window = field.window,
+                  field.isEnabled else { return }
+            window.makeFirstResponder(field)
+            field.selectText(nil)
+        }
+    }
+
+    final class Coordinator: NSObject, NSSearchFieldDelegate {
+        var parent: SidebarSearchControl
+        var lastFocusRequest: UInt64 = 0
+
+        init(_ parent: SidebarSearchControl) {
+            self.parent = parent
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSSearchField else { return }
+            parent.text = field.stringValue
+            parent.onTextChange(field.stringValue)
+        }
+
+        @objc func submit(_ sender: NSSearchField) {
+            parent.text = sender.stringValue
+            parent.onTextChange(sender.stringValue)
+            parent.onSubmit()
+        }
     }
 }
 
@@ -652,73 +2390,270 @@ private struct SidebarColumnWidthModifier: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
         if #available(macOS 13.0, *) {
-            content.navigationSplitViewColumnWidth(min: 160, ideal: 190, max: 230)
+            content.navigationSplitViewColumnWidth(
+                min: AppSidebarMetrics.minimumWidth,
+                ideal: AppSidebarMetrics.idealWidth,
+                max: AppSidebarMetrics.maximumWidth
+            )
         } else {
-            content.frame(idealWidth: 190, maxWidth: 230)
+            content.frame(
+                minWidth: AppSidebarMetrics.minimumWidth,
+                idealWidth: AppSidebarMetrics.idealWidth,
+                maxWidth: AppSidebarMetrics.maximumWidth
+            )
         }
     }
 }
 
 private struct SectionContentView: View {
+    @EnvironmentObject private var state: AppState
     @EnvironmentObject private var navigation: AppNavigationState
-    @StateObject private var liveSession = LiveBrowserSession()
+    @ObservedObject var liveSession: LiveBrowserSession
+    let showsCollapsedSearch: Bool
 
     var body: some View {
+        Group {
+            if state.isDetailPagePresented {
+                BrowserDetailRouteContainer()
+            } else {
+                baseSectionContent
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AppSurfacePalette.background)
+        .transaction { transaction in
+            // AppKit hosts SwiftUI toolbar items in constraint-based views.
+            // A structural detail-route animation can invalidate those
+            // constraints again while the display cycle is already updating.
+            transaction.disablesAnimations = true
+        }
+    }
+
+    @ViewBuilder
+    private var baseSectionContent: some View {
         Group {
             switch navigation.selectedSection {
             case .home, .live:
                 HomeLiveSectionContainer(liveSession: liveSession)
             case .favorites:
-                FavoritesView()
+                StandardBrowserSectionContainer {
+                    FavoritesView()
+                }
             case .history:
-                HistoryView()
+                StandardBrowserSectionContainer {
+                    HistoryView()
+                }
             case .settings:
-                SettingsView()
+                StandardBrowserSectionContainer {
+                    SettingsView()
+                }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(AppSurfacePalette.background.ignoresSafeArea())
     }
 }
 
-/// Home and live are the two largest browsing trees. Keeping them mounted
-/// avoids tearing down dozens of live cards while simultaneously constructing
-/// the poster grid. The navigation store is intentionally observed only here,
-/// so changing sections does not invalidate either content subtree.
+/// Applies the same right-column titlebar material used by the home browser to
+/// the remaining primary sections without changing the independent Sidebar.
+private struct StandardBrowserSectionContainer<Content: View>: View {
+    @EnvironmentObject private var state: AppState
+    @State private var isContentScrolled = false
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            content
+                .environment(
+                    \.primaryToolbarLayout,
+                    PrimaryToolbarLayoutPolicy.layout(
+                        contentWidth: proxy.size.width
+                    )
+                )
+                .environment(\.browserToolbarScrollReporter) { isScrolled in
+                    if isContentScrolled != isScrolled {
+                        isContentScrolled = isScrolled
+                    }
+                }
+                .modifier(
+                    BrowserToolbarChromeModifier(
+                        isScrolled: isContentScrolled,
+                        isWindowActive: state.isBrowserWindowKey
+                    )
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+/// Presents details as a page inside the split view's detail column. Browser
+/// state lives in AppState/LiveBrowserSession, so the expensive originating
+/// grid can be unmounted instead of continuing to lay out invisibly.
+private struct BrowserDetailRouteContainer: View {
+    @EnvironmentObject private var state: AppState
+    @State private var isContentScrolled = false
+
+    var body: some View {
+        Group {
+            if let detail = state.selectedDetail {
+                DetailView(detail: detail)
+            } else if let summary = state.pendingDetailSummary {
+                DetailLoadingView(summary: summary)
+            }
+        }
+        .environment(\.browserToolbarScrollReporter) { isScrolled in
+            if isContentScrolled != isScrolled {
+                isContentScrolled = isScrolled
+            }
+        }
+        .modifier(
+            BrowserToolbarChromeModifier(
+                isScrolled: isContentScrolled,
+                isWindowActive: state.isBrowserWindowKey
+            )
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AppSurfacePalette.background)
+    }
+}
+
+/// Home and live are the two largest browsing trees. Keep their lightweight
+/// session state here, but mount only the visible tree: an opacity-hidden live
+/// grid still participates in SwiftUI updates and can contend with playback.
 private struct HomeLiveSectionContainer: View {
+    @EnvironmentObject private var state: AppState
     @EnvironmentObject private var navigation: AppNavigationState
     @ObservedObject var liveSession: LiveBrowserSession
+    @State private var isBrowserContentScrolled = false
 
     private var showsHome: Bool {
         navigation.selectedSection == .home
     }
 
-    var body: some View {
-        ZStack {
-            HomeView()
-                .opacity(showsHome ? 1 : 0)
-                .allowsHitTesting(showsHome)
-                .accessibilityHidden(!showsHome)
-                .zIndex(showsHome ? 1 : 0)
+    private var showsHomeToolbar: Bool {
+        showsHome
+            && !state.isHomeSearchPresented
+            && !state.isDetailPagePresented
+            && state.activeConfiguration != nil
+    }
 
-            LiveView(session: liveSession)
-                .opacity(showsHome ? 0 : 1)
-                .allowsHitTesting(!showsHome)
-                .accessibilityHidden(showsHome)
-                .zIndex(showsHome ? 0 : 1)
-        }
-        .navigationTitle(navigation.selectedSection.rawValue)
-        .toolbar {
-            ToolbarItem {
+    var body: some View {
+        GeometryReader { proxy in
+            let toolbarLayout = HomeToolbarLayoutPolicy.layout(
+                contentWidth: proxy.size.width
+            )
+            Group {
                 if showsHome {
-                    HomeToolbarView()
+                    HomeView()
                 } else {
-                    LiveToolbarView(session: liveSession)
+                    LiveView(session: liveSession)
                 }
             }
+            .environment(\.primaryToolbarLayout, toolbarLayout)
+            .environment(\.browserToolbarScrollReporter) { isScrolled in
+                if isBrowserContentScrolled != isScrolled {
+                    isBrowserContentScrolled = isScrolled
+                }
+            }
+            .navigationTitle("")
+            .modifier(
+                HomeLiveToolbarModifier(
+                    showsHomeToolbar: showsHomeToolbar,
+                    showsLiveToolbar: !showsHome,
+                    isInteractionBlocked:
+                        state.mainWindowCloudAuthorizationPrompt != nil,
+                    layout: toolbarLayout,
+                    liveSession: liveSession
+                )
+            )
+            .modifier(
+                BrowserToolbarChromeModifier(
+                    isScrolled: isBrowserContentScrolled,
+                    isWindowActive: state.isBrowserWindowKey
+                )
+            )
+            .onChange(of: navigation.selectedSection) { _ in
+                isBrowserContentScrolled = false
+            }
+            .onChange(of: state.isHomeSearchPresented) { _ in
+                isBrowserContentScrolled = false
+            }
+            .transaction { transaction in
+                transaction.disablesAnimations = true
+            }
         }
-        .transaction { transaction in
-            transaction.disablesAnimations = true
+    }
+}
+
+private struct HomeLiveToolbarModifier: ViewModifier {
+    let showsHomeToolbar: Bool
+    let showsLiveToolbar: Bool
+    let isInteractionBlocked: Bool
+    let layout: HomeToolbarLayout
+    @ObservedObject var liveSession: LiveBrowserSession
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if showsHomeToolbar {
+            content.toolbar {
+                HomeBrowserToolbarContent(
+                    layout: layout,
+                    isInteractionBlocked: isInteractionBlocked
+                )
+            }
+        } else if showsLiveToolbar {
+            content.toolbar {
+                LiveBrowserToolbarContent(
+                    session: liveSession,
+                    isInteractionBlocked: isInteractionBlocked
+                )
+            }
+        } else {
+            // Search and detail pages own their toolbars. Do not attach empty
+            // parent items: AppKit otherwise exposes a stray capsule beside
+            // the native sidebar button when it merges nested toolbars.
+            content
+        }
+    }
+}
+
+private struct HomeBrowserToolbarContent: ToolbarContent {
+    let layout: HomeToolbarLayout
+    let isInteractionBlocked: Bool
+
+    var body: some ToolbarContent {
+        PrimaryPageToolbarLeadingContent(title: "点播")
+        ToolbarItemGroup(placement: .primaryAction) {
+            HomeConfigurationToolbarItem(layout: layout)
+                .frame(height: PrimaryToolbarMetrics.itemHeight)
+                .disabled(isInteractionBlocked)
+            HomeSiteToolbarItem(layout: layout)
+                .frame(height: PrimaryToolbarMetrics.itemHeight)
+                .disabled(isInteractionBlocked)
+            HomeFilterToolbarItem(layout: layout)
+                .frame(height: PrimaryToolbarMetrics.itemHeight)
+                .disabled(isInteractionBlocked)
+            PrimaryToolbarDivider()
+                .frame(height: PrimaryToolbarMetrics.itemHeight)
+            HomeRefreshToolbarItem(layout: layout)
+                .frame(height: PrimaryToolbarMetrics.itemHeight)
+                .disabled(isInteractionBlocked)
+        }
+    }
+}
+
+private struct LiveBrowserToolbarContent: ToolbarContent {
+    @ObservedObject var session: LiveBrowserSession
+    let isInteractionBlocked: Bool
+
+    var body: some ToolbarContent {
+        PrimaryPageToolbarLeadingContent(title: "直播")
+        ToolbarItemGroup(placement: .primaryAction) {
+            LiveToolbarView(session: session)
+                .frame(height: PrimaryToolbarMetrics.itemHeight)
+                .disabled(isInteractionBlocked)
         }
     }
 }

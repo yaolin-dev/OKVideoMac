@@ -1,0 +1,66 @@
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -416,8 +416,10 @@ if features['cocoa']
+     dependencies += cocoa
+     path_source += files('osdep/path-mac.m')
+     sources += files('osdep/language-mac.c',
+-                     'osdep/mac/app_bridge.m',
+-                     'player/clipboard/clipboard-mac.m')
++                     'osdep/mac/app_bridge.m')
++    if get_option('swift-build').allowed()
++        sources += files('player/clipboard/clipboard-mac.m')
++    endif
+     main_fn_source = files('osdep/main-fn-mac.c')
+ endif
+ 
+diff --git a/player/clipboard/clipboard.c b/player/clipboard/clipboard.c
+--- a/player/clipboard/clipboard.c
++++ b/player/clipboard/clipboard.c
+@@ -39,7 +39,7 @@ static const struct clipboard_backend *const clipboard_backend_list[] = {
+ #if HAVE_WIN32_DESKTOP
+     &clipboard_backend_win32,
+ #endif
+-#if HAVE_COCOA
++#if HAVE_COCOA && HAVE_SWIFT
+     &clipboard_backend_mac,
+ #endif
+ #if HAVE_WAYLAND && HAVE_WAYLAND_PROTOCOLS_1_39
+diff --git a/player/main.c b/player/main.c
+--- a/player/main.c
++++ b/player/main.c
+@@ -410,7 +410,7 @@ static int mp_initialize(struct MPContext *mpctx, char **options)
+ 
+     MP_STATS(mpctx, "start init");
+ 
+-#if HAVE_COCOA
++#if HAVE_COCOA && HAVE_SWIFT
+     mpv_handle *ctx = mp_new_client(mpctx->clients, "mac");
+     cocoa_set_mpv_handle(ctx);
+ #endif
+diff --git a/osdep/mac/app_bridge.m b/osdep/mac/app_bridge.m
+--- a/osdep/mac/app_bridge.m
++++ b/osdep/mac/app_bridge.m
+@@ -165,4 +165,22 @@ int cocoa_main(int argc, char *argv[])
+ {
+     return [(Application *)[Application sharedApplication] main:argc :argv];
+ }
++#else
++void cocoa_init_media_keys(void) {}
++void cocoa_uninit_media_keys(void) {}
++void cocoa_set_input_context(struct input_ctx *input_context)
++{
++    (void)input_context;
++}
++void cocoa_set_mpv_handle(struct mpv_handle *ctx)
++{
++    (void)ctx;
++}
++void cocoa_init_cocoa_cb(void) {}
++int cocoa_main(int argc, char *argv[])
++{
++    (void)argc;
++    (void)argv;
++    return -1;
++}
+ #endif

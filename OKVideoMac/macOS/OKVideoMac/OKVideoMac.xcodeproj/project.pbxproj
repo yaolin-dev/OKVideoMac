@@ -11,6 +11,8 @@
 		0DC49DC6E8989EB3C7FFADD2 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADFC0D6C3C9A30793D7813B3 /* AppState.swift */; };
 		0EBDF1072F01B5B03856512F /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 4027B9ADBDE079CA11AFB824 /* Localizable.strings */; };
 		15EC54A8AB04926723F01FFD /* MPVRenderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A119CE857C4037E4EA9BAB8 /* MPVRenderView.swift */; };
+		1A4FD04A5B7D4D60A115C2E0 /* PlayerWindowPreferenceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A85DB5A927E947998EAF122A /* PlayerWindowPreferenceStore.swift */; };
+		195449ECEC9D9787554618E1 /* NodeRuntimeContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = E497EB47C4C1AD4047675EFC /* NodeRuntimeContract.swift */; };
 		285AF5B7AA73E51C0BE0F632 /* NodeHTTPSpiderSiteProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 617A00084B74B412C7C3ACB9 /* NodeHTTPSpiderSiteProvider.swift */; };
 		34E5D648D9127134BBCC6933 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 689F4F5C0C244BA810946A34 /* PlayerView.swift */; };
 		3CE5EE6FA03482C30AE9FE0F /* WKWebSniffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C3F9E94B5A9587197666CC3 /* WKWebSniffer.swift */; };
@@ -21,6 +23,7 @@
 		6C218C2C6AAC7BA83B2DB968 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = ED0F982CA57DBEA3A9CBF1FE /* LICENSE */; };
 		6CDA157B1D9D80E812D81034 /* FavoritesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEE09C76DBAB9FF2328487B7 /* FavoritesView.swift */; };
 		6E4F5AA244E052ECA855ECA6 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17AF967B0C8608167C0A2531 /* SettingsView.swift */; };
+		7133DE14D3CE9A20F56BADFF /* PortableBackup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E49D86C26BE1BB599E9FAA5 /* PortableBackup.swift */; };
 		7AD66D8D9EBE463C430F6C00 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 217FFD299EC1C10BDAC94A93 /* Assets.xcassets */; };
 		7D745EAFB36BEFB59EF64D70 /* OKVideoCore in Frameworks */ = {isa = PBXBuildFile; productRef = 2C5893FD1E3264FC60A92F7D /* OKVideoCore */; };
 		7EF03B9631AC9E4D3F4246CC /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7765776920879CB4CD0A540 /* HomeView.swift */; };
@@ -30,8 +33,10 @@
 		A04BBDA44750879BBFAFB666 /* NOTICE.md in Resources */ = {isa = PBXBuildFile; fileRef = F39511E40E3FE20271196154 /* NOTICE.md */; };
 		A079B159324210117BB52A09 /* QuickJSSpiderRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78A48458B942371BAE2A85FD /* QuickJSSpiderRuntime.swift */; };
 		A0BF2B3C33EFE592A9DF59F9 /* MPVPlayerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6326E81195BB34CCB3CEC61 /* MPVPlayerClient.swift */; };
+		A2F41ABF02AE0A13544CDF2A /* CatPawProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8754CA1D367DB8EB69DB9D9 /* CatPawProtocol.swift */; };
 		A3B0AE14D90BC82289D17D61 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 115FFC7F2FD723B0F12E0D2D /* RootView.swift */; };
 		A460B1043453667657698834 /* VideoGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5707873F641B0221D67B9CBC /* VideoGrid.swift */; };
+		B83C29F7B0A24F7C9616C0D1 /* BrowserToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B74C9F0DA16E4EE2A3714BF3 /* BrowserToolbar.swift */; };
 		A55E769996EE245CA586B3C6 /* JavaScriptSpiderSiteProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E25C74DFB53809A9F2672CE /* JavaScriptSpiderSiteProvider.swift */; };
 		B1BEEF638AD2DF98A1887EA2 /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F51955D6459123DB5DAD2EAB /* SearchView.swift */; };
 		C8D0231080586D3A6558BA58 /* OKVideoPersistence in Frameworks */ = {isa = PBXBuildFile; productRef = 40F5E74826FFC180B7D5D2FD /* OKVideoPersistence */; };
@@ -40,6 +45,8 @@
 		EB38C679BF2A786E9E0B233D /* THIRD_PARTY_LICENSES.md in Resources */ = {isa = PBXBuildFile; fileRef = 8AB307256CE6590A5494384D /* THIRD_PARTY_LICENSES.md */; };
 		F9FF431B06B6D4B13A435C8A /* AppParseExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6CD897F3EA6681258B14A99 /* AppParseExecutor.swift */; };
 		FB2A4C23694D2553091FEDF2 /* DetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E18EAE5CCFAEC3E0E3E49A /* DetailView.swift */; };
+		F0A100000000000000000001 /* catpaw-quark-transfer-lifecycle.js in Resources */ = {isa = PBXBuildFile; fileRef = F0A100000000000000000101 /* catpaw-quark-transfer-lifecycle.js */; };
+		F0A100000000000000000002 /* catpaw-quark-lifecycle.patch.js in Resources */ = {isa = PBXBuildFile; fileRef = F0A100000000000000000102 /* catpaw-quark-lifecycle.patch.js */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -65,6 +72,7 @@
 		4E25C74DFB53809A9F2672CE /* JavaScriptSpiderSiteProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JavaScriptSpiderSiteProvider.swift; sourceTree = "<group>"; };
 		50471B253F948DFB29DE1F74 /* OKVideoMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OKVideoMacApp.swift; sourceTree = "<group>"; };
 		5707873F641B0221D67B9CBC /* VideoGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoGrid.swift; sourceTree = "<group>"; };
+		B74C9F0DA16E4EE2A3714BF3 /* BrowserToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserToolbar.swift; sourceTree = "<group>"; };
 		617A00084B74B412C7C3ACB9 /* NodeHTTPSpiderSiteProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeHTTPSpiderSiteProvider.swift; sourceTree = "<group>"; };
 		63284B4134B72C9ECD12EE1B /* ImageRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageRepository.swift; sourceTree = "<group>"; };
 		689F4F5C0C244BA810946A34 /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
@@ -74,6 +82,8 @@
 		7C3F9E94B5A9587197666CC3 /* WKWebSniffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WKWebSniffer.swift; sourceTree = "<group>"; };
 		7EDCFE690A729EE506C02030 /* OKVideoMacTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OKVideoMacTests.swift; sourceTree = "<group>"; };
 		8AB307256CE6590A5494384D /* THIRD_PARTY_LICENSES.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = THIRD_PARTY_LICENSES.md; sourceTree = "<group>"; };
+		9E49D86C26BE1BB599E9FAA5 /* PortableBackup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortableBackup.swift; sourceTree = "<group>"; };
+		A85DB5A927E947998EAF122A /* PlayerWindowPreferenceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerWindowPreferenceStore.swift; sourceTree = "<group>"; };
 		A406AD3C9358F59A462C9AB8 /* NodeBundleRuntimeService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeBundleRuntimeService.swift; sourceTree = "<group>"; };
 		ADFC0D6C3C9A30793D7813B3 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		BCC0FBAF18592C722D283D81 /* LiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveView.swift; sourceTree = "<group>"; };
@@ -81,12 +91,16 @@
 		D3D2A8AF3D0689F343F646E4 /* OKVideoMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OKVideoMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D6CD897F3EA6681258B14A99 /* AppParseExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppParseExecutor.swift; sourceTree = "<group>"; };
 		D7765776920879CB4CD0A540 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
+		D8754CA1D367DB8EB69DB9D9 /* CatPawProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatPawProtocol.swift; sourceTree = "<group>"; };
+		E497EB47C4C1AD4047675EFC /* NodeRuntimeContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeRuntimeContract.swift; sourceTree = "<group>"; };
 		ED0F982CA57DBEA3A9CBF1FE /* LICENSE */ = {isa = PBXFileReference; path = LICENSE; sourceTree = "<group>"; };
 		EEE09C76DBAB9FF2328487B7 /* FavoritesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesView.swift; sourceTree = "<group>"; };
 		F10066822C02CE0E2210A0C9 /* OKVideoMacTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OKVideoMacTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F39511E40E3FE20271196154 /* NOTICE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = NOTICE.md; sourceTree = "<group>"; };
 		F51955D6459123DB5DAD2EAB /* SearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchView.swift; sourceTree = "<group>"; };
 		F96551D818B82A3B4B38456B /* ConfigurationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationView.swift; sourceTree = "<group>"; };
+		F0A100000000000000000101 /* catpaw-quark-transfer-lifecycle.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "NodePatches/catpaw-quark-transfer-lifecycle.js"; sourceTree = "<group>"; };
+		F0A100000000000000000102 /* catpaw-quark-lifecycle.patch.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "NodePatches/catpaw-quark-lifecycle.patch.js"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -105,9 +119,11 @@
 		1D25F8E589BD6D2058986914 /* Spider */ = {
 			isa = PBXGroup;
 			children = (
+				D8754CA1D367DB8EB69DB9D9 /* CatPawProtocol.swift */,
 				4E25C74DFB53809A9F2672CE /* JavaScriptSpiderSiteProvider.swift */,
 				A406AD3C9358F59A462C9AB8 /* NodeBundleRuntimeService.swift */,
 				617A00084B74B412C7C3ACB9 /* NodeHTTPSpiderSiteProvider.swift */,
+				E497EB47C4C1AD4047675EFC /* NodeRuntimeContract.swift */,
 				78A48458B942371BAE2A85FD /* QuickJSSpiderRuntime.swift */,
 			);
 			path = Spider;
@@ -178,6 +194,8 @@
 			children = (
 				217FFD299EC1C10BDAC94A93 /* Assets.xcassets */,
 				4027B9ADBDE079CA11AFB824 /* Localizable.strings */,
+				F0A100000000000000000101 /* catpaw-quark-transfer-lifecycle.js */,
+				F0A100000000000000000102 /* catpaw-quark-lifecycle.patch.js */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -246,6 +264,7 @@
 				ADFC0D6C3C9A30793D7813B3 /* AppState.swift */,
 				63284B4134B72C9ECD12EE1B /* ImageRepository.swift */,
 				50471B253F948DFB29DE1F74 /* OKVideoMacApp.swift */,
+				9E49D86C26BE1BB599E9FAA5 /* PortableBackup.swift */,
 				115FFC7F2FD723B0F12E0D2D /* RootView.swift */,
 			);
 			path = App;
@@ -283,6 +302,7 @@
 				3D3A1A89473AFD33AAF47D01 /* MPVLibrary.swift */,
 				C6326E81195BB34CCB3CEC61 /* MPVPlayerClient.swift */,
 				2A119CE857C4037E4EA9BAB8 /* MPVRenderView.swift */,
+				A85DB5A927E947998EAF122A /* PlayerWindowPreferenceStore.swift */,
 			);
 			path = Player;
 			sourceTree = "<group>";
@@ -314,6 +334,7 @@
 		F9EEB5EB5FF3ED73839331B4 /* Shared */ = {
 			isa = PBXGroup;
 			children = (
+				B74C9F0DA16E4EE2A3714BF3 /* BrowserToolbar.swift */,
 				5707873F641B0221D67B9CBC /* VideoGrid.swift */,
 			);
 			path = Shared;
@@ -421,6 +442,8 @@
 				0EBDF1072F01B5B03856512F /* Localizable.strings in Resources */,
 				A04BBDA44750879BBFAFB666 /* NOTICE.md in Resources */,
 				EB38C679BF2A786E9E0B233D /* THIRD_PARTY_LICENSES.md in Resources */,
+				F0A100000000000000000001 /* catpaw-quark-transfer-lifecycle.js in Resources */,
+				F0A100000000000000000002 /* catpaw-quark-lifecycle.patch.js in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -517,6 +540,7 @@
 				5728CE6395E44C04B4A0C12A /* AppEnvironment.swift in Sources */,
 				F9FF431B06B6D4B13A435C8A /* AppParseExecutor.swift in Sources */,
 				0DC49DC6E8989EB3C7FFADD2 /* AppState.swift in Sources */,
+				A2F41ABF02AE0A13544CDF2A /* CatPawProtocol.swift in Sources */,
 				547E70EE1CB6395E47E23C62 /* ConfigurationView.swift in Sources */,
 				FB2A4C23694D2553091FEDF2 /* DetailView.swift in Sources */,
 				6CDA157B1D9D80E812D81034 /* FavoritesView.swift in Sources */,
@@ -528,15 +552,19 @@
 				05D5512B69A7C71CC3112A74 /* MPVLibrary.swift in Sources */,
 				A0BF2B3C33EFE592A9DF59F9 /* MPVPlayerClient.swift in Sources */,
 				15EC54A8AB04926723F01FFD /* MPVRenderView.swift in Sources */,
+				1A4FD04A5B7D4D60A115C2E0 /* PlayerWindowPreferenceStore.swift in Sources */,
 				CA7782FAED307EC8B1B38D2D /* NodeBundleRuntimeService.swift in Sources */,
 				285AF5B7AA73E51C0BE0F632 /* NodeHTTPSpiderSiteProvider.swift in Sources */,
+				195449ECEC9D9787554618E1 /* NodeRuntimeContract.swift in Sources */,
 				3F316183E2F6BADC6631BC5D /* OKVideoMacApp.swift in Sources */,
 				34E5D648D9127134BBCC6933 /* PlayerView.swift in Sources */,
+				7133DE14D3CE9A20F56BADFF /* PortableBackup.swift in Sources */,
 				A079B159324210117BB52A09 /* QuickJSSpiderRuntime.swift in Sources */,
 				A3B0AE14D90BC82289D17D61 /* RootView.swift in Sources */,
 				B1BEEF638AD2DF98A1887EA2 /* SearchView.swift in Sources */,
 				6E4F5AA244E052ECA855ECA6 /* SettingsView.swift in Sources */,
 				A460B1043453667657698834 /* VideoGrid.swift in Sources */,
+				B83C29F7B0A24F7C9616C0D1 /* BrowserToolbar.swift in Sources */,
 				3CE5EE6FA03482C30AE9FE0F /* WKWebSniffer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -598,7 +626,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 65;
+				CURRENT_PROJECT_VERSION = 94;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -617,7 +645,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				MARKETING_VERSION = 0.3.41;
+				MARKETING_VERSION = 0.4.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -742,7 +770,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 65;
+				CURRENT_PROJECT_VERSION = 94;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -755,7 +783,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				MARKETING_VERSION = 0.3.41;
+				MARKETING_VERSION = 0.4.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

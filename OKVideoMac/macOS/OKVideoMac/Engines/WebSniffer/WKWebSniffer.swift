@@ -18,6 +18,10 @@ final class WKWebSniffer: NSObject, WebSnifferClient {
         guard ["http", "https"].contains(request.url.scheme?.lowercased() ?? "") else {
             throw AppError.parsing("Web 嗅探只允许 HTTP/HTTPS 页面")
         }
+        guard request.allowsPrivateNetworkAccess
+                || !Self.isPrivateNetworkURL(request.url) else {
+            throw AppError.parsing("Web 嗅探拒绝访问本机或内网地址")
+        }
         activeRequest = request
         let configuration = makeConfiguration()
         let webView = WKWebView(frame: .zero, configuration: configuration)
@@ -150,6 +154,27 @@ final class WKWebSniffer: NSObject, WebSnifferClient {
         }
     }
 
+    private static func isPrivateNetworkURL(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased(), !host.isEmpty else {
+            return true
+        }
+        if host == "localhost" || host.hasSuffix(".localhost")
+            || host.hasSuffix(".local") || host.contains(":") {
+            return true
+        }
+        let parts = host.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4 else { return false }
+        guard parts.allSatisfy({ (0...255).contains($0) }) else { return true }
+        return parts[0] == 0
+            || parts[0] == 10
+            || parts[0] == 127
+            || (parts[0] == 100 && (64...127).contains(parts[1]))
+            || (parts[0] == 169 && parts[1] == 254)
+            || (parts[0] == 172 && (16...31).contains(parts[1]))
+            || (parts[0] == 192 && parts[1] == 168)
+            || parts[0] >= 224
+    }
+
     private func finish(_ result: Result<SniffedMedia, Error>) {
         guard let continuation else { return }
         self.continuation = nil
@@ -234,7 +259,11 @@ extension WKWebSniffer: WKNavigationDelegate {
             return
         }
         let scheme = url.scheme?.lowercased() ?? ""
-        decisionHandler(["http", "https", "about"].contains(scheme) ? .allow : .cancel)
+        let allowsScheme = ["http", "https", "about"].contains(scheme)
+        let blocksPrivateTarget = activeRequest?.allowsPrivateNetworkAccess == false
+            && scheme != "about"
+            && Self.isPrivateNetworkURL(url)
+        decisionHandler(allowsScheme && !blocksPrivateTarget ? .allow : .cancel)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

@@ -46,6 +46,12 @@ int okmpv_set_property_string(
     const char *name,
     const char *value
 );
+int okmpv_get_property_string(
+    OKMPVClient *client,
+    const char *name,
+    char *value,
+    int value_capacity
+);
 int okmpv_set_property_double(
     OKMPVClient *client,
     const char *name,
@@ -120,6 +126,7 @@ int okmpv_render_create(
     OKMPVClient *client,
     OKMPVGetProcAddress get_proc_address,
     void *get_proc_address_context,
+    int advanced_control,
     OKMPVRenderContext **render_context
 );
 void okmpv_render_set_update_callback(
@@ -135,6 +142,7 @@ int okmpv_render(
     int height,
     int flip_y
 );
+int okmpv_render_skip(OKMPVRenderContext *render_context);
 void okmpv_render_report_swap(OKMPVRenderContext *render_context);
 void okmpv_render_destroy(OKMPVRenderContext *render_context);
 

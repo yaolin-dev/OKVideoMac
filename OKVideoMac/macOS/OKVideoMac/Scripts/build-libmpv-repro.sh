@@ -13,6 +13,7 @@ SOURCE_DIR="$REPRO_ROOT/src/mpv-0.41.0"
 BUILD_DIR="$REPRO_ROOT/build/mpv-0.41.0"
 PREFIX="$REPRO_ROOT/mpv-prefix"
 PATCH_FILE="$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-without-cocoa.patch"
+VIDEOTOOLBOX_GL_PATCH_FILE="$PROJECT_DIR/Patches/mpv-0.41.0-libmpv-videotoolbox-gl.patch"
 FFMPEG_PREFIX="$REPRO_ROOT/prefix"
 REPORT_DIR="$REPRO_ROOT/reports"
 
@@ -28,7 +29,7 @@ for tool in /opt/local/bin/meson /opt/local/bin/ninja /opt/local/bin/pkg-config;
     exit 1
   fi
 done
-if [[ ! -f "$ARCHIVE" || ! -f "$PATCH_FILE" ]]; then
+if [[ ! -f "$ARCHIVE" || ! -f "$PATCH_FILE" || ! -f "$VIDEOTOOLBOX_GL_PATCH_FILE" ]]; then
   echo "Locked mpv source or patch is missing." >&2
   exit 1
 fi
@@ -58,6 +59,7 @@ mkdir -p "$REPRO_ROOT/src" "$REPRO_ROOT/build" "$PREFIX" "$REPORT_DIR"
 rm -rf "$SOURCE_DIR" "$BUILD_DIR" "$PREFIX"
 tar -xzf "$ARCHIVE" -C "$REPRO_ROOT/src"
 /usr/bin/patch -d "$SOURCE_DIR" -p1 -i "$PATCH_FILE"
+/usr/bin/patch -d "$SOURCE_DIR" -p1 -i "$VIDEOTOOLBOX_GL_PATCH_FILE"
 
 export MACOSX_DEPLOYMENT_TARGET=12.0
 /opt/local/bin/meson setup "$BUILD_DIR" "$SOURCE_DIR" \
@@ -79,8 +81,9 @@ export MACOSX_DEPLOYMENT_TARGET=12.0
   -Dlibavdevice=disabled \
   -Dplain-gl=enabled \
   -Dgl=enabled \
-  -Dcocoa=disabled \
-  -Dvideotoolbox-gl=disabled \
+  -Dcocoa=enabled \
+  -Dgl-cocoa=enabled \
+  -Dvideotoolbox-gl=enabled \
   -Dcoreaudio=enabled
 /opt/local/bin/meson compile -C "$BUILD_DIR"
 /opt/local/bin/meson install -C "$BUILD_DIR"
