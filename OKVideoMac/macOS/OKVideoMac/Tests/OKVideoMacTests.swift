@@ -10588,6 +10588,60 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     @MainActor
+    func testCatPawHistoryCompletesDetailIdentityFromStoredSummary() async throws {
+        let client = NodeStableReferenceHTTPClient(
+            stableLocator: nil,
+            detailEpisodes: [
+                (name: "01  [1.28GB]", url: "episode-01"),
+                (name: "02  [1.12GB]", url: "episode-02")
+            ],
+            detailSourceName: "百度",
+            detailTitle: "潜伏",
+            omitsDetailIdentity: true
+        )
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: SiteConfiguration(
+                key: "nodejs_history_fixture",
+                name: "CatPaw 历史夹具",
+                type: 3,
+                api: "/spider/history-fixture/3",
+                extra: ["okNodeRuntime": .bool(true)]
+            ),
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client,
+            configurationIdentity: UUID().uuidString.lowercased()
+        )
+        let summary = VideoSummary(
+            siteKey: provider.site.key,
+            siteName: provider.site.name,
+            videoID: "128608",
+            title: "潜伏"
+        )
+
+        let detail = try await AppState.historyPlaybackDetail(
+            provider: provider,
+            summary: summary
+        )
+        let record = HistoryRecord(
+            siteKey: provider.site.key,
+            videoID: summary.videoID,
+            title: summary.title,
+            sourceName: "百度",
+            episodeName: "02  [1.12GB]"
+        )
+        let selection = AppState.historyPlaybackSelection(
+            in: detail,
+            record: record
+        )
+
+        XCTAssertEqual(detail.summary.videoID, "128608")
+        XCTAssertEqual(detail.summary.title, "潜伏")
+        XCTAssertEqual(detail.playSources.first?.episodes.count, 2)
+        XCTAssertEqual(selection?.source.name, "百度")
+        XCTAssertEqual(selection?.episode.url, "episode-02")
+    }
+
+    @MainActor
     func testHistoryNavigationRecipeOffersChoicesInsteadOfGuessing() {
         let configurationID = UUID()
         let recipe = HistoryNavigationRecipe(
@@ -18801,8 +18855,10 @@ private actor NodeStableReferenceHTTPClient: HTTPClient {
     private let stableLocator: String?
     private let detailEpisodes: [(name: String, url: String)]
     private let detailSourceName: String
+    private let detailTitle: String
     private let invalidDetailIDs: Set<String>
     private let searchResultID: String?
+    private let omitsDetailIdentity: Bool
     private let playbackURL: String
     private var requests: [HTTPRequest] = []
 
@@ -18811,8 +18867,10 @@ private actor NodeStableReferenceHTTPClient: HTTPClient {
         detailEpisode: String? = nil,
         detailEpisodes: [(name: String, url: String)]? = nil,
         detailSourceName: String = "cloud-original",
+        detailTitle: String = "重复标题",
         invalidDetailIDs: Set<String> = [],
         searchResultID: String? = nil,
+        omitsDetailIdentity: Bool = false,
         playbackURL: String =
             "http://127.0.0.1:18988/src/down/runtime-capability"
     ) {
@@ -18821,8 +18879,10 @@ private actor NodeStableReferenceHTTPClient: HTTPClient {
             ?? detailEpisode.map { [(name: "历史分集", url: $0)] }
             ?? []
         self.detailSourceName = detailSourceName
+        self.detailTitle = detailTitle
         self.invalidDetailIDs = invalidDetailIDs
         self.searchResultID = searchResultID
+        self.omitsDetailIdentity = omitsDetailIdentity
         self.playbackURL = playbackURL
     }
 
@@ -18866,15 +18926,18 @@ private actor NodeStableReferenceHTTPClient: HTTPClient {
             }
         }
         if request.url.path.hasSuffix("/detail"), !detailEpisodes.isEmpty {
+            var detail: [String: Any] = [
+                "vod_name": detailTitle,
+                "vod_play_from": detailSourceName,
+                "vod_play_url": detailEpisodes.map {
+                    "\($0.name)$\($0.url)"
+                }.joined(separator: "#")
+            ]
+            if !omitsDetailIdentity {
+                detail["vod_id"] = "history-video"
+            }
             let response: [String: Any] = [
-                "list": [[
-                    "vod_id": "history-video",
-                    "vod_name": "重复标题",
-                    "vod_play_from": detailSourceName,
-                    "vod_play_url": detailEpisodes.map {
-                        "\($0.name)$\($0.url)"
-                    }.joined(separator: "#")
-                ]]
+                "list": [detail]
             ]
             return HTTPResponse(
                 url: request.url,

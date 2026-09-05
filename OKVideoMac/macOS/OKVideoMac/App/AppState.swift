@@ -8899,7 +8899,16 @@ final class AppState: ObservableObject {
             recoveryFailure = "旧详情身份仅可用于历史去重"
         } else {
             do {
-                let detail = try await provider.detail(id: storedDetailID)
+                let detail = try await Self.historyPlaybackDetail(
+                    provider: provider,
+                    summary: VideoSummary(
+                        siteKey: item.siteKey,
+                        siteName: siteName,
+                        videoID: storedDetailID,
+                        title: item.title,
+                        posterURL: item.posterURL
+                    )
+                )
                 guard isCurrentHistoryPreparation(preparationID) else { return }
 
                 let selections = Self.historyPlaybackChoices(
@@ -8992,8 +9001,9 @@ final class AppState: ObservableObject {
             )
             var resolved: [HistoryPlaybackChoice] = []
             for summary in candidates.prefix(12) {
-                guard let detail = try? await provider.detail(
-                    id: summary.videoID
+                guard let detail = try? await Self.historyPlaybackDetail(
+                    provider: provider,
+                    summary: summary
                 ) else {
                     continue
                 }
@@ -9059,6 +9069,28 @@ final class AppState: ObservableObject {
         playbackFailureSummary = redactedMessage
         playerSnapshot.status = .failed(redactedMessage)
         playerPresentedError = nil
+    }
+
+    /// CatPaw detail payloads may omit `vod_id` while still returning a valid
+    /// title and complete play list. Normal navigation carries its discovery
+    /// summary into `select(summary:)`, which supplies that missing identity;
+    /// history must preserve the same contract. Other provider types keep their
+    /// existing `detail(id:)` path unchanged.
+    static func historyPlaybackDetail(
+        provider: any SiteProvider,
+        summary: VideoSummary
+    ) async throws -> VideoDetail {
+        guard let nodeProvider = provider as? NodeHTTPSpiderSiteProvider else {
+            return try await provider.detail(id: summary.videoID)
+        }
+        switch try await nodeProvider.select(summary: summary) {
+        case .detail(let detail):
+            return detail
+        case .action:
+            throw AppError.spider("CatPaw 历史记录返回了设置操作，而不是影视详情")
+        case .search:
+            throw AppError.contentUnavailable("CatPaw 历史记录没有返回可播放详情")
+        }
     }
 
     private func presentHistoryPlaybackChoices(
