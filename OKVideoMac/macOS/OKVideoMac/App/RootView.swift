@@ -245,7 +245,14 @@ struct NodeConfigurationView: View {
 
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
-                    Image(systemName: "externaldrive.badge.person.crop")
+                    Image(
+                        systemName: NodeWebPresentationPolicy
+                            .showsAuthorizationGuidance(
+                                for: presentation.interactionKind
+                            )
+                            ? "externaldrive.badge.person.crop"
+                            : "slider.horizontal.3"
+                    )
                         .font(.system(size: 23, weight: .semibold))
                         .foregroundColor(.accentColor)
                     VStack(alignment: .leading, spacing: 3) {
@@ -277,10 +284,21 @@ struct NodeConfigurationView: View {
                 Divider()
 
                 HStack(spacing: 12) {
-                    Label(
-                        "请用对应网盘 App 扫码，页面显示登录成功后再继续。",
-                        systemImage: "qrcode.viewfinder"
-                    )
+                    Group {
+                        if NodeWebPresentationPolicy.showsAuthorizationGuidance(
+                            for: presentation.interactionKind
+                        ) {
+                            Label(
+                                "请用对应 App 扫码或登录，页面显示授权成功后再继续。",
+                                systemImage: "qrcode.viewfinder"
+                            )
+                        } else {
+                            Label(
+                                "请在页面中完成设置，保存后继续。",
+                                systemImage: "slider.horizontal.3"
+                            )
+                        }
+                    }
                     .font(.caption)
                     .foregroundColor(.secondary)
                     Spacer()
@@ -290,7 +308,12 @@ struct NodeConfigurationView: View {
                     Button {
                         Task { await state.completeNodeConfigurationAndRetry() }
                     } label: {
-                        Label("授权完成并重试", systemImage: "arrow.right.circle.fill")
+                        Label(
+                            NodeWebPresentationPolicy.completionButtonTitle(
+                                for: presentation.interactionKind
+                            ),
+                            systemImage: "arrow.right.circle.fill"
+                        )
                     }
                     .buttonStyle(.borderedProminent)
                 }
@@ -446,7 +469,18 @@ struct CloudAuthorizationView: View {
 
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
-                    Label("网盘授权", systemImage: "externaldrive.badge.person.crop")
+                    Label(
+                        (prompt.configurationKind == .authorization
+                            || prompt.credentialPush
+                            || prompt.phase == "qr")
+                            ? "网盘授权"
+                            : "配置操作",
+                        systemImage: (prompt.configurationKind == .authorization
+                            || prompt.credentialPush
+                            || prompt.phase == "qr")
+                            ? "externaldrive.badge.person.crop"
+                            : "slider.horizontal.3"
+                    )
                         .font(.title2.bold())
                     Spacer()
                     Button {
@@ -526,7 +560,7 @@ struct CloudAuthorizationView: View {
                     Button {
                         Task { await state.submitCloudCredential() }
                     } label: {
-                        Label("提交授权并重试播放", systemImage: "arrow.right.circle.fill")
+                        Label("提交授权", systemImage: "arrow.right.circle.fill")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)

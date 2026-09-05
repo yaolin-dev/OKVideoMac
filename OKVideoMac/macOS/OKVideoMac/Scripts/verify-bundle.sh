@@ -91,7 +91,7 @@ if [[ "$("$APKANALYZER" manifest target-sdk "$BRIDGE_APK")" != "27" ]]; then
   echo "Bundled Android bridge lost legacy Spider Activity compatibility." >&2
   exit 1
 fi
-if [[ "$("$APKANALYZER" manifest version-name "$BRIDGE_APK")" != "0.3.14" ]]; then
+if [[ "$("$APKANALYZER" manifest version-name "$BRIDGE_APK")" != "0.3.21" ]]; then
   echo "Bundled Android bridge has an unexpected version." >&2
   exit 1
 fi

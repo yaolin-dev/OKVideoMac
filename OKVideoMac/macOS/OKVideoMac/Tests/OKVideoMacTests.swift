@@ -1838,6 +1838,67 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testNodeSeekReservesEndMarginWithoutChangingGenericSeekPolicy() {
+        XCTAssertEqual(
+            PlayerSeekPolicy.target(requested: 100, duration: 100),
+            100
+        )
+        XCTAssertEqual(
+            NodePlaybackSeekPolicy.target(requested: 100, duration: 100),
+            99.25,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            NodePlaybackSeekPolicy.target(requested: 45, duration: 100),
+            45,
+            accuracy: 0.001
+        )
+    }
+
+    func testNodeSeekEOFGuardUsesRequestIdentityAndGraceWindow() {
+        let requestID = UUID()
+        let createdAt = Date(timeIntervalSince1970: 100)
+        let intent = NodePlaybackSeekIntent(
+            requestID: requestID,
+            target: 40,
+            duration: 100,
+            createdAt: createdAt
+        )
+
+        XCTAssertTrue(
+            NodePlaybackSeekPolicy.suppressesAutomaticAdvance(
+                intent: intent,
+                requestID: requestID,
+                now: createdAt.addingTimeInterval(2)
+            )
+        )
+        XCTAssertFalse(
+            NodePlaybackSeekPolicy.suppressesAutomaticAdvance(
+                intent: intent,
+                requestID: UUID(),
+                now: createdAt.addingTimeInterval(2)
+            )
+        )
+        XCTAssertFalse(
+            NodePlaybackSeekPolicy.suppressesAutomaticAdvance(
+                intent: intent,
+                requestID: requestID,
+                now: createdAt.addingTimeInterval(3.1)
+            )
+        )
+        XCTAssertTrue(NodePlaybackSeekPolicy.shouldAttemptRecovery(for: intent))
+        XCTAssertFalse(
+            NodePlaybackSeekPolicy.shouldAttemptRecovery(
+                for: NodePlaybackSeekIntent(
+                    requestID: requestID,
+                    target: 99.25,
+                    duration: 100,
+                    createdAt: createdAt
+                )
+            )
+        )
+    }
+
     func testOnlyNewestPlaybackRequestCanCommitEvents() {
         let requestA = UUID()
         let requestB = UUID()
@@ -1978,7 +2039,7 @@ final class OKVideoMacTests: XCTestCase {
               "imageCount": 0,
               "buttons": ["停用中", "停用中"],
               "controls": [
-                {"id": "button:0", "title": "停用中"},
+                {"id": "list:0:0", "title": "优汐｜夸父", "role": "choice"},
                 {"id": "button:1", "title": "停用中"}
               ],
               "texts": ["网盘配置"],
@@ -1996,8 +2057,9 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(state.isAuthorizationPrompt)
         XCTAssertEqual(
             state.actionableControls.map(\.id),
-            ["button:0", "button:1"]
+            ["list:0:0", "button:1"]
         )
+        XCTAssertEqual(state.actionableControls.first?.role, "choice")
     }
 
     func testAndroidBridgeLegacyAuthorizationStateStillDecodes() throws {
@@ -2266,6 +2328,36 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testAndroidBridgeRequiresExactHealthContract() {
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.isCompatibleHealthPayload([
+                "ok": true,
+                "version": "0.3.21",
+                "contractVersion": 1
+            ])
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.isCompatibleHealthPayload([
+                "ok": true,
+                "version": "0.3.19",
+                "contractVersion": 1
+            ])
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.isCompatibleHealthPayload([
+                "ok": true,
+                "version": "0.3.21"
+            ])
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.isCompatibleHealthPayload([
+                "ok": true,
+                "version": "0.3.21",
+                "contractVersion": 2
+            ])
+        )
+    }
+
     func testAndroidBridgeDoesNotRewriteUnrecognizedLoopbackService() {
         let client = AndroidDexBridgeClient()
         let raw = "http://127.0.0.1:10001/internal/status"
@@ -2430,6 +2522,45 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     @MainActor
+    func testCloudAuthorizationAllowsSlowQRCodeHandoff() {
+        XCTAssertFalse(
+            AppState.cloudAuthorizationWindowTimedOut(
+                kind: .authorization,
+                hiddenPollCount: 119
+            )
+        )
+        XCTAssertTrue(
+            AppState.cloudAuthorizationWindowTimedOut(
+                kind: .authorization,
+                hiddenPollCount: 120
+            )
+        )
+        XCTAssertFalse(
+            AppState.cloudAuthorizationWindowTimedOut(
+                kind: .command,
+                hiddenPollCount: 5
+            )
+        )
+        XCTAssertTrue(
+            AppState.cloudAuthorizationWindowTimedOut(
+                kind: .command,
+                hiddenPollCount: 6
+            )
+        )
+    }
+
+    @MainActor
+    func testCloudAuthorizationDoesNotInferScanFromHiddenQRCodeWindow() {
+        let waiting = AppState.cloudAuthorizationVerificationStatus(attempts: 1)
+        let delayed = AppState.cloudAuthorizationVerificationStatus(attempts: 12)
+
+        XCTAssertTrue(waiting.contains("等待扫码"))
+        XCTAssertTrue(delayed.contains("尚未检测到已登录状态"))
+        XCTAssertFalse(waiting.contains("已确认"))
+        XCTAssertFalse(delayed.contains("已确认"))
+    }
+
+    @MainActor
     func testSiteActionPreservesExplicitUpstreamMessage() {
         XCTAssertEqual(
             AppState.siteActionMessage(
@@ -2441,6 +2572,56 @@ final class OKVideoMacTests: XCTestCase {
             AppState.siteActionMessage(.string("Cookie 已清除")),
             "Cookie 已清除"
         )
+    }
+
+    func testCloudConfigurationActionPolicyUsesTypedAndProviderContracts() {
+        XCTAssertEqual(
+            CloudConfigurationActionPolicy.kind(
+                providerAPI: "csp_OtherSettings",
+                action: "opaque-login",
+                tag: "authorization"
+            ),
+            .authorization
+        )
+        XCTAssertEqual(
+            CloudConfigurationActionPolicy.kind(
+                providerAPI: MyDriveGuardActionContract.providerAPI,
+                action: "panSortShow",
+                tag: nil
+            ),
+            .order
+        )
+        XCTAssertEqual(
+            CloudConfigurationActionPolicy.kind(
+                providerAPI: MyDriveGuardActionContract.providerAPI,
+                action: "quarkClean",
+                tag: nil
+            ),
+            .command
+        )
+        XCTAssertEqual(
+            CloudConfigurationActionPolicy.kind(
+                providerAPI: "csp_OtherSettings",
+                action: "opaque",
+                tag: nil
+            ),
+            .configuration
+        )
+    }
+
+    func testMyDriveGuardAddsActionSemanticsWithoutUsingTitles() {
+        let original = VideoSummary(
+            siteKey: "drive",
+            siteName: "Drive",
+            videoID: "opaque",
+            title: "任意显示标题",
+            action: "panSourceSortShow"
+        )
+
+        let updated = MyDriveGuardActionContract.applying(to: original)
+
+        XCTAssertEqual(updated.tag, "order")
+        XCTAssertEqual(updated.title, original.title)
     }
 
     @MainActor
@@ -3084,6 +3265,96 @@ final class OKVideoMacTests: XCTestCase {
                 capability: .unsupportedSpider
             ),
             "等待迁移（暂不可用）"
+        )
+    }
+
+    func testHomeItemsUseOnlyExplicitActionSemanticsForLayout() {
+        let mediaWithActionWords = VideoSummary(
+            siteKey: "ordinary-site",
+            siteName: "Ordinary",
+            videoID: "settings-looking-media",
+            title: "授权与设置",
+            posterURL: URL(string: "https://example.test/poster.jpg")
+        )
+        let declaredAction = VideoSummary(
+            siteKey: "arbitrary-site",
+            siteName: "Arbitrary",
+            videoID: "plain-id",
+            title: "一个普通标题",
+            action: "opaque-provider-command"
+        )
+
+        let groups = HomeItemPresentationPolicy.groups(
+            from: [mediaWithActionWords, declaredAction]
+        )
+
+        XCTAssertEqual(groups.actions.map(\.videoID), ["plain-id"])
+        XCTAssertEqual(
+            groups.media.map(\.videoID),
+            ["settings-looking-media"]
+        )
+        XCTAssertEqual(mediaWithActionWords.contentKind, .media)
+        XCTAssertEqual(declaredAction.contentKind, .action)
+    }
+
+    func testActionOnlyHomeRoleRequiresOnlyExplicitActions() {
+        let action = VideoSummary(
+            siteKey: "site",
+            siteName: "Site",
+            videoID: "action",
+            title: "Arbitrary",
+            action: "opaque-provider-command"
+        )
+        let media = VideoSummary(
+            siteKey: "site",
+            siteName: "Site",
+            videoID: "media",
+            title: "授权与设置"
+        )
+
+        XCTAssertEqual(
+            SiteHome(categories: [], recommendations: [action]).semanticRole,
+            .actionOnly
+        )
+        XCTAssertEqual(
+            SiteHome(categories: [], recommendations: [media]).semanticRole,
+            .contentCapable
+        )
+        XCTAssertEqual(
+            SiteHome(
+                categories: [VideoCategory(id: "category", name: "Category")],
+                recommendations: [action]
+            ).semanticRole,
+            .contentCapable
+        )
+        XCTAssertEqual(
+            SiteHome(categories: [], recommendations: []).semanticRole,
+            .contentCapable
+        )
+    }
+
+    func testNodeWebPresentationUsesAuthorizationUIOnlyForDeclaredQRFlow() {
+        XCTAssertFalse(
+            NodeWebPresentationPolicy.showsAuthorizationGuidance(
+                for: .configuration
+            )
+        )
+        XCTAssertEqual(
+            NodeWebPresentationPolicy.completionButtonTitle(
+                for: .configuration
+            ),
+            "完成并继续"
+        )
+        XCTAssertTrue(
+            NodeWebPresentationPolicy.showsAuthorizationGuidance(
+                for: .qrAuthorization
+            )
+        )
+        XCTAssertEqual(
+            NodeWebPresentationPolicy.completionButtonTitle(
+                for: .qrAuthorization
+            ),
+            "授权完成并重试"
         )
     }
 
@@ -3902,9 +4173,109 @@ final class NodeBundleCompatibilityTests: XCTestCase {
 
         let home = try await provider.home()
 
-        XCTAssertEqual(provider.capability, .javaScriptSpider)
+        XCTAssertEqual(provider.capability, .nodeHTTPSpider)
         XCTAssertEqual(home.categories.map(\.name), ["电影"])
         XCTAssertEqual(home.recommendations.map(\.title), ["测试影片"])
+    }
+
+    func testNodeInteractiveSearchDoesNotDelayFirstOutcomeWithRetry() async throws {
+        let site = SiteConfiguration(
+            key: "nodejs_search_fixture",
+            name: "Search Fixture",
+            type: 3,
+            api: "/spider/search-fixture/3",
+            searchable: 1,
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let client = NodeSearchFailureHTTPClient()
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: try XCTUnwrap(URL(string: "http://127.0.0.1:18988/")),
+            httpClient: client
+        )
+
+        do {
+            _ = try await provider.search(
+                keyword: "fixture",
+                page: 1,
+                quick: false
+            )
+            XCTFail("HTTP 500 搜索应返回失败")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("search"))
+        }
+        let requestCount = await client.requestCount()
+        XCTAssertEqual(requestCount, 1)
+    }
+
+    func testNodeHomeTreatsMissingOptionalHomeVodAsSingleSilentProbe() async throws {
+        for statusCode in [404, 405] {
+            let client = NodeHomeVodProbeHTTPClient(
+                homeVodStatusCode: statusCode
+            )
+            let diagnostics = NodeDiagnosticEventRecorder()
+            let site = SiteConfiguration(
+                key: "opaque_\(statusCode)",
+                name: "Opaque \(statusCode)",
+                type: 3,
+                api: "/spider/opaque-\(statusCode)/3",
+                extra: ["okNodeRuntime": .bool(true)]
+            )
+            let baseURL = try XCTUnwrap(
+                URL(string: "http://127.0.0.1:18988/")
+            )
+            let provider = try NodeHTTPSpiderSiteProvider(
+                site: site,
+                baseURL: baseURL,
+                httpClient: client,
+                diagnosticReporter: diagnostics.record
+            )
+
+            let home = try await provider.home()
+            let homeRequestCount = await client.requestCount(suffix: "/home")
+            let homeVodRequestCount = await client.requestCount(
+                suffix: "/homeVod"
+            )
+
+            XCTAssertEqual(home.categories.map(\.name), ["电影"])
+            XCTAssertEqual(home.recommendations.map(\.title), ["主首页影片"])
+            XCTAssertEqual(homeRequestCount, 1)
+            XCTAssertEqual(homeVodRequestCount, 1)
+            XCTAssertTrue(diagnostics.events().isEmpty)
+        }
+    }
+
+    func testNodeHomeRetriesAndReportsRealOptionalHomeVodFailure() async throws {
+        let client = NodeHomeVodProbeHTTPClient(homeVodStatusCode: 500)
+        let diagnostics = NodeDiagnosticEventRecorder()
+        let site = SiteConfiguration(
+            key: "opaque_failure",
+            name: "Opaque Failure",
+            type: 3,
+            api: "/spider/opaque-failure/3",
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let baseURL = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:18988/")
+        )
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: baseURL,
+            httpClient: client,
+            diagnosticReporter: diagnostics.record
+        )
+
+        let home = try await provider.home()
+        let homeRequestCount = await client.requestCount(suffix: "/home")
+        let homeVodRequestCount = await client.requestCount(suffix: "/homeVod")
+        let events = diagnostics.events()
+
+        XCTAssertEqual(home.recommendations.map(\.title), ["主首页影片"])
+        XCTAssertEqual(homeRequestCount, 1)
+        XCTAssertEqual(homeVodRequestCount, 2)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.operation, "homeVod")
+        XCTAssertEqual(events.first?.severity, .error)
     }
 
     func testNodeProviderSurfacesCloudLoginAsNativeWebAuthorization() async throws {
@@ -3946,6 +4317,41 @@ final class NodeBundleCompatibilityTests: XCTestCase {
                 "http://127.0.0.1:18988/website"
             )
             XCTAssertTrue(authorization.message.contains("百度网盘"))
+            XCTAssertEqual(authorization.interactionKind, .configuration)
+        }
+    }
+
+    func testNodeProviderUsesDeclaredQRInteractionInsteadOfMessageGuessing() async throws {
+        let site = SiteConfiguration(
+            key: "typed_interaction_fixture",
+            name: "Fixture",
+            type: 4,
+            api: "/spider/fixture/4",
+            extra: ["okNodeRuntime": .bool(true)]
+        )
+        let client = NodeProviderStubHTTPClient { request in
+            HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(
+                    #"{"interactionKind":"qrAuthorization","message":"continue"}"#.utf8
+                )
+            )
+        }
+        let baseURL = try XCTUnwrap(URL(string: "http://127.0.0.1:18988/"))
+        let provider = try NodeHTTPSpiderSiteProvider(
+            site: site,
+            baseURL: baseURL,
+            httpClient: client
+        )
+
+        do {
+            _ = try await provider.category(id: "any", page: 1, filters: [:])
+            XCTFail("应该打开 Provider 明确声明的二维码授权交互")
+        } catch let interaction as NodeWebAuthorizationRequired {
+            XCTAssertEqual(interaction.interactionKind, .qrAuthorization)
+            XCTAssertEqual(interaction.message, "continue")
         }
     }
 
@@ -3973,6 +4379,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             XCTFail("应该打开内嵌配置站点")
         } catch let authorization as NodeWebAuthorizationRequired {
             XCTAssertEqual(authorization.websiteURL.path, "/website")
+            XCTAssertEqual(authorization.interactionKind, .configuration)
         }
     }
 
@@ -4224,6 +4631,88 @@ private struct NodeProviderStubHTTPClient: HTTPClient {
 
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         try handler(request)
+    }
+}
+
+private actor NodeHomeVodProbeHTTPClient: HTTPClient {
+    private let homeVodStatusCode: Int
+    private var requestPaths: [String] = []
+
+    init(homeVodStatusCode: Int) {
+        self.homeVodStatusCode = homeVodStatusCode
+    }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        requestPaths.append(request.url.path)
+        if request.url.path.hasSuffix("/homeVod") {
+            let body: Data
+            if homeVodStatusCode == 500 {
+                body = Data(#"{"error":"temporary failure"}"#.utf8)
+            } else {
+                // Missing optional routes may be served by a generic HTML 404
+                // page. The provider must classify the status before decoding.
+                body = Data("<html>missing</html>".utf8)
+            }
+            return HTTPResponse(
+                url: request.url,
+                statusCode: homeVodStatusCode,
+                headers: ["Content-Type": "text/html"],
+                body: body
+            )
+        }
+        if request.url.path.hasSuffix("/home") {
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(
+                    #"{"class":[{"type_id":"movie","type_name":"电影"}],"list":[{"vod_id":"main","vod_name":"主首页影片"}]}"#.utf8
+                )
+            )
+        }
+        return HTTPResponse(
+            url: request.url,
+            statusCode: 404,
+            headers: ["Content-Type": "application/json"],
+            body: Data(#"{"error":"missing"}"#.utf8)
+        )
+    }
+
+    func requestCount(suffix: String) -> Int {
+        requestPaths.filter { $0.hasSuffix(suffix) }.count
+    }
+}
+
+private actor NodeSearchFailureHTTPClient: HTTPClient {
+    private var count = 0
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        count += 1
+        return HTTPResponse(
+            url: request.url,
+            statusCode: 500,
+            headers: ["Content-Type": "application/json"],
+            body: Data(#"{"error":"temporary failure"}"#.utf8)
+        )
+    }
+
+    func requestCount() -> Int { count }
+}
+
+private final class NodeDiagnosticEventRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedEvents: [NodeDiagnosticEvent] = []
+
+    func record(_ event: NodeDiagnosticEvent) {
+        lock.lock()
+        recordedEvents.append(event)
+        lock.unlock()
+    }
+
+    func events() -> [NodeDiagnosticEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedEvents
     }
 }
 

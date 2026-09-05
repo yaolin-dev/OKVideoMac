@@ -112,11 +112,84 @@ enum NodeUserFacingErrorMapper {
 struct CloudAuthorizationAction: Identifiable, Equatable {
     let id: String
     let title: String
+    let role: String?
+}
+
+enum CloudConfigurationActionKind: Equatable {
+    case authorization
+    case command
+    case order
+    case toggle
+    case configuration
+
+    var acceptedClickCompletes: Bool {
+        switch self {
+        case .command, .order, .toggle: return true
+        case .authorization, .configuration: return false
+        }
+    }
+}
+
+struct CloudConfigurationActionContext: Equatable {
+    let siteKey: String
+    let categoryID: String?
+    let action: String
+    let title: String
+    let kind: CloudConfigurationActionKind
+}
+
+enum CloudConfigurationActionPolicy {
+    static func kind(
+        providerAPI: String?,
+        action: String,
+        tag: String?
+    ) -> CloudConfigurationActionKind {
+        let normalizedTag = tag?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch normalizedTag {
+        case "authorization", "login", "qrauthorization", "qr":
+            return .authorization
+        case "command", "clear":
+            return .command
+        case "order", "sort":
+            return .order
+        case "toggle", "switch":
+            return .toggle
+        default:
+            break
+        }
+        guard providerAPI?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ) == MyDriveGuardActionContract.providerAPI else {
+            return .configuration
+        }
+        switch MyDriveGuardActionContract.tag(for: action) {
+        case "authorization": return .authorization
+        case "command": return .command
+        case "order": return .order
+        case "toggle": return .toggle
+        default: return .configuration
+        }
+    }
+
+    static func completionMessage(
+        for kind: CloudConfigurationActionKind
+    ) -> String {
+        switch kind {
+        case .authorization: return "授权成功，登录状态已刷新。"
+        case .command: return "操作已完成，配置状态已刷新。"
+        case .order: return "排序已更新。"
+        case .toggle: return "设置已更新。"
+        case .configuration: return "配置操作已完成。"
+        }
+    }
 }
 
 struct CloudAuthorizationPrompt: Identifiable, Equatable {
     let id: UUID
     var title: String
+    var configurationKind: CloudConfigurationActionKind?
     var status: String?
     var phase: String?
     var provider: String?
@@ -131,7 +204,24 @@ struct NodeWebPresentation: Identifiable, Equatable {
     let url: URL
     let title: String
     let message: String
+    let interactionKind: NodeWebInteractionKind
     var revision: Int
+}
+
+enum NodeWebPresentationPolicy {
+    static func showsAuthorizationGuidance(
+        for kind: NodeWebInteractionKind
+    ) -> Bool {
+        kind == .qrAuthorization
+    }
+
+    static func completionButtonTitle(
+        for kind: NodeWebInteractionKind
+    ) -> String {
+        showsAuthorizationGuidance(for: kind)
+            ? "授权完成并重试"
+            : "完成并继续"
+    }
 }
 
 struct SearchSiteOption: Identifiable, Equatable {
@@ -210,7 +300,7 @@ enum SearchSiteScopePolicy {
     }
 }
 
-struct HomeContentIdentity: Equatable, Sendable {
+struct HomeContentIdentity: Equatable, Hashable, Sendable {
     let configurationID: UUID
     let siteKey: String
 }
@@ -324,6 +414,61 @@ enum PlaybackRequestOwnershipPolicy {
         activeRequestID: UUID
     ) -> Bool {
         requestID == activeRequestID
+    }
+}
+
+struct NodePlaybackSeekIntent: Equatable {
+    let requestID: UUID
+    let target: TimeInterval
+    let duration: TimeInterval
+    let createdAt: Date
+    var recoveryAttempted: Bool
+
+    init(
+        requestID: UUID,
+        target: TimeInterval,
+        duration: TimeInterval,
+        createdAt: Date = Date(),
+        recoveryAttempted: Bool = false
+    ) {
+        self.requestID = requestID
+        self.target = target
+        self.duration = duration
+        self.createdAt = createdAt
+        self.recoveryAttempted = recoveryAttempted
+    }
+}
+
+enum NodePlaybackSeekPolicy {
+    static let endSafetyMargin: TimeInterval = 0.75
+    static let eofSuppressionInterval: TimeInterval = 3
+
+    static func target(
+        requested: TimeInterval,
+        duration: TimeInterval
+    ) -> TimeInterval {
+        guard duration.isFinite, duration > endSafetyMargin else {
+            return requested
+        }
+        return min(requested, duration - endSafetyMargin)
+    }
+
+    static func suppressesAutomaticAdvance(
+        intent: NodePlaybackSeekIntent?,
+        requestID: UUID,
+        now: Date = Date()
+    ) -> Bool {
+        guard let intent, intent.requestID == requestID else { return false }
+        let elapsed = now.timeIntervalSince(intent.createdAt)
+        return elapsed >= 0 && elapsed <= eofSuppressionInterval
+    }
+
+    static func shouldAttemptRecovery(
+        for intent: NodePlaybackSeekIntent
+    ) -> Bool {
+        intent.duration > 0
+            && intent.duration - intent.target > endSafetyMargin * 2
+            && !intent.recoveryAttempted
     }
 }
 
@@ -758,10 +903,19 @@ final class AppState: ObservableObject {
     private var detailLoadSessionID = UUID()
     private var homeLoadSessionID = UUID()
     private var homeContentIdentity: HomeContentIdentity?
+    /// Configuration-scoped observations derived from explicit home payload
+    /// semantics. This never mutates the imported site configuration and is
+    /// deliberately keyed by configuration identity to avoid cross-source
+    /// leakage.
+    private var actionOnlyHomeIdentities = Set<HomeContentIdentity>()
     private var categoryLoadSessionID = UUID()
     private var playerEventTask: Task<Void, Never>?
     private var cloudAuthorizationPollTask: Task<Void, Never>?
     private var cloudAuthorizationSessionID = UUID()
+    private var cloudConfigurationAction: CloudConfigurationActionContext?
+    private var cloudAuthorizationObservedQRCode = false
+    private var cloudAuthorizationDidSubmit = false
+    private var cloudAuthorizationVerificationAttempts = 0
     private var activePlayback: ActivePlaybackContext?
     private var pendingPlayback: PendingCloudPlayback?
     private var livePlaybackNavigationContext: LivePlaybackNavigationContext?
@@ -775,6 +929,7 @@ final class AppState: ObservableObject {
     private var pendingNodeOperation: PendingNodeOperation?
     private var playbackSessionID = UUID()
     private var activePlayerRequestID = UUID()
+    private var recentNodePlaybackSeek: NodePlaybackSeekIntent?
     private var playbackQualitySwitchSessionID = UUID()
     private var lastHistorySaveAt = Date.distantPast
     private var pendingHistoryWrite: PlaybackHistoryWrite?
@@ -1252,10 +1407,9 @@ final class AppState: ObservableObject {
             )
             return
         }
-        if let action = summary.action?.nonEmpty {
+        if summary.action?.nonEmpty != nil {
             await performSiteAction(
-                action,
-                title: summary.title,
+                summary,
                 provider: provider
             )
             return
@@ -1371,14 +1525,41 @@ final class AppState: ObservableObject {
     }
 
     private func performSiteAction(
-        _ action: String,
-        title: String,
+        _ summary: VideoSummary,
         provider: SiteProvider
     ) async {
+        guard let action = summary.action?.nonEmpty else { return }
+        let configurationContext: CloudConfigurationActionContext? = {
+            guard provider.capability == .javaDexSpider else { return nil }
+            return CloudConfigurationActionContext(
+                siteKey: summary.siteKey,
+                categoryID: selectedCategoryID,
+                action: action,
+                title: summary.title,
+                kind: CloudConfigurationActionPolicy.kind(
+                    providerAPI: provider.site.api,
+                    action: action,
+                    tag: summary.tag
+                )
+            )
+        }()
+        if let configurationContext {
+            beginCloudConfigurationAction(configurationContext)
+        }
         isLoading = true
         defer { isLoading = false }
         do {
             let result = try await provider.action(action)
+            if let configurationContext,
+               configurationContext.kind == .command {
+                await completeCloudConfigurationAction(
+                    message: Self.siteActionMessage(result)
+                        ?? CloudConfigurationActionPolicy.completionMessage(
+                            for: configurationContext.kind
+                        )
+                )
+                return
+            }
             if provider.capability == .javaDexSpider,
                let state = await waitForCloudAuthorization() {
                 await presentCloudAuthorization(state, pending: nil)
@@ -1388,14 +1569,31 @@ final class AppState: ObservableObject {
                 ?? (provider.capability == .javaDexSpider
                     ? Self.unconfirmedSiteActionMessage
                     : "操作已完成。")
-            presentedError = UserFacingError(title: title, message: message)
+            cloudConfigurationAction = nil
+            presentedError = UserFacingError(
+                title: summary.title,
+                message: message
+            )
         } catch let authorization as NodeWebAuthorizationRequired {
             presentNodeConfiguration(authorization, pending: nil)
         } catch let authorization as AndroidBridgeUIRequired {
             await presentCloudAuthorization(authorization.state, pending: nil)
         } catch {
-            show(error, title: "\(title)失败")
+            cloudConfigurationAction = nil
+            presentedError = UserFacingError(
+                title: "\(summary.title)失败",
+                message: error.localizedDescription
+            )
         }
+    }
+
+    private func beginCloudConfigurationAction(
+        _ context: CloudConfigurationActionContext
+    ) {
+        cloudConfigurationAction = context
+        cloudAuthorizationObservedQRCode = false
+        cloudAuthorizationDidSubmit = false
+        cloudAuthorizationVerificationAttempts = 0
     }
 
     private func presentNodeConfiguration(
@@ -1408,6 +1606,7 @@ final class AppState: ObservableObject {
             url: authorization.websiteURL,
             title: authorization.title.nonEmpty ?? "网盘配置中心",
             message: authorization.message,
+            interactionKind: authorization.interactionKind,
             revision: 0
         )
     }
@@ -1490,6 +1689,30 @@ final class AppState: ObservableObject {
                     "后台授权窗口中没有找到“\(action.title)”按钮"
                 )
             }
+            cloudAuthorizationDidSubmit = true
+            if let context = cloudConfigurationAction,
+               context.kind == .authorization,
+               action.title.contains("未登录"),
+               var prompt = cloudAuthorizationPrompt {
+                // Guard account choosers return from the button click before
+                // the provider has fetched and rendered its QR code. Keep the
+                // Mac sheet alive and make that asynchronous transition
+                // explicit instead of leaving the stale “未登录” chooser on
+                // screen or allowing the same account to be submitted twice.
+                prompt.status = "已选择\(action.title.replacingOccurrences(of: "- 未登录", with: ""))，正在生成登录二维码…"
+                prompt.actions = []
+                cloudAuthorizationPrompt = prompt
+            }
+            if let context = cloudConfigurationAction,
+               context.kind.acceptedClickCompletes
+                    || (action.role == "choice"
+                        && context.kind != .authorization) {
+                await completeCloudConfigurationAction(
+                    message: CloudConfigurationActionPolicy
+                        .completionMessage(for: context.kind)
+                )
+                return
+            }
             try await Task.sleep(nanoseconds: 250_000_000)
             if let state = try? await environment.androidDexBridge.uiState(),
                state.isAuthorizationPrompt {
@@ -1538,6 +1761,10 @@ final class AppState: ObservableObject {
         cloudAuthorizationPollTask = nil
         cloudAuthorizationPrompt = nil
         cloudAuthorizationInput = ""
+        cloudConfigurationAction = nil
+        cloudAuthorizationObservedQRCode = false
+        cloudAuthorizationDidSubmit = false
+        cloudAuthorizationVerificationAttempts = 0
         if pendingCloudPlayback != nil {
             let message = "已取消网盘授权"
             playbackResolutionState = .failed
@@ -1557,7 +1784,24 @@ final class AppState: ObservableObject {
         guard let environment else { return }
         do {
             let state = try await environment.androidDexBridge.uiState()
+            if let context = cloudConfigurationAction,
+               context.kind == .authorization {
+                let verified = state.authenticated == true
+                    ? true
+                    : await verifyCloudAuthorization(
+                        context: context,
+                        state: state
+                    )
+                if verified {
+                    await completeVerifiedCloudAuthorization(context: context)
+                    return
+                }
+            }
             guard state.isAuthorizationPrompt else {
+                if var prompt = cloudAuthorizationPrompt {
+                    prompt.status = "尚未确认登录状态，正在继续检查…"
+                    cloudAuthorizationPrompt = prompt
+                }
                 startCloudAuthorizationPolling()
                 return
             }
@@ -1599,7 +1843,16 @@ final class AppState: ObservableObject {
                         "/proxy?do=input"
                     )
             })
-        let status = state.isRemoteInputQRCode
+        let isWaitingForProviderQRCode =
+            cloudConfigurationAction?.kind == .authorization
+            && cloudAuthorizationDidSubmit
+            && state.provider?.nonEmpty != nil
+            && !state.isQRCode
+        let status = isWaitingForProviderQRCode
+            ? (previous?.status?.nonEmpty ?? "正在生成登录二维码…")
+            : state.isQRCode && !credentialPush
+            ? "二维码已生成，请使用网盘 App 扫码登录；扫码成功后会自动刷新状态。"
+            : state.isRemoteInputQRCode
             ? "当前辅助输入码不适用于 Mac。请直接粘贴 Cookie，或点击“扫描二维码”生成网盘 App 登录码。"
             : credentialPush
             ? "该上游页面不是网盘 APP 登录码。请在下方粘贴 Cookie 或 Token，内容只发送到本机 Android 桥。"
@@ -1607,16 +1860,24 @@ final class AppState: ObservableObject {
         let updated = CloudAuthorizationPrompt(
             id: previous?.id ?? UUID(),
             title: state.title.nonEmpty ?? "网盘授权",
+            configurationKind: cloudConfigurationAction?.kind,
             status: status,
             phase: state.phase,
             provider: state.provider,
             hasTextInput: state.inputCount > 0 || credentialPush,
             credentialPush: credentialPush,
-            actions: state.actionableControls.map {
-                CloudAuthorizationAction(id: $0.id, title: $0.title)
+            actions: isWaitingForProviderQRCode ? [] : state.actionableControls.map {
+                CloudAuthorizationAction(
+                    id: $0.id,
+                    title: $0.title,
+                    role: $0.role
+                )
             },
             snapshot: snapshot
         )
+        if state.isQRCode {
+            cloudAuthorizationObservedQRCode = true
+        }
         if updated != previous {
             cloudAuthorizationPrompt = updated
         }
@@ -1645,6 +1906,38 @@ final class AppState: ObservableObject {
                     guard self.cloudAuthorizationSessionID == sessionID else {
                         return
                     }
+                    if let context = self.cloudConfigurationAction,
+                       context.kind == .authorization,
+                       state.authenticated == true {
+                        await self.completeVerifiedCloudAuthorization(
+                            context: context
+                        )
+                        return
+                    }
+                    if let context = self.cloudConfigurationAction,
+                       context.kind == .authorization,
+                       self.cloudAuthorizationObservedQRCode,
+                       !state.isQRCode {
+                        if await self.verifyCloudAuthorization(
+                            context: context,
+                            state: state
+                        ) {
+                            await self.completeVerifiedCloudAuthorization(
+                                context: context
+                            )
+                            return
+                        }
+                        self.cloudAuthorizationVerificationAttempts += 1
+                        if var prompt = self.cloudAuthorizationPrompt {
+                            prompt.status = Self
+                                .cloudAuthorizationVerificationStatus(
+                                    attempts: self
+                                        .cloudAuthorizationVerificationAttempts
+                                )
+                            self.cloudAuthorizationPrompt = prompt
+                        }
+                        continue
+                    }
                     if state.isAuthorizationPrompt {
                         hiddenPollCount = 0
                         if state.authenticated == true,
@@ -1655,11 +1948,39 @@ final class AppState: ObservableObject {
                         await self.updateCloudAuthorizationPrompt(state)
                     } else {
                         hiddenPollCount += 1
-                        // QR dialogs are created and replaced asynchronously.
-                        // Requiring three seconds of absence avoids treating a
-                        // normal dialog transition as a completed login.
-                        if hiddenPollCount >= 6 {
-                            await self.finishCloudAuthorizationAndRetry()
+                        if let context = self.cloudConfigurationAction,
+                           context.kind == .authorization,
+                           !self.cloudAuthorizationObservedQRCode,
+                           var prompt = self.cloudAuthorizationPrompt {
+                            // MyDriveGuard closes its account chooser first,
+                            // then performs provider network work before the QR
+                            // dialog is attached. During that gap uiState is
+                            // legitimately hidden. Preserve the sheet so the
+                            // child Activity is not reset out from underneath
+                            // the provider, and tell the user what is happening.
+                            prompt.status = hiddenPollCount >= 60
+                                ? "登录二维码仍在生成，请稍候；也可以点击刷新重试。"
+                                : "正在生成登录二维码…"
+                            self.cloudAuthorizationPrompt = prompt
+                        }
+                        if Self.cloudAuthorizationWindowTimedOut(
+                            kind: self.cloudConfigurationAction?.kind,
+                            hiddenPollCount: hiddenPollCount
+                        ) {
+                            if self.cloudAuthorizationDidSubmit,
+                               let context = self.cloudConfigurationAction,
+                               context.kind != .authorization {
+                                await self.completeCloudConfigurationAction(
+                                    message: CloudConfigurationActionPolicy
+                                        .completionMessage(for: context.kind)
+                                )
+                            } else if self.cloudConfigurationAction != nil {
+                                await self.failCloudConfigurationAction(
+                                    message: "操作窗口已关闭，但站点没有返回可验证的结果。请重试。"
+                                )
+                            } else {
+                                await self.finishCloudAuthorizationAndRetry()
+                            }
                             return
                         }
                     }
@@ -1672,7 +1993,167 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func verifyCloudAuthorization(
+        context: CloudConfigurationActionContext,
+        state: AndroidBridgeUIState?
+    ) async -> Bool {
+        guard selectedSiteKey == context.siteKey,
+              let provider = providers[context.siteKey]
+                as? AndroidDexSpiderSiteProvider else {
+            return false
+        }
+        if state?.authenticated == true {
+            return true
+        }
+        if let home = try? await provider.home(),
+           provider.homeConfirmsAuthorization(home) {
+            return true
+        }
+        guard let categoryID = context.categoryID,
+              selectedCategoryID == categoryID,
+              let previousPage = categoryPage,
+              let refreshedPage = try? await provider.category(
+                id: categoryID,
+                page: 1,
+                filters: [:]
+              ), refreshedPage != previousPage else {
+            return false
+        }
+        categoryPage = refreshedPage
+        return true
+    }
+
+    private func completeVerifiedCloudAuthorization(
+        context: CloudConfigurationActionContext
+    ) async {
+        guard cloudConfigurationAction == context else { return }
+        cloudAuthorizationSessionID = UUID()
+        cloudAuthorizationPollTask?.cancel()
+        cloudAuthorizationPollTask = nil
+        if var prompt = cloudAuthorizationPrompt {
+            prompt.status = "授权成功，正在刷新登录状态…"
+            prompt.actions = []
+            cloudAuthorizationPrompt = prompt
+        }
+        await refreshCloudConfigurationContent(context)
+        guard cloudConfigurationAction == context,
+              let provider = providers[context.siteKey] else {
+            return
+        }
+
+        // Reopen the provider-owned status surface after its persisted state
+        // has been refreshed. Legacy CatVod dialogs keep their original
+        // “未登录” labels after a child QR window closes, so updating only the
+        // SwiftUI wrapper can never show the new account state.
+        try? await environment?.androidDexBridge.resetAuthorizationUI()
+        cloudAuthorizationPrompt = nil
+        let refreshedState: AndroidBridgeUIState?
+        do {
+            _ = try await provider.action(context.action)
+            refreshedState = await waitForCloudAuthorization()
+        } catch let authorization as AndroidBridgeUIRequired {
+            refreshedState = authorization.state
+        } catch {
+            refreshedState = nil
+        }
+        if let refreshedState, refreshedState.isAuthorizationPrompt {
+            cloudAuthorizationObservedQRCode = false
+            cloudAuthorizationDidSubmit = false
+            cloudAuthorizationVerificationAttempts = 0
+            await updateCloudAuthorizationPrompt(refreshedState)
+            if var prompt = cloudAuthorizationPrompt {
+                prompt.status = CloudConfigurationActionPolicy
+                    .completionMessage(for: context.kind)
+                cloudAuthorizationPrompt = prompt
+            }
+        } else {
+            cloudAuthorizationPrompt = nil
+            cloudAuthorizationInput = ""
+            cloudConfigurationAction = nil
+            presentedError = UserFacingError(
+                title: context.title,
+                message: CloudConfigurationActionPolicy
+                    .completionMessage(for: context.kind)
+            )
+        }
+    }
+
+    private func completeCloudConfigurationAction(
+        message: String
+    ) async {
+        guard let context = cloudConfigurationAction else { return }
+        cloudAuthorizationSessionID = UUID()
+        cloudAuthorizationPollTask?.cancel()
+        cloudAuthorizationPollTask = nil
+        if var prompt = cloudAuthorizationPrompt {
+            prompt.status = message
+            prompt.actions = []
+            cloudAuthorizationPrompt = prompt
+        }
+        try? await Task.sleep(nanoseconds: 350_000_000)
+        try? await environment?.androidDexBridge.resetAuthorizationUI()
+        cloudAuthorizationPrompt = nil
+        cloudAuthorizationInput = ""
+        cloudConfigurationAction = nil
+        cloudAuthorizationObservedQRCode = false
+        cloudAuthorizationDidSubmit = false
+        cloudAuthorizationVerificationAttempts = 0
+        await refreshCloudConfigurationContent(context)
+        presentedError = UserFacingError(title: context.title, message: message)
+    }
+
+    private func failCloudConfigurationAction(message: String) async {
+        guard let context = cloudConfigurationAction else { return }
+        cloudAuthorizationSessionID = UUID()
+        cloudAuthorizationPollTask?.cancel()
+        cloudAuthorizationPollTask = nil
+        try? await environment?.androidDexBridge.resetAuthorizationUI()
+        cloudAuthorizationPrompt = nil
+        cloudAuthorizationInput = ""
+        cloudConfigurationAction = nil
+        cloudAuthorizationObservedQRCode = false
+        cloudAuthorizationDidSubmit = false
+        cloudAuthorizationVerificationAttempts = 0
+        presentedError = UserFacingError(
+            title: "\(context.title)失败",
+            message: message
+        )
+    }
+
+    private func refreshCloudConfigurationContent(
+        _ context: CloudConfigurationActionContext
+    ) async {
+        guard selectedSection == .home,
+              selectedSiteKey == context.siteKey else {
+            return
+        }
+        await loadSelectedSiteHome(
+            refreshConfigurationIfNeeded: false,
+            reportErrors: false
+        )
+        if let categoryID = context.categoryID,
+           siteHome?.categories.contains(where: { $0.id == categoryID }) == true {
+            await loadCategory(id: categoryID, filters: [:])
+        }
+    }
+
     private func finishCloudAuthorizationAndRetry() async {
+        if let context = cloudConfigurationAction {
+            if context.kind == .authorization,
+               await verifyCloudAuthorization(context: context, state: nil) {
+                await completeVerifiedCloudAuthorization(context: context)
+            } else if context.kind != .authorization {
+                await completeCloudConfigurationAction(
+                    message: CloudConfigurationActionPolicy
+                        .completionMessage(for: context.kind)
+                )
+            } else {
+                await failCloudConfigurationAction(
+                    message: "授权结果尚未确认，请刷新状态后重试。"
+                )
+            }
+            return
+        }
         cloudAuthorizationSessionID = UUID()
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = nil
@@ -1697,6 +2178,29 @@ final class AppState: ObservableObject {
         capability: SiteCapability
     ) -> Bool {
         capability == .javaDexSpider
+    }
+
+    static func cloudAuthorizationWindowTimedOut(
+        kind: CloudConfigurationActionKind?,
+        hiddenPollCount: Int
+    ) -> Bool {
+        // A normal command dialog should settle quickly. Provider QR creation
+        // can involve several upstream requests and has historically taken
+        // tens of seconds, so authorization gets a full minute before it is
+        // considered missing. Polling runs every 500 ms.
+        hiddenPollCount >= (kind == .authorization ? 120 : 6)
+    }
+
+    static func cloudAuthorizationVerificationStatus(
+        attempts: Int
+    ) -> String {
+        // A provider QR Activity can become temporarily invisible while its
+        // parent dialog is still active. That transition is not proof that the
+        // user scanned or confirmed the QR code; only credential verification
+        // may publish an authorization-success state.
+        attempts >= 12
+            ? "尚未检测到已登录状态；请完成扫码后点击刷新。"
+            : "二维码已生成，正在等待扫码并核验登录状态…"
     }
 
     /// Returns only an explicit upstream result. Empty placeholder objects are
@@ -2151,6 +2655,8 @@ final class AppState: ObservableObject {
                 reason = "配置中已隐藏"
             } else if site.searchable != 1 {
                 reason = "站点声明不支持搜索"
+            } else if isActionOnlyHome(siteKey: site.key) {
+                reason = "当前配置会话中仅提供功能操作"
             } else if providers[site.key]?.capability == .unsupportedSpider
                         || providers[site.key] == nil {
                 reason = "当前运行环境不支持"
@@ -3179,7 +3685,8 @@ final class AppState: ObservableObject {
                 _ = try await environment.database.deleteHistory(
                     configurationID: record.configurationID,
                     siteKey: record.siteKey,
-                    videoID: record.videoID
+                    videoID: record.videoID,
+                    sourceKey: record.sourceKey
                 )
             }
             try await reloadHistory()
@@ -3400,12 +3907,28 @@ final class AppState: ObservableObject {
 
     func seek(to position: TimeInterval) async {
         guard let player = environment?.player else { return }
-        guard let target = PlayerSeekPolicy.target(
+        guard var target = PlayerSeekPolicy.target(
             requested: position,
             duration: playerSnapshot.duration
         ) else {
             show(AppError.playback("跳转位置无效"), title: "跳转失败")
             return
+        }
+        let isNodePlayback = activePlayback.flatMap {
+            providers[$0.detail.summary.siteKey]?.capability
+        } == .nodeHTTPSpider
+        if isNodePlayback {
+            target = NodePlaybackSeekPolicy.target(
+                requested: target,
+                duration: playerSnapshot.duration
+            )
+            recentNodePlaybackSeek = NodePlaybackSeekIntent(
+                requestID: activePlayerRequestID,
+                target: target,
+                duration: playerSnapshot.duration
+            )
+        } else {
+            recentNodePlaybackSeek = nil
         }
         let previousPosition = playerSnapshot.position
         // Publish the accepted target immediately. Some network sources delay
@@ -3417,6 +3940,11 @@ final class AppState: ObservableObject {
         } catch {
             if playerSnapshot.position == target {
                 playerSnapshot.position = previousPosition
+            }
+            if isNodePlayback,
+               recentNodePlaybackSeek?.requestID == activePlayerRequestID,
+               recentNodePlaybackSeek?.target == target {
+                recentNodePlaybackSeek = nil
             }
             show(error, title: "跳转失败")
         }
@@ -4291,10 +4819,11 @@ final class AppState: ObservableObject {
         let matchingSources: [PlaySource]
         if let sourceName = record.sourceName?.nonEmpty {
             matchingSources = detail.playSources.filter {
-                $0.name.compare(
-                    sourceName,
-                    options: [.caseInsensitive, .widthInsensitive]
-                ) == .orderedSame
+                HistoryRecord.normalizedSourceKey($0.id) == record.sourceKey
+                    || $0.name.compare(
+                        sourceName,
+                        options: [.caseInsensitive, .widthInsensitive]
+                    ) == .orderedSame
             }
         } else {
             matchingSources = detail.playSources
@@ -4747,6 +5276,11 @@ final class AppState: ObservableObject {
         _ home: SiteHome,
         identity: HomeContentIdentity
     ) {
+        if home.semanticRole == .actionOnly {
+            actionOnlyHomeIdentities.insert(identity)
+        } else {
+            actionOnlyHomeIdentities.remove(identity)
+        }
         guard HomeContentPublicationPolicy.shouldPublish(
             currentHome: siteHome,
             currentIdentity: homeContentIdentity,
@@ -4755,6 +5289,18 @@ final class AppState: ObservableObject {
         ) else { return }
         homeContentIdentity = identity
         siteHome = home
+    }
+
+    private func isActionOnlyHome(siteKey: String) -> Bool {
+        guard let configurationID = activeConfigurationRecord?.id else {
+            return false
+        }
+        return actionOnlyHomeIdentities.contains(
+            HomeContentIdentity(
+                configurationID: configurationID,
+                siteKey: siteKey
+            )
+        )
     }
 
     private func cacheSiteHome(_ home: SiteHome, siteKey: String) async {
@@ -5079,6 +5625,11 @@ final class AppState: ObservableObject {
                         )
                         continue
                     }
+                    if await self.suppressNodeAutomaticAdvanceAfterSeek(
+                        requestID: self.activePlayerRequestID
+                    ) {
+                        continue
+                    }
                     let endedSessionID = self.playbackSessionID
                     if self.activePlayback != nil {
                         try? await self.savePlaybackHistory(
@@ -5125,6 +5676,30 @@ final class AppState: ObservableObject {
             source: playback.source,
             episode: nextEpisode
         )
+    }
+
+    private func suppressNodeAutomaticAdvanceAfterSeek(
+        requestID: UUID
+    ) async -> Bool {
+        guard NodePlaybackSeekPolicy.suppressesAutomaticAdvance(
+            intent: recentNodePlaybackSeek,
+            requestID: requestID
+        ), var intent = recentNodePlaybackSeek else {
+            return false
+        }
+
+        // Node cloud/proxy streams can transiently report EOF while mpv is
+        // reopening a byte range after a seek. Suppress episode advance for
+        // that user-driven boundary event and make one recovery attempt when
+        // the requested position was not actually near the media end.
+        if NodePlaybackSeekPolicy.shouldAttemptRecovery(for: intent),
+           let player = environment?.player {
+            intent.recoveryAttempted = true
+            recentNodePlaybackSeek = intent
+            try? await player.seek(to: intent.target)
+            try? await player.play()
+        }
+        return true
     }
 
     private func applyPlayerSubtitlePreference(requestID: UUID?) async {
@@ -5216,7 +5791,7 @@ final class AppState: ObservableObject {
         let existing = history.first {
             $0.siteKey == detail.summary.siteKey
                 && $0.videoID == detail.summary.videoID
-                && $0.sourceName == source.name
+                && $0.sourceKey == HistoryRecord.normalizedSourceKey(source.id)
                 && $0.episodeName == episode.name
         }
         let startPosition: TimeInterval?
@@ -5302,6 +5877,7 @@ final class AppState: ObservableObject {
                 videoID: detail.summary.videoID,
                 title: detail.summary.title,
                 posterURL: detail.summary.posterURL,
+                sourceKey: playback.source.id,
                 sourceName: playback.source.name,
                 episodeName: playback.episode.name,
                 episodeReference: QuarkEpisodeReference.durableHistoryReference(

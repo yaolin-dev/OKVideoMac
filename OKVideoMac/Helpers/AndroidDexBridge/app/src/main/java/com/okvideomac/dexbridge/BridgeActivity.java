@@ -9,6 +9,7 @@ import android.graphics.Color;
 import android.os.Bundle;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.AbsListView;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
@@ -128,6 +129,7 @@ public final class BridgeActivity extends Activity {
             int imageCount = 0;
             int buttonIndex = 0;
             int clickableIndex = 0;
+            int listIndex = 0;
             View root = activeRoot(rootViews());
             if (root != null) {
                 for (View view : flattened(root)) {
@@ -146,6 +148,28 @@ public final class BridgeActivity extends Activity {
                             controls.put(control);
                             buttons.put(label);
                         }
+                    } else if (view instanceof AbsListView) {
+                        AbsListView list = (AbsListView) view;
+                        int firstPosition = list.getFirstVisiblePosition();
+                        for (int childIndex = 0;
+                             childIndex < list.getChildCount();
+                             childIndex++) {
+                            View child = list.getChildAt(childIndex);
+                            if (child == null || !child.isShown()) continue;
+                            String label = labelOf(child);
+                            if (label.isEmpty()) continue;
+                            int position = firstPosition + childIndex;
+                            JSONObject control = new JSONObject();
+                            control.put(
+                                    "id",
+                                    "list:" + listIndex + ":" + position
+                            );
+                            control.put("title", label);
+                            control.put("role", "choice");
+                            controls.put(control);
+                            buttons.put(label);
+                        }
+                        listIndex++;
                     } else if (view.isClickable()) {
                         String label = labelOf(view);
                         if (!label.isEmpty()) {
@@ -232,7 +256,38 @@ public final class BridgeActivity extends Activity {
             boolean clicked = false;
             int buttonIndex = 0;
             int clickableIndex = 0;
+            int listIndex = 0;
             for (View view : views) {
+                if (view.isShown() && view instanceof AbsListView) {
+                    AbsListView list = (AbsListView) view;
+                    String prefix = "list:" + listIndex + ":";
+                    if (controlId != null && controlId.startsWith(prefix)) {
+                        try {
+                            int position = Integer.parseInt(
+                                    controlId.substring(prefix.length())
+                            );
+                            int childIndex = position
+                                    - list.getFirstVisiblePosition();
+                            View child = childIndex >= 0
+                                    && childIndex < list.getChildCount()
+                                    ? list.getChildAt(childIndex)
+                                    : null;
+                            if (child != null && child.isShown()) {
+                                clicked = list.performItemClick(
+                                        child,
+                                        position,
+                                        list.getAdapter()
+                                                .getItemId(position)
+                                );
+                            }
+                        } catch (NumberFormatException ignored) {
+                            clicked = false;
+                        }
+                        break;
+                    }
+                    listIndex++;
+                    continue;
+                }
                 if (!view.isShown() || !view.isClickable()) continue;
                 boolean isButton = view instanceof Button;
                 String label = isButton

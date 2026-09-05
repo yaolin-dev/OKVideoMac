@@ -4,6 +4,13 @@ import OKVideoCore
 struct AndroidBridgeUIControl: Decodable, Equatable, Identifiable {
     let id: String
     let title: String
+    let role: String?
+
+    init(id: String, title: String, role: String? = nil) {
+        self.id = id
+        self.title = title
+        self.role = role
+    }
 }
 
 struct AndroidBridgeUIState: Decodable, Equatable {
@@ -27,7 +34,8 @@ struct AndroidBridgeUIState: Decodable, Equatable {
         return buttons.enumerated().map {
             AndroidBridgeUIControl(
                 id: "legacy:\($0.offset)",
-                title: $0.element
+                title: $0.element,
+                role: nil
             )
         }
     }
@@ -83,6 +91,35 @@ struct AndroidBridgeUIState: Decodable, Equatable {
 
 struct AndroidBridgeUIRequired: Error {
     let state: AndroidBridgeUIState
+}
+
+enum MyDriveGuardActionContract {
+    static let providerAPI = "csp_MyDriveGuard"
+
+    static func tag(for action: String?) -> String? {
+        switch action?.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "LoginShow", "pushCkShow":
+            return "authorization"
+        case "ucClean", "quarkClean", "BdClean", "aliClean":
+            return "command"
+        case "panSortShow", "panSourceSortShow":
+            return "order"
+        default:
+            return nil
+        }
+    }
+
+    static func applying(to summary: VideoSummary) -> VideoSummary {
+        guard summary.tag?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).isEmpty != false,
+              let tag = tag(for: summary.action) else {
+            return summary
+        }
+        var updated = summary
+        updated.tag = tag
+        return updated
+    }
 }
 
 final class JavaScriptSpiderSiteProvider: SiteProvider {
@@ -279,6 +316,11 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
     private let baseURL: URL?
     private let jarReference: String
     private let bridge: AndroidDexBridgeClient
+    /// Identifies the lifetime of this provider instance across every Bridge
+    /// call. Rebuilding providers after a configuration switch creates a new
+    /// owner, so the Android runtime can never reuse a Spider owned by the
+    /// previous configuration session.
+    private let providerOwnerID = UUID().uuidString
 
     init(
         site: SiteConfiguration,
@@ -349,12 +391,18 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         homeValue: JSONValue,
         homeVideoValue: JSONValue?
     ) throws -> SiteHome {
-        let result = try SpiderResponseMapper.home(
+        var result = try SpiderResponseMapper.home(
             homeValue,
             homeVideoValue: homeVideoValue,
             site: site,
             baseURL: baseURL
         )
+        if site.api.trimmingCharacters(in: .whitespacesAndNewlines)
+            == MyDriveGuardActionContract.providerAPI {
+            result.recommendations = result.recommendations.map(
+                MyDriveGuardActionContract.applying(to:)
+            )
+        }
         guard site.categories.isEmpty else {
             let allowed = Set(site.categories)
             return SiteHome(
@@ -396,12 +444,29 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
                 arguments: arguments
             )
         }
-        return try SpiderResponseMapper.page(
+        var mappedPage = try SpiderResponseMapper.page(
             value,
             site: site,
             baseURL: baseURL,
             page: page
         )
+        if site.api.trimmingCharacters(in: .whitespacesAndNewlines)
+            == MyDriveGuardActionContract.providerAPI {
+            mappedPage.items = mappedPage.items.map(
+                MyDriveGuardActionContract.applying(to:)
+            )
+        }
+        return mappedPage
+    }
+
+    func homeConfirmsAuthorization(_ home: SiteHome) -> Bool {
+        guard site.api.trimmingCharacters(in: .whitespacesAndNewlines)
+            == MyDriveGuardActionContract.providerAPI else {
+            return false
+        }
+        return home.categories.contains { category in
+            category.id != "peizhi"
+        }
     }
 
     func detail(id: String) async throws -> VideoDetail {
@@ -542,6 +607,7 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
     ) async throws -> JSONValue {
         try await bridge.invoke(
             site: site,
+            providerOwnerID: providerOwnerID,
             jarReference: jarReference,
             baseURL: baseURL,
             method: method,
@@ -629,6 +695,7 @@ struct AndroidRuntimeStatus: Equatable {
 
 final class AndroidDexBridgeClient {
     private struct Request: Encodable {
+        let providerOwnerID: String
         let siteKey: String
         let api: String
         let ext: String
@@ -798,6 +865,7 @@ final class AndroidDexBridgeClient {
 
     func invoke(
         site: SiteConfiguration,
+        providerOwnerID: String,
         jarReference: String,
         baseURL: URL?,
         method: String,
@@ -823,6 +891,7 @@ final class AndroidDexBridgeClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(
             Request(
+                providerOwnerID: providerOwnerID,
                 siteKey: site.key,
                 api: site.api,
                 ext: try Self.extString(site.ext),
@@ -1047,8 +1116,8 @@ final class AndroidDexBridgeClient {
 }
 
 actor AndroidDexBridgeRuntime {
-    private static let bridgeVersion = "0.3.14"
-    private static let bridgeVersionCode = 26
+    private static let bridgeVersion = "0.3.21"
+    private static let bridgeContractVersion = 1
     private static let networkCheckInterval: TimeInterval = 30
     private let sdkRoot = URL(fileURLWithPath: "/Volumes/XcodeDev/AndroidSDK")
     private let compatibilityADB = FileManager.default.homeDirectoryForCurrentUser
@@ -1067,7 +1136,6 @@ actor AndroidDexBridgeRuntime {
     private let hostPort = BridgeServerPort.host
     private var emulatorProcess: Process?
     private var ready = false
-    private var acceptsNewerBridge = false
     private var lastNetworkCheck: Date?
     private var readinessTask: Task<Void, Error>?
     private var operationStatus: AndroidRuntimeStatus?
@@ -1083,9 +1151,8 @@ actor AndroidDexBridgeRuntime {
         if let operationStatus {
             return operationStatus
         }
-        if await isHealthy(acceptVersionMismatch: true) {
+        if await isHealthy() {
             ready = true
-            acceptsNewerBridge = true
             lastNetworkCheck = Date()
             return .running
         }
@@ -1116,7 +1183,6 @@ actor AndroidDexBridgeRuntime {
 
     func repair() async throws {
         ready = false
-        acceptsNewerBridge = false
         lastNetworkCheck = nil
         readinessTask?.cancel()
         readinessTask = nil
@@ -1129,7 +1195,6 @@ actor AndroidDexBridgeRuntime {
         readinessTask?.cancel()
         readinessTask = nil
         ready = false
-        acceptsNewerBridge = false
         lastNetworkCheck = nil
 
         let adb = adbExecutable
@@ -1155,7 +1220,7 @@ actor AndroidDexBridgeRuntime {
                     < Self.networkCheckInterval {
                 return
             }
-            if await isHealthy(acceptVersionMismatch: acceptsNewerBridge) {
+            if await isHealthy() {
                 lastNetworkCheck = Date()
                 return
             }
@@ -1200,9 +1265,7 @@ actor AndroidDexBridgeRuntime {
             ]
         )
         for _ in 0..<20 {
-            if await isHealthy(
-                acceptVersionMismatch: acceptsNewerBridge
-            ) {
+            if await isHealthy() {
                 ready = true
                 lastNetworkCheck = Date()
                 return
@@ -1246,12 +1309,8 @@ actor AndroidDexBridgeRuntime {
             "步骤 4/7：检查 Bridge 版本与端口",
             progress: 0.56
         )
-        let installedVersionCode = installedBridgeVersionCode(adb)
-        let hasNewerBridge = installedVersionCode.map {
-            $0 > Self.bridgeVersionCode
-        } ?? false
         if ready,
-           await isHealthy(acceptVersionMismatch: hasNewerBridge),
+           await isHealthy(),
            let lastNetworkCheck,
            Date().timeIntervalSince(lastNetworkCheck)
                 < Self.networkCheckInterval {
@@ -1272,9 +1331,8 @@ actor AndroidDexBridgeRuntime {
             networkWasRepaired = try await ensureEmulatorNetwork(adb)
         }
         if !forceInstall, !networkWasRepaired,
-           await isHealthy(acceptVersionMismatch: hasNewerBridge) {
+           await isHealthy() {
             ready = true
-            acceptsNewerBridge = hasNewerBridge
             lastNetworkCheck = Date()
             return
         }
@@ -1299,7 +1357,6 @@ actor AndroidDexBridgeRuntime {
             )
             if await isHealthy() {
                 ready = true
-                acceptsNewerBridge = false
                 lastNetworkCheck = Date()
                 return
             }
@@ -1469,17 +1526,6 @@ actor AndroidDexBridgeRuntime {
         )
     }
 
-    private func installedBridgeVersionCode(_ adb: URL) -> Int? {
-        guard let output = try? run(
-            adb,
-            [
-                "-s", device, "shell", "dumpsys", "package",
-                "com.okvideomac.dexbridge"
-            ]
-        ) else { return nil }
-        return Self.installedVersionCode(from: output)
-    }
-
     static func installedVersionCode(from packageDump: String) -> Int? {
         guard let marker = packageDump.range(of: "versionCode=") else {
             return nil
@@ -1489,9 +1535,7 @@ actor AndroidDexBridgeRuntime {
         return Int(digits)
     }
 
-    private func isHealthy(
-        acceptVersionMismatch: Bool = false
-    ) async -> Bool {
+    private func isHealthy() async -> Bool {
         guard let url = URL(
             string: "http://127.0.0.1:\(hostPort)/health"
         ) else { return false }
@@ -1508,14 +1552,16 @@ actor AndroidDexBridgeRuntime {
                     as? [String: Any] else {
                 return false
             }
-            return object["ok"] as? Bool == true
-                && (
-                    object["version"] as? String == Self.bridgeVersion
-                        || acceptVersionMismatch
-                )
+            return Self.isCompatibleHealthPayload(object)
         } catch {
             return false
         }
+    }
+
+    static func isCompatibleHealthPayload(_ object: [String: Any]) -> Bool {
+        object["ok"] as? Bool == true
+            && object["version"] as? String == bridgeVersion
+            && object["contractVersion"] as? Int == bridgeContractVersion
     }
 
     private func run(_ executable: URL, _ arguments: [String]) throws -> String {

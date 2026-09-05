@@ -76,6 +76,21 @@ public struct VideoSummary: Codable, Equatable, Hashable, Identifiable, Sendable
         tag?.trimmingCharacters(in: .whitespacesAndNewlines)
             .caseInsensitiveCompare("folder") == .orderedSame
     }
+
+    /// Presentation semantics declared by the provider response.
+    ///
+    /// An `action` is an explicit command payload, not a movie identifier.
+    /// Keep that distinction in the model so UI code never has to infer it
+    /// from a source name, title, URL, or other provider-specific string.
+    public var contentKind: VideoSummaryContentKind {
+        let command = action?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return command?.isEmpty == false ? .action : .media
+    }
+}
+
+public enum VideoSummaryContentKind: String, Equatable, Sendable {
+    case media
+    case action
 }
 
 public struct VideoDetail: Codable, Equatable, Sendable {
@@ -166,6 +181,24 @@ public struct SiteHome: Codable, Equatable, Sendable {
         self.categories = categories
         self.recommendations = recommendations
     }
+
+    /// A conservative, structural description of the home payload. A site is
+    /// action-only only when it exposes at least one explicitly typed action
+    /// and no category or media entry. Empty and mixed payloads remain content
+    /// capable so a transient/partial home response cannot disable search.
+    public var semanticRole: SiteHomeSemanticRole {
+        guard categories.isEmpty, !recommendations.isEmpty else {
+            return .contentCapable
+        }
+        return recommendations.allSatisfy { $0.contentKind == .action }
+            ? .actionOnly
+            : .contentCapable
+    }
+}
+
+public enum SiteHomeSemanticRole: String, Equatable, Sendable {
+    case contentCapable
+    case actionOnly
 }
 
 public struct PlaybackQuality: Equatable, Hashable, Identifiable, Sendable {
@@ -216,6 +249,7 @@ public enum SiteCapability: String, Codable, Sendable {
     case standardJSON
     case base64JSON
     case javaScriptSpider
+    case nodeHTTPSpider
     case javaDexSpider
     case unsupportedSpider
 }

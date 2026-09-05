@@ -199,8 +199,12 @@ public struct MultiSiteSearch {
                 var pageNumber = 1
                 var collected: [VideoSummary] = []
                 var seen = Set<String>()
+                let pageLimit = Self.aggregatePageLimit(
+                    configuredLimit: maximumPagesPerSite,
+                    capability: provider.capability
+                )
 
-                while pageNumber <= maximumPagesPerSite,
+                while pageNumber <= pageLimit,
                       collected.count < maximumResultsPerSite {
                     try Task.checkCancellation()
                     let page = try await provider.search(
@@ -265,5 +269,16 @@ public struct MultiSiteSearch {
         providerTask.cancel()
         timeoutTask.cancel()
         return outcome
+    }
+
+    static func aggregatePageLimit(
+        configuredLimit: Int,
+        capability: SiteCapability
+    ) -> Int {
+        // MiraPlay/CatPawOpen bundles expose many sites through one local Node
+        // runtime. Match FongMi's aggregate-search contract: request only the
+        // first page and publish it immediately. Further pages belong to the
+        // explicit single-site load-more flow, not the all-site fan-out.
+        capability == .nodeHTTPSpider ? 1 : max(1, configuredLimit)
     }
 }

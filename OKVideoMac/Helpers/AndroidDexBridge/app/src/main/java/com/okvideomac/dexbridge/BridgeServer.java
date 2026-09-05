@@ -120,7 +120,8 @@ final class BridgeServer {
                 if ("GET".equals(method) && "/health".equals(target)) {
                     JSONObject health = new JSONObject();
                     health.put("ok", true);
-                    health.put("version", "0.3.14");
+                    health.put("version", "0.3.21");
+                    health.put("contractVersion", 1);
                     writeJSON(output, 200, health);
                     return;
                 }

@@ -100,7 +100,7 @@ public struct FavoriteRecord: Codable, Equatable, Identifiable, Sendable {
 
 public struct HistoryRecord: Codable, Equatable, Identifiable, Sendable {
     public var id: String {
-        "\(configurationID?.uuidString.lowercased() ?? "legacy")::\(siteKey)::\(videoID)"
+        "\(configurationID?.uuidString.lowercased() ?? "legacy")::\(siteKey)::\(videoID)::\(sourceKey)"
     }
     /// The on-demand configuration that produced this record.
     ///
@@ -112,6 +112,11 @@ public struct HistoryRecord: Codable, Equatable, Identifiable, Sendable {
     public var videoID: String
     public var title: String
     public var posterURL: URL?
+    /// Stable identity of the playback source/line within one video.
+    ///
+    /// `sourceName` remains presentation text. Keeping a separate key lets
+    /// two lines of the same site/video retain independent episode progress.
+    public var sourceKey: String
     public var sourceName: String?
     public var episodeName: String?
     public var episodeReference: String?
@@ -126,6 +131,7 @@ public struct HistoryRecord: Codable, Equatable, Identifiable, Sendable {
         videoID: String,
         title: String,
         posterURL: URL? = nil,
+        sourceKey: String? = nil,
         sourceName: String? = nil,
         episodeName: String? = nil,
         episodeReference: String? = nil,
@@ -139,6 +145,7 @@ public struct HistoryRecord: Codable, Equatable, Identifiable, Sendable {
         self.videoID = videoID
         self.title = title
         self.posterURL = posterURL
+        self.sourceKey = Self.normalizedSourceKey(sourceKey ?? sourceName)
         self.sourceName = sourceName
         self.episodeName = episodeName
         self.episodeReference = episodeReference
@@ -146,6 +153,76 @@ public struct HistoryRecord: Codable, Equatable, Identifiable, Sendable {
         self.position = max(0, position)
         self.duration = max(0, duration)
         self.watchedAt = watchedAt
+    }
+
+    public static func normalizedSourceKey(_ value: String?) -> String {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "__legacy__" : trimmed
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case configurationID
+        case siteKey
+        case videoID
+        case title
+        case posterURL
+        case sourceKey
+        case sourceName
+        case episodeName
+        case episodeReference
+        case mediaReference
+        case position
+        case duration
+        case watchedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedSourceName = try container.decodeIfPresent(
+            String.self,
+            forKey: .sourceName
+        )
+        self.init(
+            configurationID: try container.decodeIfPresent(
+                UUID.self,
+                forKey: .configurationID
+            ),
+            siteKey: try container.decode(String.self, forKey: .siteKey),
+            videoID: try container.decode(String.self, forKey: .videoID),
+            title: try container.decode(String.self, forKey: .title),
+            posterURL: try container.decodeIfPresent(URL.self, forKey: .posterURL),
+            sourceKey: try container.decodeIfPresent(String.self, forKey: .sourceKey),
+            sourceName: decodedSourceName,
+            episodeName: try container.decodeIfPresent(String.self, forKey: .episodeName),
+            episodeReference: try container.decodeIfPresent(
+                String.self,
+                forKey: .episodeReference
+            ),
+            mediaReference: try container.decodeIfPresent(
+                String.self,
+                forKey: .mediaReference
+            ),
+            position: try container.decode(Double.self, forKey: .position),
+            duration: try container.decode(Double.self, forKey: .duration),
+            watchedAt: try container.decode(Date.self, forKey: .watchedAt)
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(configurationID, forKey: .configurationID)
+        try container.encode(siteKey, forKey: .siteKey)
+        try container.encode(videoID, forKey: .videoID)
+        try container.encode(title, forKey: .title)
+        try container.encodeIfPresent(posterURL, forKey: .posterURL)
+        try container.encode(sourceKey, forKey: .sourceKey)
+        try container.encodeIfPresent(sourceName, forKey: .sourceName)
+        try container.encodeIfPresent(episodeName, forKey: .episodeName)
+        try container.encodeIfPresent(episodeReference, forKey: .episodeReference)
+        try container.encodeIfPresent(mediaReference, forKey: .mediaReference)
+        try container.encode(position, forKey: .position)
+        try container.encode(duration, forKey: .duration)
+        try container.encode(watchedAt, forKey: .watchedAt)
     }
 }
 
@@ -178,7 +255,8 @@ public protocol HistoryRepository {
     func deleteHistory(
         configurationID: UUID?,
         siteKey: String,
-        videoID: String
+        videoID: String,
+        sourceKey: String
     ) async throws -> Int
     @discardableResult
     func deleteHistory(configurationID: UUID) async throws -> Int

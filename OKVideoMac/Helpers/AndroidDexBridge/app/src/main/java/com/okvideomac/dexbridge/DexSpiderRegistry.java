@@ -136,7 +136,18 @@ final class DexSpiderRegistry {
         if (!"detail".equals(method) && !"action".equals(method)) return false;
         String api = payload.optString("api", "").toLowerCase(Locale.ROOT);
         String siteKey = payload.optString("siteKey", "").toLowerCase(Locale.ROOT);
-        return api.contains("config") || siteKey.contains("config");
+        // MyDriveGuard exposes its account and ordering settings as normal
+        // action cards instead of using a *Config class/key. Its account
+        // chooser follows the same legacy lifecycle as WexConfig: selecting a
+        // provider closes the current top Activity before posting the child
+        // QR window. Without the disposable handoff Activity that also closes
+        // the bridge host, so the QR window has no valid owner and only a
+        // transient "please scan" message remains. Treat both configuration
+        // families as interactive settings surfaces.
+        return api.contains("config")
+                || siteKey.contains("config")
+                || api.contains("mydriveguard")
+                || siteKey.contains("mydriveguard");
     }
 
     private Object invokePlayer(
@@ -489,7 +500,8 @@ final class DexSpiderRegistry {
     }
 
     private static String spiderKey(JSONObject payload, String siteKey) {
-        return jarKey(payload) + ":" + siteKey;
+        String providerOwnerID = requireString(payload, "providerOwnerID");
+        return jarKey(payload) + ":" + providerOwnerID + ":" + siteKey;
     }
 
     private static String requireString(JSONObject object, String key) {

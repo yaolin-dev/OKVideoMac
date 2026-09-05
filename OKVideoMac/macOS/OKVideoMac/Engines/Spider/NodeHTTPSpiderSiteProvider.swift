@@ -3,7 +3,7 @@ import OKVideoCore
 
 struct NodeRuntimeUnavailableSiteProvider: SiteProvider {
     let site: SiteConfiguration
-    let capability: SiteCapability = .javaScriptSpider
+    let capability: SiteCapability = .nodeHTTPSpider
     let reason: String
 
     func home() async throws -> SiteHome { throw error }
@@ -26,10 +26,21 @@ struct NodeRuntimeUnavailableSiteProvider: SiteProvider {
     }
 }
 
+enum NodeWebInteractionKind: String, Equatable, Sendable {
+    /// A normal provider settings page. It may contain many unrelated
+    /// operations and must not be presented as a QR login flow.
+    case configuration
+
+    /// The provider explicitly declared an authorization interaction whose
+    /// primary completion mechanism is a QR/account login flow.
+    case qrAuthorization
+}
+
 struct NodeWebAuthorizationRequired: Error, LocalizedError, Equatable {
     let websiteURL: URL
     let title: String
     let message: String
+    let interactionKind: NodeWebInteractionKind
 
     var errorDescription: String? { message }
 }
@@ -181,11 +192,13 @@ enum QuarkEpisodeReference {
 
 final class NodeHTTPSpiderSiteProvider: SiteProvider {
     let site: SiteConfiguration
-    let capability: SiteCapability = .javaScriptSpider
+    let capability: SiteCapability = .nodeHTTPSpider
 
     private let baseURL: URL
     private let httpClient: HTTPClient
     private let diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)?
+
+    private struct OptionalRouteUnavailable: Error {}
 
     var configurationWebsiteURL: URL {
         baseURL.appendingPathComponent("website")
@@ -229,7 +242,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         let homeVideo = try? await invoke(
             method: "homeVod",
             body: [:],
-            maximumAttempts: 2
+            maximumAttempts: 2,
+            silentUnavailableStatusCodes: [404, 405]
         )
         var result = try SpiderResponseMapper.home(
             home,
@@ -302,7 +316,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         if isConfigurationCenter,
            id == "config-center" || id == "node-web-configuration" {
             throw webAuthorizationRequired(
-                message: "在内置配置中心中管理网盘登录与扫码授权。"
+                message: "在内置配置中心中管理站点设置。",
+                interactionKind: .configuration
             )
         }
         return try SpiderResponseMapper.selection(
@@ -337,7 +352,10 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 "page": .string(String(page)),
                 "pg": .string(String(page))
             ],
-            maximumAttempts: 2
+            // Interactive aggregate search must surface the first result as
+            // soon as possible. A delayed retry can be initiated explicitly;
+            // it must not hold the site's first-page event behind a 5xx retry.
+            maximumAttempts: 1
         )
         return try SpiderResponseMapper.page(
             value,
@@ -510,7 +528,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             || action == "config-center"
             || action.contains("/website") {
             throw webAuthorizationRequired(
-                message: "在内置配置中心中管理网盘登录与扫码授权。"
+                message: "在内置配置中心中管理站点设置。",
+                interactionKind: .configuration
             )
         }
         return try await invoke(
@@ -522,7 +541,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     private func invoke(
         method: String,
         body: [String: JSONValue],
-        maximumAttempts: Int = 1
+        maximumAttempts: Int = 1,
+        silentUnavailableStatusCodes: Set<Int> = []
     ) async throws -> JSONValue {
         let apiURL = try ResourceResolver.resolve(site.api, relativeTo: baseURL)
         let endpoint = apiURL.appendingPathComponent(method)
@@ -544,6 +564,9 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                         allowsNonSuccessfulStatus: true
                     )
                 )
+                if silentUnavailableStatusCodes.contains(response.statusCode) {
+                    throw OptionalRouteUnavailable()
+                }
                 let value: JSONValue
                 if response.body.isEmpty {
                     value = .null
@@ -559,13 +582,27 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                         )
                     }
                 }
+                let message = Self.serverMessage(from: value)
+                    ?? "HTTP 状态码 \(response.statusCode)"
+                if let interactionKind = Self.declaredWebInteractionKind(
+                    from: value
+                ) {
+                    throw webAuthorizationRequired(
+                        message: message,
+                        interactionKind: interactionKind
+                    )
+                }
                 guard !(200...299).contains(response.statusCode) else {
                     return value
                 }
-                let message = Self.serverMessage(from: value)
-                    ?? "HTTP 状态码 \(response.statusCode)"
                 if Self.isAuthorizationMessage(message) {
-                    throw webAuthorizationRequired(message: message)
+                    // Legacy bundles expose only a human-readable failure.
+                    // Preserve their route to the settings page, but do not
+                    // guess that the page is a QR authorization experience.
+                    throw webAuthorizationRequired(
+                        message: message,
+                        interactionKind: .configuration
+                    )
                 }
                 if attempt + 1 < attempts,
                    (500...599).contains(response.statusCode) {
@@ -575,9 +612,15 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
                 throw AppError.spider(
                     "\(site.name) \(method) 失败：\(message)"
                 )
+            } catch let unavailable as OptionalRouteUnavailable {
+                throw unavailable
             } catch let authorization as NodeWebAuthorizationRequired {
                 throw authorization
             } catch {
+                if case HTTPClientError.statusCode(let statusCode) = error,
+                   silentUnavailableStatusCodes.contains(statusCode) {
+                    throw OptionalRouteUnavailable()
+                }
                 if attempt + 1 < attempts {
                     try await retryDelay(after: attempt)
                     continue
@@ -609,13 +652,40 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     }
 
     private func webAuthorizationRequired(
-        message: String
+        message: String,
+        interactionKind: NodeWebInteractionKind
     ) -> NodeWebAuthorizationRequired {
         NodeWebAuthorizationRequired(
             websiteURL: configurationWebsiteURL,
             title: site.name.replacingOccurrences(of: "|", with: " "),
-            message: message
+            message: message,
+            interactionKind: interactionKind
         )
+    }
+
+    /// Reads only the provider's typed protocol field. Deliberately does not
+    /// inspect the title, source identity, URL, domain, or message wording.
+    private static func declaredWebInteractionKind(
+        from value: JSONValue
+    ) -> NodeWebInteractionKind? {
+        guard case .object(let object) = value else { return nil }
+        let declared = ["webInteractionKind", "interactionKind"]
+            .compactMap { object[$0]?.stringValue }
+            .map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                    .replacingOccurrences(of: "_", with: "")
+                    .replacingOccurrences(of: "-", with: "")
+            }
+            .first { !$0.isEmpty }
+        switch declared {
+        case "configuration", "settings":
+            return .configuration
+        case "qrauthorization", "authorization":
+            return .qrAuthorization
+        default:
+            return nil
+        }
     }
 
     private func retryDelay(after attempt: Int) async throws {

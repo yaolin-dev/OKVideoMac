@@ -8,7 +8,7 @@
 
 ## 当前状态
 
-- 当前版本：0.3.41（Build 62）
+- 当前版本：0.3.47（Build 71）
 - 最低系统：macOS 12.0
 - 支持架构：Apple Silicon / arm64
 - 应用技术：SwiftUI + AppKit + libmpv

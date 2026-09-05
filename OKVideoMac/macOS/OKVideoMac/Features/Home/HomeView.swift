@@ -108,7 +108,7 @@ struct HomeView: View {
                                 Text(category.name)
                                     .font(.title2)
                                 if let page = state.categoryPage {
-                                    VideoGrid(items: page.items) { summary in
+                                    HomeItemGrid(items: page.items) { summary in
                                         Task { await state.loadDetail(summary) }
                                     }
                                     if page.pagination.hasMore {
@@ -138,7 +138,7 @@ struct HomeView: View {
                             } else if !home.recommendations.isEmpty {
                                 Text("推荐")
                                     .font(.title2)
-                                VideoGrid(items: home.recommendations) { summary in
+                                HomeItemGrid(items: home.recommendations) { summary in
                                     Task { await state.loadDetail(summary) }
                                 }
                             }
@@ -202,6 +202,118 @@ struct HomeView: View {
                 }
             }
         }
+    }
+}
+
+struct HomeItemPresentationGroups: Equatable {
+    let actions: [VideoSummary]
+    let media: [VideoSummary]
+}
+
+enum HomeItemPresentationPolicy {
+    static func groups(
+        from items: [VideoSummary]
+    ) -> HomeItemPresentationGroups {
+        HomeItemPresentationGroups(
+            actions: items.filter { $0.contentKind == .action },
+            media: items.filter { $0.contentKind == .media }
+        )
+    }
+}
+
+/// Renders provider-declared commands as controls rather than movie posters.
+/// Media remains on the existing `VideoGrid`; no title, source, identifier, or
+/// URL matching participates in this decision.
+private struct HomeItemGrid: View {
+    let items: [VideoSummary]
+    let onSelect: (VideoSummary) -> Void
+
+    private let actionColumns = [
+        GridItem(.adaptive(minimum: 250, maximum: 390), spacing: 16)
+    ]
+
+    var body: some View {
+        let groups = HomeItemPresentationPolicy.groups(from: items)
+        VStack(alignment: .leading, spacing: 18) {
+            if !groups.actions.isEmpty {
+                LazyVGrid(
+                    columns: actionColumns,
+                    alignment: .leading,
+                    spacing: 14
+                ) {
+                    ForEach(groups.actions) { item in
+                        HomeActionCard(item: item) {
+                            onSelect(item)
+                        }
+                    }
+                }
+            }
+            if !groups.media.isEmpty {
+                VideoGrid(items: groups.media, onSelect: onSelect)
+            }
+        }
+    }
+}
+
+private struct HomeActionCard: View {
+    let item: VideoSummary
+    let onSelect: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 14) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundColor(.accentColor)
+                    .frame(width: 42, height: 42)
+                    .background(Color.accentColor.opacity(0.09))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(item.title)
+                        .font(.headline)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    if let remarks = item.remarks?.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    ), !remarks.isEmpty {
+                        Text(remarks)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    } else {
+                        Text("功能操作")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.secondary)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
+            .background(
+                isHovering
+                    ? Color.accentColor.opacity(0.075)
+                    : Color(nsColor: .controlBackgroundColor)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(
+                        isHovering
+                            ? Color.accentColor.opacity(0.30)
+                            : Color.secondary.opacity(0.16),
+                        lineWidth: 1
+                    )
+            }
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .accessibilityLabel("操作：\(item.title)")
     }
 }
 

@@ -329,6 +329,27 @@ final class MultiSiteSearchTests: XCTestCase {
         XCTAssertEqual(requestedPages, [1, 2, 3])
     }
 
+    func testNodeAggregateSearchPublishesOnlyFirstPage() async {
+        let recorder = SearchPageRecorder()
+        let provider = PagedSearchFixtureProvider(
+            recorder: recorder,
+            capability: .nodeHTTPSpider
+        )
+
+        var resultIDs: [String] = []
+        for await event in MultiSiteSearch(
+            maximumConcurrency: 1,
+            maximumPagesPerSite: 10
+        ).search(providers: [provider], keyword: "fixture") {
+            guard case .results(_, let items) = event else { continue }
+            resultIDs = items.map(\.videoID)
+        }
+
+        let requestedPages = await recorder.pages
+        XCTAssertEqual(resultIDs, ["1", "2"])
+        XCTAssertEqual(requestedPages, [1])
+    }
+
     func testMovingWindowStartsQueuedSiteBeforeSlowPeerFinishes() async {
         let slow = SearchFixtureProvider(
             site: SiteConfiguration(
@@ -514,7 +535,7 @@ private struct PagedSearchFixtureProvider: SiteProvider {
         type: 4,
         api: "http://127.0.0.1:18989/spider/paged"
     )
-    let capability: SiteCapability = .javaScriptSpider
+    var capability: SiteCapability = .javaScriptSpider
 
     func home() async throws -> SiteHome {
         SiteHome(categories: [], recommendations: [])
