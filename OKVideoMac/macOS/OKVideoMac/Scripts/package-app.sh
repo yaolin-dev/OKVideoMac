@@ -83,6 +83,13 @@ if [[ "$NOTARIZE" -eq 1 && -z "${OKVIDEOMAC_NOTARY_PROFILE:-}" ]]; then
   echo "--notarize requires OKVIDEOMAC_NOTARY_PROFILE." >&2
   exit 2
 fi
+if [[ "$NOTARIZE" -eq 1 ]] &&
+   ! xcrun notarytool history \
+     --keychain-profile "$OKVIDEOMAC_NOTARY_PROFILE" \
+     --output-format json >/dev/null 2>&1; then
+  echo "notary profile unavailable: $OKVIDEOMAC_NOTARY_PROFILE" >&2
+  exit 2
+fi
 
 "$SCRIPT_DIR/check-doc-status.sh"
 

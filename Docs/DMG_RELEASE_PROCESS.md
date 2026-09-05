@@ -28,7 +28,7 @@ staple 或 Gatekeeper 已完成。凭据只通过 Keychain profile 提供，不�
 
 ```sh
 export DEVELOPER_ID_APPLICATION='Developer ID Application: Name (TEAMID)'
-export OKVIDEOMAC_NOTARY_PROFILE='okvideomac-notary'
+export OKVIDEOMAC_NOTARY_PROFILE='OKVideoMac-Notary'
 OKVideoMac/macOS/OKVideoMac/Scripts/package-app.sh \
   --mode distribution \
   --notarize
