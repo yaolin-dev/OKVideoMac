@@ -10895,6 +10895,14 @@ final class OKVideoMacTests: XCTestCase {
             ),
             "provider-opaque-item-42-generation-7"
         )
+        XCTAssertNil(
+            AppState.persistentHistoryEpisodeReference(
+                "provider-opaque-item-42-generation-7",
+                providerCapability: .javaScriptSpider,
+                isNodeProvider: true
+            ),
+            "CatPaw episode tokens must never be persisted"
+        )
 
         var unsafeProviderReference = providerReference
         unsafeProviderReference.stableResourceLocator =
@@ -18316,30 +18324,22 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
     }
 
-    func testNodeDefaultReplayStoreKeepsOnlyCredentialFreeHistoryIdentity()
+    func testNodeDefaultStoreDoesNotPersistGenericReplayIdentity()
         throws {
         let configurationIdentity = UUID().uuidString.lowercased()
         let provider = try makeGenericNodeProvider(
             httpClient: NodeStableReferenceHTTPClient(stableLocator: nil),
             configurationIdentity: configurationIdentity
         )
-        let reference = try XCTUnwrap(
+        XCTAssertNil(
             provider.captureHistoryPlaybackResourceReference(
                 videoID: "stable-video-42",
                 flag: "cloud-original",
                 episode: PlayEpisode(name: "第 1 集", url: "stable-file-42"),
                 episodeIndex: 0
-            )
+            ),
+            "generic CatPaw replay arguments must remain runtime-only"
         )
-        let encoded = String(
-            decoding: try JSONEncoder().encode(reference),
-            as: UTF8.self
-        )
-
-        XCTAssertTrue(reference.stableResourceLocator.hasPrefix("ndr2."))
-        XCTAssertTrue(provider.acceptsPlaybackResourceReference(reference))
-        XCTAssertFalse(encoded.contains("authorization"))
-        XCTAssertFalse(encoded.contains("runtime-only"))
     }
 
     func testNodeDefaultReplayStoreIgnoresExistingProtectedHistoryHandle()
@@ -18490,204 +18490,98 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertLessThan(detailIndex, playIndex)
     }
 
-    func testCatPawVideoHistoryReplaysExactProviderIdentityBeforePlay()
+    func testCatPawVideoHistoryUsesNavigationAfterExpiredDetailID()
         async throws {
-        let configurationIdentity = UUID().uuidString.lowercased()
-        let replayStore = NodePlaybackReplayMemoryStore()
-        let episodeID = "https://provider.invalid/share/file-42?token=runtime-only"
-        let credentialShapedVideoID =
-            "https://provider.invalid/detail?id=42&session=runtime-only"
-        func site(profileRevision: String) -> SiteConfiguration {
-            SiteConfiguration(
-                key: "nodejs_stable_fixture",
-                name: "Stable Node Fixture",
-                type: 4,
-                api: "/spider/stable-fixture/4",
-                extra: [
-                    "okNodeRuntime": .bool(true),
-                    "okNodeBundleIdentity": .string("bundle-stable"),
-                    "okNodeProfileIdentity": .string("profile-stable"),
-                    "okNodeProfileRevision": .string(profileRevision)
-                ]
-            )
-        }
-        let baseURL = try XCTUnwrap(URL(string: "http://127.0.0.1:18988/"))
-        let initialProvider = try NodeHTTPSpiderSiteProvider(
-            site: site(profileRevision: "revision-a"),
-            baseURL: baseURL,
-            httpClient: NodeStableReferenceHTTPClient(stableLocator: nil),
-            playbackReplayStore: replayStore,
-            configurationIdentity: configurationIdentity
-        )
-        let reference = try XCTUnwrap(
-            initialProvider.captureHistoryPlaybackResourceReference(
-                videoID: credentialShapedVideoID,
-                flag: "cloud-original",
-                episode: PlayEpisode(name: "第 1 集", url: episodeID),
-                episodeIndex: 0
-            )
-        )
-        let persisted = String(
-            decoding: try JSONEncoder().encode(reference),
-            as: UTF8.self
-        )
-
-        XCTAssertTrue(reference.stableResourceLocator.hasPrefix("nhr2."))
-        XCTAssertFalse(persisted.contains(episodeID))
-        XCTAssertFalse(persisted.contains("runtime-only"))
-        XCTAssertEqual(
-            PlaybackPersistencePolicy.sanitizedProviderResourceReference(
-                reference
-            ),
-            reference
-        )
-        XCTAssertEqual(
-            replayStore.replay(for: reference.stableResourceLocator)?.videoID,
-            credentialShapedVideoID
-        )
-        let persistedVideoID = NodePlaybackReplayReference
-            .persistedOpaqueIdentity(
-                credentialShapedVideoID,
-                namespace: "catpaw-video-vod-id"
-            )
-        XCTAssertTrue(persistedVideoID.hasPrefix("cph2."))
-        XCTAssertTrue(
-            NodePlaybackReplayReference.isPersistedOpaqueIdentity(
-                persistedVideoID
-            )
-        )
-        XCTAssertFalse(
-            NodePlaybackReplayReference.isPersistedOpaqueIdentity(
-                credentialShapedVideoID
-            )
-        )
-        XCTAssertFalse(
-            NodePlaybackReplayReference.isPersistedOpaqueIdentity("cph2.bad")
-        )
-        XCTAssertFalse(persistedVideoID.contains("runtime-only"))
-        XCTAssertEqual(
-            NodePlaybackReplayReference.persistedOpaqueIdentity(
-                "中文普通影片标识",
-                namespace: "catpaw-video-vod-id"
-            ),
-            "中文普通影片标识"
-        )
-
+        let freshEpisodeID =
+            "https://provider.invalid/share/file-42?token=fresh-runtime-only"
         let client = NodeStableReferenceHTTPClient(
             stableLocator: nil,
-            detailEpisode: episodeID,
-            detailSourceName: "cloud-original"
+            detailEpisode: freshEpisodeID,
+            detailSourceName: "cloud-original",
+            invalidDetailIDs: ["expired-history-id"],
+            searchResultID: "fresh-history-id"
         )
-        let restartedProvider = try NodeHTTPSpiderSiteProvider(
-            site: site(profileRevision: "revision-b"),
-            baseURL: baseURL,
+        let provider = try makeGenericNodeProvider(
             httpClient: client,
-            playbackReplayStore: replayStore,
-            configurationIdentity: configurationIdentity
-        )
-        XCTAssertTrue(
-            restartedProvider.acceptsPlaybackResourceReference(reference),
-            "a profile content revision is refresh state, not history identity"
+            configurationIdentity: UUID().uuidString.lowercased()
         )
 
-        let refreshed = try await restartedProvider.refreshPlayback(
+        let refreshed = try await provider.refreshPlayback(
             PlaybackRefreshRequest(
-                videoID: "wrong-title-search-id",
+                videoID: "expired-history-id",
                 title: "重复标题",
-                sourceIdentity: reference.sourceIdentity,
-                resourceIdentity: reference.episodeIdentity,
-                providerResourceReference: reference
+                sourceIdentity: "obsolete-source",
+                resourceIdentity: "obsolete-episode",
+                sourceName: "cloud-original",
+                episodeName: "历史分集",
+                providerResourceReference: nil
             )
         )
         let requests = await client.capturedRequests()
-        let detailIndex = try XCTUnwrap(
-            requests.firstIndex { $0.url.path.hasSuffix("/detail") }
+        let paths = requests.map(\.url.path)
+        let firstDetail = try XCTUnwrap(
+            paths.firstIndex { $0.hasSuffix("/detail") }
         )
-        let playIndex = try XCTUnwrap(
-            requests.firstIndex { $0.url.path.hasSuffix("/play") }
+        let search = try XCTUnwrap(
+            paths.firstIndex { $0.hasSuffix("/search") }
         )
-        XCTAssertLessThan(detailIndex, playIndex)
-        XCTAssertFalse(requests.contains { $0.url.path.hasSuffix("/search") })
-        let detailBody = try XCTUnwrap(requests[detailIndex].body)
-        let detailPayload = try JSONDecoder().decode(
-            JSONValue.self,
-            from: detailBody
+        let play = try XCTUnwrap(
+            paths.firstIndex { $0.hasSuffix("/play") }
         )
-        XCTAssertEqual(
-            detailPayload.objectValue?["id"]?.stringValue,
-            credentialShapedVideoID
-        )
-        XCTAssertEqual(
-            try nodeEpisodeID(from: requests[playIndex]),
-            episodeID
-        )
-        XCTAssertEqual(refreshed.detail.summary.videoID, "history-video")
-        XCTAssertEqual(refreshed.playbackResult.resourceReference, reference)
+
+        XCTAssertLessThan(firstDetail, search)
+        XCTAssertLessThan(search, play)
+        XCTAssertEqual(try nodeEpisodeID(from: requests[play]), freshEpisodeID)
+        XCTAssertEqual(refreshed.episode.url, freshEpisodeID)
+        XCTAssertNil(refreshed.playbackResult.resourceReference)
     }
 
-    func testNodePlaybackKeychainReplayPersistsAcrossStoreInstances() throws {
-        let service = [
-            "com.okvideomac.tests.catpaw-replay",
-            UUID().uuidString.lowercased()
-        ].joined(separator: ".")
-        let firstStore = NodePlaybackKeychainReplayStore(service: service)
-        let secondStore = NodePlaybackKeychainReplayStore(service: service)
-        let replay = NodePlaybackReplay(
-            bundleIdentity: "bundle-stable",
-            profileIdentity: "profile-stable",
-            videoID: "https://provider.invalid/detail?id=42&token=secret",
-            flag: "cloud-original",
-            episodeURL:
-                "https://provider.invalid/file/42?quality=original&token=secret",
-            episodeName: "第 1 集",
-            episodeIndex: 0
+    func testCatPawReplayReferencesAreRejectedFromPersistence() async throws {
+        let configurationIdentity = UUID().uuidString.lowercased()
+        let client = NodeStableReferenceHTTPClient(stableLocator: nil)
+        let provider = try makeGenericNodeProvider(
+            httpClient: client,
+            configurationIdentity: configurationIdentity
         )
-        var storedLocator: String?
-        defer {
-            if let storedLocator {
-                _ = firstStore.removeReplay(for: storedLocator)
+        for locator in [
+            "ndr2." + Data("runtime-replay".utf8).base64EncodedString(),
+            "nhr2." + String(repeating: "a", count: 64)
+        ] {
+            let reference = PlaybackResourceReference(
+                configurationIdentity: configurationIdentity,
+                siteIdentity: "nodejs_stable_fixture",
+                providerKind: "node-http-spider",
+                providerVersion: 2,
+                stableResourceLocator: locator,
+                sourceIdentity: "source",
+                episodeIdentity: "episode",
+                stability: .providerStable
+            )
+            XCTAssertFalse(provider.acceptsPlaybackResourceReference(reference))
+            XCTAssertNil(
+                PlaybackPersistencePolicy.sanitizedProviderResourceReference(
+                    reference
+                )
+            )
+            do {
+                _ = try await provider.player(
+                    flag: "cloud-original",
+                    episodeURL: locator
+                )
+                XCTFail("CatPaw 历史内部引用不应进入 /play")
+            } catch {
+                XCTAssertTrue(error is ProviderPlaybackError)
             }
         }
-
-        let locator = try XCTUnwrap(
-            NodePlaybackReplayReference.locator(
-                configurationIdentity: UUID().uuidString.lowercased(),
-                siteIdentity: "nodejs_stable_fixture",
-                replay: replay,
-                store: firstStore
-            )
-        )
-        storedLocator = locator
-
-        XCTAssertTrue(locator.hasPrefix("nhr2."))
-        XCTAssertFalse(locator.contains("secret"))
-        XCTAssertEqual(secondStore.replay(for: locator), replay)
-        XCTAssertTrue(secondStore.removeReplay(for: locator))
-        storedLocator = nil
-        XCTAssertNil(firstStore.replay(for: locator))
+        let requests = await client.capturedRequests()
+        XCTAssertFalse(requests.contains { $0.url.path.hasSuffix("/play") })
     }
 
     func testCatPawVideoHistoryUsesFreshEpisodeTokenForSameProviderResource()
         async throws {
         let configurationIdentity = UUID().uuidString.lowercased()
-        let replayStore = NodePlaybackReplayMemoryStore()
-        let oldEpisodeID =
-            "https://provider.invalid/share/file-42?quality=original&token=old"
         let freshEpisodeID =
             "https://provider.invalid/share/file-42?quality=original&token=fresh"
-        let initialProvider = try makeGenericNodeProvider(
-            httpClient: NodeStableReferenceHTTPClient(stableLocator: nil),
-            configurationIdentity: configurationIdentity,
-            playbackReplayStore: replayStore
-        )
-        let reference = try XCTUnwrap(
-            initialProvider.captureHistoryPlaybackResourceReference(
-                videoID: "stable-video-42",
-                flag: "cloud-original",
-                episode: PlayEpisode(name: "第 1 集", url: oldEpisodeID),
-                episodeIndex: 0
-            )
-        )
         let client = NodeStableReferenceHTTPClient(
             stableLocator: nil,
             detailEpisode: freshEpisodeID,
@@ -18695,17 +18589,18 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
         let restartedProvider = try makeGenericNodeProvider(
             httpClient: client,
-            configurationIdentity: configurationIdentity,
-            playbackReplayStore: replayStore
+            configurationIdentity: configurationIdentity
         )
 
         let refreshed = try await restartedProvider.refreshPlayback(
             PlaybackRefreshRequest(
-                videoID: "obsolete-history-row-id",
+                videoID: "stable-video-42",
                 title: "重复标题",
-                sourceIdentity: reference.sourceIdentity,
-                resourceIdentity: reference.episodeIdentity,
-                providerResourceReference: reference
+                sourceIdentity: "obsolete-source-identity",
+                resourceIdentity: "obsolete-resource-identity",
+                sourceName: "cloud-original",
+                episodeName: "历史分集",
+                providerResourceReference: nil
             )
         )
         let requests = await client.capturedRequests()
@@ -18720,26 +18615,12 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         XCTAssertFalse(requests.contains { $0.url.path.hasSuffix("/search") })
         XCTAssertEqual(try nodeEpisodeID(from: requests[playIndex]), freshEpisodeID)
         XCTAssertEqual(refreshed.episode.url, freshEpisodeID)
-        XCTAssertEqual(refreshed.playbackResult.resourceReference, reference)
+        XCTAssertNil(refreshed.playbackResult.resourceReference)
     }
 
     func testCatPawHistoryKeepsEpisodesForAutoAdvance()
         async throws {
         let configurationIdentity = UUID().uuidString.lowercased()
-        let replayStore = NodePlaybackReplayMemoryStore()
-        let initialProvider = try makeGenericNodeProvider(
-            httpClient: NodeStableReferenceHTTPClient(stableLocator: nil),
-            configurationIdentity: configurationIdentity,
-            playbackReplayStore: replayStore
-        )
-        let reference = try XCTUnwrap(
-            initialProvider.captureHistoryPlaybackResourceReference(
-                videoID: "history-video",
-                flag: "cloud-original",
-                episode: PlayEpisode(name: "第 2 集", url: "episode-2"),
-                episodeIndex: 1
-            )
-        )
         let client = NodeStableReferenceHTTPClient(
             stableLocator: nil,
             detailEpisodes: [
@@ -18751,17 +18632,18 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         )
         let restartedProvider = try makeGenericNodeProvider(
             httpClient: client,
-            configurationIdentity: configurationIdentity,
-            playbackReplayStore: replayStore
+            configurationIdentity: configurationIdentity
         )
 
         let refreshed = try await restartedProvider.refreshPlayback(
             PlaybackRefreshRequest(
                 videoID: "opaque-history-row-id",
                 title: "重复标题",
-                sourceIdentity: reference.sourceIdentity,
-                resourceIdentity: reference.episodeIdentity,
-                providerResourceReference: reference
+                sourceIdentity: "obsolete-source-identity",
+                resourceIdentity: "obsolete-resource-identity",
+                sourceName: "cloud-original",
+                episodeName: "第 2 集",
+                providerResourceReference: nil
             )
         )
 
@@ -19172,19 +19054,25 @@ private actor NodeStableReferenceHTTPClient: HTTPClient {
     private let stableLocator: String?
     private let detailEpisodes: [(name: String, url: String)]
     private let detailSourceName: String
+    private let invalidDetailIDs: Set<String>
+    private let searchResultID: String?
     private var requests: [HTTPRequest] = []
 
     init(
         stableLocator: String?,
         detailEpisode: String? = nil,
         detailEpisodes: [(name: String, url: String)]? = nil,
-        detailSourceName: String = "cloud-original"
+        detailSourceName: String = "cloud-original",
+        invalidDetailIDs: Set<String> = [],
+        searchResultID: String? = nil
     ) {
         self.stableLocator = stableLocator
         self.detailEpisodes = detailEpisodes
             ?? detailEpisode.map { [(name: "历史分集", url: $0)] }
             ?? []
         self.detailSourceName = detailSourceName
+        self.invalidDetailIDs = invalidDetailIDs
+        self.searchResultID = searchResultID
     }
 
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
@@ -19197,8 +19085,39 @@ private actor NodeStableReferenceHTTPClient: HTTPClient {
                 body: Data()
             )
         }
-        if request.url.path.hasSuffix("/detail"),
-           !detailEpisodes.isEmpty {
+        if request.url.path.hasSuffix("/search"),
+           let searchResultID {
+            let response: [String: Any] = [
+                "list": [[
+                    "vod_id": searchResultID,
+                    "vod_name": "重复标题"
+                ]]
+            ]
+            return HTTPResponse(
+                url: request.url,
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: try JSONSerialization.data(
+                    withJSONObject: response,
+                    options: [.sortedKeys, .withoutEscapingSlashes]
+                )
+            )
+        }
+        if request.url.path.hasSuffix("/detail") {
+            let requestBody = request.body.flatMap {
+                try? JSONDecoder().decode(JSONValue.self, from: $0)
+            }
+            let requestID = requestBody?.objectValue?["id"]?.stringValue
+            if requestID.map(invalidDetailIDs.contains) == true {
+                return HTTPResponse(
+                    url: request.url,
+                    statusCode: 200,
+                    headers: ["Content-Type": "application/json"],
+                    body: Data(#"{"list":[]}"#.utf8)
+                )
+            }
+        }
+        if request.url.path.hasSuffix("/detail"), !detailEpisodes.isEmpty {
             let response: [String: Any] = [
                 "list": [[
                     "vod_id": "history-video",

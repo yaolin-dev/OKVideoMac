@@ -9,7 +9,7 @@ public actor SQLiteStore:
     HistoryRepository,
     SettingsRepository
 {
-    public static let currentSchemaVersion = 8
+    public static let currentSchemaVersion = 9
 
     private let connection: SQLiteConnection
     public let databaseURL: URL
@@ -1096,6 +1096,69 @@ public actor SQLiteStore:
                 }
                 try connection.execute("PRAGMA user_version = 8")
             }
+        }
+        if version < 9 {
+            try connection.transaction {
+                var rows: [(
+                    rowID: Int64,
+                    playbackReference: String?
+                )] = []
+                try connection.query(
+                    "SELECT rowid, playback_reference FROM history"
+                ) { statement in
+                    rows.append((
+                        rowID: sqlite3_column_int64(statement, 0),
+                        playbackReference: connection.text(statement, 1)
+                    ))
+                }
+
+                let encoder = JSONEncoder()
+                let decoder = JSONDecoder()
+                for row in rows {
+                    let decoded = row.playbackReference
+                        .flatMap { $0.data(using: .utf8) }
+                        .flatMap {
+                            try? decoder.decode(
+                                HistoryPlaybackReference.self,
+                                from: $0
+                            )
+                        }
+                    let providerReference = decoded?.providerResourceReference
+                    let isLegacyCatPawReplay = providerReference?.providerKind
+                            == "node-http-spider"
+                        && providerReference?.providerVersion == 2
+                        && (providerReference?.stableResourceLocator
+                            .hasPrefix("ndr2.") == true
+                            || providerReference?.stableResourceLocator
+                                .hasPrefix("nhr2.") == true)
+                    guard isLegacyCatPawReplay else { continue }
+                    let scrubbed = decoded?.sanitizedForPersistence()
+                    let encoded = try scrubbed.map {
+                        String(decoding: try encoder.encode($0), as: UTF8.self)
+                    }
+                    try connection.execute(
+                        """
+                        UPDATE history
+                        SET episode_reference = ?, playback_reference = ?
+                        WHERE rowid = ?
+                        """,
+                        bindings: [
+                            .optional(
+                                nil
+                            ),
+                            .optional(encoded),
+                            .integer(row.rowID)
+                        ]
+                    )
+                }
+                try connection.execute("PRAGMA user_version = 9")
+            }
+            // ndr2 embeds provider replay arguments in the SQLite value. Rebuild
+            // the file after removing it so old pages and WAL frames cannot keep
+            // an unreachable copy.
+            try connection.query("PRAGMA wal_checkpoint(TRUNCATE)") { _ in }
+            try connection.execute("VACUUM")
+            try connection.query("PRAGMA wal_checkpoint(TRUNCATE)") { _ in }
         }
     }
 

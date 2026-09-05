@@ -5335,10 +5335,7 @@ final class AppState: ObservableObject {
         clearConfigurationSwitchFeedback()
         let deletingActiveConfiguration = activeConfigurationRecord?.id == id
         do {
-            let protectedHistory = try await environment.database.history()
-                .filter { $0.configurationID == id }
             try await environment.database.deleteConfiguration(id: id)
-            removeCatPawReplayReferences(in: protectedHistory)
             if deletingActiveConfiguration {
                 resetSearchForConfigurationChange()
             }
@@ -8857,70 +8854,9 @@ final class AppState: ObservableObject {
         )
         if let acceptedProviderReference {
             guard isCurrentHistoryPreparation(preparationID) else { return }
-            if let nodeProvider = provider as? NodeHTTPSpiderSiteProvider,
-               NodePlaybackReplayReference.isCurrentLocator(
-                   acceptedProviderReference.stableResourceLocator
-               ) {
-                // A CatPaw nhr2 record is a replay recipe, not an episode URL.
-                // Restore it through current detail -> original flag -> exact
-                // episode -> play before constructing ActivePlayback, so the
-                // context retains every current episode for automatic advance.
-                let refreshRequest = PlaybackRefreshRequest(
-                    videoID: item.videoID,
-                    title: item.title,
-                    sourceIdentity: acceptedProviderReference.sourceIdentity,
-                    resourceIdentity:
-                        acceptedProviderReference.episodeIdentity,
-                    sourceName: item.sourceName,
-                    episodeName: item.episodeName,
-                    episodeReference:
-                        acceptedProviderReference.stableResourceLocator,
-                    providerResourceReference: acceptedProviderReference
-                )
-                do {
-                    let refreshed = try await nodeProvider.refreshPlayback(
-                        refreshRequest,
-                        transferContext: transferPlaybackContext(
-                            for: preparationID
-                        )
-                    )
-                    guard isCurrentHistoryPreparation(preparationID) else {
-                        if let receipt = refreshed.playbackResult.transferReceipt {
-                            await cleanupTransferReceipt(
-                                receipt,
-                                reason: .staleGeneration
-                            )
-                        }
-                        return
-                    }
-                    await startPlayback(
-                        detail: refreshed.detail,
-                        source: refreshed.source,
-                        episode: refreshed.episode,
-                        origin: .history(item),
-                        authoritativePlaybackResult:
-                            refreshed.playbackResult,
-                        configurationID: owningConfigurationID,
-                        continuingRequestID: preparationID,
-                        windowActivation: .preserveFocus
-                    )
-                    if let receipt = refreshed.playbackResult.transferReceipt,
-                       activePlayback?.playbackResult?.transferReceipt?
-                        .receiptID != receipt.receiptID {
-                        await cleanupTransferReceipt(
-                            receipt,
-                            reason: .resolutionFailed
-                        )
-                    }
-                    return
-                } catch is CancellationError {
-                    return
-                } catch {
-                    // Preserve the existing authorization and recovery path.
-                    // startPlayback will retry this same provider reference
-                    // and present any provider-owned authorization UI.
-                }
-            }
+            // Only a provider-attested, credential-free stable resource reaches
+            // this path. CatPaw ndr2/nhr2 replay recipes are deliberately
+            // rejected and recover through current detail/navigation below.
             var context = Self.historyPlaybackContext(
                 record: item,
                 siteName: siteName,
@@ -8957,9 +8893,9 @@ final class AppState: ObservableObject {
                storedDetailID
            ) {
             // `cph2` is a row/deduplication identity, never a provider vodID.
-            // Current CatPaw records arrive above through their protected
-            // provider reference; legacy rows continue directly to title
-            // recovery instead of issuing a guaranteed-invalid detail call.
+            // CatPaw history is navigation-first, so an opaque row identity
+            // continues directly to title recovery instead of issuing a
+            // guaranteed-invalid detail call.
             recoveryFailure = "旧详情身份仅可用于历史去重"
         } else {
             do {
@@ -9009,6 +8945,7 @@ final class AppState: ObservableObject {
         }
 
         let persistedEpisodeReference = provider.capability == .javaDexSpider
+            || provider is NodeHTTPSpiderSiteProvider
             ? nil
             : item.episodeReference?.nonEmpty.flatMap {
                 Self.persistentHistoryEpisodeReference($0)
@@ -10147,10 +10084,8 @@ final class AppState: ObservableObject {
             )
         if !origin.isHistory || migratesLegacyCatPawHistory {
             // A legacy CatPaw row may reach this point only after its exact
-            // detail/line/episode was recovered. Capture that current raw
-            // provider identity now so the next launch uses nhr2 directly
-            // instead of repeating title search. Other provider histories
-            // retain their existing navigation behavior.
+            // detail/line/episode was recovered. Persist its credential-free
+            // navigation recipe; runtime episode tokens stay in memory only.
             await persistHistoryNavigationSelection(
                 detail: detail,
                 source: source,
@@ -11941,7 +11876,6 @@ final class AppState: ObservableObject {
             _ = try await environment.database.deleteHistory(
                 configurationID: configurationID
             )
-            removeCatPawReplayReferences(in: removedRecords)
             historyPlaybackSessionCache.remove(recordIDs)
             try await reloadHistory()
         } catch {
@@ -11952,7 +11886,6 @@ final class AppState: ObservableObject {
     func deleteHistory(ids: Set<HistoryRecord.ID>) async {
         guard let environment, !ids.isEmpty else { return }
         do {
-            var removedRecords: [HistoryRecord] = []
             for record in history where ids.contains(record.id) {
                 _ = try await environment.database.deleteHistory(
                     configurationID: record.configurationID,
@@ -11960,53 +11893,12 @@ final class AppState: ObservableObject {
                     videoID: record.videoID,
                     sourceKey: record.sourceKey
                 )
-                removedRecords.append(record)
             }
-            removeCatPawReplayReferences(in: removedRecords)
             historyPlaybackSessionCache.remove(ids)
             try await reloadHistory()
         } catch {
             show(error, title: "删除历史失败")
         }
-    }
-
-    private func removeCatPawReplayReferences(
-        in records: [HistoryRecord]
-    ) {
-        let locators = Set(records.compactMap(Self.catPawReplayLocator))
-        for locator in locators {
-            _ = NodePlaybackKeychainReplayStore.shared.removeReplay(
-                for: locator
-            )
-        }
-    }
-
-    private static func catPawReplayLocator(
-        in record: HistoryRecord
-    ) -> String? {
-        guard let reference = record.playbackReference?
-            .providerResourceReference,
-              reference.providerKind == "node-http-spider",
-              reference.providerVersion == 2,
-              reference.stableResourceLocator.hasPrefix(
-                  "\(NodePlaybackReplayReference.protectedPrefix)."
-              ) else {
-            return nil
-        }
-        return reference.stableResourceLocator
-    }
-
-    private func removeReplacedCatPawReplayReference(
-        old: HistoryRecord?,
-        new: HistoryRecord
-    ) {
-        guard let oldLocator = old.flatMap(Self.catPawReplayLocator),
-              oldLocator != Self.catPawReplayLocator(in: new) else {
-            return
-        }
-        _ = NodePlaybackKeychainReplayStore.shared.removeReplay(
-            for: oldLocator
-        )
     }
 
     func exportDiagnostics(to url: URL) async throws {
@@ -13987,9 +13879,11 @@ final class AppState: ObservableObject {
     /// regenerated by the owning provider on the next playback.
     static func persistentHistoryEpisodeReference(
         _ rawValue: String,
-        providerCapability: SiteCapability? = nil
+        providerCapability: SiteCapability? = nil,
+        isNodeProvider: Bool = false
     ) -> String? {
-        guard providerCapability != .javaDexSpider else { return nil }
+        guard providerCapability != .javaDexSpider,
+              !isNodeProvider else { return nil }
         let trimmed = rawValue.trimmingCharacters(
             in: .whitespacesAndNewlines
         )
@@ -14980,8 +14874,6 @@ final class AppState: ObservableObject {
                                     configurationID: activeConfigurationID
                                 )
                             },
-                            playbackReplayStore:
-                                NodePlaybackKeychainReplayStore.shared,
                             configurationIdentity: activeConfigurationID?
                                 .uuidString
                         )) ?? UnsupportedSiteProvider(site: site)
@@ -14998,8 +14890,6 @@ final class AppState: ObservableObject {
                                 [weak runtime = nodeBundleRuntime] event in
                                 Task { await runtime?.recordDiagnosticEvent(event) }
                             },
-                            playbackReplayStore:
-                                NodePlaybackKeychainReplayStore.shared,
                             configurationIdentity: activeConfigurationID?
                                 .uuidString
                         )) ?? UnsupportedSiteProvider(site: site)
@@ -15088,13 +14978,9 @@ final class AppState: ObservableObject {
             value: -historyRetentionDays,
             to: Date()
         ) ?? Date.distantPast
-        let expiredRecords = try await environment.database.history().filter {
-            $0.watchedAt < expirationDate
-        }
         _ = try await environment.database.deleteHistory(
             olderThan: expirationDate
         )
-        removeCatPawReplayReferences(in: expiredRecords)
         try await reloadHistory()
     }
 
@@ -15922,7 +15808,9 @@ final class AppState: ObservableObject {
                 episodeReference: Self.persistentHistoryEpisodeReference(
                     playback.episode.url,
                     providerCapability: providers[detail.summary.siteKey]?
-                        .capability
+                        .capability,
+                    isNodeProvider: providers[detail.summary.siteKey]
+                        is NodeHTTPSpiderSiteProvider
                 ),
                 mediaReference: Self.persistentHistoryMediaReference(
                     playback.media.url,
@@ -16023,7 +15911,9 @@ final class AppState: ObservableObject {
             episodeReference: Self.persistentHistoryEpisodeReference(
                 episode.url,
                 providerCapability: providers[detail.summary.siteKey]?
-                    .capability
+                    .capability,
+                isNodeProvider: providers[detail.summary.siteKey]
+                    is NodeHTTPSpiderSiteProvider
             ),
             playbackReference: reference,
             position: position,
@@ -16043,14 +15933,7 @@ final class AppState: ObservableObject {
                     incognito: false
                 )
             }
-            removeReplacedCatPawReplayReference(old: existing, new: record)
         } catch {
-            if Self.catPawReplayLocator(in: existing ?? record)
-                != Self.catPawReplayLocator(in: record) {
-                removeCatPawReplayReferences(in: [record])
-            } else if existing == nil {
-                removeCatPawReplayReferences(in: [record])
-            }
             // History persistence is best effort and must never block playback.
         }
     }
@@ -16067,12 +15950,6 @@ final class AppState: ObservableObject {
                 with: write.record,
                 incognito: write.incognito
             )
-            if !write.incognito {
-                removeReplacedCatPawReplayReference(
-                    old: original,
-                    new: write.record
-                )
-            }
             activePlayback?.replacedHistoryRecord = nil
         } else {
             try await environment.database.saveHistory(

@@ -850,6 +850,126 @@ final class SQLiteStoreTests: XCTestCase {
         }
     }
 
+    func testSchemaNineMigrationRemovesCatPawReplayWithoutKeychainAccess()
+        async throws {
+        let databaseURL = try makeDatabaseURL()
+        let configurationID = UUID()
+        let sentinel = "CATPAW-REPLAY-SECRET-8842"
+        let recipe = HistoryNavigationRecipe(
+            configurationID: configurationID,
+            siteKey: "node-site",
+            detailID: "128608",
+            source: HistoryNavigationSource(
+                flag: "百度",
+                name: "百度",
+                index: 0
+            ),
+            episode: HistoryNavigationEpisode(
+                name: "第 2 集",
+                normalizedFilename: "第2集",
+                episodeNumber: 2,
+                index: 1
+            ),
+            resumePosition: 42
+        )
+        let legacyReference = HistoryPlaybackReference(
+            sourceIdentity: "node-source",
+            resourceIdentity: "node-episode",
+            providerResourceReference: PlaybackResourceReference(
+                configurationIdentity: configurationID.uuidString.lowercased(),
+                siteIdentity: "node-site",
+                providerKind: "node-http-spider",
+                providerVersion: 2,
+                stableResourceLocator: "ndr2.\(sentinel)",
+                sourceIdentity: "node-source",
+                episodeIdentity: "node-episode",
+                stability: .providerStable
+            ),
+            navigationRecipe: recipe
+        )
+        let encodedReference = String(
+            decoding: try JSONEncoder().encode(legacyReference),
+            as: UTF8.self
+        )
+        let legacy = try SQLiteConnection(url: databaseURL)
+        try legacy.execute(
+            """
+            CREATE TABLE history (
+                configuration_id TEXT NOT NULL,
+                site_key TEXT NOT NULL,
+                video_id TEXT NOT NULL,
+                source_key TEXT NOT NULL,
+                title TEXT NOT NULL,
+                poster_url TEXT,
+                source_name TEXT,
+                episode_name TEXT,
+                media_reference TEXT,
+                position REAL NOT NULL DEFAULT 0,
+                duration REAL NOT NULL DEFAULT 0,
+                watched_at REAL NOT NULL,
+                episode_reference TEXT,
+                playback_reference TEXT,
+                PRIMARY KEY (configuration_id, site_key, video_id, source_key)
+            )
+            """
+        )
+        try legacy.execute(
+            """
+            INSERT INTO history (
+                configuration_id, site_key, video_id, source_key, title,
+                source_name, episode_name, position, duration, watched_at,
+                episode_reference, playback_reference
+            ) VALUES (?, 'node-site', '128608', 'baidu', 'Fixture',
+                      '百度', '第 2 集', 42, 100, 1000, ?, ?)
+            """,
+            bindings: [
+                .text(configurationID.uuidString.lowercased()),
+                .text("opaque-episode-\(sentinel)"),
+                .text(encodedReference)
+            ]
+        )
+        try legacy.execute("PRAGMA user_version = 8")
+        legacy.close()
+
+        let store = try SQLiteStore(databaseURL: databaseURL)
+        let migratedRecords = try await store.history()
+        let record = try XCTUnwrap(migratedRecords.first)
+        XCTAssertNil(record.episodeReference)
+        XCTAssertNil(record.playbackReference?.providerResourceReference)
+        XCTAssertEqual(record.playbackReference?.navigationRecipe, recipe)
+        XCTAssertEqual(record.position, 42)
+
+        let verification = try SQLiteConnection(url: databaseURL)
+        XCTAssertEqual(
+            try verification.scalarInt("PRAGMA user_version"),
+            SQLiteStore.currentSchemaVersion
+        )
+        var persistedText = ""
+        try verification.query(
+            """
+            SELECT COALESCE(episode_reference, ''),
+                   COALESCE(playback_reference, '')
+            FROM history
+            """
+        ) { statement in
+            persistedText = (0...1)
+                .compactMap { verification.text(statement, Int32($0)) }
+                .joined(separator: "\n")
+        }
+        verification.close()
+        XCTAssertFalse(persistedText.contains(sentinel))
+
+        let sentinelData = Data(sentinel.utf8)
+        for suffix in ["", "-wal", "-shm"] {
+            let candidate = URL(fileURLWithPath: databaseURL.path + suffix)
+            guard FileManager.default.fileExists(atPath: candidate.path) else {
+                continue
+            }
+            let contents = try Data(contentsOf: candidate)
+            XCTAssertNil(contents.range(of: sentinelData))
+        }
+    }
+
     func testLegacyHistoryPlaybackReferenceDecodesWithoutProviderReference()
         throws {
         let legacy = Data(
@@ -1066,7 +1186,7 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(record.episodeName, "第8集")
         XCTAssertEqual(record.position, 88)
         XCTAssertEqual(record.playbackReference?.sourceIdentity, "line-2")
-        XCTAssertEqual(SQLiteStore.currentSchemaVersion, 8)
+        XCTAssertEqual(SQLiteStore.currentSchemaVersion, 9)
 
         let verification = try SQLiteConnection(url: databaseURL)
         var storedPlaybackReference: String?

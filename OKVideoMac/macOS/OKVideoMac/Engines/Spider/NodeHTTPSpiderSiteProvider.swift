@@ -1,7 +1,6 @@
 import CryptoKit
 import Foundation
 import OKVideoCore
-import Security
 
 private func nodeNonEmpty(_ value: String?) -> String? {
     guard let value else { return nil }
@@ -293,97 +292,6 @@ struct NodePlaybackDisabledReplayStore: NodePlaybackReplayStoring {
     func replay(for _: String) -> NodePlaybackReplay? { nil }
     func store(_: NodePlaybackReplay, for _: String) -> Bool { false }
     func removeReplay(for _: String) -> Bool { false }
-}
-
-/// Device-local protected persistence for CatPaw provider-call identities.
-///
-/// SQLite retains only the deterministic `nhr2` handle. The original vodID,
-/// flag and episodeID stay in the user's login keychain so an app restart can
-/// rebuild current detail without copying provider credentials into history,
-/// backups or diagnostic exports.
-final class NodePlaybackKeychainReplayStore: NodePlaybackReplayStoring {
-    static let shared = NodePlaybackKeychainReplayStore()
-
-    private static let maximumReplayByteCount = 256 * 1_024
-    private let service: String
-
-    init(
-        service: String = "com.okvideomac.OKVideoMac.catpaw-playback-replay.v2"
-    ) {
-        self.service = service
-    }
-
-    func replay(for locator: String) -> NodePlaybackReplay? {
-        guard Self.isProtectedLocator(locator) else { return nil }
-        var query = baseQuery(locator: locator)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              data.count <= Self.maximumReplayByteCount,
-              let replay = try? JSONDecoder().decode(
-                  NodePlaybackReplay.self,
-                  from: data
-              ) else {
-            return nil
-        }
-        return replay
-    }
-
-    @discardableResult
-    func store(_ replay: NodePlaybackReplay, for locator: String) -> Bool {
-        guard Self.isProtectedLocator(locator),
-              let data = try? JSONEncoder().encode(replay),
-              data.count <= Self.maximumReplayByteCount else {
-            return false
-        }
-        let query = baseQuery(locator: locator)
-        let attributes = [kSecValueData as String: data]
-        let updateStatus = SecItemUpdate(
-            query as CFDictionary,
-            attributes as CFDictionary
-        )
-        if updateStatus == errSecSuccess {
-            return true
-        }
-        guard updateStatus == errSecItemNotFound else { return false }
-
-        var insertion = query
-        insertion[kSecValueData as String] = data
-        insertion[kSecAttrAccessible as String] =
-            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let addStatus = SecItemAdd(insertion as CFDictionary, nil)
-        if addStatus == errSecDuplicateItem {
-            return SecItemUpdate(
-                query as CFDictionary,
-                attributes as CFDictionary
-            ) == errSecSuccess
-        }
-        return addStatus == errSecSuccess
-    }
-
-    @discardableResult
-    func removeReplay(for locator: String) -> Bool {
-        guard Self.isProtectedLocator(locator) else { return false }
-        let status = SecItemDelete(baseQuery(locator: locator) as CFDictionary)
-        return status == errSecSuccess || status == errSecItemNotFound
-    }
-
-    private func baseQuery(locator: String) -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: locator
-        ]
-    }
-
-    private static func isProtectedLocator(_ value: String) -> Bool {
-        guard value.hasPrefix("nhr2.") else { return false }
-        let digest = value.dropFirst("nhr2.".count)
-        return digest.count == 64 && digest.allSatisfy(\.isHexDigit)
-    }
 }
 
 enum NodePlaybackReplayReference {
@@ -1371,6 +1279,14 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
     }
 
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
+        guard !NodePlaybackReplayReference.isCurrentLocator(episodeURL),
+              !NodePlaybackReplayReference.isPersistedOpaqueIdentity(
+                  episodeURL
+              ) else {
+            throw ProviderPlaybackError(
+                "CatPaw 历史内部引用不能作为媒体地址，必须重新获取当前详情"
+            )
+        }
         var resolvedEpisodeURL = episodeURL
         var refreshedShareToken = false
         if QuarkEpisodeReference.requiresShareTokenRefresh(resolvedEpisodeURL) {
@@ -1638,7 +1554,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
             && reference.configurationIdentity == configurationIdentity
             && reference.siteIdentity == site.key
             && reference.providerKind == "node-http-spider"
-            && [1, 2].contains(reference.providerVersion)
+            && reference.providerVersion == 1
             && reference.stability == .providerStable
             && !reference.sourceIdentity.isEmpty
             && !reference.episodeIdentity.isEmpty,
@@ -1648,18 +1564,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
               ) == reference else {
             return false
         }
-        if reference.providerVersion == 2,
-           NodePlaybackReplayReference.isCurrentLocator(locator),
-           let replay = NodePlaybackReplayReference.replay(
-            for: locator,
-            store: playbackReplayStore
-           ) {
-            return replay.kind == .video
-                && nodeNonEmpty(replay.videoID) != nil
-                && replayBelongsToCurrentProvider(replay)
-        }
-        return reference.providerVersion == 1
-            && QuarkEpisodeReference.identity(from: locator) != nil
+        return QuarkEpisodeReference.identity(from: locator) != nil
     }
 
     private func resolvePlayer(
@@ -1929,52 +1834,14 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         episodeIndex: Int,
         persistsProtectedReplay: Bool
     ) -> PlaybackResourceReference? {
-        guard let configurationIdentity else { return nil }
-        let replay = NodePlaybackReplay(
-            kind: .video,
-            bundleIdentity: nodeNonEmpty(
-                site.extra["okNodeBundleIdentity"]?.stringValue
-            ),
-            profileIdentity: nodeNonEmpty(
-                site.extra["okNodeProfileIdentity"]?.stringValue
-            ),
-            videoID: videoID,
-            flag: flag,
-            episodeURL: episode.url,
-            episodeName: episode.name,
-            episodeIndex: episodeIndex
-        )
-        if let locator = NodePlaybackReplayReference.locator(
-            configurationIdentity: configurationIdentity,
-            siteIdentity: site.key,
-            replay: replay,
-            store: playbackReplayStore,
-            persistsProtectedReplay: persistsProtectedReplay
-        ) {
-            return PlaybackResourceReference(
-                configurationIdentity: configurationIdentity,
-                siteIdentity: site.key,
-                providerKind: "node-http-spider",
-                providerVersion: 2,
-                stableResourceLocator: locator,
-                sourceIdentity: PlaybackReferenceIdentity.source(
-                    explicitIdentity: "catpaw-video:\(site.key):\(flag)",
-                    episodes: []
-                ),
-                episodeIdentity: PlaybackReferenceIdentity.episode(
-                    explicitIdentity: "catpaw-video:\(locator)",
-                    name: episode.name,
-                    reference: ""
-                ),
-                stability: .providerStable,
-                expiresAt: nil
-            )
-        }
-
-        // If the protected store is unavailable, keep Quark's credential-free
-        // share/file tuple as a portable fallback. Other unsafe provider
-        // values intentionally fall back to the navigation recipe rather than
-        // leaking vodID/episodeID into SQLite.
+        // CatPaw detail IDs and episode tokens are runtime replay capabilities,
+        // not durable history identities. History is navigation-first and keeps
+        // only a provider-attested, credential-free resource such as qhr1.
+        // The unused parameters remain part of this private boundary so detail
+        // attachment and selection-time capture share exactly the same policy.
+        _ = videoID
+        _ = episodeIndex
+        _ = persistsProtectedReplay
         return playbackResourceReference(
             flag: flag,
             episodeURL: episode.url,
@@ -1982,10 +1849,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider {
         )
     }
 
-    /// Called at the user-selection boundary. Credential-bearing replay data
-    /// becomes durable only after the protected store accepts it; SQLite sees
-    /// only the resulting opaque locator. Portable, credential-free references
-    /// continue to use the existing fallback representation.
+    /// Called at the user-selection boundary. Only provider-attested,
+    /// credential-free references are eligible for history persistence.
     func captureHistoryPlaybackResourceReference(
         videoID: String,
         flag: String,

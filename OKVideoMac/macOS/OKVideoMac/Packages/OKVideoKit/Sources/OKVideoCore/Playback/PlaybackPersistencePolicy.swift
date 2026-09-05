@@ -82,18 +82,14 @@ public enum PlaybackPersistencePolicy {
             return nil
         }
         // Node provider locators cross a third-party runtime boundary and may
-        // be JWTs or refresh tokens despite being labelled "stable". Version
-        // 1 keeps only Quark's secret-free share/file identity. Version 2 is
-        // either a direct, bounded non-sensitive replay envelope (`ndr2`) or a
-        // device-local protected-store handle (`nhr2`); the opaque Provider
-        // arguments themselves never appear in SQLite for the latter.
+        // be session tokens despite being labelled "stable". History remains
+        // navigation-first and keeps only Quark's credential-free share/file
+        // identity. CatPaw ndr2/nhr2 replay recipes are runtime capabilities,
+        // so neither representation is eligible for persistence.
         if reference.providerKind == "node-http-spider" {
-            let isLegacyQuark = reference.providerVersion == 1
+            let isQuark = reference.providerVersion == 1
                 && locator.hasPrefix("qhr1.")
-            let isCatPawReplay = reference.providerVersion == 2
-                && (locator.hasPrefix("ndr2.")
-                    || locator.hasPrefix("nhr2."))
-            guard isLegacyQuark || isCatPawReplay else {
+            guard isQuark else {
                 return nil
             }
         }
