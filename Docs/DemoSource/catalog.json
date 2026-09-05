@@ -1,0 +1,192 @@
+{
+  "catalogVersion": 1,
+  "notice": "All titles, people, studios, artwork and descriptions in this catalog are fictional and created for OKVideoMac documentation.",
+  "categories": [
+    {"id": "film", "name": "电影"},
+    {"id": "series", "name": "剧集"},
+    {"id": "animation", "name": "动画"},
+    {"id": "documentary", "name": "纪录片"},
+    {"id": "kids", "name": "少儿"},
+    {"id": "technology", "name": "科技"}
+  ],
+  "items": [
+    {
+      "id": "midnight-orbit", "title": "夜航星河", "alternateTitle": "Midnight Orbit",
+      "year": "2026", "region": "远星联合区", "category": "documentary", "genres": ["纪录片", "天文", "探索"],
+      "synopsis": "一支虚构的轨道观测团队在最长的夜晚记录极光、海洋与城市灯火，尝试为遥远航行建立一张温柔而精确的星图。",
+      "director": "林屿", "cast": ["观测员 07", "记录员 青禾"], "studio": "零点观察室", "rating": "9.1",
+      "remarks": "全 6 集", "episodeCount": 6, "art": "orbit"
+    },
+    {
+      "id": "urban-spectrum", "title": "城市光谱", "alternateTitle": "Urban Spectrum",
+      "year": "2026", "region": "雾港", "category": "film", "genres": ["剧情", "城市", "音乐"],
+      "synopsis": "一位灯光设计师用七种颜色记录城市的一周，在一场停电之后重新理解人与街道之间的微小联系。",
+      "director": "沈砚", "cast": ["苏澄", "陆桥", "姜禾"], "studio": "折光影业", "rating": "8.7",
+      "remarks": "原创电影", "episodeCount": 1, "art": "city"
+    },
+    {
+      "id": "echo-archive", "title": "回声档案", "alternateTitle": "Echo Archive",
+      "year": "2026", "region": "临海市", "category": "series", "genres": ["悬疑", "科幻", "档案"],
+      "synopsis": "一座只保存声音的档案馆收到十二段来自未来的录音。管理员循着回声寻找寄件人，也逐渐发现每份档案都与城市记忆相连。",
+      "director": "周岸", "cast": ["闻溪", "陈昼", "代号 E"], "studio": "回声叙事实验室", "rating": "9.0",
+      "remarks": "全 12 集", "episodeCount": 12, "art": "archive"
+    },
+    {
+      "id": "blue-horizon", "title": "深蓝地平线", "alternateTitle": "Blue Horizon",
+      "year": "2025", "region": "蓝湾保护区", "category": "documentary", "genres": ["自然", "海洋", "纪录片"],
+      "synopsis": "从潮间带到深海热泉，一套完全虚构的自然影像带领观众观察光线如何塑造海洋的昼夜节律。",
+      "director": "叶澜", "cast": ["旁白：陆遥"], "studio": "蓝域记录计划", "rating": "9.3",
+      "remarks": "全 8 集", "episodeCount": 8, "art": "ocean"
+    },
+    {
+      "id": "luminous-era", "title": "微光纪元", "alternateTitle": "Luminous Era",
+      "year": "2026", "region": "新湾城", "category": "series", "genres": ["剧情", "近未来", "成长"],
+      "synopsis": "五十次日落、五十封未寄出的信，串起一群年轻工程师在新湾城建设公共照明网络的漫长一年。",
+      "director": "程雁", "cast": ["岑夏", "顾川", "唐禾"], "studio": "微光联合制作", "rating": "8.8",
+      "remarks": "全 50 集", "episodeCount": 50, "art": "workshop"
+    },
+    {
+      "id": "polar-signal", "title": "极昼信号", "alternateTitle": "Polar Signal",
+      "year": "2026", "region": "北纬站", "category": "series", "genres": ["科幻", "冒险", "长篇"],
+      "synopsis": "北纬站每个极昼都会接收到一段无法解释的短波。三代研究员跨越一百二十个章节，共同完成一场关于时间与选择的接力。",
+      "director": "顾屿", "cast": ["夏川", "宁葵", "白砾"], "studio": "纬度剧场", "rating": "8.9",
+      "remarks": "更新至 120 集", "episodeCount": 120, "art": "orbit"
+    },
+    {
+      "id": "mountain-sea-route", "title": "山海航线", "alternateTitle": "Mountain & Sea Route",
+      "year": "2025", "region": "云岬群岛", "category": "film", "genres": ["冒险", "公路", "家庭"],
+      "synopsis": "一艘安静的电动渡船沿着山海交界前行，船长和临时乘客在四个港口交换各自未完成的计划。",
+      "director": "唐渡", "cast": ["乔木", "温屿", "小满"], "studio": "远岸灯塔", "rating": "8.5",
+      "remarks": "原创电影", "episodeCount": 1, "art": "vessel"
+    },
+    {
+      "id": "morning-mist-theatre", "title": "晨雾剧场", "alternateTitle": "Morning Mist Theatre",
+      "year": "2024", "region": "栖雾镇", "category": "series", "genres": ["喜剧", "生活", "短篇"],
+      "synopsis": "一间只在清晨开门的小剧场，把居民的日常烦恼排成十六段轻巧的小戏。",
+      "director": "许白", "cast": ["黎初", "陶陶", "木槿"], "studio": "晨雾排演厅", "rating": "8.4",
+      "remarks": "全 16 集", "episodeCount": 16, "art": "archive"
+    },
+    {
+      "id": "northern-storm", "title": "北纬风暴", "alternateTitle": "Northern Current",
+      "year": "2025", "region": "北纬外海", "category": "film", "genres": ["灾难", "冒险", "救援"],
+      "synopsis": "一场虚构的磁暴切断海上通信，气象员与救援船必须依靠最基础的光信号共同穿过风眼。",
+      "director": "夏岚", "cast": ["顾石", "叶帆", "穆青"], "studio": "北线影像", "rating": "8.2",
+      "remarks": "原创电影", "episodeCount": 1, "art": "ocean"
+    },
+    {
+      "id": "far-shore-plan", "title": "远岸计划", "alternateTitle": "Far Shore Plan",
+      "year": "2026", "region": "远岸试验区", "category": "technology", "genres": ["科技", "工程", "纪录片"],
+      "synopsis": "从能源、交通到社区设计，九个虚构团队展示一座面向海风与未来的低碳港口如何从纸面走向现实。",
+      "director": "纪原", "cast": ["项目记录：林舟"], "studio": "未来基础设施档案", "rating": "9.2",
+      "remarks": "全 9 集", "episodeCount": 9, "art": "vessel"
+    },
+    {
+      "id": "little-light-workshop", "title": "光之工坊", "alternateTitle": "Little Light Workshop",
+      "year": "2026", "region": "纸片岛", "category": "kids", "genres": ["少儿", "手工", "启蒙"],
+      "synopsis": "纸、玻璃和光组成的小工坊每天解决一个形状难题，鼓励孩子观察、尝试并亲手完成答案。",
+      "director": "米粒", "cast": ["方方", "圆圆", "小光点"], "studio": "纸片岛工作室", "rating": "8.9",
+      "remarks": "全 24 集", "episodeCount": 24, "art": "workshop"
+    },
+    {
+      "id": "stardust-post", "title": "星尘邮局", "alternateTitle": "Stardust Post",
+      "year": "2025", "region": "环月城", "category": "animation", "genres": ["动画", "奇想", "家庭"],
+      "synopsis": "漂浮在轨道上的小邮局专门投递那些没有地址的愿望，一位新邮差必须学会阅读星尘留下的方向。",
+      "director": "阿栎", "cast": ["洛洛", "白盒", "点点"], "studio": "轻轨动画室", "rating": "8.8",
+      "remarks": "全 26 集", "episodeCount": 26, "art": "orbit"
+    },
+    {
+      "id": "blue-pulse", "title": "蓝色脉冲", "alternateTitle": "Blue Pulse",
+      "year": "2026", "region": "深海实验站", "category": "technology", "genres": ["科技", "海洋", "实验"],
+      "synopsis": "工程师把海浪转化为稳定电力，并以一组安全、透明的虚构实验解释能量在设备中的每一次流动。",
+      "director": "宋齐", "cast": ["讲解：闻蓝"], "studio": "脉冲实验室", "rating": "8.6",
+      "remarks": "全 10 集", "episodeCount": 10, "art": "ocean"
+    },
+    {
+      "id": "city-drift", "title": "城市漫游", "alternateTitle": "City Drift",
+      "year": "2024", "region": "雾港", "category": "documentary", "genres": ["城市", "建筑", "纪实"],
+      "synopsis": "镜头沿着虚构城市的步行路线移动，观察桥梁、雨棚、夜灯和公共空间如何改变日常节奏。",
+      "director": "乔路", "cast": ["旁白：宋暖"], "studio": "慢行记录所", "rating": "8.7",
+      "remarks": "全 7 集", "episodeCount": 7, "art": "city"
+    },
+    {
+      "id": "silent-coordinate", "title": "静默坐标", "alternateTitle": "Silent Coordinate",
+      "year": "2026", "region": "无声区", "category": "film", "genres": ["悬疑", "科幻", "剧情"],
+      "synopsis": "测绘员在一张新地图上发现从未标注的坐标，而那里每到午夜都会失去所有声音。",
+      "director": "方澈", "cast": ["辛鹿", "江白", "许隅"], "studio": "静默画幅", "rating": "8.5",
+      "remarks": "原创电影", "episodeCount": 1, "art": "archive"
+    },
+    {
+      "id": "cloud-garden", "title": "云端花园", "alternateTitle": "Cloud Garden",
+      "year": "2025", "region": "高空温室", "category": "animation", "genres": ["动画", "自然", "治愈"],
+      "synopsis": "一座随季风旅行的花园，需要三位小小维护员照顾会发光的种子和会记路的云。",
+      "director": "若岚", "cast": ["芽芽", "云尺", "风铃"], "studio": "云芽动画", "rating": "9.0",
+      "remarks": "全 20 集", "episodeCount": 20, "art": "ocean"
+    },
+    {
+      "id": "glass-forest", "title": "玻璃森林", "alternateTitle": "Glass Forest",
+      "year": "2025", "region": "折光谷", "category": "animation", "genres": ["动画", "冒险", "环保"],
+      "synopsis": "透明树木把每一次声音变成颜色，三个伙伴必须在风暴到来前找回森林失落的低音。",
+      "director": "程露", "cast": ["棱镜", "小苔", "灰羽"], "studio": "折光动画工房", "rating": "8.6",
+      "remarks": "全 18 集", "episodeCount": 18, "art": "workshop"
+    },
+    {
+      "id": "twilight-radio", "title": "暮色电台", "alternateTitle": "Twilight Radio",
+      "year": "2024", "region": "临海市", "category": "series", "genres": ["剧情", "音乐", "都市"],
+      "synopsis": "黄昏六点，一档无人署名的节目收集听众未说出口的道别，也悄悄改变主持人自己的生活。",
+      "director": "岑宁", "cast": ["安禾", "顾声", "言秋"], "studio": "六点声音社", "rating": "8.8",
+      "remarks": "全 14 集", "episodeCount": 14, "art": "city"
+    },
+    {
+      "id": "letters-in-light", "title": "光年书简", "alternateTitle": "Letters in Light",
+      "year": "2026", "region": "远星站", "category": "film", "genres": ["科幻", "爱情", "剧情"],
+      "synopsis": "两名航行员只能用每年一次的短暂光窗通信，他们把漫长等待写成一封跨越轨道的共同日记。",
+      "director": "裴星", "cast": ["温遥", "许岸"], "studio": "星窗影业", "rating": "8.9",
+      "remarks": "原创电影", "episodeCount": 1, "art": "orbit"
+    },
+    {
+      "id": "future-kitchen", "title": "未来厨房", "alternateTitle": "Future Kitchen",
+      "year": "2026", "region": "新湾城", "category": "technology", "genres": ["科技", "生活", "设计"],
+      "synopsis": "从节能灶台到可重复使用的包装，十二个虚构原型展示技术如何服务一顿更简单、更可持续的饭。",
+      "director": "沈言", "cast": ["实验主持：可可"], "studio": "日常技术所", "rating": "8.3",
+      "remarks": "全 12 集", "episodeCount": 12, "art": "workshop"
+    },
+    {
+      "id": "atlas-of-wind", "title": "风的地图", "alternateTitle": "Atlas of Wind",
+      "year": "2025", "region": "云岬群岛", "category": "documentary", "genres": ["自然", "气象", "旅行"],
+      "synopsis": "研究者沿着六条想象中的季风路线，借风筝、树叶和海面纹理解释看不见的空气。",
+      "director": "陶岚", "cast": ["旁白：程远"], "studio": "风向记录室", "rating": "9.0",
+      "remarks": "全 6 集", "episodeCount": 6, "art": "vessel"
+    },
+    {
+      "id": "island-frequency", "title": "岛屿频率", "alternateTitle": "Island Frequency",
+      "year": "2024", "region": "拾音群岛", "category": "series", "genres": ["青春", "音乐", "旅行"],
+      "synopsis": "一支临时乐队在九座岛屿收集环境声音，把潮汐、风铃和旧码头写进同一张专辑。",
+      "director": "陆岑", "cast": ["夏声", "舟野", "阿简"], "studio": "拾音剧社", "rating": "8.4",
+      "remarks": "全 22 集", "episodeCount": 22, "art": "ocean"
+    },
+    {
+      "id": "orbital-dawn", "title": "轨道晨光", "alternateTitle": "Orbital Dawn",
+      "year": "2026", "region": "晨光站", "category": "kids", "genres": ["少儿", "科普", "太空"],
+      "synopsis": "跟着晨光站的机器人伙伴认识昼夜、轨道、方向和时间，每集只回答一个清楚的小问题。",
+      "director": "小禾", "cast": ["晨晨", "轨轨", "小刻度"], "studio": "晨光科普社", "rating": "8.8",
+      "remarks": "全 30 集", "episodeCount": 30, "art": "orbit"
+    },
+    {
+      "id": "distant-echo", "title": "远方回声", "alternateTitle": "Distant Echo",
+      "year": "2025", "region": "回声峡谷", "category": "kids", "genres": ["少儿", "音乐", "自然"],
+      "synopsis": "孩子们用安全的日常材料制作乐器，在山谷、海边和房间里寻找不同的回声。",
+      "director": "木一", "cast": ["响响", "豆芽", "米星"], "studio": "小耳朵工作室", "rating": "8.7",
+      "remarks": "全 15 集", "episodeCount": 15, "art": "archive"
+    }
+  ],
+  "liveChannels": [
+    {"group": "新闻", "name": "晨光简报", "number": "101", "art": "city"},
+    {"group": "新闻", "name": "城市观察", "number": "102", "art": "archive"},
+    {"group": "体育", "name": "动感测试台", "number": "201", "art": "vessel"},
+    {"group": "自然", "name": "深蓝视窗", "number": "301", "art": "ocean"},
+    {"group": "自然", "name": "极昼观测", "number": "302", "art": "orbit"},
+    {"group": "音乐", "name": "暮色声场", "number": "401", "art": "city"},
+    {"group": "少儿", "name": "微光乐园", "number": "501", "art": "workshop"},
+    {"group": "演示", "name": "OKVideoMac Demo", "number": "901", "art": "orbit"}
+  ]
+}

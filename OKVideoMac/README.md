@@ -2,8 +2,8 @@
 
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于
 配置格式、站点类型和运行时，而不是简单以 TVBox、FongMi、MiraPlay 或 CatPawOpen
-等生态名称判断。即将发布的候选版本为 **0.4.0（Build 94）**，支持 **arm64**，
-最低系统为 **macOS 12.0**。当前公开版本仍为 0.3.41（Build 65）。
+等生态名称判断。当前正式版本为 **0.4.0（Build 94）**，支持 **arm64**，最低
+系统为 **macOS 12.0**。正式用户下载是经过 Apple 公证并已 Staple 的 DMG。
 
 项目不内置内容源、账号、Cookie、DRM key 或私人服务配置。请只导入你有权使用
 且信任的配置、脚本和媒体。
@@ -16,7 +16,7 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源�
 - 播放历史按点播配置源分组；切换同一配置内的站点不会隐藏历史，历史项仍保留
   实际站点身份用于准确恢复播放
 - 网盘登录状态按 Provider 与账号类型持久化；切换配置源只取消当前二维码交互，
-  不会清除已经确认的登录状态，也不会存储 Cookie 或 Token
+  不会清除已经确认的登录状态；凭据不会写入普通配置、历史或便携备份
 - Android Bridge 运行时固定 AVD 身份与正式签名；发现旧版 AVD 时可在完整备份和
  复制核验后安全迁移，失败会恢复原运行环境，旧 AVD 始终保持只读
 - Xcode：584 total / 582 passed / 2 intentionally skipped / 0 failed
@@ -25,27 +25,42 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源�
 - Android Release assemble 与 lint：通过；Android JVM unit tests：NO-SOURCE
 - 正式 Release packaging 会验证 28 个 Mach-O 的架构、部署目标、依赖闭包、
   Developer ID 签名和 Hardened Runtime，并生成 DMG、SBOM 与对应源码集
-- 对外分发：Build 65 已完成 Developer ID signing、Apple notarization、staple
-  和 Gatekeeper 实物验收
+- 对外分发：0.4.0 Build 94 已完成 Developer ID signing、Apple notarization、
+  staple、`stapler validate` 和 Gatekeeper 实物验收
+
+## 0.4.0 大版本变化
+
+- **界面**：首页、搜索、详情、点播、直播和设置重新梳理层级；配置与授权改用
+  系统 Window Sheet，按钮、遮罩、焦点和动画遵循原生 macOS 行为。
+- **搜索与详情**：多站搜索具备 session 隔离；返回、Esc 和 Command-[ 统一为
+  “先停止、再返回”；长剧集分页和详情竞态修复避免旧回调覆盖新页面。
+- **播放与直播**：改进缓冲、Seek、自然 EOF 自动下一集、窗口重开、线路切换和
+  直播换台；旧播放任务不能重新接管当前播放器。
+- **运行时**：扩展 Native TVBox/FongMi、selected QuickJS、CatPaw/Node 和可选
+  Android Bridge 路径，并明确 Supported/Partial/Selected/Experimental 边界。
+- **授权与夸克**：缺少凭据会进入对应授权页；夸克在 Cookie 续期或重新扫码后
+  复用稳定账号目录，清理始终只针对 receipt 的准确 `savedFID`。
+- **历史与发布**：加入便携配置/历史备份，强化状态所有权；用户 DMG、内部 ZIP、
+  Source Release、四份 SBOM 和 Notices 由外层哈希绑定到 exact Git commit。
 
 ## 安装
 
-当前公开版本安装：
+正式版本安装：
 
-1. 只从本仓库官方 GitHub Releases 页面下载 0.3.41 对应的 macOS arm64 发布包；
-2. 打开 `OKVideoMac-0.3.41-macOS-arm64.dmg`；
+1. 只从本仓库 [v0.4.0 GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.4.0) 下载 macOS arm64 发布包；
+2. 打开 `OKVideoMac-0.4.0.dmg`；
 3. 将 `OKVideoMac.app` 移入 `/Applications`；
 4. 从 Applications 或 Finder 正常启动。
 
 不要使用来源不明或无法与本仓库发布哈希对应的第三方二进制。
 
-0.4.0（Build 94）尚处于 RC。它通过审核并合入 `main` 后，正式 DMG 会从该
-exact merge commit 重新构建、公证、staple 并发布；分支上生成的 RC DMG 不会
-直接作为正式 Release 复用。
+0.4.0（Build 94）的 DMG 与 Source Release 已绑定到 exact commit
+`f93d74fed86e3e2ffcfa4888c521a10f8e3e86f3` 和 tag `v0.4.0`。DMG SHA-256 为
+`60b2eebc607be9cc21c8207c913b09544546f5b6b843db801873651ceaf427ea`。
 
 ### Gatekeeper 与 macOS 安全
 
-0.3.41（Build 65）正式 DMG 已使用 Developer ID Application: Yao Lin
+0.4.0（Build 94）正式 DMG 已使用 Developer ID Application: Yao Lin
 （KGG363ABK9）签名，启用 Hardened Runtime，并通过 Apple notarization、staple
 和 Gatekeeper 验证。安装和运行不需要关闭任何 macOS 安全机制。
 
@@ -132,7 +147,7 @@ SDK，可点击 **选择 SDK…** 并选择包含 `platform-tools` 和 `emulator
 0.4.0 面向用户的变更摘要见
 [`Docs/RELEASE_NOTES_0.4.0.md`](../Docs/RELEASE_NOTES_0.4.0.md)。
 
-## 首次发布的已知限制与风险
+## 当前已知限制与风险
 
 - 当前只交付 arm64，不支持 Intel Mac/Universal Binary；
 - Android compatibility 仍需要外部 SDK/ADB/Emulator、已安装的 arm64 system
@@ -148,8 +163,7 @@ Build 62 阶段留存的历史工程准备记录见
 [`Docs/ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md`](../Docs/ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md)，
 同期 juniversalchardet 兼容性审计见
 [`Docs/JUNIVERSALCHARDET_ELIMINATION_AUDIT.md`](../Docs/JUNIVERSALCHARDET_ELIMINATION_AUDIT.md)。
-这些材料保留为历史工程证据；Build 62/63 均不是当前 Build 65 的发布状态，
-Build 64 则保留为上一版不可变公开发布，
+这些材料保留为历史工程证据；Build 62/63/64/65 均不是当前 Build 94 的发布状态，
 也不构成法律意见
 或“无风险”保证。
 
@@ -216,7 +230,7 @@ Developer ID 分发与公证（只在真实证书和 notary profile 可用时执
 
 ```bash
 export DEVELOPER_ID_APPLICATION='Developer ID Application: …'
-export OKVIDEOMAC_NOTARY_PROFILE='okvideomac-notary'
+export OKVIDEOMAC_NOTARY_PROFILE='OKVideoMac-Notary'
 OKVideoMac/macOS/OKVideoMac/Scripts/package-app.sh \
   --mode distribution \
   --notarize

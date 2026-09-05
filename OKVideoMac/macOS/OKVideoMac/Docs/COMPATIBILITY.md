@@ -1,8 +1,8 @@
 # Compatibility
 
 - 对照版本：0.4.0（Build 94）
-- 最近更新：2026-09-01
-- 当前交付目标：Apple Silicon / arm64 / macOS 12.0+
+- 最近更新：2026-09-05
+- 当前正式版本：0.4.0（Build 94），Apple Silicon / arm64 / macOS 12.0+
 
 ## 概述
 
@@ -201,6 +201,29 @@ OKVideoMac 实现了 CatVod/CatPaw 风格 Node 视频接口的兼容子集，包
 | `danmaku` | 可保留或由 Node 配置归一化；尚未接入播放层 |
 | 未知字段 | 可以 round-trip；不得据此推导功能支持 |
 
+## 搜索、详情与状态恢复
+
+| 能力 | 状态 | 说明 |
+| --- | --- | --- |
+| 多站聚合搜索 | Supported | 每次搜索拥有独立 session；取消后保留结果，迟到回调不能覆盖新搜索 |
+| 搜索逐层返回 | Supported | Back、Esc、Command-[ 一致：执行中先停止，再返回搜索前页面 |
+| 详情请求隔离 | Supported | 配置、站点、影片和请求代际共同决定结果所有权 |
+| 长剧集分页 | Supported | 大集数按范围分段，已覆盖 120 集与多线路 |
+| 历史 / 收藏恢复 | Supported | 保留原配置和站点身份；源已删除或变化时仍可能无法恢复播放 |
+| 配置 / 历史备份恢复 | Supported | 校验格式并隔离活动状态；不包含明文账号凭据 |
+
+## 网盘授权与转存
+
+缺少凭据、账号 API 明确返回 401/403 或适配器上报结构化授权事件时，App 会打开
+对应网盘的原生授权 Sheet。目录重复、限流、网络错误、媒体 CDN 403 或分享 token
+失效不会一概被当作账号未授权。授权完成后只允许当前仍有效的播放请求自动重试一次。
+
+夸克转存目录以稳定账号身份绑定，本次 Cookie 自动续期或同账号重新扫码不会产生
+新的账号 scope。账本记录缺失或目录 FID 失效时先查询并复用已有 `OKVideoMac` 与
+安装 UUID 子目录；并发创建冲突会重新发现。清理始终只删除 receipt 中准确记录的
+`savedFID`，不会扫描、合并或清空整个目录。其他网盘适配器仍以各自已实现接口为准，
+不应从夸克行为推导相同的目录保证。
+
 ## 已知限制
 
 - TVBox/FongMi 顶层 `lives` 尚未接入独立 Live importer；
@@ -262,9 +285,9 @@ OKVideoMac 实现了 CatVod/CatPaw 风格 Node 视频接口的兼容子集，包
 | macOS 12.0+ | Supported | Info.plist 和全部 Mach-O `minos` 由包体脚本验证 |
 | Intel Mac / Universal Binary | Unsupported | 当前只交付 arm64 |
 | 本地 Hardened Runtime 包 | Supported | ad-hoc 签名，仅主 App 使用开发期 Library Validation 例外 |
-| Developer ID 分发 | Supported | 0.3.41（Build 65）正式 DMG 已使用 Developer ID Application 签名，Hardened Runtime、secure timestamp 与权限边界验证通过 |
-| Notarization / Staple / Gatekeeper | Supported | 0.3.41（Build 65）App 与 DMG 的 Apple notarization、staple 和 Gatekeeper 验证通过 |
-| 0.4.0（Build 94）RC | Candidate | DMG、源码绑定和验证链已纳入 `package-app.sh`；分支产物仅作 RC 验证，正式发布需从合并后的 `main` exact commit 重新构建并完成 Apple 公证 |
+| Developer ID 分发 | Supported | 0.4.0（Build 94）正式 DMG 已使用 Developer ID Application 与 secure timestamp 签名，Hardened Runtime、嵌套签名和权限边界验证通过 |
+| Notarization / Staple / Gatekeeper | Supported | 0.4.0（Build 94）DMG 的 Apple notarization 状态为 `Accepted`，并已通过 staple、`stapler validate` 与 Gatekeeper |
+| 0.4.0（Build 94）正式发布 | Supported | DMG、内部 ZIP、源码、四份 SBOM、Notices 和 APK 已通过外层 manifest/SHA256SUMS 绑定到 exact commit `f93d74fed86e3e2ffcfa4888c521a10f8e3e86f3` 与 tag `v0.4.0` |
 | App Sandbox | Not Applicable | 当前为 Developer ID 外部分发目标；Sandbox 与 Hardened Runtime 是不同边界 |
 
 ## 明确不提供
