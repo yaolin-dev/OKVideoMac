@@ -4,7 +4,7 @@
 
 Android Bridge 是 OKVideoMac 为部分 Java/Dex `csp_` Provider 提供的可选兼容
 运行时。它不是播放器、Native Provider、QuickJS、Node、直播或 XMLTV 的基础依赖。
-本文对应 OKVideoMac 0.3.41（Build 65）的当前实现；Bridge 的存在不代表任意
+本文对应 OKVideoMac 0.4.0（Build 94）的当前实现；Bridge 的存在不代表任意
 Java/Dex `csp_` Spider 都能兼容。
 
 ## 我需要安装 Android 吗？
@@ -188,7 +188,7 @@ QuickJS、Node 或直播功能失效。返回设置页查看 Android 兼容模�
 
 ## 当前平台范围
 
-0.3.41 公开构建目标是 Apple Silicon / arm64，运行时也只选择 `arm64-v8a`
+0.4.0 公开构建目标是 Apple Silicon / arm64，运行时也只选择 `arm64-v8a`
 system image。当前实现不选择 `x86_64` image，因此本文不承诺 Intel Mac 的
 Android Bridge 支持，也不需要 Rosetta。
 
