@@ -218,11 +218,6 @@ fi
 rm -rf "$APP_DESTINATION"
 mkdir -p "$ARTIFACTS"
 cp -R "$APP_SOURCE" "$APP_DESTINATION"
-# Xcode/File Provider can attach Finder metadata to the unsigned build output.
-# codesign rejects resource forks and FinderInfo anywhere in the bundle, so
-# remove all host-local extended attributes from the distributable copy before
-# normalizing binaries and applying the final signatures.
-/usr/bin/xattr -cr "$APP_DESTINATION"
 # Xcode keeps DWARF sections in the unsigned Release executable even when it
 # also emits an external dSYM. Strip those sections before signing so absolute
 # build paths cannot leak into the distributable App; runtime symbols remain.
@@ -474,6 +469,12 @@ sign_code() {
   codesign "${arguments[@]}" "$target"
 }
 
+# Xcode/File Provider can attach Finder metadata while the unsigned bundle is
+# assembled. codesign rejects resource forks and FinderInfo anywhere in the
+# bundle, so remove all host-local extended attributes only after the final
+# file writes and immediately before applying signatures.
+/usr/bin/xattr -cr "$APP_DESTINATION"
+
 # Explicit inside-out signing. --deep is verification-only and is never used
 # to create or repair signatures.
 for ((index=${#processed[@]} - 1; index >= 0; index--)); do
@@ -540,6 +541,10 @@ PYTHONDONTWRITEBYTECODE=1 python3 \
   "$REPOSITORY_ROOT/Tools/SourceAudit/scan_release_artifacts.py" \
   "${sensitive_scan_arguments[@]}" \
   --json-output "$LEGAL_ROOT/Compliance/SENSITIVE_INFORMATION_SCAN.json"
+# The SBOM, hash manifest, and scan attestation above are final resource writes.
+# File Provider may attach Finder metadata again while they are generated, so
+# sanitize once more at the outer-signing boundary.
+/usr/bin/xattr -cr "$APP_DESTINATION"
 sign_code "$APP_DESTINATION" "$APP_ENTITLEMENTS"
 
 "$SCRIPT_DIR/verify-bundle.sh" "$APP_DESTINATION"
