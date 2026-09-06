@@ -78,6 +78,31 @@ public enum RuntimeComponentRole: String, Codable, CaseIterable, Sendable {
     case platform
 }
 
+public enum RuntimeArchiveFormat: String, Codable, Sendable {
+    case zip
+    case tarGzip
+    case raw
+}
+
+/// Describes how an immutable catalog artifact is materialized inside a
+/// staged Runtime Generation. Both paths are catalog data, never user input.
+public struct RuntimeComponentInstallationDescriptor:
+    Codable, Equatable, Sendable {
+    public let archiveFormat: RuntimeArchiveFormat
+    public let archiveSubpath: String?
+    public let destinationRelativePath: String
+
+    public init(
+        archiveFormat: RuntimeArchiveFormat,
+        archiveSubpath: String? = nil,
+        destinationRelativePath: String
+    ) {
+        self.archiveFormat = archiveFormat
+        self.archiveSubpath = archiveSubpath
+        self.destinationRelativePath = destinationRelativePath
+    }
+}
+
 /// Every downloadable artifact is immutable once it appears in a shipped
 /// catalog. JRE artifacts intentionally use the same model as Android SDK
 /// artifacts so Java can never silently fall back to the host environment.
@@ -96,6 +121,7 @@ public struct RuntimeComponentDescriptor: Codable, Equatable, Sendable {
     public let packageID: String?
     public let compressedSize: Int64
     public let installedSize: Int64
+    public let installation: RuntimeComponentInstallationDescriptor?
 
     public init(
         id: String,
@@ -111,7 +137,8 @@ public struct RuntimeComponentDescriptor: Codable, Equatable, Sendable {
         minimumMacOS: String,
         packageID: String? = nil,
         compressedSize: Int64,
-        installedSize: Int64
+        installedSize: Int64,
+        installation: RuntimeComponentInstallationDescriptor? = nil
     ) {
         self.id = id
         self.role = role
@@ -127,6 +154,7 @@ public struct RuntimeComponentDescriptor: Codable, Equatable, Sendable {
         self.packageID = packageID
         self.compressedSize = compressedSize
         self.installedSize = installedSize
+        self.installation = installation
     }
 }
 
@@ -275,6 +303,7 @@ public enum RuntimeCatalogLoader {
                 )
             }
             var componentIDs = Set<String>()
+            var destinations = Set<String>()
             for component in generation.components {
                 guard componentIDs.insert(component.id).inserted else {
                     throw RuntimeCatalogValidationError.duplicateIdentifier(
@@ -282,6 +311,37 @@ public enum RuntimeCatalogLoader {
                     )
                 }
                 try validate(component)
+                guard component.architecture == generation.architecture else {
+                    throw RuntimeCatalogValidationError.invalidComponent(
+                        component.id,
+                        "architecture differs from its generation"
+                    )
+                }
+                guard let installation = component.installation else {
+                    throw RuntimeCatalogValidationError.invalidComponent(
+                        component.id,
+                        "installation layout is missing"
+                    )
+                }
+                guard destinations.allSatisfy({ existing in
+                    !pathsOverlap(
+                        existing,
+                        installation.destinationRelativePath
+                    )
+                }) else {
+                    throw RuntimeCatalogValidationError.invalidComponent(
+                        component.id,
+                        "installation destination overlaps another component"
+                    )
+                }
+                destinations.insert(installation.destinationRelativePath)
+                if component.role == .systemImage,
+                   component.packageID?.isEmpty != false {
+                    throw RuntimeCatalogValidationError.invalidComponent(
+                        component.id,
+                        "system image package identity is missing"
+                    )
+                }
             }
         }
     }
@@ -298,6 +358,13 @@ public enum RuntimeCatalogLoader {
             throw RuntimeCatalogValidationError.invalidComponent(
                 component.id,
                 "required identity field is empty"
+            )
+        }
+        guard isSafeRelativePath(component.id),
+              !component.id.contains("/") else {
+            throw RuntimeCatalogValidationError.invalidComponent(
+                component.id,
+                "identifier must be one safe path component"
             )
         }
         guard component.version.lowercased() != "latest" else {
@@ -331,6 +398,33 @@ public enum RuntimeCatalogLoader {
                 "component sizes must be positive"
             )
         }
+        if let installation = component.installation {
+            guard isSafeRelativePath(installation.destinationRelativePath),
+                  installation.archiveSubpath.map(isSafeRelativePath) ?? true
+            else {
+                throw RuntimeCatalogValidationError.invalidComponent(
+                    component.id,
+                    "installation paths must be safe relative paths"
+                )
+            }
+        }
+    }
+
+    private static func isSafeRelativePath(_ path: String) -> Bool {
+        guard !path.isEmpty,
+              !path.hasPrefix("/"),
+              !path.hasPrefix("~") else {
+            return false
+        }
+        return path.split(separator: "/", omittingEmptySubsequences: false)
+            .allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
+    }
+
+    private static func pathsOverlap(_ lhs: String, _ rhs: String) -> Bool {
+        let left = lhs.split(separator: "/")
+        let right = rhs.split(separator: "/")
+        let sharedCount = min(left.count, right.count)
+        return left.prefix(sharedCount).elementsEqual(right.prefix(sharedCount))
     }
 }
 

@@ -52,10 +52,11 @@ ADB, Emulator, system image, AVD, ADB key, Android environment variables, and
 the owned private ADB server all resolve to the expected active generation or
 private AndroidRuntime directory. Diagnostic locations are redacted.
 
-The existing `AndroidDexBridgeRuntime` remains the Session owner. A later
-`AndroidRuntimeManager` adapter will coordinate Installation maintenance leases
-with that Session; the two single-flight actors and state machines remain
-separate.
+The existing `AndroidDexBridgeRuntime` remains the Session owner. The Phase 2
+`AndroidRuntimeInstaller` now supplies a separate installation single-flight
+and transactional Generation commit. A later `AndroidRuntimeManager` adapter
+will coordinate Installation maintenance leases with the Session; the two
+single-flight actors and state machines remain separate.
 
 ## Consequences
 
@@ -64,5 +65,6 @@ separate.
 - No managed process may silently fall back to Android Studio, Homebrew, PATH,
   or a user JDK.
 - The first phase changes no live Runtime selection or Emulator behavior.
-- Downloading, license presentation, installation transactions, and UI are
-  deliberately deferred to later phases.
+- Public catalog pinning, license presentation, and UI remain deferred until
+  candidate qualification; the downloader and installation transaction engine
+  are implemented independently of that release decision.

@@ -11,6 +11,10 @@ let package = Package(
         .library(
             name: "AndroidRuntimeKit",
             targets: ["AndroidRuntimeKit"]
+        ),
+        .executable(
+            name: "android-runtime-matrix",
+            targets: ["AndroidRuntimeMatrix"]
         )
     ],
     targets: [
@@ -19,6 +23,10 @@ let package = Package(
             resources: [
                 .process("Resources")
             ]
+        ),
+        .executableTarget(
+            name: "AndroidRuntimeMatrix",
+            dependencies: ["AndroidRuntimeKit"]
         ),
         .testTarget(
             name: "AndroidRuntimeKitTests",

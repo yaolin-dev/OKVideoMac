@@ -10294,8 +10294,10 @@ final class OKVideoMacTests: XCTestCase {
         let processWideAdmission = AndroidRuntimeStartupSingleFlight()
         let launchGate = NodeReadinessTestGate()
         let launcher = AndroidEmulatorLauncherMock()
+        let readyCallers = NodeReadinessTestCounter()
         let firstRuntimeCallers = (0..<5).map { _ in
             Task {
+                await readyCallers.increment()
                 try await processWideAdmission.ensureRuntime {
                     await launcher.launch(waitingOn: launchGate)
                 }
@@ -10303,10 +10305,15 @@ final class OKVideoMacTests: XCTestCase {
         }
         let secondRuntimeCallers = (0..<5).map { _ in
             Task {
+                await readyCallers.increment()
                 try await processWideAdmission.ensureRuntime {
                     await launcher.launch(waitingOn: launchGate)
                 }
             }
+        }
+        for _ in 0..<20_000 {
+            if await readyCallers.value == 10 { break }
+            await Task.yield()
         }
         var sawLaunch = false
         for _ in 0..<20_000 {
@@ -10317,6 +10324,12 @@ final class OKVideoMacTests: XCTestCase {
             await Task.yield()
         }
         XCTAssertTrue(sawLaunch)
+        // Every caller has been scheduled, but returning from the counter
+        // actor and entering the admission actor are separate suspension
+        // points. Give all ten a chance to join before releasing the shared
+        // launch operation; otherwise the test can manufacture a late caller
+        // after the first flight has legitimately completed.
+        for _ in 0..<1_000 { await Task.yield() }
         var launchCount = await launcher.launchInvocationCount
         XCTAssertEqual(launchCount, 1)
         await launchGate.open()

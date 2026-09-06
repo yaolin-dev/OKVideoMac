@@ -101,6 +101,20 @@ public struct RuntimeGenerationLayout: Equatable, Sendable {
     public let sdk: URL
     public let jre: URL
     public let manifest: URL
+
+    public init(
+        id: RuntimeGenerationID,
+        root: URL,
+        sdk: URL,
+        jre: URL,
+        manifest: URL
+    ) {
+        self.id = id
+        self.root = root
+        self.sdk = sdk
+        self.jre = jre
+        self.manifest = manifest
+    }
 }
 
 public enum ManagedRuntimePathError: LocalizedError, Equatable {
