@@ -364,3 +364,76 @@ public struct ManagedAVDManifest: Codable, Equatable, Sendable {
         self.createdAt = createdAt
     }
 }
+
+public enum ManagedAVDCompatibilityStatus: String, Codable, Sendable {
+    case create
+    case adopt
+    case reuse
+    case refreshMetadata
+    case requiresRecoverableRebuild
+}
+
+public struct ManagedAVDCompatibilityReport: Equatable, Sendable {
+    public let status: ManagedAVDCompatibilityStatus
+    public let reason: String?
+
+    public init(
+        status: ManagedAVDCompatibilityStatus,
+        reason: String? = nil
+    ) {
+        self.status = status
+        self.reason = reason
+    }
+}
+
+/// Keeps AVD userdata compatibility independent from Runtime Generation
+/// identity. A tools-only generation change is reusable when its AVD schema
+/// and system-image component are unchanged; an image/schema change is never
+/// silently applied to existing userdata.
+public enum ManagedAVDCompatibility {
+    public static func evaluate(
+        hasExistingAVD: Bool,
+        manifest: ManagedAVDManifest?,
+        expectedGeneration: RuntimeGenerationDescriptor,
+        expectedSystemImageComponentID: String,
+        configurationMatchesExpectedImage: Bool
+    ) -> ManagedAVDCompatibilityReport {
+        guard hasExistingAVD else {
+            return ManagedAVDCompatibilityReport(status: .create)
+        }
+        guard configurationMatchesExpectedImage else {
+            return ManagedAVDCompatibilityReport(
+                status: .requiresRecoverableRebuild,
+                reason: "system-image-mismatch"
+            )
+        }
+        guard let manifest else {
+            return ManagedAVDCompatibilityReport(status: .adopt)
+        }
+        guard manifest.schemaVersion == ManagedAVDManifest
+            .supportedSchemaVersion else {
+            return ManagedAVDCompatibilityReport(
+                status: .requiresRecoverableRebuild,
+                reason: "unsupported-manifest-schema"
+            )
+        }
+        guard manifest.avdSchema == expectedGeneration.avdSchema else {
+            return ManagedAVDCompatibilityReport(
+                status: .requiresRecoverableRebuild,
+                reason: "avd-schema-mismatch"
+            )
+        }
+        guard manifest.systemImageComponentID
+                == expectedSystemImageComponentID else {
+            return ManagedAVDCompatibilityReport(
+                status: .requiresRecoverableRebuild,
+                reason: "system-image-component-mismatch"
+            )
+        }
+        if manifest.runtimeGenerationID != expectedGeneration.generationID
+            || manifest.bridgeSchema != expectedGeneration.bridgeSchema {
+            return ManagedAVDCompatibilityReport(status: .refreshMetadata)
+        }
+        return ManagedAVDCompatibilityReport(status: .reuse)
+    }
+}

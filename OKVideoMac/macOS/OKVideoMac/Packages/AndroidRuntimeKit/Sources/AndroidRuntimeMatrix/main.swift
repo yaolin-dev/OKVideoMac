@@ -893,8 +893,10 @@ private final class CandidateRunState {
         try measured(.reuseBootCompleted) {
             try waitForBoot(process: reuse, timeout: evaluator.options.bootTimeout)
         }
-        try startBridge()
-        try measured(.bridgeReuseHealth) { try waitForBridgeHealth() }
+        try measured(.bridgeReuseHealth) {
+            try startBridge()
+            try waitForBridgeHealth()
+        }
         try measured(.finalShutdown) { try shutdownEmulator(reuse) }
         emulator = nil
     }
@@ -1222,6 +1224,14 @@ private final class CandidateRunState {
         _ = try adb([
             "forward", "tcp:\(plan.bridgeHostPort)", "tcp:9978"
         ], timeout: 10)
+        // Keep the fixture transport inside this matrix's private ADB
+        // connection. 10.0.2.2 normally reaches the Mac loopback interface,
+        // but host firewall and network-filter configurations can reject that
+        // route even while the emulator and ADB are otherwise healthy.
+        _ = try adb([
+            "reverse", "tcp:\(evaluator.options.fixturePort)",
+            "tcp:\(evaluator.options.fixturePort)"
+        ], timeout: 10)
     }
 
     private func waitForBridgeHealth() throws {
@@ -1256,7 +1266,7 @@ private final class CandidateRunState {
         guard let fixture = evaluator.options.fixtureJAR else {
             throw MatrixCLIError.missingArgument("--fixture-jar")
         }
-        let fixtureURL = "http://10.0.2.2:\(evaluator.options.fixturePort)/"
+        let fixtureURL = "http://127.0.0.1:\(evaluator.options.fixturePort)/"
             + fixture.lastPathComponent
         let payload: [String: Any] = [
             "configurationID": "runtime-matrix",
@@ -1275,18 +1285,38 @@ private final class CandidateRunState {
             withJSONObject: payload,
             options: [.prettyPrinted, .sortedKeys]
         ).write(to: payloadURL, options: .atomic)
-        let result = try evaluator.runner.checked(
+        let responseURL = root.appendingPathComponent(
+            "dex-invoke-response.json"
+        )
+        let command = try evaluator.runner.run(
             URL(fileURLWithPath: "/usr/bin/curl"),
             [
-                "--fail", "--silent", "--show-error",
+                "--silent", "--show-error",
                 "--max-time", "30",
                 "-H", "Content-Type: application/json",
                 "--data-binary", "@\(payloadURL.path)",
+                "--output", responseURL.path,
+                "--write-out", "%{http_code}",
                 "http://127.0.0.1:\(plan.bridgeHostPort)/v1/invoke"
             ],
             environment: systemEnvironment(),
             timeout: 35
         )
+        guard command.status == 0 else {
+            throw MatrixCLIError.command(
+                "DEX Spider transport exited \(command.status): \(command.stderr)"
+            )
+        }
+        let status = Int(command.stdout.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )) ?? 0
+        let data = try Data(contentsOf: responseURL)
+        let result = String(data: data, encoding: .utf8) ?? ""
+        guard (200..<300).contains(status) else {
+            throw MatrixCLIError.invalidResponse(
+                "DEX Spider fixture HTTP \(status)"
+            )
+        }
         guard let data = result.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data)
                 as? [String: Any],
@@ -1299,10 +1329,6 @@ private final class CandidateRunState {
                 == "api-\(plan.candidate.apiLevel)" else {
             throw MatrixCLIError.invalidResponse("DEX Spider fixture")
         }
-        try Data(result.utf8).write(
-            to: root.appendingPathComponent("dex-invoke-response.json"),
-            options: .atomic
-        )
     }
 
     private func sampleIdleResources(process: LoggedProcess) throws {

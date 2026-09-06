@@ -98,10 +98,16 @@ type 3、`api` 以 `csp_` 开头且存在 jar 引用时，Provider 可通过 And
 `com.github.catvod.spider.<name>`，并调用 CatVod 风格的 `homeContent`、
 `categoryContent`、`detailContent`、`searchContent`、`playerContent` 等方法。
 
-该路径使用专用 AVD、动态 serial 和所有权校验。用户仍需准备外部 Android SDK、
-ADB、Emulator 和 arm64 system image；Bridge APK 已随正式 App 提供并由运行时
-自动安装。它只适用于受支持的 `csp_` Java/Dex Spider；普通 Native、QuickJS、
-Node、直播和 XMLTV 源不需要 Android。
+该路径使用按需安装的 OKVideoMac Managed Runtime、专用 AVD、private ADB、动态
+serial 和所有权校验。第一次实际 Dex 调用会暂停并提示安装固定的 API 35 Google
+APIs arm64 Profile；完成后自动继续。普通用户不需要 Android Studio、Homebrew、
+JDK、ADB 或 SDK 命令。Bridge APK 已随 App 提供并由运行时自动安装。它只适用于
+受支持的 `csp_` Java/Dex Spider；Native、QuickJS、Node、直播和 XMLTV 不需要
+Android。
+
+API 35 在 Candidate Matrix 中仍为 `evaluation`，同时是当前产品 `default`
+Profile：真实 Emulator E2E 证据来自 M1 / macOS 14.8.8。App 的 macOS 12.0+
+deployment support 不代表 macOS 12、13、15 已完成 Managed Runtime 实机验证。
 
 ### 其他运行时
 
@@ -233,7 +239,8 @@ OKVideoMac 实现了 CatVod/CatPaw 风格 Node 视频接口的兼容子集，包
 - `proxy/doh/rules/hosts/ads` 没有确认到完整执行链；
 - QuickJS `proxy/sniffer/isVideo` 没有完整 Provider dispatch；
 - CatPawOpen read/comic/music/pan 未实现，`/check` 与当前 `/health` 行为不同；
-- Android Bridge 仅为受支持的 `csp_` Java/Dex 源所需，并依赖外部 Android 环境；
+- Android Bridge 仅为受支持的 `csp_` Java/Dex 源所需；Managed API 35 Runtime
+  在 macOS 12、13、15 尚未获得真实机器 Emulator E2E；
 - XML CMS 自动化覆盖窄于 JSON CMS；
 - 不支持 catchup/timeshift 或 DRM；
 - 实际播放仍取决于 libmpv、codec、服务器和媒体行为。
@@ -279,6 +286,18 @@ OKVideoMac 实现了 CatVod/CatPaw 风格 Node 视频接口的兼容子集，包
 | 退出播放器完整销毁 | Supported | 10 轮 A/B 与 8 类极端生命周期场景通过；保留 `warmStop` 回退开关 |
 
 ## 平台与发布
+
+App 支持范围和 Managed Android Runtime 实机验证是两个不同结论：
+
+| macOS | App / deployment | Managed API 35 Runtime 实机状态 |
+| --- | --- | --- |
+| 12 | Supported（静态构建目标） | 尚未取得真实机器 Emulator E2E |
+| 13 | Supported（静态构建目标） | 尚未取得真实机器 Emulator E2E |
+| 14 | Supported | Verified：Apple M1 / macOS 14.8.8 |
+| 15 | Supported（静态构建目标） | 尚未取得真实机器 Emulator E2E |
+
+这里的 “Supported（静态构建目标）” 包括 deployment target 和 API availability
+门禁，不等价于 Android Guest、HVF、gfxstream 与 ADB 的对应实机组合已经验证。
 
 | 能力 | 状态 | 证据与限制 |
 | --- | --- | --- |

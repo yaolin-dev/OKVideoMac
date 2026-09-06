@@ -5,7 +5,7 @@ import XCTest
 final class AndroidRuntimeKitTests: XCTestCase {
     private let fixtureSHA256 = String(repeating: "a", count: 64)
 
-    func testBundledCatalogContainsOnlyUnqualifiedRuntimeCandidates() throws {
+    func testBundledCatalogKeepsCandidatesExplicitAndShipsOneDefaultProfile() throws {
         let catalog = try BundledRuntimeCatalog.load()
 
         XCTAssertEqual(catalog.schemaVersion, 1)
@@ -16,7 +16,22 @@ final class AndroidRuntimeKitTests: XCTestCase {
         XCTAssertTrue(
             catalog.candidateMatrix.allSatisfy { $0.state == .evaluation }
         )
-        XCTAssertTrue(catalog.generations.isEmpty)
+        XCTAssertEqual(catalog.catalogRevision, 1)
+        XCTAssertEqual(catalog.generations.count, 1)
+        XCTAssertEqual(
+            catalog.defaultProfile?.generationID.rawValue,
+            "r1-api35-arm64-20260907"
+        )
+        XCTAssertEqual(catalog.defaultProfile?.status, .defaultProfile)
+        XCTAssertEqual(
+            catalog.defaultProfile?.expectedDownloadSize,
+            catalog.generations[0].components.reduce(Int64(0)) {
+                $0 + $1.compressedSize
+            }
+        )
+        XCTAssertEqual(catalog.allowedDownloadHosts?.sorted(), [
+            "cdn.azul.com", "dl.google.com"
+        ])
     }
 
     func testCatalogRequiresFullyPinnedJREAndAndroidComponents() throws {

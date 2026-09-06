@@ -46,6 +46,12 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源�
   `OKVideoMac_Runtime`，不会改动其他 AVD、普通设置、收藏或历史。
 - Build 98 会识别 API 24–29 旧镜像，只对 OKVideoMac 私有无窗口
   Emulator 启用 ADB 认证兼容开关；API 30+ 仍使用私有 keypair 认证。
+- 第一次真正执行 Java/Dex `csp_` 内容时，原请求会暂停并显示“Android 兼容组件”
+  安装页；安装成功后自动继续，不再要求普通用户准备 Android Studio、JDK、ADB
+  或 SDK。
+- Managed Runtime 使用固定 API 35 Google APIs arm64 Profile、私有 JRE/SDK/ADB/
+  Emulator、可续传下载、SHA-256 和 archive layout 门禁、不可变 Generation 与
+  `current-runtime.json` 原子切换；失败不会覆盖旧 Runtime 或 AVD userdata。
 
 ## 0.4.1 稳定性更新
 
@@ -144,20 +150,21 @@ Android 支持是可选的。Android Bridge 只是针对部分 Java/Dex `csp_` S
 **可选兼容运行时**，不是 OKVideoMac 的基础运行依赖。Native Provider、QuickJS、
 Node、直播源、XMLTV 和普通播放均不经过 Android Bridge。
 
-需要该兼容层时，用户需准备 Android SDK、Platform-Tools（`adb`）、Android
-Emulator、Command-line Tools（`avdmanager`）和已安装的 `arm64-v8a` system
-image。Android Studio 本体不是运行时依赖，但通过 Android Studio 的 SDK Manager
-安装这些组件是最简单的推荐方式。
+需要该兼容层时，第一次实际 Dex 请求会提示安装“Android 兼容组件”。用户确认
+许可证后，OKVideoMac 自动下载并管理固定版本的私有 JRE、SDK 工具、ADB、Emulator
+和 API 35 Google APIs arm64 system image，不要求 Android Studio、Homebrew、
+系统 Java 或命令行操作。安装目录位于 OKVideoMac 的 Application Support；大文件
+不会打入 App 包体。
 
 OKVideoMac 会自行创建并启动名为 `OKVideoMac_Runtime` 的专用无窗口 AVD；不需要
 手工创建 AVD，也不使用真实 Android 设备或用户已有的普通 AVD。正式 App 已内置
 `AndroidDexBridge-release.apk`，启动时会通过 `adb install -r` 自动安装或更新，
 用户不需要下载或手工安装 APK。
 
-安装后可前往 **设置 → 高级 → Android 兼容模块**，点击 **检查**；若未自动找到
-SDK，可点击 **选择 SDK…** 并选择包含 `platform-tools` 和 `emulator` 的 SDK 根目录。
-显示“已就绪 — Java/Dex 站点可正常使用”即表示启动成功。完整安装、发现顺序与故障
-排查见 [Android Bridge 设置（中文）](macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP_zh-CN.md)
+也可前往 **设置 → Android 兼容模块** 主动安装、查看状态、修复或导出诊断。
+“旧版手动环境…”只作为高级故障排查入口，并且只在没有 Managed Runtime 指针时
+允许旧 resolver 查找外部 SDK。完整流程与故障排查见
+[Android Bridge 设置（中文）](macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP_zh-CN.md)
 或 [Android Bridge Setup (English)](macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP.md)。
 
 ## 主要能力
@@ -178,8 +185,8 @@ SDK，可点击 **选择 SDK…** 并选择包含 `platform-tools` 和 `emulator
 ## 当前已知限制与风险
 
 - 当前只交付 arm64，不支持 Intel Mac/Universal Binary；
-- Android compatibility 仍需要外部 SDK/ADB/Emulator、已安装的 arm64 system
-  image 和命令行工具；本版本不自动下载这些组件；
+- Managed Android Runtime 只在 M1 / macOS 14.8.8 完成真实 Emulator E2E；
+  macOS 12、13、15 的 App deployment compatibility 不等于 Runtime 实机验证；
 - HDR、AV1、字幕组合和广泛性能/长时间运行矩阵尚未全部覆盖；
 - 外部 Spider 兼容范围是开放的，Web 嗅探和自动换源也受上游实现影响；
 - Node bundles/scripts 以高权限子进程执行，只应使用可信、可核验的来源；

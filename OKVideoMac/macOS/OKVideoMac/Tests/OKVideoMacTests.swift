@@ -9903,6 +9903,10 @@ final class OKVideoMacTests: XCTestCase {
         try Data("private-ini".utf8).write(
             to: avdHome.appendingPathComponent("OKVideoMac_Runtime.ini")
         )
+        let avdManifest = avdHome.appendingPathComponent(
+            "avd-manifest.json"
+        )
+        try Data("avd-manifest".utf8).write(to: avdManifest)
         try Data("continuity".utf8).write(
             to: runtime.appendingPathComponent("runtime-continuity.json")
         )
@@ -9931,6 +9935,7 @@ final class OKVideoMacTests: XCTestCase {
                 ).path
             )
         )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: avdManifest.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: studioAVD.path))
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: unrelatedADBMarker.path)
@@ -9939,6 +9944,13 @@ final class OKVideoMacTests: XCTestCase {
             FileManager.default.fileExists(
                 atPath: result.directory.appendingPathComponent(
                     "OKVideoMac_Runtime.avd/config.ini"
+                ).path
+            )
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: result.directory.appendingPathComponent(
+                    "avd-manifest.json"
                 ).path
             )
         )

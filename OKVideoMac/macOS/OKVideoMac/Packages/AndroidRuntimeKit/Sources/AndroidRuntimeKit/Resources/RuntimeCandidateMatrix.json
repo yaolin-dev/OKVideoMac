@@ -1,35 +1,86 @@
 {
   "schemaVersion": 1,
-  "catalogVersion": "candidate-matrix-2026-09-06",
+  "catalogVersion": "managed-runtime-2026-09-07",
+  "catalogRevision": 1,
+  "publishedAt": "2026-09-07T00:00:00Z",
+  "allowedDownloadHosts": ["cdn.azul.com", "dl.google.com"],
   "candidateMatrix": [
-    {
-      "id": "api-28-google-apis-arm64",
-      "apiLevel": 28,
-      "systemImageVariant": "google_apis",
-      "architecture": "arm64",
-      "state": "evaluation"
-    },
-    {
-      "id": "api-30-google-apis-arm64",
-      "apiLevel": 30,
-      "systemImageVariant": "google_apis",
-      "architecture": "arm64",
-      "state": "evaluation"
-    },
-    {
-      "id": "api-31-google-apis-arm64",
-      "apiLevel": 31,
-      "systemImageVariant": "google_apis",
-      "architecture": "arm64",
-      "state": "evaluation"
-    },
-    {
-      "id": "api-35-google-apis-arm64",
-      "apiLevel": 35,
-      "systemImageVariant": "google_apis",
-      "architecture": "arm64",
-      "state": "evaluation"
-    }
+    {"id":"api-28-google-apis-arm64","apiLevel":28,"systemImageVariant":"google_apis","architecture":"arm64","state":"evaluation"},
+    {"id":"api-30-google-apis-arm64","apiLevel":30,"systemImageVariant":"google_apis","architecture":"arm64","state":"evaluation"},
+    {"id":"api-31-google-apis-arm64","apiLevel":31,"systemImageVariant":"google_apis","architecture":"arm64","state":"evaluation"},
+    {"id":"api-35-google-apis-arm64","apiLevel":35,"systemImageVariant":"google_apis","architecture":"arm64","state":"evaluation"}
   ],
-  "generations": []
+  "profiles": [{
+    "id": "default-api35-arm64",
+    "displayName": "OKVideoMac Android Compatibility Runtime",
+    "status": "default",
+    "generationID": "r1-api35-arm64-20260907",
+    "expectedDownloadSize": 2442693558,
+    "requiredFreeSpace": 15949611316,
+    "minimumAppVersion": "0.4.2",
+    "minimumMacOS": "12.0",
+    "architectures": ["arm64"],
+    "verificationNote": "API 35 Google APIs arm64 completed the full Bridge and Dex lifecycle on Apple M1 with macOS 14.8.8; other supported hosts remain explicitly unverified."
+  }],
+  "generations": [{
+    "generationID": "r1-api35-arm64-20260907",
+    "runtimeSchema": 1,
+    "avdSchema": 1,
+    "bridgeSchema": 1,
+    "minimumAppVersion": "0.4.2",
+    "architecture": "arm64",
+    "apiLevel": 35,
+    "systemImagePackageID": "system-images;android-35;google_apis;arm64-v8a",
+    "bridgeVersion": "0.3.44 (56)",
+    "components": [
+      {
+        "id": "zulu-jre-17.0.19-macos-arm64", "role": "jre", "vendor": "Azul Systems", "version": "17.0.19+10", "architecture": "arm64",
+        "downloadURL": "https://cdn.azul.com/zulu/bin/zulu17.66.19-ca-jre17.0.19-macosx_aarch64.tar.gz",
+        "sha256": "2c30ba868ee313f2cd89aa17194312dd23b9203578d9c59f587fd923eeb7ee10",
+        "licenseID": "GPL-2.0-with-classpath-exception", "licenseURL": "https://www.azul.com/products/core/openjdk-terms-of-use/", "expectedVersionOutput": "17.0.19", "minimumMacOS": "12.0",
+        "compressedSize": 43056723, "installedSize": 135490071,
+        "installation": {"archiveFormat":"tarGzip","archiveSubpath":"zulu17.66.19-ca-jre17.0.19-macosx_aarch64/Contents/Home","destinationRelativePath":"jre","allowedTopLevelEntries":["zulu17.66.19-ca-jre17.0.19-macosx_aarch64"],"maximumExtractedSize":170000000}
+      },
+      {
+        "id": "android-command-line-tools-22.0-macos-arm64", "role": "commandLineTools", "vendor": "Google", "version": "22.0-build-15859902", "architecture": "arm64",
+        "downloadURL": "https://dl.google.com/android/repository/commandlinetools-mac_arm64-15859902_latest.zip",
+        "sha256": "835b62a26162b229b441d1f6d4680383815a270809eb33522c0d480fa5002c4e",
+        "licenseID": "android-sdk-license", "licenseURL": "https://developer.android.com/studio/terms", "expectedVersionOutput": "22.0", "minimumMacOS": "12.0", "packageID": "cmdline-tools;22.0",
+        "compressedSize": 156083281, "installedSize": 181248657,
+        "installation": {"archiveFormat":"zip","archiveSubpath":"cmdline-tools","destinationRelativePath":"sdk/cmdline-tools/latest","allowedTopLevelEntries":["cmdline-tools"],"maximumExtractedSize":230000000}
+      },
+      {
+        "id": "android-platform-tools-37.0.0-macos", "role": "platformTools", "vendor": "Google", "version": "37.0.0", "architecture": "arm64",
+        "downloadURL": "https://dl.google.com/android/repository/platform-tools_r37.0.0-darwin.zip",
+        "sha256": "094a1395683c509fd4d48667da0d8b5ef4d42b2abfcd29f2e8149e2f989357c7",
+        "licenseID": "android-sdk-license", "licenseURL": "https://developer.android.com/studio/terms", "expectedVersionOutput": "37.0.0", "minimumMacOS": "12.0", "packageID": "platform-tools",
+        "compressedSize": 16442240, "installedSize": 39381483,
+        "installation": {"archiveFormat":"zip","archiveSubpath":"platform-tools","destinationRelativePath":"sdk/platform-tools","allowedTopLevelEntries":["platform-tools"],"maximumExtractedSize":55000000}
+      },
+      {
+        "id": "android-emulator-36.6.11-macos-arm64", "role": "emulator", "vendor": "Google", "version": "36.6.11-build-15507667", "architecture": "arm64",
+        "downloadURL": "https://dl.google.com/android/repository/emulator-darwin_aarch64-15507667.zip",
+        "sha256": "aebcd4dde29a4921d47e5e79b8c1ffece69a70f5b280d8dc7033ebaffa737072",
+        "licenseID": "android-sdk-license", "licenseURL": "https://developer.android.com/studio/terms", "expectedVersionOutput": "36.6.11", "minimumMacOS": "12.0", "packageID": "emulator",
+        "compressedSize": 383903546, "installedSize": 1196537752,
+        "installation": {"archiveFormat":"zip","archiveSubpath":"emulator","destinationRelativePath":"sdk/emulator","allowedTopLevelEntries":["emulator"],"maximumExtractedSize":1400000000}
+      },
+      {
+        "id": "android-platform-35-r02", "role": "platform", "vendor": "Google", "version": "35-r02-extension-13", "architecture": "arm64",
+        "downloadURL": "https://dl.google.com/android/repository/platform-35_r02.zip",
+        "sha256": "0988cacad01b38a18a47bac14a0695f246bc76c1b06c0eeb8eb0dc825ab0c8e0",
+        "licenseID": "android-sdk-license", "licenseURL": "https://developer.android.com/studio/terms", "expectedVersionOutput": "35", "minimumMacOS": "12.0", "packageID": "platforms;android-35",
+        "compressedSize": 64273788, "installedSize": 102589879,
+        "installation": {"archiveFormat":"zip","archiveSubpath":"android-35","destinationRelativePath":"sdk/platforms/android-35","allowedTopLevelEntries":["android-35"],"maximumExtractedSize":145000000}
+      },
+      {
+        "id": "android-system-image-api35-google-apis-arm64-r09", "role": "systemImage", "vendor": "Google", "version": "35-r09-extension-13", "architecture": "arm64",
+        "downloadURL": "https://dl.google.com/android/repository/sys-img/google_apis/arm64-v8a-35_r09.zip",
+        "sha256": "d2e7c6076e5df54d3677605a324daf9edf813b2808c216bdb1687f6b2b6aed99",
+        "licenseID": "android-sdk-license", "licenseURL": "https://developer.android.com/studio/terms", "expectedVersionOutput": "35", "minimumMacOS": "12.0", "packageID": "system-images;android-35;google_apis;arm64-v8a",
+        "compressedSize": 1778933980, "installedSize": 4058018995,
+        "installation": {"archiveFormat":"zip","archiveSubpath":"arm64-v8a","destinationRelativePath":"sdk/system-images/android-35/google_apis/arm64-v8a","allowedTopLevelEntries":["arm64-v8a"],"maximumExtractedSize":4700000000}
+      }
+    ]
+  }]
 }

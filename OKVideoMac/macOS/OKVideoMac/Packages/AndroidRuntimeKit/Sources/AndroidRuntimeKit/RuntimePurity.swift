@@ -115,7 +115,8 @@ public struct ManagedRuntimePurityChecker: Sendable {
     }
 
     public func evaluate(
-        _ snapshot: ManagedRuntimeEnvironmentSnapshot
+        _ snapshot: ManagedRuntimeEnvironmentSnapshot,
+        requireRunningADBServer: Bool = true
     ) -> RuntimePurityReport {
         guard snapshot.generationID.isValid,
               let boundary = try? ManagedRuntimePathBoundary(root: layout.root)
@@ -197,7 +198,9 @@ public struct ManagedRuntimePurityChecker: Sendable {
         }
 
         let adbServerState: RuntimePurityState
-        if snapshot.actualADBServerPort == nil {
+        if snapshot.actualADBServerPort == nil && !requireRunningADBServer {
+            adbServerState = .managed
+        } else if snapshot.actualADBServerPort == nil {
             adbServerState = .missing
         } else if snapshot.actualADBServerPort
                     != snapshot.expectedPrivateADBServerPort
@@ -211,7 +214,7 @@ public struct ManagedRuntimePurityChecker: Sendable {
             state: adbServerState,
             location: snapshot.actualADBServerPort.map {
                 "private-port:\($0)"
-            } ?? "<missing>"
+            } ?? (requireRunningADBServer ? "<missing>" : "private-port:pending")
         ))
 
         return RuntimePurityReport(

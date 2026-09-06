@@ -1,4 +1,5 @@
 import AppKit
+import AndroidRuntimeKit
 import CryptoKit
 import Foundation
 import OKVideoCore
@@ -4541,6 +4542,9 @@ final class AppState: ObservableObject {
         ConfigurationCategoryPresentation?
     @Published private(set) var androidRuntimeStatus: AndroidRuntimeStatus = .checking
     @Published private(set) var isAndroidRuntimeBusy = false
+    @Published private(set) var managedRuntimeInstallationState:
+        ManagedRuntimeInstallationState = .detecting
+    @Published var isAndroidRuntimeInstallSheetPresented = false
 
     var mainWindowCloudAuthorizationPrompt: CloudAuthorizationPrompt? {
         guard let prompt = cloudAuthorizationPrompt,
@@ -4702,6 +4706,7 @@ final class AppState: ObservableObject {
     private var configurationRefreshSessionID = UUID()
     private var nodeRuntimeStatusTask: Task<Void, Never>?
     private var nodeProfileRevisionTask: Task<Void, Never>?
+    private var managedRuntimeStatusTask: Task<Void, Never>?
     private var observedNodeProfileRevision: NodeProfileRevisionSnapshot?
     private var activeNodeRuntimeEndpoint: URL?
     private var lastReadyNodeRuntimeEndpoint: URL?
@@ -4752,6 +4757,8 @@ final class AppState: ObservableObject {
         guard !hasCompletedStartup, let environment else { return }
         startNodeRuntimeStatusMonitoring()
         startNodeProfileRevisionMonitoring()
+        startManagedRuntimeStatusMonitoring()
+        _ = try? await environment.androidRuntimeManager.refresh()
         isLoading = true
         defer {
             isLoading = false
@@ -12561,6 +12568,12 @@ final class AppState: ObservableObject {
            let object = try? JSONSerialization.jsonObject(with: encoded) {
             report["androidRuntime"] = LogRedactor.json(object)
         }
+        if let managedSnapshot = await environment?.androidRuntimeManager
+            .diagnosticReport(),
+           let encoded = try? diagnosticEncoder.encode(managedSnapshot),
+           let object = try? JSONSerialization.jsonObject(with: encoded) {
+            report["androidManagedRuntime"] = LogRedactor.json(object)
+        }
         do {
             let data = try JSONSerialization.data(
                 withJSONObject: report,
@@ -12626,6 +12639,8 @@ final class AppState: ObservableObject {
         nodeRuntimeStatusTask = nil
         nodeProfileRevisionTask?.cancel()
         nodeProfileRevisionTask = nil
+        managedRuntimeStatusTask?.cancel()
+        managedRuntimeStatusTask = nil
         configurationActivationTask?.cancel()
         configurationActivationTask = nil
         configurationPostActivationSessionID = UUID()
@@ -13440,6 +13455,66 @@ final class AppState: ObservableObject {
             return
         }
         androidRuntimeStatus = await environment.androidDexBridge.runtimeStatus()
+        _ = try? await environment.androidRuntimeManager.refresh()
+    }
+
+    func showManagedRuntimeInstaller() async {
+        guard let environment else { return }
+        do {
+            try await environment.androidRuntimeManager.presentInstallOffer()
+            isAndroidRuntimeInstallSheetPresented = true
+        } catch {
+            show(error, title: "Android 兼容组件暂不可用")
+        }
+    }
+
+    func installManagedRuntime(acceptingLicenses: Bool) async {
+        guard let environment else { return }
+        do {
+            try await environment.androidRuntimeManager.installDefault(
+                acceptingLicenses: acceptingLicenses
+            )
+            androidRuntimeStatus = await environment.androidDexBridge
+                .runtimeStatus()
+        } catch is CancellationError {
+            return
+        } catch {
+            // The manager publishes a path-free product error in the sheet.
+        }
+    }
+
+    func cancelManagedRuntimeInstallation() async {
+        guard let environment else { return }
+        await environment.androidRuntimeManager.cancel()
+    }
+
+    func repairManagedRuntime(acceptingLicenses: Bool) async {
+        guard let environment else { return }
+        if androidRuntimeStatus.isRunning {
+            androidRuntimeStatus = await environment.androidDexBridge.stopRuntime()
+        }
+        do {
+            try await environment.androidRuntimeManager.repair(
+                acceptingLicenses: acceptingLicenses
+            )
+        } catch is CancellationError {
+            return
+        } catch {
+            // The manager keeps the previous generation recoverable and
+            // publishes the appropriate retry/diagnostic state.
+        }
+    }
+
+    func dismissManagedRuntimeInstaller() {
+        guard !managedRuntimeInstallationState.isBusy else { return }
+        isAndroidRuntimeInstallSheetPresented = false
+        if case .available = managedRuntimeInstallationState {
+            Task { [weak self] in
+                guard let manager = self?.environment?.androidRuntimeManager
+                else { return }
+                await manager.cancel()
+            }
+        }
     }
 
     func chooseAndroidSDK() async {
@@ -13474,6 +13549,7 @@ final class AppState: ObservableObject {
             isAndroidRuntimeBusy = false
         }
         do {
+            try await environment.androidRuntimeManager.ensureReadyForDex()
             androidRuntimeStatus = try await environment.androidDexBridge
                 .startRuntime()
         } catch {
@@ -14793,6 +14869,23 @@ final class AppState: ObservableObject {
             for await status in updates {
                 guard !Task.isCancelled, let self else { return }
                 self.applyNodeRuntimeStatus(status)
+            }
+        }
+    }
+
+    private func startManagedRuntimeStatusMonitoring() {
+        guard managedRuntimeStatusTask == nil, let environment else { return }
+        managedRuntimeStatusTask = Task { @MainActor [weak self] in
+            let updates = await environment.androidRuntimeManager.states()
+            for await status in updates {
+                guard !Task.isCancelled, let self else { return }
+                self.managedRuntimeInstallationState = status
+                if case .available = status {
+                    // `.available` is emitted only by an explicit settings
+                    // action or by the first Dex request that is suspended in
+                    // the installation coordinator.
+                    self.isAndroidRuntimeInstallSheetPresented = true
+                }
             }
         }
     }

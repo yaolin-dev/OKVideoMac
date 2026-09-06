@@ -370,6 +370,10 @@ struct RootView: View {
                 dismissButton: .default(Text("好"))
             )
         }
+        .sheet(isPresented: $state.isAndroidRuntimeInstallSheetPresented) {
+            AndroidRuntimeInstallView()
+                .environmentObject(state)
+        }
         .appConfigurationSheet(scope: .browser)
         .overlay(alignment: .bottom) {
             if let status = state.siteActionStatus {

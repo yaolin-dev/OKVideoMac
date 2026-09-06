@@ -2,6 +2,7 @@ import Darwin
 import AppKit
 import CryptoKit
 import Foundation
+import AndroidRuntimeKit
 import OKVideoCore
 import Security
 
@@ -2340,14 +2341,20 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     }
 
     private let runtime: AndroidDexBridgeRuntime
+    private let managedRuntimePrerequisite: @Sendable () async throws -> Void
     private let session: URLSession
     private let interactionSession: URLSession
     private let invokeURL = URL(string: "http://127.0.0.1:19978/v1/invoke")!
     private let uiStateURL = URL(string: "http://127.0.0.1:19978/v1/ui/state")!
     private let uiDismissURL = URL(string: "http://127.0.0.1:19978/v1/ui/dismiss")!
 
-    init(runtime: AndroidDexBridgeRuntime = AndroidDexBridgeRuntime()) {
+    init(
+        runtime: AndroidDexBridgeRuntime = AndroidDexBridgeRuntime(),
+        managedRuntimePrerequisite:
+            @escaping @Sendable () async throws -> Void = {}
+    ) {
         self.runtime = runtime
+        self.managedRuntimePrerequisite = managedRuntimePrerequisite
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 65
         configuration.timeoutIntervalForResource = 70
@@ -2615,6 +2622,7 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         refreshPlayback: Bool = false,
         requestedInteractionID: UUID? = nil
     ) async throws -> JSONValue {
+        try await managedRuntimePrerequisite()
         try await runtime.ensureReady()
         let monitorsAuthorization = Self.shouldMonitorAuthorization(
             for: method,
@@ -4392,6 +4400,10 @@ struct AndroidToolchainResolver {
     let fileManager: FileManager
 
     func resolve() -> AndroidToolchain? {
+        if hasManagedRuntimePointer {
+            guard let selection = managedRuntimeSelection() else { return nil }
+            return toolchain(at: selection.sdkRoot)
+        }
         for root in candidateSDKRoots() {
             if let toolchain = toolchain(at: root) {
                 return toolchain
@@ -4417,11 +4429,39 @@ struct AndroidToolchainResolver {
     }
 
     func resolveJavaRuntime() -> AndroidJavaRuntime? {
-        AndroidJavaRuntimeResolver(
+        if hasManagedRuntimePointer {
+            guard let selection = managedRuntimeSelection() else { return nil }
+            return AndroidJavaRuntime(
+                home: selection.javaHome,
+                executable: selection.java,
+                source: "OKVideoMac Managed Runtime"
+            )
+        }
+        return AndroidJavaRuntimeResolver(
             homeDirectory: homeDirectory,
             environment: environment,
             fileManager: fileManager
         ).resolve()
+    }
+
+    private var managedRuntimeLayout: AndroidRuntimeLayout {
+        AndroidRuntimeLayout(
+            applicationSupportDirectory: applicationSupportDirectory
+        )
+    }
+
+    private var hasManagedRuntimePointer: Bool {
+        fileManager.fileExists(
+            atPath: managedRuntimeLayout.currentRuntimePointer.path
+        )
+    }
+
+    private func managedRuntimeSelection() -> ManagedRuntimeSelection? {
+        guard let catalog = try? BundledRuntimeCatalog.load() else { return nil }
+        return try? ManagedRuntimeSelection.resolve(
+            layout: managedRuntimeLayout,
+            catalog: catalog
+        )
     }
 
     func installedSystemImages(in toolchain: AndroidToolchain) -> [AndroidSystemImage] {
@@ -9709,14 +9749,40 @@ actor AndroidDexBridgeRuntime {
         } else {
             environment.removeValue(forKey: "ADB_TRACE")
         }
-        let sdkPaths = [
-            sdkRoot.appendingPathComponent("platform-tools").path,
-            sdkRoot.appendingPathComponent("emulator").path
-        ]
-        let inheritedPath = environment["PATH"] ?? ""
-        environment["PATH"] = (sdkPaths + [inheritedPath])
-            .filter { !$0.isEmpty }
-            .joined(separator: ":")
+        let generationRoot = sdkRoot.deletingLastPathComponent()
+        let managedJRE = generationRoot.appendingPathComponent(
+            "jre",
+            isDirectory: true
+        )
+        let managedJava = managedJRE.appendingPathComponent("bin/java")
+        let usesManagedGeneration = sdkRoot.lastPathComponent == "sdk"
+            && generationRoot.deletingLastPathComponent().lastPathComponent
+                == "Generations"
+            && FileManager.default.isExecutableFile(atPath: managedJava.path)
+        if usesManagedGeneration {
+            // Managed purity is a hard boundary: no Java, Android tool, or
+            // loader path from Android Studio, Homebrew, a login shell, or the
+            // launching process can influence a Session child.
+            environment["JAVA_HOME"] = managedJRE.path
+            environment["PATH"] = [
+                managedJRE.appendingPathComponent("bin").path,
+                sdkRoot.appendingPathComponent(
+                    "cmdline-tools/latest/bin"
+                ).path,
+                sdkRoot.appendingPathComponent("platform-tools").path,
+                sdkRoot.appendingPathComponent("emulator").path,
+                "/usr/bin", "/bin", "/usr/sbin", "/sbin"
+            ].joined(separator: ":")
+        } else {
+            let sdkPaths = [
+                sdkRoot.appendingPathComponent("platform-tools").path,
+                sdkRoot.appendingPathComponent("emulator").path
+            ]
+            let inheritedPath = environment["PATH"] ?? ""
+            environment["PATH"] = (sdkPaths + [inheritedPath])
+                .filter { !$0.isEmpty }
+                .joined(separator: ":")
+        }
         return environment
     }
 
@@ -10070,10 +10136,13 @@ actor AndroidDexBridgeRuntime {
         let companion = avdHome.appendingPathComponent(
             "\(Self.avdName).ini"
         )
+        let avdManifest = avdHome.appendingPathComponent(
+            "avd-manifest.json"
+        )
         let continuity = runtimeDirectory.appendingPathComponent(
             "runtime-continuity.json"
         )
-        let movable = [avd, companion, continuity].filter {
+        let movable = [avd, companion, avdManifest, continuity].filter {
             fileManager.fileExists(atPath: $0.path)
         }
         let allowedMetadataNames = Set([
@@ -10230,6 +10299,7 @@ actor AndroidDexBridgeRuntime {
         gpuBackend: AndroidEmulatorGPUBackend
     ) throws {
         try createRuntimeDirectories()
+        let managedContext = try managedAVDContext(for: toolchain)
         let configuration = avdDirectory.appendingPathComponent("config.ini")
         if fileManager.fileExists(atPath: configuration.path) {
             let listing = try run(
@@ -10252,13 +10322,52 @@ actor AndroidDexBridgeRuntime {
                 contentsOf: configuration,
                 encoding: .utf8
             )
-            guard let image = resolver().preferredInteractiveSystemImage(
-                in: toolchain,
-                avdConfiguration: contents
-            ) else {
+            let image: AndroidSystemImage?
+            if let managedContext {
+                image = resolver().interactiveSystemImages(in: toolchain)
+                    .first(where: {
+                        $0.packageID == managedContext.systemImagePackageID
+                    })
+            } else {
+                image = resolver().preferredInteractiveSystemImage(
+                    in: toolchain,
+                    avdConfiguration: contents
+                )
+            }
+            guard let image else {
                 throw AppError.spider(
                     "缺少可显示原生界面的 arm64 Android system image（ATD 不支持界面捕获）"
                 )
+            }
+            if let managedContext {
+                let existingManifest = try readManagedAVDManifest(
+                    from: managedContext.layout.avdManifest
+                )
+                let compatibility = ManagedAVDCompatibility.evaluate(
+                    hasExistingAVD: true,
+                    manifest: existingManifest,
+                    expectedGeneration: managedContext.generation,
+                    expectedSystemImageComponentID:
+                        managedContext.systemImageComponentID,
+                    configurationMatchesExpectedImage:
+                        AndroidManagedAVDConfiguration.matches(
+                            image,
+                            contents: contents
+                        )
+                )
+                guard compatibility.status
+                        != .requiresRecoverableRebuild else {
+                    appendEvent(
+                        stage: .preparingAVD,
+                        event: "managedAVDCompatibilityRejected",
+                        detail: compatibility.reason
+                    )
+                    throw AppError.spider(
+                        "现有 Android 兼容环境与当前组件不兼容。"
+                            + "为保护登录数据，OKVideoMac 未自动覆盖；"
+                            + "请在设置中选择“修复 Android Runtime…”进行可恢复重建。"
+                    )
+                }
             }
             let updated = AndroidManagedAVDConfiguration.updating(
                 contents,
@@ -10284,6 +10393,9 @@ actor AndroidDexBridgeRuntime {
                     options: [.atomic]
                 )
             }
+            if let managedContext {
+                try writeManagedAVDManifest(managedContext)
+            }
             return
         }
         if fileManager.fileExists(atPath: avdDirectory.path) {
@@ -10296,9 +10408,16 @@ actor AndroidDexBridgeRuntime {
                 "缺少 Android SDK Command-line Tools（avdmanager）"
             )
         }
-        guard let image = resolver().interactiveSystemImages(
-            in: toolchain
-        ).first else {
+        let image: AndroidSystemImage?
+        if let managedContext {
+            image = resolver().interactiveSystemImages(in: toolchain)
+                .first(where: {
+                    $0.packageID == managedContext.systemImagePackageID
+                })
+        } else {
+            image = resolver().interactiveSystemImages(in: toolchain).first
+        }
+        guard let image else {
             throw AppError.spider(
                 "缺少可显示原生界面的 arm64 Android system image；"
                     + "ATD 不支持界面捕获，本版本不会自动下载"
@@ -10349,9 +10468,108 @@ actor AndroidDexBridgeRuntime {
                         in: .whitespacesAndNewlines
                     ) == Self.avdName
                 }
-            ) else {
+        ) else {
             throw AppError.spider("专用 Android 环境无法被 Emulator 识别")
         }
+        if let managedContext {
+            try writeManagedAVDManifest(managedContext)
+        }
+    }
+
+    private struct ManagedAVDContext {
+        let layout: AndroidRuntimeLayout
+        let generation: RuntimeGenerationDescriptor
+        let systemImageComponentID: String
+        let systemImagePackageID: String
+    }
+
+    /// The Managed Runtime integration is intentionally limited to selecting
+    /// and recording AVD compatibility metadata. Startup admission, process
+    /// ownership, private ADB, and recovery remain in the existing Session
+    /// state machine.
+    private func managedAVDContext(
+        for toolchain: AndroidToolchain
+    ) throws -> ManagedAVDContext? {
+        let layout = AndroidRuntimeLayout(
+            applicationSupportDirectory: applicationSupportDirectory
+        )
+        guard fileManager.fileExists(
+            atPath: layout.currentRuntimePointer.path
+        ) else { return nil }
+        do {
+            let catalog = try BundledRuntimeCatalog.load()
+            let selection = try ManagedRuntimeSelection.resolve(
+                layout: layout,
+                catalog: catalog,
+                privateADBServerPort: privateADBServerPort
+            )
+            guard selection.sdkRoot.standardizedFileURL
+                    .resolvingSymlinksInPath()
+                    == toolchain.sdkRoot.standardizedFileURL
+                        .resolvingSymlinksInPath(),
+                  let generation = catalog.generations.first(where: {
+                      $0.generationID == selection.generationID
+                  }),
+                  let image = generation.components.first(where: {
+                      $0.role == .systemImage
+                  }),
+                  let packageID = generation.systemImagePackageID,
+                  image.packageID == packageID else {
+                throw ManagedRuntimeProductError.purityGateFailed
+            }
+            return ManagedAVDContext(
+                layout: layout,
+                generation: generation,
+                systemImageComponentID: image.id,
+                systemImagePackageID: packageID
+            )
+        } catch {
+            throw AppError.spider(
+                "Android 兼容组件校验失败；请在设置中修复组件"
+            )
+        }
+    }
+
+    private func readManagedAVDManifest(
+        from url: URL
+    ) throws -> ManagedAVDManifest? {
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        do {
+            return try JSONDecoder().decode(
+                ManagedAVDManifest.self,
+                from: Data(contentsOf: url)
+            )
+        } catch {
+            throw AppError.spider(
+                "Android 兼容环境记录无法读取。为保护登录数据，"
+                    + "OKVideoMac 未自动覆盖；请执行可恢复重建。"
+            )
+        }
+    }
+
+    private func writeManagedAVDManifest(
+        _ context: ManagedAVDContext
+    ) throws {
+        let existing = try readManagedAVDManifest(
+            from: context.layout.avdManifest
+        )
+        let manifest = ManagedAVDManifest(
+            avdSchema: context.generation.avdSchema,
+            bridgeSchema: context.generation.bridgeSchema,
+            runtimeGenerationID: context.generation.generationID,
+            systemImageComponentID: context.systemImageComponentID,
+            createdAt: existing?.createdAt ?? Date()
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(manifest).write(
+            to: context.layout.avdManifest,
+            options: [.atomic]
+        )
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: context.layout.avdManifest.path
+        )
     }
 
     private func launchManagedEmulator(

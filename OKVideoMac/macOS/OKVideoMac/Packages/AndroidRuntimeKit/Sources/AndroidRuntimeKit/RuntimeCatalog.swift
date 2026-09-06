@@ -47,6 +47,56 @@ public enum RuntimeCandidateState: String, Codable, Sendable {
     case rejected
 }
 
+/// Product-facing lifecycle for an installable runtime profile. Candidate
+/// evaluation remains independent: a profile may be the shipped default while
+/// its broader OS/hardware verification is still explicitly documented.
+public enum RuntimeProfileStatus: String, Codable, Sendable {
+    case evaluation
+    case defaultProfile = "default"
+    case deprecated
+    case unsupported
+}
+
+public struct RuntimeProfile: Codable, Equatable, Sendable {
+    public let id: String
+    public let displayName: String
+    public let status: RuntimeProfileStatus
+    public let generationID: RuntimeGenerationID
+    public let expectedDownloadSize: Int64
+    public let requiredFreeSpace: Int64
+    public let minimumAppVersion: String
+    public let maximumAppVersion: String?
+    public let minimumMacOS: String
+    public let architectures: [RuntimeHostArchitecture]
+    public let verificationNote: String
+
+    public init(
+        id: String,
+        displayName: String,
+        status: RuntimeProfileStatus,
+        generationID: RuntimeGenerationID,
+        expectedDownloadSize: Int64,
+        requiredFreeSpace: Int64,
+        minimumAppVersion: String,
+        maximumAppVersion: String? = nil,
+        minimumMacOS: String,
+        architectures: [RuntimeHostArchitecture],
+        verificationNote: String
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.status = status
+        self.generationID = generationID
+        self.expectedDownloadSize = expectedDownloadSize
+        self.requiredFreeSpace = requiredFreeSpace
+        self.minimumAppVersion = minimumAppVersion
+        self.maximumAppVersion = maximumAppVersion
+        self.minimumMacOS = minimumMacOS
+        self.architectures = architectures
+        self.verificationNote = verificationNote
+    }
+}
+
 public struct RuntimeCandidate: Codable, Equatable, Sendable {
     public let id: String
     public let apiLevel: Int
@@ -91,15 +141,24 @@ public struct RuntimeComponentInstallationDescriptor:
     public let archiveFormat: RuntimeArchiveFormat
     public let archiveSubpath: String?
     public let destinationRelativePath: String
+    /// When present, every archive entry must start with one of these names.
+    /// This rejects a correctly hashed but unexpectedly shaped payload before
+    /// extraction can publish anything into a Runtime Generation.
+    public let allowedTopLevelEntries: [String]?
+    public let maximumExtractedSize: Int64?
 
     public init(
         archiveFormat: RuntimeArchiveFormat,
         archiveSubpath: String? = nil,
-        destinationRelativePath: String
+        destinationRelativePath: String,
+        allowedTopLevelEntries: [String]? = nil,
+        maximumExtractedSize: Int64? = nil
     ) {
         self.archiveFormat = archiveFormat
         self.archiveSubpath = archiveSubpath
         self.destinationRelativePath = destinationRelativePath
+        self.allowedTopLevelEntries = allowedTopLevelEntries
+        self.maximumExtractedSize = maximumExtractedSize
     }
 }
 
@@ -167,6 +226,9 @@ public struct RuntimeGenerationDescriptor: Codable, Equatable, Sendable {
     public let maximumAppVersion: String?
     public let architecture: RuntimeHostArchitecture
     public let components: [RuntimeComponentDescriptor]
+    public let apiLevel: Int?
+    public let systemImagePackageID: String?
+    public let bridgeVersion: String?
 
     public init(
         generationID: RuntimeGenerationID,
@@ -176,7 +238,10 @@ public struct RuntimeGenerationDescriptor: Codable, Equatable, Sendable {
         minimumAppVersion: String,
         maximumAppVersion: String? = nil,
         architecture: RuntimeHostArchitecture,
-        components: [RuntimeComponentDescriptor]
+        components: [RuntimeComponentDescriptor],
+        apiLevel: Int? = nil,
+        systemImagePackageID: String? = nil,
+        bridgeVersion: String? = nil
     ) {
         self.generationID = generationID
         self.runtimeSchema = runtimeSchema
@@ -186,6 +251,9 @@ public struct RuntimeGenerationDescriptor: Codable, Equatable, Sendable {
         self.maximumAppVersion = maximumAppVersion
         self.architecture = architecture
         self.components = components
+        self.apiLevel = apiLevel
+        self.systemImagePackageID = systemImagePackageID
+        self.bridgeVersion = bridgeVersion
     }
 }
 
@@ -194,19 +262,35 @@ public struct RuntimeCatalog: Codable, Equatable, Sendable {
 
     public let schemaVersion: Int
     public let catalogVersion: String
+    public let catalogRevision: Int?
+    public let publishedAt: String?
+    public let allowedDownloadHosts: [String]?
     public let candidateMatrix: [RuntimeCandidate]
     public let generations: [RuntimeGenerationDescriptor]
+    public let profiles: [RuntimeProfile]?
 
     public init(
         schemaVersion: Int,
         catalogVersion: String,
         candidateMatrix: [RuntimeCandidate],
-        generations: [RuntimeGenerationDescriptor]
+        generations: [RuntimeGenerationDescriptor],
+        catalogRevision: Int? = nil,
+        publishedAt: String? = nil,
+        allowedDownloadHosts: [String]? = nil,
+        profiles: [RuntimeProfile]? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.catalogVersion = catalogVersion
+        self.catalogRevision = catalogRevision
+        self.publishedAt = publishedAt
+        self.allowedDownloadHosts = allowedDownloadHosts
         self.candidateMatrix = candidateMatrix
         self.generations = generations
+        self.profiles = profiles
+    }
+
+    public var defaultProfile: RuntimeProfile? {
+        profiles?.first { $0.status == .defaultProfile }
     }
 }
 
@@ -253,6 +337,25 @@ public enum RuntimeCatalogLoader {
             throw RuntimeCatalogValidationError.invalidSchema(
                 "catalogVersion is empty"
             )
+        }
+        if let revision = catalog.catalogRevision, revision <= 0 {
+            throw RuntimeCatalogValidationError.invalidSchema(
+                "catalogRevision must be positive"
+            )
+        }
+        if let hosts = catalog.allowedDownloadHosts {
+            guard !hosts.isEmpty,
+                  Set(hosts).count == hosts.count,
+                  hosts.allSatisfy({ host in
+                      !host.isEmpty
+                          && host == host.lowercased()
+                          && !host.contains("/")
+                          && !host.contains("..")
+                  }) else {
+                throw RuntimeCatalogValidationError.invalidSchema(
+                    "allowedDownloadHosts is invalid"
+                )
+            }
         }
 
         var identifiers = Set<String>()
@@ -311,6 +414,13 @@ public enum RuntimeCatalogLoader {
                     )
                 }
                 try validate(component)
+                if let hosts = catalog.allowedDownloadHosts,
+                   !hosts.contains(component.downloadURL.host?.lowercased() ?? "") {
+                    throw RuntimeCatalogValidationError.invalidComponent(
+                        component.id,
+                        "download host is not allowlisted"
+                    )
+                }
                 guard component.architecture == generation.architecture else {
                     throw RuntimeCatalogValidationError.invalidComponent(
                         component.id,
@@ -343,6 +453,90 @@ public enum RuntimeCatalogLoader {
                     )
                 }
             }
+            if let apiLevel = generation.apiLevel, apiLevel <= 0 {
+                throw RuntimeCatalogValidationError.invalidSchema(
+                    "generation \(generationID) has an invalid API level"
+                )
+            }
+            guard let packageID = generation.systemImagePackageID else {
+                if catalog.profiles?.contains(where: {
+                    $0.generationID == generation.generationID
+                }) == true {
+                    throw RuntimeCatalogValidationError.invalidSchema(
+                        "generation \(generationID) has no system image identity"
+                    )
+                }
+                continue
+            }
+            guard let systemImage = generation.components.first(where: {
+                $0.role == .systemImage
+            }), systemImage.packageID == packageID else {
+                throw RuntimeCatalogValidationError.invalidSchema(
+                    "generation \(generationID) system image identity differs"
+                )
+            }
+            let imagePath = packageID.split(separator: ";").map(String.init)
+            guard imagePath.count == 4,
+                  imagePath[0] == "system-images",
+                  imagePath.allSatisfy(isSafeRelativePath),
+                  systemImage.installation?.destinationRelativePath
+                    == "sdk/" + imagePath.joined(separator: "/"),
+                  generation.apiLevel.map({
+                      imagePath[1] == "android-\($0)"
+                  }) ?? false else {
+                throw RuntimeCatalogValidationError.invalidSchema(
+                    "generation \(generationID) system image path is inconsistent"
+                )
+            }
+        }
+
+        if let profiles = catalog.profiles, !profiles.isEmpty {
+            var profileIDs = Set<String>()
+            var defaultCount = 0
+            let generationIDs = Set(catalog.generations.map(\.generationID))
+            for profile in profiles {
+                guard isSafeRelativePath(profile.id),
+                      !profile.id.contains("/"),
+                      profileIDs.insert(profile.id).inserted else {
+                    throw RuntimeCatalogValidationError.invalidSchema(
+                        "profile identifier is invalid or duplicated"
+                    )
+                }
+                guard generationIDs.contains(profile.generationID) else {
+                    throw RuntimeCatalogValidationError.invalidSchema(
+                        "profile \(profile.id) references an unknown generation"
+                    )
+                }
+                guard !profile.displayName.isEmpty,
+                      !profile.minimumAppVersion.isEmpty,
+                      !profile.minimumMacOS.isEmpty,
+                      !profile.verificationNote.isEmpty,
+                      profile.expectedDownloadSize > 0,
+                      profile.requiredFreeSpace > profile.expectedDownloadSize,
+                      !profile.architectures.isEmpty,
+                      Set(profile.architectures.map(\.rawValue)).count
+                        == profile.architectures.count else {
+                    throw RuntimeCatalogValidationError.invalidSchema(
+                        "profile \(profile.id) is incomplete"
+                    )
+                }
+                let compressedSize = catalog.generations.first(where: {
+                    $0.generationID == profile.generationID
+                })?.components.reduce(Int64(0)) {
+                    $0 + $1.compressedSize
+                }
+                guard profile.expectedDownloadSize == compressedSize else {
+                    throw RuntimeCatalogValidationError.invalidSchema(
+                        "profile \(profile.id) download size differs from its generation"
+                    )
+                }
+                if profile.status == .defaultProfile { defaultCount += 1 }
+            }
+            guard defaultCount == 1 else {
+                throw RuntimeCatalogValidationError.invalidSchema(
+                    "catalog must contain exactly one default profile"
+                )
+            }
         }
     }
 
@@ -374,7 +568,11 @@ public enum RuntimeCatalogLoader {
             )
         }
         guard component.downloadURL.scheme?.lowercased() == "https",
-              component.licenseURL.scheme?.lowercased() == "https" else {
+              component.licenseURL.scheme?.lowercased() == "https",
+              component.downloadURL.user == nil,
+              component.downloadURL.password == nil,
+              component.downloadURL.fragment == nil,
+              component.downloadURL.host?.isEmpty == false else {
             throw RuntimeCatalogValidationError.invalidComponent(
                 component.id,
                 "download and license URLs must use HTTPS"
@@ -405,6 +603,25 @@ public enum RuntimeCatalogLoader {
                 throw RuntimeCatalogValidationError.invalidComponent(
                     component.id,
                     "installation paths must be safe relative paths"
+                )
+            }
+            if let entries = installation.allowedTopLevelEntries {
+                guard !entries.isEmpty,
+                      Set(entries).count == entries.count,
+                      entries.allSatisfy({
+                          isSafeRelativePath($0) && !$0.contains("/")
+                      }) else {
+                    throw RuntimeCatalogValidationError.invalidComponent(
+                        component.id,
+                        "allowed archive roots are invalid"
+                    )
+                }
+            }
+            if let maximum = installation.maximumExtractedSize,
+               maximum < component.installedSize {
+                throw RuntimeCatalogValidationError.invalidComponent(
+                    component.id,
+                    "maximum extracted size is smaller than installed size"
                 )
             }
         }

@@ -1,4 +1,5 @@
 import AppKit
+import AndroidRuntimeKit
 import OKVideoCore
 import OKVideoPersistence
 import SwiftUI
@@ -520,6 +521,35 @@ struct SettingsView: View {
             SettingsSectionTitle("Android 兼容模块")
             SettingsCard {
                 SettingsControlRow(
+                    icon: managedRuntimeIcon,
+                    color: managedRuntimeColor,
+                    title: managedRuntimeTitle,
+                    subtitle: managedRuntimeDetail
+                ) {
+                    HStack(spacing: 8) {
+                        if state.managedRuntimeInstallationState.isBusy {
+                            if let progress = state
+                                .managedRuntimeInstallationState.progress {
+                                ProgressView(value: progress, total: 1)
+                                    .progressViewStyle(.linear)
+                                    .frame(width: 100)
+                            } else {
+                                AppActivityIndicator(size: .small)
+                            }
+                        }
+                        Button(managedRuntimeActionTitle) {
+                            Task { await state.showManagedRuntimeInstaller() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(
+                            state.managedRuntimeInstallationState.isBusy
+                        )
+                    }
+                }
+
+                SettingsDivider()
+
+                SettingsControlRow(
                     icon: androidRuntimeIcon,
                     color: androidRuntimeColor,
                     title: state.androidRuntimeStatus.title,
@@ -546,7 +576,7 @@ struct SettingsView: View {
                         }
                         .disabled(state.isAndroidRuntimeBusy)
 
-                        Button("选择 SDK…") {
+                        Button("旧版手动环境…") {
                             Task { await state.chooseAndroidSDK() }
                         }
                         .disabled(state.isAndroidRuntimeBusy)
@@ -593,8 +623,8 @@ struct SettingsView: View {
                         systemImage: "info.circle"
                     )
                     Text(
-                        "Android 兼容环境仅在需要时启动，退出 OKVideoMac 时会自动关闭。"
-                            + "设置页按钮仅用于检查和维护。"
+                        "所需文件按需下载到 OKVideoMac 专用目录；"
+                            + "不会修改 Android Studio、Homebrew 或其他模拟器。"
                     )
                     .foregroundColor(.secondary)
                 }
@@ -638,6 +668,66 @@ struct SettingsView: View {
         case .starting, .checking, .stopping: return .orange
         case .failed, .unavailable: return .red
         case .stopped: return .secondary
+        }
+    }
+
+    private var managedRuntimeTitle: String {
+        switch state.managedRuntimeInstallationState {
+        case .ready: return "Android 兼容组件已安装"
+        case .updateAvailable: return "Android 兼容组件可更新"
+        case .failed, .damaged: return "Android 兼容组件需要修复"
+        case .incompatible: return "Android 兼容组件不兼容"
+        case .notInstalled, .available, .cancelled:
+            return "Android 兼容组件未安装"
+        default: return "正在处理 Android 兼容组件"
+        }
+    }
+
+    private var managedRuntimeDetail: String {
+        switch state.managedRuntimeInstallationState {
+        case .ready:
+            return "受 OKVideoMac 独立管理，仅在 Dex 内容需要时启动"
+        case .updateAvailable:
+            return "可安装新环境；当前环境会保留到新版本验证完成"
+        case .failed(let failure, _), .damaged(let failure, _),
+             .incompatible(let failure):
+            return failure.message
+        case .downloading(let detail):
+            return detail.componentID.map { "正在下载：\($0)" }
+                ?? "正在下载"
+        default:
+            return "首次使用需要 Android 的内容时会自动提示"
+        }
+    }
+
+    private var managedRuntimeIcon: String {
+        switch state.managedRuntimeInstallationState {
+        case .ready: return "checkmark.circle.fill"
+        case .failed, .damaged, .incompatible:
+            return "exclamationmark.triangle.fill"
+        case .updateAvailable: return "arrow.triangle.2.circlepath.circle.fill"
+        case .notInstalled, .available, .cancelled:
+            return "arrow.down.circle.fill"
+        default: return "gearshape.2.fill"
+        }
+    }
+
+    private var managedRuntimeColor: Color {
+        switch state.managedRuntimeInstallationState {
+        case .ready: return .green
+        case .failed, .damaged, .incompatible: return .red
+        case .updateAvailable: return .orange
+        case .notInstalled, .available, .cancelled: return .accentColor
+        default: return .orange
+        }
+    }
+
+    private var managedRuntimeActionTitle: String {
+        switch state.managedRuntimeInstallationState {
+        case .ready: return "详情"
+        case .updateAvailable: return "更新…"
+        case .failed, .damaged, .incompatible: return "修复…"
+        default: return "安装…"
         }
     }
 

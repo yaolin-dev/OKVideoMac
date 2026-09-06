@@ -2,236 +2,100 @@
 
 [中文](ANDROID_BRIDGE_SETUP_zh-CN.md)
 
-Android Bridge is an optional compatibility runtime for selected Java/Dex
-`csp_` providers. It is not a foundation for playback, Native providers,
-QuickJS, Node, Live TV, or XMLTV.
-This document describes the current OKVideoMac 0.4.1 (Build 95)
-implementation. The
-presence of the Bridge does not imply compatibility with every Java/Dex
-`csp_` Spider.
+Android Bridge is used only by supported Java/Dex `csp_` providers. Native,
+QuickJS, Node, Live TV, XMLTV, and normal playback do not need Android and do
+not trigger a download.
 
-## Do I need Android?
+## Default setup
 
-| Use case | Android required |
-| --- | --- |
-| Native providers, including CMS JSON/XML response paths | No |
-| FongMi image/Base64-wrapped JSON configuration | No |
-| QuickJS Spider | No |
-| Node `.js.md5` Spider | No |
-| M3U, TXT, JSON Live, and XMLTV | No |
-| Normal libmpv playback | No |
-| Supported Java/Dex `csp_` Spider | Yes |
+Normal users do not need Android Studio, Homebrew, a JDK, ADB, SDK Manager, or
+Terminal commands.
 
-Android Bridge starts only when a site is dispatched to the Java/Dex provider.
-Loading a configuration does not by itself mean Android is required; dispatch
-depends on the site's `type`, `api`, script, and Java/Dex package reference.
+1. The first real Java/Dex request pauses in place.
+2. OKVideoMac presents the Android compatibility component with its actual
+   download size, required free space, managed location, and Google Android SDK
+   and Azul Zulu JRE license links.
+3. License acceptance is explicit and never preselected.
+4. The app downloads immutable components with real byte progress, then
+   verifies, extracts, installs, validates, and activates them.
+5. After installation and Managed Environment Purity pass, the original
+   request resumes automatically.
 
-## Required components
+The same component can be installed, inspected, updated, repaired, or
+diagnosed from **Settings → Android Compatibility Module**.
 
-| Component | Required | How OKVideoMac detects it | User action |
-| --- | --- | --- | --- |
-| Android Studio | No | The IDE is not detected | Recommended as the easiest SDK Manager UI; official command-line tools also work |
-| Android SDK root | Yes | Searched in the order below or selected in the app | Provide one complete SDK directory |
-| Android SDK Platform-Tools / `adb` | Yes | `<SDK>/platform-tools/adb` must be executable | Install from **SDK Tools** |
-| Android Emulator | Yes | `<SDK>/emulator/emulator` must be executable | Install from **SDK Tools** |
-| Android SDK Command-line Tools | Required for a clean setup | Looks for `cmdline-tools/latest/bin/avdmanager`, then other version directories | Install the latest stable package from **SDK Tools** |
-| Android system image | Yes | Only `arm64-v8a` images with `package.xml` are recognized | Install an ARM 64 v8a image at API 24 or newer |
-| AVD | Yes, app-managed | Dedicated name is `OKVideoMac_Runtime` | Do not create one manually; OKVideoMac creates it |
-| Bridge APK | Yes, bundled with the app | `Contents/Resources/AndroidDexBridge-release.apk` | Do not download or install it manually |
-| `sdkmanager` | Not a runtime command | OKVideoMac never invokes it | Use it only for a command-line SDK installation |
+## Managed layout
 
-The Bridge APK has `minSdk` 24. Runtime code does not pin one API level. It
-selects the highest installed `arm64-v8a` image; at the same API level it
-prefers `google_apis`, then `default`, then other variants. A Google Play image
-is not required. The current implementation does not select `x86_64` images.
-
-## Recommended installation
-
-1. Confirm that you actually need a Java/Dex `csp_` provider. All other source
-   types can skip this setup.
-2. Install and launch Android Studio once, following the
-   [official Android instructions](https://developer.android.com/studio/install.html).
-   Android Studio is the recommended installer UI, not an OKVideoMac runtime
-   dependency.
-3. Open **Tools → SDK Manager** in Android Studio:
-   - Under **SDK Tools**, install **Android SDK Platform-Tools**,
-     **Android Emulator**, and **Android SDK Command-line Tools (latest)**.
-   - Under **SDK Platforms**, enable **Show Package Details** and install an
-     **ARM 64 v8a System Image** at API 24 or newer.
-   - Note the **Android SDK Location** shown at the top of the window.
-4. In OKVideoMac, open **Settings (设置) → Advanced (高级) → Android
-   Compatibility Module (Android 兼容模块)** and click **Check (检查)**.
-5. If the app reports that no complete Android SDK was found, click
-   **Choose SDK… (选择 SDK…)** and select the SDK root from step 3. The selected
-   directory must directly contain `platform-tools` and `emulator`.
-6. Click **Start (启动)**, or open a site that needs Java/Dex. On first use,
-   OKVideoMac creates its dedicated AVD, launches a headless Emulator, installs
-   the bundled APK, and configures port forwarding. This can take 1–4 minutes.
-7. Setup is complete when the status reads **已就绪 — Java/Dex 站点可正常使用**
-   (Ready — Java/Dex sites are available).
-
-Do not create an AVD in Android Studio's Device Manager, and do not connect an
-Android phone for OKVideoMac.
-
-## SDK discovery order
-
-The runtime uses the first SDK root containing executable
-`platform-tools/adb` and `emulator/emulator`, in this exact order:
-
-1. `~/Library/Application Support/OKVideoMac/AndroidRuntime/sdk` (reserved
-   app-managed location; this release does not download an SDK into it);
-2. the directory saved by **Settings (设置) → Advanced (高级) → Android
-   Compatibility Module (Android 兼容模块) → Choose SDK… (选择 SDK…)**;
-3. `ANDROID_HOME` visible to the OKVideoMac process at launch;
-4. `ANDROID_SDK_ROOT` visible to the process at launch;
-5. `~/Library/Android/sdk`;
-6. an SDK root inferred from `PATH` entries ending in `platform-tools`,
-   `emulator`, or `cmdline-tools/<version>/bin`.
-
-This is not a general `which adb` search. A standalone `adb` on `PATH` only
-helps when its PATH entry can be mapped back to one SDK root that also contains
-the Emulator. Apps launched from Finder may not inherit interactive-shell
-environment variables, so **Choose SDK… (选择 SDK…)** is the most deterministic
-option.
-
-## The app-managed Android environment
-
-OKVideoMac does not use ordinary user AVDs. It points `ANDROID_AVD_HOME` to:
+The multi-gigabyte Runtime is not bundled in the app. It is installed on demand:
 
 ```text
-~/Library/Application Support/OKVideoMac/AndroidRuntime/avd
+~/Library/Application Support/OKVideoMac/AndroidRuntime/
+  Generations/<generation>/{sdk,jre}
+  current-runtime.json
+  Downloads/
+  Staging/
+  Backups/
+  avd/
+  home/.android/
 ```
 
-It then creates `OKVideoMac_Runtime` with `avdmanager create avd` and launches
-it headlessly, without audio or snapshots and with hardware acceleration. The
-runtime connects only to the `emulator-<console-port>` process it launched and
-verified. A physical Android device cannot replace this dedicated Emulator.
+The default profile uses API 35 Google APIs for `arm64-v8a`. The catalog pins
+the JRE, Command-line Tools, Platform Tools/ADB, Android Platform, Emulator, and
+system image by exact version, URL, size, SHA-256, architecture, license, and
+archive layout.
 
-Swift uses serial-scoped `adb` commands to verify the process and AVD, wait for
-boot, run `adb install -r`, start the Activity, and configure loopback port
-forwarding. Inside the Emulator, the APK binds to `127.0.0.1:9978`; the main
-Mac-side HTTP endpoint is `127.0.0.1:19978`. The Bridge loads
-`com.github.catvod.spider.<csp_ suffix>` with `DexClassLoader` and returns JSON
-results to the Swift provider.
+Runtime Generations are immutable. An update is installed and validated as a
+new Generation before `current-runtime.json` is switched atomically. The AVD
+is outside every Generation, so a tool update does not overwrite userdata.
+Repair reinstalls managed components while preserving the AVD, favorites,
+history, and normal settings.
 
-**Stop** shuts down the dedicated Emulator only after its PID, AVD, serial, and
-process command match the saved runtime identity. A mismatch causes a safe
-refusal rather than an attempt to stop another Emulator.
+## Isolation and trust boundaries
 
-## Advanced setup without Android Studio
+- Every Android/Java executable must come from the active Generation.
+- ADB uses an OKVideoMac-owned high port and private keypair.
+- The AVD must remain under the private `AndroidRuntime/avd` root.
+- Child processes receive explicit `PATH`, `JAVA_HOME`, Android home variables,
+  AVD home, and `ADB_VENDOR_KEYS` values.
+- Once a managed pointer exists, a bad Generation fails closed instead of
+  falling back to Android Studio, Homebrew, system Java, or shell `PATH`.
+- Installation and Emulator Session have independent single-flights. Concurrent
+  install requests join one transaction; Runtime requests retain the existing
+  one-startup-task behavior.
 
-The runtime supports a standard Android SDK directory and does not require the
-Android Studio IDE. Follow the
-[official `sdkmanager` documentation](https://developer.android.com/tools/sdkmanager)
-to install Platform-Tools, Emulator, Command-line Tools, and a qualifying
-`arm64-v8a` system image, then select that SDK root in OKVideoMac.
-
-OKVideoMac does not invoke `sdkmanager`, accept SDK licenses, download, or
-upgrade SDK packages. It also does not repair an incomplete SDK. Obtain all SDK
-components only from official Android channels.
-
-For a read-only Terminal check, replace `SDK_ROOT` with the actual SDK root:
-
-```bash
-test -x "$SDK_ROOT/platform-tools/adb"
-test -x "$SDK_ROOT/emulator/emulator"
-test -x "$SDK_ROOT/cmdline-tools/latest/bin/avdmanager"
-"$SDK_ROOT/platform-tools/adb" version
-"$SDK_ROOT/emulator/emulator" -version
-find "$SDK_ROOT/system-images" -path '*/arm64-v8a/package.xml' -print
-```
-
-`avdmanager` may also be under `cmdline-tools/<version>/bin`. An empty result
-from the default `emulator -list-avds` is not evidence of failure: OKVideoMac's
-dedicated AVD lives under a separate `ANDROID_AVD_HOME` and does not appear in
-the default user AVD list.
+The catalog is untrusted input. Non-HTTPS or non-allowlisted downloads, bad
+SHA-256 values, traversal, absolute paths, duplicate IDs, unexpected archive
+roots, symlink escapes, and extraction-size overruns fail before activation.
+Failure and cancellation preserve the active pointer. Safe completed downloads
+can be reused, and partial downloads support HTTP Range resumption.
 
 ## Troubleshooting
 
-### Complete Android SDK not found
+- **Download failed:** check the network and retry. A safe `.partial` is kept
+  for resumption.
+- **Integrity failed:** the artifact and Generation are rejected; the current
+  Runtime and AVD are unchanged.
+- **Insufficient disk:** the app checks download, extraction, two-generation,
+  and safety headroom before downloading.
+- **Damaged/incompatible Runtime:** use **Repair** in Settings. Repair uses a
+  recoverable backup and never deletes Android Studio data or user ADB keys.
+- **Emulator/Bridge failure:** export diagnostics. Reports contain product and
+  lifecycle evidence but redact user paths and omit cookies, tokens, private
+  source URLs, playback URLs, Spider content, and ADB private keys.
 
-The SDK root must contain both executable `platform-tools/adb` and
-`emulator/emulator`. In **Settings (设置) → Advanced (高级) → Android
-Compatibility Module (Android 兼容模块)**, click **Choose SDK… (选择 SDK…)** and
-select the SDK root itself, not its `platform-tools` or `emulator` child
-directory.
+## Legacy / Troubleshooting / Developer Setup
 
-### `adb` not found
+The **Legacy Manual Environment…** control is retained for maintainers and old
+installations only. The legacy resolver may inspect a selected SDK or Android
+environment only when no managed-generation pointer exists. This is not the
+normal setup path and does not provide managed versioning, purity, or rollback.
 
-Install **Android SDK Platform-Tools** in Android Studio's SDK Manager. A device
-driver, `fastboot`, or a standalone script without the required SDK directory
-layout does not satisfy the current resolver.
+## Compatibility statement
 
-### Emulator missing or unable to start
+- Static App support: Apple Silicon / arm64, macOS 12.0 or later.
+- Real Managed API 35 Runtime E2E: Apple M1, macOS 14.8.8.
+- macOS 12, 13, and 15: no real-machine Emulator E2E yet.
+- Java/Dex Spider compatibility remains a selected/experimental subset.
 
-Install **Android Emulator** and ensure that its architecture is suitable for
-Apple Silicon. The runtime passes `-accel on`, so the host must provide the
-hardware virtualization required by Android Emulator. OKVideoMac currently
-checks only that the executable exists; it does not preflight the Emulator
-version or host CPU features. A present but unusable Emulator therefore fails
-when **Start (启动)** is clicked and its launch error is shown then.
-
-### Command-line Tools (`avdmanager`) missing
-
-Install **Android SDK Command-line Tools (latest)**. A complete existing
-dedicated AVD can still be reused, but a clean setup needs `avdmanager` to
-create it automatically.
-
-### No arm64 Android system image
-
-Install an **ARM 64 v8a System Image** at API 24 or newer. An SDK containing
-only `x86_64` images does not pass the current check. This release does not
-download images automatically.
-
-### Incomplete AVD record or unverified runtime ownership
-
-The runtime stops and preserves its record; it will not mutate an Emulator it
-cannot prove it owns. Click **Check** first. For a normally owned running
-instance, **Repair (修复)** rebuilds port forwarding and reinstalls the bundled
-APK.
-Do not use `killall`, `adb kill-server`, delete other AVDs, or wipe data as a
-routine fix. Export redacted diagnostics and file an issue if the problem
-persists.
-
-The current UI has no “delete and recreate dedicated AVD” action. A damaged
-dedicated AVD directory requires maintainer diagnosis rather than asking a
-normal user to delete it manually.
-
-### Bridge APK fails to start
-
-The formal app should contain
-`Contents/Resources/AndroidDexBridge-release.apk`. Users should not install an
-APK manually. Try **Repair (修复)** first. If the app reports that the APK is
-missing, reinstall the complete official app instead of downloading an APK
-elsewhere.
-
-### Native sources work but a Java/Dex provider fails
-
-This normally means only the optional Android compatibility runtime is not
-ready. It does not mean that OKVideoMac, libmpv, QuickJS, Node, or Live TV has
-failed. Check the Android Compatibility Module status in Settings.
-
-### Stopping or disabling Android Bridge
-
-When the status is Ready, click **Stop (停止)** under **Settings (设置) → Advanced
-(高级) → Android Compatibility Module (Android 兼容模块)**. This release has no
-persistent disable toggle; opening a Java/Dex site again prepares the runtime
-automatically. Avoiding Java/Dex `csp_` providers prevents it from being
-triggered.
-
-Quitting OKVideoMac does not forcibly stop the dedicated Emulator. Click
-**Stop (停止)** before quitting if you do not want it to keep using resources.
-
-## Current platform scope
-
-The 0.4.1 public build targets Apple Silicon / arm64, and the runtime selects
-only `arm64-v8a` system images. It does not select `x86_64` images, so this
-document does not claim Intel Mac Android Bridge support. Rosetta is not
-required.
-
-For Android SDK, Emulator, and hardware requirements, use the official Android
-documentation:
-
-- [Install Android Studio](https://developer.android.com/studio/install.html)
-- [SDK Manager](https://developer.android.com/studio/intro/update.html#sdk-manager)
-- [Configure Emulator acceleration](https://developer.android.com/studio/run/emulator-acceleration)
+Refer to [Android Developers](https://developer.android.com/studio) for upstream
+Android terms and [Azul](https://www.azul.com/downloads/) for Zulu JRE details.

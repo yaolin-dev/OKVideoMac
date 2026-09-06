@@ -78,6 +78,12 @@ Gatekeeper 和 source/binary 外层哈希绑定后才能公开发布。
    可执行文件；否则脚本从 `PATH` 查找 `node`。找不到时 Release 构建会立即
    失败，而不会生成缺少 Node runtime 的残缺 App。
 
+面向最终用户的 Managed Android Runtime 与 Android Bridge 的“构建 APK”前置条件
+不同：用户不需要上述 JDK 或 Android SDK。App 在第一次真实 Dex 调用时，根据
+`Packages/AndroidRuntimeKit/.../RuntimeCandidateMatrix.json` 下载固定 API 35
+Profile 到自己的 Application Support 目录。开发者本机的 Java、Android Studio、
+Homebrew ADB 或 SDK 不能代替 Managed Purity 门禁。
+
 ## 工程和测试
 
 ```bash
@@ -103,6 +109,25 @@ xcodebuild \
   CODE_SIGNING_ALLOWED=NO \
   test
 ```
+
+AndroidRuntimeKit 的普通测试（真实下载测试按设计跳过）：
+
+```bash
+swift test --package-path Packages/AndroidRuntimeKit
+```
+
+发布验证可在隔离的 `/tmp` Application Support 目录执行一次真实 Profile 安装：
+
+```bash
+OKVIDEOMAC_MANAGED_RUNTIME_E2E_SUPPORT=/tmp/okvideomac-runtime-e2e \
+  swift test --package-path Packages/AndroidRuntimeKit \
+  --filter LiveManagedRuntimeE2ETests/testProductionCatalogInstallsIntoAnEmptyManagedRoot
+```
+
+该测试会下载约 2.44 GB 并展开约 5.7 GB。它不得指向真实用户的
+`~/Library/Application Support/OKVideoMac`。随后使用 `android-runtime-matrix`
+对该 Generation 的 `sdk`/`jre` 运行现有完整 Emulator、private ADB、Bridge、Dex
+和二次复用链路。普通 CI 不运行真实 Emulator E2E，也不得把编译通过表述为实机验证。
 
 `OKVIDEOMAC_BUILD_ROOT` 未设置时默认使用仓库内的 `Vendor/Build`。如需把下载
 缓存、第三方源码、原生构建目录、DerivedData 和 `Artifacts` 放到其他磁盘，

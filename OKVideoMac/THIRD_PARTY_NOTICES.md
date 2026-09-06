@@ -58,6 +58,28 @@ from the Phase 2 APK because its exact corresponding source could not be
 recovered. It is not part of the distributed runtime inventory. See
 `Docs/XPP3_1_1_3_3_REMEDIATION.md`.
 
+## On-demand Managed Android Runtime
+
+The Release App contains a catalog and installer, but does not bundle the
+multi-gigabyte Runtime payload. Only after explicit user action, OKVideoMac may
+download the fixed `r1-api35-arm64-20260907` profile into its private
+Application Support directory:
+
+| Component | Fixed version | Source | License / terms |
+| --- | --- | --- | --- |
+| Azul Zulu JRE | 17.0.19+10 (Zulu 17.66.19), macOS arm64 | `cdn.azul.com` | GPL-2.0 with Classpath Exception; [Azul OpenJDK terms](https://www.azul.com/products/core/openjdk-terms-of-use/) |
+| Android Command-line Tools | 22.0, build 15859902, macOS arm64 | `dl.google.com` | [Android SDK License](https://developer.android.com/studio/terms) |
+| Android Platform Tools / ADB | 37.0.0 | `dl.google.com` | Android SDK License |
+| Android Emulator | 36.6.11, build 15507667, macOS arm64 | `dl.google.com` | Android SDK License |
+| Android Platform | API 35 r02, extension 13 | `dl.google.com` | Android SDK License |
+| Google APIs system image | API 35 r09, extension 13, arm64-v8a | `dl.google.com` | Android SDK License |
+
+Exact URLs, SHA-256 values, sizes, package identities, and archive layouts are
+in the bundled `RuntimeCandidateMatrix.json`. License acceptance is presented
+before download and is not preselected. These payloads are not part of the App
+bundle's binary SBOM; diagnostics identify the installed generation and
+versions separately.
+
 ## Build tooling distributed in source form
 
 The repository tracks the Gradle 8.9 wrapper JAR. The wrapper properties lock

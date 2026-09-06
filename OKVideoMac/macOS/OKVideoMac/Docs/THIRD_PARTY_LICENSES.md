@@ -20,3 +20,9 @@ Release packaging copies those materials to
 `OKVideoMac.app/Contents/Resources/Legal/`. Third-party components remain under
 their own licenses; the project-level `GPL-3.0-only` license does not replace
 those terms.
+
+The App also contains an on-demand Managed Android Runtime catalog. Downloaded
+Azul Zulu JRE and Google Android SDK/Emulator artifacts are not embedded in the
+Release App; their fixed versions, upstream terms, URLs, SHA-256 values, and
+user license gate are documented in `OKVideoMac/THIRD_PARTY_NOTICES.md` and the
+bundled `RuntimeCandidateMatrix.json`.

@@ -28,6 +28,13 @@ Build 98 同时把主导航改为 AppKit 原生 Source List 与 Sidebar 材质�
 App Store 的字号、间距、状态颜色和蓝色语义图标。搜索框有文字时第一次 Esc
 只清空内容并保持焦点，空框再次 Esc 才退出搜索。
 
+当前源码候选也已把可选 Android 兼容环境产品化。第一次真正执行 Java/Dex
+`csp_` 请求时，原请求会暂停并出现安装提示；OKVideoMac 将固定版本、SHA-256
+锁定的 JRE、SDK 工具、Emulator 与 API 35 Google APIs arm64 镜像下载到自己的
+Application Support 目录，在 staging 中校验后原子启用一个不可变 Generation，
+随后自动继续原请求。普通用户不再需要安装 Android Studio、Homebrew、JDK 或
+执行命令行配置。
+
 ## 0.4.1 Highlights
 
 0.4.1 重点改善部分 TVBox / Java/Dex Spider 使用的可选 Android 兼容 Runtime。
@@ -138,7 +145,7 @@ OKVideoMac 现在能够安全接管上一轮留下的健康私有 Emulator，串
 | CMS XML / Native type 4 | Partial | 覆盖窄于 JSON 路径 |
 | QuickJS Spider | Selected | 符合当前接口的部分 CatVod/FongMi 风格脚本 |
 | Node `.js.md5` | Selected | CatVod/CatPaw 风格 Node 视频接口兼容子集 |
-| Java/Dex `csp_` | Experimental | 需要外部 Android 环境和可选 Bridge |
+| Java/Dex `csp_` | Experimental | 首次真实 Dex 使用时按需安装 App 自管 API 35 Runtime |
 | M3U / TXT / JSON 直播 | Supported | 通过独立直播源导入器使用 |
 | XMLTV EPG | Supported | 不需要 Android |
 | 顶层 `lives`、parser type 2/3/4 | Unsupported | 可解析部分字段，但没有完整执行链 |
@@ -151,7 +158,8 @@ OKVideoMac 现在能够安全接管上一轮留下的健康私有 Emulator，串
 
 - macOS 12.0 或更高版本；
 - Apple Silicon（`arm64`）；
-- 只有 Java/Dex `csp_` 源需要外部 Android SDK、ADB、Emulator 和 arm64 system image。
+- 只有 Java/Dex `csp_` 源需要可选 Android 兼容组件；首次使用时由 OKVideoMac
+  提示下载和管理。
 
 下载 `OKVideoMac-0.4.1.dmg`，打开后将 `OKVideoMac.app` 拖入 Applications。
 正式包已经 Apple 公证，不需要也不应关闭 Gatekeeper 或 SIP。
@@ -168,7 +176,9 @@ MacPorts libc++/libc++abi 输入未能恢复；它们不会被误标为可重复
 ## 已知限制
 
 - 仅支持 Apple Silicon，不提供 Intel 或 Universal Binary。
-- Java/Dex Bridge 为 Experimental，依赖外部 Android 环境。
+- Java/Dex Bridge 仍为 Experimental；Managed API 35 Profile 只在一台
+  M1 / macOS 14.8.8 完成实机 E2E，macOS 12、13、15 尚无对应实机 Emulator
+  E2E 结论。
 - QuickJS、Node、网盘和网页嗅探只兼容已实现的接口，上游变化可能需要后续适配。
 - TVBox/FongMi 顶层 `lives`、catchup/timeshift、parser type 2/3/4 和 DRM 不受支持。
 - 大型旧数据库升级可能出现一次性启动停顿；TMDB 元数据增强计划留待后续版本。

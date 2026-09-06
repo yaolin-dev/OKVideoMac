@@ -2,8 +2,9 @@
 
 ## Status
 
-Accepted as a single-candidate engineering baseline. API 35 remains an
-evaluation candidate and is not yet a public downloadable generation.
+Accepted as the single-candidate engineering baseline. API 35 remains an
+`evaluation` candidate for the wider machine matrix and is now the fixed,
+installable default managed profile for product validation.
 
 ## Candidate scope
 
@@ -25,12 +26,12 @@ The isolated run used:
 All required phases passed:
 
 - fresh AVD creation
-- cold boot private ADB online in 12.48 seconds
-- cold boot completion in a further 9.10 seconds
+- cold boot private ADB online in 13.71 seconds
+- cold boot completion in a further 9.18 seconds (22.90 seconds total)
 - Bridge install, start, and health check
 - real Dex Spider invocation returning `OKVideoMac Matrix PASS`
 - controlled shutdown
-- second boot private ADB online in 11.35 seconds
+- second boot private ADB online in 10.33 seconds
 - reused Bridge health check and final shutdown
 - isolated tool, AVD, key, port, and environment checks
 
@@ -40,8 +41,9 @@ server were all gone after final cleanup. The production Runtime was never
 started or mutated by the run.
 
 This evidence proves the selected API 35 guest works on this host. It does not
-yet prove clean-machine behavior or macOS 12, 13, and 15 coverage, so the
-candidate remains `evaluation` in the bundled catalog.
+prove macOS 12, 13, and 15 real-machine coverage, so the Candidate Matrix entry
+remains `evaluation`. Product profile status is a separate dimension: the same
+locked generation is the shipped `default` profile.
 
 ## Installation transaction
 
@@ -71,6 +73,14 @@ destinations reject absolute paths and traversal; extracted symlinks must stay
 inside their staging tree. Transaction diagnostics do not persist arbitrary
 underlying error text or user paths.
 
+The official direct Emulator archive does not contain the local SDK
+`emulator/package.xml` normally written by `sdkmanager`. The installer creates
+that metadata inside staging from the pinned Catalog package ID and revision,
+without overwriting artifact-provided metadata. This is required for the
+managed `avdmanager` to recognize the installed Emulator package. A second
+empty-root installation test and a full Session matrix were run from that exact
+installer output.
+
 On download, hash, extraction, validation, or cancellation failure, the active
 pointer is not changed and only that transaction's staging directory is
 removed. Downloads that passed SHA-256 may be reused. A generation committed
@@ -78,12 +88,16 @@ before a pointer-write failure remains inactive and can be validated and
 activated by a retry. AVD userdata remains outside all generations and is not
 part of installation rollback.
 
-## Deferred release gates
+## Productization update
 
-- Pin official immutable URLs, hashes, sizes, licenses, and archive layouts for
-  the JRE and each Android component.
-- Run the selected API 35 candidate on the required clean and supported macOS
-  host set.
-- Publish the first non-empty Runtime Generation only after those gates pass.
-- Connect installation progress and explicit license acceptance to the main
-  app UI without changing `AndroidDexBridgeRuntime` Session ownership.
+- Catalog `managed-runtime-2026-09-07` pins the API 35 generation, official
+  Google/Azul URLs, exact compressed sizes and SHA-256 values, licenses,
+  architectures, destinations, expected archive roots, and extraction caps.
+- The main app now presents explicit license acceptance and real-byte progress,
+  while `AndroidManagedRuntimeManager` coordinates installation independently
+  from `AndroidDexBridgeRuntime` Session ownership.
+- macOS 12/13/15 real-machine Emulator E2E remains a field-validation item and
+  is not implied by the macOS 12 deployment target.
+- The final empty-root transaction consumed 2,442,693,558 compressed bytes and
+  produced 5,713,038,554 logical bytes. Using the verified local download cache,
+  materialization, validation, and activation took 28.37 seconds.

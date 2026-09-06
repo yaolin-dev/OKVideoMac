@@ -30,6 +30,15 @@ Build 98 also adopts AppKit's native source-list and sidebar material for the
 primary navigation. Search follows the App Store interaction model: Escape
 clears a non-empty query first, then exits search when the field is empty.
 
+This source candidate also productizes the optional Android compatibility
+environment. The first Java/Dex `csp_` request now pauses and offers to install
+an app-managed, API 35 Google APIs arm64 Runtime. OKVideoMac downloads the
+fixed, SHA-256-pinned JRE, SDK tools, Emulator, and system image into its own
+Application Support directory, validates them in staging, atomically activates
+one immutable generation, then resumes the original request. Android Studio,
+Homebrew, a system JDK, and command-line setup are no longer part of the normal
+user path.
+
 ## 0.4.1 Highlights
 
 Version 0.4.1 improves the optional Android compatibility Runtime used by
@@ -164,7 +173,7 @@ requirements, and media behavior—not by an ecosystem brand.
 | CMS XML / Native type 4 | Partial | Coverage is narrower than JSON |
 | QuickJS Spider | Selected | Selected CatVod/FongMi-style scripts matching the current API |
 | Node `.js.md5` | Selected | Compatible CatVod/CatPaw-style video-interface subset |
-| Java/Dex `csp_` | Experimental | Requires an external Android environment and optional Bridge |
+| Java/Dex `csp_` | Experimental | Optional app-managed API 35 Runtime; installed on first real Dex use |
 | M3U / TXT / JSON Live | Supported | Imported through the dedicated Live importer |
 | XMLTV EPG | Supported | Android is not required |
 | Top-level `lives`, parser types 2/3/4 | Unsupported | Some fields parse, but no complete execution path exists |
@@ -178,8 +187,8 @@ Requirements:
 
 - macOS 12.0 or later;
 - Apple Silicon (`arm64`);
-- only Java/Dex `csp_` sources need an external Android SDK, ADB, Emulator, and
-  arm64 system image.
+- only Java/Dex `csp_` sources need the optional Android compatibility
+  component; OKVideoMac offers to download and manage it on first use.
 
 Download `OKVideoMac-0.4.1.dmg`, open it, and drag `OKVideoMac.app` to
 Applications. The official image is notarized by Apple; do not disable
@@ -200,7 +209,9 @@ not be recovered.
 ## Known limitations
 
 - Apple Silicon only; no Intel or Universal Binary build is provided.
-- The Java/Dex Bridge is Experimental and depends on an external Android setup.
+- The Java/Dex Bridge remains Experimental. Its managed API 35 profile is
+  verified on one M1 / macOS 14.8.8 host; macOS 12, 13, and 15 have not yet
+  received real-machine Emulator E2E verification.
 - QuickJS, Node, cloud, and web-sniffing paths implement selected interfaces;
   upstream changes can require compatibility updates.
 - Top-level TVBox/FongMi `lives`, catchup/timeshift, parser types 2/3/4, and DRM

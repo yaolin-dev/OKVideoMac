@@ -22,6 +22,7 @@
 		547E70EE1CB6395E47E23C62 /* ConfigurationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F96551D818B82A3B4B38456B /* ConfigurationView.swift */; };
 		5728CE6395E44C04B4A0C12A /* AppEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09C1F786F0D9BA2EB9105485 /* AppEnvironment.swift */; };
 		6C218C2C6AAC7BA83B2DB968 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = ED0F982CA57DBEA3A9CBF1FE /* LICENSE */; };
+		6CCB5B911833DDAFF2E3C740 /* AndroidRuntimeInstallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2F4D267570538F3BA5BA36A /* AndroidRuntimeInstallView.swift */; };
 		6CDA157B1D9D80E812D81034 /* FavoritesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEE09C76DBAB9FF2328487B7 /* FavoritesView.swift */; };
 		6E4F5AA244E052ECA855ECA6 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17AF967B0C8608167C0A2531 /* SettingsView.swift */; };
 		7133DE14D3CE9A20F56BADFF /* PortableBackup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E49D86C26BE1BB599E9FAA5 /* PortableBackup.swift */; };
@@ -95,6 +96,7 @@
 		D6CD897F3EA6681258B14A99 /* AppParseExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppParseExecutor.swift; sourceTree = "<group>"; };
 		D7765776920879CB4CD0A540 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		D8754CA1D367DB8EB69DB9D9 /* CatPawProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatPawProtocol.swift; sourceTree = "<group>"; };
+		E2F4D267570538F3BA5BA36A /* AndroidRuntimeInstallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AndroidRuntimeInstallView.swift; sourceTree = "<group>"; };
 		E497EB47C4C1AD4047675EFC /* NodeRuntimeContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeRuntimeContract.swift; sourceTree = "<group>"; };
 		ED0F982CA57DBEA3A9CBF1FE /* LICENSE */ = {isa = PBXFileReference; path = LICENSE; sourceTree = "<group>"; };
 		EEE09C76DBAB9FF2328487B7 /* FavoritesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesView.swift; sourceTree = "<group>"; };
@@ -230,6 +232,7 @@
 		82D1F518EA79A329973E4A9C /* Settings */ = {
 			isa = PBXGroup;
 			children = (
+				E2F4D267570538F3BA5BA36A /* AndroidRuntimeInstallView.swift */,
 				17AF967B0C8608167C0A2531 /* SettingsView.swift */,
 			);
 			path = Settings;
@@ -551,6 +554,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				6CCB5B911833DDAFF2E3C740 /* AndroidRuntimeInstallView.swift in Sources */,
 				5728CE6395E44C04B4A0C12A /* AppEnvironment.swift in Sources */,
 				F9FF431B06B6D4B13A435C8A /* AppParseExecutor.swift in Sources */,
 				0DC49DC6E8989EB3C7FFADD2 /* AppState.swift in Sources */,

@@ -14,6 +14,42 @@ public enum RuntimeInstallationPhase: String, Codable, Sendable {
     case cancelled
 }
 
+public struct RuntimeInstallationProgress: Equatable, Sendable {
+    public let phase: RuntimeInstallationPhase
+    public let generationID: RuntimeGenerationID
+    public let componentID: String?
+    public let receivedBytes: Int64
+    public let componentBytes: Int64
+    public let completedBytes: Int64
+    public let totalBytes: Int64
+
+    public init(
+        phase: RuntimeInstallationPhase,
+        generationID: RuntimeGenerationID,
+        componentID: String? = nil,
+        receivedBytes: Int64 = 0,
+        componentBytes: Int64 = 0,
+        completedBytes: Int64 = 0,
+        totalBytes: Int64 = 0
+    ) {
+        self.phase = phase
+        self.generationID = generationID
+        self.componentID = componentID
+        self.receivedBytes = receivedBytes
+        self.componentBytes = componentBytes
+        self.completedBytes = completedBytes
+        self.totalBytes = totalBytes
+    }
+
+    public var fractionCompleted: Double? {
+        guard totalBytes > 0 else { return nil }
+        return min(
+            1,
+            max(0, Double(completedBytes + receivedBytes) / Double(totalBytes))
+        )
+    }
+}
+
 public struct RuntimeInstallationTransaction: Codable, Equatable, Sendable {
     public static let supportedSchemaVersion = 1
 
@@ -88,6 +124,9 @@ public enum RuntimeInstallationError: LocalizedError, Equatable {
     case unreadableTransactionJournal
     case unsafeTransactionJournal
     case processFailed(String)
+    case insufficientDiskSpace(required: Int64, available: Int64)
+    case invalidDownloadResponse(String)
+    case downloadSizeMismatch(String)
 
     public var errorDescription: String? {
         switch self {
@@ -121,6 +160,12 @@ public enum RuntimeInstallationError: LocalizedError, Equatable {
             return "The previous Runtime installation transaction is unsafe"
         case .processFailed(let executable):
             return "Runtime validation process failed: \(executable)"
+        case let .insufficientDiskSpace(required, available):
+            return "Managed Android Runtime needs \(required) bytes but only \(available) bytes are available"
+        case .invalidDownloadResponse(let detail):
+            return "Runtime download response is invalid: \(detail)"
+        case .downloadSizeMismatch(let id):
+            return "Runtime component download size does not match the catalog: \(id)"
         }
     }
 }
@@ -131,6 +176,15 @@ public protocol RuntimeArtifactDownloading: Sendable {
     func download(
         component: RuntimeComponentDescriptor,
         to destination: URL
+    ) async throws
+}
+
+public protocol ProgressReportingRuntimeArtifactDownloading:
+    RuntimeArtifactDownloading {
+    func download(
+        component: RuntimeComponentDescriptor,
+        to destination: URL,
+        progress: @escaping @Sendable (Int64, Int64) -> Void
     ) async throws
 }
 
@@ -152,15 +206,24 @@ public protocol StagedRuntimeValidating: Sendable {
 }
 
 public final class URLSessionRuntimeArtifactDownloader:
-    RuntimeArtifactDownloading, @unchecked Sendable {
-    private let session: URLSession
+    ProgressReportingRuntimeArtifactDownloading, @unchecked Sendable {
+    private let configuration: URLSessionConfiguration
     private let fileManager: FileManager
+    private let allowedHosts: Set<String>
 
     public init(
-        session: URLSession = .shared,
+        configuration: URLSessionConfiguration? = nil,
+        allowedHosts: Set<String> = [],
         fileManager: FileManager = .default
     ) {
-        self.session = session
+        let configuration = configuration ?? .ephemeral
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 7_200
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        configuration.httpMaximumConnectionsPerHost = 3
+        self.configuration = configuration
+        self.allowedHosts = Set(allowedHosts.map { $0.lowercased() })
         self.fileManager = fileManager
     }
 
@@ -168,18 +231,316 @@ public final class URLSessionRuntimeArtifactDownloader:
         component: RuntimeComponentDescriptor,
         to destination: URL
     ) async throws {
-        let (temporary, response) = try await session.download(
-            from: component.downloadURL
+        try await download(
+            component: component,
+            to: destination,
+            progress: { _, _ in }
         )
-        guard let http = response as? HTTPURLResponse,
-              (200..<300).contains(http.statusCode) else {
-            throw URLError(.badServerResponse)
+    }
+
+    public func download(
+        component: RuntimeComponentDescriptor,
+        to destination: URL,
+        progress: @escaping @Sendable (Int64, Int64) -> Void
+    ) async throws {
+        let originalHost = component.downloadURL.host?.lowercased() ?? ""
+        let hosts = allowedHosts.isEmpty
+            ? Set([originalHost])
+            : allowedHosts
+        var attempt = 0
+        while true {
+            try Task.checkCancellation()
+            let operation = RuntimeResumableDownloadOperation(
+                configuration: configuration,
+                component: component,
+                destination: destination,
+                allowedHosts: hosts,
+                fileManager: fileManager,
+                progress: progress
+            )
+            do {
+                try await operation.run()
+                return
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                guard attempt < 2, Self.isRetryable(error) else { throw error }
+                attempt += 1
+                try await Task.sleep(
+                    nanoseconds: UInt64(attempt) * 1_000_000_000
+                )
+            }
         }
-        try Task.checkCancellation()
-        if fileManager.fileExists(atPath: destination.path) {
-            try fileManager.removeItem(at: destination)
+    }
+
+    private static func isRetryable(_ error: Error) -> Bool {
+        guard let error = error as? URLError else { return false }
+        return [
+            .timedOut,
+            .cannotFindHost,
+            .cannotConnectToHost,
+            .networkConnectionLost,
+            .dnsLookupFailed,
+            .notConnectedToInternet,
+            .cannotDecodeRawData,
+            .cannotDecodeContentData
+        ].contains(error.code)
+    }
+}
+
+private final class RuntimeResumableDownloadOperation:
+    NSObject, URLSessionDataDelegate, URLSessionTaskDelegate,
+    @unchecked Sendable {
+    private let lock = NSLock()
+    private let configuration: URLSessionConfiguration
+    private let component: RuntimeComponentDescriptor
+    private let destination: URL
+    private let allowedHosts: Set<String>
+    private let fileManager: FileManager
+    private let progress: @Sendable (Int64, Int64) -> Void
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var session: URLSession?
+    private var task: URLSessionDataTask?
+    private var handle: FileHandle?
+    private var receivedBytes: Int64 = 0
+    private var lastReportedBytes: Int64 = -1
+    private var didComplete = false
+
+    init(
+        configuration: URLSessionConfiguration,
+        component: RuntimeComponentDescriptor,
+        destination: URL,
+        allowedHosts: Set<String>,
+        fileManager: FileManager,
+        progress: @escaping @Sendable (Int64, Int64) -> Void
+    ) {
+        self.configuration = configuration
+        self.component = component
+        self.destination = destination
+        self.allowedHosts = allowedHosts
+        self.fileManager = fileManager
+        self.progress = progress
+    }
+
+    func run() async throws {
+        try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                start(continuation)
+            }
+        }, onCancel: { [weak self] in
+            self?.cancel()
+        })
+    }
+
+    private func start(_ continuation: CheckedContinuation<Void, Error>) {
+        lock.lock()
+        guard !didComplete else {
+            lock.unlock()
+            continuation.resume(throwing: CancellationError())
+            return
         }
-        try fileManager.moveItem(at: temporary, to: destination)
+        self.continuation = continuation
+        do {
+            try fileManager.createDirectory(
+                at: destination.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            var offset = Self.fileSize(destination, fileManager: fileManager)
+            if offset > component.compressedSize {
+                try fileManager.removeItem(at: destination)
+                offset = 0
+            }
+            if !fileManager.fileExists(atPath: destination.path) {
+                guard fileManager.createFile(
+                    atPath: destination.path,
+                    contents: nil,
+                    attributes: [.posixPermissions: 0o600]
+                ) else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+            }
+            receivedBytes = offset
+            var request = URLRequest(url: component.downloadURL)
+            request.timeoutInterval = configuration.timeoutIntervalForRequest
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            // Runtime artifacts are already compressed archives. Asking the
+            // origin and any local HTTP proxy for identity transfer encoding
+            // avoids CFNetwork decoding failures and, critically, keeps byte
+            // ranges aligned with the catalog's compressed artifact bytes.
+            request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+            if offset > 0 {
+                request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
+            }
+            let session = URLSession(
+                configuration: configuration,
+                delegate: self,
+                delegateQueue: nil
+            )
+            self.session = session
+            let task = session.dataTask(with: request)
+            self.task = task
+            lock.unlock()
+            lastReportedBytes = offset
+            progress(offset, component.compressedSize)
+            task.resume()
+        } catch {
+            lock.unlock()
+            finish(error)
+        }
+    }
+
+    private func cancel() {
+        lock.lock()
+        let task = self.task
+        lock.unlock()
+        task?.cancel()
+        if task == nil { finish(CancellationError()) }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let url = request.url,
+              url.scheme?.lowercased() == "https",
+              allowedHosts.contains(url.host?.lowercased() ?? "") else {
+            completionHandler(nil)
+            finish(RuntimeInstallationError.invalidDownloadResponse(
+                "redirect target is not allowlisted"
+            ))
+            return
+        }
+        completionHandler(request)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        do {
+            guard let http = response as? HTTPURLResponse,
+                  let url = response.url,
+                  url.scheme?.lowercased() == "https",
+                  allowedHosts.contains(url.host?.lowercased() ?? "") else {
+                throw RuntimeInstallationError.invalidDownloadResponse(
+                    "non-HTTPS or non-allowlisted response"
+                )
+            }
+            let requestedResume = receivedBytes > 0
+            if requestedResume && http.statusCode == 200 {
+                receivedBytes = 0
+                try Data().write(to: destination, options: .atomic)
+            } else if requestedResume && http.statusCode != 206 {
+                throw RuntimeInstallationError.invalidDownloadResponse(
+                    "HTTP \(http.statusCode) did not honor resume"
+                )
+            } else if !requestedResume && http.statusCode != 200 {
+                throw RuntimeInstallationError.invalidDownloadResponse(
+                    "HTTP \(http.statusCode)"
+                )
+            }
+            if requestedResume, http.statusCode == 206 {
+                let expectedPrefix = "bytes \(receivedBytes)-"
+                guard let contentRange = http.value(
+                    forHTTPHeaderField: "Content-Range"
+                )?.lowercased(), contentRange.hasPrefix(expectedPrefix) else {
+                    throw RuntimeInstallationError.invalidDownloadResponse(
+                        "resume response has an unexpected Content-Range"
+                    )
+                }
+            }
+            if response.expectedContentLength > 0,
+               receivedBytes + response.expectedContentLength
+                > component.compressedSize {
+                throw RuntimeInstallationError.downloadSizeMismatch(
+                    component.id
+                )
+            }
+            handle = try FileHandle(forWritingTo: destination)
+            try handle?.seekToEnd()
+            completionHandler(.allow)
+        } catch {
+            completionHandler(.cancel)
+            finish(error)
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive data: Data
+    ) {
+        do {
+            receivedBytes += Int64(data.count)
+            guard receivedBytes <= component.compressedSize else {
+                throw RuntimeInstallationError.downloadSizeMismatch(
+                    component.id
+                )
+            }
+            try handle?.write(contentsOf: data)
+            if receivedBytes == component.compressedSize
+                || receivedBytes - lastReportedBytes >= 1_048_576 {
+                lastReportedBytes = receivedBytes
+                progress(receivedBytes, component.compressedSize)
+            }
+        } catch {
+            task?.cancel()
+            finish(error)
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        if let error {
+            finish((error as? URLError)?.code == .cancelled
+                ? CancellationError()
+                : error)
+            return
+        }
+        guard receivedBytes == component.compressedSize else {
+            finish(RuntimeInstallationError.downloadSizeMismatch(component.id))
+            return
+        }
+        finish(nil)
+    }
+
+    private func finish(_ error: Error?) {
+        lock.lock()
+        guard !didComplete else {
+            lock.unlock()
+            return
+        }
+        didComplete = true
+        let continuation = self.continuation
+        self.continuation = nil
+        let handle = self.handle
+        self.handle = nil
+        let session = self.session
+        self.session = nil
+        lock.unlock()
+        try? handle?.close()
+        session?.finishTasksAndInvalidate()
+        if let error {
+            continuation?.resume(throwing: error)
+        } else {
+            continuation?.resume()
+        }
+    }
+
+    private static func fileSize(
+        _ url: URL,
+        fileManager: FileManager
+    ) -> Int64 {
+        (try? fileManager.attributesOfItem(atPath: url.path)[.size]
+            as? NSNumber)?.int64Value ?? 0
     }
 }
 
@@ -257,7 +618,9 @@ public struct ArchiveRuntimeComponentMaterializer:
                     )
                     try Self.validateArchiveEntries(
                         entries,
-                        componentID: component.id
+                        componentID: component.id,
+                        allowedTopLevelEntries:
+                            installation.allowedTopLevelEntries
                     )
                     try await Self.run(
                         executable: URL(fileURLWithPath: "/usr/bin/ditto"),
@@ -270,7 +633,9 @@ public struct ArchiveRuntimeComponentMaterializer:
                     )
                     try Self.validateArchiveEntries(
                         entries,
-                        componentID: component.id
+                        componentID: component.id,
+                        allowedTopLevelEntries:
+                            installation.allowedTopLevelEntries
                     )
                     try await Self.run(
                         executable: URL(fileURLWithPath: "/usr/bin/tar"),
@@ -288,7 +653,8 @@ public struct ArchiveRuntimeComponentMaterializer:
             }
             try validateExtractedTree(
                 extractionRoot,
-                componentID: component.id
+                componentID: component.id,
+                maximumSize: installation.maximumExtractedSize
             )
             let source = installation.archiveSubpath.map {
                 extractionRoot.appendingPathComponent($0)
@@ -312,7 +678,8 @@ public struct ArchiveRuntimeComponentMaterializer:
 
     private func validateExtractedTree(
         _ root: URL,
-        componentID: String
+        componentID: String,
+        maximumSize: Int64?
     ) throws {
         let fileManager = FileManager.default
         let canonicalRoot = root.resolvingSymlinksInPath().standardizedFileURL
@@ -324,12 +691,23 @@ public struct ArchiveRuntimeComponentMaterializer:
         ) else {
             throw RuntimeInstallationError.archivePayloadMissing(componentID)
         }
+        var extractedSize: Int64 = 0
         for case let item as URL in enumerator {
             let resolved = item.resolvingSymlinksInPath().standardizedFileURL
             guard Self.isDescendantOrEqual(resolved, root: canonicalRoot) else {
                 throw RuntimeInstallationError.archiveEscapesStaging(
                     componentID
                 )
+            }
+            if let size = try? item.resourceValues(
+                forKeys: [.fileSizeKey, .isRegularFileKey]
+            ), size.isRegularFile == true {
+                extractedSize += Int64(size.fileSize ?? 0)
+                if let maximumSize, extractedSize > maximumSize {
+                    throw RuntimeInstallationError.archiveExtractionFailed(
+                        componentID
+                    )
+                }
             }
         }
     }
@@ -398,7 +776,8 @@ public struct ArchiveRuntimeComponentMaterializer:
 
     private static func validateArchiveEntries(
         _ listing: String,
-        componentID: String
+        componentID: String,
+        allowedTopLevelEntries: [String]?
     ) throws {
         for entry in listing.split(separator: "\n", omittingEmptySubsequences: true) {
             var path = String(entry)
@@ -411,6 +790,13 @@ public struct ArchiveRuntimeComponentMaterializer:
                     .allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
             else {
                 throw RuntimeInstallationError.archiveEscapesStaging(
+                    componentID
+                )
+            }
+            if let allowedTopLevelEntries,
+               let topLevel = path.split(separator: "/").first,
+               !allowedTopLevelEntries.contains(String(topLevel)) {
+                throw RuntimeInstallationError.archivePayloadMissing(
                     componentID
                 )
             }
@@ -509,6 +895,7 @@ public struct DefaultStagedRuntimeValidator:
                 arguments: ["-version"],
                 expected: component.expectedVersionOutput
             )
+            try validatePackageIdentity(component, at: location)
         case .systemImage:
             let package = location.appendingPathComponent("package.xml")
             guard let data = try? Data(contentsOf: package),
@@ -526,6 +913,21 @@ public struct DefaultStagedRuntimeValidator:
                     "Android platform jar is missing"
                 )
             }
+        }
+    }
+
+    private func validatePackageIdentity(
+        _ component: RuntimeComponentDescriptor,
+        at location: URL
+    ) throws {
+        guard let packageID = component.packageID else { return }
+        let package = location.appendingPathComponent("package.xml")
+        guard let data = try? Data(contentsOf: package),
+              let text = String(data: data, encoding: .utf8),
+              text.contains("localPackage path=\"\(packageID)\"") else {
+            throw RuntimeInstallationError.stagedValidationFailed(
+                "SDK package identity is missing: \(component.id)"
+            )
         }
     }
 
@@ -655,6 +1057,7 @@ public struct AndroidRuntimeInstaller: Sendable {
     private let downloader: any RuntimeArtifactDownloading
     private let materializer: any RuntimeComponentMaterializing
     private let validator: any StagedRuntimeValidating
+    private let progress: @Sendable (RuntimeInstallationProgress) -> Void
 
     public init(
         layout: AndroidRuntimeLayout,
@@ -664,13 +1067,17 @@ public struct AndroidRuntimeInstaller: Sendable {
         materializer: any RuntimeComponentMaterializing =
             ArchiveRuntimeComponentMaterializer(),
         validator: any StagedRuntimeValidating =
-            DefaultStagedRuntimeValidator()
+            DefaultStagedRuntimeValidator(),
+        progress: @escaping @Sendable (RuntimeInstallationProgress) -> Void = {
+            _ in
+        }
     ) {
         self.layout = layout
         self.catalog = catalog
         self.downloader = downloader
         self.materializer = materializer
         self.validator = validator
+        self.progress = progress
     }
 
     public func install(
@@ -723,6 +1130,18 @@ public struct AndroidRuntimeInstaller: Sendable {
             )
         }
         try validateHost(for: descriptor)
+        let totalBytes = descriptor.components.reduce(Int64(0)) {
+            $0 + $1.compressedSize
+        }
+        progress(RuntimeInstallationProgress(
+            phase: .preparing,
+            generationID: generationID,
+            totalBytes: totalBytes
+        ))
+        try validateDiskSpace(
+            for: descriptor,
+            at: layout.root.deletingLastPathComponent()
+        )
         let previous = readCurrentPointer()?.generationID
         let detection = AndroidRuntimeDetector(layout: layout).detect(
             catalog: catalog
@@ -791,6 +1210,7 @@ public struct AndroidRuntimeInstaller: Sendable {
 
         var phase = RuntimeInstallationPhase.preparing
         var componentID: String?
+        var completedBytes: Int64 = 0
         do {
             try recordTransaction(
                 id: transactionID,
@@ -805,6 +1225,14 @@ public struct AndroidRuntimeInstaller: Sendable {
                 try Task.checkCancellation()
                 componentID = component.id
                 phase = .downloading
+                progress(RuntimeInstallationProgress(
+                    phase: phase,
+                    generationID: generationID,
+                    componentID: component.id,
+                    componentBytes: component.compressedSize,
+                    completedBytes: completedBytes,
+                    totalBytes: totalBytes
+                ))
                 try recordTransaction(
                     id: transactionID,
                     generationID: generationID,
@@ -813,9 +1241,23 @@ public struct AndroidRuntimeInstaller: Sendable {
                     componentID: component.id,
                     startedAt: startedAt
                 )
-                let artifact = try await verifiedArtifact(for: component)
+                let artifact = try await verifiedArtifact(
+                    for: component,
+                    generationID: generationID,
+                    completedBytes: completedBytes,
+                    totalBytes: totalBytes
+                )
                 try Task.checkCancellation()
                 phase = .staging
+                progress(RuntimeInstallationProgress(
+                    phase: phase,
+                    generationID: generationID,
+                    componentID: component.id,
+                    receivedBytes: component.compressedSize,
+                    componentBytes: component.compressedSize,
+                    completedBytes: completedBytes,
+                    totalBytes: totalBytes
+                ))
                 try recordTransaction(
                     id: transactionID,
                     generationID: generationID,
@@ -830,7 +1272,12 @@ public struct AndroidRuntimeInstaller: Sendable {
                     stagedGeneration: stagedGeneration,
                     extractionWorkspace: extractionWorkspace
                 ))
+                completedBytes += component.compressedSize
             }
+            try synthesizeMissingSDKPackageMetadata(
+                generation: stagedGeneration,
+                descriptor: descriptor
+            )
             if fileManager.fileExists(atPath: extractionWorkspace.path) {
                 try fileManager.removeItem(at: extractionWorkspace)
             }
@@ -847,6 +1294,12 @@ public struct AndroidRuntimeInstaller: Sendable {
             try encode(manifest, to: stagedGeneration.manifest)
             phase = .validating
             componentID = nil
+            progress(RuntimeInstallationProgress(
+                phase: phase,
+                generationID: generationID,
+                completedBytes: totalBytes,
+                totalBytes: totalBytes
+            ))
             try recordTransaction(
                 id: transactionID,
                 generationID: generationID,
@@ -863,6 +1316,12 @@ public struct AndroidRuntimeInstaller: Sendable {
             try Task.checkCancellation()
 
             phase = .committing
+            progress(RuntimeInstallationProgress(
+                phase: phase,
+                generationID: generationID,
+                completedBytes: totalBytes,
+                totalBytes: totalBytes
+            ))
             try recordTransaction(
                 id: transactionID,
                 generationID: generationID,
@@ -877,6 +1336,12 @@ public struct AndroidRuntimeInstaller: Sendable {
             )
             try validateCommittedGeneration(generationID)
             phase = .activating
+            progress(RuntimeInstallationProgress(
+                phase: phase,
+                generationID: generationID,
+                completedBytes: totalBytes,
+                totalBytes: totalBytes
+            ))
             try recordTransaction(
                 id: transactionID,
                 generationID: generationID,
@@ -887,6 +1352,12 @@ public struct AndroidRuntimeInstaller: Sendable {
             )
             try writePointer(generationID)
             phase = .completed
+            progress(RuntimeInstallationProgress(
+                phase: phase,
+                generationID: generationID,
+                completedBytes: totalBytes,
+                totalBytes: totalBytes
+            ))
             try? recordTransaction(
                 id: transactionID,
                 generationID: generationID,
@@ -905,6 +1376,13 @@ public struct AndroidRuntimeInstaller: Sendable {
             let finalPhase: RuntimeInstallationPhase = error is CancellationError
                 ? .cancelled
                 : .failed
+            progress(RuntimeInstallationProgress(
+                phase: finalPhase,
+                generationID: generationID,
+                componentID: componentID,
+                completedBytes: completedBytes,
+                totalBytes: totalBytes
+            ))
             try? recordTransaction(
                 id: transactionID,
                 generationID: generationID,
@@ -920,7 +1398,10 @@ public struct AndroidRuntimeInstaller: Sendable {
     }
 
     private func verifiedArtifact(
-        for component: RuntimeComponentDescriptor
+        for component: RuntimeComponentDescriptor,
+        generationID: RuntimeGenerationID,
+        completedBytes: Int64,
+        totalBytes: Int64
     ) async throws -> URL {
         let fileManager = FileManager.default
         let boundary = try ManagedRuntimePathBoundary(root: layout.root)
@@ -929,28 +1410,181 @@ public struct AndroidRuntimeInstaller: Sendable {
             under: layout.downloads
         )
         if fileManager.fileExists(atPath: artifact.path) {
+            progress(RuntimeInstallationProgress(
+                phase: .verifying,
+                generationID: generationID,
+                componentID: component.id,
+                receivedBytes: component.compressedSize,
+                componentBytes: component.compressedSize,
+                completedBytes: completedBytes,
+                totalBytes: totalBytes
+            ))
             if try RuntimeSHA256.digest(of: artifact) == component.sha256 {
                 return artifact
             }
             try fileManager.removeItem(at: artifact)
         }
         let partial = try boundary.descendant(
-            relativePath: "\(UUID().uuidString.lowercased()).partial",
+            relativePath: "\(component.sha256)-\(component.id).partial",
             under: layout.downloads
         )
-        defer { try? fileManager.removeItem(at: partial) }
-        try await downloader.download(component: component, to: partial)
+        let partialSize = ((try? fileManager.attributesOfItem(
+            atPath: partial.path
+        )[.size]) as? NSNumber)?.int64Value ?? 0
+        if partialSize == component.compressedSize {
+            progress(RuntimeInstallationProgress(
+                phase: .verifying,
+                generationID: generationID,
+                componentID: component.id,
+                receivedBytes: component.compressedSize,
+                componentBytes: component.compressedSize,
+                completedBytes: completedBytes,
+                totalBytes: totalBytes
+            ))
+            if try RuntimeSHA256.digest(of: partial) == component.sha256 {
+                try fileManager.moveItem(at: partial, to: artifact)
+                return artifact
+            }
+            try fileManager.removeItem(at: partial)
+        }
+        do {
+            if let reporting = downloader
+                as? any ProgressReportingRuntimeArtifactDownloading {
+                try await reporting.download(
+                    component: component,
+                    to: partial
+                ) { received, expected in
+                    progress(RuntimeInstallationProgress(
+                        phase: .downloading,
+                        generationID: generationID,
+                        componentID: component.id,
+                        receivedBytes: received,
+                        componentBytes: expected,
+                        completedBytes: completedBytes,
+                        totalBytes: totalBytes
+                    ))
+                }
+            } else {
+                try await downloader.download(
+                    component: component,
+                    to: partial
+                )
+            }
+        } catch {
+            if !(error is CancellationError) {
+                let size = ((try? fileManager.attributesOfItem(
+                    atPath: partial.path
+                )[.size]) as? NSNumber)?.int64Value ?? 0
+                if size > component.compressedSize {
+                    try? fileManager.removeItem(at: partial)
+                }
+            }
+            throw error
+        }
         guard fileManager.fileExists(atPath: partial.path) else {
             throw RuntimeInstallationError.downloadDidNotProduceArtifact(
                 component.id
             )
         }
+        progress(RuntimeInstallationProgress(
+            phase: .verifying,
+            generationID: generationID,
+            componentID: component.id,
+            receivedBytes: component.compressedSize,
+            componentBytes: component.compressedSize,
+            completedBytes: completedBytes,
+            totalBytes: totalBytes
+        ))
         let digest = try RuntimeSHA256.digest(of: partial)
         guard digest == component.sha256 else {
+            try? fileManager.removeItem(at: partial)
             throw RuntimeInstallationError.artifactHashMismatch(component.id)
         }
         try fileManager.moveItem(at: partial, to: artifact)
         return artifact
+    }
+
+    private func validateDiskSpace(
+        for descriptor: RuntimeGenerationDescriptor,
+        at volumeURL: URL
+    ) throws {
+        let values = try volumeURL.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+        )
+        guard let available = values.volumeAvailableCapacityForImportantUsage
+        else { return }
+        let compressed = descriptor.components.reduce(Int64(0)) {
+            $0 + $1.compressedSize
+        }
+        let expanded = descriptor.components.reduce(Int64(0)) {
+            $0 + $1.installedSize
+        }
+        let required = Int64(Double(compressed + expanded * 2) * 1.15)
+        guard available >= required else {
+            throw RuntimeInstallationError.insufficientDiskSpace(
+                required: required,
+                available: available
+            )
+        }
+    }
+
+    /// The direct Google Emulator archive omits the local SDK `package.xml`
+    /// that sdkmanager normally writes after installation. avdmanager refuses
+    /// to create an AVD without that record, so the transactional installer
+    /// derives it from the already-pinned Catalog identity. Artifact-provided
+    /// metadata is never overwritten.
+    private func synthesizeMissingSDKPackageMetadata(
+        generation: RuntimeGenerationLayout,
+        descriptor: RuntimeGenerationDescriptor
+    ) throws {
+        let boundary = try ManagedRuntimePathBoundary(root: layout.root)
+        for component in descriptor.components where component.role == .emulator {
+            guard let packageID = component.packageID,
+                  let destination = component.installation?
+                    .destinationRelativePath else { continue }
+            let location = try boundary.descendant(
+                relativePath: destination,
+                under: generation.root
+            )
+            let packageXML = location.appendingPathComponent("package.xml")
+            guard !FileManager.default.fileExists(
+                atPath: packageXML.path
+            ) else { continue }
+            let revision = component.version.split(separator: "-", maxSplits: 1)
+                .first?.split(separator: ".").compactMap { Int($0) } ?? []
+            guard let major = revision.first else {
+                throw RuntimeInstallationError.stagedValidationFailed(
+                    "component revision is invalid: \(component.id)"
+                )
+            }
+            var revisionXML = "<major>\(major)</major>"
+            if revision.count > 1 {
+                revisionXML += "<minor>\(revision[1])</minor>"
+            }
+            if revision.count > 2 {
+                revisionXML += "<micro>\(revision[2])</micro>"
+            }
+            let displayName = component.role == .emulator
+                ? "Android Emulator"
+                : "Android SDK Command-line Tools"
+            let xml = """
+            <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <ns2:repository xmlns:ns2="http://schemas.android.com/repository/android/common/02" xmlns:ns5="http://schemas.android.com/repository/android/generic/02" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><localPackage path="\(Self.xmlEscaped(packageID))" obsolete="false"><type-details xsi:type="ns5:genericDetailsType"/><revision>\(revisionXML)</revision><display-name>\(Self.xmlEscaped(displayName))</display-name></localPackage></ns2:repository>
+            """
+            try Data(xml.utf8).write(to: packageXML, options: [.atomic])
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o644],
+                ofItemAtPath: packageXML.path
+            )
+        }
+    }
+
+    private static func xmlEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
     }
 
     private func validateCommittedGeneration(
@@ -1066,31 +1700,34 @@ public struct AndroidRuntimeInstaller: Sendable {
 
     private func recoverInterruptedInstallation() throws {
         let fileManager = FileManager.default
-        guard fileManager.fileExists(
-            atPath: layout.installationTransaction.path
-        ) else { return }
-        let transaction: RuntimeInstallationTransaction
-        do {
-            transaction = try JSONDecoder().decode(
-                RuntimeInstallationTransaction.self,
-                from: Data(contentsOf: layout.installationTransaction)
-            )
-        } catch {
-            throw RuntimeInstallationError.unreadableTransactionJournal
-        }
-        guard transaction.schemaVersion == RuntimeInstallationTransaction
-            .supportedSchemaVersion,
-              UUID(uuidString: transaction.transactionID) != nil,
-              transaction.generationID.isValid else {
-            throw RuntimeInstallationError.unsafeTransactionJournal
-        }
         let boundary = try ManagedRuntimePathBoundary(root: layout.root)
-        let abandoned = try boundary.descendant(
-            relativePath: transaction.transactionID,
-            under: layout.staging
+        if fileManager.fileExists(
+            atPath: layout.installationTransaction.path
+        ) {
+            let transaction: RuntimeInstallationTransaction
+            do {
+                transaction = try JSONDecoder().decode(
+                    RuntimeInstallationTransaction.self,
+                    from: Data(contentsOf: layout.installationTransaction)
+                )
+            } catch {
+                throw RuntimeInstallationError.unreadableTransactionJournal
+            }
+            guard transaction.schemaVersion == RuntimeInstallationTransaction
+                .supportedSchemaVersion,
+                  UUID(uuidString: transaction.transactionID) != nil,
+                  transaction.generationID.isValid else {
+                throw RuntimeInstallationError.unsafeTransactionJournal
+            }
+        }
+        let entries = try fileManager.contentsOfDirectory(
+            at: layout.staging,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
         )
-        if fileManager.fileExists(atPath: abandoned.path) {
-            try fileManager.removeItem(at: abandoned)
+        for entry in entries where UUID(uuidString: entry.lastPathComponent) != nil {
+            _ = try boundary.validateMutationTarget(entry)
+            try fileManager.removeItem(at: entry)
         }
     }
 

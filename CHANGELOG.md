@@ -2,6 +2,28 @@
 
 ## [0.4.2] - 2026-09-06
 
+### Managed Android Runtime
+
+- Added an on-demand Android compatibility component installer inside
+  OKVideoMac. The first actual Java/Dex request is suspended while the user
+  reviews licenses and installs; success resumes that same request.
+- Added a production, immutable API 35 Google APIs arm64 profile with pinned
+  Google Android artifacts and Azul Zulu JRE 17, exact sizes, SHA-256 hashes,
+  license links, host allowlisting, and archive-layout limits.
+- Added resumable downloads, truthful byte progress, disk preflight, staging,
+  structure/version validation, immutable Runtime Generations, and atomic
+  `current-runtime.json` activation. Failure and cancellation preserve the
+  active Runtime and the separate AVD userdata.
+- Added an installation single-flight independent of the existing Emulator
+  startup single-flight. Concurrent Settings and Dex requests join one
+  installation, then pass the Managed Environment Purity gate before Session.
+- Added Settings install/update/repair states and path-free diagnostic output.
+  Legacy external SDK selection remains available only as an advanced fallback
+  when no managed-generation pointer exists.
+- API 35 remains an `evaluation` candidate and the shipped default managed
+  profile. Real Emulator E2E is verified only on M1 / macOS 14.8.8; other
+  supported macOS versions are not represented as field-verified.
+
 ### Fixed
 
 - Replaced the Android Runtime's approximately 60-second ADB admission loop

@@ -1,4 +1,5 @@
 import AppKit
+import AndroidRuntimeKit
 import Darwin
 import Foundation
 import OKVideoCore
@@ -16,6 +17,7 @@ struct AppEnvironment {
     let epgService: XMLTVService
     let spiderRuntimeFactory: SpiderRuntimeFactory?
     let nodeBundleRuntime: NodeBundleRuntimeService
+    let androidRuntimeManager: AndroidManagedRuntimeManager
     let androidDexBridge: AndroidDexBridgeClient
     let player: PlayerLifecycleController
     let imageRepository: ImageRepository
@@ -54,6 +56,9 @@ struct AppEnvironment {
         let player = PlayerLifecycleController(
             mode: PlayerTeardownMode.configured()
         )
+        let androidRuntimeManager = try AndroidManagedRuntimeManager.live(
+            applicationSupportDirectory: directories.applicationSupport
+        )
         return AppEnvironment(
             directories: directories,
             applicationInstanceLease: applicationInstanceLease,
@@ -78,10 +83,14 @@ struct AppEnvironment {
                 cacheDirectory: directories.caches,
                 remoteHTTPClient: interactiveHTTPClient
             ),
+            androidRuntimeManager: androidRuntimeManager,
             androidDexBridge: AndroidDexBridgeClient(
                 runtime: AndroidDexBridgeRuntime(
                     applicationSupportDirectory: directories.applicationSupport
-                )
+                ),
+                managedRuntimePrerequisite: {
+                    try await androidRuntimeManager.ensureReadyForDex()
+                }
             ),
             player: player,
             imageRepository: ImageRepository(
