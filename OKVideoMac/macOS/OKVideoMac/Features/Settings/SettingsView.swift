@@ -551,8 +551,16 @@ struct SettingsView: View {
                         }
                         .disabled(state.isAndroidRuntimeBusy)
 
-                        Button("修复") {
+                        Button("修复 Bridge") {
                             Task { await state.repairAndroidRuntime() }
+                        }
+                        .disabled(
+                            state.isAndroidRuntimeBusy
+                                || state.androidRuntimeStatus.phase == .unavailable
+                        )
+
+                        Button("修复 Android Runtime…", role: .destructive) {
+                            Task { await state.rebuildAndroidRuntime() }
                         }
                         .disabled(
                             state.isAndroidRuntimeBusy

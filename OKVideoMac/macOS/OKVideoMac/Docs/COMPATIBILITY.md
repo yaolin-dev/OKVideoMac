@@ -1,8 +1,9 @@
 # Compatibility
 
-- 对照版本：0.4.1（Build 95）
-- 最近更新：2026-09-05
-- 当前正式版本：0.4.1（Build 95），Apple Silicon / arm64 / macOS 12.0+
+- 对照版本：0.4.2（Build 96）
+- 最近更新：2026-09-06
+- 当前代码候选版本：0.4.2（Build 96），Apple Silicon / arm64 / macOS 12.0+
+- 当前公开正式版本：0.4.1（Build 95）
 
 ## 概述
 

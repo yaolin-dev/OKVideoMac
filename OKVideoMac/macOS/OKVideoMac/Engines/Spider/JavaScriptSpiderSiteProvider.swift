@@ -1849,10 +1849,18 @@ enum AndroidRuntimeFailureCategory: String, Codable, Sendable {
     case sdkIncomplete
     case javaRuntimeMissing
     case adbUnavailable
+    case adbPrivateServerFailed
     case adbDeviceMissing
     case adbDeviceOffline
+    case adbSerialMissingTimeout
+    case adbOfflineTimeout
+    case adbReconnectFailed
+    case hostGPUADBOfflineTimeout
+    case softwareGPUADBOfflineTimeout
+    case privateAVDRecoveryRequired
     case emulatorLaunchFailed
     case emulatorLaunchTimedOut
+    case emulatorExitedBeforeADB
     case emulatorExitedEarly
     case emulatorExited
     case appRequestedTermination
@@ -1977,6 +1985,13 @@ struct AndroidRuntimeDiagnosticSnapshot: Codable, Equatable, Sendable {
     let emulatorArguments: [String]
     let emulatorEnvironment: [String: String]
     let adbEnvironment: [String: String]
+    let adbPrivateServer: AndroidADBServerDiagnostic?
+    let adbReconnect: AndroidADBReconnectDiagnostic?
+    let adbTransportSummary: AndroidADBTransportSummary?
+    let selectedGPUBackend: AndroidEmulatorGPUBackend?
+    let gpuFallbackAttempted: Bool
+    let gpuFallbackResult: String?
+    let privateAVDRecoveryBackup: String?
     let emulatorTerminationCategory: AndroidRuntimeFailureCategory?
     let avdManagerPath: String?
     let avdManagerExists: Bool
@@ -2067,11 +2082,19 @@ struct AndroidRuntimeFailureError: LocalizedError, Sendable {
             return "创建专用 Android 环境需要 Java Runtime。请安装 JDK，或安装包含 JBR 的 Android Studio。"
         case .adbUnavailable:
             return "ADB 无法使用，无法连接专用 Android Emulator。"
-        case .adbDeviceMissing:
+        case .adbPrivateServerFailed:
+            return "OKVideoMac 无法启动独立的 ADB 服务；没有连接或关闭系统默认 ADB。"
+        case .adbDeviceMissing, .adbSerialMissingTimeout:
             return "Android Emulator 仍在运行，但 ADB 未发现目标设备。"
-        case .adbDeviceOffline:
+        case .adbDeviceOffline, .adbOfflineTimeout,
+             .hostGPUADBOfflineTimeout, .softwareGPUADBOfflineTimeout:
             return "ADB 已发现专用 Android Emulator，但设备一直处于 offline 状态。"
+        case .adbReconnectFailed:
+            return "专用 Android Emulator 的有界 ADB 重连失败。"
+        case .privateAVDRecoveryRequired:
+            return "专用 Android Runtime 使用硬件和软件渲染均无法启动；请在设置中重建 Runtime。"
         case .emulatorLaunchFailed, .emulatorLaunchTimedOut,
+             .emulatorExitedBeforeADB,
              .emulatorExitedEarly, .emulatorExited, .runtimeExited:
             return "Android Emulator 未能正常启动，请导出诊断后重试。"
         case .appRequestedTermination:
@@ -2344,6 +2367,11 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
 
     func repairRuntime() async throws -> AndroidRuntimeStatus {
         try await runtime.repair()
+        return await runtime.status()
+    }
+
+    func rebuildRuntime() async throws -> AndroidRuntimeStatus {
+        try await runtime.rebuildPrivateAVD()
         return await runtime.status()
     }
 
@@ -4285,11 +4313,12 @@ struct AndroidManagedAVDConfiguration {
 
     static func updating(
         _ contents: String,
-        for image: AndroidSystemImage
+        for image: AndroidSystemImage,
+        gpuBackend: AndroidEmulatorGPUBackend = .host
     ) -> String {
         let updates = [
             "hw.gpu.enabled": "yes",
-            "hw.gpu.mode": "host",
+            "hw.gpu.mode": gpuBackend.rawValue,
             "hw.initialOrientation": "portrait",
             "hw.lcd.density": "\(AndroidManagedDisplayProfile.densityDPI)",
             "hw.lcd.height": "\(AndroidManagedDisplayProfile.pixelHeight)",
@@ -4644,6 +4673,8 @@ struct AndroidRuntimeIdentity: Codable, Equatable, Sendable {
     let sdkRoot: URL
     let emulatorExecutable: URL
     var adbExecutable: URL?
+    var adbServerPort: Int?
+    var gpuBackend: AndroidEmulatorGPUBackend?
     let avdName: String
     let avdDirectory: URL
     let pid: Int32
@@ -4713,6 +4744,119 @@ enum AndroidADBTargetState: String, Equatable, Sendable {
     case offline
     case unauthorized
     case unknown
+}
+
+enum AndroidEmulatorGPUBackend: String, Codable, Equatable, Sendable {
+    case host
+    case software
+}
+
+enum AndroidADBTransportAction: Equatable, Sendable {
+    case wait
+    case reconnect
+    case ready
+    case fail(AndroidRuntimeFailureCategory)
+}
+
+struct AndroidADBTransportPolicy: Equatable, Sendable {
+    static let production = AndroidADBTransportPolicy(
+        timeout: 180,
+        offlineGracePeriod: 20,
+        summaryInterval: 5
+    )
+
+    let timeout: TimeInterval
+    let offlineGracePeriod: TimeInterval
+    let summaryInterval: TimeInterval
+
+    func action(
+        elapsed: TimeInterval,
+        targetState: AndroidADBTargetState,
+        processPresent: Bool,
+        processOwned: Bool,
+        reconnectAttempted: Bool,
+        reconnectFailed: Bool = false,
+        gpuBackend: AndroidEmulatorGPUBackend
+    ) -> AndroidADBTransportAction {
+        guard processPresent else { return .fail(.emulatorExitedBeforeADB) }
+        guard processOwned else { return .fail(.emulatorProcessMismatch) }
+        if targetState == .device { return .ready }
+        if elapsed >= timeout {
+            if reconnectFailed {
+                return .fail(.adbReconnectFailed)
+            }
+            switch targetState {
+            case .missing:
+                return .fail(.adbSerialMissingTimeout)
+            case .offline:
+                return .fail(
+                    gpuBackend == .host
+                        ? .hostGPUADBOfflineTimeout
+                        : .softwareGPUADBOfflineTimeout
+                )
+            case .unauthorized, .unknown:
+                return .fail(.adbUnavailable)
+            case .device:
+                return .ready
+            }
+        }
+        if targetState == .offline,
+           elapsed >= offlineGracePeriod,
+           !reconnectAttempted {
+            return .reconnect
+        }
+        return .wait
+    }
+
+    func shouldRecordSummary(
+        elapsed: TimeInterval,
+        previousState: AndroidADBTargetState?,
+        state: AndroidADBTargetState,
+        lastSummaryElapsed: TimeInterval?
+    ) -> Bool {
+        if previousState != state { return true }
+        guard let lastSummaryElapsed else { return true }
+        return elapsed - lastSummaryElapsed >= summaryInterval
+    }
+}
+
+struct AndroidADBReconnectDiagnostic: Codable, Equatable, Sendable {
+    let startedAt: Date
+    let endedAt: Date
+    let monotonicElapsed: TimeInterval
+    let executable: String
+    let serverPort: Int
+    let exitCode: Int32
+    let stdout: String
+    let stderr: String
+    let duration: TimeInterval
+    let stateBefore: String
+    let stateAfter: String
+}
+
+struct AndroidADBTransportSummary: Codable, Equatable, Sendable {
+    let startedAt: Date
+    let endedAt: Date
+    let elapsed: TimeInterval
+    let missingCount: Int
+    let offlineCount: Int
+    let deviceCount: Int
+    let reconnectCount: Int
+    let emulatorAlwaysAlive: Bool
+    let emulatorAlwaysOwned: Bool
+    let consolePortAlwaysListening: Bool?
+    let adbPortAlwaysListening: Bool?
+    let finalState: String
+}
+
+struct AndroidADBServerDiagnostic: Codable, Equatable, Sendable {
+    let port: Int
+    let pid: Int32?
+    let executable: String?
+    let version: String?
+    let birthIdentity: String?
+    let startedAt: Date?
+    let ownedBySelectedSDK: Bool
 }
 
 struct AndroidADBWaitObservation: Codable, Equatable, Sendable {
@@ -4853,9 +4997,27 @@ private struct AndroidManagedRuntimeProcessCandidate: Sendable {
     let executable: URL
     let command: String
     let consolePort: Int
+    let gpuBackend: AndroidEmulatorGPUBackend?
     let birthIdentity: String
     let startedAt: Date
     let referencesPrivateAVD: Bool
+}
+
+private struct AndroidRuntimeProfile: Codable, Equatable, Sendable {
+    static let schema = 1
+
+    let schema: Int
+    var privateADBServerPort: Int
+    var preferredGPUBackend: AndroidEmulatorGPUBackend
+    var privateADBServerPID: Int32?
+    var privateADBServerBirthIdentity: String?
+    var updatedAt: Date
+}
+
+struct AndroidPrivateAVDBackupResult: Equatable, Sendable {
+    let directory: URL
+    let movedItemNames: [String]
+    let metadataItemNames: [String]
 }
 
 private struct AndroidRuntimeContinuityRecord: Codable, Equatable, Sendable {
@@ -5134,6 +5296,7 @@ actor AndroidDexBridgeRuntime {
     private static let manifestSchema = 1
     private static let avdName = "OKVideoMac_Runtime"
     private static let appSessionID = UUID().uuidString
+    static let candidatePrivateADBServerPorts = Array(50_437...50_445)
     static let candidateConsolePorts = Array(
         stride(from: 5_554, through: 5_682, by: 2)
     )
@@ -5144,6 +5307,7 @@ actor AndroidDexBridgeRuntime {
     private let avdDirectory: URL
     private let manifestURL: URL
     private let continuityURL: URL
+    private let runtimeProfileURL: URL
     private let backupDirectory: URL
     private let fileManager: FileManager
     private let defaults: UserDefaults
@@ -5154,6 +5318,18 @@ actor AndroidDexBridgeRuntime {
     private var emulatorProcess: Process?
     private var emulatorOutputHandles: [FileHandle] = []
     private var emulatorProcessRecorder: AndroidEmulatorProcessRecorder?
+    private var adbServerProcess: Process?
+    private var adbServerOutputHandles: [FileHandle] = []
+    private var privateADBServerPort: Int
+    private var preferredGPUBackend: AndroidEmulatorGPUBackend
+    private var persistedADBServerPID: Int32?
+    private var persistedADBServerBirthIdentity: String?
+    private var lastADBServerDiagnostic: AndroidADBServerDiagnostic?
+    private var lastADBReconnectDiagnostic: AndroidADBReconnectDiagnostic?
+    private var lastADBTransportSummary: AndroidADBTransportSummary?
+    private var gpuFallbackAttempted = false
+    private var gpuFallbackResult: String?
+    private var lastPrivateAVDRecoveryBackup: String?
     private var ready = false
     private var acceptsNewerBridge = false
     private var managedDisplayConfigured = false
@@ -5252,6 +5428,10 @@ actor AndroidDexBridgeRuntime {
         continuityURL = runtimeDirectory.appendingPathComponent(
             "runtime-continuity.json"
         )
+        let profileURL = runtimeDirectory.appendingPathComponent(
+            "runtime-profile.json"
+        )
+        runtimeProfileURL = profileURL
         backupDirectory = runtimeDirectory.appendingPathComponent(
             "Backups",
             isDirectory: true
@@ -5261,6 +5441,22 @@ actor AndroidDexBridgeRuntime {
         baseEnvironment = environment
         homeDirectory = fileManager.homeDirectoryForCurrentUser
         currentBootIdentifier = Self.systemBootIdentifier()
+        if let data = try? Data(contentsOf: profileURL),
+           let profile = Self.persistedRuntimeProfile(from: data),
+           Self.candidatePrivateADBServerPorts.contains(
+               profile.privateADBServerPort
+           ) {
+            privateADBServerPort = profile.privateADBServerPort
+            preferredGPUBackend = profile.preferredGPUBackend
+            persistedADBServerPID = profile.privateADBServerPID
+            persistedADBServerBirthIdentity =
+                profile.privateADBServerBirthIdentity
+        } else {
+            privateADBServerPort = Self.candidatePrivateADBServerPorts[0]
+            preferredGPUBackend = .host
+            persistedADBServerPID = nil
+            persistedADBServerBirthIdentity = nil
+        }
         userSelectedSDKRoot = defaults.string(
             forKey: AndroidToolchainResolver.userSDKRootDefaultsKey
         )
@@ -5430,13 +5626,12 @@ actor AndroidDexBridgeRuntime {
             displayWidth: lease.displayPixelWidth,
             displayHeight: lease.displayPixelHeight
         )
-        _ = try run(
-            toolchain.adb,
+        _ = try runADB(
+            toolchain,
             [
                 "-s", identity.serial,
                 "shell", "input", "tap", "\(point.x)", "\(point.y)"
             ],
-            environment: childEnvironment(for: toolchain),
             category: "adb.surface.tap",
             timeout: 5
         )
@@ -5474,8 +5669,8 @@ actor AndroidDexBridgeRuntime {
             displayHeight: lease.displayPixelHeight
         )
         let duration = min(2_000, max(50, durationMilliseconds))
-        _ = try run(
-            toolchain.adb,
+        _ = try runADB(
+            toolchain,
             [
                 "-s", identity.serial,
                 "shell", "input", "swipe",
@@ -5483,7 +5678,6 @@ actor AndroidDexBridgeRuntime {
                 "\(end.x)", "\(end.y)",
                 "\(duration)"
             ],
-            environment: childEnvironment(for: toolchain),
             category: "adb.surface.swipe",
             timeout: 5
         )
@@ -5495,13 +5689,12 @@ actor AndroidDexBridgeRuntime {
         let (_, identity, toolchain) = try activeActionSurfaceLease(
             matching: frame
         )
-        _ = try run(
-            toolchain.adb,
+        _ = try runADB(
+            toolchain,
             [
                 "-s", identity.serial,
                 "shell", "input", "keyevent", "KEYCODE_BACK"
             ],
-            environment: childEnvironment(for: toolchain),
             category: "adb.surface.back",
             timeout: 5
         )
@@ -5520,13 +5713,12 @@ actor AndroidDexBridgeRuntime {
         // `adb shell input text` receives this as one argv item; `%s` is the
         // Android input command's portable representation for spaces.
         let encoded = text.replacingOccurrences(of: " ", with: "%s")
-        _ = try run(
-            toolchain.adb,
+        _ = try runADB(
+            toolchain,
             [
                 "-s", identity.serial,
                 "shell", "input", "text", encoded
             ],
-            environment: childEnvironment(for: toolchain),
             category: "adb.surface.text",
             timeout: 10
         )
@@ -5638,6 +5830,9 @@ actor AndroidDexBridgeRuntime {
             }
         }
         appendEvent(stage: stage, event: event, detail: detail)
+        if stage == .ready, event != "runtimeReady" {
+            appendEvent(stage: stage, event: "runtimeReady", detail: detail)
+        }
         switch stage {
         case .idle:
             operationStatus = nil
@@ -6073,10 +6268,10 @@ actor AndroidDexBridgeRuntime {
         var forwardOwned: Bool?
 
         if let toolchain {
-            adbVersion = try? run(
-                toolchain.adb,
+            try? ensureADBServer(toolchain)
+            adbVersion = try? runADB(
+                toolchain,
                 ["version"],
-                environment: childEnvironment(for: toolchain),
                 category: "diagnostic.adb.version",
                 timeout: 5
             )
@@ -6086,10 +6281,9 @@ actor AndroidDexBridgeRuntime {
                 category: "diagnostic.emulator.version",
                 timeout: 5
             )
-            if let devices = try? run(
-                toolchain.adb,
+            if let devices = try? runADB(
+                toolchain,
                 ["devices", "-l"],
-                environment: childEnvironment(for: toolchain),
                 category: "diagnostic.adb.devices",
                 timeout: 5
             ) {
@@ -6111,10 +6305,9 @@ actor AndroidDexBridgeRuntime {
                 identity,
                 toolchain: toolchain
             )
-            if let observedState = try? run(
-                toolchain.adb,
+            if let observedState = try? runADB(
+                toolchain,
                 ["-s", identity.serial, "get-state"],
-                environment: childEnvironment(for: toolchain),
                 category: "diagnostic.adb.get_state",
                 timeout: 5
             ).trimmingCharacters(in: .whitespacesAndNewlines),
@@ -6327,6 +6520,14 @@ actor AndroidDexBridgeRuntime {
                     toolchain: $0
                 )
             } ?? [:],
+            adbPrivateServer: lastADBServerDiagnostic,
+            adbReconnect: lastADBReconnectDiagnostic,
+            adbTransportSummary: lastADBTransportSummary,
+            selectedGPUBackend: identity?.gpuBackend
+                ?? preferredGPUBackend,
+            gpuFallbackAttempted: gpuFallbackAttempted,
+            gpuFallbackResult: gpuFallbackResult,
+            privateAVDRecoveryBackup: lastPrivateAVDRecoveryBackup,
             emulatorTerminationCategory: Self.emulatorTerminationCategory(
                 emulatorSnapshot
             ),
@@ -6515,17 +6716,110 @@ actor AndroidDexBridgeRuntime {
         )
     }
 
+    func rebuildPrivateAVD() async throws {
+        let stopToken = await Self.startupSingleFlight.beginStopping(
+            permanent: false
+        )
+        do {
+            guard let toolchain = resolver().resolve() else {
+                throw AppError.spider(
+                    "未找到用户选择的完整 Android SDK；未修改现有 Runtime"
+                )
+            }
+            guard toolchain.avdManager != nil else {
+                throw AppError.spider(
+                    "所选 Android SDK 缺少 Command-line Tools（avdmanager）；未修改现有 Runtime"
+                )
+            }
+            guard !resolver().interactiveSystemImages(in: toolchain).isEmpty
+            else {
+                throw AppError.spider(
+                    "所选 Android SDK 没有可用的 arm64 可视 system image；本版本不会自动下载"
+                )
+            }
+            guard resolver().resolveJavaRuntime() != nil else {
+                throw AppError.spider(
+                    "重建 Android Runtime 需要 Java Runtime；未修改现有 Runtime"
+                )
+            }
+
+            let metadataSnapshots = Self.privateAVDMetadataSnapshots(
+                runtimeDirectory: runtimeDirectory,
+                fileManager: fileManager
+            )
+            await performStop(reason: "privateAVDRepair")
+            let matchingProcessCount = try matchingAVDProcessCount()
+            guard Self.privateAVDRepairMayProceed(
+                shutdownMechanism: lastShutdownMechanism,
+                matchingAVDProcessCount: matchingProcessCount
+            ) else {
+                throw AppError.spider(
+                    "无法明确确认 OKVideoMac 专用 Emulator 已停止，已拒绝重建"
+                )
+            }
+
+            appendEvent(
+                stage: .preparingAVD,
+                event: "privateAVDBackupStart"
+            )
+            let backup = try Self.movePrivateAVDToRecoverableBackup(
+                runtimeDirectory: runtimeDirectory,
+                fileManager: fileManager,
+                metadataSnapshots: metadataSnapshots
+            )
+            lastPrivateAVDRecoveryBackup = backup.map {
+                "<app-support>/AndroidRuntime/Backups/"
+                    + $0.directory.lastPathComponent
+            }
+            if let backup {
+                appendEvent(
+                    stage: .preparingAVD,
+                    event: "privateAVDBackupCreated",
+                    detail: backup.directory.lastPathComponent
+                )
+            }
+            clearRuntimeRecord()
+            ready = false
+            acceptsNewerBridge = false
+            lastNetworkCheck = nil
+            lastFailure = nil
+            transition(to: .preparingAVD)
+            try ensureManagedAVD(
+                toolchain,
+                gpuBackend: preferredGPUBackend
+            )
+            appendEvent(
+                stage: .preparingAVD,
+                event: "privateAVDRecreated",
+                detail: "gpu=\(preferredGPUBackend.rawValue)"
+            )
+        } catch {
+            await Self.startupSingleFlight.finishStopping(stopToken)
+            throw error
+        }
+        await Self.startupSingleFlight.finishStopping(stopToken)
+        try await ensureRuntimeStartup(forceInstall: true)
+    }
+
     func stop() async {
         let stopToken = await Self.startupSingleFlight.beginStopping(
             permanent: false
         )
+        let toolchain = loadIdentity().flatMap {
+            resolver().toolchain(at: $0.sdkRoot)
+        } ?? resolver().resolve() ?? lastObservedToolchain
         await performStop(reason: "userRequestedStop")
+        stopPrivateADBServerIfOwned(toolchain: toolchain)
         await Self.startupSingleFlight.finishStopping(stopToken)
     }
 
     func shutdownForApplicationTermination() async {
         await beginApplicationTermination()
+        let toolchain = loadIdentity().flatMap {
+            resolver().toolchain(at: $0.sdkRoot)
+        } ?? resolver().resolve() ?? lastObservedToolchain
         await performStop(reason: "applicationTermination")
+        stopPrivateADBServerIfOwned(toolchain: toolchain)
     }
 
     func beginApplicationTermination() async {
@@ -6902,6 +7196,10 @@ actor AndroidDexBridgeRuntime {
         lastNetworkRecoveryCommand = nil
         connectivityProbeResult = nil
         adbWaitTimeline = []
+        lastADBReconnectDiagnostic = nil
+        lastADBTransportSummary = nil
+        gpuFallbackAttempted = false
+        gpuFallbackResult = nil
         probeStartedAt = nil
         probeRetryCount = 0
         probeHTTPStatus = nil
@@ -6929,48 +7227,55 @@ actor AndroidDexBridgeRuntime {
                         )
                     }
                     try ensureADBServer(recordedToolchain)
-                    let observation = observeRuntimeOwnership(
+                    if try await retireLegacyADBServerRuntimeIfNeeded(
                         recorded,
                         toolchain: recordedToolchain
-                    )
-                    switch observation.decision {
-                    case .reuseOwnedRuntime:
-                        recorded = refreshedIdentityForCurrentSession(
-                            recorded,
-                            toolchain: recordedToolchain
-                        )
-                        try saveIdentity(recorded)
-                        let recordedState = adbTargetState(
-                            recorded,
-                            toolchain: recordedToolchain
-                        )
-                        lastOwnershipClassification = Self
-                            .ownershipClassification(
-                                isCurrentAppLaunch:
-                                    recorded.launchOrigin == .currentLaunch,
-                                targetState: recordedState,
-                                deviceOwned: observation.deviceOwned,
-                                processAge: Date().timeIntervalSince(
-                                    recorded.launchedAt
-                                )
-                            )
-                        activeIdentity = recorded
-                        activeToolchain = recordedToolchain
-                    case let .clearStaleRecord(reason):
-                        appendStaleRecordRecovery(reason)
-                        if reason == .previousSystemBoot {
-                            operationStatus = .starting(
-                                "检测到电脑重启后的旧运行记录，正在重新连接。",
-                                progress: AndroidRuntimeStartupStage
-                                    .locatingSDK.progress ?? 0
-                            )
-                            await Task.yield()
-                        }
+                    ) {
                         clearRuntimeRecord()
-                    case .rejectConflictingRuntime:
-                        throw AppError.spider(
-                            "检测到其他 Emulator 使用了记录端口，未执行任何操作"
+                    } else {
+                        let observation = observeRuntimeOwnership(
+                            recorded,
+                            toolchain: recordedToolchain
                         )
+                        switch observation.decision {
+                        case .reuseOwnedRuntime:
+                            recorded = refreshedIdentityForCurrentSession(
+                                recorded,
+                                toolchain: recordedToolchain
+                            )
+                            try saveIdentity(recorded)
+                            let recordedState = adbTargetState(
+                                recorded,
+                                toolchain: recordedToolchain
+                            )
+                            lastOwnershipClassification = Self
+                                .ownershipClassification(
+                                    isCurrentAppLaunch:
+                                        recorded.launchOrigin == .currentLaunch,
+                                    targetState: recordedState,
+                                    deviceOwned: observation.deviceOwned,
+                                    processAge: Date().timeIntervalSince(
+                                        recorded.launchedAt
+                                    )
+                                )
+                            activeIdentity = recorded
+                            activeToolchain = recordedToolchain
+                        case let .clearStaleRecord(reason):
+                            appendStaleRecordRecovery(reason)
+                            if reason == .previousSystemBoot {
+                                operationStatus = .starting(
+                                    "检测到电脑重启后的旧运行记录，正在重新连接。",
+                                    progress: AndroidRuntimeStartupStage
+                                        .locatingSDK.progress ?? 0
+                                )
+                                await Task.yield()
+                            }
+                            clearRuntimeRecord()
+                        case .rejectConflictingRuntime:
+                            throw AppError.spider(
+                                "检测到其他 Emulator 使用了记录端口，未执行任何操作"
+                            )
+                        }
                     }
                 } else {
                     // A corrupt/legacy-incompatible record is only stale after
@@ -7025,10 +7330,24 @@ actor AndroidDexBridgeRuntime {
                     activeIdentity = discovered
                     activeToolchain = toolchain
                 } else {
-                    try ensureManagedAVD(toolchain)
+                    appendEvent(
+                        stage: .preparingAVD,
+                        event: "prepareAVDStart"
+                    )
+                    try ensureManagedAVD(
+                        toolchain,
+                        gpuBackend: preferredGPUBackend
+                    )
+                    appendEvent(
+                        stage: .preparingAVD,
+                        event: "prepareAVDEnd"
+                    )
                     try clearStalePrivateAVDLocksIfSafe(toolchain: toolchain)
                     transition(to: .launchingEmulator)
-                    identity = try await launchManagedEmulator(toolchain)
+                    identity = try await launchManagedEmulator(
+                        toolchain,
+                        gpuBackend: preferredGPUBackend
+                    )
                     activeIdentity = identity
                     activeToolchain = toolchain
                 }
@@ -7037,9 +7356,99 @@ actor AndroidDexBridgeRuntime {
             lastObservedToolchain = toolchain
 
             transition(to: .waitingForADB)
-            try await waitForOwnership(identity, toolchain: toolchain)
+            do {
+                try await waitForOwnership(identity, toolchain: toolchain)
+            } catch let failure as AndroidRuntimeFailureError
+                where Self.shouldAttemptSoftwareGPUFallback(
+                    failureCategory: failure.record.category,
+                    currentBackend: identity.gpuBackend ?? preferredGPUBackend,
+                    fallbackAlreadyAttempted: gpuFallbackAttempted
+                ) {
+                gpuFallbackAttempted = true
+                appendEvent(
+                    stage: .waitingForADB,
+                    event: "gpuFallbackRequested",
+                    detail: "host -> software"
+                )
+                guard softwareGPUBackendSupported(toolchain: toolchain) else {
+                    gpuFallbackResult = "software_backend_unavailable"
+                    throw privateAVDRecoveryRequired(
+                        "Emulator 不支持 software GPU backend；未修改 userdata"
+                    )
+                }
+                appendEvent(
+                    stage: .waitingForADB,
+                    event: "hostEmulatorShutdownStart",
+                    detail: "pid=\(identity.pid)"
+                )
+                guard await cleanupFailedRuntime(
+                    identity,
+                    toolchain: toolchain,
+                    reason: "gpuFallback",
+                    allowVerifiedSIGKILL: true
+                ), await waitForEmulatorPortsToRelease(identity) else {
+                    gpuFallbackResult = "host_shutdown_unconfirmed"
+                    throw privateAVDRecoveryRequired(
+                        "host GPU Emulator 无法确认安全退出；未启动第二个实例"
+                    )
+                }
+                appendEvent(
+                    stage: .waitingForADB,
+                    event: "hostEmulatorShutdownEnd",
+                    detail: "ports released"
+                )
+                try clearStalePrivateAVDLocksIfSafe(toolchain: toolchain)
+                transition(to: .preparingAVD)
+                appendEvent(
+                    stage: .preparingAVD,
+                    event: "prepareAVDStart",
+                    detail: "gpu=software"
+                )
+                try ensureManagedAVD(toolchain, gpuBackend: .software)
+                appendEvent(
+                    stage: .preparingAVD,
+                    event: "prepareAVDEnd",
+                    detail: "gpu=software"
+                )
+                transition(to: .launchingEmulator)
+                appendEvent(
+                    stage: .launchingEmulator,
+                    event: "softwareEmulatorLaunchStart",
+                    detail: "single bounded fallback"
+                )
+                identity = try await launchManagedEmulator(
+                    toolchain,
+                    gpuBackend: .software
+                )
+                activeIdentity = identity
+                lastObservedIdentity = identity
+                transition(to: .waitingForADB)
+                do {
+                    try await waitForOwnership(
+                        identity,
+                        toolchain: toolchain
+                    )
+                    gpuFallbackResult = "software_transport_ready"
+                } catch let softwareFailure as AndroidRuntimeFailureError
+                    where Self.softwareFallbackRequiresAVDRecovery(
+                        failureCategory: softwareFailure.record.category
+                    ) {
+                    gpuFallbackResult = softwareFailure.record.category.rawValue
+                    appendEvent(
+                        stage: .waitingForADB,
+                        event: "softwareGPUFallbackFailed",
+                        detail: softwareFailure.record.category.rawValue
+                    )
+                    throw privateAVDRecoveryRequired(
+                        "host 与 software GPU 均无法建立 ADB transport；未删除 userdata"
+                    )
+                }
+            }
             transition(to: .waitingForAndroidBoot)
             try await waitForBoot(identity, toolchain: toolchain)
+            try recordSuccessfulGPUBackend(
+                identity.gpuBackend ?? preferredGPUBackend
+            )
             try Task.checkCancellation()
             try configureManagedDisplay(
                 identity,
@@ -7278,6 +7687,9 @@ actor AndroidDexBridgeRuntime {
                     identity,
                     toolchain: toolchain
                 )
+                if cleaned {
+                    stopPrivateADBServerIfOwned(toolchain: toolchain)
+                }
                 if !cleaned {
                     appendEvent(
                         stage: failure.record.stage,
@@ -7574,6 +7986,14 @@ actor AndroidDexBridgeRuntime {
             ), value.trimmingCharacters(in: .whitespacesAndNewlines) == "1" {
                 lastBootCompleted = true
                 lastBootWaitDuration = Date().timeIntervalSince(startedAt)
+                appendEvent(
+                    stage: .waitingForAndroidBoot,
+                    event: "sysBootCompletedFirstObserved",
+                    detail: String(
+                        format: "elapsed=%.3f",
+                        lastBootWaitDuration ?? 0
+                    )
+                )
                 return
             }
             try await Task.sleep(nanoseconds: 1_000_000_000)
@@ -8278,6 +8698,7 @@ actor AndroidDexBridgeRuntime {
                 executable: executable,
                 command: command,
                 consolePort: consolePort,
+                gpuBackend: Self.gpuBackend(in: command),
                 birthIdentity: processIdentity.value,
                 startedAt: processIdentity.startedAt,
                 referencesPrivateAVD: processReferencesPrivateAVD(pid: pid)
@@ -8323,6 +8744,8 @@ actor AndroidDexBridgeRuntime {
             sdkRoot: toolchain.sdkRoot,
             emulatorExecutable: toolchain.emulator,
             adbExecutable: toolchain.adb,
+            adbServerPort: privateADBServerPort,
+            gpuBackend: candidate.gpuBackend ?? preferredGPUBackend,
             avdName: Self.avdName,
             avdDirectory: avdDirectory,
             pid: candidate.pid,
@@ -8422,10 +8845,9 @@ actor AndroidDexBridgeRuntime {
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain
     ) -> AndroidADBTargetState {
-        guard let listing = try? run(
-            toolchain.adb,
+        guard let listing = try? runADB(
+            toolchain,
             ["devices", "-l"],
-            environment: childEnvironment(for: toolchain),
             category: "runtime.discovery.adb_devices",
             timeout: 5
         ) else { return .unknown }
@@ -8508,10 +8930,101 @@ actor AndroidDexBridgeRuntime {
         )
     }
 
+    private func saveRuntimeProfile() throws {
+        try createRuntimeDirectories()
+        let profile = AndroidRuntimeProfile(
+            schema: AndroidRuntimeProfile.schema,
+            privateADBServerPort: privateADBServerPort,
+            preferredGPUBackend: preferredGPUBackend,
+            privateADBServerPID: persistedADBServerPID,
+            privateADBServerBirthIdentity:
+                persistedADBServerBirthIdentity,
+            updatedAt: Date()
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(profile)
+        try data.write(to: runtimeProfileURL, options: [.atomic])
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: runtimeProfileURL.path
+        )
+    }
+
+    private func recordSuccessfulGPUBackend(
+        _ backend: AndroidEmulatorGPUBackend
+    ) throws {
+        preferredGPUBackend = backend
+        try saveRuntimeProfile()
+        appendEvent(
+            stage: currentStage,
+            event: "gpuBackendPersisted",
+            detail: backend.rawValue
+        )
+    }
+
+    static func supportedGPUBackends(from help: String) -> Set<String> {
+        Set(help.split(whereSeparator: \.isNewline).compactMap { line in
+            let fields = line.trimmingCharacters(in: .whitespaces)
+                .split(whereSeparator: \.isWhitespace)
+            guard let first = fields.first else { return nil }
+            let value = String(first)
+            return ["host", "software", "swiftshader", "swangle"]
+                .contains(value) ? value : nil
+        })
+    }
+
+    static func persistedRuntimeProfile(
+        from data: Data
+    ) -> (
+        privateADBServerPort: Int,
+        preferredGPUBackend: AndroidEmulatorGPUBackend,
+        privateADBServerPID: Int32?,
+        privateADBServerBirthIdentity: String?
+    )? {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let profile = try? decoder.decode(
+            AndroidRuntimeProfile.self,
+            from: data
+        ), profile.schema == AndroidRuntimeProfile.schema else { return nil }
+        return (
+            profile.privateADBServerPort,
+            profile.preferredGPUBackend,
+            profile.privateADBServerPID,
+            profile.privateADBServerBirthIdentity
+        )
+    }
+
+    private func softwareGPUBackendSupported(
+        toolchain: AndroidToolchain
+    ) -> Bool {
+        guard let help = try? run(
+            toolchain.emulator,
+            ["-help-gpu"],
+            environment: childEnvironment(for: toolchain),
+            category: "emulator.gpu.capabilities",
+            timeout: 10
+        ) else { return false }
+        return Self.supportedGPUBackends(from: help).contains("software")
+    }
+
     private func childEnvironment(
         for toolchain: AndroidToolchain
     ) -> [String: String] {
         var environment = baseEnvironment
+        // Test hosts and developer launches can inject loader paths that must
+        // never leak into SDK executables spawned by the shipped app.
+        for key in environment.keys where key.hasPrefix("DYLD_") {
+            environment.removeValue(forKey: key)
+        }
+        // A caller may have inherited Android Studio/Homebrew ADB routing.
+        // Remove it and explicitly bind every child to OKVideoMac's private
+        // selected-SDK daemon instead of the global 5037 server.
+        environment.removeValue(forKey: "ADB_SERVER_SOCKET")
+        environment["ANDROID_ADB_SERVER_PORT"] =
+            "\(privateADBServerPort)"
         environment["ANDROID_HOME"] = toolchain.sdkRoot.path
         environment["ANDROID_SDK_ROOT"] = toolchain.sdkRoot.path
         environment["ANDROID_AVD_HOME"] = avdHome.path
@@ -8525,6 +9038,73 @@ actor AndroidDexBridgeRuntime {
             .filter { !$0.isEmpty }
             .joined(separator: ":")
         return environment
+    }
+
+    static func scopedADBArguments(
+        _ arguments: [String],
+        serverPort: Int
+    ) -> [String] {
+        ["-P", "\(serverPort)"] + arguments
+    }
+
+    static func privateADBServerLaunchArguments(port: Int) -> [String] {
+        ["-L", "tcp:localhost:\(port)", "server", "nodaemon"]
+    }
+
+    static func selectPrivateADBServerPort(
+        preferred: Int?,
+        reusable: Set<Int>,
+        occupied: Set<Int>,
+        candidates: [Int] = candidatePrivateADBServerPorts
+    ) -> Int? {
+        let ordered = ([preferred].compactMap { $0 } + candidates).reduce(
+            into: [Int]()
+        ) { result, port in
+            if !result.contains(port) { result.append(port) }
+        }
+        return ordered.first { reusable.contains($0) || !occupied.contains($0) }
+    }
+
+    static func privateADBServerIdentityMatches(
+        listenerPID: Int32,
+        listenerBirthIdentity: String?,
+        listenerExecutable: URL,
+        recordedPID: Int32?,
+        recordedBirthIdentity: String?,
+        selectedADB: URL
+    ) -> Bool {
+        listenerPID == recordedPID
+            && listenerBirthIdentity == recordedBirthIdentity
+            && recordedBirthIdentity != nil
+            && listenerExecutable.standardizedFileURL
+                .resolvingSymlinksInPath()
+                == selectedADB.standardizedFileURL.resolvingSymlinksInPath()
+    }
+
+    static func privateADBServerLaunchMatches(
+        expectedLaunchedPID: Int32?,
+        observedListenerPID: Int32?
+    ) -> Bool {
+        guard let expectedLaunchedPID else { return true }
+        return observedListenerPID == expectedLaunchedPID
+    }
+
+    private func runADB(
+        _ toolchain: AndroidToolchain,
+        _ arguments: [String],
+        category: String = "adb.command",
+        timeout: TimeInterval = 30
+    ) throws -> String {
+        try run(
+            toolchain.adb,
+            Self.scopedADBArguments(
+                arguments,
+                serverPort: privateADBServerPort
+            ),
+            environment: childEnvironment(for: toolchain),
+            category: category,
+            timeout: timeout
+        )
     }
 
     private func diagnosticEmulatorEnvironment(
@@ -8631,6 +9211,128 @@ actor AndroidDexBridgeRuntime {
         return safe
     }
 
+    static func privateAVDMetadataSnapshots(
+        runtimeDirectory: URL,
+        fileManager: FileManager
+    ) -> [String: Data] {
+        let allowed = [
+            "runtime-manifest.json",
+            "runtime-continuity.json",
+            "runtime-profile.json"
+        ]
+        return Dictionary(uniqueKeysWithValues: allowed.compactMap { name in
+            let url = runtimeDirectory.appendingPathComponent(name)
+            guard fileManager.fileExists(atPath: url.path),
+                  let data = try? Data(contentsOf: url) else { return nil }
+            return (name, data)
+        })
+    }
+
+    /// Atomically scopes repair to the private AVD. Items are moved, never
+    /// deleted; if any move/write fails, completed moves are rolled back.
+    static func movePrivateAVDToRecoverableBackup(
+        runtimeDirectory: URL,
+        fileManager: FileManager = .default,
+        now: Date = Date(),
+        identifier: String = UUID().uuidString,
+        metadataSnapshots: [String: Data] = [:]
+    ) throws -> AndroidPrivateAVDBackupResult? {
+        let avdHome = runtimeDirectory.appendingPathComponent(
+            "avd",
+            isDirectory: true
+        )
+        let avd = avdHome.appendingPathComponent(
+            "\(Self.avdName).avd",
+            isDirectory: true
+        )
+        let companion = avdHome.appendingPathComponent(
+            "\(Self.avdName).ini"
+        )
+        let continuity = runtimeDirectory.appendingPathComponent(
+            "runtime-continuity.json"
+        )
+        let movable = [avd, companion, continuity].filter {
+            fileManager.fileExists(atPath: $0.path)
+        }
+        let allowedMetadataNames = Set([
+            "runtime-manifest.json",
+            "runtime-continuity.json",
+            "runtime-profile.json"
+        ])
+        let metadata = metadataSnapshots.filter {
+            allowedMetadataNames.contains($0.key)
+        }
+        guard !movable.isEmpty || !metadata.isEmpty else { return nil }
+
+        let backups = runtimeDirectory.appendingPathComponent(
+            "Backups",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(
+            at: backups,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let safeIdentifier = identifier.filter {
+            $0.isLetter || $0.isNumber || $0 == "-"
+        }
+        let suffix = String(safeIdentifier.prefix(8))
+        let backup = backups.appendingPathComponent(
+            "\(Self.avdName)-\(formatter.string(from: now))-\(suffix)",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(
+            at: backup,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+
+        var completedMoves: [(source: URL, destination: URL)] = []
+        var writtenMetadata: [String] = []
+        do {
+            for source in movable {
+                let destination = backup.appendingPathComponent(
+                    source.lastPathComponent,
+                    isDirectory: source.pathExtension == "avd"
+                )
+                try fileManager.moveItem(at: source, to: destination)
+                completedMoves.append((source, destination))
+            }
+            for (name, data) in metadata.sorted(by: { $0.key < $1.key }) {
+                let destination = backup.appendingPathComponent(name)
+                if !fileManager.fileExists(atPath: destination.path) {
+                    try data.write(to: destination, options: [.atomic])
+                    try fileManager.setAttributes(
+                        [.posixPermissions: 0o600],
+                        ofItemAtPath: destination.path
+                    )
+                }
+                writtenMetadata.append(name)
+            }
+        } catch {
+            for move in completedMoves.reversed()
+                where !fileManager.fileExists(atPath: move.source.path) {
+                try? fileManager.moveItem(
+                    at: move.destination,
+                    to: move.source
+                )
+            }
+            try? fileManager.removeItem(at: backup)
+            throw error
+        }
+        return AndroidPrivateAVDBackupResult(
+            directory: backup,
+            movedItemNames: completedMoves.map {
+                $0.destination.lastPathComponent
+            }.sorted(),
+            metadataItemNames: writtenMetadata.sorted()
+        )
+    }
+
     private func backupManagedAVDForRenderingUpgrade() throws {
         try fileManager.createDirectory(
             at: backupDirectory,
@@ -8701,7 +9403,10 @@ actor AndroidDexBridgeRuntime {
         }
     }
 
-    private func ensureManagedAVD(_ toolchain: AndroidToolchain) throws {
+    private func ensureManagedAVD(
+        _ toolchain: AndroidToolchain,
+        gpuBackend: AndroidEmulatorGPUBackend
+    ) throws {
         try createRuntimeDirectories()
         let configuration = avdDirectory.appendingPathComponent("config.ini")
         if fileManager.fileExists(atPath: configuration.path) {
@@ -8735,7 +9440,8 @@ actor AndroidDexBridgeRuntime {
             }
             let updated = AndroidManagedAVDConfiguration.updating(
                 contents,
-                for: image
+                for: image,
+                gpuBackend: gpuBackend
             )
             if updated != contents {
                 if AndroidManagedAVDConfiguration.requiresSystemImageMigration(
@@ -8800,7 +9506,8 @@ actor AndroidDexBridgeRuntime {
         let contents = try String(contentsOf: configuration, encoding: .utf8)
         let updated = AndroidManagedAVDConfiguration.updating(
             contents,
-            for: image
+            for: image,
+            gpuBackend: gpuBackend
         )
         if updated != contents {
             try Data(updated.utf8).write(
@@ -8826,7 +9533,8 @@ actor AndroidDexBridgeRuntime {
     }
 
     private func launchManagedEmulator(
-        _ toolchain: AndroidToolchain
+        _ toolchain: AndroidToolchain,
+        gpuBackend: AndroidEmulatorGPUBackend
     ) async throws -> AndroidRuntimeIdentity {
         let generation = UUID().uuidString
         var sawPortConflict = false
@@ -8846,10 +9554,16 @@ actor AndroidDexBridgeRuntime {
             let process = Process()
             process.executableURL = toolchain.emulator
             let arguments = Self.emulatorLaunchArguments(
-                consolePort: consolePort
+                consolePort: consolePort,
+                gpuBackend: gpuBackend
             )
             let environment = childEnvironment(for: toolchain)
             let launchAt = Date()
+            appendEvent(
+                stage: .launchingEmulator,
+                event: "emulatorLaunchStart",
+                detail: "port=\(consolePort) gpu=\(gpuBackend.rawValue)"
+            )
             let recorder = AndroidEmulatorProcessRecorder(
                 launchAt: launchAt,
                 stdoutURL: stdoutURL,
@@ -8907,6 +9621,8 @@ actor AndroidDexBridgeRuntime {
                 sdkRoot: toolchain.sdkRoot,
                 emulatorExecutable: toolchain.emulator,
                 adbExecutable: toolchain.adb,
+                adbServerPort: privateADBServerPort,
+                gpuBackend: gpuBackend,
                 avdName: Self.avdName,
                 avdDirectory: avdDirectory,
                 pid: process.processIdentifier,
@@ -8930,6 +9646,11 @@ actor AndroidDexBridgeRuntime {
                     stage: .launchingEmulator,
                     event: "emulator_process_launched",
                     detail: "pid=\(identity.pid) serial=\(identity.serial)"
+                )
+                appendEvent(
+                    stage: .launchingEmulator,
+                    event: "emulatorPIDObserved",
+                    detail: "pid=\(identity.pid)"
                 )
             } catch {
                 recorder.recordTerminationRequestedByApp(
@@ -8994,7 +9715,10 @@ actor AndroidDexBridgeRuntime {
         throw AppError.spider("没有可用的 Android Emulator console port")
     }
 
-    static func emulatorLaunchArguments(consolePort: Int) -> [String] {
+    static func emulatorLaunchArguments(
+        consolePort: Int,
+        gpuBackend: AndroidEmulatorGPUBackend = .host
+    ) -> [String] {
         [
             "-avd", avdName,
             "-port", "\(consolePort)",
@@ -9003,7 +9727,7 @@ actor AndroidDexBridgeRuntime {
             "-no-boot-anim",
             "-no-metrics",
             "-no-snapshot",
-            "-gpu", "host",
+            "-gpu", gpuBackend.rawValue,
             "-accel", "on"
         ]
     }
@@ -9012,89 +9736,363 @@ actor AndroidDexBridgeRuntime {
         "emulator-\(consolePort)"
     }
 
+    static func gpuBackend(in command: String) -> AndroidEmulatorGPUBackend? {
+        let fields = command.split(whereSeparator: { $0.isWhitespace })
+            .map(String.init)
+        guard let index = fields.firstIndex(of: "-gpu"),
+              fields.indices.contains(index + 1) else { return nil }
+        return AndroidEmulatorGPUBackend(rawValue: fields[index + 1])
+    }
+
+    static func shouldAttemptSoftwareGPUFallback(
+        failureCategory: AndroidRuntimeFailureCategory,
+        currentBackend: AndroidEmulatorGPUBackend,
+        fallbackAlreadyAttempted: Bool
+    ) -> Bool {
+        (failureCategory == .hostGPUADBOfflineTimeout
+            || failureCategory == .adbReconnectFailed)
+            && currentBackend == .host
+            && !fallbackAlreadyAttempted
+    }
+
+    static func softwareFallbackRequiresAVDRecovery(
+        failureCategory: AndroidRuntimeFailureCategory
+    ) -> Bool {
+        switch failureCategory {
+        case .softwareGPUADBOfflineTimeout, .adbSerialMissingTimeout,
+             .adbOfflineTimeout, .adbReconnectFailed, .adbUnavailable:
+            return true
+        default:
+            return false
+        }
+    }
+
+    static func privateAVDRepairMayProceed(
+        shutdownMechanism: AndroidRuntimeShutdownMechanism,
+        matchingAVDProcessCount: Int
+    ) -> Bool {
+        shutdownMechanism != .refusedOwnershipMismatch
+            && matchingAVDProcessCount == 0
+    }
+
     private func ensureADBServer(_ toolchain: AndroidToolchain) throws {
-        do {
-            _ = try run(
-                toolchain.adb,
-                ["start-server"],
-                environment: childEnvironment(for: toolchain),
-                category: "adb.server.start",
-                timeout: 15
-            )
-            appendEvent(
-                stage: currentStage,
-                event: "selected_sdk_adb_server_ready",
-                detail: "ADB server 已在 Emulator discovery/launch 前确认"
-            )
-        } catch {
-            throw AndroidRuntimeFailureError(
-                record: AndroidRuntimeFailureRecord(
-                    occurredAt: Date(),
-                    stage: .launchingEmulator,
-                    category: .adbUnavailable,
-                    message: "无法使用所选 Android SDK 启动 ADB server"
-                )
+        appendEvent(
+            stage: currentStage,
+            event: "adbPrivateServerStart",
+            detail: "selected SDK; default 5037 excluded"
+        )
+        let selectedADB = toolchain.adb.standardizedFileURL
+            .resolvingSymlinksInPath()
+        var occupied = Set<Int>()
+        var reusable = Set<Int>()
+        for port in Self.candidatePrivateADBServerPorts {
+            let pids = listeningProcessIDs(on: port)
+            guard !pids.isEmpty else { continue }
+            occupied.insert(port)
+            if pids.count == 1,
+               port == privateADBServerPort,
+               let path = processExecutablePath(pid: pids[0]),
+               Self.privateADBServerIdentityMatches(
+                    listenerPID: pids[0],
+                    listenerBirthIdentity:
+                        processBirthIdentity(pid: pids[0])?.value,
+                    listenerExecutable: URL(fileURLWithPath: path),
+                    recordedPID: persistedADBServerPID,
+                    recordedBirthIdentity:
+                        persistedADBServerBirthIdentity,
+                    selectedADB: selectedADB
+               ) {
+                // An executable match alone is insufficient: another tool
+                // can start the same SDK's adb on a high port. Reuse only the
+                // exact PID and birth identity recorded by OKVideoMac.
+                reusable.insert(port)
+            }
+        }
+        guard let selectedPort = Self.selectPrivateADBServerPort(
+            preferred: privateADBServerPort,
+            reusable: reusable,
+            occupied: occupied
+        ) else {
+            throw adbPrivateServerFailure(
+                "OKVideoMac 私有 ADB 端口范围已被其他进程占用"
             )
         }
+        privateADBServerPort = selectedPort
+
+        var expectedLaunchedPID: Int32?
+        if !reusable.contains(selectedPort) {
+            do {
+                try launchPrivateADBServer(
+                    toolchain: toolchain,
+                    port: selectedPort
+                )
+                expectedLaunchedPID = adbServerProcess?.processIdentifier
+            } catch {
+                throw adbPrivateServerFailure(
+                    "无法使用所选 Android SDK 启动私有 ADB server："
+                        + sanitizedEmulatorText(
+                            error.localizedDescription,
+                            toolchain: toolchain
+                        )
+                )
+            }
+        }
+
+        var diagnostic: AndroidADBServerDiagnostic?
+        for _ in 0..<100 {
+            diagnostic = adbServerDiagnostic(toolchain: toolchain)
+            if diagnostic?.ownedBySelectedSDK == true,
+               Self.privateADBServerLaunchMatches(
+                    expectedLaunchedPID: expectedLaunchedPID,
+                    observedListenerPID: diagnostic?.pid
+               ) {
+                break
+            }
+            if adbServerProcess?.isRunning == false { break }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        guard let diagnostic,
+              diagnostic.ownedBySelectedSDK,
+              Self.privateADBServerLaunchMatches(
+                expectedLaunchedPID: expectedLaunchedPID,
+                observedListenerPID: diagnostic.pid
+              ) else {
+            if adbServerProcess?.isRunning == true {
+                adbServerProcess?.terminate()
+            }
+            adbServerProcess = nil
+            for handle in adbServerOutputHandles { try? handle.close() }
+            adbServerOutputHandles = []
+            throw adbPrivateServerFailure(
+                "私有 ADB server 进程无法通过 selected SDK 身份校验"
+            )
+        }
+        lastADBServerDiagnostic = diagnostic
+        persistedADBServerPID = diagnostic.pid
+        persistedADBServerBirthIdentity = diagnostic.birthIdentity
+        try saveRuntimeProfile()
+        appendEvent(
+            stage: currentStage,
+            event: "adbPrivateServerReady",
+            detail: "port=\(selectedPort) pid=\(diagnostic.pid.map(String.init) ?? "unknown")"
+        )
+    }
+
+    private func launchPrivateADBServer(
+        toolchain: AndroidToolchain,
+        port: Int
+    ) throws {
+        try createRuntimeDirectories()
+        for handle in adbServerOutputHandles {
+            try? handle.close()
+        }
+        adbServerOutputHandles = []
+        adbServerProcess = nil
+
+        let stdoutURL = runtimeDirectory.appendingPathComponent(
+            "adb-server-\(port).stdout.log"
+        )
+        let stderrURL = runtimeDirectory.appendingPathComponent(
+            "adb-server-\(port).stderr.log"
+        )
+        for url in [stdoutURL, stderrURL] {
+            if !fileManager.fileExists(atPath: url.path) {
+                _ = fileManager.createFile(atPath: url.path, contents: nil)
+            }
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.truncate(atOffset: 0)
+            adbServerOutputHandles.append(handle)
+        }
+        guard adbServerOutputHandles.count == 2 else {
+            throw AppError.spider("无法创建私有 ADB server 日志")
+        }
+        let process = Process()
+        process.executableURL = toolchain.adb
+        process.arguments = Self.privateADBServerLaunchArguments(port: port)
+        process.environment = childEnvironment(for: toolchain)
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = adbServerOutputHandles[0]
+        process.standardError = adbServerOutputHandles[1]
+        do {
+            try process.run()
+        } catch {
+            for handle in adbServerOutputHandles { try? handle.close() }
+            adbServerOutputHandles = []
+            throw error
+        }
+        adbServerProcess = process
+        appendEvent(
+            stage: currentStage,
+            event: "adbPrivateServerPIDObserved",
+            detail: "port=\(port) pid=\(process.processIdentifier)"
+        )
+    }
+
+    private func adbPrivateServerFailure(
+        _ message: String
+    ) -> AndroidRuntimeFailureError {
+        AndroidRuntimeFailureError(
+            record: AndroidRuntimeFailureRecord(
+                occurredAt: Date(),
+                stage: currentStage,
+                category: .adbPrivateServerFailed,
+                message: message
+            )
+        )
+    }
+
+    private func listeningProcessIDs(on port: Int) -> [Int32] {
+        let lsof = URL(fileURLWithPath: "/usr/sbin/lsof")
+        guard fileManager.isExecutableFile(atPath: lsof.path) else { return [] }
+        guard let output = try? run(
+            lsof,
+            ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-Fp"],
+            category: "adb.server.listener_identity",
+            timeout: 5
+        ) else { return [] }
+        return Array(Set(output.split(whereSeparator: \.isNewline).compactMap {
+            line in
+            guard line.first == "p" else { return nil }
+            return Int32(line.dropFirst())
+        })).sorted()
+    }
+
+    private func adbServerDiagnostic(
+        toolchain: AndroidToolchain
+    ) -> AndroidADBServerDiagnostic? {
+        let pids = listeningProcessIDs(on: privateADBServerPort)
+        guard pids.count == 1 else { return nil }
+        let pid = pids[0]
+        let actualPath = processExecutablePath(pid: pid).map {
+            URL(fileURLWithPath: $0).standardizedFileURL
+                .resolvingSymlinksInPath()
+        }
+        let selectedPath = toolchain.adb.standardizedFileURL
+            .resolvingSymlinksInPath()
+        let owned = actualPath == selectedPath
+        let birth = processBirthIdentity(pid: pid)
+        let version = owned ? (try? runADB(
+            toolchain,
+            ["version"],
+            category: "adb.server.private.version",
+            timeout: 5
+        )).map(Self.firstDiagnosticLine) : nil
+        return AndroidADBServerDiagnostic(
+            port: privateADBServerPort,
+            pid: pid,
+            executable: actualPath.map {
+                sanitizedEmulatorText($0.path, toolchain: toolchain)
+            },
+            version: version,
+            birthIdentity: birth?.value,
+            startedAt: birth?.startedAt,
+            ownedBySelectedSDK: owned
+        )
+    }
+
+    private func stopPrivateADBServerIfOwned(
+        toolchain: AndroidToolchain?
+    ) {
+        let expectedPID = lastADBServerDiagnostic?.pid
+            ?? persistedADBServerPID
+        let expectedBirthIdentity = lastADBServerDiagnostic?.birthIdentity
+            ?? persistedADBServerBirthIdentity
+        guard let toolchain,
+              let expectedPID,
+              let expectedBirthIdentity,
+              listeningProcessIDs(on: privateADBServerPort) == [expectedPID],
+              processBirthIdentity(pid: expectedPID)?.value
+                == expectedBirthIdentity,
+              processExecutablePath(pid: expectedPID).map({
+                  URL(fileURLWithPath: $0).standardizedFileURL
+                      .resolvingSymlinksInPath()
+              }) == toolchain.adb.standardizedFileURL
+                  .resolvingSymlinksInPath(),
+              let current = adbServerDiagnostic(toolchain: toolchain),
+              current.ownedBySelectedSDK,
+              current.pid == expectedPID,
+              current.birthIdentity == expectedBirthIdentity
+        else { return }
+        _ = try? runADB(
+            toolchain,
+            ["kill-server"],
+            category: "adb.server.private.stop",
+            timeout: 10
+        )
+        appendEvent(
+            stage: currentStage,
+            event: "adbPrivateServerStopped",
+            detail: "port=\(privateADBServerPort)"
+        )
+        for _ in 0..<20 where listeningProcessIDs(
+            on: privateADBServerPort
+        ).contains(current.pid ?? -1) {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if let pid = current.pid,
+           listeningProcessIDs(on: privateADBServerPort).contains(pid),
+           processBirthIdentity(pid: pid)?.value == current.birthIdentity,
+           processExecutablePath(pid: pid).map({
+               URL(fileURLWithPath: $0).standardizedFileURL
+                   .resolvingSymlinksInPath()
+           }) == toolchain.adb.standardizedFileURL.resolvingSymlinksInPath() {
+            _ = Darwin.kill(pid, SIGTERM)
+        }
+        adbServerProcess = nil
+        for handle in adbServerOutputHandles { try? handle.close() }
+        adbServerOutputHandles = []
+        lastADBServerDiagnostic = nil
+        persistedADBServerPID = nil
+        persistedADBServerBirthIdentity = nil
+        try? saveRuntimeProfile()
     }
 
     private func waitForOwnership(
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain
     ) async throws {
+        let policy = AndroidADBTransportPolicy.production
+        let monotonicStart = ProcessInfo.processInfo.systemUptime
+        let wallStart = Date()
         var targetState: AndroidADBTargetState = .missing
         var observedEmulatorSerials: [String] = []
+        var allObservedEmulatorSerials = Set<String>()
         var sanitizedDevices: [String] = []
-        var sawTargetOffline = false
-        var sawUnexpectedEmulatorSerial = false
-        var attemptedOfflineRecovery = false
+        var previousState: AndroidADBTargetState?
+        var lastSummaryElapsed: TimeInterval?
+        var lastPortProbeElapsed: TimeInterval?
+        var reconnectAttempted = false
+        var reconnectCount = 0
+        var missingCount = 0
+        var offlineCount = 0
+        var deviceCount = 0
+        var emulatorAlwaysAlive = true
+        var emulatorAlwaysOwned = true
         var consolePortListening: Bool?
         var adbPortListening: Bool?
-        for attempt in 0..<120 {
+        var consolePortAlwaysListening: Bool?
+        var adbPortAlwaysListening: Bool?
+        var gracePeriodEnded = false
+        var firstMissingRecorded = false
+        var firstOfflineRecorded = false
+        var firstDeviceRecorded = false
+        var portsRecorded = false
+
+        while true {
             try Task.checkCancellation()
+            let elapsed = ProcessInfo.processInfo.systemUptime
+                - monotonicStart
             let processPresent = processExecutablePath(pid: identity.pid) != nil
             let processOwned = processPresent
                 && verifyProcessOwnership(identity, toolchain: toolchain)
-            guard processPresent else {
-                appendADBWaitObservation(
-                    identity: identity,
-                    targetState: targetState,
-                    observedEmulatorSerials: observedEmulatorSerials,
-                    adbDevices: sanitizedDevices,
-                    emulatorAlive: false,
-                    emulatorOwned: false,
-                    consolePortListening: consolePortListening,
-                    adbPortListening: adbPortListening
-                )
-                throw AndroidRuntimeFailureError(
-                    record: AndroidRuntimeFailureRecord(
-                        occurredAt: Date(),
-                        stage: .waitingForADB,
-                        category: .emulatorExited,
-                        message: "Android Emulator 在接入 ADB 前已退出"
-                    )
-                )
-            }
-            guard processOwned else {
-                throw AndroidRuntimeFailureError(
-                    record: AndroidRuntimeFailureRecord(
-                        occurredAt: Date(),
-                        stage: .waitingForADB,
-                        category: .emulatorProcessMismatch,
-                        message: "Android Emulator PID 已不属于本次启动的专用实例"
-                    )
-                )
-            }
+            emulatorAlwaysAlive = emulatorAlwaysAlive && processPresent
+            emulatorAlwaysOwned = emulatorAlwaysOwned && processOwned
 
-            // Sample the complete device list once per second. Fixed-serial
-            // get-state alone cannot distinguish a missing target from an
-            // unexpected emulator serial or an offline device that vanished.
-            if attempt.isMultiple(of: 2) {
+            if processPresent, processOwned {
                 do {
-                    let listing = try run(
-                        toolchain.adb,
+                    let listing = try runADB(
+                        toolchain,
                         ["devices", "-l"],
-                        environment: childEnvironment(for: toolchain),
                         category: "adb.wait.devices",
                         timeout: 5
                     )
@@ -9105,13 +10103,9 @@ actor AndroidDexBridgeRuntime {
                     observedEmulatorSerials = Self.emulatorSerials(
                         in: listing
                     )
-                    sawTargetOffline = sawTargetOffline
-                        || targetState == .offline
-                    sawUnexpectedEmulatorSerial =
-                        sawUnexpectedEmulatorSerial
-                        || observedEmulatorSerials.contains {
-                            $0 != identity.serial
-                        }
+                    allObservedEmulatorSerials.formUnion(
+                        observedEmulatorSerials
+                    )
                     sanitizedDevices = Self.sanitizedADBDevices(
                         listing,
                         ownedSerial: identity.serial
@@ -9122,118 +10116,356 @@ actor AndroidDexBridgeRuntime {
                     observedEmulatorSerials = []
                     sanitizedDevices = []
                 }
+            }
 
-                if attempt.isMultiple(of: 10) {
-                    let portStatus = emulatorPortStatus(identity)
-                    consolePortListening = portStatus.console
-                    adbPortListening = portStatus.adb
+            switch targetState {
+            case .missing:
+                missingCount += 1
+                if !firstMissingRecorded {
+                    firstMissingRecorded = true
+                    appendEvent(
+                        stage: .waitingForADB,
+                        event: "adbSerialMissingFirstObserved",
+                        detail: String(format: "elapsed=%.3f", elapsed)
+                    )
                 }
+            case .offline:
+                offlineCount += 1
+                if !firstOfflineRecorded {
+                    firstOfflineRecorded = true
+                    appendEvent(
+                        stage: .waitingForADB,
+                        event: "adbOfflineFirstObserved",
+                        detail: String(format: "elapsed=%.3f", elapsed)
+                    )
+                }
+            case .device:
+                deviceCount += 1
+                if !firstDeviceRecorded {
+                    firstDeviceRecorded = true
+                    appendEvent(
+                        stage: .waitingForADB,
+                        event: "adbDeviceFirstObserved",
+                        detail: String(format: "elapsed=%.3f", elapsed)
+                    )
+                }
+            case .unauthorized, .unknown:
+                break
+            }
+
+            if lastPortProbeElapsed == nil
+                || elapsed - (lastPortProbeElapsed ?? 0) >= 5 {
+                let portStatus = emulatorPortStatus(identity)
+                consolePortListening = portStatus.console
+                adbPortListening = portStatus.adb
+                consolePortAlwaysListening = Self.combinedPortObservation(
+                    consolePortAlwaysListening,
+                    portStatus.console
+                )
+                adbPortAlwaysListening = Self.combinedPortObservation(
+                    adbPortAlwaysListening,
+                    portStatus.adb
+                )
+                lastPortProbeElapsed = elapsed
+                if !portsRecorded {
+                    portsRecorded = true
+                    appendEvent(
+                        stage: .waitingForADB,
+                        event: "consolePortListening",
+                        detail: "\(identity.consolePort)=\(portStatus.console.map(String.init) ?? "unknown")"
+                    )
+                    appendEvent(
+                        stage: .waitingForADB,
+                        event: "adbPortListening",
+                        detail: "\(identity.consolePort + 1)=\(portStatus.adb.map(String.init) ?? "unknown")"
+                    )
+                }
+            }
+
+            if !gracePeriodEnded,
+               elapsed >= policy.offlineGracePeriod {
+                gracePeriodEnded = true
+                appendEvent(
+                    stage: .waitingForADB,
+                    event: "offlineGracePeriodEnd",
+                    detail: String(format: "elapsed=%.3f", elapsed)
+                )
+            }
+
+            if policy.shouldRecordSummary(
+                elapsed: elapsed,
+                previousState: previousState,
+                state: targetState,
+                lastSummaryElapsed: lastSummaryElapsed
+            ) {
                 appendADBWaitObservation(
                     identity: identity,
                     targetState: targetState,
                     observedEmulatorSerials: observedEmulatorSerials,
                     adbDevices: sanitizedDevices,
-                    emulatorAlive: true,
-                    emulatorOwned: true,
+                    emulatorAlive: processPresent,
+                    emulatorOwned: processOwned,
                     consolePortListening: consolePortListening,
                     adbPortListening: adbPortListening
                 )
-
-                if targetState == .offline, !attemptedOfflineRecovery {
-                    attemptedOfflineRecovery = true
-                    operationStatus = .starting(
-                        "ADB 正在恢复专用 Emulator 连接",
-                        progress: AndroidRuntimeStartupStage.waitingForADB.progress
-                            ?? 0.18
-                    )
-                    appendEvent(
-                        stage: .waitingForADB,
-                        event: "adb_offline_recovery_requested",
-                        detail: identity.serial
-                    )
-                    _ = try? run(
-                        toolchain.adb,
-                        ["-s", identity.serial, "reconnect"],
-                        environment: childEnvironment(for: toolchain),
-                        category: "adb.wait.reconnect_owned_device",
-                        timeout: 8
-                    )
-                }
-
-                if targetState == .device {
-                    guard verifyDeviceOwnership(
-                        identity,
-                        toolchain: toolchain
-                    ) else {
-                        throw AndroidRuntimeFailureError(
-                            record: AndroidRuntimeFailureRecord(
-                                occurredAt: Date(),
-                                stage: .waitingForADB,
-                                category: .emulatorOwnershipMismatch,
-                                message: "ADB 设备已连接，但 AVD 名称与专用运行记录不匹配"
-                            )
-                        )
-                    }
-                    lastOwnershipClassification = Self.ownershipClassification(
-                        isCurrentAppLaunch:
-                            identity.launchOrigin == .currentLaunch
-                                && identity.appSessionID == Self.appSessionID,
-                        targetState: .device,
-                        deviceOwned: true,
-                        processAge: Date().timeIntervalSince(identity.launchedAt)
-                    )
-                    return
-                }
+                lastSummaryElapsed = elapsed
             }
-            try await Task.sleep(nanoseconds: 500_000_000)
+
+            let backend = identity.gpuBackend ?? preferredGPUBackend
+            let action = policy.action(
+                elapsed: elapsed,
+                targetState: targetState,
+                processPresent: processPresent,
+                processOwned: processOwned,
+                reconnectAttempted: reconnectAttempted,
+                reconnectFailed:
+                    lastADBReconnectDiagnostic.map { $0.exitCode != 0 }
+                        ?? false,
+                gpuBackend: backend
+            )
+            switch action {
+            case .ready:
+                guard verifyDeviceOwnership(identity, toolchain: toolchain)
+                else {
+                    finishADBTransportWait(
+                        identity: identity,
+                        startedAt: wallStart,
+                        elapsed: elapsed,
+                        missingCount: missingCount,
+                        offlineCount: offlineCount,
+                        deviceCount: deviceCount,
+                        reconnectCount: reconnectCount,
+                        emulatorAlwaysAlive: emulatorAlwaysAlive,
+                        emulatorAlwaysOwned: emulatorAlwaysOwned,
+                        consolePortAlwaysListening: consolePortAlwaysListening,
+                        adbPortAlwaysListening: adbPortAlwaysListening,
+                        finalState: targetState
+                    )
+                    throw waitingForADBFailure(
+                        .emulatorOwnershipMismatch,
+                        message: "ADB 设备已连接，但 AVD 名称与专用运行记录不匹配"
+                    )
+                }
+                finishADBTransportWait(
+                    identity: identity,
+                    startedAt: wallStart,
+                    elapsed: elapsed,
+                    missingCount: missingCount,
+                    offlineCount: offlineCount,
+                    deviceCount: deviceCount,
+                    reconnectCount: reconnectCount,
+                    emulatorAlwaysAlive: emulatorAlwaysAlive,
+                    emulatorAlwaysOwned: emulatorAlwaysOwned,
+                    consolePortAlwaysListening: consolePortAlwaysListening,
+                    adbPortAlwaysListening: adbPortAlwaysListening,
+                    finalState: targetState
+                )
+                lastOwnershipClassification = Self.ownershipClassification(
+                    isCurrentAppLaunch:
+                        identity.launchOrigin == .currentLaunch
+                            && identity.appSessionID == Self.appSessionID,
+                    targetState: .device,
+                    deviceOwned: true,
+                    processAge: Date().timeIntervalSince(identity.launchedAt)
+                )
+                return
+            case .reconnect:
+                reconnectAttempted = true
+                reconnectCount += 1
+                operationStatus = .starting(
+                    "ADB 正在恢复专用 Emulator 连接",
+                    progress: AndroidRuntimeStartupStage.waitingForADB.progress
+                        ?? 0.18
+                )
+                lastADBReconnectDiagnostic = performBoundedADBReconnect(
+                    identity,
+                    toolchain: toolchain,
+                    monotonicElapsed: elapsed,
+                    stateBefore: targetState
+                )
+            case let .fail(category):
+                let effectiveCategory: AndroidRuntimeFailureCategory
+                if category == .adbSerialMissingTimeout,
+                   allObservedEmulatorSerials.contains(where: {
+                       $0 != identity.serial
+                   }) {
+                    effectiveCategory = .unexpectedSerial
+                } else {
+                    effectiveCategory = category
+                }
+                finishADBTransportWait(
+                    identity: identity,
+                    startedAt: wallStart,
+                    elapsed: elapsed,
+                    missingCount: missingCount,
+                    offlineCount: offlineCount,
+                    deviceCount: deviceCount,
+                    reconnectCount: reconnectCount,
+                    emulatorAlwaysAlive: emulatorAlwaysAlive,
+                    emulatorAlwaysOwned: emulatorAlwaysOwned,
+                    consolePortAlwaysListening: consolePortAlwaysListening,
+                    adbPortAlwaysListening: adbPortAlwaysListening,
+                    finalState: targetState
+                )
+                throw waitingForADBFailure(effectiveCategory)
+            case .wait:
+                break
+            }
+            previousState = targetState
+            try await Task.sleep(nanoseconds: 1_000_000_000)
         }
-        let processPresent = processExecutablePath(pid: identity.pid) != nil
-        let processOwned = processPresent
-            && verifyProcessOwnership(identity, toolchain: toolchain)
-        let effectiveTargetState: AndroidADBTargetState =
-            sawTargetOffline && targetState != .device
-            ? .offline : targetState
-        let deviceOwned = effectiveTargetState == .device
-            && verifyDeviceOwnership(identity, toolchain: toolchain)
-        lastOwnershipClassification = Self.ownershipClassification(
-            isCurrentAppLaunch:
-                identity.launchOrigin == .currentLaunch
-                    && identity.appSessionID == Self.appSessionID,
-            targetState: effectiveTargetState,
-            deviceOwned: deviceOwned,
-            processAge: Date().timeIntervalSince(identity.launchedAt)
+    }
+
+    private static func combinedPortObservation(
+        _ current: Bool?,
+        _ next: Bool?
+    ) -> Bool? {
+        guard let next else { return current }
+        guard let current else { return next }
+        return current && next
+    }
+
+    private func performBoundedADBReconnect(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain,
+        monotonicElapsed: TimeInterval,
+        stateBefore: AndroidADBTargetState
+    ) -> AndroidADBReconnectDiagnostic {
+        let startedAt = Date()
+        appendEvent(
+            stage: .waitingForADB,
+            event: "adbReconnectStart",
+            detail: String(format: "elapsed=%.3f", monotonicElapsed)
         )
-        guard let category = Self.waitingForADBFailureCategory(
-            processPresent: processPresent,
-            processOwned: processOwned,
-            targetState: effectiveTargetState,
-            deviceOwned: deviceOwned,
-            hasUnexpectedEmulatorSerial: sawUnexpectedEmulatorSerial
-        ) else { return }
-        let message: String
-        switch category {
-        case .emulatorExitedEarly, .emulatorExited:
-            message = "Android Emulator 在接入 ADB 前已退出"
-        case .appRequestedTermination:
-            message = "Android Emulator 启动已由 App 结束"
-        case .emulatorRuntimeConflict:
-            message = "Android Emulator PID 已不属于本次启动的专用实例"
-        case .emulatorProcessMismatch:
-            message = "Android Emulator PID 已不属于本次启动的专用实例"
-        case .adbDeviceMissing:
-            message = "Android Emulator 进程仍在运行，但 ADB 未在限定时间内发现目标设备"
-        case .adbDeviceOffline:
-            message = "ADB 已发现专用 Android Emulator，但设备一直处于 offline 状态"
-        case .unexpectedSerial:
-            message = "ADB 发现了其他 Emulator serial，但未发现本次启动的目标设备"
-        case .emulatorOwnershipMismatch:
-            message = "ADB 设备已连接，但 AVD 名称与专用运行记录不匹配"
-        case .adbUnavailable:
-            message = "ADB 目标设备状态异常（\(effectiveTargetState.rawValue)）"
-        default:
-            message = "Android Emulator 接入 ADB 失败"
+        var exitCode: Int32 = 0
+        var stdout = ""
+        var stderr = ""
+        var duration: TimeInterval = 0
+        do {
+            stdout = try runADB(
+                toolchain,
+                ["-s", identity.serial, "reconnect"],
+                category: "adb.wait.reconnect_owned_device",
+                timeout: 8
+            )
+            duration = Date().timeIntervalSince(startedAt)
+        } catch let error as AndroidToolCommandError {
+            exitCode = error.exitCode
+            stdout = error.stdout
+            stderr = error.stderr
+            duration = error.duration
+        } catch {
+            exitCode = -1
+            stderr = error.localizedDescription
+            duration = Date().timeIntervalSince(startedAt)
         }
-        throw AndroidRuntimeFailureError(
+        let stateAfter = (try? runADB(
+            toolchain,
+            ["devices", "-l"],
+            category: "adb.wait.reconnect_state",
+            timeout: 5
+        )).map {
+            Self.adbTargetState(in: $0, serial: identity.serial)
+        } ?? .unknown
+        let diagnostic = AndroidADBReconnectDiagnostic(
+            startedAt: startedAt,
+            endedAt: Date(),
+            monotonicElapsed: monotonicElapsed,
+            executable: "<sdk-root>/platform-tools/adb",
+            serverPort: privateADBServerPort,
+            exitCode: exitCode,
+            stdout: String(sanitizedCommandOutput(
+                stdout,
+                category: "adb.wait.reconnect_owned_device"
+            ).prefix(4_000)),
+            stderr: String(sanitizedCommandOutput(
+                stderr,
+                category: "adb.wait.reconnect_owned_device"
+            ).prefix(4_000)),
+            duration: duration,
+            stateBefore: stateBefore.rawValue,
+            stateAfter: stateAfter.rawValue
+        )
+        appendEvent(
+            stage: .waitingForADB,
+            event: "adbReconnectEnd",
+            detail: "exit=\(exitCode) state=\(stateAfter.rawValue)"
+        )
+        return diagnostic
+    }
+
+    private func finishADBTransportWait(
+        identity: AndroidRuntimeIdentity,
+        startedAt: Date,
+        elapsed: TimeInterval,
+        missingCount: Int,
+        offlineCount: Int,
+        deviceCount: Int,
+        reconnectCount: Int,
+        emulatorAlwaysAlive: Bool,
+        emulatorAlwaysOwned: Bool,
+        consolePortAlwaysListening: Bool?,
+        adbPortAlwaysListening: Bool?,
+        finalState: AndroidADBTargetState
+    ) {
+        lastADBTransportSummary = AndroidADBTransportSummary(
+            startedAt: startedAt,
+            endedAt: Date(),
+            elapsed: elapsed,
+            missingCount: missingCount,
+            offlineCount: offlineCount,
+            deviceCount: deviceCount,
+            reconnectCount: reconnectCount,
+            emulatorAlwaysAlive: emulatorAlwaysAlive,
+            emulatorAlwaysOwned: emulatorAlwaysOwned,
+            consolePortAlwaysListening: consolePortAlwaysListening,
+            adbPortAlwaysListening: adbPortAlwaysListening,
+            finalState: finalState.rawValue
+        )
+        appendEvent(
+            stage: .waitingForADB,
+            event: "transportWaitEnd",
+            detail: String(
+                format: "elapsed=%.3f state=%@ missing=%d offline=%d device=%d reconnect=%d",
+                elapsed,
+                finalState.rawValue,
+                missingCount,
+                offlineCount,
+                deviceCount,
+                reconnectCount
+            )
+        )
+    }
+
+    private func waitingForADBFailure(
+        _ category: AndroidRuntimeFailureCategory,
+        message explicitMessage: String? = nil
+    ) -> AndroidRuntimeFailureError {
+        let message: String
+        if let explicitMessage {
+            message = explicitMessage
+        } else {
+            switch category {
+            case .emulatorExitedBeforeADB, .emulatorExitedEarly,
+                 .emulatorExited:
+                message = "Android Emulator 在接入 ADB 前已退出"
+            case .emulatorProcessMismatch:
+                message = "Android Emulator PID 已不属于本次启动的专用实例"
+            case .adbSerialMissingTimeout:
+                message = "Android Emulator 仍在运行，但私有 ADB 未在 180 秒内发现目标 serial"
+            case .hostGPUADBOfflineTimeout:
+                message = "host GPU Emulator 在 180 秒内始终处于 ADB offline"
+            case .softwareGPUADBOfflineTimeout:
+                message = "software GPU Emulator 在 180 秒内始终处于 ADB offline"
+            case .adbReconnectFailed:
+                message = "目标 Emulator 的有界 ADB reconnect 失败"
+            case .adbUnavailable:
+                message = "私有 ADB 目标设备状态异常"
+            default:
+                message = "Android Emulator 接入私有 ADB 失败"
+            }
+        }
+        return AndroidRuntimeFailureError(
             record: AndroidRuntimeFailureRecord(
                 occurredAt: Date(),
                 stage: .waitingForADB,
@@ -9241,6 +10473,81 @@ actor AndroidDexBridgeRuntime {
                 message: message
             )
         )
+    }
+
+    private func privateAVDRecoveryRequired(
+        _ message: String
+    ) -> AndroidRuntimeFailureError {
+        AndroidRuntimeFailureError(
+            record: AndroidRuntimeFailureRecord(
+                occurredAt: Date(),
+                stage: .waitingForADB,
+                category: .privateAVDRecoveryRequired,
+                message: message
+            )
+        )
+    }
+
+    private func retireLegacyADBServerRuntimeIfNeeded(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) async throws -> Bool {
+        guard identity.adbServerPort != privateADBServerPort,
+              processExecutablePath(pid: identity.pid) != nil else {
+            return false
+        }
+        guard verifyStrictProcessOwnership(identity, toolchain: toolchain)
+        else {
+            throw AndroidRuntimeFailureError(
+                record: AndroidRuntimeFailureRecord(
+                    occurredAt: Date(),
+                    stage: .locatingSDK,
+                    category: .emulatorProcessMismatch,
+                    message: "旧 Runtime 未使用私有 ADB，且无法通过严格身份校验；未执行终止"
+                )
+            )
+        }
+        appendEvent(
+            stage: .locatingSDK,
+            event: "legacyADBServerRuntimeMigrationStart",
+            detail: "retire owned pre-0.4.2 runtime"
+        )
+        guard await cleanupFailedRuntime(
+            identity,
+            toolchain: toolchain,
+            reason: "privateADBServerMigration",
+            allowVerifiedSIGKILL: true
+        ), await waitForEmulatorPortsToRelease(identity) else {
+            throw AndroidRuntimeFailureError(
+                record: AndroidRuntimeFailureRecord(
+                    occurredAt: Date(),
+                    stage: .locatingSDK,
+                    category: .emulatorProcessMismatch,
+                    message: "旧 Runtime 无法确认安全退出；未启动第二个 Emulator"
+                )
+            )
+        }
+        try clearStalePrivateAVDLocksIfSafe(toolchain: toolchain)
+        appendEvent(
+            stage: .locatingSDK,
+            event: "legacyADBServerRuntimeMigrationEnd",
+            detail: "private ADB relaunch permitted"
+        )
+        return true
+    }
+
+    private func waitForEmulatorPortsToRelease(
+        _ identity: AndroidRuntimeIdentity
+    ) async -> Bool {
+        for _ in 0..<40 {
+            if listeningProcessIDs(on: identity.consolePort).isEmpty,
+               listeningProcessIDs(on: identity.consolePort + 1).isEmpty {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return listeningProcessIDs(on: identity.consolePort).isEmpty
+            && listeningProcessIDs(on: identity.consolePort + 1).isEmpty
     }
 
     static func adbTargetState(
@@ -9417,6 +10724,8 @@ actor AndroidDexBridgeRuntime {
               identity.adbExecutable == nil
                 || identity.adbExecutable?.standardizedFileURL
                     == toolchain.adb.standardizedFileURL,
+              identity.adbServerPort == nil
+                || identity.adbServerPort == privateADBServerPort,
               let executablePath = processExecutablePath(pid: identity.pid)
         else { return false }
 
@@ -9469,6 +10778,10 @@ actor AndroidDexBridgeRuntime {
         var refreshed = identity
         refreshed.systemBootIdentifier = currentBootIdentifier
         refreshed.adbExecutable = toolchain.adb
+        refreshed.adbServerPort = privateADBServerPort
+        if refreshed.gpuBackend == nil {
+            refreshed.gpuBackend = preferredGPUBackend
+        }
         refreshed.pidBirthIdentity = processBirthIdentity(
             pid: identity.pid
         )?.value
@@ -9489,15 +10802,13 @@ actor AndroidDexBridgeRuntime {
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain
     ) -> Bool {
-        guard let state = try? run(
-            toolchain.adb,
-            ["-s", identity.serial, "get-state"],
-            environment: childEnvironment(for: toolchain)
+        guard let state = try? runADB(
+            toolchain,
+            ["-s", identity.serial, "get-state"]
         ), state.trimmingCharacters(in: .whitespacesAndNewlines) == "device",
-        let avdOutput = try? run(
-            toolchain.adb,
-            ["-s", identity.serial, "emu", "avd", "name"],
-            environment: childEnvironment(for: toolchain)
+        let avdOutput = try? runADB(
+            toolchain,
+            ["-s", identity.serial, "emu", "avd", "name"]
         ), Self.avdName(from: avdOutput) == identity.avdName else {
             return false
         }
@@ -9516,10 +10827,9 @@ actor AndroidDexBridgeRuntime {
                 "Android 运行实例所有权校验失败，已拒绝执行 ADB 操作"
             )
         }
-        return try run(
-            toolchain.adb,
+        return try runADB(
+            toolchain,
             ["-s", identity.serial] + arguments,
-            environment: childEnvironment(for: toolchain),
             category: category,
             timeout: timeout
         )
@@ -9540,7 +10850,10 @@ actor AndroidDexBridgeRuntime {
         do {
             let result = try await Self.executeBinaryProcess(
                 toolchain.adb,
-                ["-s", identity.serial] + arguments,
+                Self.scopedADBArguments(
+                    ["-s", identity.serial] + arguments,
+                    serverPort: privateADBServerPort
+                ),
                 environment: childEnvironment(for: toolchain),
                 timeout: timeout
             )
@@ -9664,10 +10977,9 @@ actor AndroidDexBridgeRuntime {
         toolchain: AndroidToolchain?
     ) -> Bool {
         guard let toolchain,
-              let state = try? run(
-                toolchain.adb,
-                ["-s", identity.serial, "get-state"],
-                environment: childEnvironment(for: toolchain)
+              let state = try? runADB(
+                toolchain,
+                ["-s", identity.serial, "get-state"]
               ) else { return false }
         return state.trimmingCharacters(in: .whitespacesAndNewlines) == "device"
     }
@@ -9789,8 +11101,22 @@ actor AndroidDexBridgeRuntime {
 
     private func cleanupFailedRuntime(
         _ identity: AndroidRuntimeIdentity,
-        toolchain: AndroidToolchain
+        toolchain: AndroidToolchain,
+        reason: String = "startupFailureCleanup",
+        allowVerifiedSIGKILL: Bool = false
     ) async -> Bool {
+        appendEvent(
+            stage: currentStage,
+            event: "startupCleanupStart",
+            detail: reason
+        )
+        defer {
+            appendEvent(
+                stage: currentStage,
+                event: "startupCleanupEnd",
+                detail: reason
+            )
+        }
         let observation = observeRuntimeOwnership(
             identity,
             toolchain: toolchain
@@ -9813,16 +11139,28 @@ actor AndroidDexBridgeRuntime {
         }
         recordEmulatorTerminationRequest(
             pid: identity.pid,
-            reason: "startupFailureCleanup"
+            reason: reason
         )
         if !observation.deviceOwned {
             _ = Darwin.kill(identity.pid, SIGTERM)
-            for _ in 0..<20 {
+            let attempts = allowVerifiedSIGKILL ? 80 : 20
+            for _ in 0..<attempts {
                 if processExecutablePath(pid: identity.pid) == nil {
                     clearRuntimeRecord()
                     return true
                 }
                 try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            if allowVerifiedSIGKILL,
+               verifyStrictProcessOwnership(identity, toolchain: toolchain) {
+                _ = Darwin.kill(identity.pid, SIGKILL)
+                for _ in 0..<20 {
+                    if processExecutablePath(pid: identity.pid) == nil {
+                        clearRuntimeRecord()
+                        return true
+                    }
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                }
             }
             return false
         }
@@ -10112,6 +11450,10 @@ actor AndroidDexBridgeRuntime {
         duration: TimeInterval,
         timedOut: Bool
     ) {
+        // Transport polling is summarized separately by state change and a
+        // five-second cadence. Do not let hundreds of identical device-list
+        // samples evict reconnect/server/boot evidence from this ring.
+        if category == "adb.wait.devices" { return }
         let isDiagnosticEvidence = category.hasPrefix("diagnostic.")
             || category.hasPrefix("adb.server.")
             || category.hasPrefix("adb.network.")

@@ -7,9 +7,20 @@ provides configurable video providers, live sources, search, detail, favorites,
 history, and libmpv playback. It does not bundle third-party content sources,
 accounts, cookies, parsing services, or DRM keys.
 
-The current release is **0.4.1 (Build 95)** for macOS 12 or later on Apple
-Silicon (`arm64`). Download the Developer ID-signed, Apple-notarized, and stapled
-DMG from the [v0.4.1 release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.4.1).
+The current hotfix candidate is **0.4.2 (Build 96)** for macOS 12 or later on
+Apple Silicon (`arm64`). It has not been published yet. The current public,
+Developer ID-signed, Apple-notarized, and stapled DMG remains available from the
+[v0.4.1 release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.4.1).
+
+## 0.4.2 Hotfix Candidate
+
+Version 0.4.2 hardens the optional Android compatibility Runtime for cold boots
+that remain `emulator-5554 offline`: it separates a 180-second ADB transport
+window from Android boot, isolates OKVideoMac on a selected-SDK private ADB
+server, performs at most one delayed targeted reconnect, and bounds GPU recovery
+to a single host-to-software fallback. If both backends fail, Settings offers a
+recoverable private-AVD rebuild that does not touch Android Studio AVDs, the
+default ADB server, or OKVideoMac favorites and history.
 
 ## 0.4.1 Highlights
 

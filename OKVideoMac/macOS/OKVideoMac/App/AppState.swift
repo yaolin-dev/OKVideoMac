@@ -13515,6 +13515,42 @@ final class AppState: ObservableObject {
         }
     }
 
+    func rebuildAndroidRuntime() async {
+        guard let environment, !isAndroidRuntimeBusy else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "修复 Android Runtime？"
+        alert.informativeText =
+            "当前 OKVideoMac 专用 Android Runtime 会先移到可恢复备份，"
+            + "再使用已选 Android SDK 中现有的 system image 重建。\n\n"
+            + "Android Runtime 内部状态会重置，部分网盘可能需要重新登录或授权。"
+            + "\nOKVideoMac 的普通设置、收藏和历史不受影响。"
+        alert.addButton(withTitle: "备份并重建")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        isAndroidRuntimeBusy = true
+        androidRuntimeStatus = .starting(
+            "正在备份并重建 OKVideoMac 专用 Android Runtime",
+            progress: 0
+        )
+        let progressTask = monitorAndroidRuntimeProgress(
+            environment.androidDexBridge
+        )
+        defer {
+            progressTask.cancel()
+            isAndroidRuntimeBusy = false
+        }
+        do {
+            androidRuntimeStatus = try await environment.androidDexBridge
+                .rebuildRuntime()
+        } catch {
+            androidRuntimeStatus = await environment.androidDexBridge
+                .runtimeStatus()
+            show(error, title: "Android Runtime 重建失败")
+        }
+    }
+
     private func monitorAndroidRuntimeProgress(
         _ bridge: AndroidDexBridgeClient
     ) -> Task<Void, Never> {

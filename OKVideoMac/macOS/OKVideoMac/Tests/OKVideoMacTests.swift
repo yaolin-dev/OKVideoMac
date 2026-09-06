@@ -9104,6 +9104,527 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testAndroidADBTransportUsesSeparate180SecondMonotonicWindow() {
+        let policy = AndroidADBTransportPolicy.production
+        XCTAssertEqual(policy.timeout, 180)
+        XCTAssertEqual(policy.offlineGracePeriod, 20)
+        XCTAssertEqual(policy.summaryInterval, 5)
+
+        XCTAssertEqual(
+            policy.action(
+                elapsed: 90,
+                targetState: .offline,
+                processPresent: true,
+                processOwned: true,
+                reconnectAttempted: true,
+                gpuBackend: .host
+            ),
+            .wait
+        )
+        XCTAssertEqual(
+            policy.action(
+                elapsed: 91,
+                targetState: .device,
+                processPresent: true,
+                processOwned: true,
+                reconnectAttempted: true,
+                gpuBackend: .host
+            ),
+            .ready
+        )
+    }
+
+    func testAndroidADBTransportOfflineGraceAndReconnectAreBounded() {
+        let policy = AndroidADBTransportPolicy.production
+        XCTAssertEqual(
+            policy.action(
+                elapsed: 19.999,
+                targetState: .offline,
+                processPresent: true,
+                processOwned: true,
+                reconnectAttempted: false,
+                gpuBackend: .host
+            ),
+            .wait
+        )
+        XCTAssertEqual(
+            policy.action(
+                elapsed: 20,
+                targetState: .offline,
+                processPresent: true,
+                processOwned: true,
+                reconnectAttempted: false,
+                gpuBackend: .host
+            ),
+            .reconnect
+        )
+        XCTAssertEqual(
+            policy.action(
+                elapsed: 120,
+                targetState: .offline,
+                processPresent: true,
+                processOwned: true,
+                reconnectAttempted: true,
+                gpuBackend: .host
+            ),
+            .wait
+        )
+    }
+
+    func testAndroidADBTransportExitsImmediatelyAndClassifiesDeadline() {
+        let policy = AndroidADBTransportPolicy.production
+        XCTAssertEqual(
+            policy.action(
+                elapsed: 30,
+                targetState: .offline,
+                processPresent: false,
+                processOwned: false,
+                reconnectAttempted: true,
+                gpuBackend: .host
+            ),
+            .fail(.emulatorExitedBeforeADB)
+        )
+        XCTAssertEqual(
+            policy.action(
+                elapsed: 180,
+                targetState: .offline,
+                processPresent: true,
+                processOwned: true,
+                reconnectAttempted: true,
+                reconnectFailed: true,
+                gpuBackend: .host
+            ),
+            .fail(.adbReconnectFailed)
+        )
+        XCTAssertEqual(
+            policy.action(
+                elapsed: 180,
+                targetState: .offline,
+                processPresent: true,
+                processOwned: true,
+                reconnectAttempted: true,
+                gpuBackend: .host
+            ),
+            .fail(.hostGPUADBOfflineTimeout)
+        )
+        XCTAssertEqual(
+            policy.action(
+                elapsed: 180,
+                targetState: .offline,
+                processPresent: true,
+                processOwned: true,
+                reconnectAttempted: true,
+                gpuBackend: .software
+            ),
+            .fail(.softwareGPUADBOfflineTimeout)
+        )
+        XCTAssertEqual(
+            policy.action(
+                elapsed: 180,
+                targetState: .missing,
+                processPresent: true,
+                processOwned: true,
+                reconnectAttempted: false,
+                gpuBackend: .host
+            ),
+            .fail(.adbSerialMissingTimeout)
+        )
+    }
+
+    func testAndroidADBReconnectDiagnosticSurvivesIndependentEncoding()
+        throws {
+        let diagnostic = AndroidADBReconnectDiagnostic(
+            startedAt: Date(timeIntervalSince1970: 1),
+            endedAt: Date(timeIntervalSince1970: 3),
+            monotonicElapsed: 20.25,
+            executable: "<sdk-root>/platform-tools/adb",
+            serverPort: 50_437,
+            exitCode: 7,
+            stdout: "reconnecting emulator-5554",
+            stderr: "transport still offline",
+            duration: 2,
+            stateBefore: "offline",
+            stateAfter: "offline"
+        )
+        let decoded = try JSONDecoder().decode(
+            AndroidADBReconnectDiagnostic.self,
+            from: JSONEncoder().encode(diagnostic)
+        )
+        XCTAssertEqual(decoded, diagnostic)
+        XCTAssertEqual(decoded.exitCode, 7)
+        XCTAssertEqual(decoded.stderr, "transport still offline")
+    }
+
+    func testAndroidADBWaitSummaryRecordsChangesAndFiveSecondHeartbeat() {
+        let policy = AndroidADBTransportPolicy.production
+        XCTAssertTrue(
+            policy.shouldRecordSummary(
+                elapsed: 1,
+                previousState: nil,
+                state: .missing,
+                lastSummaryElapsed: nil
+            )
+        )
+        XCTAssertFalse(
+            policy.shouldRecordSummary(
+                elapsed: 4.9,
+                previousState: .offline,
+                state: .offline,
+                lastSummaryElapsed: 1
+            )
+        )
+        XCTAssertTrue(
+            policy.shouldRecordSummary(
+                elapsed: 6,
+                previousState: .offline,
+                state: .offline,
+                lastSummaryElapsed: 1
+            )
+        )
+        XCTAssertTrue(
+            policy.shouldRecordSummary(
+                elapsed: 2,
+                previousState: .missing,
+                state: .offline,
+                lastSummaryElapsed: 1
+            )
+        )
+    }
+
+    func testAndroidPrivateADBPortNeverUsesGlobal5037() {
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.candidatePrivateADBServerPorts
+                .contains(5_037)
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.selectPrivateADBServerPort(
+                preferred: 50_437,
+                reusable: [],
+                occupied: [5_037, 50_437]
+            ),
+            50_438
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.selectPrivateADBServerPort(
+                preferred: 50_437,
+                reusable: [50_437],
+                occupied: [5_037, 50_437]
+            ),
+            50_437
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.privateADBServerLaunchArguments(
+                port: 50_437
+            ),
+            ["-L", "tcp:localhost:50437", "server", "nodaemon"]
+        )
+        let selectedADB = URL(fileURLWithPath: "/sdk/platform-tools/adb")
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.privateADBServerIdentityMatches(
+                listenerPID: 42,
+                listenerBirthIdentity: "birth-1",
+                listenerExecutable: selectedADB,
+                recordedPID: 42,
+                recordedBirthIdentity: "birth-1",
+                selectedADB: selectedADB
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.privateADBServerIdentityMatches(
+                listenerPID: 42,
+                listenerBirthIdentity: "unrecorded",
+                listenerExecutable: selectedADB,
+                recordedPID: nil,
+                recordedBirthIdentity: nil,
+                selectedADB: selectedADB
+            )
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.privateADBServerLaunchMatches(
+                expectedLaunchedPID: 42,
+                observedListenerPID: 42
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.privateADBServerLaunchMatches(
+                expectedLaunchedPID: 42,
+                observedListenerPID: 43
+            )
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.privateADBServerLaunchMatches(
+                expectedLaunchedPID: nil,
+                observedListenerPID: 42
+            )
+        )
+    }
+
+    func testEveryAndroidADBOperationCanBeExplicitlyPrivateScoped() {
+        let commandTails = [
+            ["devices", "-l"],
+            ["-s", "emulator-5554", "get-state"],
+            ["-s", "emulator-5554", "reconnect"],
+            ["-s", "emulator-5554", "shell", "getprop"],
+            ["-s", "emulator-5554", "install", "bridge.apk"],
+            ["-s", "emulator-5554", "forward", "--list"],
+            ["-s", "emulator-5554", "emu", "kill"],
+            ["kill-server"]
+        ]
+        for tail in commandTails {
+            let scoped = AndroidDexBridgeRuntime.scopedADBArguments(
+                tail,
+                serverPort: 50_437
+            )
+            XCTAssertEqual(Array(scoped.prefix(2)), ["-P", "50437"])
+            XCTAssertEqual(Array(scoped.dropFirst(2)), tail)
+        }
+    }
+
+    func testAndroidSoftwareGPUCapabilityAndConfigurationAreExplicit() {
+        let help = """
+        auto (default) -> recommended
+        host -> host drivers
+        software -> default software renderer
+        lavapipe -> Vulkan software renderer
+        """
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.supportedGPUBackends(from: help),
+            ["host", "software"]
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.emulatorLaunchArguments(
+                consolePort: 5_554,
+                gpuBackend: .software
+            ).suffix(4),
+            ["-gpu", "software", "-accel", "on"]
+        )
+        let image = AndroidSystemImage(
+            packageID: "system-images;android-24;google_apis;arm64-v8a",
+            apiLevel: 24,
+            variant: "google_apis",
+            architecture: "arm64-v8a"
+        )
+        let updated = AndroidManagedAVDConfiguration.updating(
+            "hw.gpu.enabled=yes\nhw.gpu.mode=host\ntarget=android-24\n",
+            for: image,
+            gpuBackend: .software
+        )
+        XCTAssertEqual(
+            AndroidManagedAVDConfiguration.value(
+                for: "hw.gpu.mode",
+                in: updated
+            ),
+            "software"
+        )
+    }
+
+    func testAndroidSuccessfulSoftwareGPUPreferenceCanBeReloaded() throws {
+        let data = try XCTUnwrap(
+            """
+            {
+              "schema": 1,
+              "privateADBServerPort": 50439,
+              "preferredGPUBackend": "software",
+              "privateADBServerPID": 73,
+              "privateADBServerBirthIdentity": "birth-73",
+              "updatedAt": "2026-09-06T09:00:00Z"
+            }
+            """.data(using: .utf8)
+        )
+        let profile = try XCTUnwrap(
+            AndroidDexBridgeRuntime.persistedRuntimeProfile(from: data)
+        )
+        XCTAssertEqual(profile.privateADBServerPort, 50_439)
+        XCTAssertEqual(profile.preferredGPUBackend, .software)
+        XCTAssertEqual(profile.privateADBServerPID, 73)
+        XCTAssertEqual(profile.privateADBServerBirthIdentity, "birth-73")
+    }
+
+    func testAndroidGPUFallbackIsExactlyOneAndThenRequiresRecovery() {
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.shouldAttemptSoftwareGPUFallback(
+                failureCategory: .hostGPUADBOfflineTimeout,
+                currentBackend: .host,
+                fallbackAlreadyAttempted: false
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.shouldAttemptSoftwareGPUFallback(
+                failureCategory: .hostGPUADBOfflineTimeout,
+                currentBackend: .host,
+                fallbackAlreadyAttempted: true
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.shouldAttemptSoftwareGPUFallback(
+                failureCategory: .softwareGPUADBOfflineTimeout,
+                currentBackend: .software,
+                fallbackAlreadyAttempted: false
+            )
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.shouldAttemptSoftwareGPUFallback(
+                failureCategory: .adbReconnectFailed,
+                currentBackend: .host,
+                fallbackAlreadyAttempted: false
+            )
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.softwareFallbackRequiresAVDRecovery(
+                failureCategory: .softwareGPUADBOfflineTimeout
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.softwareFallbackRequiresAVDRecovery(
+                failureCategory: .emulatorExitedBeforeADB
+            )
+        )
+    }
+
+    func testTenConcurrentAndroidRequestsShareOneFallbackWorkflow()
+        async throws {
+        let startup = AndroidRuntimeStartupSingleFlight()
+        let gate = NodeReadinessTestGate()
+        let workflowCount = NodeReadinessTestCounter()
+        let launcher = AndroidEmulatorLauncherMock()
+        let callers = (0..<10).map { _ in
+            Task {
+                try await startup.ensureRuntime {
+                    await workflowCount.increment()
+                    await launcher.recordLaunch()
+                    await launcher.recordLaunch()
+                    await gate.wait()
+                }
+            }
+        }
+        var sawFallbackWorkflow = false
+        for _ in 0..<20_000 {
+            if await launcher.launchInvocationCount == 2 {
+                sawFallbackWorkflow = true
+                break
+            }
+            await Task.yield()
+        }
+        XCTAssertTrue(sawFallbackWorkflow)
+        var observedWorkflowCount = await workflowCount.value
+        var observedLaunchCount = await launcher.launchInvocationCount
+        XCTAssertEqual(observedWorkflowCount, 1)
+        XCTAssertEqual(observedLaunchCount, 2)
+        await gate.open()
+        for caller in callers { try await caller.value }
+        observedWorkflowCount = await workflowCount.value
+        observedLaunchCount = await launcher.launchInvocationCount
+        XCTAssertEqual(observedWorkflowCount, 1)
+        XCTAssertEqual(observedLaunchCount, 2)
+    }
+
+    func testAndroidPrivateAVDRepairMovesOnlyManagedRuntimeToBackup()
+        throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "AndroidRepair-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtime = root.appendingPathComponent("AndroidRuntime")
+        let avdHome = runtime.appendingPathComponent("avd")
+        let privateAVD = avdHome.appendingPathComponent(
+            "OKVideoMac_Runtime.avd"
+        )
+        let studioAVD = avdHome.appendingPathComponent("Pixel_8.avd")
+        try FileManager.default.createDirectory(
+            at: privateAVD,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: studioAVD,
+            withIntermediateDirectories: true
+        )
+        try Data("private-config".utf8).write(
+            to: privateAVD.appendingPathComponent("config.ini")
+        )
+        try Data("studio-config".utf8).write(
+            to: studioAVD.appendingPathComponent("config.ini")
+        )
+        try Data("private-ini".utf8).write(
+            to: avdHome.appendingPathComponent("OKVideoMac_Runtime.ini")
+        )
+        try Data("continuity".utf8).write(
+            to: runtime.appendingPathComponent("runtime-continuity.json")
+        )
+        let unrelatedADBMarker = root.appendingPathComponent(
+            "default-5037-adb-running"
+        )
+        try Data("untouched".utf8).write(to: unrelatedADBMarker)
+
+        let result = try XCTUnwrap(
+            AndroidDexBridgeRuntime.movePrivateAVDToRecoverableBackup(
+                runtimeDirectory: runtime,
+                now: Date(timeIntervalSince1970: 0),
+                identifier: "ABCDEF12-rest",
+                metadataSnapshots: [
+                    "runtime-manifest.json": Data("manifest".utf8),
+                    "runtime-profile.json": Data("profile".utf8),
+                    "not-allowed.txt": Data("ignored".utf8)
+                ]
+            )
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: privateAVD.path))
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: avdHome.appendingPathComponent(
+                    "OKVideoMac_Runtime.ini"
+                ).path
+            )
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: studioAVD.path))
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: unrelatedADBMarker.path)
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: result.directory.appendingPathComponent(
+                    "OKVideoMac_Runtime.avd/config.ini"
+                ).path
+            )
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: result.directory.appendingPathComponent(
+                    "runtime-manifest.json"
+                ).path
+            )
+        )
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: result.directory.appendingPathComponent(
+                    "not-allowed.txt"
+                ).path
+            )
+        )
+    }
+
+    func testAndroidPrivateAVDRepairRefusesAmbiguousOwnership() {
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.privateAVDRepairMayProceed(
+                shutdownMechanism: .refusedOwnershipMismatch,
+                matchingAVDProcessCount: 0
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.privateAVDRepairMayProceed(
+                shutdownMechanism: .alreadyExited,
+                matchingAVDProcessCount: 1
+            )
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.privateAVDRepairMayProceed(
+                shutdownMechanism: .alreadyExited,
+                matchingAVDProcessCount: 0
+            )
+        )
+    }
+
     func testAndroidEmulatorAVDConflictRecognizesActualFatalMessage() {
         XCTAssertTrue(
             AndroidDexBridgeRuntime.isEmulatorAVDConflict(

@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.4.2] - 2026-09-06
+
+### Fixed
+
+- Replaced the Android Runtime's approximately 60-second ADB admission loop
+  with a separate 180-second monotonic transport window; the existing Android
+  guest boot wait begins only after the serial reaches `device`.
+- Added a 20-second transient-offline grace period and one bounded, targeted
+  reconnect whose result is retained independently in diagnostics.
+- Isolated every OKVideoMac ADB operation and Emulator launch on a private,
+  selected-SDK ADB server instead of sharing the global port 5037 daemon.
+- Added one bounded host-to-software GPU fallback for an owned Emulator that
+  stays offline for the complete transport window, and persist the backend
+  that successfully reaches Runtime readiness.
+- Added a recoverable private-AVD rebuild in Settings. It backs up only
+  `OKVideoMac_Runtime` and never wipes userdata automatically or modifies other
+  AVDs, Android Studio, global ADB, favorites, history, or normal settings.
+
+### Diagnostics and safety
+
+- Record private ADB server identity, transport summaries, Emulator/port
+  liveness, reconnect evidence, GPU fallback, and startup/cleanup milestones.
+- Preserve the 0.4.1 process ownership, PID birth identity, single-flight,
+  port-conflict, stale-lock, adoption, and owned-only shutdown guarantees.
+
+### Validation scope
+
+- The complete macOS suite passes 621 tests (617 passed, 4 intentionally
+  skipped); Android Runtime tests cover delayed transport, ADB isolation,
+  bounded fallback, repair isolation, and 10-way concurrent startup.
+- A command-level private ADB server was verified with the locally selected
+  SDK. The user-specific API 24 / Emulator 37.1.11 / M1 combination remains a
+  real-machine validation item; it is not stated as a confirmed GPU defect.
+
 ## [0.4.1] - 2026-09-06
 
 ### Fixed

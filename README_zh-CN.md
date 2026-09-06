@@ -6,9 +6,19 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。它�
 视频 Provider、直播源、搜索、详情、收藏、历史和基于 libmpv 的播放体验，但不
 内置第三方影视源、账号、Cookie、解析服务或 DRM 密钥。
 
-当前正式版本为 **0.4.1（Build 95）**，支持 macOS 12 或更高版本、Apple Silicon
-（`arm64`）。请从 [v0.4.1 正式发布页](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.4.1)
-下载经过 Developer ID 签名、Apple 公证并已 Staple 的 DMG。
+当前热修复候选版本为 **0.4.2（Build 96）**，支持 macOS 12 或更高版本、
+Apple Silicon（`arm64`），尚未对外发布。当前公开的 Developer ID 签名、
+Apple 公证并已 Staple 版本仍从
+[v0.4.1 正式发布页](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.4.1)
+下载。
+
+## 0.4.2 热修复候选版本
+
+0.4.2 针对冷启动长时间停留在 `emulator-5554 offline` 的 Android Runtime：
+把 180 秒 ADB transport 等待与 Android boot 明确分开，使用所选 SDK 的私有
+ADB server，宽限期后最多执行一次目标 reconnect，并把 GPU 恢复限制为
+host 到 software 的一次回退。两种后端都失败时，设置页可恢复地重建私有
+AVD，不影响 Android Studio AVD、默认 ADB server、收藏或历史。
 
 ## 0.4.1 Highlights
 
