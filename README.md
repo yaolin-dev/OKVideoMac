@@ -7,7 +7,7 @@ provides configurable video providers, live sources, search, detail, favorites,
 history, and libmpv playback. It does not bundle third-party content sources,
 accounts, cookies, parsing services, or DRM keys.
 
-The current hotfix candidate is **0.4.2 (Build 97)** for macOS 12 or later on
+The current hotfix candidate is **0.4.2 (Build 98)** for macOS 12 or later on
 Apple Silicon (`arm64`). It has not been published yet. The current public,
 Developer ID-signed, Apple-notarized, and stapled DMG remains available from the
 [v0.4.1 release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.4.1).
@@ -22,9 +22,13 @@ to a single host-to-software fallback. If both backends fail, Settings offers a
 recoverable private-AVD rebuild that does not touch Android Studio AVDs, the
 default ADB server, or OKVideoMac favorites and history.
 
-Build 97 adds a narrowly scoped headless ADB-auth compatibility launch mode
+Build 98 includes a narrowly scoped headless ADB-auth compatibility launch mode
 for legacy API 24–29 system images. Modern images continue to use the isolated
 OKVideoMac key pair with guest authentication enabled.
+
+Build 98 also adopts AppKit's native source-list and sidebar material for the
+primary navigation. Search follows the App Store interaction model: Escape
+clears a non-empty query first, then exits search when the field is empty.
 
 ## 0.4.1 Highlights
 

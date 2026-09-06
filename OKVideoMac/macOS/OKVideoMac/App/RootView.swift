@@ -14,16 +14,55 @@ enum AppSurfacePalette {
 }
 
 enum AppSidebarMetrics {
-    static let minimumWidth: CGFloat = 224
-    static let idealWidth: CGFloat = 224
-    static let maximumWidth: CGFloat = 280
-    static let horizontalInset: CGFloat = 16
-    static let searchHeight: CGFloat = 32
-    static let rowHeight: CGFloat = 26
-    static let labelFontSize: CGFloat = 14
-    static let iconWidth: CGFloat = 18
-    static let iconTextSpacing: CGFloat = 8
-    static let rowContentMinimumWidth: CGFloat = 168
+    // App Store uses a stable source-list column rather than presenting a
+    // prominent, freely resizable divider. Keep the primary column fixed;
+    // AppKit still owns the geometry within the chosen large source-list
+    // treatment used by the current App Store navigation.
+    static let width: CGFloat = 220
+    static let horizontalInset: CGFloat = 10
+    static let topInset: CGFloat = 0
+    static let searchToListSpacing: CGFloat = 16
+}
+
+enum SidebarSearchEscapeAction: Equatable {
+    case clearText
+    case exitSearch
+}
+
+enum SidebarSearchEscapePolicy {
+    static func action(for text: String) -> SidebarSearchEscapeAction {
+        text.isEmpty ? .exitSearch : .clearText
+    }
+}
+
+@MainActor
+enum AppSidebarNativePolicy {
+    static var iconTint: NSColor { .systemBlue }
+
+    static func configure(background: NSVisualEffectView) {
+        background.material = .sidebar
+        background.blendingMode = .behindWindow
+        background.state = .followsWindowActiveState
+        background.isEmphasized = true
+    }
+
+    static func configure(searchField: NSSearchField) {
+        searchField.controlSize = .large
+        searchField.sendsSearchStringImmediately = false
+        searchField.sendsWholeSearchString = true
+    }
+
+    static func configure(outlineView: NSOutlineView) {
+        outlineView.style = .sourceList
+        // App Store deliberately uses the spacious source-list treatment even
+        // when the global table-size preference resolves to medium. AppKit
+        // still owns all text and symbol metrics inside the large row style.
+        outlineView.rowSizeStyle = .large
+        outlineView.headerView = nil
+        outlineView.allowsEmptySelection = false
+        outlineView.allowsMultipleSelection = false
+        outlineView.autosaveExpandedItems = false
+    }
 }
 
 private struct BrowserWindowVibrancyBackground: NSViewRepresentable {
@@ -101,78 +140,6 @@ extension View {
                 cornerRadius: cornerRadius,
                 selected: selected,
                 destructive: destructive
-            )
-        )
-    }
-}
-
-enum SidebarRowHoverPolicy {
-    static let cornerRadius: CGFloat = 6
-    static let animationDuration: TimeInterval = 0.11
-    static let selectionBackgroundOpacity = 0.10
-
-    static func hoverOverlayOpacity(
-        isSelected: Bool,
-        isHovering: Bool,
-        isEnabled: Bool
-    ) -> Double {
-        guard isEnabled, isHovering else { return 0 }
-        return isSelected ? 0.04 : 0.06
-    }
-}
-
-/// A compact hover treatment for sidebar navigation rows. Selection remains
-/// owned by the native List whenever possible; this modifier only supplies a
-/// stable, layout-neutral hover overlay. Selection stays native so every row
-/// receives exactly the same width, height, and neutral sidebar appearance.
-struct SidebarRowHoverModifier: ViewModifier {
-    @Environment(\.isEnabled) private var isEnabled
-    @State private var isHovering = false
-
-    let isSelected: Bool
-
-    func body(content: Content) -> some View {
-        let hoverOpacity = SidebarRowHoverPolicy.hoverOverlayOpacity(
-            isSelected: isSelected,
-            isHovering: isHovering,
-            isEnabled: isEnabled
-        )
-
-        content
-            .background {
-                ZStack {
-                    if isSelected {
-                        RoundedRectangle(
-                            cornerRadius: SidebarRowHoverPolicy.cornerRadius,
-                            style: .continuous
-                        )
-                        .fill(
-                            Color.primary.opacity(
-                                SidebarRowHoverPolicy.selectionBackgroundOpacity
-                            )
-                        )
-                    }
-
-                    RoundedRectangle(
-                        cornerRadius: SidebarRowHoverPolicy.cornerRadius,
-                        style: .continuous
-                    )
-                    .fill(Color.primary.opacity(hoverOpacity))
-                }
-            }
-            .animation(
-                .easeOut(duration: SidebarRowHoverPolicy.animationDuration),
-                value: hoverOpacity
-            )
-            .onHover { isHovering = isEnabled && $0 }
-    }
-}
-
-extension View {
-    func sidebarRowHover(isSelected: Bool) -> some View {
-        modifier(
-            SidebarRowHoverModifier(
-                isSelected: isSelected
             )
         )
     }
@@ -496,6 +463,7 @@ private struct ModernRootSplitView: View {
                 showsCollapsedSearch: columnVisibility == .detailOnly
             )
         }
+        .navigationSplitViewStyle(.balanced)
     }
 }
 
@@ -1479,7 +1447,7 @@ final class AppKeyCommandMonitorView: NSView {
                   let window = self.window,
                   window.isKeyWindow,
                   event.window === window,
-                  (!Self.isEditingText(in: window) || event.keyCode == 53),
+                  !Self.isEditingText(in: window),
                   self.handler?(event) == true else {
                 return event
             }
@@ -2113,44 +2081,18 @@ private struct SidebarView: View {
     @EnvironmentObject private var navigation: AppNavigationState
     @ObservedObject var liveSession: LiveBrowserSession
 
-    private let primarySections: [AppSection] = [.home, .live]
-    private let personalSections: [AppSection] = [
-        .favorites,
-        .history,
-        .settings
-    ]
-
     var body: some View {
-        VStack(spacing: 0) {
-            SidebarSearchControl(
-                text: searchText,
-                presentation: searchPresentation,
-                isEnabled: searchIsEnabled,
-                focusRequest: state.globalSearchFocusRequest,
-                onTextChange: handleSearchTextChange,
-                onSubmit: submitSearch
-            )
-            .frame(height: AppSidebarMetrics.searchHeight)
-            .padding(.horizontal, AppSidebarMetrics.horizontalInset)
-            .padding(.top, 10)
-            .padding(.bottom, 8)
-
-            List {
-                Section("浏览") {
-                    ForEach(primarySections) { section in
-                        sidebarNavigationRow(section)
-                    }
-                }
-
-                Section("资料库") {
-                    ForEach(personalSections) { section in
-                        sidebarNavigationRow(section)
-                    }
-                }
-            }
-            .listStyle(.sidebar)
-            .environment(\.defaultMinListRowHeight, AppSidebarMetrics.rowHeight)
-        }
+        NativeSidebarSourceList(
+            text: searchText,
+            presentation: searchPresentation,
+            isSearchEnabled: searchIsEnabled,
+            focusRequest: state.globalSearchFocusRequest,
+            selectedSection: navigation.selectedSection,
+            onTextChange: handleSearchTextChange,
+            onSubmit: submitSearch,
+            onExitSearch: exitSearchField,
+            onSelect: state.selectSection
+        )
         .modifier(SidebarColumnWidthModifier())
     }
 
@@ -2178,21 +2120,6 @@ private struct SidebarView: View {
         }
     }
 
-    private func sidebarNavigationRow(_ section: AppSection) -> some View {
-        let isSelected = navigation.selectedSection == section
-        return Button {
-            state.selectSection(section)
-        } label: {
-            SidebarRowContent(
-                section: section,
-                isSelected: isSelected
-            )
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(section.rawValue)
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
-    }
-
     private func handleSearchTextChange(_ value: String) {
         guard searchPresentation.kind == .video,
               value.isEmpty else { return }
@@ -2206,38 +2133,357 @@ private struct SidebarView: View {
         guard !keyword.isEmpty else { return }
         state.searchFromSidebar(keyword)
     }
+
+    private func exitSearchField() -> Bool {
+        if searchPresentation.kind == .video,
+           state.isHomeSearchPresented {
+            state.returnFromSearchToOrigin()
+        }
+        return true
+    }
 }
 
-private struct SidebarRowContent: View {
-    let section: AppSection
-    let isSelected: Bool
+/// Hosts the browser navigation in the same native source-list controls used
+/// by AppKit applications. AppKit owns the sidebar material, row size, text,
+/// glyph, selection, inactive-window, accent-color, and accessibility states.
+/// The only explicit size choices are AppKit's large search control and
+/// semantic `large` source-list rows, matching the current App Store rather
+/// than hand-drawn text, glyph, or selection metrics.
+@MainActor
+private struct NativeSidebarSourceList: NSViewRepresentable {
+    @Binding var text: String
+    let presentation: SidebarSearchPresentation
+    let isSearchEnabled: Bool
+    let focusRequest: UInt64
+    let selectedSection: AppSection
+    let onTextChange: (String) -> Void
+    let onSubmit: () -> Void
+    let onExitSearch: () -> Bool
+    let onSelect: (AppSection) -> Void
 
-    var body: some View {
-        HStack(spacing: AppSidebarMetrics.iconTextSpacing) {
-            Image(systemName: section.systemImage)
-                .symbolRenderingMode(.hierarchical)
-                .foregroundColor(Color(nsColor: .systemBlue))
-                .frame(width: AppSidebarMetrics.iconWidth, alignment: .center)
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
 
-            Text(section.rawValue)
-                .foregroundColor(.primary)
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
+    func makeNSView(context: Context) -> ContainerView {
+        let view = ContainerView(coordinator: context.coordinator)
+        context.coordinator.attach(to: view)
+        context.coordinator.synchronize(view)
+        return view
+    }
 
-            Spacer(minLength: 0)
+    func updateNSView(_ view: ContainerView, context: Context) {
+        context.coordinator.parent = self
+        context.coordinator.synchronize(view)
+    }
+
+    final class ItemNode: NSObject {
+        let section: AppSection
+
+        init(section: AppSection) {
+            self.section = section
         }
-            .font(.system(size: AppSidebarMetrics.labelFontSize, weight: .regular))
-            // A finite proposal avoids SwiftUI's sidebar table collapsing the
-            // text column to its truncation glyph when the split view restores
-            // a saved width. The row can still expand naturally with the list.
-            .frame(
-                minWidth: AppSidebarMetrics.rowContentMinimumWidth,
-                maxWidth: .infinity,
-                alignment: .leading
+    }
+
+    final class ContainerView: NSVisualEffectView {
+        let searchField = NSSearchField()
+        let scrollView = NSScrollView()
+        let outlineView = NSOutlineView()
+
+        init(coordinator: Coordinator) {
+            super.init(frame: .zero)
+
+            AppSidebarNativePolicy.configure(background: self)
+
+            searchField.translatesAutoresizingMaskIntoConstraints = false
+            AppSidebarNativePolicy.configure(searchField: searchField)
+            searchField.delegate = coordinator
+            searchField.target = coordinator
+            searchField.action = #selector(Coordinator.submit(_:))
+
+            let column = NSTableColumn(
+                identifier: NSUserInterfaceItemIdentifier("AppSidebar.column")
             )
-            .frame(height: AppSidebarMetrics.rowHeight - 2)
-            .contentShape(Rectangle())
-            .sidebarRowHover(isSelected: isSelected)
+            column.resizingMask = .autoresizingMask
+            outlineView.addTableColumn(column)
+            outlineView.outlineTableColumn = column
+            AppSidebarNativePolicy.configure(outlineView: outlineView)
+            outlineView.dataSource = coordinator
+            outlineView.delegate = coordinator
+            outlineView.setAccessibilityLabel("边栏")
+
+            scrollView.translatesAutoresizingMaskIntoConstraints = false
+            scrollView.documentView = outlineView
+            scrollView.hasVerticalScroller = true
+            scrollView.hasHorizontalScroller = false
+            scrollView.autohidesScrollers = true
+            scrollView.borderType = .noBorder
+            scrollView.drawsBackground = false
+
+            addSubview(searchField)
+            addSubview(scrollView)
+            NSLayoutConstraint.activate([
+                searchField.topAnchor.constraint(
+                    equalTo: topAnchor,
+                    constant: AppSidebarMetrics.topInset
+                ),
+                searchField.leadingAnchor.constraint(
+                    equalTo: leadingAnchor,
+                    constant: AppSidebarMetrics.horizontalInset
+                ),
+                searchField.trailingAnchor.constraint(
+                    equalTo: trailingAnchor,
+                    constant: -AppSidebarMetrics.horizontalInset
+                ),
+                scrollView.topAnchor.constraint(
+                    equalTo: searchField.bottomAnchor,
+                    constant: AppSidebarMetrics.searchToListSpacing
+                ),
+                scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+                scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+                scrollView.bottomAnchor.constraint(equalTo: bottomAnchor)
+            ])
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+    }
+
+    final class ItemCellView: NSTableCellView {
+        private let symbolView = NSImageView()
+        private let label = NSTextField(labelWithString: "")
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+
+            symbolView.translatesAutoresizingMaskIntoConstraints = false
+            symbolView.imageScaling = .scaleProportionallyDown
+            symbolView.contentTintColor = AppSidebarNativePolicy.iconTint
+            symbolView.setContentHuggingPriority(.required, for: .horizontal)
+
+            label.translatesAutoresizingMaskIntoConstraints = false
+            label.lineBreakMode = .byTruncatingTail
+            label.maximumNumberOfLines = 1
+            label.setContentCompressionResistancePriority(
+                .defaultLow,
+                for: .horizontal
+            )
+
+            imageView = symbolView
+            textField = label
+            addSubview(symbolView)
+            addSubview(label)
+            NSLayoutConstraint.activate([
+                symbolView.leadingAnchor.constraint(equalTo: leadingAnchor),
+                symbolView.centerYAnchor.constraint(equalTo: centerYAnchor),
+                label.leadingAnchor.constraint(
+                    equalTo: symbolView.trailingAnchor,
+                    constant: 7
+                ),
+                label.trailingAnchor.constraint(
+                    lessThanOrEqualTo: trailingAnchor
+                ),
+                label.centerYAnchor.constraint(equalTo: centerYAnchor)
+            ])
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        func configure(section: AppSection) {
+            label.stringValue = section.rawValue
+            label.setAccessibilityLabel(section.rawValue)
+            symbolView.image = NSImage(
+                systemSymbolName: section.systemImage,
+                accessibilityDescription: section.rawValue
+            )
+        }
+    }
+
+    final class SourceListRowView: NSTableRowView {
+        // App Store keeps the navigation selection neutral while the glyph
+        // continues to use its adaptive blue semantic color. This asks AppKit
+        // for its native neutral source-list selection instead of painting
+        // our own.
+        override var isEmphasized: Bool {
+            get { false }
+            set { super.isEmphasized = false }
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject,
+        NSSearchFieldDelegate,
+        NSOutlineViewDataSource,
+        NSOutlineViewDelegate {
+        var parent: NativeSidebarSourceList
+        var lastFocusRequest: UInt64 = 0
+        private var isSynchronizingSelection = false
+        private let items = AppSection.allCases.map(ItemNode.init(section:))
+
+        init(_ parent: NativeSidebarSourceList) {
+            self.parent = parent
+        }
+
+        func attach(to view: ContainerView) {
+            view.outlineView.reloadData()
+        }
+
+        func synchronize(_ view: ContainerView) {
+            let field = view.searchField
+            field.placeholderString = parent.presentation.placeholder
+            field.setAccessibilityLabel(parent.presentation.accessibilityLabel)
+            field.toolTip = parent.presentation.help
+            field.isEnabled = parent.isSearchEnabled
+            if field.stringValue != parent.text {
+                field.stringValue = parent.text
+            }
+            synchronizeSelection(view.outlineView)
+
+            guard parent.focusRequest > 0,
+                  lastFocusRequest != parent.focusRequest else { return }
+            lastFocusRequest = parent.focusRequest
+            DispatchQueue.main.async { [weak field] in
+                guard let field,
+                      let window = field.window,
+                      field.isEnabled else { return }
+                window.makeFirstResponder(field)
+                field.selectText(nil)
+            }
+        }
+
+        private func synchronizeSelection(_ outlineView: NSOutlineView) {
+            guard let row = row(
+                for: parent.selectedSection,
+                in: outlineView
+            ), outlineView.selectedRow != row else { return }
+            isSynchronizingSelection = true
+            outlineView.selectRowIndexes(
+                IndexSet(integer: row),
+                byExtendingSelection: false
+            )
+            outlineView.scrollRowToVisible(row)
+            isSynchronizingSelection = false
+        }
+
+        private func row(
+            for section: AppSection,
+            in outlineView: NSOutlineView
+        ) -> Int? {
+            guard let item = items.first(
+                where: { $0.section == section }
+            ) else { return nil }
+            let row = outlineView.row(forItem: item)
+            return row >= 0 ? row : nil
+        }
+
+        func outlineView(
+            _ outlineView: NSOutlineView,
+            numberOfChildrenOfItem item: Any?
+        ) -> Int {
+            item == nil ? items.count : 0
+        }
+
+        func outlineView(
+            _ outlineView: NSOutlineView,
+            child index: Int,
+            ofItem item: Any?
+        ) -> Any {
+            items[index]
+        }
+
+        func outlineView(
+            _ outlineView: NSOutlineView,
+            isItemExpandable item: Any
+        ) -> Bool {
+            false
+        }
+
+        func outlineView(
+            _ outlineView: NSOutlineView,
+            shouldSelectItem item: Any
+        ) -> Bool {
+            item is ItemNode
+        }
+
+        func outlineView(
+            _ outlineView: NSOutlineView,
+            viewFor tableColumn: NSTableColumn?,
+            item: Any
+        ) -> NSView? {
+            guard let item = item as? ItemNode else { return nil }
+            let identifier = NSUserInterfaceItemIdentifier("AppSidebar.item")
+            let cell = outlineView.makeView(
+                withIdentifier: identifier,
+                owner: self
+            ) as? ItemCellView ?? ItemCellView()
+            cell.identifier = identifier
+            cell.configure(section: item.section)
+            return cell
+        }
+
+        func outlineView(
+            _ outlineView: NSOutlineView,
+            rowViewForItem item: Any
+        ) -> NSTableRowView? {
+            item is ItemNode ? SourceListRowView() : nil
+        }
+
+        func outlineViewSelectionDidChange(_ notification: Notification) {
+            guard !isSynchronizingSelection,
+                  let outlineView = notification.object as? NSOutlineView,
+                  outlineView.selectedRow >= 0,
+                  let item = outlineView.item(
+                    atRow: outlineView.selectedRow
+                  ) as? ItemNode else { return }
+            parent.onSelect(item.section)
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSSearchField else {
+                return
+            }
+            parent.text = field.stringValue
+            parent.onTextChange(field.stringValue)
+        }
+
+        func control(
+            _ control: NSControl,
+            textView: NSTextView,
+            doCommandBy commandSelector: Selector
+        ) -> Bool {
+            guard commandSelector == #selector(NSResponder.cancelOperation(_:)),
+                  let field = control as? NSSearchField else {
+                return false
+            }
+
+            switch SidebarSearchEscapePolicy.action(for: textView.string) {
+            case .clearText:
+                // Match App Store search: the first Escape clears the query
+                // while preserving the field editor and its focus. Do not
+                // route this through onTextChange because an empty video query
+                // intentionally exits the search presentation when it comes
+                // from the clear button or normal editing.
+                textView.string = ""
+                field.stringValue = ""
+                parent.text = ""
+                return true
+            case .exitSearch:
+                guard parent.onExitSearch() else { return false }
+                field.window?.makeFirstResponder(nil)
+                return true
+            }
+        }
+
+        @objc func submit(_ sender: NSSearchField) {
+            parent.text = sender.stringValue
+            parent.onTextChange(sender.stringValue)
+            parent.onSubmit()
+        }
     }
 }
 
@@ -2391,15 +2637,15 @@ private struct SidebarColumnWidthModifier: ViewModifier {
     func body(content: Content) -> some View {
         if #available(macOS 13.0, *) {
             content.navigationSplitViewColumnWidth(
-                min: AppSidebarMetrics.minimumWidth,
-                ideal: AppSidebarMetrics.idealWidth,
-                max: AppSidebarMetrics.maximumWidth
+                min: AppSidebarMetrics.width,
+                ideal: AppSidebarMetrics.width,
+                max: AppSidebarMetrics.width
             )
         } else {
             content.frame(
-                minWidth: AppSidebarMetrics.minimumWidth,
-                idealWidth: AppSidebarMetrics.idealWidth,
-                maxWidth: AppSidebarMetrics.maximumWidth
+                minWidth: AppSidebarMetrics.width,
+                idealWidth: AppSidebarMetrics.width,
+                maxWidth: AppSidebarMetrics.width
             )
         }
     }

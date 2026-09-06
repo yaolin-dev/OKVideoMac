@@ -17,10 +17,15 @@
 - Added a recoverable private-AVD rebuild in Settings. It backs up only
   `OKVideoMac_Runtime` and never wipes userdata automatically or modifies other
   AVDs, Android Studio, global ADB, favorites, history, or normal settings.
-- Build 97 adds the Emulator's official ADB-auth compatibility switch only for
+- Build 98 includes the Emulator's official ADB-auth compatibility switch only for
   the private headless API 24–29 runtime, whose legacy boot-property path cannot
   provision a newly generated private host key. API 30+ authentication is
   unchanged.
+- Replaced the custom primary sidebar with an AppKit source list on the native
+  sidebar material, including semantic blue symbols, neutral selection, native
+  search control sizing, and active/inactive window appearance.
+- Matched App Store search cancellation: Escape first clears a non-empty query
+  without dropping focus; a second Escape on the empty field exits search.
 
 ### Diagnostics and safety
 
@@ -36,7 +41,7 @@
 - The complete macOS suite passes 629 tests (625 passed, 4 intentionally
   skipped); Android Runtime tests cover delayed transport, ADB isolation,
   bounded fallback, repair isolation, and 10-way concurrent startup.
-- The local API 35 private-ADB A/B reaches `device`, and Build 97 does not add
+- The local API 35 private-ADB A/B reaches `device`, and Build 98 does not add
   the compatibility switch to API 30+. The user-specific API 24 / Emulator
   37.1.11 / M1 recovery result remains a real-machine validation item.
 

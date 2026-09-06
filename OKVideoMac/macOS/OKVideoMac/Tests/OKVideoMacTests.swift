@@ -2540,47 +2540,6 @@ final class OKVideoMacTests: XCTestCase {
         }
     }
 
-    func testSidebarRowHoverOnlyAddsACompactEnabledOverlay() {
-        XCTAssertEqual(
-            SidebarRowHoverPolicy.hoverOverlayOpacity(
-                isSelected: false,
-                isHovering: false,
-                isEnabled: true
-            ),
-            0
-        )
-        XCTAssertEqual(
-            SidebarRowHoverPolicy.hoverOverlayOpacity(
-                isSelected: false,
-                isHovering: true,
-                isEnabled: true
-            ),
-            0.06
-        )
-        XCTAssertEqual(
-            SidebarRowHoverPolicy.hoverOverlayOpacity(
-                isSelected: true,
-                isHovering: true,
-                isEnabled: true
-            ),
-            0.04
-        )
-        XCTAssertEqual(
-            SidebarRowHoverPolicy.hoverOverlayOpacity(
-                isSelected: false,
-                isHovering: true,
-                isEnabled: false
-            ),
-            0
-        )
-        XCTAssertEqual(SidebarRowHoverPolicy.cornerRadius, 6)
-        XCTAssertEqual(SidebarRowHoverPolicy.animationDuration, 0.11)
-        XCTAssertEqual(
-            SidebarRowHoverPolicy.selectionBackgroundOpacity,
-            0.10
-        )
-    }
-
     func testSidebarVideoSearchReturnsToItsOriginSection() async {
         await MainActor.run {
             let state = AppState(environment: nil)
@@ -13955,17 +13914,48 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testBrowserChromeAndSidebarMatchModernMacMetrics() {
-        XCTAssertEqual(AppSidebarMetrics.minimumWidth, 224)
-        XCTAssertEqual(AppSidebarMetrics.idealWidth, 224)
-        XCTAssertEqual(AppSidebarMetrics.maximumWidth, 280)
-        XCTAssertEqual(AppSidebarMetrics.horizontalInset, 16)
-        XCTAssertEqual(AppSidebarMetrics.searchHeight, 32)
-        XCTAssertEqual(AppSidebarMetrics.rowHeight, 26)
-        XCTAssertEqual(AppSidebarMetrics.labelFontSize, 14)
-        XCTAssertEqual(AppSidebarMetrics.iconWidth, 18)
-        XCTAssertEqual(AppSidebarMetrics.iconTextSpacing, 8)
-        XCTAssertEqual(AppSidebarMetrics.rowContentMinimumWidth, 168)
+    @MainActor
+    func testBrowserSidebarUsesNativeSourceListMetricsAndMaterial() {
+        XCTAssertEqual(AppSidebarMetrics.width, 220)
+        XCTAssertEqual(AppSidebarMetrics.horizontalInset, 10)
+        XCTAssertEqual(AppSidebarMetrics.topInset, 0)
+        XCTAssertEqual(AppSidebarMetrics.searchToListSpacing, 16)
+
+        let background = NSVisualEffectView()
+        AppSidebarNativePolicy.configure(background: background)
+        XCTAssertEqual(background.material, .sidebar)
+        XCTAssertEqual(background.blendingMode, .behindWindow)
+        XCTAssertEqual(background.state, .followsWindowActiveState)
+        XCTAssertTrue(background.isEmphasized)
+        XCTAssertTrue(
+            AppSidebarNativePolicy.iconTint.isEqual(NSColor.systemBlue)
+        )
+
+        let outlineView = NSOutlineView()
+        AppSidebarNativePolicy.configure(outlineView: outlineView)
+        XCTAssertEqual(outlineView.style, .sourceList)
+        XCTAssertEqual(outlineView.rowSizeStyle, .large)
+        XCTAssertNil(outlineView.headerView)
+        XCTAssertFalse(outlineView.allowsEmptySelection)
+        XCTAssertFalse(outlineView.allowsMultipleSelection)
+    }
+
+    @MainActor
+    func testBrowserSidebarSearchUsesNativeLargeExplicitSubmission() {
+        let searchField = NSSearchField()
+        AppSidebarNativePolicy.configure(searchField: searchField)
+
+        XCTAssertEqual(searchField.controlSize, .large)
+        XCTAssertFalse(searchField.sendsSearchStringImmediately)
+        XCTAssertTrue(searchField.sendsWholeSearchString)
+        XCTAssertEqual(
+            SidebarSearchEscapePolicy.action(for: "正在输入"),
+            .clearText
+        )
+        XCTAssertEqual(
+            SidebarSearchEscapePolicy.action(for: ""),
+            .exitSearch
+        )
     }
 
     @MainActor
@@ -13976,7 +13966,6 @@ final class OKVideoMacTests: XCTestCase {
             backing: .buffered,
             defer: false
         )
-
         BrowserWindowChromeController.configure(window)
 
         XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))

@@ -1,6 +1,6 @@
 # OKVideoMac Third-Party Notices
 
-This is the authoritative third-party index for OKVideoMac 0.4.2 (Build 97). It
+This is the authoritative third-party index for OKVideoMac 0.4.2 (Build 98). It
 covers executable material actually shipped in the macOS App and its embedded
 Android APK. Third-party software remains under its original terms; the
 project's `GPL-3.0-only` license does not relicense it.

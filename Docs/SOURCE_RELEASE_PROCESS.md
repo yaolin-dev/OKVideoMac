@@ -4,16 +4,16 @@ Each formal OKVideoMac binary must be published with a source set produced by
 `macOS/OKVideoMac/Scripts/create-source-release.sh` from the exact release Git
 commit. Moving branches and `latest` URLs are not corresponding-source links.
 
-For the local 0.4.2 hotfix candidate (Build 97), the package gate prepares the
+For the local 0.4.2 hotfix candidate (Build 98), the package gate prepares the
 following names from one exact clean commit. These files remain local until a
 separate reviewed publish operation is authorized:
 
-- `OKVideoMac-0.4.2-build97-source.tar.gz`
-- `OKVideoMac-0.4.2-build97-third-party-source.tar.gz`
-- `OKVideoMac-0.4.2-build97-licenses.tar.gz`
-- `OKVideoMac-0.4.2-build97-SOURCE_RELEASE_INDEX.json`
-- `OKVideoMac-0.4.2-build97-SOURCE_RELEASE_MANIFEST.json`
-- `OKVideoMac-0.4.2-build97-SHA256SUMS`
+- `OKVideoMac-0.4.2-build98-source.tar.gz`
+- `OKVideoMac-0.4.2-build98-third-party-source.tar.gz`
+- `OKVideoMac-0.4.2-build98-licenses.tar.gz`
+- `OKVideoMac-0.4.2-build98-SOURCE_RELEASE_INDEX.json`
+- `OKVideoMac-0.4.2-build98-SOURCE_RELEASE_MANIFEST.json`
+- `OKVideoMac-0.4.2-build98-SHA256SUMS`
 - `OKVideoMac-0.4.2-macOS-arm64.zip`
 - `OKVideoMac-0.4.2.dmg`
 - `OKVideoMac-0.4.2-AndroidDexBridge-release.apk`
