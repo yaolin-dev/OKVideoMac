@@ -99,7 +99,12 @@ ARTIFACTS="${OKVIDEOMAC_ARTIFACTS:-$OKVIDEOMAC_BUILD_ROOT/Artifacts}"
 SOURCE_RELEASE_DIR="${OKVIDEOMAC_SOURCE_RELEASE_DIR:-$ARTIFACTS/SourceRelease}"
 SOURCE_RELEASE_CACHE="${OKVIDEOMAC_SOURCE_RELEASE_CACHE:-$OKVIDEOMAC_BUILD_ROOT/Downloads/SourceRelease}"
 APP_SOURCE="$DERIVED_DATA/Build/Products/Release/OKVideoMac.app"
-APP_DESTINATION="$ARTIFACTS/OKVideoMac.app"
+FINAL_APP_DESTINATION="$ARTIFACTS/OKVideoMac.app"
+# Documents/Desktop can be backed by File Provider, which may immediately
+# reattach FinderInfo after xattr removes it. Assemble and sign on the local
+# temporary filesystem so the "sanitize + codesign" boundary is deterministic.
+PACKAGE_STAGING="$(mktemp -d "${TMPDIR:-/tmp}/OKVideoMac-Package-Staging.XXXXXX")"
+APP_DESTINATION="$PACKAGE_STAGING/OKVideoMac.app"
 LIBMPV_ROOT="$OKVIDEOMAC_BUILD_ROOT/libmpv"
 QUICKJS_ROOT="$OKVIDEOMAC_BUILD_ROOT/QuickJS"
 NODE_RUNTIME="$APP_DESTINATION/Contents/Resources/NodeRuntime/node"
@@ -215,7 +220,6 @@ if [[ ! -d "$APP_SOURCE" ]]; then
   exit 1
 fi
 
-rm -rf "$APP_DESTINATION"
 mkdir -p "$ARTIFACTS"
 cp -R "$APP_SOURCE" "$APP_DESTINATION"
 # Xcode keeps DWARF sections in the unsigned Release executable even when it
@@ -239,12 +243,15 @@ fi
 ARCHIVE="$ARTIFACTS/OKVideoMac-${APP_VERSION}-macOS-arm64.zip"
 DMG="$ARTIFACTS/OKVideoMac-${APP_VERSION}.dmg"
 DMG_STAGING=""
-cleanup_dmg_staging() {
+cleanup_package_staging() {
   if [[ -n "$DMG_STAGING" && -d "$DMG_STAGING" ]]; then
     rm -rf "$DMG_STAGING"
   fi
+  if [[ -n "$PACKAGE_STAGING" && -d "$PACKAGE_STAGING" ]]; then
+    rm -rf "$PACKAGE_STAGING"
+  fi
 }
-trap cleanup_dmg_staging EXIT
+trap cleanup_package_staging EXIT
 SOURCE_RELEASE_BASE="OKVideoMac-${APP_VERSION}-build${APP_BUILD}"
 SOURCE_RELEASE_INDEX="$SOURCE_RELEASE_DIR/${SOURCE_RELEASE_BASE}-SOURCE_RELEASE_INDEX.json"
 source_release_arguments=(
@@ -556,7 +563,10 @@ sign_code "$APP_DESTINATION" "$APP_ENTITLEMENTS"
 
 create_archive() {
   rm -f "$ARCHIVE" "$ARCHIVE.sha256"
-  ditto -c -k --sequesterRsrc --keepParent "$APP_DESTINATION" "$ARCHIVE"
+  # Extended attributes here describe the build host, not the product. In
+  # particular, preserving FinderInfo would make an otherwise valid bundle
+  # fail strict verification after extraction.
+  ditto -c -k --norsrc --noextattr --keepParent "$APP_DESTINATION" "$ARCHIVE"
   (
     cd "$ARTIFACTS"
     shasum -a 256 "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256"
@@ -665,7 +675,17 @@ PYTHONDONTWRITEBYTECODE=1 python3 \
   "$REPOSITORY_ROOT/Tools/SourceAudit/scan_release_artifacts.py" \
   "${final_sensitive_scan_arguments[@]}"
 
-echo "Packaged app: $APP_DESTINATION"
+# Materialize the standalone App only after the canonical staging App, ZIP,
+# DMG, signatures, SBOMs, and source-release identity have all passed. The
+# destination may acquire host-local File Provider attributes, but its signed
+# file bytes are copied from the already verified canonical bundle.
+FINAL_APP_STAGING="$ARTIFACTS/.OKVideoMac.app.incoming"
+rm -rf "$FINAL_APP_STAGING"
+cp -R "$APP_DESTINATION" "$FINAL_APP_STAGING"
+rm -rf "$FINAL_APP_DESTINATION"
+mv "$FINAL_APP_STAGING" "$FINAL_APP_DESTINATION"
+
+echo "Packaged app: $FINAL_APP_DESTINATION"
 echo "Internal archive: $ARCHIVE"
 echo "Public DMG: $DMG"
 echo "Source release: $SOURCE_RELEASE_DIR"
