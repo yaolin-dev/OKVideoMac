@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A9D7F5C102A14B8E91D0C301 /* AndroidRuntimeModeCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9D7F5C102A14B8E91D0C302 /* AndroidRuntimeModeCoordinator.swift */; };
 		05D5512B69A7C71CC3112A74 /* MPVLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D3A1A89473AFD33AAF47D01 /* MPVLibrary.swift */; };
 		0DC49DC6E8989EB3C7FFADD2 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADFC0D6C3C9A30793D7813B3 /* AppState.swift */; };
 		0EBDF1072F01B5B03856512F /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 4027B9ADBDE079CA11AFB824 /* Localizable.strings */; };
@@ -62,6 +63,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		A9D7F5C102A14B8E91D0C302 /* AndroidRuntimeModeCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AndroidRuntimeModeCoordinator.swift; sourceTree = "<group>"; };
 		04E18EAE5CCFAEC3E0E3E49A /* DetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailView.swift; sourceTree = "<group>"; };
 		09C1F786F0D9BA2EB9105485 /* AppEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppEnvironment.swift; sourceTree = "<group>"; };
 		115FFC7F2FD723B0F12E0D2D /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
@@ -275,6 +277,7 @@
 		A6C57E39CC1AB3666C2EF762 /* App */ = {
 			isa = PBXGroup;
 			children = (
+				A9D7F5C102A14B8E91D0C302 /* AndroidRuntimeModeCoordinator.swift */,
 				09C1F786F0D9BA2EB9105485 /* AppEnvironment.swift */,
 				ADFC0D6C3C9A30793D7813B3 /* AppState.swift */,
 				63284B4134B72C9ECD12EE1B /* ImageRepository.swift */,
@@ -554,6 +557,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A9D7F5C102A14B8E91D0C301 /* AndroidRuntimeModeCoordinator.swift in Sources */,
 				6CCB5B911833DDAFF2E3C740 /* AndroidRuntimeInstallView.swift in Sources */,
 				5728CE6395E44C04B4A0C12A /* AppEnvironment.swift in Sources */,
 				F9FF431B06B6D4B13A435C8A /* AppParseExecutor.swift in Sources */,

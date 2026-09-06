@@ -24,6 +24,26 @@ Terminal commands.
 The same component can be installed, inspected, updated, repaired, or
 diagnosed from **Settings → Android Compatibility Module**.
 
+## Runtime choice and backward compatibility
+
+Managed Runtime remains the default and recommended choice. Advanced users
+may instead explicitly select an existing Android SDK in Settings. External
+mode is a first-class compatibility path: OKVideoMac uses `adb`, Emulator, and
+the matching arm64 system image from that exact SDK while retaining its own ADB
+server port, ADB keypair, Android home, and private AVD.
+
+An existing OKVideoMac SDK preference is migrated once. A validated Managed
+Generation takes precedence; otherwise the historical explicitly saved SDK is
+preserved as External mode even when that path is currently unavailable, so
+the user can see and correct the real configuration. Shell `PATH`,
+`ANDROID_HOME`, Homebrew, and Android Studio discovery never silently select
+External mode.
+
+Selecting a new SDK follows `select → validate → show capabilities →
+confirm → atomically switch`. A failed validation or cancellation leaves the
+current choice unchanged. The Emulator Session must be stopped before changing
+mode.
+
 ## Managed layout
 
 The multi-gigabyte Runtime is not bundled in the app. It is installed on demand:
@@ -52,7 +72,9 @@ history, and normal settings.
 
 ## Isolation and trust boundaries
 
-- Every Android/Java executable must come from the active Generation.
+- In Managed mode every Android/Java executable must come from the active
+  Generation. In External mode Android executables must come from the exact
+  user-confirmed SDK.
 - ADB uses an OKVideoMac-owned high port and private keypair.
 - The AVD must remain under the private `AndroidRuntime/avd` root.
 - Child processes receive explicit `PATH`, `JAVA_HOME`, Android home variables,
@@ -62,6 +84,12 @@ history, and normal settings.
 - Installation and Emulator Session have independent single-flights. Concurrent
   install requests join one transaction; Runtime requests retain the existing
   one-startup-task behavior.
+- Managed mode never reads or launches an External Android executable. External
+  mode never invokes Managed installation admission.
+- The shared private AVD is guarded by a compatibility fingerprint containing
+  Runtime source, API, ABI, system-image package/tag, AVD schema, and Emulator
+  compatibility. A mismatch fails closed without deleting or rebuilding
+  userdata.
 
 The catalog is untrusted input. Non-HTTPS or non-allowlisted downloads, bad
 SHA-256 values, traversal, absolute paths, duplicate IDs, unexpected archive
@@ -83,12 +111,13 @@ can be reused, and partial downloads support HTTP Range resumption.
   lifecycle evidence but redact user paths and omit cookies, tokens, private
   source URLs, playback URLs, Spider content, and ADB private keys.
 
-## Legacy / Troubleshooting / Developer Setup
+## Existing Android SDK mode
 
-The **Legacy Manual Environment…** control is retained for maintainers and old
-installations only. The legacy resolver may inspect a selected SDK or Android
-environment only when no managed-generation pointer exists. This is not the
-normal setup path and does not provide managed versioning, purity, or rollback.
+External mode does not download or version the selected SDK and cannot provide
+Managed Generation rollback. Validation separates launch capability from
+create/repair capability: an already compatible private AVD may launch without
+Java or `avdmanager`; creating or rebuilding one requires both. Missing or
+incompatible components are reported without falling through to another SDK.
 
 ## Compatibility statement
 

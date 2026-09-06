@@ -18,6 +18,7 @@ struct AppEnvironment {
     let spiderRuntimeFactory: SpiderRuntimeFactory?
     let nodeBundleRuntime: NodeBundleRuntimeService
     let androidRuntimeManager: AndroidManagedRuntimeManager
+    let androidRuntimeModeCoordinator: AndroidRuntimeModeCoordinator
     let androidDexBridge: AndroidDexBridgeClient
     let player: PlayerLifecycleController
     let imageRepository: ImageRepository
@@ -59,6 +60,55 @@ struct AppEnvironment {
         let androidRuntimeManager = try AndroidManagedRuntimeManager.live(
             applicationSupportDirectory: directories.applicationSupport
         )
+        let runtimeLayout = AndroidRuntimeLayout(
+            applicationSupportDirectory: directories.applicationSupport
+        )
+        let runtimeCatalog = try BundledRuntimeCatalog.load()
+        let managedRuntimeUsable = (try? ManagedRuntimeSelection.resolve(
+            layout: runtimeLayout,
+            catalog: runtimeCatalog
+        )) != nil
+        let androidSession = AndroidDexBridgeRuntime(
+            applicationSupportDirectory: directories.applicationSupport
+        )
+        let androidRuntimeModeCoordinator = try AndroidRuntimeModeCoordinator(
+            store: AndroidRuntimeModeStore(
+                applicationSupportDirectory: directories.applicationSupport
+            ),
+            layout: runtimeLayout,
+            catalog: runtimeCatalog,
+            externalValidator: ExternalAndroidRuntimeValidator(
+                applicationSupportDirectory: directories.applicationSupport
+            ),
+            managedRuntimeUsableAtMigration: managedRuntimeUsable,
+            managedUsability: {
+                (try? ManagedRuntimeSelection.resolve(
+                    layout: runtimeLayout,
+                    catalog: runtimeCatalog
+                )) != nil
+            },
+            ensureManagedReady: {
+                try await androidRuntimeManager.ensureReadyForDex()
+            },
+            cancelManagedAdmission: {
+                await androidRuntimeManager.cancel()
+            },
+            configureSession: { mode, externalSDKRoot in
+                await androidSession.setRuntimeSelection(
+                    mode: mode,
+                    externalSDKRoot: externalSDKRoot
+                )
+            },
+            sessionStatus: {
+                await androidSession.status()
+            }
+        )
+        let androidDexBridge = AndroidDexBridgeClient(
+            runtime: androidSession,
+            runtimePrerequisite: {
+                try await androidRuntimeModeCoordinator.prepareRuntime()
+            }
+        )
         return AppEnvironment(
             directories: directories,
             applicationInstanceLease: applicationInstanceLease,
@@ -84,14 +134,8 @@ struct AppEnvironment {
                 remoteHTTPClient: interactiveHTTPClient
             ),
             androidRuntimeManager: androidRuntimeManager,
-            androidDexBridge: AndroidDexBridgeClient(
-                runtime: AndroidDexBridgeRuntime(
-                    applicationSupportDirectory: directories.applicationSupport
-                ),
-                managedRuntimePrerequisite: {
-                    try await androidRuntimeManager.ensureReadyForDex()
-                }
-            ),
+            androidRuntimeModeCoordinator: androidRuntimeModeCoordinator,
+            androidDexBridge: androidDexBridge,
             player: player,
             imageRepository: ImageRepository(
                 dataRepository: try ImageDataRepository(

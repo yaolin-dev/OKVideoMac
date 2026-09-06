@@ -4544,6 +4544,8 @@ final class AppState: ObservableObject {
     @Published private(set) var isAndroidRuntimeBusy = false
     @Published private(set) var managedRuntimeInstallationState:
         ManagedRuntimeInstallationState = .detecting
+    @Published private(set) var androidRuntimeModeSnapshot:
+        AndroidRuntimeModeSnapshot = .initial
     @Published var isAndroidRuntimeInstallSheetPresented = false
 
     var mainWindowCloudAuthorizationPrompt: CloudAuthorizationPrompt? {
@@ -4758,6 +4760,8 @@ final class AppState: ObservableObject {
         startNodeRuntimeStatusMonitoring()
         startNodeProfileRevisionMonitoring()
         startManagedRuntimeStatusMonitoring()
+        androidRuntimeModeSnapshot = await environment
+            .androidRuntimeModeCoordinator.refresh()
         _ = try? await environment.androidRuntimeManager.refresh()
         isLoading = true
         defer {
@@ -12574,6 +12578,12 @@ final class AppState: ObservableObject {
            let object = try? JSONSerialization.jsonObject(with: encoded) {
             report["androidManagedRuntime"] = LogRedactor.json(object)
         }
+        if let modeSnapshot = await environment?.androidRuntimeModeCoordinator
+            .diagnosticReport(),
+           let encoded = try? diagnosticEncoder.encode(modeSnapshot),
+           let object = try? JSONSerialization.jsonObject(with: encoded) {
+            report["androidRuntimeSelection"] = LogRedactor.json(object)
+        }
         do {
             let data = try JSONSerialization.data(
                 withJSONObject: report,
@@ -13454,6 +13464,8 @@ final class AppState: ObservableObject {
             androidRuntimeStatus = .unavailable("应用运行环境未完成初始化")
             return
         }
+        androidRuntimeModeSnapshot = await environment
+            .androidRuntimeModeCoordinator.refresh()
         androidRuntimeStatus = await environment.androidDexBridge.runtimeStatus()
         _ = try? await environment.androidRuntimeManager.refresh()
     }
@@ -13519,19 +13531,88 @@ final class AppState: ObservableObject {
 
     func chooseAndroidSDK() async {
         guard let environment, !isAndroidRuntimeBusy else { return }
-        let panel = NSOpenPanel()
-        panel.title = "选择 Android SDK"
-        panel.message = "请选择包含 platform-tools 和 emulator 的 Android SDK 目录。"
-        panel.prompt = "选择 SDK"
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = false
-        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Android", isDirectory: true)
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        await environment.androidDexBridge.setUserSelectedSDKRoot(url)
-        androidRuntimeStatus = await environment.androidDexBridge.runtimeStatus()
+        while true {
+            let panel = NSOpenPanel()
+            panel.title = "选择 Android SDK"
+            panel.message = "请选择包含 platform-tools 和 emulator 的 Android SDK 目录。"
+            panel.prompt = "检查 SDK"
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            panel.allowsMultipleSelection = false
+            panel.canCreateDirectories = false
+            panel.directoryURL = androidRuntimeModeSnapshot.externalSDKRoot?
+                .deletingLastPathComponent()
+                ?? FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent(
+                        "Library/Android",
+                        isDirectory: true
+                    )
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            let validation = await environment.androidRuntimeModeCoordinator
+                .previewExternalSDK(url)
+            let alert = NSAlert()
+            alert.alertStyle = validation.canPrepareRuntime
+                ? .informational
+                : .warning
+            alert.messageText = validation.canSelectEnvironment
+                ? (validation.canPrepareRuntime
+                    ? "现有 Android SDK 可以使用"
+                    : "现有 Android SDK 需要重建专用环境")
+                : "现有 Android SDK 当前不可用"
+            alert.informativeText = [
+                "位置：\(validation.sdkRoot.path)",
+                "启动能力：\(validation.launchCapability.detail)",
+                "创建/修复能力：\(validation.createRepairCapability.detail)",
+                validation.userFacingSelectionStatus
+            ].joined(separator: "\n")
+            if validation.canSelectEnvironment {
+                alert.addButton(withTitle: "使用此环境")
+                alert.addButton(withTitle: "取消")
+                guard alert.runModal() == .alertFirstButtonReturn else {
+                    return
+                }
+                do {
+                    androidRuntimeModeSnapshot = try await environment
+                        .androidRuntimeModeCoordinator.useExternalSDK(url)
+                    isAndroidRuntimeInstallSheetPresented = false
+                    androidRuntimeStatus = await environment.androidDexBridge
+                        .runtimeStatus()
+                } catch {
+                    show(error, title: "无法切换 Android 运行环境")
+                }
+                return
+            }
+            alert.addButton(withTitle: "重新选择…")
+            alert.addButton(withTitle: "取消")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+    }
+
+    func useConfiguredExternalAndroidRuntime() async {
+        guard let environment, !isAndroidRuntimeBusy else { return }
+        do {
+            androidRuntimeModeSnapshot = try await environment
+                .androidRuntimeModeCoordinator.useConfiguredExternalSDK()
+            isAndroidRuntimeInstallSheetPresented = false
+            androidRuntimeStatus = await environment.androidDexBridge
+                .runtimeStatus()
+        } catch {
+            show(error, title: "现有 Android SDK 不可用")
+        }
+    }
+
+    func useManagedAndroidRuntime() async {
+        guard let environment, !isAndroidRuntimeBusy else { return }
+        do {
+            androidRuntimeModeSnapshot = try await environment
+                .androidRuntimeModeCoordinator.useManagedRuntime()
+            _ = try? await environment.androidRuntimeManager.refresh()
+            if !androidRuntimeModeSnapshot.managedRuntimeUsable {
+                await showManagedRuntimeInstaller()
+            }
+        } catch {
+            show(error, title: "无法切换 Android 运行环境")
+        }
     }
 
     func startAndroidRuntime() async {
@@ -13549,7 +13630,7 @@ final class AppState: ObservableObject {
             isAndroidRuntimeBusy = false
         }
         do {
-            try await environment.androidRuntimeManager.ensureReadyForDex()
+            try await environment.androidRuntimeModeCoordinator.prepareRuntime()
             androidRuntimeStatus = try await environment.androidDexBridge
                 .startRuntime()
         } catch {
@@ -13582,6 +13663,7 @@ final class AppState: ObservableObject {
             isAndroidRuntimeBusy = false
         }
         do {
+            try await environment.androidRuntimeModeCoordinator.prepareRuntime()
             androidRuntimeStatus = try await environment.androidDexBridge
                 .repairRuntime()
         } catch {
@@ -13618,6 +13700,8 @@ final class AppState: ObservableObject {
             isAndroidRuntimeBusy = false
         }
         do {
+            try await environment.androidRuntimeModeCoordinator
+                .prepareRuntimeRepair()
             androidRuntimeStatus = try await environment.androidDexBridge
                 .rebuildRuntime()
         } catch {

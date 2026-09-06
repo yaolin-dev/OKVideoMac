@@ -521,9 +521,21 @@ struct SettingsView: View {
             SettingsSectionTitle("Android 兼容模块")
             SettingsCard {
                 SettingsControlRow(
+                    icon: "arrow.triangle.branch",
+                    color: .accentColor,
+                    title: "当前运行环境",
+                    subtitle: runtimeModeDetail
+                ) {
+                    Text(state.androidRuntimeModeSnapshot.mode.userFacingName)
+                        .foregroundStyle(.secondary)
+                }
+
+                SettingsDivider()
+
+                SettingsControlRow(
                     icon: managedRuntimeIcon,
                     color: managedRuntimeColor,
-                    title: managedRuntimeTitle,
+                    title: "OKVideoMac 自动管理（推荐）",
                     subtitle: managedRuntimeDetail
                 ) {
                     HStack(spacing: 8) {
@@ -537,12 +549,53 @@ struct SettingsView: View {
                                 AppActivityIndicator(size: .small)
                             }
                         }
-                        Button(managedRuntimeActionTitle) {
-                            Task { await state.showManagedRuntimeInstaller() }
+                        Button(managedRuntimeButtonTitle) {
+                            if state.androidRuntimeModeSnapshot.mode == .managed {
+                                Task {
+                                    await state.showManagedRuntimeInstaller()
+                                }
+                            } else {
+                                Task {
+                                    await state.useManagedAndroidRuntime()
+                                }
+                            }
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.bordered)
                         .disabled(
                             state.managedRuntimeInstallationState.isBusy
+                                || state.androidRuntimeStatus.isRunning
+                        )
+                    }
+                }
+
+                SettingsDivider()
+
+                SettingsControlRow(
+                    icon: externalRuntimeIcon,
+                    color: externalRuntimeColor,
+                    title: "现有 Android SDK",
+                    subtitle: externalRuntimeDetail
+                ) {
+                    HStack(spacing: 8) {
+                        if state.androidRuntimeModeSnapshot.mode != .external,
+                           state.androidRuntimeModeSnapshot.externalSDKRoot != nil {
+                            Button("使用") {
+                                Task {
+                                    await state
+                                        .useConfiguredExternalAndroidRuntime()
+                                }
+                            }
+                            .disabled(
+                                state.isAndroidRuntimeBusy
+                                    || state.androidRuntimeStatus.isRunning
+                            )
+                        }
+                        Button(externalRuntimeButtonTitle) {
+                            Task { await state.chooseAndroidSDK() }
+                        }
+                        .disabled(
+                            state.isAndroidRuntimeBusy
+                                || state.androidRuntimeStatus.isRunning
                         )
                     }
                 }
@@ -576,11 +629,6 @@ struct SettingsView: View {
                         }
                         .disabled(state.isAndroidRuntimeBusy)
 
-                        Button("旧版手动环境…") {
-                            Task { await state.chooseAndroidSDK() }
-                        }
-                        .disabled(state.isAndroidRuntimeBusy)
-
                         Button("修复 Bridge") {
                             Task { await state.repairAndroidRuntime() }
                         }
@@ -594,7 +642,6 @@ struct SettingsView: View {
                         }
                         .disabled(
                             state.isAndroidRuntimeBusy
-                                || state.androidRuntimeStatus.phase == .unavailable
                         )
 
                         if state.androidRuntimeStatus.isRunning {
@@ -623,8 +670,7 @@ struct SettingsView: View {
                         systemImage: "info.circle"
                     )
                     Text(
-                        "所需文件按需下载到 OKVideoMac 专用目录；"
-                            + "不会修改 Android Studio、Homebrew 或其他模拟器。"
+                        runtimeIsolationDetail
                     )
                     .foregroundColor(.secondary)
                 }
@@ -668,6 +714,74 @@ struct SettingsView: View {
         case .starting, .checking, .stopping: return .orange
         case .failed, .unavailable: return .red
         case .stopped: return .secondary
+        }
+    }
+
+    private var runtimeModeDetail: String {
+        switch state.androidRuntimeModeSnapshot.mode {
+        case .managed:
+            return "Android 内容只使用经过校验的 OKVideoMac 托管组件"
+        case .external:
+            return "Android 内容只使用下方明确选择的 SDK；不会触发托管安装"
+        }
+    }
+
+    private var externalRuntimeDetail: String {
+        guard let root = state.androidRuntimeModeSnapshot.externalSDKRoot else {
+            return "未配置；高级用户可选择已经安装的完整 Android SDK"
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let displayPath = root.path.hasPrefix(home + "/")
+            ? "~/" + root.path.dropFirst(home.count + 1)
+            : root.path
+        if state.androidRuntimeModeSnapshot.mode != .external {
+            return "已保存：\(displayPath)；切换前将重新验证"
+        }
+        let stateDetail = state.androidRuntimeModeSnapshot.externalValidation?
+            .userFacingStatus ?? "正在检查现有 Android SDK"
+        return "\(stateDetail) · \(displayPath)"
+    }
+
+    private var externalRuntimeIcon: String {
+        guard state.androidRuntimeModeSnapshot.externalSDKRoot != nil else {
+            return "externaldrive.badge.questionmark"
+        }
+        if state.androidRuntimeModeSnapshot.mode != .external {
+            return "externaldrive"
+        }
+        return state.androidRuntimeModeSnapshot.externalValidation?
+            .canPrepareRuntime == true
+                ? "checkmark.circle.fill"
+                : "exclamationmark.triangle.fill"
+    }
+
+    private var externalRuntimeColor: Color {
+        guard state.androidRuntimeModeSnapshot.mode == .external else {
+            return .secondary
+        }
+        return state.androidRuntimeModeSnapshot.externalValidation?
+            .canPrepareRuntime == true ? .green : .red
+    }
+
+    private var externalRuntimeButtonTitle: String {
+        state.androidRuntimeModeSnapshot.externalSDKRoot == nil
+            ? "选择…"
+            : "更改…"
+    }
+
+    private var managedRuntimeButtonTitle: String {
+        if state.androidRuntimeModeSnapshot.mode != .managed {
+            return "改用…"
+        }
+        return managedRuntimeActionTitle
+    }
+
+    private var runtimeIsolationDetail: String {
+        switch state.androidRuntimeModeSnapshot.mode {
+        case .managed:
+            return "所需文件按需下载到 OKVideoMac 专用目录；不会读取或借用外部 Android 工具。"
+        case .external:
+            return "ADB 与 Emulator 固定来自所选 SDK；仍使用 OKVideoMac 私有 ADB、密钥和专用 AVD。"
         }
     }
 

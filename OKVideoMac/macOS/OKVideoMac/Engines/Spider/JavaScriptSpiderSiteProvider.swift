@@ -1954,6 +1954,7 @@ private extension String {
 }
 
 struct AndroidRuntimeDiagnosticSnapshot: Codable, Equatable, Sendable {
+    let runtimeMode: AndroidRuntimeMode?
     let runtimeState: String
     let ownershipClassification: AndroidRuntimeOwnershipClassification?
     let launchOrigin: AndroidRuntimeLaunchOrigin?
@@ -2341,7 +2342,7 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     }
 
     private let runtime: AndroidDexBridgeRuntime
-    private let managedRuntimePrerequisite: @Sendable () async throws -> Void
+    private let runtimePrerequisite: @Sendable () async throws -> Void
     private let session: URLSession
     private let interactionSession: URLSession
     private let invokeURL = URL(string: "http://127.0.0.1:19978/v1/invoke")!
@@ -2350,11 +2351,11 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
 
     init(
         runtime: AndroidDexBridgeRuntime = AndroidDexBridgeRuntime(),
-        managedRuntimePrerequisite:
+        runtimePrerequisite:
             @escaping @Sendable () async throws -> Void = {}
     ) {
         self.runtime = runtime
-        self.managedRuntimePrerequisite = managedRuntimePrerequisite
+        self.runtimePrerequisite = runtimePrerequisite
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 65
         configuration.timeoutIntervalForResource = 70
@@ -2408,6 +2409,16 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
 
     func setUserSelectedSDKRoot(_ url: URL) async {
         await runtime.setUserSelectedSDKRoot(url)
+    }
+
+    func setRuntimeSelection(
+        mode: AndroidRuntimeMode,
+        externalSDKRoot: URL?
+    ) async {
+        await runtime.setRuntimeSelection(
+            mode: mode,
+            externalSDKRoot: externalSDKRoot
+        )
     }
 
     func hostReachableProxyURL(_ rawURL: String) -> String {
@@ -2622,7 +2633,7 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         refreshPlayback: Bool = false,
         requestedInteractionID: UUID? = nil
     ) async throws -> JSONValue {
-        try await managedRuntimePrerequisite()
+        try await runtimePrerequisite()
         try await runtime.ensureReady()
         let monitorsAuthorization = Self.shouldMonitorAuthorization(
             for: method,
@@ -4398,8 +4409,17 @@ struct AndroidToolchainResolver {
     let environment: [String: String]
     let userSelectedSDKRoot: String?
     let fileManager: FileManager
+    var selectionMode: AndroidRuntimeMode? = nil
 
     func resolve() -> AndroidToolchain? {
+        if selectionMode == .managed {
+            guard let selection = managedRuntimeSelection() else { return nil }
+            return toolchain(at: selection.sdkRoot)
+        }
+        if selectionMode == .external {
+            guard let userSelectedSDKRoot else { return nil }
+            return toolchain(at: Self.url(from: userSelectedSDKRoot))
+        }
         if hasManagedRuntimePointer {
             guard let selection = managedRuntimeSelection() else { return nil }
             return toolchain(at: selection.sdkRoot)
@@ -4429,7 +4449,15 @@ struct AndroidToolchainResolver {
     }
 
     func resolveJavaRuntime() -> AndroidJavaRuntime? {
-        if hasManagedRuntimePointer {
+        if selectionMode == .managed {
+            guard let selection = managedRuntimeSelection() else { return nil }
+            return AndroidJavaRuntime(
+                home: selection.javaHome,
+                executable: selection.java,
+                source: "OKVideoMac Managed Runtime"
+            )
+        }
+        if selectionMode == nil, hasManagedRuntimePointer {
             guard let selection = managedRuntimeSelection() else { return nil }
             return AndroidJavaRuntime(
                 home: selection.javaHome,
@@ -5887,6 +5915,7 @@ actor AndroidDexBridgeRuntime {
     private let currentBootIdentifier: String
     private let verboseAndroidDiagnosticsEnabled: Bool
     private var userSelectedSDKRoot: String?
+    private var runtimeSelectionMode: AndroidRuntimeMode?
     private var emulatorProcess: Process?
     private var emulatorOutputHandles: [FileHandle] = []
     private var emulatorProcessRecorder: AndroidEmulatorProcessRecorder?
@@ -6055,6 +6084,7 @@ actor AndroidDexBridgeRuntime {
         userSelectedSDKRoot = defaults.string(
             forKey: AndroidToolchainResolver.userSDKRootDefaultsKey
         )
+        runtimeSelectionMode = nil
     }
 
     /// Starts the single emulator display lease owned by this ActionSession.
@@ -7079,6 +7109,7 @@ actor AndroidDexBridgeRuntime {
         } ?? identity?.adbAuthenticationMode?
             .skipsGuestADBAuthentication ?? false
         return AndroidRuntimeDiagnosticSnapshot(
+            runtimeMode: runtimeSelectionMode,
             runtimeState: runtimeState,
             ownershipClassification: lastOwnershipClassification,
             launchOrigin: identity?.launchOrigin,
@@ -7282,6 +7313,12 @@ actor AndroidDexBridgeRuntime {
     }
 
     private func sdkDiscoverySource(_ toolchain: AndroidToolchain) -> String {
+        if runtimeSelectionMode == .managed {
+            return "managed-generation"
+        }
+        if runtimeSelectionMode == .external {
+            return "explicit-external"
+        }
         let root = toolchain.sdkRoot.standardizedFileURL.path
         if let selected = userSelectedSDKRoot,
            URL(fileURLWithPath: selected).standardizedFileURL.path == root {
@@ -7348,6 +7385,27 @@ actor AndroidDexBridgeRuntime {
             forKey: AndroidToolchainResolver.userSDKRootDefaultsKey
         )
         userSelectedSDKRoot = normalized
+        runtimeSelectionMode = .external
+        resetResolvedRuntimeState()
+    }
+
+    /// Product-level routing resolves Managed versus External before entering
+    /// the stable Session state machine. This setter only supplies that exact
+    /// selection; it never persists or discovers a fallback SDK.
+    func setRuntimeSelection(
+        mode: AndroidRuntimeMode,
+        externalSDKRoot: URL?
+    ) {
+        let normalizedRoot = externalSDKRoot?.standardizedFileURL
+            .resolvingSymlinksInPath().path
+        guard runtimeSelectionMode != mode
+                || userSelectedSDKRoot != normalizedRoot else { return }
+        runtimeSelectionMode = mode
+        userSelectedSDKRoot = mode == .external ? normalizedRoot : nil
+        resetResolvedRuntimeState()
+    }
+
+    private func resetResolvedRuntimeState() {
         actionSurfaceLease = nil
         ready = false
         acceptsNewerBridge = false
@@ -9279,7 +9337,8 @@ actor AndroidDexBridgeRuntime {
             homeDirectory: homeDirectory,
             environment: baseEnvironment,
             userSelectedSDKRoot: userSelectedSDKRoot,
-            fileManager: fileManager
+            fileManager: fileManager,
+            selectionMode: runtimeSelectionMode
         )
     }
 
@@ -9774,14 +9833,18 @@ actor AndroidDexBridgeRuntime {
                 "/usr/bin", "/bin", "/usr/sbin", "/sbin"
             ].joined(separator: ":")
         } else {
-            let sdkPaths = [
+            // External mode still uses a user-selected SDK, but its child
+            // processes must not fall through to Homebrew or Android Studio
+            // tools on the launching process PATH.
+            environment.removeValue(forKey: "JAVA_HOME")
+            environment["PATH"] = [
+                sdkRoot.appendingPathComponent(
+                    "cmdline-tools/latest/bin"
+                ).path,
                 sdkRoot.appendingPathComponent("platform-tools").path,
-                sdkRoot.appendingPathComponent("emulator").path
-            ]
-            let inheritedPath = environment["PATH"] ?? ""
-            environment["PATH"] = (sdkPaths + [inheritedPath])
-                .filter { !$0.isEmpty }
-                .joined(separator: ":")
+                sdkRoot.appendingPathComponent("emulator").path,
+                "/usr/bin", "/bin", "/usr/sbin", "/sbin"
+            ].joined(separator: ":")
         }
         return environment
     }
@@ -10339,6 +10402,12 @@ actor AndroidDexBridgeRuntime {
                     "缺少可显示原生界面的 arm64 Android system image（ATD 不支持界面捕获）"
                 )
             }
+            try synchronizeAVDCompatibilityFingerprint(
+                toolchain: toolchain,
+                image: image,
+                configurationContents: contents,
+                managedContext: managedContext
+            )
             if let managedContext {
                 let existingManifest = try readManagedAVDManifest(
                     from: managedContext.layout.avdManifest
@@ -10456,6 +10525,12 @@ actor AndroidDexBridgeRuntime {
                 options: [.atomic]
             )
         }
+        try synchronizeAVDCompatibilityFingerprint(
+            toolchain: toolchain,
+            image: image,
+            configurationContents: updated,
+            managedContext: managedContext
+        )
         let listing = try run(
             toolchain.emulator,
             ["-list-avds"],
@@ -10478,6 +10553,7 @@ actor AndroidDexBridgeRuntime {
 
     private struct ManagedAVDContext {
         let layout: AndroidRuntimeLayout
+        let selection: ManagedRuntimeSelection
         let generation: RuntimeGenerationDescriptor
         let systemImageComponentID: String
         let systemImagePackageID: String
@@ -10519,6 +10595,7 @@ actor AndroidDexBridgeRuntime {
             }
             return ManagedAVDContext(
                 layout: layout,
+                selection: selection,
                 generation: generation,
                 systemImageComponentID: image.id,
                 systemImagePackageID: packageID
@@ -10528,6 +10605,59 @@ actor AndroidDexBridgeRuntime {
                 "Android 兼容组件校验失败；请在设置中修复组件"
             )
         }
+    }
+
+    private func synchronizeAVDCompatibilityFingerprint(
+        toolchain: AndroidToolchain,
+        image: AndroidSystemImage,
+        configurationContents: String,
+        managedContext: ManagedAVDContext?
+    ) throws {
+        guard let runtimeSelectionMode else { return }
+        guard ExternalAndroidRuntimeValidator.avdConfiguration(
+            configurationContents,
+            matches: image
+        ) else {
+            throw AndroidRuntimeModeCoordinatorError.incompatibleAVD(
+                "avd-configuration-metadata"
+            )
+        }
+        let expected: AndroidRuntimeAVDCompatibilityFingerprint
+        switch runtimeSelectionMode {
+        case .managed:
+            guard let managedContext,
+                  let fingerprint = ExternalAndroidRuntimeValidator
+                    .managedFingerprint(
+                        selection: managedContext.selection,
+                        descriptor: managedContext.generation
+                    ) else {
+                throw AndroidRuntimeModeCoordinatorError
+                    .managedRuntimeUnavailable
+            }
+            expected = fingerprint
+        case .external:
+            expected = ExternalAndroidRuntimeValidator.externalFingerprint(
+                sdkRoot: toolchain.sdkRoot,
+                image: image,
+                emulatorRevision: ExternalAndroidRuntimeValidator
+                    .emulatorRevision(in: toolchain.sdkRoot)
+            )
+        }
+        let layout = AndroidRuntimeLayout(
+            applicationSupportDirectory: applicationSupportDirectory
+        )
+        let store = AndroidRuntimeAVDFingerprintStore(
+            layout: layout,
+            fileManager: fileManager
+        )
+        let status = store.inspect(
+            expected: expected,
+            hasAVD: true,
+            legacyManagedManifestExists: fileManager.fileExists(
+                atPath: layout.avdManifest.path
+            )
+        )
+        try store.adoptOrRefresh(expected, status: status)
     }
 
     private func readManagedAVDManifest(

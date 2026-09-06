@@ -19,6 +19,22 @@ Node、直播、XMLTV 和普通播放不需要 Android，也不会触发下载�
 
 也可以从 **设置 → Android 兼容模块** 主动安装、查看详情、更新、修复或导出诊断。
 
+## 运行环境选择与向后兼容
+
+Managed Runtime 仍是默认和推荐方案。高级用户也可在设置中明确选择已有
+Android SDK。External 模式是受支持的兼容路径：OKVideoMac 仅使用该 SDK
+中的 `adb`、Emulator 和匹配的 arm64 system image，但仍使用 App 私有
+ADB 端口、密钥、Android home 和专用 AVD。
+
+历史上由 OKVideoMac 明确保存的 SDK 偏好只迁移一次：已通过完整校验的
+Managed Generation 优先；否则保留原 External 选择。即使路径已失效，也会显示
+真实错误供用户重选。不会根据 shell `PATH`、`ANDROID_HOME`、Homebrew 或
+Android Studio 自动发现而静默切换到 External。
+
+新 SDK 的选择流程为：`选择 → 校验 → 展示启动/创建修复能力 → 用户确认 →
+原子切换`。校验失败或用户取消不会修改当前模式。切换前 Emulator Session
+必须已停止。
+
 ## 安装内容与位置
 
 App 包内不包含数 GB Runtime。组件按需安装到：
@@ -44,7 +60,8 @@ userdata。修复只重装受管组件，并保留 AVD、收藏、历史和普�
 
 ## 安全与隔离
 
-- 所有 Android/Java 子进程必须来自当前 Managed Generation。
+- Managed 模式的 Android/Java 子进程必须来自当前 Generation；External
+  模式的 Android 工具必须来自用户明确确认的那一个 SDK。
 - ADB 使用 OKVideoMac 私有高位端口和私有 keypair。
 - AVD 只位于 OKVideoMac 的 `AndroidRuntime/avd`。
 - 子进程使用显式构建的 `PATH`、`JAVA_HOME`、`ANDROID_HOME`、
@@ -54,6 +71,11 @@ userdata。修复只重装受管组件，并保留 AVD、收藏、历史和普�
   Studio、Homebrew、系统 Java 或用户 shell `PATH`。
 - 安装与 Emulator Session 使用两套独立 single-flight：并发安装请求共享一个安装
   事务，并发 Runtime 请求继续共享现有一个 Emulator 启动任务。
+- Managed 模式不读取、不启动 External Android 工具；External 模式不调用
+  Managed Installer/admission。
+- 共用的 App 私有 AVD 受兼容指纹保护，指纹包含 Runtime 来源、API、ABI、
+  system-image package/tag、AVD schema 和 Emulator 兼容信息。不匹配时关闭
+  失败，不会静默删除或重建 userdata。
 
 Catalog 被当作不可信输入。非 HTTPS、非白名单 host、错误 SHA-256、路径穿越、
 绝对路径、重复 ID、异常 archive root、symlink escape 或解压尺寸超限都会在激活前
@@ -87,11 +109,12 @@ HTTP Range 续传。
 Profile、版本、Purity、ADB/Emulator/Bridge 状态和时间线，但会脱敏用户名路径，
 且不包含 Cookie、Token、私人源 URL、播放地址、Spider 内容或 adb private key。
 
-## Legacy / Troubleshooting / Developer Setup
+## 现有 Android SDK 模式
 
-“旧版手动环境…”入口仅用于维护者和历史环境排查。只有在不存在 Managed Runtime
-指针时，旧 resolver 才可能读取手工选择的 SDK、`ANDROID_HOME` 或标准 SDK 目录。
-它不是普通用户安装路径，也不具备 Managed Runtime 的版本、Purity 和回滚保证。
+External 模式不下载或版本化所选 SDK，也不具备 Managed Generation 回滚能力。
+校验会分开“启动能力”和“创建/修复能力”：已有且兼容的私有 AVD 即使没有
+Java 或 `avdmanager` 也可启动；新建或重建 AVD 才需要两者。缺失或不兼容时
+会报明确错误，不会退回另一套 SDK。
 
 ## 兼容性声明
 

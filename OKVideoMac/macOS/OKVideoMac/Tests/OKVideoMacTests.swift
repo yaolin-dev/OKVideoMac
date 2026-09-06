@@ -3,6 +3,7 @@ import Combine
 import CryptoKit
 import SwiftUI
 import XCTest
+import AndroidRuntimeKit
 import OKVideoCore
 import OKVideoPersistence
 @testable import OKVideoMac
@@ -10428,6 +10429,230 @@ final class OKVideoMacTests: XCTestCase {
         }
     }
 
+    func testAndroidRealExternalModeCoordinatorBridgeDexAndSecondStart()
+        async throws {
+        guard ProcessInfo.processInfo.environment[
+            "OKVIDEOMAC_RUN_ANDROID_EXTERNAL_MODE_E2E"
+        ] == "1" || UserDefaults.standard.bool(
+            forKey: "OKVideoMac.RunAndroidExternalModeE2E"
+        ) else {
+            throw XCTSkip("requires explicit real External mode E2E run")
+        }
+
+        let fileManager = FileManager.default
+        let support = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                "Library/Application Support/OKVideoMac",
+                isDirectory: true
+            )
+        let sdk = try androidIntegrationSDKRoot()
+        let fixtureJAR = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "Vendor/Build/AndroidRuntimeMatrix/matrix-fixture.jar"
+            )
+        guard fileManager.fileExists(atPath: fixtureJAR.path) else {
+            throw XCTSkip("deterministic Dex matrix fixture is not built")
+        }
+
+        let selectionSupport = fileManager.temporaryDirectory
+            .appendingPathComponent(
+                "AndroidExternalModeE2E-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try fileManager.createDirectory(
+            at: selectionSupport,
+            withIntermediateDirectories: true
+        )
+        let defaultsSuite = "AndroidExternalModeE2E.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
+        defaults.set(
+            sdk.path,
+            forKey: AndroidRuntimeModeStore.legacySDKRootDefaultsKey
+        )
+        defer {
+            defaults.removePersistentDomain(forName: defaultsSuite)
+            try? fileManager.removeItem(at: selectionSupport)
+        }
+
+        let serverPort = 28_979
+        let server = Process()
+        server.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        server.arguments = [
+            "-m", "http.server", "\(serverPort)",
+            "--bind", "127.0.0.1",
+            "--directory", fixtureJAR.deletingLastPathComponent().path
+        ]
+        server.standardOutput = FileHandle.nullDevice
+        server.standardError = FileHandle.nullDevice
+        try server.run()
+        defer {
+            if server.isRunning { server.terminate() }
+        }
+        let fixtureURL = URL(
+            string: "http://127.0.0.1:\(serverPort)/"
+                + fixtureJAR.lastPathComponent
+        )!
+        var serverReady = false
+        for _ in 0..<50 {
+            if !server.isRunning { break }
+            if let (_, response) = try? await URLSession.shared.data(
+                from: fixtureURL
+            ), (response as? HTTPURLResponse)?.statusCode == 200 {
+                serverReady = true
+                break
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        XCTAssertTrue(serverReady, "fixture HTTP server did not start")
+
+        let runtime = AndroidDexBridgeRuntime(
+            applicationSupportDirectory: support
+        )
+        let routingProbe = AndroidRuntimeRoutingProbe()
+        let coordinator = try AndroidRuntimeModeCoordinator(
+            store: AndroidRuntimeModeStore(
+                applicationSupportDirectory: selectionSupport,
+                defaults: defaults
+            ),
+            layout: AndroidRuntimeLayout(
+                applicationSupportDirectory: support
+            ),
+            catalog: try BundledRuntimeCatalog.load(),
+            externalValidator: ExternalAndroidRuntimeValidator(
+                applicationSupportDirectory: support
+            ),
+            managedRuntimeUsableAtMigration: false,
+            managedUsability: { false },
+            ensureManagedReady: {
+                await routingProbe.recordManagedAdmission()
+            },
+            cancelManagedAdmission: {},
+            configureSession: { mode, root in
+                await routingProbe.recordConfiguration(
+                    mode: mode,
+                    sdkRoot: root
+                )
+                await runtime.setRuntimeSelection(
+                    mode: mode,
+                    externalSDKRoot: root
+                )
+            },
+            sessionStatus: { await runtime.status() }
+        )
+        let client = AndroidDexBridgeClient(
+            runtime: runtime,
+            runtimePrerequisite: {
+                try await coordinator.prepareRuntime()
+            }
+        )
+
+        func runADB(
+            port: Int,
+            serial: String,
+            arguments: [String]
+        ) throws -> String {
+            let process = Process()
+            let output = Pipe()
+            process.executableURL = sdk.appendingPathComponent(
+                "platform-tools/adb"
+            )
+            process.arguments = [
+                "-P", "\(port)", "-s", serial
+            ] + arguments
+            process.standardOutput = output
+            process.standardError = output
+            try process.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let text = String(decoding: data, as: UTF8.self)
+            XCTAssertEqual(process.terminationStatus, 0, text)
+            return text
+        }
+
+        do {
+            let migrated = await coordinator.refresh()
+            XCTAssertEqual(migrated.mode, .external)
+            XCTAssertEqual(migrated.selectionSource, .legacyExternalMigration)
+            XCTAssertTrue(
+                migrated.externalValidation?.launchCapability.available == true
+            )
+
+            try await coordinator.prepareRuntime()
+            _ = try await client.startRuntime()
+            let first = await client.diagnosticSnapshot()
+            XCTAssertEqual(first.runtimeMode, .external)
+            XCTAssertEqual(first.sdkDiscoverySource, "explicit-external")
+            XCTAssertEqual(first.adbDeviceState, "device")
+            XCTAssertEqual(first.androidBootCompleted, true)
+            XCTAssertEqual(first.bridgeProcessRunning, true)
+            let adbPort = try XCTUnwrap(first.adbPrivateServer?.port)
+            let serial = try XCTUnwrap(first.emulatorSerial)
+            _ = try runADB(
+                port: adbPort,
+                serial: serial,
+                arguments: [
+                    "reverse", "tcp:\(serverPort)", "tcp:\(serverPort)"
+                ]
+            )
+
+            let value = try await client.invoke(
+                site: SiteConfiguration(
+                    key: "runtime-external-e2e",
+                    name: "Runtime External E2E",
+                    type: 3,
+                    api: "csp_MatrixFixture"
+                ),
+                configurationID: "runtime-external-e2e",
+                configurationHosts: [],
+                jarReference: fixtureURL.absoluteString,
+                baseURL: nil,
+                method: "home",
+                arguments: [.bool(true)]
+            )
+            guard case .object(let object) = value,
+                  case .array(let list)? = object["list"],
+                  case .object(let item)? = list.first else {
+                XCTFail("unexpected deterministic Dex response: \(value)")
+                await client.stopRuntime()
+                return
+            }
+            XCTAssertEqual(
+                item["vod_name"],
+                .string("OKVideoMac Matrix PASS")
+            )
+
+            _ = await client.stopRuntime()
+            let stopped = await client.diagnosticSnapshot()
+            XCTAssertFalse(stopped.emulatorProcessRunning)
+            XCTAssertFalse(stopped.shutdownForced)
+
+            try await coordinator.prepareRuntime()
+            _ = try await client.startRuntime()
+            let second = await client.diagnosticSnapshot()
+            XCTAssertEqual(second.runtimeMode, .external)
+            XCTAssertEqual(second.adbDeviceState, "device")
+            XCTAssertEqual(second.androidBootCompleted, true)
+            XCTAssertEqual(second.bridgeProcessRunning, true)
+            _ = await client.stopRuntime()
+
+            let managedAdmissionCount = await routingProbe
+                .managedAdmissionCount
+            XCTAssertEqual(managedAdmissionCount, 0)
+            let configurations = await routingProbe.configurations
+            XCTAssertFalse(configurations.isEmpty)
+            XCTAssertTrue(configurations.allSatisfy {
+                $0.mode == .external
+                    && $0.sdkRoot == sdk.standardizedFileURL
+                        .resolvingSymlinksInPath()
+            })
+        } catch {
+            _ = await client.stopRuntime()
+            throw error
+        }
+    }
+
     func testAndroidRealLifecycleQuitDuringStartupDoesNotOrphan()
         async throws {
         guard ProcessInfo.processInfo.environment[
@@ -11565,7 +11790,11 @@ final class OKVideoMacTests: XCTestCase {
         let path = try XCTUnwrap(
             environment["OKVIDEOMAC_ANDROID_INTEGRATION_SDK_ROOT"]
                 ?? environment["ANDROID_SDK_ROOT"]
-                ?? environment["ANDROID_HOME"],
+                ?? environment["ANDROID_HOME"]
+                ?? UserDefaults.standard.string(
+                    forKey: AndroidRuntimeModeStore
+                        .legacySDKRootDefaultsKey
+                ),
             "Real Android integration requires an explicit SDK environment path"
         )
         return URL(fileURLWithPath: path)
@@ -22186,5 +22415,800 @@ private actor NodeProxyEndpointTransitionHTTPClient: HTTPClient {
 
     func requestedPorts() -> [Int] {
         ports
+    }
+}
+
+final class AndroidRuntimeModeCompatibilityTests: XCTestCase {
+    func testNewUserMigratesToManagedAndPersistsAcrossRelaunch() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let store = fixture.store
+
+        let first = try store.loadOrMigrate(managedRuntimeUsable: false)
+        let second = try store.loadOrMigrate(managedRuntimeUsable: false)
+
+        XCTAssertEqual(first.mode, .managed)
+        XCTAssertEqual(first.selectionSource, .newUserDefault)
+        XCTAssertEqual(second, first)
+    }
+
+    func testUsableManagedRuntimeWinsOverHistoricalExternalPreference() throws {
+        let fixture = try makeFixture(legacySDKRoot: "/legacy/sdk")
+        defer { fixture.cleanup() }
+
+        let record = try fixture.store.loadOrMigrate(
+            managedRuntimeUsable: true
+        )
+
+        XCTAssertEqual(record.mode, .managed)
+        XCTAssertEqual(
+            record.selectionSource,
+            .usableManagedRuntimeMigration
+        )
+        XCTAssertEqual(record.externalSDKRoot, "/legacy/sdk")
+    }
+
+    func testHistoricalExternalPreferenceMigratesEvenWhenCurrentlyInvalid()
+        throws {
+        let fixture = try makeFixture(legacySDKRoot: "/missing/legacy/sdk")
+        defer { fixture.cleanup() }
+
+        let record = try fixture.store.loadOrMigrate(
+            managedRuntimeUsable: false
+        )
+
+        XCTAssertEqual(record.mode, .external)
+        XCTAssertEqual(record.selectionSource, .legacyExternalMigration)
+        XCTAssertEqual(record.externalSDKRoot, "/missing/legacy/sdk")
+    }
+
+    func testExplicitModeCommitIsAtomicAndMigrationDoesNotRunAgain() throws {
+        let fixture = try makeFixture(legacySDKRoot: "/legacy/sdk")
+        defer { fixture.cleanup() }
+        let initial = try fixture.store.loadOrMigrate(
+            managedRuntimeUsable: false
+        )
+        let committed = try fixture.store.committing(
+            initial,
+            mode: .managed,
+            externalSDKRoot: nil,
+            source: .userSelectedManaged
+        )
+
+        fixture.defaults.set(
+            "/different/sdk",
+            forKey: AndroidRuntimeModeStore.legacySDKRootDefaultsKey
+        )
+        let relaunched = try fixture.store.loadOrMigrate(
+            managedRuntimeUsable: false
+        )
+
+        XCTAssertEqual(committed.mode, .managed)
+        XCTAssertEqual(relaunched, committed)
+        XCTAssertEqual(relaunched.externalSDKRoot, "/legacy/sdk")
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: fixture.store.recordURL.path
+        )
+        XCTAssertEqual(attributes[.posixPermissions] as? NSNumber, 0o600)
+    }
+
+    func testExternalValidatorAllowsLaunchWithoutJavaWhenAVDExists() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let sdk = fixture.root.appendingPathComponent("ExternalSDK")
+        try makeSDK(at: sdk, includeAVDManager: false)
+        try makeSystemImage(at: sdk)
+        try makeAVD(in: fixture.support)
+        let validator = makeValidator(
+            fixture: fixture,
+            javaRuntime: nil
+        )
+
+        let result = validator.validate(sdkRoot: sdk)
+
+        XCTAssertTrue(result.launchCapability.available)
+        XCTAssertFalse(result.createRepairCapability.available)
+        XCTAssertTrue(result.canPrepareRuntime)
+        XCTAssertEqual(result.avdFingerprintStatus, .adoptableLegacy)
+        XCTAssertTrue(result.issues.contains { $0.code == .missingJava })
+    }
+
+    func testExternalValidatorRequiresJavaOnlyForFirstAVDCreation() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let sdk = fixture.root.appendingPathComponent("ExternalSDK")
+        let javaHome = fixture.root.appendingPathComponent("JRE")
+        try makeSDK(at: sdk, includeAVDManager: true)
+        try makeSystemImage(at: sdk)
+        try makeExecutable(at: javaHome.appendingPathComponent("bin/java"))
+        let java = AndroidJavaRuntime(
+            home: javaHome,
+            executable: javaHome.appendingPathComponent("bin/java"),
+            source: "test-java"
+        )
+        let validator = makeValidator(fixture: fixture, javaRuntime: java)
+
+        let result = validator.validate(sdkRoot: sdk)
+
+        XCTAssertFalse(result.launchCapability.available)
+        XCTAssertTrue(result.createRepairCapability.available)
+        XCTAssertTrue(result.canPrepareRuntime)
+        XCTAssertFalse(result.avdExists)
+    }
+
+    func testExternalValidatorFailsClosedWhenAVDImageIsNotInSelectedSDK()
+        throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let sdk = fixture.root.appendingPathComponent("ExternalSDK")
+        try makeSDK(at: sdk, includeAVDManager: true)
+        try makeSystemImage(at: sdk, variant: "google_apis")
+        try makeAVD(in: fixture.support, variant: "default")
+
+        let result = makeValidator(
+            fixture: fixture,
+            javaRuntime: nil
+        ).validate(sdkRoot: sdk)
+
+        XCTAssertFalse(result.launchCapability.available)
+        XCTAssertFalse(result.canPrepareRuntime)
+        XCTAssertTrue(result.issues.contains {
+            $0.code == .avdSystemImageMissingFromSelectedSDK
+        })
+    }
+
+    func testAVDFingerprintAdoptsLegacyThenRejectsCrossModeReuse() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let layout = AndroidRuntimeLayout(
+            applicationSupportDirectory: fixture.support
+        )
+        try makeAVD(in: fixture.support)
+        let image = AndroidSystemImage(
+            packageID: "system-images;android-35;default;arm64-v8a",
+            apiLevel: 35,
+            variant: "default",
+            architecture: "arm64-v8a"
+        )
+        let external = ExternalAndroidRuntimeValidator.externalFingerprint(
+            sdkRoot: fixture.root.appendingPathComponent("ExternalSDK"),
+            image: image,
+            emulatorRevision: "36.6.11"
+        )
+        let store = AndroidRuntimeAVDFingerprintStore(
+            layout: layout,
+            fileManager: .default
+        )
+        let legacy = store.inspect(
+            expected: external,
+            hasAVD: true,
+            legacyManagedManifestExists: false
+        )
+        XCTAssertEqual(legacy, .adoptableLegacy)
+        try store.adoptOrRefresh(external, status: legacy)
+        XCTAssertEqual(
+            store.inspect(
+                expected: external,
+                hasAVD: true,
+                legacyManagedManifestExists: false
+            ),
+            .compatible
+        )
+
+        let managed = AndroidRuntimeAVDCompatibilityFingerprint(
+            avdSchema: 1,
+            runtimeSource: .managed,
+            runtimeIdentity: "managed:r1",
+            systemImagePackageID: external.systemImagePackageID,
+            apiLevel: external.apiLevel,
+            abi: external.abi,
+            tag: external.tag,
+            emulatorRevision: external.emulatorRevision
+        )
+        XCTAssertEqual(
+            store.inspect(
+                expected: managed,
+                hasAVD: true,
+                legacyManagedManifestExists: false
+            ),
+            .incompatible("runtime-source")
+        )
+    }
+
+    func testCrossModeSDKSelectionRequiresExplicitRepairWithoutChangingAVD()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let sdk = fixture.root.appendingPathComponent("ExternalSDK")
+        let javaHome = fixture.root.appendingPathComponent("JRE")
+        try makeSDK(at: sdk, includeAVDManager: true)
+        try makeSystemImage(at: sdk)
+        try makeAVD(in: fixture.support)
+        try makeExecutable(at: javaHome.appendingPathComponent("bin/java"))
+        let java = AndroidJavaRuntime(
+            home: javaHome,
+            executable: javaHome.appendingPathComponent("bin/java"),
+            source: "test-java"
+        )
+        let layout = AndroidRuntimeLayout(
+            applicationSupportDirectory: fixture.support
+        )
+        let fingerprintStore = AndroidRuntimeAVDFingerprintStore(
+            layout: layout,
+            fileManager: .default
+        )
+        let managedFingerprint = AndroidRuntimeAVDCompatibilityFingerprint(
+            avdSchema: 1,
+            runtimeSource: .managed,
+            runtimeIdentity: "managed:r1",
+            systemImagePackageID:
+                "system-images;android-35;default;arm64-v8a",
+            apiLevel: 35,
+            abi: "arm64-v8a",
+            tag: "default",
+            emulatorRevision: "36.6.11"
+        )
+        try fingerprintStore.write(managedFingerprint)
+        let fingerprintBefore = try Data(contentsOf: fingerprintStore.url)
+        let validator = makeValidator(fixture: fixture, javaRuntime: java)
+        let validation = validator.validate(sdkRoot: sdk)
+
+        XCTAssertFalse(validation.launchCapability.available)
+        XCTAssertTrue(validation.createRepairCapability.available)
+        XCTAssertFalse(validation.canPrepareRuntime)
+        XCTAssertTrue(validation.canSelectEnvironment)
+
+        let probe = AndroidRuntimeRoutingProbe()
+        let coordinator = try makeCoordinator(
+            fixture: fixture,
+            validator: validator,
+            managedRuntimeUsableAtMigration: false,
+            managedUsability: false,
+            probe: probe
+        )
+        let selected = try await coordinator.useExternalSDK(sdk)
+        XCTAssertEqual(selected.mode, .external)
+        XCTAssertEqual(
+            try Data(contentsOf: fingerprintStore.url),
+            fingerprintBefore,
+            "mode selection must not mutate or rebuild the shared AVD"
+        )
+
+        do {
+            try await coordinator.prepareRuntime()
+            XCTFail("normal launch must remain fail-closed")
+        } catch let error as AndroidRuntimeModeCoordinatorError {
+            guard case .externalUnavailable = error else {
+                XCTFail("unexpected error: \(error)")
+                return
+            }
+        }
+        try await coordinator.prepareRuntimeRepair()
+        let configurations = await probe.configurations
+        XCTAssertEqual(configurations.last?.mode, .external)
+        XCTAssertEqual(try Data(contentsOf: fingerprintStore.url), fingerprintBefore)
+    }
+
+    func testExternalCoordinatorNeverInvokesManagedAdmission() async throws {
+        let fixture = try makeFixture(legacySDKRoot: nil)
+        defer { fixture.cleanup() }
+        let sdk = fixture.root.appendingPathComponent("ExternalSDK")
+        try makeSDK(at: sdk, includeAVDManager: true)
+        try makeSystemImage(at: sdk)
+        try makeAVD(in: fixture.support)
+        let initial = try fixture.store.loadOrMigrate(
+            managedRuntimeUsable: false
+        )
+        _ = try fixture.store.committing(
+            initial,
+            mode: .external,
+            externalSDKRoot: sdk,
+            source: .userSelectedExternal
+        )
+        let probe = AndroidRuntimeRoutingProbe()
+        let coordinator = try makeCoordinator(
+            fixture: fixture,
+            validator: makeValidator(fixture: fixture, javaRuntime: nil),
+            managedRuntimeUsableAtMigration: false,
+            managedUsability: false,
+            probe: probe
+        )
+
+        let callers = (0..<10).map { _ in
+            Task { try await coordinator.prepareRuntime() }
+        }
+        for caller in callers { try await caller.value }
+
+        let managedCalls = await probe.managedAdmissionCount
+        let configurations = await probe.configurations
+        XCTAssertEqual(managedCalls, 0)
+        XCTAssertEqual(configurations.count, 10)
+        XCTAssertTrue(configurations.allSatisfy {
+            $0.mode == .external
+                && $0.sdkRoot == sdk.standardizedFileURL
+                    .resolvingSymlinksInPath()
+        })
+    }
+
+    func testExternalAdmissionReroutesWhenModeChangesAtSessionBoundary()
+        async throws {
+        let fixture = try makeFixture(legacySDKRoot: nil)
+        defer { fixture.cleanup() }
+        let sdk = fixture.root.appendingPathComponent("ExternalSDK")
+        try makeSDK(at: sdk, includeAVDManager: true)
+        try makeSystemImage(at: sdk)
+        try makeAVD(in: fixture.support)
+        let initial = try fixture.store.loadOrMigrate(
+            managedRuntimeUsable: false
+        )
+        _ = try fixture.store.committing(
+            initial,
+            mode: .external,
+            externalSDKRoot: sdk,
+            source: .userSelectedExternal
+        )
+        let probe = AndroidRuntimeRoutingProbe()
+        let boundary = AndroidRuntimeConfigurationBoundary()
+        let coordinator = try AndroidRuntimeModeCoordinator(
+            store: fixture.store,
+            layout: AndroidRuntimeLayout(
+                applicationSupportDirectory: fixture.support
+            ),
+            catalog: try BundledRuntimeCatalog.load(),
+            externalValidator: makeValidator(
+                fixture: fixture,
+                javaRuntime: nil
+            ),
+            managedRuntimeUsableAtMigration: false,
+            managedUsability: { true },
+            ensureManagedReady: {
+                await probe.recordManagedAdmission()
+            },
+            cancelManagedAdmission: {
+                await probe.recordManagedCancellation()
+            },
+            managedAVDAdmission: {},
+            configureSession: { mode, root in
+                await probe.recordConfiguration(mode: mode, sdkRoot: root)
+                await boundary.configure(mode: mode)
+            },
+            sessionStatus: { .stopped }
+        )
+
+        let admitted = Task { try await coordinator.prepareRuntime() }
+        await boundary.waitUntilExternalConfigurationStarts()
+        _ = try await coordinator.useManagedRuntime()
+        await boundary.releaseExternalConfiguration()
+        try await admitted.value
+
+        let managedAdmissions = await probe.managedAdmissionCount
+        let finalSnapshot = await coordinator.currentSnapshot()
+        let configurations = await probe.configurations
+        XCTAssertEqual(managedAdmissions, 1)
+        XCTAssertEqual(finalSnapshot.mode, .managed)
+        XCTAssertEqual(configurations.last?.mode, .managed)
+    }
+
+    func testManagedCoordinatorDoesNotInspectOrConfigureExternalSDK()
+        async throws {
+        let fixture = try makeFixture(legacySDKRoot: "/external/sdk")
+        defer { fixture.cleanup() }
+        let architectureProbe = AndroidRuntimeSynchronousCounter()
+        let validator = ExternalAndroidRuntimeValidator(
+            applicationSupportDirectory: fixture.support,
+            homeDirectory: fixture.root,
+            environment: [:],
+            architectureInspector: { _ in
+                architectureProbe.increment()
+                return true
+            },
+            javaResolver: { nil }
+        )
+        let probe = AndroidRuntimeRoutingProbe()
+        let coordinator = try makeCoordinator(
+            fixture: fixture,
+            validator: validator,
+            managedRuntimeUsableAtMigration: true,
+            managedUsability: true,
+            probe: probe
+        )
+
+        try await coordinator.prepareRuntime()
+
+        let managedCalls = await probe.managedAdmissionCount
+        let configurations = await probe.configurations
+        XCTAssertEqual(managedCalls, 1)
+        XCTAssertEqual(architectureProbe.value, 0)
+        XCTAssertEqual(configurations.map(\.mode), [.managed])
+        XCTAssertEqual(configurations.first?.sdkRoot, nil)
+    }
+
+    func testInvalidExternalSelectionDoesNotChangeCurrentMode() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let probe = AndroidRuntimeRoutingProbe()
+        let coordinator = try makeCoordinator(
+            fixture: fixture,
+            validator: makeValidator(fixture: fixture, javaRuntime: nil),
+            managedRuntimeUsableAtMigration: false,
+            managedUsability: false,
+            probe: probe
+        )
+
+        do {
+            _ = try await coordinator.useExternalSDK(
+                fixture.root.appendingPathComponent("MissingSDK")
+            )
+            XCTFail("invalid SDK must not switch mode")
+        } catch {
+            // Expected.
+        }
+        let snapshot = await coordinator.currentSnapshot()
+        XCTAssertEqual(snapshot.mode, .managed)
+    }
+
+    func testModeSwitchRequiresStoppedSession() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let sdk = fixture.root.appendingPathComponent("ExternalSDK")
+        try makeSDK(at: sdk, includeAVDManager: true)
+        try makeSystemImage(at: sdk)
+        try makeAVD(in: fixture.support)
+        let probe = AndroidRuntimeRoutingProbe(sessionStatus: .running)
+        let coordinator = try makeCoordinator(
+            fixture: fixture,
+            validator: makeValidator(fixture: fixture, javaRuntime: nil),
+            managedRuntimeUsableAtMigration: false,
+            managedUsability: false,
+            probe: probe
+        )
+
+        do {
+            _ = try await coordinator.useExternalSDK(sdk)
+            XCTFail("running Session must block mode switch")
+        } catch let error as AndroidRuntimeModeCoordinatorError {
+            XCTAssertEqual(error, .runtimeMustStop)
+        }
+        let snapshot = await coordinator.currentSnapshot()
+        XCTAssertEqual(snapshot.mode, .managed)
+    }
+
+    func testForcedResolversDoNotCrossManagedExternalBoundary() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let external = fixture.root.appendingPathComponent("ExternalSDK")
+        try makeSDK(at: external, includeAVDManager: false)
+
+        let managedResolver = AndroidToolchainResolver(
+            applicationSupportDirectory: fixture.support,
+            homeDirectory: fixture.root,
+            environment: ["ANDROID_HOME": external.path],
+            userSelectedSDKRoot: external.path,
+            fileManager: .default,
+            selectionMode: .managed
+        )
+        let externalResolver = AndroidToolchainResolver(
+            applicationSupportDirectory: fixture.support,
+            homeDirectory: fixture.root,
+            environment: ["ANDROID_HOME": "/another/sdk"],
+            userSelectedSDKRoot: external.path,
+            fileManager: .default,
+            selectionMode: .external
+        )
+
+        XCTAssertNil(managedResolver.resolve())
+        XCTAssertEqual(
+            externalResolver.resolve()?.sdkRoot,
+            external.standardizedFileURL.resolvingSymlinksInPath()
+        )
+    }
+
+    func testExternalChildEnvironmentCannotFallThroughToHomebrewTools() {
+        let runtime = URL(fileURLWithPath: "/private/runtime")
+        let sdk = URL(fileURLWithPath: "/selected/sdk")
+        let environment = AndroidDexBridgeRuntime.privateRuntimeEnvironment(
+            baseEnvironment: [
+                "PATH": "/opt/homebrew/bin:/Applications/Android Studio.app/bin",
+                "JAVA_HOME": "/opt/homebrew/opt/openjdk"
+            ],
+            sdkRoot: sdk,
+            avdHome: runtime.appendingPathComponent("avd"),
+            keyPaths: AndroidPrivateADBKeyPaths.paths(
+                runtimeDirectory: runtime
+            ),
+            privateADBServerPort: 50_437,
+            verboseDiagnostics: false
+        )
+
+        XCTAssertFalse(environment["PATH", default: ""].contains("homebrew"))
+        XCTAssertFalse(
+            environment["PATH", default: ""].contains("Android Studio")
+        )
+        XCTAssertNil(environment["JAVA_HOME"])
+        XCTAssertTrue(
+            environment["PATH", default: ""].hasPrefix(
+                "/selected/sdk/cmdline-tools/latest/bin:"
+            )
+        )
+    }
+
+    func testModeDiagnosticsAreRedactedAndContainNoExternalAbsoluteTools()
+        async throws {
+        let fixture = try makeFixture(legacySDKRoot: "/Volumes/Private/SDK")
+        defer { fixture.cleanup() }
+        let probe = AndroidRuntimeRoutingProbe()
+        let coordinator = try makeCoordinator(
+            fixture: fixture,
+            validator: makeValidator(fixture: fixture, javaRuntime: nil),
+            managedRuntimeUsableAtMigration: false,
+            managedUsability: false,
+            probe: probe
+        )
+
+        let report = await coordinator.diagnosticReport()
+        let encoded = try JSONEncoder().encode(report)
+        let text = try XCTUnwrap(String(data: encoded, encoding: .utf8))
+
+        XCTAssertEqual(report.mode, "external")
+        XCTAssertTrue(text.contains("<external-sdk>"))
+        XCTAssertFalse(text.contains("/Volumes/Private/SDK/platform-tools"))
+        XCTAssertFalse(text.lowercased().contains("adbkey"))
+    }
+
+    private struct Fixture {
+        let root: URL
+        let support: URL
+        let defaults: UserDefaults
+        let suiteName: String
+        let store: AndroidRuntimeModeStore
+
+        func cleanup() {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: root)
+        }
+    }
+
+    private func makeFixture(legacySDKRoot: String? = nil) throws -> Fixture {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "AndroidRuntimeMode-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let support = root.appendingPathComponent("Application Support")
+        try FileManager.default.createDirectory(
+            at: support,
+            withIntermediateDirectories: true
+        )
+        let suiteName = "AndroidRuntimeModeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        if let legacySDKRoot {
+            defaults.set(
+                legacySDKRoot,
+                forKey: AndroidRuntimeModeStore.legacySDKRootDefaultsKey
+            )
+        }
+        return Fixture(
+            root: root,
+            support: support,
+            defaults: defaults,
+            suiteName: suiteName,
+            store: AndroidRuntimeModeStore(
+                applicationSupportDirectory: support,
+                defaults: defaults
+            )
+        )
+    }
+
+    private func makeValidator(
+        fixture: Fixture,
+        javaRuntime: AndroidJavaRuntime?
+    ) -> ExternalAndroidRuntimeValidator {
+        ExternalAndroidRuntimeValidator(
+            applicationSupportDirectory: fixture.support,
+            homeDirectory: fixture.root,
+            environment: [:],
+            architectureInspector: { _ in true },
+            javaResolver: { javaRuntime }
+        )
+    }
+
+    private func makeCoordinator(
+        fixture: Fixture,
+        validator: ExternalAndroidRuntimeValidator,
+        managedRuntimeUsableAtMigration: Bool,
+        managedUsability: Bool,
+        probe: AndroidRuntimeRoutingProbe
+    ) throws -> AndroidRuntimeModeCoordinator {
+        try AndroidRuntimeModeCoordinator(
+            store: fixture.store,
+            layout: AndroidRuntimeLayout(
+                applicationSupportDirectory: fixture.support
+            ),
+            catalog: try BundledRuntimeCatalog.load(),
+            externalValidator: validator,
+            managedRuntimeUsableAtMigration: managedRuntimeUsableAtMigration,
+            managedUsability: { managedUsability },
+            ensureManagedReady: {
+                await probe.recordManagedAdmission()
+            },
+            cancelManagedAdmission: {
+                await probe.recordManagedCancellation()
+            },
+            managedAVDAdmission: {},
+            configureSession: { mode, root in
+                await probe.recordConfiguration(mode: mode, sdkRoot: root)
+            },
+            sessionStatus: {
+                await probe.sessionStatus
+            }
+        )
+    }
+
+    private func makeSDK(
+        at root: URL,
+        includeAVDManager: Bool
+    ) throws {
+        try makeExecutable(at: root.appendingPathComponent("platform-tools/adb"))
+        try makeExecutable(at: root.appendingPathComponent("emulator/emulator"))
+        if includeAVDManager {
+            try makeExecutable(
+                at: root.appendingPathComponent(
+                    "cmdline-tools/latest/bin/avdmanager"
+                )
+            )
+        }
+        let source = root.appendingPathComponent("emulator/source.properties")
+        try Data("Pkg.Revision=36.6.11\n".utf8).write(
+            to: source,
+            options: [.atomic]
+        )
+    }
+
+    private func makeExecutable(at url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        XCTAssertTrue(FileManager.default.createFile(
+            atPath: url.path,
+            contents: Data("#!/bin/sh\nexit 0\n".utf8)
+        ))
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: url.path
+        )
+    }
+
+    private func makeSystemImage(
+        at sdk: URL,
+        variant: String = "default"
+    ) throws {
+        let directory = sdk.appendingPathComponent(
+            "system-images/android-35/\(variant)/arm64-v8a",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <sdk:sdk-repository xmlns:sdk="http://schemas.android.com/sdk/android/repo/repository2/01">
+          <localPackage path="system-images;android-35;\(variant);arm64-v8a">
+            <type-details>
+              <api-level>35</api-level>
+              <extension-level>0</extension-level>
+              <tag><id>\(variant)</id><display>\(variant)</display></tag>
+              <abi>arm64-v8a</abi>
+            </type-details>
+          </localPackage>
+        </sdk:sdk-repository>
+        """
+        try Data(xml.utf8).write(
+            to: directory.appendingPathComponent("package.xml"),
+            options: [.atomic]
+        )
+    }
+
+    private func makeAVD(
+        in support: URL,
+        variant: String = "default"
+    ) throws {
+        let layout = AndroidRuntimeLayout(
+            applicationSupportDirectory: support
+        )
+        try FileManager.default.createDirectory(
+            at: layout.avdDirectory,
+            withIntermediateDirectories: true
+        )
+        let config = """
+        abi.type=arm64-v8a
+        image.sysdir.1=system-images/android-35/\(variant)/arm64-v8a/
+        tag.id=\(variant)
+        target=android-35
+        hw.gpu.enabled=yes
+        hw.gpu.mode=host
+        """
+        try Data(config.utf8).write(
+            to: layout.avdDirectory.appendingPathComponent("config.ini"),
+            options: [.atomic]
+        )
+    }
+}
+
+private actor AndroidRuntimeRoutingProbe {
+    struct Configuration: Equatable, Sendable {
+        let mode: AndroidRuntimeMode
+        let sdkRoot: URL?
+    }
+
+    private(set) var managedAdmissionCount = 0
+    private(set) var managedCancellationCount = 0
+    private(set) var configurations: [Configuration] = []
+    let sessionStatus: AndroidRuntimeStatus
+
+    init(sessionStatus: AndroidRuntimeStatus = .stopped) {
+        self.sessionStatus = sessionStatus
+    }
+
+    func recordManagedAdmission() {
+        managedAdmissionCount += 1
+    }
+
+    func recordManagedCancellation() {
+        managedCancellationCount += 1
+    }
+
+    func recordConfiguration(mode: AndroidRuntimeMode, sdkRoot: URL?) {
+        configurations.append(Configuration(mode: mode, sdkRoot: sdkRoot))
+    }
+}
+
+private actor AndroidRuntimeConfigurationBoundary {
+    private var externalConfigurationStarted = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var externalConfigurationReleased = false
+
+    func configure(mode: AndroidRuntimeMode) async {
+        guard mode == .external, !externalConfigurationReleased else { return }
+        externalConfigurationStarted = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilExternalConfigurationStarts() async {
+        if externalConfigurationStarted { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func releaseExternalConfiguration() {
+        externalConfigurationReleased = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+}
+
+private final class AndroidRuntimeSynchronousCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
     }
 }

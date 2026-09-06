@@ -89,6 +89,16 @@ struct AndroidRuntimeInstallView: View {
                         }
                     }
 
+                    if !state.managedRuntimeInstallationState.isBusy,
+                       state.androidRuntimeModeSnapshot.externalSDKRoot != nil {
+                        Button("使用已配置的 Android SDK") {
+                            Task {
+                                await state
+                                    .useConfiguredExternalAndroidRuntime()
+                            }
+                        }
+                    }
+
                     Spacer()
 
                     primaryAction
