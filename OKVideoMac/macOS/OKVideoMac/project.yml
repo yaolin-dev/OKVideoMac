@@ -9,6 +9,8 @@ options:
 packages:
   OKVideoKit:
     path: Packages/OKVideoKit
+  AndroidRuntimeKit:
+    path: Packages/AndroidRuntimeKit
 
 settings:
   base:
@@ -172,6 +174,8 @@ targets:
         product: OKVideoCore
       - package: OKVideoKit
         product: OKVideoPersistence
+      - package: AndroidRuntimeKit
+        product: AndroidRuntimeKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.okvideomac.OKVideoMac

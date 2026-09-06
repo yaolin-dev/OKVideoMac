@@ -10,11 +10,12 @@
 		05D5512B69A7C71CC3112A74 /* MPVLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D3A1A89473AFD33AAF47D01 /* MPVLibrary.swift */; };
 		0DC49DC6E8989EB3C7FFADD2 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADFC0D6C3C9A30793D7813B3 /* AppState.swift */; };
 		0EBDF1072F01B5B03856512F /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 4027B9ADBDE079CA11AFB824 /* Localizable.strings */; };
+		1413D999363890C932CC3650 /* PlayerWindowPreferenceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3FF98807A0D56E338F4B907 /* PlayerWindowPreferenceStore.swift */; };
 		15EC54A8AB04926723F01FFD /* MPVRenderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A119CE857C4037E4EA9BAB8 /* MPVRenderView.swift */; };
-		1A4FD04A5B7D4D60A115C2E0 /* PlayerWindowPreferenceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A85DB5A927E947998EAF122A /* PlayerWindowPreferenceStore.swift */; };
 		195449ECEC9D9787554618E1 /* NodeRuntimeContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = E497EB47C4C1AD4047675EFC /* NodeRuntimeContract.swift */; };
 		285AF5B7AA73E51C0BE0F632 /* NodeHTTPSpiderSiteProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 617A00084B74B412C7C3ACB9 /* NodeHTTPSpiderSiteProvider.swift */; };
 		34E5D648D9127134BBCC6933 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 689F4F5C0C244BA810946A34 /* PlayerView.swift */; };
+		34E606A00CCFD969B84B8FBE /* AndroidRuntimeKit in Frameworks */ = {isa = PBXBuildFile; productRef = 8FE0033299FFB90088709F45 /* AndroidRuntimeKit */; };
 		3CE5EE6FA03482C30AE9FE0F /* WKWebSniffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C3F9E94B5A9587197666CC3 /* WKWebSniffer.swift */; };
 		3E9FFD15831E0CF53FBCA00A /* OKVideoMacTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EDCFE690A729EE506C02030 /* OKVideoMacTests.swift */; };
 		3F316183E2F6BADC6631BC5D /* OKVideoMacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50471B253F948DFB29DE1F74 /* OKVideoMacApp.swift */; };
@@ -28,6 +29,7 @@
 		7D745EAFB36BEFB59EF64D70 /* OKVideoCore in Frameworks */ = {isa = PBXBuildFile; productRef = 2C5893FD1E3264FC60A92F7D /* OKVideoCore */; };
 		7EF03B9631AC9E4D3F4246CC /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7765776920879CB4CD0A540 /* HomeView.swift */; };
 		8476BCE36C5318B88C0EB9D5 /* LEGAL_AND_SECURITY.md in Resources */ = {isa = PBXBuildFile; fileRef = 75B64DF2F947BB2B8EE678A5 /* LEGAL_AND_SECURITY.md */; };
+		9026FCDA3BBE44AB9C8EA9BE /* catpaw-quark-transfer-lifecycle.js in Resources */ = {isa = PBXBuildFile; fileRef = 4A1AD0EEB256E04382C11191 /* catpaw-quark-transfer-lifecycle.js */; };
 		907BE2DC1B86A821A8D0AC2B /* LiveView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCC0FBAF18592C722D283D81 /* LiveView.swift */; };
 		9450118DE1AF8CCD3CBB84BC /* ImageRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63284B4134B72C9ECD12EE1B /* ImageRepository.swift */; };
 		A04BBDA44750879BBFAFB666 /* NOTICE.md in Resources */ = {isa = PBXBuildFile; fileRef = F39511E40E3FE20271196154 /* NOTICE.md */; };
@@ -36,8 +38,8 @@
 		A2F41ABF02AE0A13544CDF2A /* CatPawProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8754CA1D367DB8EB69DB9D9 /* CatPawProtocol.swift */; };
 		A3B0AE14D90BC82289D17D61 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 115FFC7F2FD723B0F12E0D2D /* RootView.swift */; };
 		A460B1043453667657698834 /* VideoGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5707873F641B0221D67B9CBC /* VideoGrid.swift */; };
-		B83C29F7B0A24F7C9616C0D1 /* BrowserToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B74C9F0DA16E4EE2A3714BF3 /* BrowserToolbar.swift */; };
 		A55E769996EE245CA586B3C6 /* JavaScriptSpiderSiteProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E25C74DFB53809A9F2672CE /* JavaScriptSpiderSiteProvider.swift */; };
+		B0DF0200CA6A81F268264204 /* catpaw-quark-lifecycle.patch.js in Resources */ = {isa = PBXBuildFile; fileRef = CBE20DF0608D06DF61EEF248 /* catpaw-quark-lifecycle.patch.js */; };
 		B1BEEF638AD2DF98A1887EA2 /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F51955D6459123DB5DAD2EAB /* SearchView.swift */; };
 		C8D0231080586D3A6558BA58 /* OKVideoPersistence in Frameworks */ = {isa = PBXBuildFile; productRef = 40F5E74826FFC180B7D5D2FD /* OKVideoPersistence */; };
 		CA7782FAED307EC8B1B38D2D /* NodeBundleRuntimeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A406AD3C9358F59A462C9AB8 /* NodeBundleRuntimeService.swift */; };
@@ -45,8 +47,7 @@
 		EB38C679BF2A786E9E0B233D /* THIRD_PARTY_LICENSES.md in Resources */ = {isa = PBXBuildFile; fileRef = 8AB307256CE6590A5494384D /* THIRD_PARTY_LICENSES.md */; };
 		F9FF431B06B6D4B13A435C8A /* AppParseExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6CD897F3EA6681258B14A99 /* AppParseExecutor.swift */; };
 		FB2A4C23694D2553091FEDF2 /* DetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E18EAE5CCFAEC3E0E3E49A /* DetailView.swift */; };
-		F0A100000000000000000001 /* catpaw-quark-transfer-lifecycle.js in Resources */ = {isa = PBXBuildFile; fileRef = F0A100000000000000000101 /* catpaw-quark-transfer-lifecycle.js */; };
-		F0A100000000000000000002 /* catpaw-quark-lifecycle.patch.js in Resources */ = {isa = PBXBuildFile; fileRef = F0A100000000000000000102 /* catpaw-quark-lifecycle.patch.js */; };
+		FE2B817E3AA2A2B7F78FFB16 /* BrowserToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93E793C1BB91D17F7670A0B9 /* BrowserToolbar.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -68,11 +69,11 @@
 		27E32A15EF823232F0CAFD20 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
 		2A119CE857C4037E4EA9BAB8 /* MPVRenderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MPVRenderView.swift; sourceTree = "<group>"; };
 		3D3A1A89473AFD33AAF47D01 /* MPVLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MPVLibrary.swift; sourceTree = "<group>"; };
+		4A1AD0EEB256E04382C11191 /* catpaw-quark-transfer-lifecycle.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "catpaw-quark-transfer-lifecycle.js"; sourceTree = "<group>"; };
 		4ACA134A51B5EAC0085C4BDA /* HistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryView.swift; sourceTree = "<group>"; };
 		4E25C74DFB53809A9F2672CE /* JavaScriptSpiderSiteProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JavaScriptSpiderSiteProvider.swift; sourceTree = "<group>"; };
 		50471B253F948DFB29DE1F74 /* OKVideoMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OKVideoMacApp.swift; sourceTree = "<group>"; };
 		5707873F641B0221D67B9CBC /* VideoGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoGrid.swift; sourceTree = "<group>"; };
-		B74C9F0DA16E4EE2A3714BF3 /* BrowserToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserToolbar.swift; sourceTree = "<group>"; };
 		617A00084B74B412C7C3ACB9 /* NodeHTTPSpiderSiteProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeHTTPSpiderSiteProvider.swift; sourceTree = "<group>"; };
 		63284B4134B72C9ECD12EE1B /* ImageRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageRepository.swift; sourceTree = "<group>"; };
 		689F4F5C0C244BA810946A34 /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
@@ -82,12 +83,14 @@
 		7C3F9E94B5A9587197666CC3 /* WKWebSniffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WKWebSniffer.swift; sourceTree = "<group>"; };
 		7EDCFE690A729EE506C02030 /* OKVideoMacTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OKVideoMacTests.swift; sourceTree = "<group>"; };
 		8AB307256CE6590A5494384D /* THIRD_PARTY_LICENSES.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = THIRD_PARTY_LICENSES.md; sourceTree = "<group>"; };
+		93E793C1BB91D17F7670A0B9 /* BrowserToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserToolbar.swift; sourceTree = "<group>"; };
 		9E49D86C26BE1BB599E9FAA5 /* PortableBackup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortableBackup.swift; sourceTree = "<group>"; };
-		A85DB5A927E947998EAF122A /* PlayerWindowPreferenceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerWindowPreferenceStore.swift; sourceTree = "<group>"; };
+		A3FF98807A0D56E338F4B907 /* PlayerWindowPreferenceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerWindowPreferenceStore.swift; sourceTree = "<group>"; };
 		A406AD3C9358F59A462C9AB8 /* NodeBundleRuntimeService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeBundleRuntimeService.swift; sourceTree = "<group>"; };
 		ADFC0D6C3C9A30793D7813B3 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		BCC0FBAF18592C722D283D81 /* LiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveView.swift; sourceTree = "<group>"; };
 		C6326E81195BB34CCB3CEC61 /* MPVPlayerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MPVPlayerClient.swift; sourceTree = "<group>"; };
+		CBE20DF0608D06DF61EEF248 /* catpaw-quark-lifecycle.patch.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "catpaw-quark-lifecycle.patch.js"; sourceTree = "<group>"; };
 		D3D2A8AF3D0689F343F646E4 /* OKVideoMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OKVideoMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D6CD897F3EA6681258B14A99 /* AppParseExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppParseExecutor.swift; sourceTree = "<group>"; };
 		D7765776920879CB4CD0A540 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
@@ -96,11 +99,10 @@
 		ED0F982CA57DBEA3A9CBF1FE /* LICENSE */ = {isa = PBXFileReference; path = LICENSE; sourceTree = "<group>"; };
 		EEE09C76DBAB9FF2328487B7 /* FavoritesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesView.swift; sourceTree = "<group>"; };
 		F10066822C02CE0E2210A0C9 /* OKVideoMacTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OKVideoMacTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		F33ACFAFB8CC2F0BAEE4E8E1 /* AndroidRuntimeKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = AndroidRuntimeKit; path = Packages/AndroidRuntimeKit; sourceTree = SOURCE_ROOT; };
 		F39511E40E3FE20271196154 /* NOTICE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = NOTICE.md; sourceTree = "<group>"; };
 		F51955D6459123DB5DAD2EAB /* SearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchView.swift; sourceTree = "<group>"; };
 		F96551D818B82A3B4B38456B /* ConfigurationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationView.swift; sourceTree = "<group>"; };
-		F0A100000000000000000101 /* catpaw-quark-transfer-lifecycle.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "NodePatches/catpaw-quark-transfer-lifecycle.js"; sourceTree = "<group>"; };
-		F0A100000000000000000102 /* catpaw-quark-lifecycle.patch.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "NodePatches/catpaw-quark-lifecycle.patch.js"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -110,6 +112,7 @@
 			files = (
 				7D745EAFB36BEFB59EF64D70 /* OKVideoCore in Frameworks */,
 				C8D0231080586D3A6558BA58 /* OKVideoPersistence in Frameworks */,
+				34E606A00CCFD969B84B8FBE /* AndroidRuntimeKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -184,6 +187,7 @@
 		4EDB8BCB31ED90D4240819E6 /* Packages */ = {
 			isa = PBXGroup;
 			children = (
+				F33ACFAFB8CC2F0BAEE4E8E1 /* AndroidRuntimeKit */,
 				6C46BA484BEA09A1EFD0BA2A /* OKVideoKit */,
 			);
 			path = Packages;
@@ -194,8 +198,7 @@
 			children = (
 				217FFD299EC1C10BDAC94A93 /* Assets.xcassets */,
 				4027B9ADBDE079CA11AFB824 /* Localizable.strings */,
-				F0A100000000000000000101 /* catpaw-quark-transfer-lifecycle.js */,
-				F0A100000000000000000102 /* catpaw-quark-lifecycle.patch.js */,
+				9B5299216613E3873209E72A /* NodePatches */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -257,6 +260,15 @@
 			path = Configuration;
 			sourceTree = "<group>";
 		};
+		9B5299216613E3873209E72A /* NodePatches */ = {
+			isa = PBXGroup;
+			children = (
+				CBE20DF0608D06DF61EEF248 /* catpaw-quark-lifecycle.patch.js */,
+				4A1AD0EEB256E04382C11191 /* catpaw-quark-transfer-lifecycle.js */,
+			);
+			path = NodePatches;
+			sourceTree = "<group>";
+		};
 		A6C57E39CC1AB3666C2EF762 /* App */ = {
 			isa = PBXGroup;
 			children = (
@@ -302,7 +314,7 @@
 				3D3A1A89473AFD33AAF47D01 /* MPVLibrary.swift */,
 				C6326E81195BB34CCB3CEC61 /* MPVPlayerClient.swift */,
 				2A119CE857C4037E4EA9BAB8 /* MPVRenderView.swift */,
-				A85DB5A927E947998EAF122A /* PlayerWindowPreferenceStore.swift */,
+				A3FF98807A0D56E338F4B907 /* PlayerWindowPreferenceStore.swift */,
 			);
 			path = Player;
 			sourceTree = "<group>";
@@ -334,7 +346,7 @@
 		F9EEB5EB5FF3ED73839331B4 /* Shared */ = {
 			isa = PBXGroup;
 			children = (
-				B74C9F0DA16E4EE2A3714BF3 /* BrowserToolbar.swift */,
+				93E793C1BB91D17F7670A0B9 /* BrowserToolbar.swift */,
 				5707873F641B0221D67B9CBC /* VideoGrid.swift */,
 			);
 			path = Shared;
@@ -389,6 +401,7 @@
 			packageProductDependencies = (
 				2C5893FD1E3264FC60A92F7D /* OKVideoCore */,
 				40F5E74826FFC180B7D5D2FD /* OKVideoPersistence */,
+				8FE0033299FFB90088709F45 /* AndroidRuntimeKit */,
 			);
 			productName = OKVideoMac;
 			productReference = D3D2A8AF3D0689F343F646E4 /* OKVideoMac.app */;
@@ -418,6 +431,7 @@
 			mainGroup = 307E02B6EA0B01CCE3CA89AE;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				1A8ABF000060E051067A9F79 /* XCLocalSwiftPackageReference "Packages/AndroidRuntimeKit" */,
 				7724EF2268427DD0E6E288BC /* XCLocalSwiftPackageReference "Packages/OKVideoKit" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -442,8 +456,8 @@
 				0EBDF1072F01B5B03856512F /* Localizable.strings in Resources */,
 				A04BBDA44750879BBFAFB666 /* NOTICE.md in Resources */,
 				EB38C679BF2A786E9E0B233D /* THIRD_PARTY_LICENSES.md in Resources */,
-				F0A100000000000000000001 /* catpaw-quark-transfer-lifecycle.js in Resources */,
-				F0A100000000000000000002 /* catpaw-quark-lifecycle.patch.js in Resources */,
+				B0DF0200CA6A81F268264204 /* catpaw-quark-lifecycle.patch.js in Resources */,
+				9026FCDA3BBE44AB9C8EA9BE /* catpaw-quark-transfer-lifecycle.js in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -540,6 +554,7 @@
 				5728CE6395E44C04B4A0C12A /* AppEnvironment.swift in Sources */,
 				F9FF431B06B6D4B13A435C8A /* AppParseExecutor.swift in Sources */,
 				0DC49DC6E8989EB3C7FFADD2 /* AppState.swift in Sources */,
+				FE2B817E3AA2A2B7F78FFB16 /* BrowserToolbar.swift in Sources */,
 				A2F41ABF02AE0A13544CDF2A /* CatPawProtocol.swift in Sources */,
 				547E70EE1CB6395E47E23C62 /* ConfigurationView.swift in Sources */,
 				FB2A4C23694D2553091FEDF2 /* DetailView.swift in Sources */,
@@ -552,19 +567,18 @@
 				05D5512B69A7C71CC3112A74 /* MPVLibrary.swift in Sources */,
 				A0BF2B3C33EFE592A9DF59F9 /* MPVPlayerClient.swift in Sources */,
 				15EC54A8AB04926723F01FFD /* MPVRenderView.swift in Sources */,
-				1A4FD04A5B7D4D60A115C2E0 /* PlayerWindowPreferenceStore.swift in Sources */,
 				CA7782FAED307EC8B1B38D2D /* NodeBundleRuntimeService.swift in Sources */,
 				285AF5B7AA73E51C0BE0F632 /* NodeHTTPSpiderSiteProvider.swift in Sources */,
 				195449ECEC9D9787554618E1 /* NodeRuntimeContract.swift in Sources */,
 				3F316183E2F6BADC6631BC5D /* OKVideoMacApp.swift in Sources */,
 				34E5D648D9127134BBCC6933 /* PlayerView.swift in Sources */,
+				1413D999363890C932CC3650 /* PlayerWindowPreferenceStore.swift in Sources */,
 				7133DE14D3CE9A20F56BADFF /* PortableBackup.swift in Sources */,
 				A079B159324210117BB52A09 /* QuickJSSpiderRuntime.swift in Sources */,
 				A3B0AE14D90BC82289D17D61 /* RootView.swift in Sources */,
 				B1BEEF638AD2DF98A1887EA2 /* SearchView.swift in Sources */,
 				6E4F5AA244E052ECA855ECA6 /* SettingsView.swift in Sources */,
 				A460B1043453667657698834 /* VideoGrid.swift in Sources */,
-				B83C29F7B0A24F7C9616C0D1 /* BrowserToolbar.swift in Sources */,
 				3CE5EE6FA03482C30AE9FE0F /* WKWebSniffer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -828,6 +842,10 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
+		1A8ABF000060E051067A9F79 /* XCLocalSwiftPackageReference "Packages/AndroidRuntimeKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/AndroidRuntimeKit;
+		};
 		7724EF2268427DD0E6E288BC /* XCLocalSwiftPackageReference "Packages/OKVideoKit" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/OKVideoKit;
@@ -842,6 +860,10 @@
 		40F5E74826FFC180B7D5D2FD /* OKVideoPersistence */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = OKVideoPersistence;
+		};
+		8FE0033299FFB90088709F45 /* AndroidRuntimeKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = AndroidRuntimeKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

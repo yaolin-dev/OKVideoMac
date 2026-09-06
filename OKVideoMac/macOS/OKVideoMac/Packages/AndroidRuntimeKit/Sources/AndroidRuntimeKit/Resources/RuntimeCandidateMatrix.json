@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "catalogVersion": "candidate-matrix-2026-09-06",
+  "candidateMatrix": [
+    {
+      "id": "api-28-google-apis-arm64",
+      "apiLevel": 28,
+      "systemImageVariant": "google_apis",
+      "architecture": "arm64",
+      "state": "evaluation"
+    },
+    {
+      "id": "api-30-google-apis-arm64",
+      "apiLevel": 30,
+      "systemImageVariant": "google_apis",
+      "architecture": "arm64",
+      "state": "evaluation"
+    },
+    {
+      "id": "api-31-google-apis-arm64",
+      "apiLevel": 31,
+      "systemImageVariant": "google_apis",
+      "architecture": "arm64",
+      "state": "evaluation"
+    },
+    {
+      "id": "api-35-google-apis-arm64",
+      "apiLevel": 35,
+      "systemImageVariant": "google_apis",
+      "architecture": "arm64",
+      "state": "evaluation"
+    }
+  ],
+  "generations": []
+}
