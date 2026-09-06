@@ -2,7 +2,7 @@
 
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于
 配置格式、站点类型和运行时，而不是简单以 TVBox、FongMi、MiraPlay 或 CatPawOpen
-等生态名称判断。当前代码版本为 **0.4.2（Build 96）** 热修复候选包，支持
+等生态名称判断。当前代码版本为 **0.4.2（Build 97）** 热修复候选包，支持
 **arm64**，最低系统为 **macOS 12.0**；它尚未对外发布。当前公开正式版仍是
 0.4.1（Build 95）经 Apple 公证并已 Staple 的 DMG。
 
@@ -11,7 +11,7 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源�
 
 ## 当前版本
 
-- 当前版本：0.4.2（Build 96）
+- 当前版本：0.4.2（Build 97）
 - 最低系统：macOS 12.0
 - 支持架构：Apple Silicon / arm64
 - 播放历史按点播配置源分组；切换同一配置内的站点不会隐藏历史，历史项仍保留
@@ -20,7 +20,7 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源�
   不会清除已经确认的登录状态；凭据不会写入普通配置、历史或便携备份
 - Android Bridge 运行时固定 AVD 身份与正式签名；发现旧版 AVD 时可在完整备份和
  复制核验后安全迁移，失败会恢复原运行环境，旧 AVD 始终保持只读
-- Xcode：621 total / 617 passed / 4 intentionally skipped / 0 failed
+- Xcode：629 total / 625 passed / 4 intentionally skipped / 0 failed
 - OKVideoKit：173 passed / 0 failed
 - Node / CatPaw / Quark：30 passed / 0 failed
 - Android Release assemble 与 lint：通过；Android JVM unit tests：NO-SOURCE
@@ -41,6 +41,8 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源�
   一次；成功后持久化后端，两次失败不自动擦除 userdata。
 - 设置页新增可恢复的“修复 Android Runtime”，只备份并重建
   `OKVideoMac_Runtime`，不会改动其他 AVD、普通设置、收藏或历史。
+- Build 97 会识别 API 24–29 旧镜像，只对 OKVideoMac 私有无窗口
+  Emulator 启用 ADB 认证兼容开关；API 30+ 仍使用私有 keypair 认证。
 
 ## 0.4.1 稳定性更新
 

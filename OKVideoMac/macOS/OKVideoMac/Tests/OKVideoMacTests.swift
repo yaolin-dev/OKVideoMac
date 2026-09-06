@@ -9104,6 +9104,75 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testAndroidLegacySystemImageUsesHeadlessADBAuthCompatibility() {
+        let mode = AndroidDexBridgeRuntime.emulatorADBAuthenticationMode(
+            systemImageAPILevel: 24
+        )
+        XCTAssertEqual(mode, .legacySkipAuthCompatibility)
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.emulatorADBAuthenticationMode(
+                systemImageAPILevel: 29
+            ),
+            .legacySkipAuthCompatibility
+        )
+        XCTAssertTrue(mode.skipsGuestADBAuthentication)
+        XCTAssertNotNil(mode.diagnosticReason)
+
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.emulatorLaunchArguments(
+                consolePort: 5_554,
+                adbAuthenticationMode: mode
+            ),
+            [
+                "-avd", "OKVideoMac_Runtime",
+                "-port", "5554",
+                "-no-window",
+                "-no-audio",
+                "-no-boot-anim",
+                "-no-metrics",
+                "-no-snapshot",
+                "-skip-adb-auth",
+                "-gpu", "host",
+                "-accel", "on"
+            ]
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.emulatorADBAuthenticationMode(
+                in: "emulator -avd OKVideoMac_Runtime -port 5554 -skip-adb-auth"
+            ),
+            .legacySkipAuthCompatibility
+        )
+    }
+
+    func testAndroidModernOrUnknownSystemImageKeepsADBAuthentication() {
+        for apiLevel in [30, 35] {
+            XCTAssertEqual(
+                AndroidDexBridgeRuntime.emulatorADBAuthenticationMode(
+                    systemImageAPILevel: apiLevel
+                ),
+                .privateKeyBootProperty
+            )
+        }
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.emulatorADBAuthenticationMode(
+                systemImageAPILevel: nil
+            ),
+            .privateKeyBootProperty
+        )
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.emulatorADBAuthenticationMode(
+                in: "emulator -avd OKVideoMac_Runtime -port 5554"
+            ),
+            .privateKeyBootProperty
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.emulatorLaunchArguments(
+                consolePort: 5_554,
+                adbAuthenticationMode: .privateKeyBootProperty
+            ).contains("-skip-adb-auth")
+        )
+    }
+
     func testAndroidPrivateRuntimeEnvironmentIsFullyIsolated() {
         let runtime = URL(
             fileURLWithPath: "/private/app-support/AndroidRuntime",

@@ -6,7 +6,7 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。它�
 视频 Provider、直播源、搜索、详情、收藏、历史和基于 libmpv 的播放体验，但不
 内置第三方影视源、账号、Cookie、解析服务或 DRM 密钥。
 
-当前热修复候选版本为 **0.4.2（Build 96）**，支持 macOS 12 或更高版本、
+当前热修复候选版本为 **0.4.2（Build 97）**，支持 macOS 12 或更高版本、
 Apple Silicon（`arm64`），尚未对外发布。当前公开的 Developer ID 签名、
 Apple 公证并已 Staple 版本仍从
 [v0.4.1 正式发布页](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.4.1)
@@ -19,6 +19,10 @@ Apple 公证并已 Staple 版本仍从
 ADB server，宽限期后最多执行一次目标 reconnect，并把 GPU 恢复限制为
 host 到 software 的一次回退。两种后端都失败时，设置页可恢复地重建私有
 AVD，不影响 Android Studio AVD、默认 ADB server、收藏或历史。
+
+Build 97 为 API 24–29 旧 system image 增加了仅限私有、无窗口
+Emulator 的 ADB 认证兼容启动方式；现代镜像仍使用 OKVideoMac 私有
+keypair 并保持 Guest ADB 认证。
 
 ## 0.4.1 Highlights
 

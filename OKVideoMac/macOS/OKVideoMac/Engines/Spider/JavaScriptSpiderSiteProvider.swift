@@ -1985,6 +1985,9 @@ struct AndroidRuntimeDiagnosticSnapshot: Codable, Equatable, Sendable {
     let emulatorStderrTail: String?
     let emulatorArguments: [String]
     let emulatorEnvironment: [String: String]
+    let emulatorADBAuthenticationMode: AndroidEmulatorADBAuthenticationMode
+    let emulatorSkipADBAuthEnabled: Bool
+    let emulatorADBAuthenticationCompatibilityReason: String?
     let adbEnvironment: [String: String]
     let privateADBKeyPath: String
     let privateADBPublicKeyPath: String
@@ -4696,6 +4699,7 @@ struct AndroidRuntimeIdentity: Codable, Equatable, Sendable {
     var adbExecutable: URL?
     var adbServerPort: Int?
     var gpuBackend: AndroidEmulatorGPUBackend?
+    var adbAuthenticationMode: AndroidEmulatorADBAuthenticationMode?
     let avdName: String
     let avdDirectory: URL
     let pid: Int32
@@ -4770,6 +4774,32 @@ enum AndroidADBTargetState: String, Equatable, Sendable {
 enum AndroidEmulatorGPUBackend: String, Codable, Equatable, Sendable {
     case host
     case software
+}
+
+enum AndroidEmulatorADBAuthenticationMode: String, Codable, Equatable,
+    Sendable {
+    /// Modern system images accept the host public key through Android boot
+    /// properties. ADB authentication remains enabled end to end.
+    case privateKeyBootProperty
+
+    /// Android 10 and older system images predate the modern Emulator boot
+    /// property path. A fresh, isolated key cannot be authorized in a
+    /// headless guest, so the private Emulator must use its official local
+    /// compatibility switch while all host-side isolation remains intact.
+    case legacySkipAuthCompatibility
+
+    var skipsGuestADBAuthentication: Bool {
+        self == .legacySkipAuthCompatibility
+    }
+
+    var diagnosticReason: String? {
+        switch self {
+        case .privateKeyBootProperty:
+            return nil
+        case .legacySkipAuthCompatibility:
+            return "system image API < 30 does not support modern Emulator ADB public-key boot-property provisioning"
+        }
+    }
 }
 
 enum AndroidADBTransportAction: Equatable, Sendable {
@@ -5492,6 +5522,7 @@ private struct AndroidManagedRuntimeProcessCandidate: Sendable {
     let command: String
     let consolePort: Int
     let gpuBackend: AndroidEmulatorGPUBackend?
+    let adbAuthenticationMode: AndroidEmulatorADBAuthenticationMode
     let birthIdentity: String
     let startedAt: Date
     let referencesPrivateAVD: Bool
@@ -6999,6 +7030,14 @@ actor AndroidDexBridgeRuntime {
         }
         let adbKeySignals = emulatorADBKeySignals(emulatorSnapshot)
         let adbServerKeySignals = privateADBServerKeySignals()
+        let adbAuthenticationMode = identity?.adbAuthenticationMode
+            ?? Self.emulatorADBAuthenticationMode(
+                systemImageAPILevel: image?.apiLevel
+            )
+        let emulatorSkipADBAuthEnabled = emulatorSnapshot.map {
+            $0.arguments.contains("-skip-adb-auth")
+        } ?? identity?.adbAuthenticationMode?
+            .skipsGuestADBAuthentication ?? false
         return AndroidRuntimeDiagnosticSnapshot(
             runtimeState: runtimeState,
             ownershipClassification: lastOwnershipClassification,
@@ -7048,6 +7087,10 @@ actor AndroidDexBridgeRuntime {
             },
             emulatorArguments: emulatorSnapshot?.arguments ?? [],
             emulatorEnvironment: emulatorSnapshot?.environment ?? [:],
+            emulatorADBAuthenticationMode: adbAuthenticationMode,
+            emulatorSkipADBAuthEnabled: emulatorSkipADBAuthEnabled,
+            emulatorADBAuthenticationCompatibilityReason:
+                adbAuthenticationMode.diagnosticReason,
             adbEnvironment: toolchain.map {
                 diagnosticEmulatorEnvironment(
                     childEnvironment(for: $0),
@@ -7822,23 +7865,44 @@ actor AndroidDexBridgeRuntime {
                                 recorded,
                                 toolchain: recordedToolchain
                             )
-                            try saveIdentity(recorded)
-                            let recordedState = adbTargetState(
+                            if requiresADBAuthenticationCompatibilityRelaunch(
                                 recorded,
                                 toolchain: recordedToolchain
-                            )
-                            lastOwnershipClassification = Self
-                                .ownershipClassification(
-                                    isCurrentAppLaunch:
-                                        recorded.launchOrigin == .currentLaunch,
-                                    targetState: recordedState,
-                                    deviceOwned: observation.deviceOwned,
-                                    processAge: Date().timeIntervalSince(
-                                        recorded.launchedAt
-                                    )
+                            ) {
+                                appendEvent(
+                                    stage: .locatingSDK,
+                                    event: "legacyADBAuthCompatibilityRelaunch",
+                                    detail: "owned Emulator lacks -skip-adb-auth"
                                 )
-                            activeIdentity = recorded
-                            activeToolchain = recordedToolchain
+                                guard await cleanupFailedRuntime(
+                                    recorded,
+                                    toolchain: recordedToolchain,
+                                    reason: "legacyADBAuthCompatibilityUpgrade",
+                                    allowVerifiedSIGKILL: true
+                                ) else {
+                                    throw AppError.spider(
+                                        "无法安全重启旧版 Android 兼容环境；未启动第二个实例"
+                                    )
+                                }
+                            } else {
+                                try saveIdentity(recorded)
+                                let recordedState = adbTargetState(
+                                    recorded,
+                                    toolchain: recordedToolchain
+                                )
+                                lastOwnershipClassification = Self
+                                    .ownershipClassification(
+                                        isCurrentAppLaunch:
+                                            recorded.launchOrigin == .currentLaunch,
+                                        targetState: recordedState,
+                                        deviceOwned: observation.deviceOwned,
+                                        processAge: Date().timeIntervalSince(
+                                            recorded.launchedAt
+                                        )
+                                    )
+                                activeIdentity = recorded
+                                activeToolchain = recordedToolchain
+                            }
                         case let .clearStaleRecord(reason):
                             appendStaleRecordRecovery(reason)
                             if reason == .previousSystemBoot {
@@ -9278,6 +9342,8 @@ actor AndroidDexBridgeRuntime {
                 command: command,
                 consolePort: consolePort,
                 gpuBackend: Self.gpuBackend(in: command),
+                adbAuthenticationMode: Self
+                    .emulatorADBAuthenticationMode(in: command),
                 birthIdentity: processIdentity.value,
                 startedAt: processIdentity.startedAt,
                 referencesPrivateAVD: processReferencesPrivateAVD(pid: pid)
@@ -9325,6 +9391,7 @@ actor AndroidDexBridgeRuntime {
             adbExecutable: toolchain.adb,
             adbServerPort: privateADBServerPort,
             gpuBackend: candidate.gpuBackend ?? preferredGPUBackend,
+            adbAuthenticationMode: candidate.adbAuthenticationMode,
             avdName: Self.avdName,
             avdDirectory: avdDirectory,
             pid: candidate.pid,
@@ -10292,6 +10359,9 @@ actor AndroidDexBridgeRuntime {
         gpuBackend: AndroidEmulatorGPUBackend
     ) async throws -> AndroidRuntimeIdentity {
         let generation = UUID().uuidString
+        let authenticationMode = emulatorADBAuthenticationMode(
+            for: toolchain
+        )
         var sawPortConflict = false
         for consolePort in Self.candidateConsolePorts {
             try Task.checkCancellation()
@@ -10311,6 +10381,7 @@ actor AndroidDexBridgeRuntime {
             let arguments = Self.emulatorLaunchArguments(
                 consolePort: consolePort,
                 gpuBackend: gpuBackend,
+                adbAuthenticationMode: authenticationMode,
                 verboseDiagnostics: verboseAndroidDiagnosticsEnabled
             )
             let environment = childEnvironment(for: toolchain)
@@ -10318,7 +10389,7 @@ actor AndroidDexBridgeRuntime {
             appendEvent(
                 stage: .launchingEmulator,
                 event: "emulatorLaunchStart",
-                detail: "port=\(consolePort) gpu=\(gpuBackend.rawValue)"
+                detail: "port=\(consolePort) gpu=\(gpuBackend.rawValue) adbAuth=\(authenticationMode.rawValue)"
             )
             let recorder = AndroidEmulatorProcessRecorder(
                 launchAt: launchAt,
@@ -10379,6 +10450,7 @@ actor AndroidDexBridgeRuntime {
                 adbExecutable: toolchain.adb,
                 adbServerPort: privateADBServerPort,
                 gpuBackend: gpuBackend,
+                adbAuthenticationMode: authenticationMode,
                 avdName: Self.avdName,
                 avdDirectory: avdDirectory,
                 pid: process.processIdentifier,
@@ -10474,6 +10546,8 @@ actor AndroidDexBridgeRuntime {
     static func emulatorLaunchArguments(
         consolePort: Int,
         gpuBackend: AndroidEmulatorGPUBackend = .host,
+        adbAuthenticationMode: AndroidEmulatorADBAuthenticationMode =
+            .privateKeyBootProperty,
         verboseDiagnostics: Bool = false
     ) -> [String] {
         var arguments = [
@@ -10483,14 +10557,60 @@ actor AndroidDexBridgeRuntime {
             "-no-audio",
             "-no-boot-anim",
             "-no-metrics",
-            "-no-snapshot",
+            "-no-snapshot"
+        ]
+        if adbAuthenticationMode.skipsGuestADBAuthentication {
+            arguments.append("-skip-adb-auth")
+        }
+        arguments.append(contentsOf: [
             "-gpu", gpuBackend.rawValue,
             "-accel", "on"
-        ]
+        ])
         if verboseDiagnostics {
             arguments.append(contentsOf: ["-verbose", "-show-kernel"])
         }
         return arguments
+    }
+
+    static func emulatorADBAuthenticationMode(
+        systemImageAPILevel: Int?
+    ) -> AndroidEmulatorADBAuthenticationMode {
+        guard let systemImageAPILevel else {
+            // Never weaken guest authentication when the selected image
+            // cannot be proven to require the legacy compatibility path.
+            return .privateKeyBootProperty
+        }
+        return systemImageAPILevel < 30
+            ? .legacySkipAuthCompatibility
+            : .privateKeyBootProperty
+    }
+
+    static func emulatorADBAuthenticationMode(
+        in command: String
+    ) -> AndroidEmulatorADBAuthenticationMode {
+        let fields = command.split(whereSeparator: { $0.isWhitespace })
+        return fields.contains("-skip-adb-auth")
+            ? .legacySkipAuthCompatibility
+            : .privateKeyBootProperty
+    }
+
+    private func emulatorADBAuthenticationMode(
+        for toolchain: AndroidToolchain
+    ) -> AndroidEmulatorADBAuthenticationMode {
+        let configurationURL = avdDirectory.appendingPathComponent(
+            "config.ini"
+        )
+        let configuration = try? String(
+            contentsOf: configurationURL,
+            encoding: .utf8
+        )
+        let image = resolver().preferredInteractiveSystemImage(
+            in: toolchain,
+            avdConfiguration: configuration
+        )
+        return Self.emulatorADBAuthenticationMode(
+            systemImageAPILevel: image?.apiLevel
+        )
     }
 
     static func emulatorSerial(consolePort: Int) -> String {
@@ -11593,6 +11713,16 @@ actor AndroidDexBridgeRuntime {
         if refreshed.gpuBackend == nil {
             refreshed.gpuBackend = preferredGPUBackend
         }
+        if refreshed.adbAuthenticationMode == nil,
+           let command = try? run(
+               URL(fileURLWithPath: "/bin/ps"),
+               ["-p", "\(identity.pid)", "-o", "command="],
+               category: "runtime.identity.adb_auth_mode",
+               timeout: 5
+           ) {
+            refreshed.adbAuthenticationMode = Self
+                .emulatorADBAuthenticationMode(in: command)
+        }
         refreshed.pidBirthIdentity = processBirthIdentity(
             pid: identity.pid
         )?.value
@@ -11607,6 +11737,16 @@ actor AndroidDexBridgeRuntime {
         refreshed.terminationRequestedAt = nil
         refreshed.terminationRequestReason = nil
         return refreshed
+    }
+
+    private func requiresADBAuthenticationCompatibilityRelaunch(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain
+    ) -> Bool {
+        emulatorADBAuthenticationMode(for: toolchain)
+            == .legacySkipAuthCompatibility
+            && identity.adbAuthenticationMode
+                != .legacySkipAuthCompatibility
     }
 
     private func verifyDeviceOwnership(

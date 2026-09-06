@@ -1,4 +1,4 @@
-# OKVideoMac 0.4.2（Build 96）Release Notes
+# OKVideoMac 0.4.2（Build 97）Release Notes
 
 候选构建日期：2026-09-06
 
@@ -24,29 +24,34 @@
 - 设置页新增“修复 Android Runtime”。它会在明确停止自有 Emulator
   后，把专用 AVD、companion `.ini` 和有限元数据移到可恢复备份，
   然后只使用用户已选 SDK 中已存在的兼容 arm64 image 重建。
+- Build 97 修复 API 24 旧镜像无法通过现代 boot property 接收新生成
+  私有 ADB 公钥的闭环缺口。仅 API 24–29 的 OKVideoMac 私有无窗口
+  Emulator 使用官方 `-skip-adb-auth` 兼容开关；API 30+ 认证路径不变。
+- 诊断现在记录 ADB 认证模式、实际是否启用兼容开关及选择原因。
 
 ## 边界与已知限制
 
 - 重建专用 AVD 会重置 Android Runtime 内部状态，部分授权可能需重新登录；
   OKVideoMac 普通设置、收藏和历史不受影响。
-- API 24 旧 userdata、Emulator 37.1.11、M1 与 host/gfxstream 组合是待验证的
-  兼容性假设，不是已确认的 GPU 故障根因。
+- 用户日志已排除 GPU、旧 userdata、私有 ADB server 和 keypair 文件
+  错误；API 24 Guest 未获得该公钥是已定位的失败机制。
 - 本机没有 API 24 / Emulator 37.1.11 环境，未为此测试下载、删除或
-  修改任何 SDK。该组合仍需在受影响用户机器上验证。
+  修改任何 SDK。`-skip-adb-auth` 在该精确用户组合上的恢复效果
+  仍需受影响用户安装 Build 97 后验证。
 
 ## 验证
 
-- macOS Xcode：621 total / 617 passed / 4 intentionally skipped / 0 failed。
+- macOS Xcode：629 total / 625 passed / 4 intentionally skipped / 0 failed。
 - 10 路并发启动仍共享一个 process-wide startup task；即使进入 GPU
   fallback，也只有一条 workflow。
 - 单元/fake process 覆盖 90 秒 offline 后恢复、宽限期、有界 reconnect、
   private ADB、GPU fallback 与 AVD repair isolation。
-- 本机所选 SDK 的私有 ADB server 命令链已验证；完整实机 Runtime
-  组合因本地 XCTest host 启动外置 SDK 的 dyld 条件而无法完成。
+- 本机 API 35 私有 ADB A/B 可从 `offline` 转为 `device`，且 Build 97
+  不会对 API 30+ 添加兼容开关；本机未安装 API 24 镜像。
 
 ---
 
-# OKVideoMac 0.4.2 (Build 96) Release Notes
+# OKVideoMac 0.4.2 (Build 97) Release Notes
 
 Candidate date: 2026-09-06
 
@@ -61,6 +66,9 @@ Settings can rebuild only the private AVD after moving it to a recoverable
 backup. No user Android Studio AVD, global ADB server, SDK, favorite, history,
 or normal setting is modified.
 
-The API 24 / Emulator 37.1.11 / M1 host-gfxstream combination remains a
-real-machine compatibility hypothesis, not a confirmed GPU root cause. The
-affected user machine is still required for final validation.
+The user evidence rules out GPU selection, stale userdata, private ADB server
+selection, and malformed private key files. Build 97 adds the Emulator's
+official `-skip-adb-auth` compatibility option only for the private headless
+API 24–29 runtime; modern API 30+ images retain isolated private-key
+authentication. The affected API 24 machine is still required to validate the
+recovery result.

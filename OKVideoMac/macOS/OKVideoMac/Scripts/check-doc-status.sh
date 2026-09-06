@@ -60,7 +60,7 @@ assert_contains "$ROOT_README" "current hotfix candidate is **${VERSION} (Build 
 assert_contains "$ROOT_README_ZH" "当前热修复候选版本为 **${VERSION}（Build ${BUILD}）**"
 assert_exact_line "$CHANGELOG" "## [${VERSION}] - 2026-09-06"
 assert_contains "$NOTICES" "OKVideoMac ${VERSION} (Build ${BUILD})"
-assert_contains "$README" "- Xcode：621 total / 617 passed / 4 intentionally skipped / 0 failed"
+assert_contains "$README" "- Xcode：629 total / 625 passed / 4 intentionally skipped / 0 failed"
 assert_contains "$README" "- OKVideoKit：173 passed / 0 failed"
 assert_contains "$README" "- Node / CatPaw / Quark：30 passed / 0 failed"
 assert_contains "$README" "- Android Release assemble 与 lint：通过；Android JVM unit tests：NO-SOURCE"
