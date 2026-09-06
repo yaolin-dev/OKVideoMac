@@ -9104,6 +9104,308 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testAndroidPrivateRuntimeEnvironmentIsFullyIsolated() {
+        let runtime = URL(
+            fileURLWithPath: "/private/app-support/AndroidRuntime",
+            isDirectory: true
+        )
+        let keyPaths = AndroidPrivateADBKeyPaths.paths(
+            runtimeDirectory: runtime
+        )
+        let environment = AndroidDexBridgeRuntime.privateRuntimeEnvironment(
+            baseEnvironment: [
+                "HOME": "/Users/customer",
+                "PATH": "/opt/homebrew/bin:/usr/bin",
+                "ADB_VENDOR_KEYS": "/Users/customer/.android/adbkey",
+                "ADB_SERVER_SOCKET": "tcp:localhost:5037",
+                "ANDROID_ADB_SERVER_ADDRESS": "localhost",
+                "ANDROID_SDK_HOME": "/Users/customer",
+                "ANDROID_EMULATOR_HOME": "/Users/customer/.android",
+                "ANDROID_USER_HOME": "/Users/customer/.android",
+                "DYLD_LIBRARY_PATH": "/untrusted"
+            ],
+            sdkRoot: URL(fileURLWithPath: "/private/sdk"),
+            avdHome: runtime.appendingPathComponent("avd"),
+            keyPaths: keyPaths,
+            privateADBServerPort: 50_437,
+            verboseDiagnostics: false
+        )
+
+        XCTAssertEqual(environment["HOME"], keyPaths.privateHome.path)
+        XCTAssertEqual(
+            environment["ANDROID_EMULATOR_HOME"],
+            keyPaths.emulatorHome.path
+        )
+        XCTAssertEqual(
+            environment["ANDROID_USER_HOME"],
+            keyPaths.emulatorHome.path
+        )
+        XCTAssertEqual(
+            environment["ANDROID_AVD_HOME"],
+            runtime.appendingPathComponent("avd").path
+        )
+        XCTAssertEqual(
+            environment["ADB_VENDOR_KEYS"],
+            keyPaths.privateKey.path
+        )
+        XCTAssertEqual(environment["ANDROID_ADB_SERVER_PORT"], "50437")
+        XCTAssertNil(environment["ADB_SERVER_SOCKET"])
+        XCTAssertNil(environment["ANDROID_ADB_SERVER_ADDRESS"])
+        XCTAssertNil(environment["ANDROID_SDK_HOME"])
+        XCTAssertNil(environment["DYLD_LIBRARY_PATH"])
+        XCTAssertNil(environment["ADB_TRACE"])
+        XCTAssertFalse(
+            environment.values.contains {
+                $0.contains("/Users/customer/.android/adbkey")
+            }
+        )
+    }
+
+    func testAndroidPrivateRuntimeDiagnosticEnvironmentIsControlled() {
+        let runtime = URL(fileURLWithPath: "/private/runtime")
+        let keyPaths = AndroidPrivateADBKeyPaths.paths(
+            runtimeDirectory: runtime
+        )
+        let environment = AndroidDexBridgeRuntime.privateRuntimeEnvironment(
+            baseEnvironment: [:],
+            sdkRoot: URL(fileURLWithPath: "/private/sdk"),
+            avdHome: runtime.appendingPathComponent("avd"),
+            keyPaths: keyPaths,
+            privateADBServerPort: 50_439,
+            verboseDiagnostics: true
+        )
+        XCTAssertEqual(environment["ADB_TRACE"], "auth,transport")
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.emulatorLaunchArguments(
+                consolePort: 5_554,
+                verboseDiagnostics: true
+            ).suffix(2),
+            ["-verbose", "-show-kernel"]
+        )
+    }
+
+    func testAndroidPrivateADBKeyPathsStayInsideRuntimeDirectory() {
+        let runtime = URL(
+            fileURLWithPath: "/private/app-support/AndroidRuntime",
+            isDirectory: true
+        )
+        let paths = AndroidPrivateADBKeyPaths.paths(
+            runtimeDirectory: runtime
+        )
+        for path in [
+            paths.privateHome,
+            paths.emulatorHome,
+            paths.privateKey,
+            paths.publicKey
+        ] {
+            XCTAssertTrue(path.path.hasPrefix(runtime.path + "/"))
+            XCTAssertFalse(path.path.contains("/Users/customer/.android"))
+        }
+        XCTAssertEqual(paths.privateKey.lastPathComponent, "adbkey")
+        XCTAssertEqual(paths.publicKey.lastPathComponent, "adbkey.pub")
+    }
+
+    func testAndroidPrivateADBGeneratedKeyPairCanBeValidated() throws {
+        let candidates = [
+            ProcessInfo.processInfo.environment["ANDROID_SDK_ROOT"].map {
+                URL(fileURLWithPath: $0)
+                    .appendingPathComponent("platform-tools/adb")
+            },
+            URL(fileURLWithPath: NSHomeDirectory())
+                .appendingPathComponent("Library/Android/sdk/platform-tools/adb")
+        ].compactMap { $0 }
+        guard let adb = candidates.first(where: {
+            FileManager.default.isExecutableFile(atPath: $0.path)
+        }) else {
+            throw XCTSkip("requires an installed adb for isolated keygen")
+        }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "OKVideoMac-private-adb-key-test-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtime = root.appendingPathComponent(
+            "Application Support/OKVideoMac/AndroidRuntime",
+            isDirectory: true
+        )
+        let externalAndroidHome = root.appendingPathComponent(
+            "UserHome/.android",
+            isDirectory: true
+        )
+        let externalAVD = externalAndroidHome.appendingPathComponent(
+            "avd/External.avd/config.ini"
+        )
+        let externalADBKey = externalAndroidHome.appendingPathComponent(
+            "adbkey"
+        )
+        try FileManager.default.createDirectory(
+            at: externalAVD.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let externalKeySentinel = Data("user-owned-adb-key".utf8)
+        let externalAVDSentinel = Data("user-owned-avd".utf8)
+        try externalKeySentinel.write(to: externalADBKey)
+        try externalAVDSentinel.write(to: externalAVD)
+
+        let paths = AndroidPrivateADBKeyPaths.paths(
+            runtimeDirectory: runtime
+        )
+        var generationCount = 0
+        let generate: (URL) throws -> Void = { privateKey in
+            generationCount += 1
+            let process = Process()
+            process.executableURL = adb
+            process.arguments = ["keygen", privateKey.path]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            process.waitUntilExit()
+            XCTAssertEqual(process.terminationStatus, 0)
+        }
+        let first = try AndroidPrivateADBKeyManager.ensureKeyPair(
+            paths: paths,
+            generate: generate
+        )
+        let status = first.status
+        XCTAssertTrue(first.generated)
+        XCTAssertEqual(generationCount, 1)
+        XCTAssertTrue(status.privateKeyExists)
+        XCTAssertTrue(status.publicKeyExists)
+        XCTAssertTrue(status.privateKeyReadable)
+        XCTAssertTrue(status.publicKeyReadable)
+        XCTAssertEqual(status.keyPairMatches, true)
+        XCTAssertEqual(status.publicKeySHA256?.count, 64)
+        let publicKey = try String(
+            contentsOf: paths.publicKey,
+            encoding: .utf8
+        ).split(whereSeparator: \.isWhitespace).first.map(String.init)
+        let emulatorSignals = AndroidDexBridgeRuntime.emulatorADBKeySignals(
+            in: "INFO | Sending adb public key [\(try XCTUnwrap(publicKey)) test@host]"
+        )
+        XCTAssertEqual(
+            emulatorSignals.reportedPublicKeySHA256,
+            status.publicKeySHA256
+        )
+        XCTAssertEqual(
+            try Data(contentsOf: externalADBKey),
+            externalKeySentinel
+        )
+        XCTAssertEqual(
+            try Data(contentsOf: externalAVD),
+            externalAVDSentinel
+        )
+
+        let reused = try AndroidPrivateADBKeyManager.ensureKeyPair(
+            paths: paths,
+            generate: generate
+        )
+        XCTAssertFalse(reused.generated)
+        XCTAssertEqual(generationCount, 1)
+
+        try Data("not-an-adb-public-key".utf8).write(
+            to: paths.publicKey,
+            options: [.atomic]
+        )
+        let mismatched = AndroidPrivateADBKeyManager.status(paths: paths)
+        XCTAssertEqual(mismatched.keyPairMatches, false)
+        XCTAssertNil(mismatched.publicKeySHA256)
+
+        let repaired = try AndroidPrivateADBKeyManager.ensureKeyPair(
+            paths: paths,
+            generate: generate
+        )
+        XCTAssertTrue(repaired.generated)
+        XCTAssertEqual(repaired.status.keyPairMatches, true)
+        XCTAssertEqual(generationCount, 2)
+        XCTAssertEqual(
+            try Data(contentsOf: externalADBKey),
+            externalKeySentinel
+        )
+        XCTAssertEqual(
+            try Data(contentsOf: externalAVD),
+            externalAVDSentinel
+        )
+
+        let linkedRuntime = root.appendingPathComponent(
+            "LinkedAndroidRuntime",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: linkedRuntime,
+            withIntermediateDirectories: true
+        )
+        let linkedPaths = AndroidPrivateADBKeyPaths.paths(
+            runtimeDirectory: linkedRuntime
+        )
+        try FileManager.default.createSymbolicLink(
+            at: linkedPaths.privateHome,
+            withDestinationURL: root.appendingPathComponent("UserHome")
+        )
+        XCTAssertThrowsError(
+            try AndroidPrivateADBKeyManager.ensureKeyPair(
+                paths: linkedPaths,
+                generate: generate
+            )
+        )
+        XCTAssertEqual(generationCount, 2)
+        XCTAssertEqual(
+            try Data(contentsOf: externalADBKey),
+            externalKeySentinel
+        )
+        XCTAssertEqual(
+            try Data(contentsOf: externalAVD),
+            externalAVDSentinel
+        )
+    }
+
+    func testAndroidEmulatorADBKeySignalsAndRedaction() {
+        let log = """
+        INFO | Sending adb public key [AAAA customer@host]
+        qemu.adb.pubkey=AAAA
+        """
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.emulatorADBKeySignals(in: log),
+            AndroidEmulatorADBKeySignals(
+                reportedSendingPublicKey: true,
+                reportedMissingPrivateKey: false,
+                bootPropertiesContainPublicKey: true,
+                reportedPublicKeySHA256: nil
+            )
+        )
+        let privateKeyLabel = "PRIVATE" + " KEY"
+        let privateKeyBlock =
+            "\n-----BEGIN \(privateKeyLabel)-----\nsecret\n"
+            + "-----END \(privateKeyLabel)-----"
+        let redacted = AndroidDexBridgeRuntime.redactingADBKeyMaterial(
+            in: log + privateKeyBlock
+        )
+        XCTAssertFalse(redacted.contains("customer@host"))
+        XCTAssertFalse(redacted.contains("secret"))
+        XCTAssertTrue(redacted.contains("<redacted-public-key>"))
+        XCTAssertTrue(redacted.contains("<redacted-private-key>"))
+
+        XCTAssertEqual(
+            AndroidDexBridgeRuntime.emulatorADBKeySignals(
+                in: "WARNING | No adb private key exists"
+            ),
+            AndroidEmulatorADBKeySignals(
+                reportedSendingPublicKey: false,
+                reportedMissingPrivateKey: true,
+                bootPropertiesContainPublicKey: false,
+                reportedPublicKeySHA256: nil
+            )
+        )
+
+        let serverSignals = AndroidDexBridgeRuntime
+            .privateADBServerKeySignals(
+                in: "loaded new key from '/private/runtime/.android/adbkey' with fingerprint ABCD",
+                expectedPrivateKeyPath: "/private/runtime/.android/adbkey"
+            )
+        XCTAssertTrue(serverSignals.reportedKeyLoaded)
+        XCTAssertTrue(serverSignals.expectedPathMatched)
+    }
+
     func testAndroidADBTransportUsesSeparate180SecondMonotonicWindow() {
         let policy = AndroidADBTransportPolicy.production
         XCTAssertEqual(policy.timeout, 180)
@@ -9422,11 +9724,12 @@ final class OKVideoMacTests: XCTestCase {
         let data = try XCTUnwrap(
             """
             {
-              "schema": 1,
+              "schema": 2,
               "privateADBServerPort": 50439,
               "preferredGPUBackend": "software",
               "privateADBServerPID": 73,
               "privateADBServerBirthIdentity": "birth-73",
+              "privateADBPublicKeySHA256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
               "updatedAt": "2026-09-06T09:00:00Z"
             }
             """.data(using: .utf8)
@@ -9438,6 +9741,29 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(profile.preferredGPUBackend, .software)
         XCTAssertEqual(profile.privateADBServerPID, 73)
         XCTAssertEqual(profile.privateADBServerBirthIdentity, "birth-73")
+        XCTAssertEqual(
+            profile.privateADBPublicKeySHA256,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        )
+    }
+
+    func testAndroidLegacyADBProfileCannotReuseServerWithoutPrivateKeyIdentity()
+        throws {
+        let data = try XCTUnwrap(
+            """
+            {
+              "schema": 1,
+              "privateADBServerPort": 50437,
+              "preferredGPUBackend": "host",
+              "privateADBServerPID": 73,
+              "privateADBServerBirthIdentity": "birth-73",
+              "updatedAt": "2026-09-06T09:00:00Z"
+            }
+            """.data(using: .utf8)
+        )
+        XCTAssertNil(
+            AndroidDexBridgeRuntime.persistedRuntimeProfile(from: data)
+        )
     }
 
     func testAndroidGPUFallbackIsExactlyOneAndThenRequiresRecovery() {

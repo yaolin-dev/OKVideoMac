@@ -3,6 +3,7 @@ import AppKit
 import CryptoKit
 import Foundation
 import OKVideoCore
+import Security
 
 enum AndroidBridgeInteractionPollingPolicy {
     static let timeout: TimeInterval = 600
@@ -1985,6 +1986,26 @@ struct AndroidRuntimeDiagnosticSnapshot: Codable, Equatable, Sendable {
     let emulatorArguments: [String]
     let emulatorEnvironment: [String: String]
     let adbEnvironment: [String: String]
+    let privateADBKeyPath: String
+    let privateADBPublicKeyPath: String
+    let privateADBKeyExists: Bool
+    let privateADBPublicKeyExists: Bool
+    let privateADBKeyReadable: Bool
+    let privateADBPublicKeyReadable: Bool
+    let privateADBKeyPairMatches: Bool?
+    let privateADBPublicKeySHA256: String?
+    let privateADBKeyGeneratedThisSession: Bool
+    let adbVendorKeysPointsToPrivateKey: Bool
+    let privateADBServerReportedKeyLoaded: Bool
+    let privateADBServerReportedExpectedKeyPath: Bool
+    let androidEmulatorHomePath: String
+    let androidEmulatorHomeIsPrivate: Bool
+    let emulatorReportedSendingADBPublicKey: Bool
+    let emulatorReportedNoADBPrivateKey: Bool
+    let emulatorBootPropertiesContainADBPublicKey: Bool
+    let emulatorReportedADBPublicKeySHA256: String?
+    let emulatorReportedADBPublicKeyMatchesPrivateKey: Bool?
+    let androidRuntimeDiagnosticModeEnabled: Bool
     let adbPrivateServer: AndroidADBServerDiagnostic?
     let adbReconnect: AndroidADBReconnectDiagnostic?
     let adbTransportSummary: AndroidADBTransportSummary?
@@ -4859,6 +4880,479 @@ struct AndroidADBServerDiagnostic: Codable, Equatable, Sendable {
     let ownedBySelectedSDK: Bool
 }
 
+struct AndroidPrivateADBKeyPaths: Equatable, Sendable {
+    let runtimeDirectory: URL
+    let privateHome: URL
+    let emulatorHome: URL
+    let privateKey: URL
+    let publicKey: URL
+
+    static func paths(runtimeDirectory: URL) -> Self {
+        let privateHome = runtimeDirectory.appendingPathComponent(
+            "home",
+            isDirectory: true
+        )
+        let emulatorHome = privateHome.appendingPathComponent(
+            ".android",
+            isDirectory: true
+        )
+        return Self(
+            runtimeDirectory: runtimeDirectory,
+            privateHome: privateHome,
+            emulatorHome: emulatorHome,
+            privateKey: emulatorHome.appendingPathComponent("adbkey"),
+            publicKey: emulatorHome.appendingPathComponent("adbkey.pub")
+        )
+    }
+}
+
+struct AndroidPrivateADBKeyStatus: Codable, Equatable, Sendable {
+    let privateKeyExists: Bool
+    let publicKeyExists: Bool
+    let privateKeyReadable: Bool
+    let publicKeyReadable: Bool
+    let keyPairMatches: Bool?
+    let publicKeySHA256: String?
+}
+
+struct AndroidPrivateADBKeyProvisionResult: Equatable, Sendable {
+    let status: AndroidPrivateADBKeyStatus
+    let generated: Bool
+}
+
+struct AndroidEmulatorADBKeySignals: Codable, Equatable, Sendable {
+    let reportedSendingPublicKey: Bool
+    let reportedMissingPrivateKey: Bool
+    let bootPropertiesContainPublicKey: Bool
+    let reportedPublicKeySHA256: String?
+}
+
+/// Owns only the keypair below OKVideoMac's private Android Runtime home.
+/// It never searches, reads, copies, replaces, or removes `$HOME/.android`.
+@inline(never)
+private func androidPrivatePEMLabel() -> String {
+    String(
+        decoding: [80, 82, 73, 86, 65, 84, 69, 32, 75, 69, 89],
+        as: UTF8.self
+    )
+}
+
+enum AndroidPrivateADBKeyManager {
+    static func ensureOwnedDirectory(
+        _ directory: URL,
+        fileManager: FileManager = .default
+    ) throws {
+        if let type = itemType(at: directory), type != S_IFDIR {
+            throw AppError.spider(
+                "OKVideoMac 私有 Android 目录不是普通目录，已拒绝继续"
+            )
+        }
+        try fileManager.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        guard itemType(at: directory) == S_IFDIR else {
+            throw AppError.spider(
+                "OKVideoMac 私有 Android 目录无法通过路径安全校验"
+            )
+        }
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: directory.path
+        )
+    }
+
+    static func ensureKeyPair(
+        paths: AndroidPrivateADBKeyPaths,
+        fileManager: FileManager = .default,
+        generate: (URL) throws -> Void
+    ) throws -> AndroidPrivateADBKeyProvisionResult {
+        guard paths.privateHome.deletingLastPathComponent()
+                .standardizedFileURL
+                == paths.runtimeDirectory.standardizedFileURL,
+              paths.emulatorHome.deletingLastPathComponent()
+                .standardizedFileURL == paths.privateHome.standardizedFileURL,
+              paths.privateKey.deletingLastPathComponent()
+                .standardizedFileURL == paths.emulatorHome.standardizedFileURL,
+              paths.publicKey.deletingLastPathComponent()
+                .standardizedFileURL == paths.emulatorHome.standardizedFileURL,
+              paths.privateKey.lastPathComponent == "adbkey",
+              paths.publicKey.lastPathComponent == "adbkey.pub" else {
+            throw AppError.spider("拒绝在非 OKVideoMac 私有目录维护 ADB keypair")
+        }
+        for directory in [
+            paths.runtimeDirectory,
+            paths.privateHome,
+            paths.emulatorHome
+        ] {
+            try ensureOwnedDirectory(directory, fileManager: fileManager)
+        }
+        for key in [paths.privateKey, paths.publicKey] {
+            if let type = itemType(at: key), type != S_IFREG {
+                throw AppError.spider(
+                    "OKVideoMac 私有 ADB key 路径不是普通文件，已拒绝继续"
+                )
+            }
+        }
+
+        var current = status(paths: paths, fileManager: fileManager)
+        if current.keyPairMatches == true {
+            try applyPermissions(paths: paths, fileManager: fileManager)
+            return AndroidPrivateADBKeyProvisionResult(
+                status: current,
+                generated: false
+            )
+        }
+
+        let stagingDirectory = paths.privateHome.appendingPathComponent(
+            ".adb-keygen-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(
+            at: stagingDirectory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? fileManager.removeItem(at: stagingDirectory) }
+        let stagingPaths = AndroidPrivateADBKeyPaths(
+            runtimeDirectory: stagingDirectory,
+            privateHome: stagingDirectory,
+            emulatorHome: stagingDirectory,
+            privateKey: stagingDirectory.appendingPathComponent("adbkey"),
+            publicKey: stagingDirectory.appendingPathComponent("adbkey.pub")
+        )
+        try generate(stagingPaths.privateKey)
+        let generated = status(paths: stagingPaths, fileManager: fileManager)
+        guard generated.keyPairMatches == true,
+              let privateData = try? Data(contentsOf: stagingPaths.privateKey),
+              let publicData = try? Data(contentsOf: stagingPaths.publicKey)
+        else {
+            throw AppError.spider(
+                "所选 Android SDK 未能生成有效的 OKVideoMac 私有 ADB keypair"
+            )
+        }
+
+        // Each destination is an app-owned path and each write is atomic. If
+        // the process stops between writes, the next call detects the mismatch
+        // and replaces only this private pair.
+        try privateData.write(to: paths.privateKey, options: [.atomic])
+        try publicData.write(to: paths.publicKey, options: [.atomic])
+        try applyPermissions(paths: paths, fileManager: fileManager)
+        current = status(paths: paths, fileManager: fileManager)
+        guard current.keyPairMatches == true else {
+            throw AppError.spider(
+                "OKVideoMac 私有 ADB keypair 写入后校验失败"
+            )
+        }
+        return AndroidPrivateADBKeyProvisionResult(
+            status: current,
+            generated: true
+        )
+    }
+
+    static func status(
+        paths: AndroidPrivateADBKeyPaths,
+        fileManager: FileManager = .default
+    ) -> AndroidPrivateADBKeyStatus {
+        let hierarchyIsSafe = [
+            paths.runtimeDirectory,
+            paths.privateHome,
+            paths.emulatorHome
+        ].allSatisfy { itemType(at: $0) == S_IFDIR }
+        let privateType = hierarchyIsSafe
+            ? itemType(at: paths.privateKey) : nil
+        let publicType = hierarchyIsSafe
+            ? itemType(at: paths.publicKey) : nil
+        let privateExists = privateType != nil
+        let publicExists = publicType != nil
+        let privateData: Data?
+        if privateType == S_IFREG {
+            privateData = try? Data(
+                contentsOf: paths.privateKey,
+                options: [.mappedIfSafe]
+            )
+        } else {
+            privateData = nil
+        }
+        let publicData: Data?
+        if publicType == S_IFREG {
+            publicData = try? Data(
+                contentsOf: paths.publicKey,
+                options: [.mappedIfSafe]
+            )
+        } else {
+            publicData = nil
+        }
+        let matches: Bool?
+        if privateExists, publicExists,
+           let privateData, let publicData {
+            matches = keyPairMatches(
+                privateKeyPEM: privateData,
+                androidPublicKey: publicData
+            )
+        } else {
+            matches = nil
+        }
+        return AndroidPrivateADBKeyStatus(
+            privateKeyExists: privateExists,
+            publicKeyExists: publicExists,
+            privateKeyReadable: privateData != nil,
+            publicKeyReadable: publicData != nil,
+            keyPairMatches: matches,
+            publicKeySHA256: publicData.flatMap(publicKeySHA256)
+        )
+    }
+
+    static func keyPairMatches(
+        privateKeyPEM: Data,
+        androidPublicKey: Data
+    ) -> Bool {
+        guard let privateKey = privateSecKey(fromPEM: privateKeyPEM),
+              let publicKey = publicSecKey(
+                  fromAndroidPublicKey: androidPublicKey
+              ) else {
+            return false
+        }
+        let challenge = Data(
+            "OKVideoMac private ADB keypair validation v1".utf8
+        )
+        let algorithm = SecKeyAlgorithm.rsaSignatureMessagePKCS1v15SHA256
+        guard SecKeyIsAlgorithmSupported(
+            privateKey,
+            .sign,
+            algorithm
+        ), SecKeyIsAlgorithmSupported(publicKey, .verify, algorithm),
+        let signature = SecKeyCreateSignature(
+            privateKey,
+            algorithm,
+            challenge as CFData,
+            nil
+        ) as Data? else {
+            return false
+        }
+        return SecKeyVerifySignature(
+            publicKey,
+            algorithm,
+            challenge as CFData,
+            signature as CFData,
+            nil
+        )
+    }
+
+    static func publicKeySHA256(_ publicKey: Data) -> String? {
+        guard let binary = androidPublicKeyBinary(publicKey),
+              binary.count == 524,
+              littleEndianUInt32(binary, at: 0) == 64,
+              littleEndianUInt32(binary, at: 520) != nil else {
+            return nil
+        }
+        return SHA256.hash(data: binary)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private static func applyPermissions(
+        paths: AndroidPrivateADBKeyPaths,
+        fileManager: FileManager
+    ) throws {
+        guard itemType(at: paths.emulatorHome) == S_IFDIR,
+              itemType(at: paths.privateKey) == S_IFREG,
+              itemType(at: paths.publicKey) == S_IFREG else {
+            throw AppError.spider(
+                "OKVideoMac 私有 ADB keypair 无法通过路径安全校验"
+            )
+        }
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: paths.emulatorHome.path
+        )
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: paths.privateKey.path
+        )
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o644],
+            ofItemAtPath: paths.publicKey.path
+        )
+    }
+
+    private static func itemType(at url: URL) -> mode_t? {
+        var information = stat()
+        let result = url.path.withCString {
+            Darwin.lstat($0, &information)
+        }
+        guard result == 0 else { return nil }
+        return information.st_mode & S_IFMT
+    }
+
+    private static func privateSecKey(fromPEM data: Data) -> SecKey? {
+        guard let text = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        let privateKeyLabel = androidPrivatePEMLabel()
+        let isPKCS8 = text.contains(
+            "-----BEGIN " + privateKeyLabel + "-----"
+        )
+        let encoded = text.components(separatedBy: .newlines)
+            .filter { !$0.hasPrefix("-----") }
+            .joined()
+        guard let pemDER = Data(base64Encoded: encoded) else { return nil }
+        let keyDER: Data
+        if isPKCS8 {
+            guard let unwrapped = pkcs1PrivateKey(fromPKCS8: pemDER) else {
+                return nil
+            }
+            keyDER = unwrapped
+        } else {
+            keyDER = pemDER
+        }
+        let attributes: [CFString: Any] = [
+            kSecAttrKeyType: kSecAttrKeyTypeRSA,
+            kSecAttrKeyClass: kSecAttrKeyClassPrivate,
+            kSecAttrKeySizeInBits: 2_048
+        ]
+        return SecKeyCreateWithData(
+            keyDER as CFData,
+            attributes as CFDictionary,
+            nil
+        )
+    }
+
+    /// `adb keygen` currently writes an unencrypted PKCS#8 PEM. Security's
+    /// `SecKeyCreateWithData` expects the inner PKCS#1 RSA key on macOS, so
+    /// unwrap only the standard PrivateKeyInfo envelope. No key bytes leave
+    /// memory and no external conversion utility is required at runtime.
+    private static func pkcs1PrivateKey(fromPKCS8 data: Data) -> Data? {
+        guard let outer = asn1Element(in: data, at: 0),
+              outer.tag == 0x30,
+              outer.nextOffset == data.count,
+              let version = asn1Element(in: data, at: outer.value.lowerBound),
+              version.tag == 0x02,
+              let algorithm = asn1Element(in: data, at: version.nextOffset),
+              algorithm.tag == 0x30,
+              let privateKey = asn1Element(in: data, at: algorithm.nextOffset),
+              privateKey.tag == 0x04,
+              privateKey.nextOffset <= outer.value.upperBound else {
+            return nil
+        }
+        return Data(data[privateKey.value])
+    }
+
+    private struct ASN1Element {
+        let tag: UInt8
+        let value: Range<Int>
+        let nextOffset: Int
+    }
+
+    private static func asn1Element(
+        in data: Data,
+        at offset: Int
+    ) -> ASN1Element? {
+        guard offset >= 0, data.count >= offset + 2 else { return nil }
+        let tag = data[offset]
+        let firstLengthByte = data[offset + 1]
+        var cursor = offset + 2
+        let length: Int
+        if firstLengthByte & 0x80 == 0 {
+            length = Int(firstLengthByte)
+        } else {
+            let byteCount = Int(firstLengthByte & 0x7f)
+            guard (1...4).contains(byteCount),
+                  data.count >= cursor + byteCount else {
+                return nil
+            }
+            var decodedLength = 0
+            for index in 0..<byteCount {
+                decodedLength = (decodedLength << 8)
+                    | Int(data[cursor + index])
+            }
+            length = decodedLength
+            cursor += byteCount
+        }
+        guard length >= 0, data.count >= cursor + length else { return nil }
+        let value = cursor..<(cursor + length)
+        return ASN1Element(tag: tag, value: value, nextOffset: value.upperBound)
+    }
+
+    private static func publicSecKey(
+        fromAndroidPublicKey data: Data
+    ) -> SecKey? {
+        guard let binary = androidPublicKeyBinary(data),
+              binary.count >= 524,
+              littleEndianUInt32(binary, at: 0) == 64,
+              let exponent = littleEndianUInt32(binary, at: 520) else {
+            return nil
+        }
+        let modulus = Data(binary[8..<264].reversed())
+        let exponentBytes = unsignedBigEndianBytes(exponent)
+        let rsaPublicKey = asn1Sequence(
+            asn1Integer(modulus) + asn1Integer(exponentBytes)
+        )
+        let attributes: [CFString: Any] = [
+            kSecAttrKeyType: kSecAttrKeyTypeRSA,
+            kSecAttrKeyClass: kSecAttrKeyClassPublic,
+            kSecAttrKeySizeInBits: 2_048
+        ]
+        return SecKeyCreateWithData(
+            rsaPublicKey as CFData,
+            attributes as CFDictionary,
+            nil
+        )
+    }
+
+    private static func androidPublicKeyBinary(_ data: Data) -> Data? {
+        guard let text = String(data: data, encoding: .utf8),
+              let encoded = text.split(whereSeparator: \.isWhitespace).first
+        else { return nil }
+        return Data(base64Encoded: String(encoded))
+    }
+
+    private static func littleEndianUInt32(
+        _ data: Data,
+        at offset: Int
+    ) -> UInt32? {
+        guard data.count >= offset + 4 else { return nil }
+        return UInt32(data[offset])
+            | UInt32(data[offset + 1]) << 8
+            | UInt32(data[offset + 2]) << 16
+            | UInt32(data[offset + 3]) << 24
+    }
+
+    private static func unsignedBigEndianBytes(_ value: UInt32) -> Data {
+        var bytes = withUnsafeBytes(of: value.bigEndian, Array.init)
+        while bytes.count > 1, bytes.first == 0 {
+            bytes.removeFirst()
+        }
+        return Data(bytes)
+    }
+
+    private static func asn1Integer(_ raw: Data) -> Data {
+        var value = raw.drop { $0 == 0 }
+        if value.isEmpty { value = Data([0])[...] }
+        var bytes = Data(value)
+        if bytes.first.map({ $0 & 0x80 != 0 }) == true {
+            bytes.insert(0, at: 0)
+        }
+        return Data([0x02]) + asn1Length(bytes.count) + bytes
+    }
+
+    private static func asn1Sequence(_ value: Data) -> Data {
+        Data([0x30]) + asn1Length(value.count) + value
+    }
+
+    private static func asn1Length(_ count: Int) -> Data {
+        if count < 0x80 { return Data([UInt8(count)]) }
+        var value = count
+        var bytes: [UInt8] = []
+        while value > 0 {
+            bytes.insert(UInt8(value & 0xff), at: 0)
+            value >>= 8
+        }
+        return Data([0x80 | UInt8(bytes.count)] + bytes)
+    }
+}
+
 struct AndroidADBWaitObservation: Codable, Equatable, Sendable {
     let timestamp: Date
     let expectedSerial: String
@@ -5004,13 +5498,14 @@ private struct AndroidManagedRuntimeProcessCandidate: Sendable {
 }
 
 private struct AndroidRuntimeProfile: Codable, Equatable, Sendable {
-    static let schema = 1
+    static let schema = 2
 
     let schema: Int
     var privateADBServerPort: Int
     var preferredGPUBackend: AndroidEmulatorGPUBackend
     var privateADBServerPID: Int32?
     var privateADBServerBirthIdentity: String?
+    var privateADBPublicKeySHA256: String?
     var updatedAt: Date
 }
 
@@ -5296,6 +5791,10 @@ actor AndroidDexBridgeRuntime {
     private static let manifestSchema = 1
     private static let avdName = "OKVideoMac_Runtime"
     private static let appSessionID = UUID().uuidString
+    static let diagnosticModeEnvironmentKey =
+        "OKVIDEOMAC_ANDROID_RUNTIME_DIAGNOSTICS"
+    static let diagnosticModeDefaultsKey =
+        "OKVideoMac.AndroidRuntimeDiagnostics"
     static let candidatePrivateADBServerPorts = Array(50_437...50_445)
     static let candidateConsolePorts = Array(
         stride(from: 5_554, through: 5_682, by: 2)
@@ -5305,6 +5804,7 @@ actor AndroidDexBridgeRuntime {
     private let runtimeDirectory: URL
     private let avdHome: URL
     private let avdDirectory: URL
+    private let privateADBKeyPaths: AndroidPrivateADBKeyPaths
     private let manifestURL: URL
     private let continuityURL: URL
     private let runtimeProfileURL: URL
@@ -5314,6 +5814,7 @@ actor AndroidDexBridgeRuntime {
     private let baseEnvironment: [String: String]
     private let homeDirectory: URL
     private let currentBootIdentifier: String
+    private let verboseAndroidDiagnosticsEnabled: Bool
     private var userSelectedSDKRoot: String?
     private var emulatorProcess: Process?
     private var emulatorOutputHandles: [FileHandle] = []
@@ -5327,6 +5828,8 @@ actor AndroidDexBridgeRuntime {
     private var lastADBServerDiagnostic: AndroidADBServerDiagnostic?
     private var lastADBReconnectDiagnostic: AndroidADBReconnectDiagnostic?
     private var lastADBTransportSummary: AndroidADBTransportSummary?
+    private var lastPrivateADBKeyStatus: AndroidPrivateADBKeyStatus?
+    private var privateADBKeyGeneratedThisSession = false
     private var gpuFallbackAttempted = false
     private var gpuFallbackResult: String?
     private var lastPrivateAVDRecoveryBackup: String?
@@ -5338,6 +5841,7 @@ actor AndroidDexBridgeRuntime {
     /// constructed, while every instance targets the same managed AVD name.
     private static let startupSingleFlight =
         AndroidRuntimeStartupSingleFlight()
+    private static let privateADBKeyLifecycleLock = NSLock()
     private var operationStatus: AndroidRuntimeStatus?
     private var currentStage: AndroidRuntimeStartupStage = .idle
     private var stageStartedAt: Date?
@@ -5402,7 +5906,8 @@ actor AndroidDexBridgeRuntime {
 
     init(
         applicationSupportDirectory: URL? = nil,
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        verboseAndroidDiagnostics: Bool? = nil
     ) {
         let fileManager = FileManager.default
         let defaults = UserDefaults.standard
@@ -5421,6 +5926,9 @@ actor AndroidDexBridgeRuntime {
         avdDirectory = avdHome.appendingPathComponent(
             "\(Self.avdName).avd",
             isDirectory: true
+        )
+        privateADBKeyPaths = AndroidPrivateADBKeyPaths.paths(
+            runtimeDirectory: runtimeDirectory
         )
         manifestURL = runtimeDirectory.appendingPathComponent(
             "runtime-manifest.json"
@@ -5441,6 +5949,11 @@ actor AndroidDexBridgeRuntime {
         baseEnvironment = environment
         homeDirectory = fileManager.homeDirectoryForCurrentUser
         currentBootIdentifier = Self.systemBootIdentifier()
+        verboseAndroidDiagnosticsEnabled = verboseAndroidDiagnostics
+            ?? Self.diagnosticModeEnabled(
+                environment: environment,
+                defaults: defaults
+            )
         if let data = try? Data(contentsOf: profileURL),
            let profile = Self.persistedRuntimeProfile(from: data),
            Self.candidatePrivateADBServerPorts.contains(
@@ -5448,9 +5961,20 @@ actor AndroidDexBridgeRuntime {
            ) {
             privateADBServerPort = profile.privateADBServerPort
             preferredGPUBackend = profile.preferredGPUBackend
-            persistedADBServerPID = profile.privateADBServerPID
-            persistedADBServerBirthIdentity =
-                profile.privateADBServerBirthIdentity
+            let currentKey = AndroidPrivateADBKeyManager.status(
+                paths: privateADBKeyPaths,
+                fileManager: fileManager
+            )
+            let canReuseRecordedServer = currentKey.keyPairMatches == true
+                && profile.privateADBPublicKeySHA256 != nil
+                && profile.privateADBPublicKeySHA256
+                    == currentKey.publicKeySHA256
+            persistedADBServerPID = canReuseRecordedServer
+                ? profile.privateADBServerPID
+                : nil
+            persistedADBServerBirthIdentity = canReuseRecordedServer
+                ? profile.privateADBServerBirthIdentity
+                : nil
         } else {
             privateADBServerPort = Self.candidatePrivateADBServerPorts[0]
             preferredGPUBackend = .host
@@ -6465,6 +6989,16 @@ actor AndroidDexBridgeRuntime {
             runtimeState = "stopped"
         }
         let emulatorSnapshot = emulatorProcessRecorder?.snapshot()
+        let privateADBKeyStatus = lastPrivateADBKeyStatus
+            ?? AndroidPrivateADBKeyManager.status(
+                paths: privateADBKeyPaths,
+                fileManager: fileManager
+            )
+        let privateEnvironment = toolchain.map {
+            childEnvironment(for: $0)
+        }
+        let adbKeySignals = emulatorADBKeySignals(emulatorSnapshot)
+        let adbServerKeySignals = privateADBServerKeySignals()
         return AndroidRuntimeDiagnosticSnapshot(
             runtimeState: runtimeState,
             ownershipClassification: lastOwnershipClassification,
@@ -6520,6 +7054,48 @@ actor AndroidDexBridgeRuntime {
                     toolchain: $0
                 )
             } ?? [:],
+            privateADBKeyPath:
+                "<app-support>/AndroidRuntime/home/.android/adbkey",
+            privateADBPublicKeyPath:
+                "<app-support>/AndroidRuntime/home/.android/adbkey.pub",
+            privateADBKeyExists: privateADBKeyStatus.privateKeyExists,
+            privateADBPublicKeyExists: privateADBKeyStatus.publicKeyExists,
+            privateADBKeyReadable: privateADBKeyStatus.privateKeyReadable,
+            privateADBPublicKeyReadable:
+                privateADBKeyStatus.publicKeyReadable,
+            privateADBKeyPairMatches: privateADBKeyStatus.keyPairMatches,
+            privateADBPublicKeySHA256:
+                privateADBKeyStatus.publicKeySHA256,
+            privateADBKeyGeneratedThisSession:
+                privateADBKeyGeneratedThisSession,
+            adbVendorKeysPointsToPrivateKey:
+                privateEnvironment?["ADB_VENDOR_KEYS"]
+                    == privateADBKeyPaths.privateKey.path,
+            privateADBServerReportedKeyLoaded:
+                adbServerKeySignals.reportedKeyLoaded,
+            privateADBServerReportedExpectedKeyPath:
+                adbServerKeySignals.expectedPathMatched,
+            androidEmulatorHomePath:
+                "<app-support>/AndroidRuntime/home/.android",
+            androidEmulatorHomeIsPrivate:
+                privateEnvironment?["ANDROID_EMULATOR_HOME"]
+                    == privateADBKeyPaths.emulatorHome.path,
+            emulatorReportedSendingADBPublicKey:
+                adbKeySignals.reportedSendingPublicKey,
+            emulatorReportedNoADBPrivateKey:
+                adbKeySignals.reportedMissingPrivateKey,
+            emulatorBootPropertiesContainADBPublicKey:
+                adbKeySignals.bootPropertiesContainPublicKey,
+            emulatorReportedADBPublicKeySHA256:
+                adbKeySignals.reportedPublicKeySHA256,
+            emulatorReportedADBPublicKeyMatchesPrivateKey:
+                adbKeySignals.reportedPublicKeySHA256.flatMap { reported in
+                    privateADBKeyStatus.publicKeySHA256.map {
+                        reported == $0
+                    }
+                },
+            androidRuntimeDiagnosticModeEnabled:
+                verboseAndroidDiagnosticsEnabled,
             adbPrivateServer: lastADBServerDiagnostic,
             adbReconnect: lastADBReconnectDiagnostic,
             adbTransportSummary: lastADBTransportSummary,
@@ -6742,6 +7318,9 @@ actor AndroidDexBridgeRuntime {
                     "重建 Android Runtime 需要 Java Runtime；未修改现有 Runtime"
                 )
             }
+            // A rebuilt guest must see the same app-owned key used by the
+            // private ADB daemon on its very first boot.
+            try ensurePrivateADBKeypair(toolchain)
 
             let metadataSnapshots = Self.privateAVDMetadataSnapshots(
                 runtimeDirectory: runtimeDirectory,
@@ -8601,15 +9180,15 @@ actor AndroidDexBridgeRuntime {
     }
 
     private func createRuntimeDirectories() throws {
-        for directory in [runtimeDirectory, avdHome] {
-            try fileManager.createDirectory(
-                at: directory,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            try fileManager.setAttributes(
-                [.posixPermissions: 0o700],
-                ofItemAtPath: directory.path
+        for directory in [
+            runtimeDirectory,
+            avdHome,
+            privateADBKeyPaths.privateHome,
+            privateADBKeyPaths.emulatorHome
+        ] {
+            try AndroidPrivateADBKeyManager.ensureOwnedDirectory(
+                directory,
+                fileManager: fileManager
             )
         }
     }
@@ -8939,6 +9518,12 @@ actor AndroidDexBridgeRuntime {
             privateADBServerPID: persistedADBServerPID,
             privateADBServerBirthIdentity:
                 persistedADBServerBirthIdentity,
+            privateADBPublicKeySHA256: lastPrivateADBKeyStatus?
+                .publicKeySHA256
+                    ?? AndroidPrivateADBKeyManager.status(
+                        paths: privateADBKeyPaths,
+                        fileManager: fileManager
+                    ).publicKeySHA256,
             updatedAt: Date()
         )
         let encoder = JSONEncoder()
@@ -8981,7 +9566,8 @@ actor AndroidDexBridgeRuntime {
         privateADBServerPort: Int,
         preferredGPUBackend: AndroidEmulatorGPUBackend,
         privateADBServerPID: Int32?,
-        privateADBServerBirthIdentity: String?
+        privateADBServerBirthIdentity: String?,
+        privateADBPublicKeySHA256: String?
     )? {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
@@ -8993,7 +9579,8 @@ actor AndroidDexBridgeRuntime {
             profile.privateADBServerPort,
             profile.preferredGPUBackend,
             profile.privateADBServerPID,
-            profile.privateADBServerBirthIdentity
+            profile.privateADBServerBirthIdentity,
+            profile.privateADBPublicKeySHA256
         )
     }
 
@@ -9010,8 +9597,24 @@ actor AndroidDexBridgeRuntime {
         return Self.supportedGPUBackends(from: help).contains("software")
     }
 
-    private func childEnvironment(
-        for toolchain: AndroidToolchain
+    static func diagnosticModeEnabled(
+        environment: [String: String],
+        defaults: UserDefaults
+    ) -> Bool {
+        let value = environment[diagnosticModeEnvironmentKey]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return ["1", "true", "yes", "on"].contains(value ?? "")
+            || defaults.bool(forKey: diagnosticModeDefaultsKey)
+    }
+
+    static func privateRuntimeEnvironment(
+        baseEnvironment: [String: String],
+        sdkRoot: URL,
+        avdHome: URL,
+        keyPaths: AndroidPrivateADBKeyPaths,
+        privateADBServerPort: Int,
+        verboseDiagnostics: Bool
     ) -> [String: String] {
         var environment = baseEnvironment
         // Test hosts and developer launches can inject loader paths that must
@@ -9019,25 +9622,48 @@ actor AndroidDexBridgeRuntime {
         for key in environment.keys where key.hasPrefix("DYLD_") {
             environment.removeValue(forKey: key)
         }
-        // A caller may have inherited Android Studio/Homebrew ADB routing.
-        // Remove it and explicitly bind every child to OKVideoMac's private
-        // selected-SDK daemon instead of the global 5037 server.
+        // Do not inherit Android Studio/Homebrew routing or user-home SDK
+        // configuration. Every child sees one private home, AVD directory,
+        // ADB server port, and ADB identity owned by OKVideoMac.
         environment.removeValue(forKey: "ADB_SERVER_SOCKET")
+        environment.removeValue(forKey: "ANDROID_ADB_SERVER_ADDRESS")
+        environment.removeValue(forKey: "ANDROID_SDK_HOME")
         environment["ANDROID_ADB_SERVER_PORT"] =
             "\(privateADBServerPort)"
-        environment["ANDROID_HOME"] = toolchain.sdkRoot.path
-        environment["ANDROID_SDK_ROOT"] = toolchain.sdkRoot.path
+        environment["ADB_VENDOR_KEYS"] = keyPaths.privateKey.path
+        environment["ANDROID_HOME"] = sdkRoot.path
+        environment["ANDROID_SDK_ROOT"] = sdkRoot.path
         environment["ANDROID_AVD_HOME"] = avdHome.path
-        environment["HOME"] = homeDirectory.path
+        environment["ANDROID_EMULATOR_HOME"] = keyPaths.emulatorHome.path
+        environment["ANDROID_USER_HOME"] = keyPaths.emulatorHome.path
+        environment["HOME"] = keyPaths.privateHome.path
+        if verboseDiagnostics {
+            environment["ADB_TRACE"] = "auth,transport"
+        } else {
+            environment.removeValue(forKey: "ADB_TRACE")
+        }
         let sdkPaths = [
-            toolchain.sdkRoot.appendingPathComponent("platform-tools").path,
-            toolchain.sdkRoot.appendingPathComponent("emulator").path
+            sdkRoot.appendingPathComponent("platform-tools").path,
+            sdkRoot.appendingPathComponent("emulator").path
         ]
         let inheritedPath = environment["PATH"] ?? ""
         environment["PATH"] = (sdkPaths + [inheritedPath])
             .filter { !$0.isEmpty }
             .joined(separator: ":")
         return environment
+    }
+
+    private func childEnvironment(
+        for toolchain: AndroidToolchain
+    ) -> [String: String] {
+        Self.privateRuntimeEnvironment(
+            baseEnvironment: baseEnvironment,
+            sdkRoot: toolchain.sdkRoot,
+            avdHome: avdHome,
+            keyPaths: privateADBKeyPaths,
+            privateADBServerPort: privateADBServerPort,
+            verboseDiagnostics: verboseAndroidDiagnosticsEnabled
+        )
     }
 
     static func scopedADBArguments(
@@ -9120,6 +9746,8 @@ actor AndroidDexBridgeRuntime {
             "ANDROID_USER_HOME",
             "ADB_SERVER_SOCKET",
             "ANDROID_ADB_SERVER_PORT",
+            "ADB_VENDOR_KEYS",
+            "ADB_TRACE",
             "PATH",
             "HOME",
             "TMPDIR"
@@ -9175,6 +9803,97 @@ actor AndroidDexBridgeRuntime {
         return sanitizedEmulatorText(raw, toolchain: lastObservedToolchain)
     }
 
+    private func emulatorADBKeySignals(
+        _ snapshot: AndroidEmulatorProcessSnapshot?
+    ) -> AndroidEmulatorADBKeySignals {
+        guard let snapshot else {
+            return AndroidEmulatorADBKeySignals(
+                reportedSendingPublicKey: false,
+                reportedMissingPrivateKey: false,
+                bootPropertiesContainPublicKey: false,
+                reportedPublicKeySHA256: nil
+            )
+        }
+        let text = [snapshot.stdoutURL, snapshot.stderrURL]
+            .compactMap { try? Data(contentsOf: $0, options: [.mappedIfSafe]) }
+            .map { String(decoding: $0.prefix(1_048_576), as: UTF8.self) }
+            .joined(separator: "\n")
+        return Self.emulatorADBKeySignals(in: text)
+    }
+
+    private func privateADBServerKeySignals() -> (
+        reportedKeyLoaded: Bool,
+        expectedPathMatched: Bool
+    ) {
+        let stderrURL = runtimeDirectory.appendingPathComponent(
+            "adb-server-\(privateADBServerPort).stderr.log"
+        )
+        guard let data = try? Data(
+            contentsOf: stderrURL,
+            options: [.mappedIfSafe]
+        ) else { return (false, false) }
+        return Self.privateADBServerKeySignals(
+            in: String(decoding: data.prefix(1_048_576), as: UTF8.self),
+            expectedPrivateKeyPath: privateADBKeyPaths.privateKey.path
+        )
+    }
+
+    static func privateADBServerKeySignals(
+        in log: String,
+        expectedPrivateKeyPath: String
+    ) -> (reportedKeyLoaded: Bool, expectedPathMatched: Bool) {
+        let normalized = log.lowercased()
+        let reported = normalized.contains("loaded new key from")
+            || normalized.contains("ignored already-loaded key from")
+        let expectedPath = expectedPrivateKeyPath.lowercased()
+        let matched = normalized.contains("key from '\(expectedPath)'")
+            || normalized.contains("key from \"\(expectedPath)\"")
+        return (reported, matched)
+    }
+
+    static func emulatorADBKeySignals(
+        in log: String
+    ) -> AndroidEmulatorADBKeySignals {
+        let lowercased = log.lowercased()
+        return AndroidEmulatorADBKeySignals(
+            reportedSendingPublicKey: lowercased.contains(
+                "sending adb public key"
+            ),
+            reportedMissingPrivateKey: lowercased.contains(
+                "no adb private key exists"
+            ) || lowercased.contains("no private key found"),
+            bootPropertiesContainPublicKey: lowercased.contains(
+                "qemu.adb.pubkey="
+            ) || lowercased.contains("qemu.adb.pubkey "),
+            reportedPublicKeySHA256: emulatorReportedPublicKey(in: log)
+                .flatMap { token in
+                    AndroidPrivateADBKeyManager.publicKeySHA256(
+                        Data(token.utf8)
+                    )
+                }
+        )
+    }
+
+    private static func emulatorReportedPublicKey(in log: String) -> String? {
+        let patterns = [
+            #"(?i)Sending adb public key\s*\[([A-Za-z0-9+/=]+)"#,
+            #"(?i)(?:androidboot\.)?qemu\.adb\.pubkey=[\"']?([A-Za-z0-9+/=]+)"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(
+                    in: log,
+                    range: NSRange(log.startIndex..., in: log)
+                  ),
+                  match.numberOfRanges >= 2,
+                  let range = Range(match.range(at: 1), in: log) else {
+                continue
+            }
+            return String(log[range])
+        }
+        return nil
+    }
+
     static func diagnosticLogTail(
         from data: Data,
         maximumBytes: Int = 16_384,
@@ -9193,7 +9912,7 @@ actor AndroidDexBridgeRuntime {
         _ text: String,
         toolchain: AndroidToolchain?
     ) -> String {
-        var safe = LogRedactor.text(text)
+        var safe = LogRedactor.text(Self.redactingADBKeyMaterial(in: text))
         if let toolchain {
             safe = safe.replacingOccurrences(
                 of: toolchain.sdkRoot.path,
@@ -9209,6 +9928,42 @@ actor AndroidDexBridgeRuntime {
             with: "<HOME>"
         )
         return safe
+    }
+
+    static func redactingADBKeyMaterial(in text: String) -> String {
+        let privateKeyLabel = androidPrivatePEMLabel()
+        let privateKeyPattern =
+            #"(?is)(-----BEGIN (?:RSA )?"#
+            + privateKeyLabel
+            + #"-----).*?(-----END (?:RSA )?"#
+            + privateKeyLabel
+            + #"-----)"#
+        let patterns = [
+            (
+                privateKeyPattern,
+                "$1<redacted-private-key>$2"
+            ),
+            (
+                #"(?i)(Sending adb public key\s*\[)[^\]\r\n]+(\])"#,
+                "$1<redacted-public-key>$2"
+            ),
+            (
+                #"(?i)((?:androidboot\.)?qemu\.adb\.pubkey=)[^\s\r\n]+"#,
+                "$1<redacted-public-key>"
+            )
+        ]
+        var output = text
+        for (pattern, template) in patterns {
+            guard let regex = try? NSRegularExpression(
+                pattern: pattern
+            ) else { continue }
+            output = regex.stringByReplacingMatches(
+                in: output,
+                range: NSRange(output.startIndex..., in: output),
+                withTemplate: template
+            )
+        }
+        return output
     }
 
     static func privateAVDMetadataSnapshots(
@@ -9555,7 +10310,8 @@ actor AndroidDexBridgeRuntime {
             process.executableURL = toolchain.emulator
             let arguments = Self.emulatorLaunchArguments(
                 consolePort: consolePort,
-                gpuBackend: gpuBackend
+                gpuBackend: gpuBackend,
+                verboseDiagnostics: verboseAndroidDiagnosticsEnabled
             )
             let environment = childEnvironment(for: toolchain)
             let launchAt = Date()
@@ -9717,9 +10473,10 @@ actor AndroidDexBridgeRuntime {
 
     static func emulatorLaunchArguments(
         consolePort: Int,
-        gpuBackend: AndroidEmulatorGPUBackend = .host
+        gpuBackend: AndroidEmulatorGPUBackend = .host,
+        verboseDiagnostics: Bool = false
     ) -> [String] {
-        [
+        var arguments = [
             "-avd", avdName,
             "-port", "\(consolePort)",
             "-no-window",
@@ -9730,6 +10487,10 @@ actor AndroidDexBridgeRuntime {
             "-gpu", gpuBackend.rawValue,
             "-accel", "on"
         ]
+        if verboseDiagnostics {
+            arguments.append(contentsOf: ["-verbose", "-show-kernel"])
+        }
+        return arguments
     }
 
     static func emulatorSerial(consolePort: Int) -> String {
@@ -9775,7 +10536,57 @@ actor AndroidDexBridgeRuntime {
             && matchingAVDProcessCount == 0
     }
 
+    /// Provisions one process-wide, app-owned keypair before either the
+    /// private ADB daemon or an Emulator process can start. The lock covers
+    /// multiple runtime actor instances that share the same Application
+    /// Support directory.
+    private func ensurePrivateADBKeypair(
+        _ toolchain: AndroidToolchain
+    ) throws {
+        Self.privateADBKeyLifecycleLock.lock()
+        defer { Self.privateADBKeyLifecycleLock.unlock() }
+
+        try createRuntimeDirectories()
+        let result = try AndroidPrivateADBKeyManager.ensureKeyPair(
+            paths: privateADBKeyPaths,
+            fileManager: fileManager
+        ) { stagingPrivateKey in
+            _ = try run(
+                toolchain.adb,
+                ["keygen", stagingPrivateKey.path],
+                environment: childEnvironment(for: toolchain),
+                category: "adb.keygen.private",
+                timeout: 30
+            )
+        }
+        lastPrivateADBKeyStatus = result.status
+        privateADBKeyGeneratedThisSession =
+            privateADBKeyGeneratedThisSession || result.generated
+        if result.generated {
+            appendEvent(
+                stage: currentStage,
+                event: "privateADBKeyGenerated",
+                detail: result.status.publicKeySHA256.map {
+                    "sha256=\($0)"
+                }
+            )
+        }
+    }
+
     private func ensureADBServer(_ toolchain: AndroidToolchain) throws {
+        do {
+            try ensurePrivateADBKeypair(toolchain)
+        } catch let failure as AndroidRuntimeFailureError {
+            throw failure
+        } catch {
+            throw adbPrivateServerFailure(
+                "无法准备 OKVideoMac 私有 ADB keypair："
+                    + sanitizedEmulatorText(
+                        error.localizedDescription,
+                        toolchain: toolchain
+                    )
+            )
+        }
         appendEvent(
             stage: currentStage,
             event: "adbPrivateServerStart",
