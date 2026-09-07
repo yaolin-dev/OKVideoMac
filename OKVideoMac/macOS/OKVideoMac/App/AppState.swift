@@ -12692,7 +12692,7 @@ final class AppState: ObservableObject {
                 )
             }
             await self.environment?.nodeBundleRuntime.stop(force: true)
-            await androidShutdownTask?.value
+            _ = await androidShutdownTask?.value
             self.pendingPlayback = nil
             self.cloudAuthorizationContext = nil
             self.pendingHistoryWrite = nil

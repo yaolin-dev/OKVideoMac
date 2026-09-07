@@ -71,6 +71,8 @@ struct OKVideoMacApp: App {
 
 @MainActor
 final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
+    static let terminationFallbackTimeout: TimeInterval = 10
+
     private enum TerminationState {
         case idle
         case waiting
@@ -201,20 +203,35 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
         case .idle:
             guard let appState else { return .terminateNow }
             terminationState = .waiting
+            orderOutVisibleWindowsForTermination(sender)
             terminationTask = Task { @MainActor [weak self, weak appState] in
                 await appState?.shutdown()
                 guard !Task.isCancelled else { return }
                 self?.finishTerminationAfterShutdown()
             }
             terminationTimeoutTask = Task { @MainActor [weak self] in
-                // Android shutdown is bounded internally (ADB, TERM, then an
-                // identity-checked final kill). Leave enough time for that
-                // sequence and the ordinary player/history teardown.
-                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                // The window has already disappeared. Keep a final bound for
+                // the background player/history/Node/Android cleanup so a
+                // broken child process can never pin application termination.
+                try? await Task.sleep(nanoseconds: UInt64(
+                    Self.terminationFallbackTimeout * 1_000_000_000
+                ))
                 guard !Task.isCancelled else { return }
                 self?.finishTerminationAfterTimeout()
             }
             return .terminateLater
+        }
+    }
+
+    private func orderOutVisibleWindowsForTermination(
+        _ application: NSApplication
+    ) {
+        // Do not call `hide(_:)`: that changes scene phase and starts another
+        // playback-persistence task while shutdown is already doing the same
+        // work. Ordering windows out is synchronous and keeps cleanup intact.
+        for window in application.windows where window.isVisible {
+            window.alphaValue = 0
+            window.orderOut(nil)
         }
     }
 

@@ -2389,7 +2389,9 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         return await runtime.status()
     }
 
-    func shutdownForApplicationTermination() async {
+    @discardableResult
+    func shutdownForApplicationTermination() async
+        -> AndroidRuntimeShutdownOutcome {
         await runtime.shutdownForApplicationTermination()
     }
 
@@ -4810,11 +4812,53 @@ enum AndroidRuntimeShutdownMechanism: String, Codable, Equatable, Sendable {
     case alreadyExited
 }
 
+struct AndroidRuntimeShutdownOutcome: Equatable, Sendable {
+    let mechanism: AndroidRuntimeShutdownMechanism
+    let forced: Bool
+    let startedAt: Date?
+    let completedAt: Date?
+}
+
 enum AndroidRuntimeShutdownAction: Equatable, Sendable {
     case adbEmuKill
     case sigterm
     case sigkill
     case refuse
+}
+
+struct AndroidRuntimeShutdownTimingPolicy: Equatable, Sendable {
+    let adbCommandTimeout: TimeInterval
+    let adbEmulatorGrace: TimeInterval
+    let sigtermGrace: TimeInterval
+    let sigkillConfirmation: TimeInterval
+    let processPollInterval: TimeInterval
+    let privateADBServerGrace: TimeInterval
+
+    static let standard = AndroidRuntimeShutdownTimingPolicy(
+        adbCommandTimeout: 30,
+        adbEmulatorGrace: 5,
+        sigtermGrace: 3,
+        sigkillConfirmation: 2,
+        processPollInterval: 0.25,
+        privateADBServerGrace: 1
+    )
+
+    /// App termination retains the full normal Emulator graceful window. The
+    /// measured healthy shutdown (~2.45 s) therefore stays on `adb emu kill`;
+    /// only later escalation phases and polling are tightened. The visible
+    /// windows have already been ordered out.
+    static let applicationTermination = AndroidRuntimeShutdownTimingPolicy(
+        adbCommandTimeout: 0.75,
+        adbEmulatorGrace: 5,
+        sigtermGrace: 1,
+        sigkillConfirmation: 0.5,
+        processPollInterval: 0.1,
+        privateADBServerGrace: 0.3
+    )
+
+    var signalWaitBudget: TimeInterval {
+        adbEmulatorGrace + sigtermGrace + sigkillConfirmation
+    }
 }
 
 enum AndroidRuntimeDiscoveryAction: Equatable, Sendable {
@@ -7533,13 +7577,28 @@ actor AndroidDexBridgeRuntime {
         await Self.startupSingleFlight.finishStopping(stopToken)
     }
 
-    func shutdownForApplicationTermination() async {
+    @discardableResult
+    func shutdownForApplicationTermination() async
+        -> AndroidRuntimeShutdownOutcome {
         await beginApplicationTermination()
         let toolchain = loadIdentity().flatMap {
             resolver().toolchain(at: $0.sdkRoot)
         } ?? resolver().resolve() ?? lastObservedToolchain
         await performStop(reason: "applicationTermination")
-        stopPrivateADBServerIfOwned(toolchain: toolchain)
+        let timing = Self.shutdownTimingPolicy(
+            reason: "applicationTermination"
+        )
+        stopPrivateADBServerIfOwned(
+            toolchain: toolchain,
+            commandTimeout: timing.adbCommandTimeout,
+            listenerGrace: timing.privateADBServerGrace
+        )
+        return AndroidRuntimeShutdownOutcome(
+            mechanism: lastShutdownMechanism,
+            forced: lastShutdownForced,
+            startedAt: lastShutdownStartedAt,
+            completedAt: lastShutdownCompletedAt
+        )
     }
 
     func beginApplicationTermination() async {
@@ -7547,6 +7606,7 @@ actor AndroidDexBridgeRuntime {
     }
 
     private func performStop(reason: String) async {
+        let timing = Self.shutdownTimingPolicy(reason: reason)
         actionSurfaceLease = nil
         managedDisplayConfigured = false
         transition(to: .stopping, event: "stop_requested")
@@ -7627,7 +7687,8 @@ actor AndroidDexBridgeRuntime {
         try? saveIdentity(identity)
         let observation = observeRuntimeOwnership(
             identity,
-            toolchain: toolchain
+            toolchain: toolchain,
+            adbTimeout: timing.adbCommandTimeout
         )
         switch observation.decision {
         case let .clearStaleRecord(reason):
@@ -7635,6 +7696,18 @@ actor AndroidDexBridgeRuntime {
             lastShutdownMechanism = .alreadyExited
             finishOwnedRuntimeExitCleanup(toolchain: toolchain)
             return
+        case .rejectConflictingRuntime
+            where reason == "applicationTermination"
+                && observation.processState == .owned:
+            // A short ADB deadline can prove the target serial reachable but
+            // time out before `emu avd name` completes. Never send an ADB
+            // command in that ambiguous state; the strict PID/birth/private-
+            // AVD checks below can still safely stop only our own process.
+            appendEvent(
+                stage: .stopping,
+                event: "shutdownADBIdentityUnavailable",
+                detail: "using strict process ownership"
+            )
         case .rejectConflictingRuntime:
             lastShutdownMechanism = .refusedOwnershipMismatch
             lastLifecycleConflictReason =
@@ -7670,15 +7743,25 @@ actor AndroidDexBridgeRuntime {
 
         recordEmulatorTerminationRequest(pid: identity.pid, reason: reason)
         if observation.deviceOwned {
-            try? removeOwnedPortForwards(identity, toolchain: toolchain)
-            _ = try? runVerifiedADB(
-                identity,
-                toolchain: toolchain,
-                ["emu", "kill"],
-                category: "adb.runtime.shutdown"
+            if reason != "applicationTermination" {
+                try? removeOwnedPortForwards(identity, toolchain: toolchain)
+            }
+            // Strict PID/birth/AVD and device ownership were verified directly
+            // above. Use the exact private ADB and serial here so the bounded
+            // application-termination command does not repeat several slower
+            // ownership probes before it can deliver the graceful request.
+            _ = try? runADB(
+                toolchain,
+                ["-s", identity.serial, "emu", "kill"],
+                category: "adb.runtime.shutdown",
+                timeout: timing.adbCommandTimeout
             )
             lastShutdownMechanism = .adbEmuKill
-            if await waitForOwnedProcessExit(identity, attempts: 20) {
+            if await waitForOwnedProcessExit(
+                identity,
+                timeout: timing.adbEmulatorGrace,
+                pollInterval: timing.processPollInterval
+            ) {
                 finishOwnedRuntimeExitCleanup(toolchain: toolchain)
                 return
             }
@@ -7694,7 +7777,11 @@ actor AndroidDexBridgeRuntime {
         }
         _ = Darwin.kill(identity.pid, SIGTERM)
         lastShutdownMechanism = .sigterm
-        if await waitForOwnedProcessExit(identity, attempts: 12) {
+        if await waitForOwnedProcessExit(
+            identity,
+            timeout: timing.sigtermGrace,
+            pollInterval: timing.processPollInterval
+        ) {
             finishOwnedRuntimeExitCleanup(toolchain: toolchain)
             return
         }
@@ -7710,7 +7797,11 @@ actor AndroidDexBridgeRuntime {
         _ = Darwin.kill(identity.pid, SIGKILL)
         lastShutdownMechanism = .sigkill
         lastShutdownForced = true
-        if await waitForOwnedProcessExit(identity, attempts: 8) {
+        if await waitForOwnedProcessExit(
+            identity,
+            timeout: timing.sigkillConfirmation,
+            pollInterval: timing.processPollInterval
+        ) {
             finishOwnedRuntimeExitCleanup(toolchain: toolchain)
             return
         }
@@ -7726,9 +7817,11 @@ actor AndroidDexBridgeRuntime {
 
     private func waitForOwnedProcessExit(
         _ identity: AndroidRuntimeIdentity,
-        attempts: Int
+        timeout: TimeInterval,
+        pollInterval: TimeInterval
     ) async -> Bool {
-        for _ in 0..<attempts {
+        let deadline = ProcessInfo.processInfo.systemUptime + max(0, timeout)
+        while true {
             guard let current = processBirthIdentity(pid: identity.pid) else {
                 return true
             }
@@ -7740,9 +7833,22 @@ actor AndroidDexBridgeRuntime {
                 )
                 return true
             }
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { break }
+            let sleep = min(max(0.02, pollInterval), remaining)
+            try? await Task.sleep(
+                nanoseconds: UInt64(sleep * 1_000_000_000)
+            )
         }
         return processBirthIdentity(pid: identity.pid) == nil
+    }
+
+    static func shutdownTimingPolicy(
+        reason: String
+    ) -> AndroidRuntimeShutdownTimingPolicy {
+        reason == "applicationTermination"
+            ? .applicationTermination
+            : .standard
     }
 
     private func finishShutdownAfterIdentityChanged(
@@ -11220,14 +11326,17 @@ actor AndroidDexBridgeRuntime {
         )
     }
 
-    private func listeningProcessIDs(on port: Int) -> [Int32] {
+    private func listeningProcessIDs(
+        on port: Int,
+        timeout: TimeInterval = 5
+    ) -> [Int32] {
         let lsof = URL(fileURLWithPath: "/usr/sbin/lsof")
         guard fileManager.isExecutableFile(atPath: lsof.path) else { return [] }
         guard let output = try? run(
             lsof,
             ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-Fp"],
             category: "adb.server.listener_identity",
-            timeout: 5
+            timeout: timeout
         ) else { return [] }
         return Array(Set(output.split(whereSeparator: \.isNewline).compactMap {
             line in
@@ -11237,9 +11346,13 @@ actor AndroidDexBridgeRuntime {
     }
 
     private func adbServerDiagnostic(
-        toolchain: AndroidToolchain
+        toolchain: AndroidToolchain,
+        commandTimeout: TimeInterval = 5
     ) -> AndroidADBServerDiagnostic? {
-        let pids = listeningProcessIDs(on: privateADBServerPort)
+        let pids = listeningProcessIDs(
+            on: privateADBServerPort,
+            timeout: min(1, commandTimeout)
+        )
         guard pids.count == 1 else { return nil }
         let pid = pids[0]
         let actualPath = processExecutablePath(pid: pid).map {
@@ -11254,7 +11367,7 @@ actor AndroidDexBridgeRuntime {
             toolchain,
             ["version"],
             category: "adb.server.private.version",
-            timeout: 5
+            timeout: commandTimeout
         )).map(Self.firstDiagnosticLine) : nil
         return AndroidADBServerDiagnostic(
             port: privateADBServerPort,
@@ -11270,16 +11383,22 @@ actor AndroidDexBridgeRuntime {
     }
 
     private func stopPrivateADBServerIfOwned(
-        toolchain: AndroidToolchain?
+        toolchain: AndroidToolchain?,
+        commandTimeout: TimeInterval = 10,
+        listenerGrace: TimeInterval = 1
     ) {
         let expectedPID = lastADBServerDiagnostic?.pid
             ?? persistedADBServerPID
         let expectedBirthIdentity = lastADBServerDiagnostic?.birthIdentity
             ?? persistedADBServerBirthIdentity
+        let listenerProbeTimeout = min(1, commandTimeout)
         guard let toolchain,
               let expectedPID,
               let expectedBirthIdentity,
-              listeningProcessIDs(on: privateADBServerPort) == [expectedPID],
+              listeningProcessIDs(
+                  on: privateADBServerPort,
+                  timeout: listenerProbeTimeout
+              ) == [expectedPID],
               processBirthIdentity(pid: expectedPID)?.value
                 == expectedBirthIdentity,
               processExecutablePath(pid: expectedPID).map({
@@ -11287,7 +11406,10 @@ actor AndroidDexBridgeRuntime {
                       .resolvingSymlinksInPath()
               }) == toolchain.adb.standardizedFileURL
                   .resolvingSymlinksInPath(),
-              let current = adbServerDiagnostic(toolchain: toolchain),
+              let current = adbServerDiagnostic(
+                  toolchain: toolchain,
+                  commandTimeout: min(5, commandTimeout)
+              ),
               current.ownedBySelectedSDK,
               current.pid == expectedPID,
               current.birthIdentity == expectedBirthIdentity
@@ -11296,26 +11418,46 @@ actor AndroidDexBridgeRuntime {
             toolchain,
             ["kill-server"],
             category: "adb.server.private.stop",
-            timeout: 10
+            timeout: commandTimeout
         )
         appendEvent(
             stage: currentStage,
             event: "adbPrivateServerStopped",
             detail: "port=\(privateADBServerPort)"
         )
-        for _ in 0..<20 where listeningProcessIDs(
-            on: privateADBServerPort
+        let listenerPollInterval: TimeInterval = 0.05
+        let listenerAttempts = max(
+            1,
+            Int(ceil(listenerGrace / listenerPollInterval))
+        )
+        for _ in 0..<listenerAttempts where listeningProcessIDs(
+            on: privateADBServerPort,
+            timeout: listenerProbeTimeout
         ).contains(current.pid ?? -1) {
-            Thread.sleep(forTimeInterval: 0.05)
+            Thread.sleep(forTimeInterval: listenerPollInterval)
         }
         if let pid = current.pid,
-           listeningProcessIDs(on: privateADBServerPort).contains(pid),
+           listeningProcessIDs(
+               on: privateADBServerPort,
+               timeout: listenerProbeTimeout
+           ).contains(pid),
            processBirthIdentity(pid: pid)?.value == current.birthIdentity,
            processExecutablePath(pid: pid).map({
                URL(fileURLWithPath: $0).standardizedFileURL
                    .resolvingSymlinksInPath()
            }) == toolchain.adb.standardizedFileURL.resolvingSymlinksInPath() {
             _ = Darwin.kill(pid, SIGTERM)
+            let signalDeadline = ProcessInfo.processInfo.systemUptime
+                + max(0, listenerGrace)
+            while processBirthIdentity(pid: pid)?.value
+                    == expectedBirthIdentity {
+                let remaining = signalDeadline
+                    - ProcessInfo.processInfo.systemUptime
+                guard remaining > 0 else { break }
+                Thread.sleep(
+                    forTimeInterval: min(listenerPollInterval, remaining)
+                )
+            }
         }
         adbServerProcess = nil
         for handle in adbServerOutputHandles { try? handle.close() }
@@ -11919,17 +12061,23 @@ actor AndroidDexBridgeRuntime {
 
     private func observeRuntimeOwnership(
         _ identity: AndroidRuntimeIdentity,
-        toolchain: AndroidToolchain
+        toolchain: AndroidToolchain,
+        adbTimeout: TimeInterval = 30
     ) -> AndroidRuntimeOwnershipObservation {
         let processPresent = processExecutablePath(pid: identity.pid) != nil
         let processOwned = processPresent
             && verifyProcessOwnership(identity, toolchain: toolchain)
         let deviceReachable = deviceIsReachable(
             identity,
-            toolchain: toolchain
+            toolchain: toolchain,
+            timeout: adbTimeout
         )
         let deviceOwned = deviceReachable
-            && verifyDeviceOwnership(identity, toolchain: toolchain)
+            && verifyDeviceOwnership(
+                identity,
+                toolchain: toolchain,
+                timeout: adbTimeout
+            )
         return AndroidRuntimeOwnershipObservation(
             processState: Self.processIdentityState(
                 processPresent: processPresent,
@@ -11970,7 +12118,8 @@ actor AndroidDexBridgeRuntime {
 
     private func verifyOwnership(
         _ identity: AndroidRuntimeIdentity,
-        toolchain: AndroidToolchain
+        toolchain: AndroidToolchain,
+        adbTimeout: TimeInterval = 30
     ) -> Bool {
         Self.ownershipAllowsMutation(
             processOwned: verifyProcessOwnership(
@@ -11979,7 +12128,8 @@ actor AndroidDexBridgeRuntime {
             ),
             deviceOwned: verifyDeviceOwnership(
                 identity,
-                toolchain: toolchain
+                toolchain: toolchain,
+                timeout: adbTimeout
             )
         )
     }
@@ -12099,15 +12249,18 @@ actor AndroidDexBridgeRuntime {
 
     private func verifyDeviceOwnership(
         _ identity: AndroidRuntimeIdentity,
-        toolchain: AndroidToolchain
+        toolchain: AndroidToolchain,
+        timeout: TimeInterval = 30
     ) -> Bool {
         guard let state = try? runADB(
             toolchain,
-            ["-s", identity.serial, "get-state"]
+            ["-s", identity.serial, "get-state"],
+            timeout: timeout
         ), state.trimmingCharacters(in: .whitespacesAndNewlines) == "device",
         let avdOutput = try? runADB(
             toolchain,
-            ["-s", identity.serial, "emu", "avd", "name"]
+            ["-s", identity.serial, "emu", "avd", "name"],
+            timeout: timeout
         ), Self.avdName(from: avdOutput) == identity.avdName else {
             return false
         }
@@ -12121,7 +12274,11 @@ actor AndroidDexBridgeRuntime {
         category: String = "adb.command",
         timeout: TimeInterval = 30
     ) throws -> String {
-        guard verifyOwnership(identity, toolchain: toolchain) else {
+        guard verifyOwnership(
+            identity,
+            toolchain: toolchain,
+            adbTimeout: timeout
+        ) else {
             throw AppError.spider(
                 "Android 运行实例所有权校验失败，已拒绝执行 ADB 操作"
             )
@@ -12273,12 +12430,14 @@ actor AndroidDexBridgeRuntime {
 
     private func deviceIsReachable(
         _ identity: AndroidRuntimeIdentity,
-        toolchain: AndroidToolchain?
+        toolchain: AndroidToolchain?,
+        timeout: TimeInterval = 30
     ) -> Bool {
         guard let toolchain,
               let state = try? runADB(
                 toolchain,
-                ["-s", identity.serial, "get-state"]
+                ["-s", identity.serial, "get-state"],
+                timeout: timeout
               ) else { return false }
         return state.trimmingCharacters(in: .whitespacesAndNewlines) == "device"
     }

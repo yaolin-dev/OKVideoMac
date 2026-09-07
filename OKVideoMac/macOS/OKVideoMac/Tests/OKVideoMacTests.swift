@@ -10237,6 +10237,39 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testAndroidLifecycle10BApplicationTerminationIsFastButGraceful() {
+        let regular = AndroidDexBridgeRuntime.shutdownTimingPolicy(
+            reason: "userRequestedStop"
+        )
+        let termination = AndroidDexBridgeRuntime.shutdownTimingPolicy(
+            reason: "applicationTermination"
+        )
+
+        XCTAssertEqual(regular, .standard)
+        XCTAssertEqual(termination, .applicationTermination)
+        XCTAssertEqual(
+            termination.adbEmulatorGrace,
+            regular.adbEmulatorGrace
+        )
+        XCTAssertLessThan(
+            termination.signalWaitBudget,
+            regular.signalWaitBudget
+        )
+        XCTAssertLessThan(
+            termination.processPollInterval,
+            regular.processPollInterval
+        )
+        XCTAssertLessThan(
+            termination.adbCommandTimeout,
+            regular.adbCommandTimeout
+        )
+        XCTAssertLessThan(
+            termination.signalWaitBudget,
+            OKVideoMacAppDelegate.terminationFallbackTimeout
+        )
+    }
+
     func testAndroidLifecycle11MissingADBUsesOwnedSIGTERM() {
         XCTAssertEqual(
             AndroidDexBridgeRuntime.shutdownAction(
@@ -10615,7 +10648,7 @@ final class OKVideoMacTests: XCTestCase {
                   case .array(let list)? = object["list"],
                   case .object(let item)? = list.first else {
                 XCTFail("unexpected deterministic Dex response: \(value)")
-                await client.stopRuntime()
+                _ = await client.stopRuntime()
                 return
             }
             XCTAssertEqual(
@@ -10635,7 +10668,31 @@ final class OKVideoMacTests: XCTestCase {
             XCTAssertEqual(second.adbDeviceState, "device")
             XCTAssertEqual(second.androidBootCompleted, true)
             XCTAssertEqual(second.bridgeProcessRunning, true)
-            _ = await client.stopRuntime()
+            let emulatorPID = try XCTUnwrap(second.emulatorPID)
+            let privateADBServerPID = try XCTUnwrap(
+                second.adbPrivateServer?.pid
+            )
+            let terminationStartedAt = ProcessInfo.processInfo.systemUptime
+            let terminationOutcome = await client
+                .shutdownForApplicationTermination()
+            let terminationElapsed = ProcessInfo.processInfo.systemUptime
+                - terminationStartedAt
+            print(String(
+                format: "ANDROID_APP_TERMINATION_ELAPSED=%.3f",
+                terminationElapsed
+            ))
+            XCTAssertEqual(terminationOutcome.mechanism, .adbEmuKill)
+            XCTAssertFalse(terminationOutcome.forced)
+            XCTAssertNotNil(terminationOutcome.completedAt)
+            let terminationFallbackTimeout = await MainActor.run {
+                OKVideoMacAppDelegate.terminationFallbackTimeout
+            }
+            XCTAssertLessThan(
+                terminationElapsed,
+                terminationFallbackTimeout
+            )
+            XCTAssertEqual(Darwin.kill(emulatorPID, 0), -1)
+            XCTAssertEqual(Darwin.kill(privateADBServerPID, 0), -1)
 
             let managedAdmissionCount = await routingProbe
                 .managedAdmissionCount
@@ -10696,6 +10753,70 @@ final class OKVideoMacTests: XCTestCase {
             .contentsOfDirectory(atPath: managedAVD.path)
             .filter { $0.lowercased().contains("lock") }
         XCTAssertTrue(remainingLocks.isEmpty)
+    }
+
+    func testAndroidRealApplicationTerminationIsBoundedAndClean()
+        async throws {
+        guard ProcessInfo.processInfo.environment[
+            "OKVIDEOMAC_RUN_ANDROID_EXIT_INTEGRATION"
+        ] == "1" || UserDefaults.standard.bool(
+            forKey: "OKVideoMac.RunAndroidExitIntegration"
+        ) else {
+            throw XCTSkip("requires explicit real app-exit integration run")
+        }
+
+        let support = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                "Library/Application Support/OKVideoMac",
+                isDirectory: true
+            )
+        let runtime = AndroidDexBridgeRuntime(
+            applicationSupportDirectory: support
+        )
+        await runtime.setUserSelectedSDKRoot(try androidIntegrationSDKRoot())
+        do {
+            try await runtime.start()
+            let running = await runtime.diagnosticSnapshot()
+            XCTAssertTrue(running.emulatorProcessRunning)
+            XCTAssertEqual(running.adbDeviceState, "device")
+            XCTAssertEqual(running.androidBootCompleted, true)
+            let emulatorPID = try XCTUnwrap(running.emulatorPID)
+            let privateADBServerPID = try XCTUnwrap(
+                running.adbPrivateServer?.pid
+            )
+
+            let startedAt = ProcessInfo.processInfo.systemUptime
+            let outcome = await runtime.shutdownForApplicationTermination()
+            let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+            print(String(
+                format: "ANDROID_APP_TERMINATION_ELAPSED=%.3f",
+                elapsed
+            ))
+
+            XCTAssertEqual(outcome.mechanism, .adbEmuKill)
+            XCTAssertFalse(outcome.forced)
+            XCTAssertNotNil(outcome.completedAt)
+            let terminationFallbackTimeout = await MainActor.run {
+                OKVideoMacAppDelegate.terminationFallbackTimeout
+            }
+            XCTAssertLessThan(
+                elapsed,
+                terminationFallbackTimeout
+            )
+            XCTAssertEqual(
+                Darwin.kill(emulatorPID, 0),
+                -1,
+                "Emulator must exit before shutdown completes"
+            )
+            XCTAssertEqual(
+                Darwin.kill(privateADBServerPID, 0),
+                -1,
+                "private ADB server must exit before shutdown completes"
+            )
+        } catch {
+            await runtime.shutdownForApplicationTermination()
+            throw error
+        }
     }
 
     func testAndroidEmulatorDiagnosticLogTailIsBoundedAndRedacted() {
