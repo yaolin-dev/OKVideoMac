@@ -79,7 +79,7 @@ history, and normal settings.
 - The AVD must remain under the private `AndroidRuntime/avd` root.
 - Child processes receive explicit `PATH`, `JAVA_HOME`, Android home variables,
   AVD home, and `ADB_VENDOR_KEYS` values.
-- Once a managed pointer exists, a bad Generation fails closed instead of
+- While Managed mode is selected, a bad Generation fails closed instead of
   falling back to Android Studio, Homebrew, system Java, or shell `PATH`.
 - Installation and Emulator Session have independent single-flights. Concurrent
   install requests join one transaction; Runtime requests retain the existing

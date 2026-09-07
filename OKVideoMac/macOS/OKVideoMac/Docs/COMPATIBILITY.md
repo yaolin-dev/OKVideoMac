@@ -1,9 +1,8 @@
 # Compatibility
 
-- 对照版本：0.4.2（Build 98）
-- 最近更新：2026-09-06
-- 当前代码候选版本：0.4.2（Build 98），Apple Silicon / arm64 / macOS 12.0+
-- 当前公开正式版本：0.4.1（Build 95）
+- 对照版本：0.5.0（Build 99）
+- 最近更新：2026-09-07
+- 当前公开正式版本：0.5.0（Build 99），Apple Silicon / arm64 / macOS 12.0+
 
 ## 概述
 
@@ -98,12 +97,23 @@ type 3、`api` 以 `csp_` 开头且存在 jar 引用时，Provider 可通过 And
 `com.github.catvod.spider.<name>`，并调用 CatVod 风格的 `homeContent`、
 `categoryContent`、`detailContent`、`searchContent`、`playerContent` 等方法。
 
-该路径使用按需安装的 OKVideoMac Managed Runtime、专用 AVD、private ADB、动态
-serial 和所有权校验。第一次实际 Dex 调用会暂停并提示安装固定的 API 35 Google
-APIs arm64 Profile；完成后自动继续。普通用户不需要 Android Studio、Homebrew、
-JDK、ADB 或 SDK 命令。Bridge APK 已随 App 提供并由运行时自动安装。它只适用于
-受支持的 `csp_` Java/Dex Spider；Native、QuickJS、Node、直播和 XMLTV 不需要
-Android。
+该路径先经过 `AndroidRuntimeModeCoordinator`，再进入原有 Emulator Session。
+Managed Runtime 是推荐默认：第一次实际 Dex 调用会暂停并提示安装固定的
+API 35 Google APIs arm64 Profile，完成后自动继续。普通用户不需要
+Android Studio、Homebrew、JDK、ADB 或 SDK 命令。External SDK 是用户明确选择的
+受支持高级模式，可以沿用兼容的已有 SDK 和 App 私有 AVD，不会触发 Managed
+installer。已有兼容 AVD 的启动能力不以 Java 或 `avdmanager` 为绝对前提；它们只
+影响创建/修复能力。
+
+模式保存在版本化、原子写入的 `AndroidRuntime/runtime-selection.json`。已有显式模式
+保持；无模式时先选完整验证可用的 Managed Generation，否则只迁移历史上由
+OKVideoMac 明确保存的 SDK。`PATH`、`ANDROID_HOME`、Homebrew 或 Android Studio
+不会静默改变模式。Managed 与 External 执行路径互相隔离。私有 ADB、专用
+AVD、动态 serial、ownership、single-flight、GPU fallback 与恢复继续由 Session 管理。
+AVD 兼容指纹不匹配时 fail closed，不会静默删除或重建 userdata。
+
+Bridge APK 已随 App 提供并由运行时自动安装。它只适用于受支持的 `csp_`
+Java/Dex Spider；Native、QuickJS、Node、直播和 XMLTV 不需要 Android。
 
 API 35 在 Candidate Matrix 中仍为 `evaluation`，同时是当前产品 `default`
 Profile：真实 Emulator E2E 证据来自 M1 / macOS 14.8.8。App 的 macOS 12.0+
@@ -305,9 +315,9 @@ App 支持范围和 Managed Android Runtime 实机验证是两个不同结论：
 | macOS 12.0+ | Supported | Info.plist 和全部 Mach-O `minos` 由包体脚本验证 |
 | Intel Mac / Universal Binary | Unsupported | 当前只交付 arm64 |
 | 本地 Hardened Runtime 包 | Supported | ad-hoc 签名，仅主 App 使用开发期 Library Validation 例外 |
-| Developer ID 分发 | Supported | 0.4.1（Build 95）正式 DMG 使用 Developer ID Application 与 secure timestamp 签名，Hardened Runtime、嵌套签名和权限边界由发布门禁验证 |
-| Notarization / Staple / Gatekeeper | Supported | 0.4.1（Build 95）只有在 Apple notarization 返回 `Accepted` 并通过 staple、`stapler validate` 与 Gatekeeper 后才发布 |
-| 0.4.1（Build 95）正式发布 | Supported | DMG、内部 ZIP、源码、四份 SBOM、Notices 和 APK 由外层 manifest/SHA256SUMS 绑定到 tag `v0.4.1` 指向的 exact commit |
+| Developer ID 分发 | Supported | 0.5.0（Build 99）正式 DMG 使用 Developer ID Application 与 secure timestamp 签名，Hardened Runtime、嵌套签名和权限边界由发布门禁验证 |
+| Notarization / Staple / Gatekeeper | Supported | 0.5.0（Build 99）只有在 Apple notarization 返回 `Accepted` 并通过 staple、`stapler validate` 与 Gatekeeper 后才发布 |
+| 0.5.0（Build 99）正式发布 | Supported | DMG、内部 ZIP、源码、四份 SBOM、Notices 和 APK 由外层 manifest/SHA256SUMS 绑定到 tag `v0.5.0` 指向的 exact commit |
 | App Sandbox | Not Applicable | 当前为 Developer ID 外部分发目标；Sandbox 与 Hardened Runtime 是不同边界 |
 
 ## 明确不提供

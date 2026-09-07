@@ -1,6 +1,6 @@
-# OKVideoMac 0.4.1 (Build 95) Source Provenance Manifest
+# OKVideoMac 0.5.0 (Build 99) Source Provenance Manifest
 
-Manifest date: 2026-09-06
+Manifest date: 2026-09-07
 Baseline audit: `Docs/THIRD_PARTY_LICENSE_AUDIT.md`
 Status vocabulary: `VERIFIED`, `PARTIAL`, `UNRESOLVED`
 
@@ -19,7 +19,7 @@ represented as `<BUILD_ROOT>` and `<MACPORTS_PREFIX>`.
 | mpv/libmpv | [v0.41.0 archive](https://github.com/mpv-player/mpv/archive/refs/tags/v0.41.0.tar.gz) | `ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209` | `macOS/OKVideoMac/Scripts/build-libmpv.sh`; Meson arm64, Cocoa disabled, GPL left enabled; actual config has `HAVE_GPL 1` | `mpv-0.41.0-coreaudio-without-cocoa.patch`, SHA `f57fa49d8916d3ffc3834bb3f2a53b041c0113984bbd9f3ef6b68257b3c0af9f` | pre-package `libmpv.2.dylib` `15f4516f…`; audited signed `Frameworks/libmpv.dylib` `6f2f7f53ed3ec1309ae6cef869dd8a83bb4bfff09ad9d61a87f6e2f5778b0cd4` | `VERIFIED` |
 | QuickJS | [quickjs-2025-09-13-2.tar.xz](https://bellard.org/quickjs/quickjs-2025-09-13-2.tar.xz) | `996c6b5018fc955ad4d06426d0e9cb713685a00c825aa5c0418bd53f7df8b0b4` | `macOS/OKVideoMac/Scripts/build-quickjs.sh`; arm64 static archive, linker `-force_load` into project bridge | None in upstream source | pre-package bridge `d60f16…`; audited signed `libOKQuickJS.dylib` `e1dc2d48b5972e8e6d346e5f6e20da9d5e3d701163450c73f06a2d58a2141414` | `VERIFIED` |
 | Node.js executable input | [node-v22.23.0-darwin-arm64.tar.gz](https://nodejs.org/download/release/v22.23.0/node-v22.23.0-darwin-arm64.tar.gz) | `e0f383a215dd3093de6d2c74f87056dc2306a2e09ad494cbffdba28f89046f56`, matching official `SHASUMS256.txt` | `project.yml` copies only `bin/node`; package script applies project entitlements and re-signs it | None; local input is byte-identical to official binary | official/local input `cc61696726abdfe8392297ecd75aa9863cd9b6435b202c0dc2266039f493da10`; audited re-signed App output `60df37880c72f74c789d0857c2729f42256e7ae944c9a5055162da97e54adc3e` | `VERIFIED` |
-| FongMi/TV `catvod` source | [commit `5fdff00a…`](https://github.com/FongMi/TV/tree/5fdff00a602dc56e8ba756174daef20edab024f2/catvod/src/main) | Git commit identity; deterministic source-only subset is included in the 0.4.1 third-party source archive | Gradle 8.9 / Android plugin; compiled as Android bridge module | `Proxy.java` port `-1` → `9978`; see change notice | `AndroidDexBridge-release.apk`; per-package SHA is generated in `Legal/Compliance/BUILD_OUTPUT_SHA256.txt` | `VERIFIED` source identity and local diff; corresponding source published with `v0.4.1` |
+| FongMi/TV `catvod` source | [commit `5fdff00a…`](https://github.com/FongMi/TV/tree/5fdff00a602dc56e8ba756174daef20edab024f2/catvod/src/main) | Git commit identity; deterministic source-only subset is included in the 0.5.0 third-party source archive | Gradle 8.9 / Android plugin; compiled as Android bridge module | `Proxy.java` port `-1` → `9978`; see change notice | `AndroidDexBridge-release.apk`; per-package SHA is generated in `Legal/Compliance/BUILD_OUTPUT_SHA256.txt` | `VERIFIED` source identity and local diff; corresponding source published with `v0.5.0` |
 | stax | Maven `stax:stax:1.2.0`; [Central directory](https://repo1.maven.org/maven2/stax/stax/1.2.0/) | sources JAR `dfa08201c86e04eb93baf726af3495efcc30709f6a35ba902c44dfbc36266a11`; binary JAR `df6905a047b05e23bc91f03ba57ac2f87c1ddf83e048aa0e5bd13169d5ebf0d9` | Gradle-resolved transitive input, compiled into APK | None known | Android bridge APK | `VERIFIED` exact source/license identity |
 | Gradle distribution | [gradle-8.9-bin.zip](https://services.gradle.org/distributions/gradle-8.9-bin.zip) | `d725d707bfabd4dfdc958c624003b3c80accc03f7037b5122c4b1d0ef15cecab` | Wrapper 8.9; SHA locked in `gradle-wrapper.properties` | None | tracked wrapper JAR SHA `e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637`; build-time only | `VERIFIED` distribution; wrapper JAR retained with license/NOTICE |
 | juniversalchardet covered source | Maven `com.googlecode.juniversalchardet:juniversalchardet:1.0.3` [sources JAR](https://repo1.maven.org/maven2/com/googlecode/juniversalchardet/juniversalchardet/1.0.3/juniversalchardet-1.0.3-sources.jar) | sources `3d1cb067f5cfe3cc19b77c837156f22368462af9acac5dd878e785966758fc27`; binary `757bfe906193b8b651e79dc26cd67d6b55d0770a2cdfb0381591504f779d4a76`; POM `7846399b35c7cd642a9b3a000c3e2d62d04eb37a4547b6933cc8b18bcc2f086b` | exact 58-file list retained; Gradle runtime lock fixes the artifact | None by OKVideoMac | Android bridge APK | `VERIFIED` exact source delivery; **DOCUMENTED LICENSE INTERPRETATION RISK**; independent legal review `NOT PERFORMED` |
@@ -84,7 +84,7 @@ promoted to `VERIFIED`.
 ## Audited Release output inventory
 
 The stable native third-party hashes below freeze the audited inputs reused by
-0.4.1 (Build 95). Some unchanged inputs were first audited for the Build 63 candidate.
+0.5.0 (Build 99). Some unchanged inputs were first audited for the Build 63 candidate.
 Code signing or rebuilding can change output hashes even when source is
 unchanged. Therefore `package-app.sh` generates the authoritative hash of the
 27 stable nested Mach-O objects and the rebuilt APK inside each actual App at

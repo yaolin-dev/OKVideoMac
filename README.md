@@ -7,37 +7,33 @@ provides configurable video providers, live sources, search, detail, favorites,
 history, and libmpv playback. It does not bundle third-party content sources,
 accounts, cookies, parsing services, or DRM keys.
 
-The current hotfix candidate is **0.4.2 (Build 98)** for macOS 12 or later on
-Apple Silicon (`arm64`). It has not been published yet. The current public,
-Developer ID-signed, Apple-notarized, and stapled DMG remains available from the
-[v0.4.1 release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.4.1).
+The current release is **0.5.0 (Build 99)** for macOS 12 or later on Apple
+Silicon (`arm64`). Download the Developer ID-signed, Apple-notarized, and
+stapled DMG from the
+[v0.5.0 release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.5.0).
 
-## 0.4.2 Hotfix Candidate
+## 0.5.0 Highlights
 
-Version 0.4.2 hardens the optional Android compatibility Runtime for cold boots
-that remain `emulator-5554 offline`: it separates a 180-second ADB transport
-window from Android boot, isolates OKVideoMac on a selected-SDK private ADB
-server, performs at most one delayed targeted reconnect, and bounds GPU recovery
-to a single host-to-software fallback. If both backends fail, Settings offers a
-recoverable private-AVD rebuild that does not touch Android Studio AVDs, the
-default ADB server, or OKVideoMac favorites and history.
+Android compatibility now has two explicit modes. **Managed Runtime** is the
+recommended default: on the first real Java/Dex `csp_` request, OKVideoMac can
+download and transactionally activate its pinned JRE, Android tools, Emulator,
+and API 35 Google APIs arm64 image inside private Application Support storage.
+**External SDK** lets existing and advanced users explicitly keep a compatible
+Android SDK without being forced through a Managed download.
 
-Build 98 includes a narrowly scoped headless ADB-auth compatibility launch mode
-for legacy API 24–29 system images. Modern images continue to use the isolated
-OKVideoMac key pair with guest authentication enabled.
+The selected mode is stored atomically and never changes merely because `PATH`,
+`ANDROID_HOME`, Homebrew, or Android Studio exposes another SDK. Managed and
+External execution remain isolated, while the private ADB server, owned AVD,
+process ownership, startup single-flight, GPU fallback, and safe recovery stay
+under the existing Session lifecycle. Compatibility fingerprints fail closed
+without silently deleting AVD userdata.
 
-Build 98 also adopts AppKit's native source-list and sidebar material for the
-primary navigation. Search follows the App Store interaction model: Escape
-clears a non-empty query first, then exits search when the field is empty.
-
-This source candidate also productizes the optional Android compatibility
-environment. The first Java/Dex `csp_` request now pauses and offers to install
-an app-managed, API 35 Google APIs arm64 Runtime. OKVideoMac downloads the
-fixed, SHA-256-pinned JRE, SDK tools, Emulator, and system image into its own
-Application Support directory, validates them in staging, atomically activates
-one immutable generation, then resumes the original request. Android Studio,
-Homebrew, a system JDK, and command-line setup are no longer part of the normal
-user path.
+This release also retains the ADB/offline and legacy guest-auth recovery work
+developed in the 0.4.2 candidate, adopts an AppKit-native source-list sidebar,
+and matches the App Store Escape sequence for search. During App Quit, visible
+windows now leave the screen immediately while the owned Android Runtime keeps
+its full graceful shutdown opportunity in the background; unrelated Emulators
+and ADB servers are never targeted.
 
 ## 0.4.1 Highlights
 
@@ -173,7 +169,7 @@ requirements, and media behavior—not by an ecosystem brand.
 | CMS XML / Native type 4 | Partial | Coverage is narrower than JSON |
 | QuickJS Spider | Selected | Selected CatVod/FongMi-style scripts matching the current API |
 | Node `.js.md5` | Selected | Compatible CatVod/CatPaw-style video-interface subset |
-| Java/Dex `csp_` | Experimental | Optional app-managed API 35 Runtime; installed on first real Dex use |
+| Java/Dex `csp_` | Experimental | Managed API 35 Runtime or an explicitly confirmed compatible External SDK |
 | M3U / TXT / JSON Live | Supported | Imported through the dedicated Live importer |
 | XMLTV EPG | Supported | Android is not required |
 | Top-level `lives`, parser types 2/3/4 | Unsupported | Some fields parse, but no complete execution path exists |
@@ -190,14 +186,14 @@ Requirements:
 - only Java/Dex `csp_` sources need the optional Android compatibility
   component; OKVideoMac offers to download and manage it on first use.
 
-Download `OKVideoMac-0.4.1.dmg`, open it, and drag `OKVideoMac.app` to
+Download `OKVideoMac-0.5.0.dmg`, open it, and drag `OKVideoMac.app` to
 Applications. The official image is notarized by Apple; do not disable
 Gatekeeper or SIP.
 
 ## Binary and source identity
 
-The 0.4.1 (Build 95) assets are built from the exact commit referenced by tag
-`v0.4.1`. The GitHub Release publishes `OKVideoMac-0.4.1.dmg` together with its
+The 0.5.0 (Build 99) assets are built from the exact commit referenced by tag
+`v0.5.0`. The GitHub Release publishes `OKVideoMac-0.5.0.dmg` together with its
 post-notarization `.sha256` checksum. The source tag is the public source of
 truth; generated source indexes, manifests, SBOMs, notices, and checksums bind
 the binary to that commit without placing a circular binary hash in the tagged
@@ -221,7 +217,7 @@ not be recovered.
 
 ## Documentation and security
 
-- [0.4.1 release notes](Docs/RELEASE_NOTES_0.4.1.md)
+- [0.5.0 release notes](Docs/RELEASE_NOTES_0.5.0.md)
 - [Detailed project documentation](OKVideoMac/README.md)
 - [Compatibility guide](OKVideoMac/macOS/OKVideoMac/Docs/COMPATIBILITY.md)
 - [Android Bridge Setup](OKVideoMac/macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP.md)

@@ -1,9 +1,16 @@
 # Changelog
 
-## [0.4.2] - 2026-09-06
+## [0.5.0] - 2026-09-07
 
 ### Managed Android Runtime
 
+- Added explicit **Managed Runtime** and **External SDK** modes. Managed remains
+  the recommended default; existing and advanced users can explicitly retain a
+  compatible Android SDK without being forced through a Managed download.
+- Added versioned, atomic `runtime-selection.json` persistence and one-time
+  migration of the historical SDK preference. Ambient `PATH`, `ANDROID_HOME`,
+  Homebrew, and Android Studio discovery never silently change the selected
+  mode.
 - Added an on-demand Android compatibility component installer inside
   OKVideoMac. The first actual Java/Dex request is suspended while the user
   reviews licenses and installs; success resumes that same request.
@@ -17,9 +24,13 @@
 - Added an installation single-flight independent of the existing Emulator
   startup single-flight. Concurrent Settings and Dex requests join one
   installation, then pass the Managed Environment Purity gate before Session.
-- Added Settings install/update/repair states and path-free diagnostic output.
-  Legacy external SDK selection remains available only as an advanced fallback
-  when no managed-generation pointer exists.
+- Added Settings install/update/repair states, explicit External SDK
+  selection/confirmation, and path-free diagnostic output. External validation
+  separates existing-AVD launch capability from Java/`avdmanager`-dependent
+  create/repair capability.
+- Added a strict compatibility fingerprint for the shared private AVD. Runtime
+  source/identity, API, ABI, system image, schema, and Emulator compatibility
+  mismatches fail closed without silently deleting or rebuilding userdata.
 - API 35 remains an `evaluation` candidate and the shipped default managed
   profile. Real Emulator E2E is verified only on M1 / macOS 14.8.8; other
   supported macOS versions are not represented as field-verified.
@@ -39,7 +50,7 @@
 - Added a recoverable private-AVD rebuild in Settings. It backs up only
   `OKVideoMac_Runtime` and never wipes userdata automatically or modifies other
   AVDs, Android Studio, global ADB, favorites, history, or normal settings.
-- Build 98 includes the Emulator's official ADB-auth compatibility switch only for
+- Includes the Emulator's official ADB-auth compatibility switch only for
   the private headless API 24–29 runtime, whose legacy boot-property path cannot
   provision a newly generated private host key. API 30+ authentication is
   unchanged.
@@ -57,13 +68,27 @@
   actually enabled, and why it was selected without logging key material.
 - Preserve the 0.4.1 process ownership, PID birth identity, single-flight,
   port-conflict, stale-lock, adoption, and owned-only shutdown guarantees.
+- Managed mode never invokes External Android tools; External mode never enters
+  Managed installation admission. Switching modes requires a stopped Session.
+
+### Quit and lifecycle
+
+- Visible windows now leave the screen immediately after a confirmed App Quit,
+  while required Player, history, Node, and owned Android Runtime cleanup
+  continues in the background before AppKit completes process termination.
+- Preserved the full healthy `adb emu kill` grace period. Only later fallback
+  polling and escalation are shortened; `SIGTERM` and `SIGKILL` remain bounded
+  last-resort paths after strict ownership validation.
+- Repeated Quit requests share one termination operation. Cleanup remains
+  limited to OKVideoMac-owned Emulator and private ADB processes and never
+  targets unrelated Android Studio or user AVDs.
 
 ### Validation scope
 
-- The complete macOS suite passes 629 tests (625 passed, 4 intentionally
+- The complete macOS suite passes 649 tests (643 passed, 6 intentionally
   skipped); Android Runtime tests cover delayed transport, ADB isolation,
   bounded fallback, repair isolation, and 10-way concurrent startup.
-- The local API 35 private-ADB A/B reaches `device`, and Build 98 does not add
+- The local API 35 private-ADB A/B reaches `device`, and this release does not add
   the compatibility switch to API 30+. The user-specific API 24 / Emulator
   37.1.11 / M1 recovery result remains a real-machine validation item.
 

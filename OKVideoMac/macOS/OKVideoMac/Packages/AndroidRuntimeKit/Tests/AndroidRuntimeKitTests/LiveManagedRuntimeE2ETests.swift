@@ -32,7 +32,7 @@ final class LiveManagedRuntimeE2ETests: XCTestCase {
             downloader: URLSessionRuntimeArtifactDownloader(
                 allowedHosts: Set(catalog.allowedDownloadHosts ?? [])
             ),
-            currentAppVersion: "0.4.2"
+            currentAppVersion: "0.5.0"
         )
         let observer = Task {
             let states = await manager.states()

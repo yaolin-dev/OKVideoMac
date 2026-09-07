@@ -1,7 +1,7 @@
 # DMG Release Process
 
-OKVideoMac 0.4.1（Build 95）的正式用户下载格式固定为
-`OKVideoMac-0.4.1.dmg`。ZIP 仅为内部归档，不是 GitHub Release 的主下载。
+OKVideoMac 0.5.0（Build 99）的正式用户下载格式固定为
+`OKVideoMac-0.5.0.dmg`。ZIP 仅为内部归档，不是 GitHub Release 的主下载。
 
 ## Pipeline
 
@@ -36,10 +36,10 @@ OKVideoMac/macOS/OKVideoMac/Scripts/package-app.sh \
 
 ## 预发布与正式发布边界
 
-分支上的预发布 DMG 仅用于确认流水线。PR 以 Merge Commit 合入 `main` 后，必须从
-该 exact merge commit 重新构建 App、DMG、source release、SBOM 和 checksums，
-完成公证与安装 smoke test 后才允许创建 `v0.4.1`。不得把分支预发布 DMG 直接
-复用为正式发布资产。
+分支上的预发布 DMG 仅用于确认流水线。开发分支以不重写历史的 merge 或可审计的
+fast-forward 进入 `main` 后，必须从 `main` 的 exact release commit 重新构建
+App、DMG、source release、SBOM 和 checksums，完成公证与安装 smoke test 后才
+允许创建 `v0.5.0`。不得把分支预发布 DMG 直接复用为正式发布资产。
 
 ## 0.4.0 历史正式发布记录
 

@@ -12,7 +12,7 @@ final class ManagedRuntimeProductTests: XCTestCase {
         }))
 
         XCTAssertEqual(profile.id, "default-api35-arm64")
-        XCTAssertEqual(profile.minimumAppVersion, "0.4.2")
+        XCTAssertEqual(profile.minimumAppVersion, "0.5.0")
         XCTAssertEqual(profile.minimumMacOS, "12.0")
         XCTAssertEqual(profile.architectures, [.arm64])
         XCTAssertEqual(generation.apiLevel, 35)

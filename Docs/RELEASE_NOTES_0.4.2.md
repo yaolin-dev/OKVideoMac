@@ -1,5 +1,9 @@
 # OKVideoMac 0.4.2（Build 98）Release Notes
 
+> 文档类型：历史、未发布候选记录。0.4.2 未创建正式 Tag 或 GitHub Release；
+> 其后续修复与 Android Runtime 双模式最终随 0.5.0 发布。当前信息见
+> [`RELEASE_NOTES_0.5.0.md`](RELEASE_NOTES_0.5.0.md)。
+
 候选构建日期：2026-09-06
 
 发布状态：本地热修复候选包，尚未创建 Tag 或 GitHub Release

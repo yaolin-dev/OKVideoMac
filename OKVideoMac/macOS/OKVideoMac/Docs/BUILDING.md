@@ -2,6 +2,14 @@
 
 ## Supported / verified environment
 
+2026-09-07 的 0.5.0（Build 99）正式发布源码门禁基线为：649 项 Xcode
+测试中 643 项通过、6 项按设计跳过；36 项 AndroidRuntimeKit 测试中 35 项
+通过、1 项真实在线安装测试按设计跳过；173 项 OKVideoKit 测试全部通过。
+本版本新增明确的 Managed / External Android Runtime 模式，并将可见窗口退出与
+后台 owned Runtime 清理解耦。最终公开产物仍必须从 exact clean release commit
+重新执行本文 `package-app.sh` 的 Release、签名、公证、staple、Gatekeeper、
+SBOM、源码绑定与 DMG 验证门禁。
+
 Phase 4 在 2026-08-12 已于以下环境完成验证：
 
 - macOS 14.8.8（23J620），Apple Silicon / arm64；

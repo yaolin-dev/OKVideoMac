@@ -6,34 +6,28 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。它�
 视频 Provider、直播源、搜索、详情、收藏、历史和基于 libmpv 的播放体验，但不
 内置第三方影视源、账号、Cookie、解析服务或 DRM 密钥。
 
-当前热修复候选版本为 **0.4.2（Build 98）**，支持 macOS 12 或更高版本、
-Apple Silicon（`arm64`），尚未对外发布。当前公开的 Developer ID 签名、
-Apple 公证并已 Staple 版本仍从
-[v0.4.1 正式发布页](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.4.1)
-下载。
+当前正式版本为 **0.5.0（Build 99）**，支持 macOS 12 或更高版本、
+Apple Silicon（`arm64`）。请从
+[v0.5.0 正式发布页](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.5.0)
+下载 Developer ID 签名、Apple 公证并已 Staple 的 DMG。
 
-## 0.4.2 热修复候选版本
+## 0.5.0 主要更新
 
-0.4.2 针对冷启动长时间停留在 `emulator-5554 offline` 的 Android Runtime：
-把 180 秒 ADB transport 等待与 Android boot 明确分开，使用所选 SDK 的私有
-ADB server，宽限期后最多执行一次目标 reconnect，并把 GPU 恢复限制为
-host 到 software 的一次回退。两种后端都失败时，设置页可恢复地重建私有
-AVD，不影响 Android Studio AVD、默认 ADB server、收藏或历史。
+Android 兼容环境现在有两种明确模式。**Managed Runtime** 是普通用户的
+推荐默认：第一次真正调用 Java/Dex `csp_` 内容时，OKVideoMac 可在私有
+Application Support 目录中下载并事务性启用锁定的 JRE、Android 工具、
+Emulator 和 API 35 Google APIs arm64 镜像。**External SDK** 则让老用户和高级
+用户明确沿用已有兼容 SDK，不会被强制下载 Managed Runtime。
 
-Build 98 包含 API 24–29 旧 system image 所需的仅限私有、无窗口
-Emulator 的 ADB 认证兼容启动方式；现代镜像仍使用 OKVideoMac 私有
-keypair 并保持 Guest ADB 认证。
+模式选择原子保存，不会因为 `PATH`、`ANDROID_HOME`、Homebrew 或 Android Studio
+发现另一套 SDK 就静默切换。Managed 与 External 执行严格隔离；私有 ADB、
+专用 AVD、进程 ownership、启动 single-flight、GPU fallback 与安全恢复仍由原有
+Session 生命周期管理。兼容指纹不匹配时 fail closed，不静默删除 AVD userdata。
 
-Build 98 同时把主导航改为 AppKit 原生 Source List 与 Sidebar 材质，匹配
-App Store 的字号、间距、状态颜色和蓝色语义图标。搜索框有文字时第一次 Esc
-只清空内容并保持焦点，空框再次 Esc 才退出搜索。
-
-当前源码候选也已把可选 Android 兼容环境产品化。第一次真正执行 Java/Dex
-`csp_` 请求时，原请求会暂停并出现安装提示；OKVideoMac 将固定版本、SHA-256
-锁定的 JRE、SDK 工具、Emulator 与 API 35 Google APIs arm64 镜像下载到自己的
-Application Support 目录，在 staging 中校验后原子启用一个不可变 Generation，
-随后自动继续原请求。普通用户不再需要安装 Android Studio、Homebrew、JDK 或
-执行命令行配置。
+本版本同时保留 0.4.2 候选阶段的 ADB/offline 与旧 Guest 认证恢复，并引入
+AppKit 原生 Source List 侧边栏以及 App Store 式搜索 Esc 行为。退出 App 时，
+可见窗口现在会立即离开屏幕，后台仍为自有 Android Runtime 保留完整优雅退出
+机会；不会针对无关 Emulator 或 ADB server。
 
 ## 0.4.1 Highlights
 
@@ -145,7 +139,7 @@ OKVideoMac 现在能够安全接管上一轮留下的健康私有 Emulator，串
 | CMS XML / Native type 4 | Partial | 覆盖窄于 JSON 路径 |
 | QuickJS Spider | Selected | 符合当前接口的部分 CatVod/FongMi 风格脚本 |
 | Node `.js.md5` | Selected | CatVod/CatPaw 风格 Node 视频接口兼容子集 |
-| Java/Dex `csp_` | Experimental | 首次真实 Dex 使用时按需安装 App 自管 API 35 Runtime |
+| Java/Dex `csp_` | Experimental | Managed API 35 Runtime 或用户明确确认的兼容 External SDK |
 | M3U / TXT / JSON 直播 | Supported | 通过独立直播源导入器使用 |
 | XMLTV EPG | Supported | 不需要 Android |
 | 顶层 `lives`、parser type 2/3/4 | Unsupported | 可解析部分字段，但没有完整执行链 |
@@ -161,13 +155,13 @@ OKVideoMac 现在能够安全接管上一轮留下的健康私有 Emulator，串
 - 只有 Java/Dex `csp_` 源需要可选 Android 兼容组件；首次使用时由 OKVideoMac
   提示下载和管理。
 
-下载 `OKVideoMac-0.4.1.dmg`，打开后将 `OKVideoMac.app` 拖入 Applications。
+下载 `OKVideoMac-0.5.0.dmg`，打开后将 `OKVideoMac.app` 拖入 Applications。
 正式包已经 Apple 公证，不需要也不应关闭 Gatekeeper 或 SIP。
 
 ## 二进制与源码身份
 
-0.4.1（Build 95）资产从 Tag `v0.4.1` 指向的 exact commit 构建。GitHub Release
-同时提供 `OKVideoMac-0.4.1.dmg` 与公证、Staple 后重新计算的 `.sha256` 文件。
+0.5.0（Build 99）资产从 Tag `v0.5.0` 指向的 exact commit 构建。GitHub Release
+同时提供 `OKVideoMac-0.5.0.dmg` 与公证、Staple 后重新计算的 `.sha256` 文件。
 公开源码以 Git tag 为准；生成的 source index、manifest、SBOM、Notices 与校验和
 把二进制绑定到该 commit，避免在 tagged source 中引入循环的二进制哈希。原生
 第三方来源仍明确披露两个可复现性例外：zlib 精确归档不可用，以及历史
@@ -185,7 +179,7 @@ MacPorts libc++/libc++abi 输入未能恢复；它们不会被误标为可重复
 
 ## 文档与安全
 
-- [0.4.1 发布说明](Docs/RELEASE_NOTES_0.4.1.md)
+- [0.5.0 发布说明](Docs/RELEASE_NOTES_0.5.0.md)
 - [详细项目文档](OKVideoMac/README.md)
 - [兼容性指南](OKVideoMac/macOS/OKVideoMac/Docs/COMPATIBILITY.md)
 - [Android Bridge 设置](OKVideoMac/macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP_zh-CN.md)

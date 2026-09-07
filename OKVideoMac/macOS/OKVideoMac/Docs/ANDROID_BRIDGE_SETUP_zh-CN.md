@@ -67,7 +67,7 @@ userdata。修复只重装受管组件，并保留 AVD、收藏、历史和普�
 - 子进程使用显式构建的 `PATH`、`JAVA_HOME`、`ANDROID_HOME`、
   `ANDROID_SDK_ROOT`、`ANDROID_AVD_HOME`、`ANDROID_USER_HOME`、
   `ANDROID_EMULATOR_HOME` 和 `ADB_VENDOR_KEYS`。
-- 一旦存在 Managed Runtime 指针，解析失败会直接报错，不会偷偷退回 Android
+- 选中 Managed 模式时，Generation 解析失败会直接报错，不会偷偷退回 Android
   Studio、Homebrew、系统 Java 或用户 shell `PATH`。
 - 安装与 Emulator Session 使用两套独立 single-flight：并发安装请求共享一个安装
   事务，并发 Runtime 请求继续共享现有一个 Emulator 启动任务。

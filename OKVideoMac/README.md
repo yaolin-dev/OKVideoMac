@@ -2,16 +2,16 @@
 
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于
 配置格式、站点类型和运行时，而不是简单以 TVBox、FongMi、MiraPlay 或 CatPawOpen
-等生态名称判断。当前代码版本为 **0.4.2（Build 98）** 热修复候选包，支持
-**arm64**，最低系统为 **macOS 12.0**；它尚未对外发布。当前公开正式版仍是
-0.4.1（Build 95）经 Apple 公证并已 Staple 的 DMG。
+等生态名称判断。当前正式版本为 **0.5.0（Build 99）**，支持
+**arm64**，最低系统为 **macOS 12.0**，通过 Developer ID 签名、Apple 公证、
+Staple 和 Gatekeeper 验证后通过 GitHub Release 分发。
 
 项目不内置内容源、账号、Cookie、DRM key 或私人服务配置。请只导入你有权使用
 且信任的配置、脚本和媒体。
 
 ## 当前版本
 
-- 当前版本：0.4.2（Build 98）
+- 当前版本：0.5.0（Build 99）
 - 最低系统：macOS 12.0
 - 支持架构：Apple Silicon / arm64
 - 播放历史按点播配置源分组；切换同一配置内的站点不会隐藏历史，历史项仍保留
@@ -23,16 +23,27 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源�
 - 左侧导航改用 AppKit 原生 Source List 与 Sidebar 材质，统一 App Store 风格的
   字号、间距、蓝色语义图标、选中状态和窗口激活状态；搜索框支持两段式 Esc
 - 搜索框有文字时第一次 Esc 只清空并保持焦点，空框再次 Esc 才退出搜索
-- Xcode：629 total / 625 passed / 4 intentionally skipped / 0 failed
+- Xcode：649 total / 643 passed / 6 intentionally skipped / 0 failed
 - OKVideoKit：173 passed / 0 failed
 - Node / CatPaw / Quark：30 passed / 0 failed
 - Android Release assemble 与 lint：通过；Android JVM unit tests：NO-SOURCE
 - 正式 Release packaging 会验证 28 个 Mach-O 的架构、部署目标、依赖闭包、
   Developer ID 签名和 Hardened Runtime，并生成 DMG、SBOM 与对应源码集
-- 对外分发：0.4.1 Build 95 已完成 Developer ID signing、Apple notarization、
+- 对外分发：0.5.0 Build 99 已完成 Developer ID signing、Apple notarization、
   staple、`stapler validate` 和 Gatekeeper 实物验收
 
-## 0.4.2 Android Runtime 热修复
+## 0.5.0 Android Runtime 模式与生命周期
+
+- Android 兼容环境分为明确的 Managed Runtime 和 External SDK 两种模式。
+  Managed 是普通用户的推荐默认；老用户和高级用户可确认沿用已有 SDK。
+- `AndroidRuntime/runtime-selection.json` 以版本化、原子方式保存 mode 和 SDK identity。
+  选择、校验或用户确认失败时不会留下半切换状态。
+- 不会因为 `PATH`、`ANDROID_HOME`、Homebrew 或 Android Studio 发现 SDK 就静默切换模式。
+  Managed 不读取或启动 External Android 工具，External 不触发 Managed installer。
+- External 校验分开启动能力与创建/修复能力：已有兼容 AVD 时，缺少 Java 或
+  `avdmanager` 不会错误阻止启动，只影响新建或修复。
+- 共用的 App 私有 AVD 使用 Runtime 来源、identity、API、ABI、system image、
+  AVD schema 和 Emulator 兼容信息指纹。不兼容时 fail closed，不静默删除 userdata。
 
 - ADB transport 等待改为独立的 180 秒单调时钟窗口，再进入原有约 240 秒
   Android guest boot 阶段，冷启动不再在约 60 秒被过早清理。
@@ -44,7 +55,7 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源�
   一次；成功后持久化后端，两次失败不自动擦除 userdata。
 - 设置页新增可恢复的“修复 Android Runtime”，只备份并重建
   `OKVideoMac_Runtime`，不会改动其他 AVD、普通设置、收藏或历史。
-- Build 98 会识别 API 24–29 旧镜像，只对 OKVideoMac 私有无窗口
+- 会识别 API 24–29 旧镜像，只对 OKVideoMac 私有无窗口
   Emulator 启用 ADB 认证兼容开关；API 30+ 仍使用私有 keypair 认证。
 - 第一次真正执行 Java/Dex `csp_` 内容时，原请求会暂停并显示“Android 兼容组件”
   安装页；安装成功后自动继续，不再要求普通用户准备 Android Studio、JDK、ADB
@@ -52,6 +63,9 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源�
 - Managed Runtime 使用固定 API 35 Google APIs arm64 Profile、私有 JRE/SDK/ADB/
   Emulator、可续传下载、SHA-256 和 archive layout 门禁、不可变 Generation 与
   `current-runtime.json` 原子切换；失败不会覆盖旧 Runtime 或 AVD userdata。
+- 退出 App 时可见窗口先快速离开屏幕；后台仍对已验证属于 OKVideoMac 的
+  Emulator 优先执行 `adb emu kill`，保留完整优雅等待，必要时才分级 fallback。
+  该流程是 termination single-flight，不会关闭非自有 Emulator 或用户的 ADB server。
 
 ## 0.4.1 稳定性更新
 
@@ -81,20 +95,20 @@ OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源�
 
 正式版本安装：
 
-1. 只从本仓库 [v0.4.1 GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.4.1) 下载 macOS arm64 发布包；
-2. 打开 `OKVideoMac-0.4.1.dmg`；
+1. 只从本仓库 [v0.5.0 GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.5.0) 下载 macOS arm64 发布包；
+2. 打开 `OKVideoMac-0.5.0.dmg`；
 3. 将 `OKVideoMac.app` 移入 `/Applications`；
 4. 从 Applications 或 Finder 正常启动。
 
 不要使用来源不明或无法与本仓库发布哈希对应的第三方二进制。
 
-0.4.1（Build 95）的 DMG 与 Source Release 绑定到 tag `v0.4.1` 指向的 exact
+0.5.0（Build 99）的 DMG 与 Source Release 绑定到 tag `v0.5.0` 指向的 exact
 commit。最终公证并 Staple 后的 DMG SHA-256 由 GitHub Release 同名 `.sha256`
 文件提供。
 
 ### Gatekeeper 与 macOS 安全
 
-0.4.1（Build 95）正式 DMG 使用 Developer ID Application: Yao Lin
+0.5.0（Build 99）正式 DMG 使用 Developer ID Application: Yao Lin
 （KGG363ABK9）签名，启用 Hardened Runtime，并通过 Apple notarization、staple
 和 Gatekeeper 验证。安装和运行不需要关闭任何 macOS 安全机制。
 
@@ -161,9 +175,9 @@ OKVideoMac 会自行创建并启动名为 `OKVideoMac_Runtime` 的专用无窗�
 `AndroidDexBridge-release.apk`，启动时会通过 `adb install -r` 自动安装或更新，
 用户不需要下载或手工安装 APK。
 
-也可前往 **设置 → Android 兼容模块** 主动安装、查看状态、修复或导出诊断。
-“旧版手动环境…”只作为高级故障排查入口，并且只在没有 Managed Runtime 指针时
-允许旧 resolver 查找外部 SDK。完整流程与故障排查见
+也可前往 **设置 → Android 兼容模块** 查看当前模式、安装/修复 Managed
+Runtime，或选择并确认 External SDK。历史上由 OKVideoMac 明确保存的 SDK 会按
+一次性迁移规则恢复为 External；环境变量或自动发现不会改变模式。完整流程与故障排查见
 [Android Bridge 设置（中文）](macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP_zh-CN.md)
 或 [Android Bridge Setup (English)](macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP.md)。
 
@@ -179,8 +193,8 @@ OKVideoMac 会自行创建并启动名为 `OKVideoMac_Runtime` 的专用无窗�
 
 功能级别状态与证据见
 [`macOS/OKVideoMac/Docs/COMPATIBILITY.md`](macOS/OKVideoMac/Docs/COMPATIBILITY.md)。
-0.4.1 面向用户的变更摘要见
-[`Docs/RELEASE_NOTES_0.4.1.md`](../Docs/RELEASE_NOTES_0.4.1.md)。
+0.5.0 面向用户的变更摘要见
+[`Docs/RELEASE_NOTES_0.5.0.md`](../Docs/RELEASE_NOTES_0.5.0.md)。
 
 ## 当前已知限制与风险
 
@@ -198,7 +212,7 @@ Build 62 阶段留存的历史工程准备记录见
 [`Docs/ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md`](../Docs/ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md)，
 同期 juniversalchardet 兼容性审计见
 [`Docs/JUNIVERSALCHARDET_ELIMINATION_AUDIT.md`](../Docs/JUNIVERSALCHARDET_ELIMINATION_AUDIT.md)。
-这些材料保留为历史工程证据；Build 62/63/64/65 均不是当前 Build 95 的发布状态，
+这些材料保留为历史工程证据；Build 62/63/64/65 均不是当前 Build 99 的发布状态，
 也不构成法律意见
 或“无风险”保证。
 
@@ -225,24 +239,24 @@ Git tag 指向的 exact release commit 才是项目源码基准；不要把移�
 `master` 或 `latest` 当作对应源码。正式 Release 应同时提供并由统一
 `SHA256SUMS` 绑定：
 
-- source release index：`OKVideoMac-0.4.1-build95-SOURCE_RELEASE_INDEX.json`；
+- source release index：`OKVideoMac-0.5.0-build99-SOURCE_RELEASE_INDEX.json`；
 - binary-to-source mapping：
   [`Docs/BINARY_SOURCE_MAPPING.md`](../Docs/BINARY_SOURCE_MAPPING.md)；
 - binary/source manifest：
-  `OKVideoMac-0.4.1-build95-SOURCE_RELEASE_MANIFEST.json`；
-- hashes：`OKVideoMac-0.4.1-build95-SHA256SUMS`；
+  `OKVideoMac-0.5.0-build99-SOURCE_RELEASE_MANIFEST.json`；
+- hashes：`OKVideoMac-0.5.0-build99-SHA256SUMS`；
 - macOS SPDX / CycloneDX：`OKVideoMac-macOS.spdx.json`、
   `OKVideoMac-macOS.cdx.json`；
 - Android SPDX / CycloneDX：`OKVideoMac-Android.spdx.json`、
   `OKVideoMac-Android.cdx.json`；
-- exact APK：`OKVideoMac-0.4.1-AndroidDexBridge-release.apk`；
-- exact project source：`OKVideoMac-0.4.1-build95-source.tar.gz`；
+- exact APK：`OKVideoMac-0.5.0-AndroidDexBridge-release.apk`；
+- exact project source：`OKVideoMac-0.5.0-build99-source.tar.gz`；
 - third-party source package：
-  `OKVideoMac-0.4.1-build95-third-party-source.tar.gz`；
-- license package：`OKVideoMac-0.4.1-build95-licenses.tar.gz`；
-- macOS artifact：`OKVideoMac-0.4.1.dmg`。
+  `OKVideoMac-0.5.0-build99-third-party-source.tar.gz`；
+- license package：`OKVideoMac-0.5.0-build99-licenses.tar.gz`；
+- macOS artifact：`OKVideoMac-0.5.0.dmg`。
 
-0.4.1 Build 95 文件清单与生成规则见
+0.5.0 Build 99 文件清单与生成规则见
 [`Docs/SOURCE_RELEASE_PROCESS.md`](../Docs/SOURCE_RELEASE_PROCESS.md)。Build 62/63
 发布准备阶段的历史工程状态保留在
 [Historical Build 62 Release Readiness Record](../Docs/IMMUTABLE_RELEASE_READINESS.md)。

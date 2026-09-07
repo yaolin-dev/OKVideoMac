@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted for the 0.4.2 source candidate without changing the App version.
+Accepted for the 0.4.2 source candidate and shipped in 0.5.0. The selection
+portion below is superseded by ADR 0008; the installation/Session boundary and
+transactional Managed Runtime decisions remain active.
 
 ## Decision
 
@@ -43,9 +45,10 @@ remain resumable. Product repair moves only the selected immutable Generation
 to a recoverable backup; if repair fails, it restores both the Generation and
 the previous pointer. AVD userdata is never part of that transaction.
 
-When a managed pointer exists, all Java and Android resolution fails closed.
-Legacy external SDK/JDK discovery is available only when there is no managed
-pointer, and is labeled as a developer/troubleshooting path in the UI.
+When Managed mode is selected, all Java and Android resolution fails closed.
+ADR 0008 replaces the former pointer-based External fallback with explicit,
+atomically persisted Managed/External modes and one-time migration of only the
+historical OKVideoMac SDK preference.
 
 ## Compatibility
 
