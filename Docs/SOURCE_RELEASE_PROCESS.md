@@ -1,10 +1,13 @@
 # Immutable Corresponding-Source Release Process
 
-The 0.7.3 (Build 129) release candidate uses
-`OKVideoMac-0.7.3-macOS-arm64.zip` and `OKVideoMac-0.7.3.dmg`. Local ad-hoc
-verification does not replace the notarized public 0.6.1 release or create a tag.
+The formal 0.7.3 (Build 129) release uses
+`OKVideoMac-0.7.3-macOS-arm64.zip` as its internal identity/archive carrier and
+`OKVideoMac-0.7.3.dmg` as its public user download. Tag `v0.7.3` pins exact
+release commit `55ffa9d55faced404b20034d7cfe5bcfbc1be581`; the 15 public assets were
+published with the GitHub Release and verified against the build outputs. See the
+[final validation record](RELEASE_VALIDATION_0.7.3.md).
 
-> The 0.6.1 DMG passed Developer ID signing, Apple notarization, stapling, Gatekeeper
+> Historical note: the 0.6.1 DMG passed Developer ID signing, Apple notarization, stapling, Gatekeeper
 > and installation smoke tests. Tag `v0.6.1` pins release commit
 > `25155f52fb8c416f3245c9a829a93175dec9857b`; see the
 > [validation record](RELEASE_VALIDATION_0.6.1.md). Subsequent documentation updates
@@ -55,10 +58,10 @@ does not disguise exceptions: the missing original zlib 1.3.2 distfile and
 historical clang-11 input used by MacPorts libc++ remain explicit in the
 manifest and keep native provenance incomplete.
 
-For release 0.6.1 (101), the manifest records Xcode 16.2 and macOS SDK 15.2 as
-the actual release package builder. Xcode 14.2 remains the older supported
-macOS 12 baseline, but is not reported as the tool that produced this audited
-binary.
+For release 0.7.3 (129), the generated index and manifest record the actual
+release builder, exact commit, binary hashes and source inputs. Xcode 14.2 remains
+the older supported macOS 12 baseline, but is not reported as the tool that
+produced the audited 0.7.3 binary.
 
 The licenses archive contains the project license/notices, every retained
 third-party license, APK notices, change notices, and provenance documents.

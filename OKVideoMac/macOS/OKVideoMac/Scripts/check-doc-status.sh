@@ -33,6 +33,7 @@ if [[ -z "$VERSION" || -z "$BUILD" ]]; then
   exit 1
 fi
 READINESS="$REPOSITORY_ROOT/Docs/RELEASE_READINESS_${VERSION}.md"
+VALIDATION="$REPOSITORY_ROOT/Docs/RELEASE_VALIDATION_${VERSION}.md"
 
 assert_exact_line() {
   file="$1"
@@ -54,24 +55,11 @@ assert_contains() {
   fi
 }
 
-# A release may be described either before publication or after publication.
-# Both forms must still name the exact source version/build from project.yml.
-assert_contains_either() {
-  file="$1"
-  first="$2"
-  second="$3"
-  if ! grep -Fq -- "$first" "$file" && ! grep -Fq -- "$second" "$file"; then
-    echo "Documentation metadata is stale: $file" >&2
-    echo "Expected text: $first OR $second" >&2
-    exit 1
-  fi
-}
-
-assert_exact_line "$README" "- 当前发布候选：${VERSION}（Build ${BUILD}）"
+assert_exact_line "$README" "- 当前稳定版本：${VERSION}（Build ${BUILD}）"
 assert_exact_line "$COMPATIBILITY" "- 对照版本：${VERSION}（Build ${BUILD}）"
 assert_exact_line "$PERFORMANCE" "- 对照版本：${VERSION}（Build ${BUILD}）"
-assert_contains_either "$ROOT_README" "current release candidate is **${VERSION} (Build ${BUILD})**" "latest stable release is **${VERSION} (Build ${BUILD})**"
-assert_contains_either "$ROOT_README_ZH" "当前发布候选为 **${VERSION}（Build ${BUILD}）**" "最新稳定版本为 **${VERSION}（Build ${BUILD}）**"
+assert_contains "$ROOT_README" "latest stable release is **${VERSION} (Build ${BUILD})**"
+assert_contains "$ROOT_README_ZH" "最新稳定版本为 **${VERSION}（Build ${BUILD}）**"
 assert_contains "$CHANGELOG" "## [${VERSION}] - "
 assert_contains "$NOTICES" "OKVideoMac ${VERSION} (Build ${BUILD})"
 assert_exact_line "$PERFORMANCE" "- 多站搜索全局并发 20；共享同一 Node runtime 的站点并发 20，聚合搜索每站只取第一页；"
@@ -79,10 +67,11 @@ assert_contains "$SOURCE_RELEASE_PROCESS" "OKVideoMac-${VERSION}.dmg"
 assert_contains "$SOURCE_RELEASE_PROCESS" "OKVideoMac-${VERSION}-macOS-arm64.zip"
 assert_contains "$SOURCE_RELEASE_PROCESS" "OKVideoMac-${VERSION}-build${BUILD}-SOURCE_RELEASE_INDEX.json"
 assert_exact_line "$REPOSITORY_ROOT/Docs/RELEASE_NOTES_${VERSION}.md" "# OKVideoMac ${VERSION}（Build ${BUILD}）Release Notes"
-assert_contains_either "$README" "目标 tag：\`v${VERSION}\`" "Tag \`v${VERSION}\` 在全部正式分发门禁通过后创建"
+assert_contains "$README" "Tag：\`v${VERSION}\`"
 assert_contains "$README" "OKVideoMac-${VERSION}-build${BUILD}-SOURCE_RELEASE_INDEX.json"
 assert_contains "$COMPATIBILITY" "tag \`v${VERSION}\`"
 assert_exact_line "$READINESS" "# OKVideoMac ${VERSION}（Build ${BUILD}）发布就绪记录"
+assert_exact_line "$VALIDATION" "# OKVideoMac ${VERSION}（Build ${BUILD}）正式发布验证记录"
 
 PYTHONDONTWRITEBYTECODE=1 python3 - "$PROJECT_DIR" "$VERSION" "$BUILD" <<'PY'
 import pathlib

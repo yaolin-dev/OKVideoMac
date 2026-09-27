@@ -3,10 +3,22 @@
 OKVideoMac 0.7.3（Build 129）的正式用户下载格式固定为
 `OKVideoMac-0.7.3.dmg`。ZIP 仅为内部归档，不是 GitHub Release 的主下载。
 
-0.7.3 当前处于发布候选阶段；以下正式流水线尚未执行。最新已验证并公开的 DMG
-仍是 0.6.1（Build 101）。
+## 0.7.3 / Build 129 已完成验证 / Verified release
 
-## 0.6.1 / Build 101 已完成验证 / Verified release
+Tag `v0.7.3` 固定 exact release commit
+`55ffa9d55faced404b20034d7cfe5bcfbc1be581`。正式 DMG 使用
+`Developer ID Application: Yao Lin (KGG363ABK9)` 签名，已通过 Apple
+notarization `Accepted`、Staple、Gatekeeper 与最终安装 smoke。Submission：
+`133c1043-d3b8-429a-b502-6dc586de6ab9`。最终 DMG SHA-256：
+`9cf6c79f9c6d4a8bc7e37e72612e3debc98ca22ffffc3e5e9084c61efe42dbfc`。
+详细结果见 [0.7.3 验证记录](RELEASE_VALIDATION_0.7.3.md)。
+
+The 0.7.3 DMG passed Developer ID signing, Apple notarization, stapling,
+Gatekeeper and final installation smoke. The tag pins the exact release commit
+above; later documentation updates preserve the signed binary, tag and build-time
+source/notes snapshots.
+
+## 0.6.1 / Build 101 历史验证 / Historical verified release
 
 Tag `v0.6.1` 固定提交 `25155f52fb8c416f3245c9a829a93175dec9857b`。正式 DMG 已通过
 Developer ID、Apple notarization `Accepted`、Staple、Gatekeeper 与安装 smoke。
@@ -79,7 +91,8 @@ OKVideoMac/macOS/OKVideoMac/Scripts/package-app.sh \
 分支上的预发布 DMG 仅用于确认流水线。开发分支以不重写历史的 merge 或可审计的
 fast-forward 进入 `main` 后，必须从 `main` 的 exact release commit 重新构建
 App、DMG、source release、SBOM 和 checksums，完成公证与安装 smoke test 后才
-允许创建 `v0.7.3`。不得把分支预发布 DMG 直接复用为正式发布资产。
+允许创建版本 Tag。不得把分支预发布 DMG 直接复用为正式发布资产。0.7.3 已按此
+边界从上述 exact commit 完成正式发行。
 
 ## 0.4.0 历史正式发布记录
 

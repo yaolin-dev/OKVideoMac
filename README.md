@@ -13,8 +13,8 @@ selected TVBox/CatVod/CatPaw-style providers, and libmpv playback.**
 Built with Swift and SwiftUI/AppKit. Android is an optional compatibility layer
 for selected Java/Dex providers.
 
-The current release candidate is **0.7.3 (Build 129)**. The latest notarized
-stable release remains listed below.
+The latest stable release is **0.7.3 (Build 129)**. It is Developer ID signed,
+Apple-notarized and distributed from the exact `v0.7.3` release commit.
 
 **Native macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · Multi-provider Search ·
 QuickJS/Node Spiders**
@@ -23,11 +23,11 @@ QuickJS/Node Spiders**
 
 ### [Download the latest stable release →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-The latest stable release is **0.6.1 (Build 101)** · macOS 12.0+ · Apple Silicon
-(`arm64`) only. This patch adds Android component storage management and uninstall.
+The latest stable release is **0.7.3 (Build 129)** · macOS 12.0+ · Apple Silicon
+(`arm64`) only.
 
 Download the Developer ID signed and Apple-notarized
-[v0.6.1 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.6.1).
+[v0.7.3 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.7.3).
 This release passed stapling, Gatekeeper assessment and installation smoke tests.
 
 Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to
@@ -37,7 +37,7 @@ and notices are published with each release.
 > OKVideoMac is a player and provider client. It does not include third-party
 > video sources, accounts, cookies, parsing services, or DRM keys.
 
-## 0.7.3 release candidate
+## New in 0.7.3
 
 - **Native Full Guide:** browse bounded XMLTV and Native Xtream programme data
   with date navigation, Now repositioning, virtualized channel rows and programme
@@ -54,8 +54,9 @@ and notices are published with each release.
   History and Favorites views; populated rows keep separators while empty space
   stays clean.
 
-This source candidate has not yet replaced the notarized 0.6.1 download. See the
-[0.7.3 release notes](Docs/RELEASE_NOTES_0.7.3.md) for scope and limitations.
+See the [0.7.3 release notes](Docs/RELEASE_NOTES_0.7.3.md) and
+[final validation record](Docs/RELEASE_VALIDATION_0.7.3.md) for scope, integrity
+evidence and known limitations.
 
 ## New in 0.6.1
 
@@ -293,13 +294,16 @@ checks; a local Debug compile is not a public release artifact.
 
 ## Release integrity
 
-The 0.6.1 / Build 101 DMG passed Release packaging, Developer ID signing,
+The 0.7.3 / Build 129 DMG passed Release packaging, Developer ID signing,
 Apple notarization (`Accepted`), stapling, Gatekeeper and installation smoke tests
-under the [DMG release process](Docs/DMG_RELEASE_PROCESS.md). Tag `v0.6.1` pins
-release commit `25155f52fb8c416f3245c9a829a93175dec9857b`; matching source archives,
-SBOMs and checksums accompany the download. Later documentation updates do not
-change that signed binary or its source snapshot. The v0.6.0 release remains unchanged. See the [0.6.1 release notes](Docs/RELEASE_NOTES_0.6.1.md)
-and [source release process](Docs/SOURCE_RELEASE_PROCESS.md).
+under the [DMG release process](Docs/DMG_RELEASE_PROCESS.md). Tag `v0.7.3` pins
+release commit `55ffa9d55faced404b20034d7cfe5bcfbc1be581`; the final DMG SHA-256 is
+`9cf6c79f9c6d4a8bc7e37e72612e3debc98ca22ffffc3e5e9084c61efe42dbfc`.
+Matching source archives, SBOMs and checksums accompany the download. Later
+documentation updates do not change the signed binary, tag or source snapshot.
+See the [final validation record](Docs/RELEASE_VALIDATION_0.7.3.md),
+[0.7.3 release notes](Docs/RELEASE_NOTES_0.7.3.md) and
+[source release process](Docs/SOURCE_RELEASE_PROCESS.md).
 
 ## Documentation
 
@@ -310,6 +314,7 @@ and [source release process](Docs/SOURCE_RELEASE_PROCESS.md).
 - [Architecture](OKVideoMac/macOS/OKVideoMac/Docs/ARCHITECTURE.md)
 - [Android storage and uninstall](Docs/ANDROID_MANAGED_UNINSTALL.md)
 - [0.7.3 release notes](Docs/RELEASE_NOTES_0.7.3.md)
+- [0.7.3 final validation](Docs/RELEASE_VALIDATION_0.7.3.md)
 - [0.6.1 release notes](Docs/RELEASE_NOTES_0.6.1.md)
 - [Changelog](CHANGELOG.md)
 - [Security policy](SECURITY.md)

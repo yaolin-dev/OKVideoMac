@@ -1,10 +1,12 @@
 # Building OKVideoMac
 
-## 0.7.3 release candidate verification
+## 0.7.3 formal release verification
 
-The current source candidate is 0.7.3 (Build 129). Its final automated test,
-static-check and local Release packaging results are recorded in the
-[0.7.3 release-readiness record](../../../../Docs/RELEASE_READINESS_0.7.3.md).
+The current stable release is 0.7.3 (Build 129). Its automated test and frozen
+preflight results are recorded in the
+[0.7.3 release-readiness record](../../../../Docs/RELEASE_READINESS_0.7.3.md),
+and its exact signed/notarized distribution is recorded in the
+[final validation](../../../../Docs/RELEASE_VALIDATION_0.7.3.md).
 The committed Xcode project must match `project.yml` when regenerated with
 XcodeGen 2.38.0 exactly; a newer generator is not an accepted substitute.
 
@@ -23,11 +25,11 @@ Kotlin 2.0 metadata. Lint still completed with zero errors and six warnings. Do
 not suppress these diagnostics or describe this host-tooling limitation as a
 successful real-device compatibility matrix.
 
-Local ad-hoc Release packaging verifies the app bundle before installation, but
-formal publication still requires an exact clean release commit followed by
-Developer ID signing, notarization, stapling, Gatekeeper, installation smoke and
-the complete source/SBOM/hash asset set. Debug builds and earlier local candidates
-are never release deliverables.
+The formal build from exact clean commit
+`55ffa9d55faced404b20034d7cfe5bcfbc1be581` passed Developer ID signing,
+notarization (`Accepted`), stapling, Gatekeeper, final DMG installation smoke and
+the complete source/SBOM/hash asset set. Tag `v0.7.3` pins that commit. Debug builds
+and earlier local candidates are never release deliverables.
 
 ## 0.6.1 historical release verification
 

@@ -1,5 +1,11 @@
-# OKVideoMac 0.6.1 (Build 101) Source Provenance Manifest
+# Historical OKVideoMac 0.6.1 (Build 101) Source Provenance Audit
 
+> This file preserves the 0.6.1 native-input audit and its historical output hashes; it is
+> not the current binary manifest. For 0.7.3 use the generated
+> `OKVideoMac-0.7.3-build129-SOURCE_RELEASE_INDEX.json`,
+> `OKVideoMac-0.7.3-build129-SOURCE_RELEASE_MANIFEST.json` and the
+> [0.7.3 final validation record](RELEASE_VALIDATION_0.7.3.md).
+>
 > The 0.6.1 third-party input set is unchanged from 0.6.0. Audited output hashes below are
 > historical evidence; the generated 0.6.1 source index and manifest bind current
 > binaries at tag `v0.6.1` (commit `25155f52fb8c416f3245c9a829a93175dec9857b`).

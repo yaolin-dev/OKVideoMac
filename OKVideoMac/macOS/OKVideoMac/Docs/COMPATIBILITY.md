@@ -2,9 +2,9 @@
 
 - 对照版本：0.7.3（Build 129）
 - 最近更新：2026-09-27
-- 当前发布候选：0.7.3（Build 129），Apple Silicon / arm64 / macOS 12.0+
-- 最新公开公证 DMG：0.6.1（Build 101）；Developer ID、Apple Accepted、Staple、Gatekeeper 与安装 smoke 均通过
-- 0.7.3 的目标 tag `v0.7.3` 仅在 exact release commit 的正式门禁完成后创建。
+- 当前稳定版本：0.7.3（Build 129），Apple Silicon / arm64 / macOS 12.0+
+- 最新公开公证 DMG：0.7.3（Build 129）；Developer ID、Apple Accepted、Staple、Gatekeeper 与安装 smoke 均通过
+- Tag `v0.7.3` 固定 exact release commit `55ffa9d55faced404b20034d7cfe5bcfbc1be581`。
 
 ## 概述
 
@@ -360,11 +360,11 @@ App 支持范围和 Managed Android Runtime 实机验证是两个不同结论：
 | macOS 12.0+ | Supported | Info.plist 和全部 Mach-O `minos` 由包体脚本验证 |
 | Intel Mac / Universal Binary | Unsupported | 当前只交付 arm64 |
 | 本地 Hardened Runtime 包 | Supported | ad-hoc 签名，仅主 App 使用开发期 Library Validation 例外 |
-| Developer ID 分发 | Supported | 0.6.1（Build 101）正式 DMG 使用 Developer ID Application 与 secure timestamp 签名，Hardened Runtime、嵌套签名和权限边界由发布门禁验证 |
-| Notarization / Staple / Gatekeeper | Supported | 0.6.1（Build 101）已取得 Apple notarization `Accepted`，并通过 staple、`stapler validate` 与 Gatekeeper |
+| Developer ID 分发 | Supported | 0.7.3（Build 129）正式 DMG 使用 Developer ID Application 与 secure timestamp 签名，Hardened Runtime、29 个嵌套 Mach-O 和权限边界由发布门禁验证 |
+| Notarization / Staple / Gatekeeper | Supported | 0.7.3（Build 129）已取得 Apple notarization `Accepted`，并通过 staple、`stapler validate`、Gatekeeper 与最终 DMG 安装 smoke |
 | 0.6.0（Build 100）正式发布 | Supported | DMG、内部 ZIP、源码、四份 SBOM、Notices 和 APK 由外层 manifest/SHA256SUMS 绑定到 tag `v0.6.0` 指向的 exact commit |
 | 0.6.1（Build 101）正式发布 | Supported | 1060 项自动测试通过，9 项条件测试跳过；tag `v0.6.1` 固定提交 `25155f52fb8c416f3245c9a829a93175dec9857b`；正式 DMG 独立完成公证、Gatekeeper 与安装 smoke |
-| 0.7.3（Build 129）发布候选 | Pending formal distribution | 本地自动测试、静态检查和 Release 包结果见发布就绪记录；尚未创建 tag、签名、公证或上传 |
+| 0.7.3（Build 129）正式发布 | Supported | 自动测试与静态检查通过；tag `v0.7.3` 固定 `55ffa9d55faced404b20034d7cfe5bcfbc1be581`；Developer ID、公证、Staple、Gatekeeper、安装 smoke 与 15 个公开资产复核通过，详见最终验证记录 |
 | App Sandbox | Not Applicable | 当前为 Developer ID 外部分发目标；Sandbox 与 Hardened Runtime 是不同边界 |
 
 ## 明确不提供

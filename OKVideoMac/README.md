@@ -2,7 +2,7 @@
 
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于
 原生 Xtream、M3U/XMLTV、配置格式和运行时，而不是简单以 TVBox、FongMi、MiraPlay 或 CatPawOpen
-等生态名称判断。最新稳定版本为 **0.6.1（Build 101）**，支持
+等生态名称判断。最新稳定版本为 **0.7.3（Build 129）**，支持
 **arm64**，最低系统为 **macOS 12.0**。公开二进制通过 Developer ID 签名、Apple 公证、
 Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
@@ -11,9 +11,9 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
 ## 当前版本
 
-- 当前发布候选：0.7.3（Build 129）
-- 目标 tag：`v0.7.3`；只有 exact release commit 的正式分发门禁全部通过后才创建。
-- 预期 source release index：`OKVideoMac-0.7.3-build129-SOURCE_RELEASE_INDEX.json`。
+- 当前稳定版本：0.7.3（Build 129）
+- Tag：`v0.7.3`，固定 exact release commit `55ffa9d55faced404b20034d7cfe5bcfbc1be581`。
+- Source release index：`OKVideoMac-0.7.3-build129-SOURCE_RELEASE_INDEX.json`。
 - 最低系统：macOS 12.0
 - 支持架构：Apple Silicon / arm64
 - 播放历史与收藏保留配置、站点和稳定媒体身份；旧记录经过迁移后仍可准确恢复，
@@ -27,13 +27,12 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 - 搜索框有文字时第一次 Esc 只清空并保持焦点，空框再次 Esc 才退出搜索
 - 0.6.0 历史另行执行的 4 项真实 Android 生命周期测试与 API 35 隔离矩阵通过；
   本轮正式收口不把这些历史实机结果冒充为重跑结果
-- 0.7.3 的全量自动测试、静态检查和本地 Release 包体验证结果记录在
-  [发布就绪记录](../Docs/RELEASE_READINESS_0.7.3.md)
-- 对外分发：0.6.1 Build 101 已完成 Developer ID signing、Apple notarization（`Accepted`）、
-  staple、`stapler validate`、Gatekeeper 和 DMG 安装 smoke 验收；签名使用临时专用
-  keychain，结束后已删除并恢复原 search list。详见[验证记录](../Docs/RELEASE_VALIDATION_0.6.1.md)
+- 0.7.3 的发布前测试与冻结结果记录在[发布就绪记录](../Docs/RELEASE_READINESS_0.7.3.md)，
+  正式签名、公证、资产与安装验证记录在[最终验证记录](../Docs/RELEASE_VALIDATION_0.7.3.md)
+- 对外分发：0.7.3 Build 129 已完成 Developer ID signing、Apple notarization（`Accepted`）、
+  staple、`stapler validate`、Gatekeeper、DMG 安装 smoke 和 15 个公开资产复核。
 
-## 0.7.3 发布候选
+## 0.7.3 新增内容
 
 - XMLTV 和 Native Xtream 直播支持原生完整节目单，包括日期导航、回到当前时刻、
   固定时间比例、虚拟化频道行和节目详情；Native Xtream 短 EPG 已进入支持范围。
@@ -45,8 +44,8 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
   Native Xtream 媒体遵循系统代理，并改进音量记忆、全屏比例与退出全屏恢复。
 - 点播、直播、历史和收藏统一原生悬浮与选中反馈；只有有内容的列表行显示分割线。
 
-详见 [0.7.3 发布说明](../Docs/RELEASE_NOTES_0.7.3.md)。在 Developer ID、Apple
-公证、Staple、Gatekeeper 和安装 smoke 门禁完成前，最新公开稳定版仍为 0.6.1。
+详见 [0.7.3 发布说明](../Docs/RELEASE_NOTES_0.7.3.md)和
+[最终验证记录](../Docs/RELEASE_VALIDATION_0.7.3.md)。
 
 ## 0.6.1 新增内容
 
@@ -135,22 +134,23 @@ Android Compatibility 分类显示组件、缓存、用户数据和备份，并�
 
 ## 安装
 
-最新正式版本为 0.6.1（Build 101），已完成 Apple 公证。安装步骤：
+最新正式版本为 0.7.3（Build 129），已完成 Apple 公证。安装步骤：
 
-1. 只从本仓库 [v0.6.1 GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.6.1) 下载 macOS arm64 发布包；
-2. 打开 `OKVideoMac-0.6.1.dmg`；
+1. 只从本仓库 [v0.7.3 GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.7.3) 下载 macOS arm64 发布包；
+2. 打开 `OKVideoMac-0.7.3.dmg`；
 3. 将 `OKVideoMac.app` 移入 `/Applications`；
 4. 从 Applications 或 Finder 正常启动。
 
 不要使用来源不明或无法与本仓库发布哈希对应的第三方二进制。
 
-0.6.1（Build 101）的 DMG 与 Source Release 绑定到 tag `v0.6.1` 指向的 exact
-commit。最终公证并 Staple 后的 DMG SHA-256 由 GitHub Release 同名 `.sha256`
-文件提供。
+0.7.3（Build 129）的 DMG 与 Source Release 绑定到 tag `v0.7.3` 指向的 exact
+commit `55ffa9d55faced404b20034d7cfe5bcfbc1be581`。最终公证并 Staple 后的 DMG
+SHA-256 为 `9cf6c79f9c6d4a8bc7e37e72612e3debc98ca22ffffc3e5e9084c61efe42dbfc`，
+GitHub Release 同名 `.sha256` 文件提供独立校验值。
 
 ### Gatekeeper 与 macOS 安全
 
-0.6.1（Build 101）正式 DMG 使用 Developer ID Application: Yao Lin
+0.7.3（Build 129）正式 DMG 使用 Developer ID Application: Yao Lin
 （KGG363ABK9）签名，启用 Hardened Runtime，并通过 Apple notarization、staple
 和 Gatekeeper 验证。安装和运行不需要关闭任何 macOS 安全机制。
 
@@ -285,27 +285,27 @@ Git tag 指向的 exact release commit 才是项目源码基准；不要把移�
 `master` 或 `latest` 当作对应源码。正式 Release 应同时提供并由统一
 `SHA256SUMS` 绑定：
 
-- source release index：`OKVideoMac-0.6.1-build101-SOURCE_RELEASE_INDEX.json`；
+- source release index：`OKVideoMac-0.7.3-build129-SOURCE_RELEASE_INDEX.json`；
 - binary-to-source mapping：
   [`Docs/BINARY_SOURCE_MAPPING.md`](../Docs/BINARY_SOURCE_MAPPING.md)；
 - binary/source manifest：
-  `OKVideoMac-0.6.1-build101-SOURCE_RELEASE_MANIFEST.json`；
-- hashes：`OKVideoMac-0.6.1-build101-SHA256SUMS`；
+  `OKVideoMac-0.7.3-build129-SOURCE_RELEASE_MANIFEST.json`；
+- hashes：`OKVideoMac-0.7.3-build129-SHA256SUMS`；
 - macOS SPDX / CycloneDX：`OKVideoMac-macOS.spdx.json`、
   `OKVideoMac-macOS.cdx.json`；
 - Android SPDX / CycloneDX：`OKVideoMac-Android.spdx.json`、
   `OKVideoMac-Android.cdx.json`；
-- exact APK：`OKVideoMac-0.6.1-AndroidDexBridge-release.apk`；
-- exact project source：`OKVideoMac-0.6.1-build101-source.tar.gz`；
+- exact APK：`OKVideoMac-0.7.3-AndroidDexBridge-release.apk`；
+- exact project source：`OKVideoMac-0.7.3-build129-source.tar.gz`；
 - third-party source package：
-  `OKVideoMac-0.6.1-build101-third-party-source.tar.gz`；
-- license package：`OKVideoMac-0.6.1-build101-licenses.tar.gz`；
-- macOS artifact：`OKVideoMac-0.6.1.dmg`。
+  `OKVideoMac-0.7.3-build129-third-party-source.tar.gz`；
+- license package：`OKVideoMac-0.7.3-build129-licenses.tar.gz`；
+- macOS artifact：`OKVideoMac-0.7.3.dmg`。
 
-Tag `v0.6.1` 在全部正式分发门禁通过后创建，固定提交
-`25155f52fb8c416f3245c9a829a93175dec9857b`。后续文档更新不改变已公证二进制、
+Tag `v0.7.3` 在全部正式分发门禁通过后创建，固定提交
+`55ffa9d55faced404b20034d7cfe5bcfbc1be581`。后续文档更新不改变已公证二进制、
 原始源码/发布说明快照及其哈希。
-0.6.1 Build 101 文件清单与生成规则见
+0.7.3 Build 129 文件清单与生成规则见
 [`Docs/SOURCE_RELEASE_PROCESS.md`](../Docs/SOURCE_RELEASE_PROCESS.md)。Build 62/63
 发布准备阶段的历史工程状态保留在
 [Historical Build 62 Release Readiness Record](../Docs/IMMUTABLE_RELEASE_READINESS.md)。

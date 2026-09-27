@@ -13,8 +13,8 @@
 使用 Swift 和 SwiftUI/AppKit 构建。Android 是部分 Java/Dex Provider 按需使用的
 可选兼容层。
 
-当前发布候选为 **0.7.3（Build 129）**。下方仍列出最近一个已完成 Apple 公证的
-稳定版本。
+最新稳定版本为 **0.7.3（Build 129）**，已完成 Developer ID 签名和 Apple 公证，
+并从 `v0.7.3` 固定的 exact release commit 分发。
 
 **原生 macOS · Xtream · IPTV/点播 · M3U/XMLTV · libmpv · 多 Provider 搜索 ·
 QuickJS/Node Spider**
@@ -23,11 +23,11 @@ QuickJS/Node Spider**
 
 ### [下载最新稳定版本 →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-最新稳定版本为 **0.6.1（Build 101）** · macOS 12.0+ · 仅支持 Apple Silicon
-（`arm64`）。本次补丁增加 Android 组件存储管理与卸载。
+最新稳定版本为 **0.7.3（Build 129）** · macOS 12.0+ · 仅支持 Apple Silicon
+（`arm64`）。
 
 下载已完成 Developer ID 签名和 Apple 公证的
-[v0.6.1 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.6.1)。
+[v0.7.3 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.7.3)。
 本版本已通过 Staple、Gatekeeper 评估和安装 smoke test。
 
 打开 DMG，将 `OKVideoMac.app` 拖入“应用程序”即可。无需关闭 Gatekeeper 或 SIP。
@@ -36,7 +36,7 @@ QuickJS/Node Spider**
 > OKVideoMac 是播放器与 Provider 客户端，不内置第三方影视源、账号、Cookie、
 > 解析服务或 DRM 密钥。
 
-## 0.7.3 发布候选
+## 0.7.3 新增内容
 
 - **原生完整节目单：** 支持有界加载 XMLTV 与 Native Xtream 节目数据，提供日期导航、
   回到当前时刻、虚拟化频道行和节目详情。
@@ -49,8 +49,8 @@ QuickJS/Node Spider**
 - **界面统一：** 点播、直播、历史和收藏统一原生悬浮与选中反馈；有内容的列表保留
   行分割线，空白区域不再出现网格线。
 
-该源码候选尚未替代已公证的 0.6.1 下载。范围与限制见
-[0.7.3 发布说明](Docs/RELEASE_NOTES_0.7.3.md)。
+范围、完整性证据与已知限制见 [0.7.3 发布说明](Docs/RELEASE_NOTES_0.7.3.md)和
+[最终验证记录](Docs/RELEASE_VALIDATION_0.7.3.md)。
 
 ## 0.6.1 新增内容
 
@@ -256,12 +256,13 @@ Managed Runtime 安装与 Android Emulator Session 分开；安装和 Session �
 
 ## 发布完整性
 
-0.6.1 / Build 101 DMG 已按 [DMG 发布流程](Docs/DMG_RELEASE_PROCESS.md)通过 Release
+0.7.3 / Build 129 DMG 已按 [DMG 发布流程](Docs/DMG_RELEASE_PROCESS.md)通过 Release
 打包、Developer ID 签名、Apple 公证（`Accepted`）、Staple、Gatekeeper 和安装 smoke test。
-Tag `v0.6.1` 固定发布提交 `25155f52fb8c416f3245c9a829a93175dec9857b`，下载随附对应
-源码归档、SBOM 和校验和。后续文档更新不改变已签名二进制或其源码快照。
-已有 v0.6.0 发布和资产保持不变。详见
-[0.6.1 发布说明](Docs/RELEASE_NOTES_0.6.1.md)与[源码发布流程](Docs/SOURCE_RELEASE_PROCESS.md)。
+Tag `v0.7.3` 固定发布提交 `55ffa9d55faced404b20034d7cfe5bcfbc1be581`；最终 DMG
+SHA-256 为 `9cf6c79f9c6d4a8bc7e37e72612e3debc98ca22ffffc3e5e9084c61efe42dbfc`。
+下载随附对应源码归档、SBOM 和校验和。后续文档更新不改变已签名二进制、Tag 或源码快照。
+详见[最终验证记录](Docs/RELEASE_VALIDATION_0.7.3.md)、
+[0.7.3 发布说明](Docs/RELEASE_NOTES_0.7.3.md)与[源码发布流程](Docs/SOURCE_RELEASE_PROCESS.md)。
 
 ## 文档
 
@@ -272,6 +273,7 @@ Tag `v0.6.1` 固定发布提交 `25155f52fb8c416f3245c9a829a93175dec9857b`，下
 - [架构说明](OKVideoMac/macOS/OKVideoMac/Docs/ARCHITECTURE.md)
 - [Android 存储与卸载](Docs/ANDROID_MANAGED_UNINSTALL.md)
 - [0.7.3 发布说明](Docs/RELEASE_NOTES_0.7.3.md)
+- [0.7.3 最终验证](Docs/RELEASE_VALIDATION_0.7.3.md)
 - [0.6.1 发布说明](Docs/RELEASE_NOTES_0.6.1.md)
 - [更新日志](CHANGELOG.md)
 - [安全政策](SECURITY.md)

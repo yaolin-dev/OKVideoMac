@@ -2,6 +2,10 @@
 
 日期：2026-09-27
 
+> 本文是创建 exact release commit 前冻结的发布前审计快照，保留当时的分支、工作区
+> 和候选结论，不随发布后事实改写。0.7.3 已正式发布；签名、公证、Tag、GitHub
+> Release、最终资产与安装结果见[最终验证记录](RELEASE_VALIDATION_0.7.3.md)。
+
 ## 基线与候选
 
 - 最近一次正式 GitHub Release / Tag：`v0.6.1`，Build 101，提交
