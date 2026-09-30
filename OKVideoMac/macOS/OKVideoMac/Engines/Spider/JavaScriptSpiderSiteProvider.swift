@@ -2089,6 +2089,11 @@ struct AndroidRuntimeDiagnosticSnapshot: Codable, Equatable, Sendable {
     let stageHistory: [AndroidRuntimeStageRecord]
     let timeline: [AndroidRuntimeEventRecord]
     let recentCommands: [AndroidRuntimeCommandRecord]
+    var emulatorProcessPresent: Bool? = nil
+    var recordedADBServerPort: Int? = nil
+    var selectedADBServerPort: Int? = nil
+    var adbBindingMatches: Bool? = nil
+    var adbObservationsAreCached: Bool? = nil
 }
 
 struct AndroidRuntimeFailureError: LocalizedError, Sendable {
@@ -7011,137 +7016,26 @@ actor AndroidDexBridgeRuntime {
             lastObservedIdentity = identity
         }
 
-        var adbVersion: String?
-        var emulatorVersion: String?
-        var deviceState: String?
-        var androidCPUABI: String?
-        var androidSDKLevel: String?
-        var androidRelease: String?
-        var processRunning = false
-        var forwardPresent: Bool?
-        var forwardOwned: Bool?
-
-        if let toolchain {
-            try? ensureADBServer(toolchain)
-            adbVersion = try? runADB(
-                toolchain,
-                ["version"],
-                category: "diagnostic.adb.version",
-                timeout: 5
-            )
-            emulatorVersion = try? run(
-                toolchain.emulator,
-                ["-version"],
-                category: "diagnostic.emulator.version",
-                timeout: 5
-            )
-            if let devices = try? runADB(
-                toolchain,
-                ["devices", "-l"],
-                category: "diagnostic.adb.devices",
-                timeout: 5
-            ) {
-                lastADBDevices = Self.sanitizedADBDevices(
-                    devices,
-                    ownedSerial: identity?.serial
-                )
-                if let serial = identity?.serial {
-                    deviceState = Self.adbTargetState(
-                        in: devices,
-                        serial: serial
-                    ).rawValue
-                }
-            }
-        }
-
+        // Export is observational. ADB clients can automatically start a
+        // server even for `devices`/`get-state`; use lifecycle observations
+        // instead of changing the runtime while collecting a failure report.
+        let adbVersion = lastADBServerDiagnostic?.version
+        let emulatorVersion: String? = nil
+        let deviceState = adbWaitTimeline.last?.targetState
+        let androidCPUABI: String? = nil
+        let androidSDKLevel: String? = nil
+        let androidRelease: String? = nil
+        let processPresent = identity.map {
+            processExecutablePath(pid: $0.pid) != nil
+        } ?? false
+        let processRunning: Bool
         if let identity, let toolchain {
-            processRunning = verifyProcessOwnership(
-                identity,
-                toolchain: toolchain
-            )
-            if let observedState = try? runADB(
-                toolchain,
-                ["-s", identity.serial, "get-state"],
-                category: "diagnostic.adb.get_state",
-                timeout: 5
-            ).trimmingCharacters(in: .whitespacesAndNewlines),
-               !observedState.isEmpty {
-                deviceState = observedState
-            }
-            if verifyOwnership(identity, toolchain: toolchain) {
-                if let boot = try? runVerifiedADB(
-                    identity,
-                    toolchain: toolchain,
-                    ["shell", "getprop", "sys.boot_completed"],
-                    category: "diagnostic.android.boot_completed",
-                    timeout: 5
-                ) {
-                    lastBootCompleted = boot.trimmingCharacters(
-                        in: .whitespacesAndNewlines
-                    ) == "1"
-                }
-                androidCPUABI = try? runVerifiedADB(
-                    identity,
-                    toolchain: toolchain,
-                    ["shell", "getprop", "ro.product.cpu.abi"],
-                    category: "diagnostic.android.cpu_abi",
-                    timeout: 5
-                ).trimmingCharacters(in: .whitespacesAndNewlines)
-                androidSDKLevel = try? runVerifiedADB(
-                    identity,
-                    toolchain: toolchain,
-                    ["shell", "getprop", "ro.build.version.sdk"],
-                    category: "diagnostic.android.sdk_level",
-                    timeout: 5
-                ).trimmingCharacters(in: .whitespacesAndNewlines)
-                androidRelease = try? runVerifiedADB(
-                    identity,
-                    toolchain: toolchain,
-                    ["shell", "getprop", "ro.build.version.release"],
-                    category: "diagnostic.android.release",
-                    timeout: 5
-                ).trimmingCharacters(in: .whitespacesAndNewlines)
-                _ = observeNetwork(identity, toolchain: toolchain)
-                let installed = installedBridgeVersionCode(
-                    identity,
-                    toolchain: toolchain
-                )
-                lastBridgeVersionCode = installed
-                lastBridgePackageInstalled = installed != nil
-                if let bridgePID = try? runVerifiedADB(
-                    identity,
-                    toolchain: toolchain,
-                    ["shell", "pidof", "com.okvideomac.dexbridge"],
-                    category: "diagnostic.bridge.pidof",
-                    timeout: 5
-                ) {
-                    lastBridgeProcessRunning = !bridgePID.trimmingCharacters(
-                        in: .whitespacesAndNewlines
-                    ).isEmpty
-                } else {
-                    lastBridgeProcessRunning = false
-                }
-                if let forwards = try? runVerifiedADB(
-                    identity,
-                    toolchain: toolchain,
-                    ["forward", "--list"],
-                    category: "diagnostic.adb.forwards",
-                    timeout: 5
-                ) {
-                    lastADBForwards = Self.sanitizedADBForwards(
-                        forwards,
-                        ownedSerial: identity.serial
-                    )
-                    forwardPresent = Self.portForwardExists(
-                        listing: forwards,
-                        device: identity.serial,
-                        host: BridgeServerPort.host,
-                        guest: BridgeServerPort.guest
-                    )
-                    forwardOwned = forwardPresent
-                }
-            }
+            processRunning = verifyProcessOwnership(identity, toolchain: toolchain)
+        } else {
+            processRunning = false
         }
+        let forwardPresent: Bool? = nil
+        let forwardOwned: Bool? = nil
 
         let configurationURL = avdDirectory.appendingPathComponent(
             "config.ini"
@@ -7437,7 +7331,12 @@ actor AndroidDexBridgeRuntime {
             probeDuration: probeDuration,
             stageHistory: stageHistory,
             timeline: timeline,
-            recentCommands: recentCommands
+            recentCommands: recentCommands,
+            emulatorProcessPresent: processPresent,
+            recordedADBServerPort: identity?.adbServerPort,
+            selectedADBServerPort: privateADBServerPort,
+            adbBindingMatches: identity.map { $0.adbServerPort == privateADBServerPort },
+            adbObservationsAreCached: true
         )
     }
 
@@ -7835,10 +7734,8 @@ actor AndroidDexBridgeRuntime {
             }
             return
         }
-        identity = refreshedIdentityForCurrentSession(
-            identity,
-            toolchain: toolchain
-        )
+        // Preserve the original ADB binding. A stop must not adopt whichever
+        // daemon happens to be on the currently selected port.
         identity.terminationRequestedAt = Date()
         identity.terminationRequestReason = reason
         lastObservedIdentity = identity
@@ -8212,7 +8109,7 @@ actor AndroidDexBridgeRuntime {
                         )
                     }
                     try ensureADBServer(recordedToolchain)
-                    if try await retireLegacyADBServerRuntimeIfNeeded(
+                    if try await retireDisconnectedADBServerRuntimeIfNeeded(
                         recorded,
                         toolchain: recordedToolchain
                     ) {
@@ -11365,7 +11262,11 @@ actor AndroidDexBridgeRuntime {
         var occupied = Set<Int>()
         var reusable = Set<Int>()
         for port in Self.candidatePrivateADBServerPorts {
-            let pids = listeningProcessIDs(on: port)
+            guard let pids = listeningProcessIDs(on: port) else {
+                throw adbPrivateServerFailure(
+                    "无法确认私有 ADB 端口占用情况；保留当前运行记录，请重试"
+                )
+            }
             guard !pids.isEmpty else { continue }
             occupied.insert(port)
             if pids.count == 1,
@@ -11520,34 +11421,56 @@ actor AndroidDexBridgeRuntime {
         )
     }
 
+    // nil means the probe failed; only a successful empty result proves that
+    // a port is free. In particular, a timeout must never select a new port.
+    static func listenerPIDs(exitCode: Int32, stdout: String,
+                             stderr: String, timedOut: Bool) -> [Int32]? {
+        guard !timedOut else { return nil }
+        if exitCode == 1 && stdout.isEmpty && stderr.isEmpty { return [] }
+        guard exitCode == 0, stderr.isEmpty else { return nil }
+        let lines = stdout.split(whereSeparator: \.isNewline)
+        let pids = lines.filter { $0.first == "p" }.compactMap {
+            Int32($0.dropFirst())
+        }
+        guard !pids.isEmpty, pids.allSatisfy({ $0 > 0 }),
+              pids.count == lines.filter({ $0.first == "p" }).count else {
+            return nil
+        }
+        return Array(Set(pids)).sorted()
+    }
+
     private func listeningProcessIDs(
         on port: Int,
         timeout: TimeInterval = 5
-    ) -> [Int32] {
+    ) -> [Int32]? {
         let lsof = URL(fileURLWithPath: "/usr/sbin/lsof")
-        guard fileManager.isExecutableFile(atPath: lsof.path) else { return [] }
-        guard let output = try? run(
-            lsof,
-            ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-Fp"],
-            category: "adb.server.listener_identity",
-            timeout: timeout
-        ) else { return [] }
-        return Array(Set(output.split(whereSeparator: \.isNewline).compactMap {
-            line in
-            guard line.first == "p" else { return nil }
-            return Int32(line.dropFirst())
-        })).sorted()
+        guard fileManager.isExecutableFile(atPath: lsof.path) else { return nil }
+        do {
+            let output = try run(
+                lsof,
+                ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-Fp"],
+                category: "adb.server.listener_identity",
+                timeout: timeout
+            )
+            return Self.listenerPIDs(exitCode: 0, stdout: output,
+                                     stderr: "", timedOut: false)
+        } catch let error as AndroidToolCommandError {
+            return Self.listenerPIDs(exitCode: error.exitCode,
+                                     stdout: error.stdout, stderr: error.stderr,
+                                     timedOut: error.timedOut)
+        } catch {
+            return nil
+        }
     }
 
     private func adbServerDiagnostic(
         toolchain: AndroidToolchain,
         commandTimeout: TimeInterval = 5
     ) -> AndroidADBServerDiagnostic? {
-        let pids = listeningProcessIDs(
+        guard let pids = listeningProcessIDs(
             on: privateADBServerPort,
             timeout: min(1, commandTimeout)
-        )
-        guard pids.count == 1 else { return nil }
+        ), pids.count == 1 else { return nil }
         let pid = pids[0]
         let actualPath = processExecutablePath(pid: pid).map {
             URL(fileURLWithPath: $0).standardizedFileURL
@@ -11627,14 +11550,14 @@ actor AndroidDexBridgeRuntime {
         for _ in 0..<listenerAttempts where listeningProcessIDs(
             on: privateADBServerPort,
             timeout: listenerProbeTimeout
-        ).contains(current.pid ?? -1) {
+        )?.contains(current.pid ?? -1) == true {
             Thread.sleep(forTimeInterval: listenerPollInterval)
         }
         if let pid = current.pid,
            listeningProcessIDs(
                on: privateADBServerPort,
                timeout: listenerProbeTimeout
-           ).contains(pid),
+           )?.contains(pid) == true,
            processBirthIdentity(pid: pid)?.value == current.birthIdentity,
            processExecutablePath(pid: pid).map({
                URL(fileURLWithPath: $0).standardizedFileURL
@@ -12106,12 +12029,18 @@ actor AndroidDexBridgeRuntime {
         )
     }
 
-    private func retireLegacyADBServerRuntimeIfNeeded(
+    func retireDisconnectedADBServerRuntimeIfNeeded(
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain
     ) async throws -> Bool {
         guard identity.adbServerPort != privateADBServerPort,
-              processExecutablePath(pid: identity.pid) != nil else {
+              identity.systemBootIdentifier.map({
+                  Self.bootIdentifiersReferToSameBoot($0, currentBootIdentifier)
+              }) != false,
+              processExecutablePath(pid: identity.pid) != nil,
+              identity.pidBirthIdentity == nil
+                || processBirthIdentity(pid: identity.pid)?.value
+                    == identity.pidBirthIdentity else {
             return false
         }
         guard verifyStrictProcessOwnership(identity, toolchain: toolchain)
@@ -12121,19 +12050,19 @@ actor AndroidDexBridgeRuntime {
                     occurredAt: Date(),
                     stage: .locatingSDK,
                     category: .emulatorProcessMismatch,
-                    message: "旧 Runtime 未使用私有 ADB，且无法通过严格身份校验；未执行终止"
+                    message: "ADB 连接已变化，但无法严格确认旧 Emulator 身份；未执行终止"
                 )
             )
         }
         appendEvent(
             stage: .locatingSDK,
-            event: "legacyADBServerRuntimeMigrationStart",
-            detail: "retire owned pre-0.4.2 runtime"
+            event: "adbServerBindingRecoveryStart",
+            detail: "retire strictly owned Emulator after ADB binding change"
         )
         guard await cleanupFailedRuntime(
             identity,
             toolchain: toolchain,
-            reason: "privateADBServerMigration",
+            reason: "adbServerBindingRecovery",
             allowVerifiedSIGKILL: true
         ), await waitForEmulatorPortsToRelease(identity) else {
             throw AndroidRuntimeFailureError(
@@ -12148,7 +12077,7 @@ actor AndroidDexBridgeRuntime {
         try clearStalePrivateAVDLocksIfSafe(toolchain: toolchain)
         appendEvent(
             stage: .locatingSDK,
-            event: "legacyADBServerRuntimeMigrationEnd",
+            event: "adbServerBindingRecoveryEnd",
             detail: "private ADB relaunch permitted"
         )
         return true
@@ -12158,14 +12087,14 @@ actor AndroidDexBridgeRuntime {
         _ identity: AndroidRuntimeIdentity
     ) async -> Bool {
         for _ in 0..<40 {
-            if listeningProcessIDs(on: identity.consolePort).isEmpty,
-               listeningProcessIDs(on: identity.consolePort + 1).isEmpty {
+            if listeningProcessIDs(on: identity.consolePort)?.isEmpty == true,
+               listeningProcessIDs(on: identity.consolePort + 1)?.isEmpty == true {
                 return true
             }
             try? await Task.sleep(nanoseconds: 250_000_000)
         }
-        return listeningProcessIDs(on: identity.consolePort).isEmpty
-            && listeningProcessIDs(on: identity.consolePort + 1).isEmpty
+        return listeningProcessIDs(on: identity.consolePort)?.isEmpty == true
+            && listeningProcessIDs(on: identity.consolePort + 1)?.isEmpty == true
     }
 
     static func adbTargetState(
@@ -12350,8 +12279,6 @@ actor AndroidDexBridgeRuntime {
               identity.adbExecutable == nil
                 || identity.adbExecutable?.standardizedFileURL
                     == toolchain.adb.standardizedFileURL,
-              identity.adbServerPort == nil
-                || identity.adbServerPort == privateADBServerPort,
               let executablePath = processExecutablePath(pid: identity.pid)
         else { return false }
 
@@ -12404,7 +12331,6 @@ actor AndroidDexBridgeRuntime {
         var refreshed = identity
         refreshed.systemBootIdentifier = currentBootIdentifier
         refreshed.adbExecutable = toolchain.adb
-        refreshed.adbServerPort = privateADBServerPort
         if refreshed.gpuBackend == nil {
             refreshed.gpuBackend = preferredGPUBackend
         }
@@ -12444,12 +12370,35 @@ actor AndroidDexBridgeRuntime {
                 != .legacySkipAuthCompatibility
     }
 
+    private func ownsADBTransport(
+        _ identity: AndroidRuntimeIdentity,
+        toolchain: AndroidToolchain,
+        timeout: TimeInterval
+    ) -> Bool {
+        guard identity.adbServerPort == privateADBServerPort,
+              let pids = listeningProcessIDs(on: privateADBServerPort,
+                                              timeout: min(1, timeout)),
+              pids.count == 1,
+              let executable = processExecutablePath(pid: pids[0]) else {
+            return false
+        }
+        return Self.privateADBServerIdentityMatches(
+            listenerPID: pids[0],
+            listenerBirthIdentity: processBirthIdentity(pid: pids[0])?.value,
+            listenerExecutable: URL(fileURLWithPath: executable),
+            recordedPID: persistedADBServerPID,
+            recordedBirthIdentity: persistedADBServerBirthIdentity,
+            selectedADB: toolchain.adb
+        )
+    }
+
     private func verifyDeviceOwnership(
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain,
         timeout: TimeInterval = 30
     ) -> Bool {
-        guard let state = try? runADB(
+        guard ownsADBTransport(identity, toolchain: toolchain, timeout: timeout),
+              let state = try? runADB(
             toolchain,
             ["-s", identity.serial, "get-state"],
             timeout: timeout
@@ -12631,6 +12580,7 @@ actor AndroidDexBridgeRuntime {
         timeout: TimeInterval = 30
     ) -> Bool {
         guard let toolchain,
+              ownsADBTransport(identity, toolchain: toolchain, timeout: timeout),
               let state = try? runADB(
                 toolchain,
                 ["-s", identity.serial, "get-state"],
@@ -12798,23 +12748,21 @@ actor AndroidDexBridgeRuntime {
         )
         if !observation.deviceOwned {
             _ = Darwin.kill(identity.pid, SIGTERM)
-            let attempts = allowVerifiedSIGKILL ? 80 : 20
-            for _ in 0..<attempts {
-                if processExecutablePath(pid: identity.pid) == nil {
-                    clearRuntimeRecord()
-                    return true
-                }
-                try? await Task.sleep(nanoseconds: 250_000_000)
+            if await waitForOwnedProcessExit(
+                identity, timeout: allowVerifiedSIGKILL ? 20 : 5,
+                pollInterval: 0.25
+            ) {
+                clearRuntimeRecord()
+                return true
             }
             if allowVerifiedSIGKILL,
                verifyStrictProcessOwnership(identity, toolchain: toolchain) {
                 _ = Darwin.kill(identity.pid, SIGKILL)
-                for _ in 0..<20 {
-                    if processExecutablePath(pid: identity.pid) == nil {
-                        clearRuntimeRecord()
-                        return true
-                    }
-                    try? await Task.sleep(nanoseconds: 250_000_000)
+                if await waitForOwnedProcessExit(
+                    identity, timeout: 5, pollInterval: 0.25
+                ) {
+                    clearRuntimeRecord()
+                    return true
                 }
             }
             return false

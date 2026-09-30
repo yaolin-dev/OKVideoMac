@@ -32905,3 +32905,245 @@ final class Danmaku127SessionTests: XCTestCase {
         c.endSession()
     }
 }
+
+final class AndroidADBRecoveryRegressionTests: XCTestCase {
+    func testPortChangeStopsOnlyStrictlyOwnedProcessWithoutADB() async throws {
+        let fixture = try ProcessFixture()
+        defer { fixture.cleanup() }
+        let runtime = fixture.runtime()
+        await runtime.stop()
+        let snapshot = await runtime.diagnosticSnapshot()
+        XCTAssertFalse(fixture.process.isRunning)
+        XCTAssertEqual(snapshot.shutdownMechanism, .sigterm)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.manifest.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.adbMarker.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.userdata.path))
+    }
+
+    func testStartupRetiresDisconnectedInstanceAndPreservesUserData() async throws {
+        // Do not use a real user's occupied emulator console ports.
+        let probe = Process()
+        probe.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        probe.arguments = ["-nP", "-iTCP:5682-5683", "-sTCP:LISTEN", "-Fp"]
+        probe.standardOutput = FileHandle.nullDevice
+        try probe.run()
+        probe.waitUntilExit()
+        guard probe.terminationStatus == 1 else {
+            throw XCTSkip("Fixture console ports are unavailable")
+        }
+        let fixture = try ProcessFixture()
+        defer { fixture.cleanup() }
+        let runtime = fixture.runtime()
+        let recovered = try await runtime.retireDisconnectedADBServerRuntimeIfNeeded(
+            fixture.identity, toolchain: AndroidToolchain(
+                sdkRoot: fixture.sdk,
+                adb: fixture.sdk.appendingPathComponent("platform-tools/adb"),
+                emulator: fixture.sdk.appendingPathComponent("emulator/emulator"),
+                avdManager: nil))
+        XCTAssertTrue(recovered)
+        XCTAssertFalse(fixture.process.isRunning)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.manifest.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.adbMarker.path))
+        XCTAssertEqual(try String(contentsOf: fixture.userdata), "preserve-user-data")
+    }
+
+    func testSamePortWithoutServerOwnershipUsesProcessOnlyStop() async throws {
+        let fixture = try ProcessFixture()
+        defer { fixture.cleanup() }
+        fixture.identity.adbServerPort = 50_438
+        try fixture.saveIdentity()
+        let runtime = fixture.runtime()
+        await runtime.stop()
+        let snapshot = await runtime.diagnosticSnapshot()
+        XCTAssertFalse(fixture.process.isRunning)
+        XCTAssertEqual(snapshot.shutdownMechanism, .sigterm)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.adbMarker.path))
+    }
+
+    func testChangedBirthIdentityNeverSignalsReusedPID() async throws {
+        let fixture = try ProcessFixture()
+        defer { fixture.cleanup() }
+        fixture.identity.pidBirthIdentity = "different-process-birth"
+        try fixture.saveIdentity()
+        let runtime = fixture.runtime()
+        await runtime.stop()
+        let snapshot = await runtime.diagnosticSnapshot()
+        XCTAssertTrue(fixture.process.isRunning)
+        XCTAssertEqual(snapshot.shutdownMechanism, .alreadyExited)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.adbMarker.path))
+    }
+
+    func testProcessWithoutPrivateAVDProofIsNotTerminated() async throws {
+        let fixture = try ProcessFixture(openPrivateAVD: false)
+        defer { fixture.cleanup() }
+        let runtime = fixture.runtime()
+        await runtime.stop()
+        let snapshot = await runtime.diagnosticSnapshot()
+        XCTAssertTrue(fixture.process.isRunning)
+        XCTAssertEqual(snapshot.shutdownMechanism, .refusedOwnershipMismatch)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.manifest.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.adbMarker.path))
+    }
+
+    func testWrongExecutableIsNotTerminatedAfterPortChange() async throws {
+        let fixture = try ProcessFixture(wrongExecutable: true)
+        defer { fixture.cleanup() }
+        let runtime = fixture.runtime()
+        await runtime.stop()
+        let snapshot = await runtime.diagnosticSnapshot()
+        XCTAssertTrue(fixture.process.isRunning)
+        XCTAssertEqual(snapshot.shutdownMechanism, .refusedOwnershipMismatch)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.manifest.path))
+    }
+
+    func testDiagnosticsPreserveBindingAndNeverExecuteADB() async throws {
+        let fixture = try ProcessFixture()
+        defer { fixture.cleanup() }
+        let before = try Data(contentsOf: fixture.manifest)
+        let profileBefore = try Data(contentsOf: fixture.profile)
+        let runtime = fixture.runtime()
+        for _ in 0..<2 {
+            let snapshot = await runtime.diagnosticSnapshot()
+            XCTAssertTrue(snapshot.emulatorProcessRunning)
+            XCTAssertEqual(snapshot.emulatorProcessPresent, true)
+            XCTAssertEqual(snapshot.recordedADBServerPort, 50_437)
+            XCTAssertEqual(snapshot.selectedADBServerPort, 50_438)
+            XCTAssertEqual(snapshot.adbBindingMatches, false)
+            XCTAssertEqual(snapshot.adbObservationsAreCached, true)
+        }
+        XCTAssertEqual(try Data(contentsOf: fixture.manifest), before)
+        XCTAssertEqual(try Data(contentsOf: fixture.profile), profileBefore)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.adbMarker.path))
+        XCTAssertTrue(fixture.process.isRunning)
+    }
+
+    func testListenerProbeSeparatesVacantPortsFromUnknownResults() {
+        XCTAssertEqual(AndroidDexBridgeRuntime.listenerPIDs(
+            exitCode: 1, stdout: "", stderr: "", timedOut: false), [])
+        XCTAssertEqual(AndroidDexBridgeRuntime.listenerPIDs(
+            exitCode: 0, stdout: "p42\nf4\np42\nf5\n", stderr: "", timedOut: false), [42])
+        for result: (Int32, String, String, Bool) in [
+            (1, "", "", true), (1, "", "permission denied", false),
+            (0, "", "", false), (0, "pinvalid\n", "", false),
+            (0, "p42\n", "partial result", false), (2, "", "", false)
+        ] {
+            XCTAssertNil(AndroidDexBridgeRuntime.listenerPIDs(
+                exitCode: result.0, stdout: result.1,
+                stderr: result.2, timedOut: result.3))
+        }
+    }
+
+    // An isolated native process exercises the production PID/birth/executable/
+    // argv/open-file checks and real signals. It is not an Android boot test.
+    private final class ProcessFixture {
+        let root: URL
+        let sdk: URL
+        let support: URL
+        let manifest: URL
+        let profile: URL
+        let userdata: URL
+        let adbMarker: URL
+        let process = Process()
+        var identity: AndroidRuntimeIdentity!
+
+        init(openPrivateAVD: Bool = true, wrongExecutable: Bool = false) throws {
+            let fm = FileManager.default
+            root = fm.temporaryDirectory.appendingPathComponent("adb-recovery-\(UUID())")
+                .resolvingSymlinksInPath()
+            sdk = root.appendingPathComponent("sdk")
+            support = root.appendingPathComponent("support")
+            let runtime = support.appendingPathComponent("AndroidRuntime")
+            let avd = runtime.appendingPathComponent("avd/OKVideoMac_Runtime.avd")
+            manifest = runtime.appendingPathComponent("runtime-manifest.json")
+            profile = runtime.appendingPathComponent("runtime-profile.json")
+            userdata = avd.appendingPathComponent("userdata-qemu.img")
+            adbMarker = root.appendingPathComponent("adb-was-executed")
+            let emulator = sdk.appendingPathComponent("emulator/emulator")
+            let adb = sdk.appendingPathComponent("platform-tools/adb")
+            for directory in [avd, emulator.deletingLastPathComponent(), adb.deletingLastPathComponent()] {
+                try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+            }
+            try Data("preserve-user-data".utf8).write(to: userdata)
+            let source = root.appendingPathComponent("process.c")
+            try """
+            #include <stdio.h>
+            #include <unistd.h>
+            int main(int argc, char **argv) {
+                if (argc < 7) return 2;
+                FILE *held = fopen(argv[5], "r");
+                if (!held) return 3;
+                FILE *ready = fopen(argv[6], "w");
+                if (!ready) return 4;
+                fclose(ready);
+                for (;;) pause();
+            }
+            """.write(to: source, atomically: true, encoding: .utf8)
+            let compiler = Process()
+            compiler.executableURL = URL(fileURLWithPath: "/usr/bin/clang")
+            compiler.arguments = [source.path, "-o", emulator.path]
+            try compiler.run()
+            compiler.waitUntilExit()
+            guard compiler.terminationStatus == 0 else {
+                throw NSError(domain: "RecoveryFixture", code: 1)
+            }
+            // Any attempted ADB command leaves evidence, including `version`.
+            try "#!/bin/sh\n: > '\(adbMarker.path)'\nexit 1\n"
+                .write(to: adb, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: adb.path)
+            let ready = root.appendingPathComponent("ready")
+            if wrongExecutable {
+                let other = root.appendingPathComponent("unrelated-process")
+                try fm.copyItem(at: emulator, to: other)
+                process.executableURL = other
+            } else {
+                process.executableURL = emulator
+            }
+            process.arguments = ["-avd", "OKVideoMac_Runtime", "-port", "5682",
+                                 openPrivateAVD ? userdata.path : "/dev/null", ready.path]
+            try process.run()
+            for _ in 0..<100 where !fm.fileExists(atPath: ready.path) {
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+            guard fm.fileExists(atPath: ready.path) else {
+                process.terminate()
+                throw NSError(domain: "RecoveryFixture", code: 2)
+            }
+            var info = proc_bsdinfo()
+            let size = Int32(MemoryLayout.size(ofValue: info))
+            guard proc_pidinfo(process.processIdentifier, PROC_PIDTBSDINFO, 0, &info, size) == size else {
+                process.terminate()
+                throw NSError(domain: "RecoveryFixture", code: 3)
+            }
+            identity = AndroidRuntimeIdentity(
+                schema: 1, generation: UUID().uuidString,
+                systemBootIdentifier: AndroidDexBridgeRuntime.systemBootIdentifier(),
+                sdkRoot: sdk, emulatorExecutable: emulator, adbExecutable: adb,
+                adbServerPort: 50_437,
+                avdName: "OKVideoMac_Runtime", avdDirectory: avd,
+                pid: process.processIdentifier,
+                pidBirthIdentity: "\(info.pbi_start_tvsec):\(info.pbi_start_tvusec)",
+                consolePort: 5_682, serial: "emulator-5682",
+                forwards: [
+                    AndroidPortForwardIdentity(hostPort: 19978, devicePort: 9978),
+                    AndroidPortForwardIdentity(hostPort: 18096, devicePort: 8096),
+                    AndroidPortForwardIdentity(hostPort: 16677, devicePort: 6677)
+                ], launchedAt: Date())
+            try saveIdentity()
+            try Data("""
+            {"schema":2,"privateADBServerPort":50438,"preferredGPUBackend":"host","updatedAt":"2026-09-30T00:00:00Z"}
+            """.utf8).write(to: profile)
+        }
+
+        func runtime() -> AndroidDexBridgeRuntime {
+            AndroidDexBridgeRuntime(applicationSupportDirectory: support,
+                                    environment: ["ANDROID_HOME": sdk.path])
+        }
+        func saveIdentity() throws {
+            try JSONEncoder().encode(identity).write(to: manifest)
+        }
+        func cleanup() {
+            if process.isRunning { process.terminate(); process.waitUntilExit() }
+            try? FileManager.default.removeItem(at: root)
+        }
+    }
+}
