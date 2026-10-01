@@ -135,6 +135,34 @@ final class BridgeDialogWindowTracker {
         }
     }
 
+    /** Terminal cleanup runs on main, before the Activity loses its window token. */
+    void dismissOwnedWindows() {
+        Activity activity = owner.get();
+        if (activity == null || Looper.myLooper() != Looper.getMainLooper()) return;
+        try {
+            View activityRoot = activity.getWindow().getDecorView();
+            IBinder token = activityRoot.getApplicationWindowToken();
+            for (View root : new ArrayList<>(windowRoots())) {
+                if (root == null || root == activityRoot || !ownedBy(activity, token, root)) continue;
+                // Dialog is the Window.Callback; cancel invokes provider cleanup
+                // (QR polling, etc.) as well as removing the window.
+                try {
+                    Field field = root.getClass().getDeclaredField("mWindow");
+                    field.setAccessible(true);
+                    Object window = field.get(root);
+                    if (window instanceof android.view.Window
+                            && ((android.view.Window) window).getCallback() instanceof android.app.Dialog) {
+                        ((android.app.Dialog) ((android.view.Window) window).getCallback()).cancel();
+                        continue;
+                    }
+                } catch (ReflectiveOperationException ignored) { }
+                activity.getWindowManager().removeViewImmediate(root);
+            }
+        } catch (Throwable error) {
+            android.util.Log.w("OKVideoBridge", "Could not release all request-owned windows", error);
+        }
+    }
+
     synchronized void release() {
         released = true;
         windowIDs.clear();

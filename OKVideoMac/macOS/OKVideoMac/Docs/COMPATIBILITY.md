@@ -1,10 +1,10 @@
 # Compatibility
 
-- 对照版本：0.7.3（Build 129）
-- 最近更新：2026-09-27
-- 当前发布候选：0.7.3（Build 129），Apple Silicon / arm64 / macOS 12.0+
-- 最新公开公证 DMG：0.6.1（Build 101）；Developer ID、Apple Accepted、Staple、Gatekeeper 与安装 smoke 均通过
-- 0.7.3 的目标 tag `v0.7.3` 仅在 exact release commit 的正式门禁完成后创建。
+- 对照版本：0.8.0（Build 130）
+- 最近更新：2026-10-01
+- 当前发布候选：0.8.0（Build 130），Apple Silicon / arm64 / macOS 12.0+
+- 最新公开公证 DMG：0.7.3（Build 129）；Developer ID、Apple Accepted、Staple、Gatekeeper 与安装 smoke 均通过
+- 0.8.0 的目标 tag `v0.8.0` 仅在 exact release commit 的正式门禁完成后创建。
 
 ## 概述
 
@@ -115,6 +115,23 @@ Spider 返回的清晰度顺序或显式位置，不按“原画”名称擅自�
 这是受支持 CatVod/CatPaw 风格 Node 视频接口的一个兼容子集，不表示支持任意 Node
 Spider、完整 CatPawOpen 应用协议或其他内容模块。远程 bundle 具有 Node 完整能力，
 只应加载可信配置。
+
+### 0.8.0 的搜索、连播与配置边界
+
+| 能力 | 状态 | 证据与限制 |
+| --- | --- | --- |
+| CatPaw 搜索复用 | Selected | 30 秒有界内存缓存、同请求复用、Node 尝试次序调整；并发仍为 20，所有已选可执行站点仍尝试第一页，不保证固定加速比例 |
+| Node 详情与配置 revision | Selected | 缓存写入不取消页面详情；真实配置/账号/endpoint 变化仍使可复用数据失效 |
+| 编号视频文件自动连播 | Selected | 同季同版本、唯一序号列表；未知内容至少三个连续集号建立序列，可有其他缺集；前缀可以不同，不用重复/冲突集号猜测下一集 |
+| TVBox 配置卡片 | Experimental | 支持的 csp_PanConfig / csp_Guard；可取消，实际原生交互出现后才展示；普通影片详情不走配置流程 |
+| Android 配置网页 | Experimental | 明确点击的入口与 Provider 返回 URL 一致；交互/Provider/JAR 范围的网页、表单和 JS 对话框，不是通用桌面浏览器或完整 Android UI |
+| 原生播放授权继续 | Experimental | 原生交互确认后同集同线路最多重试一次；配置路由要求可核验的 `[realm](auth)` 合同及唯一匹配站点，未知 Cookie 错误/任意 HTML 不作为登录协议 |
+
+列表级集号推断只用于展示与播放队列，不升级为可信历史/收藏身份。连播等待历史列表
+恢复；拖动到确认片尾允许遵循自动连播设置，提前断流仍被拒绝。
+Bridge 当前为 0.3.48（60），相对 0.7.3 的 0.3.45（57）增加上述有界交互。
+前序 API 35 Bridge instrumentation 96 项通过，本轮对照确认 Android 源文件一致；
+真实账号授权成功与所有外部配置网页没有进行完整矩阵验收。
 
 ### Android Managed component storage / uninstall
 
@@ -360,11 +377,12 @@ App 支持范围和 Managed Android Runtime 实机验证是两个不同结论：
 | macOS 12.0+ | Supported | Info.plist 和全部 Mach-O `minos` 由包体脚本验证 |
 | Intel Mac / Universal Binary | Unsupported | 当前只交付 arm64 |
 | 本地 Hardened Runtime 包 | Supported | ad-hoc 签名，仅主 App 使用开发期 Library Validation 例外 |
-| Developer ID 分发 | Supported | 0.6.1（Build 101）正式 DMG 使用 Developer ID Application 与 secure timestamp 签名，Hardened Runtime、嵌套签名和权限边界由发布门禁验证 |
-| Notarization / Staple / Gatekeeper | Supported | 0.6.1（Build 101）已取得 Apple notarization `Accepted`，并通过 staple、`stapler validate` 与 Gatekeeper |
+| Developer ID 分发 | Supported | 0.7.3（Build 129）正式 DMG 使用 Developer ID Application 与 secure timestamp 签名，Hardened Runtime、嵌套签名和权限边界由发布门禁验证 |
+| Notarization / Staple / Gatekeeper | Supported | 0.7.3（Build 129）已取得 Apple notarization `Accepted`，并通过 staple、`stapler validate` 与 Gatekeeper |
 | 0.6.0（Build 100）正式发布 | Supported | DMG、内部 ZIP、源码、四份 SBOM、Notices 和 APK 由外层 manifest/SHA256SUMS 绑定到 tag `v0.6.0` 指向的 exact commit |
 | 0.6.1（Build 101）正式发布 | Supported | 1060 项自动测试通过，9 项条件测试跳过；tag `v0.6.1` 固定提交 `25155f52fb8c416f3245c9a829a93175dec9857b`；正式 DMG 独立完成公证、Gatekeeper 与安装 smoke |
-| 0.7.3（Build 129）发布候选 | Pending formal distribution | 本地自动测试、静态检查和 Release 包结果见发布就绪记录；尚未创建 tag、签名、公证或上传 |
+| 0.7.3（Build 129）正式发布 | Supported | tag v0.7.3 固定 55ffa9d；Developer ID、公证、Staple、Gatekeeper 与安装 smoke 已完成，见 GitHub Release |
+| 0.8.0（Build 130）发布候选 | Pending formal distribution | 模块验证与本地 Release 包结果见 0.8.0 发布就绪记录；正式 tag、分发签名、公证与上传待执行 |
 | App Sandbox | Not Applicable | 当前为 Developer ID 外部分发目标；Sandbox 与 Hardened Runtime 是不同边界 |
 
 ## 明确不提供
@@ -375,3 +393,6 @@ App 支持范围和 Managed Android Runtime 实机验证是两个不同结论：
 | TVBus / ForceTech | Unsupported | 私有 P2P/闭源引擎不在当前实现范围 |
 | DLNA | Unsupported | 尚未实现设备发现和投屏流程 |
 | 本地公开 HTTP API | Unsupported | Node 内部回环服务不属于公开对外 API |
+
+0.8.0 完整前后行为对照见 [发布说明](../../../../Docs/RELEASE_NOTES_0.8.0.md)，
+本轮结果及前序证据边界见 [发布就绪记录](../../../../Docs/RELEASE_READINESS_0.8.0.md)。

@@ -276,6 +276,8 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     private var geometryGeneration: UInt64 = 0
     private let explicitGeometryKey = UUID()
     private let userFrameKey = UUID()
+    private var overlayHostingView: PlayerOverlayHostingView<AnyView>?
+    private var playerOverlayContainer: PlayerFullscreenOverlayView?
     private let fullscreenPresentation = PlayerFullscreenPresentation()
     private var snapshotGeometryCancellable: AnyCancellable?
     private var windowModeCancellable: AnyCancellable?
@@ -462,6 +464,16 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
             hostedView.autoresizingMask = [.width, .height]
             container.addSubview(hostedView)
             self.hostingController = hostingController
+            if let overlay = playerOverlayContainer {
+                let host = PlayerOverlayHostingView(rootView: AnyView(
+                    PlayerPlaybackOverlayRoot(appState: appState).environmentObject(appState)
+                ))
+                if #available(macOS 13.0, *) { host.sizingOptions = [] }
+                host.frame = overlay.bounds
+                host.autoresizingMask = [.width, .height]
+                overlay.addSubview(host)
+                overlayHostingView = host
+            }
         }
         return window
     }
@@ -508,6 +520,9 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
             let composition = PlayerFullscreenContentView(frame: content.bounds)
             content.addSubview(composition)
             playerContentContainer = composition
+            let overlay = PlayerFullscreenOverlayView(frame: content.bounds)
+            content.addSubview(overlay)
+            playerOverlayContainer = overlay
         }
 
         configureInitialGeometry(for: window)
@@ -1085,6 +1100,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         lastAppliedAspectRatio = nil
         appState?.setPlayerWindowKey(false)
         hostingController?.view.removeFromSuperview()
+        overlayHostingView?.removeFromSuperview()
         if let window {
             WindowTransitionCoordinator.state(for: window).cancel(explicitGeometryKey)
             WindowTransitionCoordinator.state(for: window).cancel(userFrameKey)
@@ -1092,6 +1108,8 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         window?.delegate = nil
         window = nil
         playerContentContainer = nil
+        playerOverlayContainer = nil
+        overlayHostingView = nil
         hostingController = nil
         lastProgrammaticFrame = nil
         isApplyingProgrammaticFrame = false
@@ -1509,44 +1527,15 @@ struct PlayerPlaybackWindowRoot: View {
                 .allowsHitTesting(false)
             }
 
-            if appState.isPlayerPresented {
-                PlayerView(
-                    playerSnapshotState: appState.playerSnapshotState,
-                    onWindowChromeRestored: {}
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if appState.isPlayerPresented, !appState.isLivePlayback {
+                PlayerDanmakuLayer(coordinator: appState.danmaku, snapshotState: appState.playerSnapshotState)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
-        .overlay(alignment: .top) {
-            if let error = appState.playerPresentedError {
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "exclamationmark.circle")
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(error.title).font(.headline)
-                        Text(error.message).font(.callout).textSelection(.enabled)
-                    }
-                    Button { appState.playerPresentedError = nil } label: {
-                        Image(systemName: "xmark")
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(L10n.string("common.close", fallback: "Close"))
-                }
-                .foregroundStyle(.white)
-                .padding(16)
-                .frame(maxWidth: 560)
-                .shadow(color: .black.opacity(0.65), radius: 2, y: 1)
-                .padding(.top, 54)
-                .padding(.horizontal, 20)
-            }
-        }
-        .task(id: appState.playerPresentedError?.id) {
-            guard let id = appState.playerPresentedError?.id else { return }
-            do { try await Task.sleep(nanoseconds: 6_000_000_000) } catch { return }
-            if appState.playerPresentedError?.id == id { appState.playerPresentedError = nil }
-        }
-        .appConfigurationSheet(scope: .player)
+
     }
 }
 
@@ -1998,5 +1987,47 @@ struct AppCommands: Commands {
                 .keyboardShortcut(.cancelAction)
                 .disabled(!state.allowsPlayerShortcuts)
         }
+    }
+}
+
+/// Shares the video's window, but not its fullscreen scale transform.
+struct PlayerPlaybackOverlayRoot: View {
+    @ObservedObject var appState: AppState
+    var body: some View {
+        Group {
+            if appState.isPlayerPresented {
+                PlayerView(playerSnapshotState: appState.playerSnapshotState, onWindowChromeRestored: {})
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .ignoresSafeArea()
+        .overlay(alignment: .top) {
+            if let error = appState.playerPresentedError {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "exclamationmark.circle")
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(error.title).font(.headline)
+                        Text(error.message).font(.callout).textSelection(.enabled)
+                    }
+                    Button { appState.playerPresentedError = nil } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(L10n.string("common.close", fallback: "Close"))
+                }
+                .foregroundStyle(.white)
+                .padding(16)
+                .frame(maxWidth: 560)
+                .shadow(color: .black.opacity(0.65), radius: 2, y: 1)
+                .padding(.top, 54)
+                .padding(.horizontal, 20)
+            }
+        }
+        .task(id: appState.playerPresentedError?.id) {
+            guard let id = appState.playerPresentedError?.id else { return }
+            do { try await Task.sleep(nanoseconds: 6_000_000_000) } catch { return }
+            if appState.playerPresentedError?.id == id { appState.playerPresentedError = nil }
+        }
+        .appConfigurationSheet(scope: .player)
     }
 }

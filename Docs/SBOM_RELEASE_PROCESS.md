@@ -1,6 +1,9 @@
 # Release SBOM Process
 
-Date: 2026-09-06
+Date: 2026-10-01
+
+Current candidate: OKVideoMac 0.8.0 (Build 130). Historical published hashes below
+remain unchanged.
 
 Every packaged release contains four machine-readable documents under
 `Contents/Resources/Legal/Compliance/SBOM/`:
@@ -11,14 +14,14 @@ Every packaged release contains four machine-readable documents under
 - `OKVideoMac-Android.cdx.json` (CycloneDX 1.6).
 
 `Tools/SourceAudit/generate_sbom.py` inventories the built App, not a static
-expected-file list. It refuses an unknown Mach-O and requires exactly 28
+expected-file list. It refuses an unknown Mach-O and requires exactly 29
 arm64 Mach-O components. Every nested Mach-O has a final post-signing SHA-256.
 The main executable deliberately has no embedded-SBOM hash because signing the
 outer App rewrites its code signature, which would create a circular resource
 hash. Its integrity is checked by `codesign` after outer signing.
 
 The Android documents contain the AndroidDexBridge aggregate, exact FongMi
-commit, and all 87 coordinates in the tracked `releaseRuntimeClasspath`
+commit, and all 170 coordinates in the tracked `releaseRuntimeClasspath`
 Gradle lock. Locally resolved Maven artifacts carry SHA-256 values; the APK
 aggregate carries the exact embedded APK SHA-256. Excluded xpp3 is forbidden.
 

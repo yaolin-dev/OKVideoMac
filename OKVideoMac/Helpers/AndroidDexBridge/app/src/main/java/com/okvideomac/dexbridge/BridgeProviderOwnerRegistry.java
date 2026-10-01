@@ -69,6 +69,11 @@ final class BridgeProviderOwnerRegistry {
         return binding;
     }
 
+    static synchronized Binding binding(String interactionID) {
+        String key = INTERACTION_BINDINGS.get(clean(interactionID));
+        return key == null ? null : BINDINGS.get(key);
+    }
+
     static synchronized JSONObject state(String interactionID) {
         String key = INTERACTION_BINDINGS.get(clean(interactionID));
         Binding binding = key == null ? null : BINDINGS.get(key);

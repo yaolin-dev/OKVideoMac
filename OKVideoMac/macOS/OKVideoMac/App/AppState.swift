@@ -1862,6 +1862,7 @@ struct CloudAuthorizationPrompt: Identifiable, Equatable {
     var status: String?
     var allowsRetry: Bool
     var allowsCompletionConfirmation: Bool
+    var webLinks: [String] = []
 }
 
 /// FongMi treats an action result message like `Notify.show`: it is optional,
@@ -3630,6 +3631,7 @@ enum PlayerEpisodeAdvancePolicy {
     static func orderedEpisodes(in episodes: [PlayEpisode], categoryName: String? = nil) -> [PlayEpisode] {
         var values: [(item: PlayEpisode, semantics: PlaybackResourceSemantics)] = []
         for (episode, value) in zip(episodes, PlaybackResourceAnalyzer.analyzeList(episodes, categoryName: categoryName)) {
+            guard !PlaybackResourceAnalyzer.isNonVideoResource(episode) else { continue }
             let contextual = value.form == .series && value.evidence == .contextual && value.role == .main
             if value.hasReliableEpisode || contextual { values.append((episode, value)) }
         }
@@ -3655,7 +3657,7 @@ enum PlayerEpisodeAdvancePolicy {
         let semantics = PlaybackResourceAnalyzer.analyzeList(episodes, categoryName: categoryName)
         var groups: [String: [PlayEpisode]] = [:]
         for (episode, value) in zip(episodes, semantics) {
-            guard !value.versionLabels.isEmpty, value.form == .series,
+            guard !PlaybackResourceAnalyzer.isNonVideoResource(episode), value.form == .series,
                   value.role == .main, value.episode != nil, value.endEpisode == nil,
                   value.evidence != .conflict else { continue }
             // Pass inferred type only to local queue analysis, never mutate source metadata.
@@ -4212,6 +4214,21 @@ private enum PendingCloudOperation {
     }
 }
 
+struct TVBoxConfigurationRefreshTarget: Equatable {
+    let sourceIdentity: HomeContentIdentity
+    let categoryID: String?
+    let filters: [String: String]
+    let categoryPresentationID: UUID?
+}
+
+struct PendingTVBoxConfigurationAction: Equatable {
+    let id: UUID
+    let siteKey: String
+    let route: HomeFunctionRoute
+    let title: String
+    let refreshTarget: TVBoxConfigurationRefreshTarget
+}
+
 private struct CloudAuthorizationContext {
     let sourceIdentity: HomeContentIdentity
     let operationID: UUID
@@ -4228,6 +4245,7 @@ private struct CloudAuthorizationContext {
     var operation: PendingCloudOperation
     var hasObservedPrompt: Bool
     var lastObservedRevision: Int?
+    var configurationRefreshTarget: TVBoxConfigurationRefreshTarget? = nil
 }
 
 enum PlaybackRequestOrigin: Equatable, Sendable {
@@ -5490,8 +5508,12 @@ final class AppState: ObservableObject {
     private var configurationPostActivationSessionID = UUID()
     private var configurationSwitchFeedbackDismissTask: Task<Void, Never>?
     private var providers: [String: SiteProvider] = [:] {
-        didSet { invalidateDetailContext() }
+        didSet { invalidateDetailContext(preservingRoute: preservesDetailRouteOnProviderReplacement) }
     }
+    private var preservesDetailRouteOnProviderReplacement = false
+    private let catPawSearchMemory = CatPawSearchMemory()
+    private var activeSearchContext: SearchLaunchContext?
+    private var activeSearchScope: SearchSiteScope?
     private var activeXtreamCredentials: XtreamCredentials?
     private var nativeLiveGeneration = UUID()
     private var nativeLiveAccountMutationIDs = Set<UUID>()
@@ -5549,13 +5571,17 @@ final class AppState: ObservableObject {
     private var nodeAuthorizationAutoRetryRequestID: UUID?
     private var cloudAuthorizationSessionID = UUID()
     private var lastCloudAuthorizationSurfaceCaptureAt: Date?
-    private var configurationInteractionCoordinator =
+    @Published private var configurationInteractionCoordinator =
         ConfigurationInteractionCoordinator()
     private var configurationInteractionTerminalTask: Task<Void, Never>?
     /// Serializes provider cancellation/restart cleanup across UI dismissal
     /// and a subsequent button click. A cleared sheet must not make its old
     /// DEX worker invisible to the next interaction.
     private var configurationInteractionCleanupTask: Task<Void, Never>?
+    @Published private(set) var pendingTVBoxConfigurationAction: PendingTVBoxConfigurationAction?
+    private var tvboxConfigurationActionTask: Task<Void, Never>?
+    private var tvboxConfigurationActionTimeoutTask: Task<Void, Never>?
+    private let configurationActionTimeout: TimeInterval
     private var siteActionStatusGeneration: UInt64 = 0
     private var siteActionStatusDismissTask: Task<Void, Never>?
     private var activePlayback: ActivePlaybackContext?
@@ -5800,10 +5826,12 @@ final class AppState: ObservableObject {
         liveReferenceStore: SQLiteStore? = nil,
         liveCredentialStore: (any XtreamCredentialStoring)? = nil,
         playbackDisplaySleep: PlaybackDisplaySleepController? = nil,
-        detailRequestTimeout: TimeInterval = 90
+        detailRequestTimeout: TimeInterval = 90,
+        configurationActionTimeout: TimeInterval = 90
     ) {
         self.environment = environment
         self.playerAudioPreference = environment?.player.audioPreference ?? .init()
+        self.configurationActionTimeout = configurationActionTimeout.isFinite ? min(600, max(0.001, configurationActionTimeout)) : 90
         self.detailRequestTimeout = detailRequestTimeout.isFinite ? min(600, max(0.001, detailRequestTimeout)) : 90
         self.playbackDisplaySleep = playbackDisplaySleep ?? PlaybackDisplaySleepController()
         self.playbackDisplaySleep.beginSession(activePlayerRequestID)
@@ -6447,7 +6475,7 @@ final class AppState: ObservableObject {
                 guard change == .semantic else { return false }
                 self.invalidateCatPawHomeLoads()
                 self.categoryLoadSessionID = UUID()
-                self.rebuildProviders()
+                self.rebuildProviders(preservingDetailRoute: self.activeConfigurationUsesNodeRuntime)
                 let previousSiteKey = self.selectedSiteKey
                 if !self.supportedSites.contains(where: {
                     $0.key == self.selectedSiteKey
@@ -6959,7 +6987,7 @@ final class AppState: ObservableObject {
         }
         let requiresProviderRebuild = change == .semantic || providers.isEmpty
         if requiresProviderRebuild {
-            rebuildProviders()
+            rebuildProviders(preservingDetailRoute: true)
             if !supportedSites.contains(where: { $0.key == selectedSiteKey }) {
                 selectedSiteKey = HomeLandingSitePolicy.defaultSiteKey(
                     from: supportedSites
@@ -7620,6 +7648,10 @@ final class AppState: ObservableObject {
     }
 
     func closeConfigurationCategory() {
+        if let pending = pendingTVBoxConfigurationAction,
+           pending.refreshTarget.categoryPresentationID == configurationCategoryPresentation?.id {
+            cancelPendingTVBoxConfigurationAction(pending.id)
+        }
         configurationCategoryLoadSessionID = UUID()
         configurationCategoryPresentation = nil
     }
@@ -8068,7 +8100,8 @@ final class AppState: ObservableObject {
             detailLoadState = .failed(L10n.string("provider.unavailable.history-preserved", fallback: "Provider %@ is unavailable in the current configuration. The record will be preserved.", summary.siteKey))
             return
         }
-        if summary.action?.nonEmpty != nil {
+        if summary.action?.nonEmpty != nil || (provider.capability == .javaDexSpider
+            && AndroidDexSpiderSiteProvider.isPanConfigurationAPI(provider.site.api)) {
             await performHomeAction(SiteActionItem(summary: summary))
             return
         }
@@ -8106,6 +8139,8 @@ final class AppState: ObservableObject {
             searchActiveAtTap: isSearching
         )
         detailRequestSummary = summary
+        // Media navigates immediately. Configuration entries are dispatched
+        // above by their item/provider contract, never by engine type alone.
         detailRouteSummary = summary
         detailLoadState = .loading
         detailSuggestedSearch = nil
@@ -8142,7 +8177,8 @@ final class AppState: ObservableObject {
                   self.detailLoadState == .loading else { return }
             self.cancelDetailRequest()
             self.pendingDetailSummary = nil
-            self.detailLoadState = .failed(L10n.string("detail.request-timeout", fallback: "This provider is taking too long. Your page is preserved; you can retry."))
+            let message = L10n.string("detail.request-timeout", fallback: "This provider is taking too long. Your page is preserved; you can retry.")
+            self.detailLoadState = .failed(message)
         }
         await task.value
         if detailLoadSessionID == sessionID {
@@ -8180,7 +8216,10 @@ final class AppState: ObservableObject {
 
     /// Provider replacement covers configuration revisions and account edits.
     /// Authorization entry points also invalidate snapshots before retrying.
-    private func invalidateDetailContext() {
+    private func invalidateDetailContext(preservingRoute: Bool = false) {
+        catPawSearchMemory.invalidate(clearPerformance: true)
+        let retainedSummary = preservingRoute && isDetailPagePresented
+            ? (detailRouteSummary ?? detailRequestSummary) : nil
         detailFavoriteSource = nil
         detailFavoriteExpectation = nil
         detailResponseCache.invalidate()
@@ -8189,6 +8228,20 @@ final class AppState: ObservableObject {
         pendingDetailSummary = nil
         detailRouteSummary = nil
         selectedDetail = nil
+        if let retainedSummary {
+            detailRequestSummary = retainedSummary
+            detailRouteSummary = retainedSummary
+            detailSuggestedSearch = nil
+            detailLoadState = .failed(L10n.string("detail.source-updated", fallback: "This source's configuration changed. Retry to load the updated details."))
+        }
+    }
+
+    /// Unknown Profile fields may contain credentials as well as share caches.
+    /// Invalidate reusable data conservatively, but let the current page-owned
+    /// request finish. A later catalogue change is handled separately.
+    func nodeProfileStorageDidChange() {
+        detailResponseCache.invalidate()
+        catPawSearchMemory.invalidate()
     }
 
     private func performDetailRequest(
@@ -8224,6 +8277,7 @@ final class AppState: ObservableObject {
                 guard acceptsFavoriteDetail(detail) else { return }
                 activeDetailPerformanceTrace = performanceTrace
                 performanceTrace.markSelectedDetail(searchActive: isSearching)
+                detailRouteSummary = summary
                 selectedDetail = detail
                 detailLoadState = .loaded
                 detailRevision &+= 1
@@ -8232,12 +8286,28 @@ final class AppState: ObservableObject {
                 await completeFavoriteDetail(detail)
             case .search(let query):
                 performanceTrace.finishRequest(outcome: "discovery")
+                detailRouteSummary = summary
                 detailSuggestedSearch = query
                 detailLoadState = .failed(L10n.string("detail.search-returned", fallback: "This provider returned a search suggestion instead of details. Retry or continue searching."))
             case .action(let result):
                 performanceTrace.finishRequest(outcome: "action")
-                detailLoadState = .failed(Self.siteActionMessage(result)
-                    ?? L10n.string("configuration.action.mismatched", fallback: "The provider returned a configuration action unrelated to the current request. Go back and try again."))
+                if provider.capability == .javaDexSpider {
+                    detailRouteSummary = nil
+                    selectedDetail = nil
+                    detailRequestSummary = nil
+                    let generation = beginSiteActionStatusSession()
+                    publishSiteActionStatus(Self.siteActionMessage(result)
+                        ?? L10n.string("configuration.action.finished", fallback: "Operation finished"),
+                        title: summary.title, generation: generation)
+                    detailLoadState = .loaded
+                    if selectedSection == .home, selectedSiteKey == summary.siteKey {
+                        await loadSelectedSiteHome(refreshConfigurationIfNeeded: false,
+                            forceCategoryRefresh: true, forceHomeRefresh: true)
+                    }
+                } else {
+                    detailLoadState = .failed(Self.siteActionMessage(result)
+                        ?? L10n.string("configuration.action.mismatched", fallback: "The provider returned a configuration action unrelated to the current request. Go back and try again."))
+                }
             }
         } catch let authorization as NodeWebAuthorizationRequired {
             performanceTrace.finishRequest(outcome: "authorization")
@@ -8278,8 +8348,12 @@ final class AppState: ObservableObject {
             performanceTrace.finishRequest(outcome: Task.isCancelled ? "cancelled" : "failure")
             guard detailLoadSessionID == sessionID, !Task.isCancelled else { return }
             pendingDetailSummary = nil
-            detailLoadState = .failed(userFacingError(for: error,
-                title: L10n.string("detail.load.failed", fallback: "Details Failed to Load")).message)
+            let failure = userFacingError(for: error,
+                title: L10n.string("detail.load.failed", fallback: "Details Failed to Load"))
+            if provider.capability == .javaDexSpider, detailRouteSummary == nil {
+                presentedError = failure
+            }
+            detailLoadState = .failed(failure.message)
         }
     }
 
@@ -8304,7 +8378,111 @@ final class AppState: ObservableObject {
         }
     }
 
+    func isTVBoxConfigurationActionPending(_ item: SiteActionItem) -> Bool {
+        pendingTVBoxConfigurationAction.map {
+            $0.siteKey == item.siteKey && $0.route == item.resolvedRoute
+        } ?? false
+    }
+
+    /// The task exists before runtime startup or a native dialog. Cancellation
+    /// therefore works throughout preparation, not only after UI appears.
+    private func runTVBoxConfigurationAction(
+        siteKey: String, route: HomeFunctionRoute, title: String,
+        operation: @escaping @MainActor () async -> Void
+    ) async {
+        guard !Task.isCancelled else { return }
+        guard let identity = activeSourceIdentity(for: siteKey) else {
+            presentedError = UserFacingError(title: title,
+                message: L10n.string("configuration.action.configuration-changed", fallback: "The configuration associated with this action has changed"))
+            return
+        }
+        if let pending = pendingTVBoxConfigurationAction {
+            guard pending.siteKey != siteKey || pending.route != route else { return }
+            cancelPendingTVBoxConfigurationAction(pending.id)
+        }
+        let pending = PendingTVBoxConfigurationAction(id: UUID(), siteKey: siteKey,
+            route: route, title: title,
+            refreshTarget: TVBoxConfigurationRefreshTarget(sourceIdentity: identity,
+                categoryID: selectedCategoryID, filters: selectedCategoryFilters,
+                categoryPresentationID: configurationCategoryPresentation?.id))
+        pendingTVBoxConfigurationAction = pending
+        let task = Task { @MainActor [weak self] in
+            guard let self, !Task.isCancelled,
+                  self.pendingTVBoxConfigurationAction?.id == pending.id else { return }
+            await operation()
+        }
+        tvboxConfigurationActionTask = task
+        let timeout = UInt64(configurationActionTimeout * 1_000_000_000)
+        tvboxConfigurationActionTimeoutTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: timeout) } catch { return }
+            guard let self, self.pendingTVBoxConfigurationAction?.id == pending.id else { return }
+            self.cancelPendingTVBoxConfigurationAction(pending.id)
+            self.presentedError = UserFacingError(title: title,
+                message: L10n.string("configuration.action.timeout", fallback: "The operation timed out. Refresh the configuration to check its current state before retrying."))
+        }
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+            Task { @MainActor [weak self] in
+                self?.cancelPendingTVBoxConfigurationAction(pending.id)
+            }
+        }
+        guard pendingTVBoxConfigurationAction?.id == pending.id else { return }
+        if Task.isCancelled {
+            cancelPendingTVBoxConfigurationAction(pending.id)
+        } else {
+            tvboxConfigurationActionTimeoutTask?.cancel()
+            tvboxConfigurationActionTimeoutTask = nil
+            tvboxConfigurationActionTask = nil
+            pendingTVBoxConfigurationAction = nil
+        }
+    }
+
+    func cancelPendingTVBoxConfigurationAction(_ id: UUID) {
+        guard pendingTVBoxConfigurationAction?.id == id else { return }
+        tvboxConfigurationActionTask?.cancel()
+        tvboxConfigurationActionTask = nil
+        tvboxConfigurationActionTimeoutTask?.cancel()
+        tvboxConfigurationActionTimeoutTask = nil
+        pendingTVBoxConfigurationAction = nil
+        _ = beginSiteActionStatusSession()
+        if cloudAuthorizationContext?.operationID == id {
+            clearCloudAuthorization(resetBridgeUI: true, markPendingPlaybackCancelled: false,
+                cancellationReason: .user)
+        }
+    }
+
+    private func refreshTVBoxConfigurationAfterAction(_ target: TVBoxConfigurationRefreshTarget) async {
+        guard !Task.isCancelled,
+              activeSourceIdentity(for: target.sourceIdentity.siteKey) == target.sourceIdentity,
+              selectedSection == .home, selectedSiteKey == target.sourceIdentity.siteKey else { return }
+        // Read back exactly the original visible category. Never invoke the
+        // action a second time, or navigate back over a newer user selection.
+        if let presentationID = target.categoryPresentationID {
+            guard configurationCategoryPresentation?.id == presentationID else { return }
+            await refreshConfigurationCategory()
+        } else if let categoryID = target.categoryID {
+            guard selectedCategoryID == categoryID, selectedCategoryFilters == target.filters else { return }
+            await loadCategory(id: categoryID, page: 1, filters: target.filters, forceRefresh: true)
+        } else if selectedCategoryID == nil {
+            await loadSelectedSiteHome(refreshConfigurationIfNeeded: false,
+                forceCategoryRefresh: true, forceHomeRefresh: true)
+        }
+    }
+
     func performHomeAction(_ item: SiteActionItem) async {
+        guard let provider = providers[item.siteKey], provider.capability == .javaDexSpider,
+              case .providerSelection = item.resolvedRoute else {
+            await performHomeActionRequest(item)
+            return
+        }
+        await runTVBoxConfigurationAction(siteKey: item.siteKey, route: item.resolvedRoute, title: item.title) {
+            await self.performHomeActionRequest(item)
+        }
+    }
+
+    private func performHomeActionRequest(_ item: SiteActionItem) async {
         detailResponseCache.invalidate()
         guard let provider = providers[item.siteKey] else {
             show(
@@ -8322,17 +8500,20 @@ final class AppState: ObservableObject {
                 action,
                 title: item.title,
                 provider: provider,
-                tag: item.tag
+                tag: item.tag,
+                configurationSelectionText: item.remarks ?? ""
             )
             return
         case .providerSelection:
             break
         }
         let actionStatusGeneration = beginSiteActionStatusSession()
+        let refreshTarget = provider.capability == .javaDexSpider
+            ? pendingTVBoxConfigurationAction?.refreshTarget : nil
         let operation = PendingCloudOperation.homeAction(item)
         if provider.capability == .javaDexSpider {
             await supersedeConfigurationInteractionIfNeeded()
-            guard siteActionStatusGeneration == actionStatusGeneration else {
+            guard !Task.isCancelled, siteActionStatusGeneration == actionStatusGeneration else {
                 return
             }
         }
@@ -8343,6 +8524,7 @@ final class AppState: ObservableObject {
                 siteKey: item.siteKey,
                 operation: operation,
                 semantic: operation.initialSemantic,
+                interactionID: pendingTVBoxConfigurationAction?.id ?? UUID(),
                 actionStatusGeneration: actionStatusGeneration,
                 presentsPlaceholder: false
             ) else {
@@ -8371,6 +8553,12 @@ final class AppState: ObservableObject {
             } else {
                 selection = try await provider.select(action: item)
             }
+            try Task.checkCancellation()
+            if let interactionID {
+                guard configurationInteractionCoordinator.owns(interactionID),
+                      cloudAuthorizationContext?.actionStatusGeneration == actionStatusGeneration,
+                      cloudAuthorizationContext.map(isCurrentCloudAuthorizationContext) == true else { return }
+            }
             switch selection {
             case .detail:
                 if let interactionID,
@@ -8395,7 +8583,7 @@ final class AppState: ObservableObject {
                 if let interactionID,
                    configurationInteractionCoordinator.owns(interactionID) {
                     publishSiteActionStatus(
-                        Self.siteActionMessage(result),
+                        Self.siteActionMessage(result) ?? L10n.string("configuration.action.finished", fallback: "Operation finished"),
                         title: item.title,
                         generation: actionStatusGeneration
                     )
@@ -8418,6 +8606,9 @@ final class AppState: ObservableObject {
                         title: item.title,
                         generation: actionStatusGeneration
                     )
+                }
+                if let refreshTarget, siteActionStatusGeneration == actionStatusGeneration {
+                    await refreshTVBoxConfigurationAfterAction(refreshTarget)
                 }
             case .search(let query):
                 if let interactionID,
@@ -8446,7 +8637,7 @@ final class AppState: ObservableObject {
                 pending: .homeAction(identity: identity, item: item)
             )
         } catch let authorization as AndroidBridgeUIRequired {
-            guard siteActionStatusGeneration == actionStatusGeneration else {
+            guard !Task.isCancelled, siteActionStatusGeneration == actionStatusGeneration else {
                 scheduleConfigurationInteractionCleanup(
                     authorization.handle,
                     reason: ConfigurationInteractionCancellationReason
@@ -8480,6 +8671,7 @@ final class AppState: ObservableObject {
                 )
             }
         } catch {
+            guard !Task.isCancelled, interactionID.map { configurationInteractionCoordinator.owns($0) } ?? true else { return }
             if AsyncCancellationPolicy.isCancellation(error) {
                 if let interactionID,
                    configurationInteractionCoordinator.owns(interactionID) {
@@ -8766,13 +8958,32 @@ final class AppState: ObservableObject {
     }
 
     private func performSiteAction(
+        _ action: String, title: String, provider: SiteProvider, tag: String? = nil,
+        configurationSelectionText: String? = nil
+    ) async {
+        guard provider.capability == .javaDexSpider else {
+            await performSiteActionRequest(action, title: title, provider: provider, tag: tag,
+                configurationSelectionText: configurationSelectionText)
+            return
+        }
+        await runTVBoxConfigurationAction(siteKey: provider.site.key,
+            route: .command(action: action), title: title) {
+            await self.performSiteActionRequest(action, title: title, provider: provider, tag: tag,
+                configurationSelectionText: configurationSelectionText)
+        }
+    }
+
+    private func performSiteActionRequest(
         _ action: String,
         title: String,
         provider: SiteProvider,
-        tag: String? = nil
+        tag: String? = nil,
+        configurationSelectionText: String? = nil
     ) async {
         detailResponseCache.invalidate()
         let actionStatusGeneration = beginSiteActionStatusSession()
+        let refreshTarget = provider.capability == .javaDexSpider
+            ? pendingTVBoxConfigurationAction?.refreshTarget : nil
         let effectiveTag: String? = tag?.nonEmpty ?? {
             guard MyDriveGuardActionContract.supportsAccountAuthorization(
                 api: provider.site.api
@@ -8781,8 +8992,6 @@ final class AppState: ObservableObject {
         }()
         let interactionKind = AndroidDexSpiderSiteProvider
             .interactionActionKind(tag: effectiveTag)
-        let presentsProviderUI = interactionKind != .command
-            && interactionKind != .immediate
         let operation = PendingCloudOperation.siteAction(
             action: action,
             title: title,
@@ -8790,7 +8999,7 @@ final class AppState: ObservableObject {
         )
         if provider.capability == .javaDexSpider {
             await supersedeConfigurationInteractionIfNeeded()
-            guard siteActionStatusGeneration == actionStatusGeneration else {
+            guard !Task.isCancelled, siteActionStatusGeneration == actionStatusGeneration else {
                 return
             }
         }
@@ -8801,6 +9010,7 @@ final class AppState: ObservableObject {
                 siteKey: provider.site.key,
                 operation: operation,
                 semantic: operation.initialSemantic,
+                interactionID: pendingTVBoxConfigurationAction?.id ?? UUID(),
                 actionStatusGeneration: actionStatusGeneration,
                 // FongMi does not manufacture a host dialog while action()
                 // runs. Present only if Android actually publishes a surface.
@@ -8815,7 +9025,6 @@ final class AppState: ObservableObject {
             interactionID = nil
         }
         let usesGlobalLoadingIndicator = interactionID == nil
-            || !presentsProviderUI
         if usesGlobalLoadingIndicator { isLoading = true }
         defer {
             if usesGlobalLoadingIndicator { isLoading = false }
@@ -8827,10 +9036,16 @@ final class AppState: ObservableObject {
                 result = try await provider.action(
                     action,
                     interactionID: interactionID,
-                    interactionKind: interactionKind
+                    interactionKind: interactionKind,
+                    configurationSelectionText: configurationSelectionText
                 )
             } else {
                 result = try await provider.action(action)
+            }
+            try Task.checkCancellation()
+            if let interactionID {
+                guard configurationInteractionCoordinator.owns(interactionID),
+                      cloudAuthorizationContext.map(isCurrentCloudAuthorizationContext) == true else { return }
             }
             await invalidatePersistedCloudAccountStatus(
                 provider: provider,
@@ -8843,7 +9058,7 @@ final class AppState: ObservableObject {
                     return
                 }
                 publishSiteActionStatus(
-                    Self.siteActionMessage(result),
+                    Self.siteActionMessage(result) ?? L10n.string("configuration.action.finished", fallback: "Operation finished"),
                     title: title,
                     generation: actionStatusGeneration
                 )
@@ -8866,6 +9081,9 @@ final class AppState: ObservableObject {
                     generation: actionStatusGeneration
                 )
             }
+            if let refreshTarget, siteActionStatusGeneration == actionStatusGeneration {
+                await refreshTVBoxConfigurationAfterAction(refreshTarget)
+            }
         } catch let authorization as NodeWebAuthorizationRequired {
             guard let identity = activeSourceIdentity(
                 for: provider.site.key
@@ -8885,7 +9103,7 @@ final class AppState: ObservableObject {
                 )
             )
         } catch let authorization as AndroidBridgeUIRequired {
-            guard siteActionStatusGeneration == actionStatusGeneration else {
+            guard !Task.isCancelled, siteActionStatusGeneration == actionStatusGeneration else {
                 scheduleConfigurationInteractionCleanup(
                     authorization.handle,
                     reason: ConfigurationInteractionCancellationReason
@@ -8919,6 +9137,7 @@ final class AppState: ObservableObject {
                 )
             }
         } catch {
+            guard !Task.isCancelled, interactionID.map { configurationInteractionCoordinator.owns($0) } ?? true else { return }
             if AsyncCancellationPolicy.isCancellation(error) {
                 if let interactionID,
                    configurationInteractionCoordinator.owns(interactionID) {
@@ -9013,7 +9232,9 @@ final class AppState: ObservableObject {
             providerInteraction: providerInteraction,
             operation: operation,
             hasObservedPrompt: false,
-            lastObservedRevision: nil
+            lastObservedRevision: nil,
+            configurationRefreshTarget: pendingTVBoxConfigurationAction?.id == interactionID
+                ? pendingTVBoxConfigurationAction?.refreshTarget : nil
         )
         cloudAuthorizationPrompt = presentsPlaceholder
             ? CloudAuthorizationPrompt(
@@ -9049,6 +9270,7 @@ final class AppState: ObservableObject {
                 || cloudAuthorizationPrompt != nil else { return }
         let bridge = environment?.androidDexBridge
         let providerHandle = cloudAuthorizationContext?.providerHandle
+        let interactionID = cloudAuthorizationContext?.operationID
         let usesLegacyBridge = providerHandle == nil
         clearCloudAuthorization(
             resetBridgeUI: false,
@@ -9062,7 +9284,7 @@ final class AppState: ObservableObject {
                     .superseded.rawValue
             )
         } else if usesLegacyBridge, let bridge {
-            try? await bridge.resetAuthorizationUI()
+            try? await bridge.resetAuthorizationUI(interactionID: interactionID)
         }
     }
 
@@ -9091,7 +9313,12 @@ final class AppState: ObservableObject {
             semantic: semantic,
             transport: .native,
             status: status
-        ), var prompt = cloudAuthorizationPrompt,
+        ) else { return }
+        if phase.isTerminal {
+            cloudAuthorizationSurfaceFrame = nil
+            lastCloudAuthorizationSurfaceCaptureAt = nil
+        }
+        guard var prompt = cloudAuthorizationPrompt,
               prompt.interactionID == interactionID,
               configurationInteractionCoordinator.owns(
                 interactionID,
@@ -9107,10 +9334,6 @@ final class AppState: ObservableObject {
         prompt.lifecyclePhase = phase
         if let status { prompt.status = status }
         if let allowsRetry { prompt.allowsRetry = allowsRetry }
-        if phase.isTerminal {
-            cloudAuthorizationSurfaceFrame = nil
-            lastCloudAuthorizationSurfaceCaptureAt = nil
-        }
         cloudAuthorizationPrompt = prompt
     }
 
@@ -9130,12 +9353,23 @@ final class AppState: ObservableObject {
         _ interactionID: UUID,
         message: String
     ) {
+        guard configurationInteractionCoordinator.owns(interactionID) else { return }
+        let title = configurationInteractionCoordinator.current?.request.title
+            ?? L10n.string("cloud.configuration-action.title", fallback: "Configuration Action")
+        let hasPrompt = cloudAuthorizationPrompt?.interactionID == interactionID
         transitionConfigurationInteraction(
             interactionID,
             to: .failed,
             status: message,
             allowsRetry: true
         )
+        if !hasPrompt {
+            presentedError = UserFacingError(title: title, message: message)
+            // No sheet owns a retry here. Retire the failed request and its
+            // provider lease now; the user can retry the original card.
+            clearCloudAuthorization(resetBridgeUI: true, markPendingPlaybackCancelled: false,
+                cancellationReason: .providerCancelled)
+        }
     }
 
     private func observeConfigurationInteractionTerminal(
@@ -9521,6 +9755,7 @@ final class AppState: ObservableObject {
             nodeAuthorizationAutoRetryRequestID = requestID
         }
         detailResponseCache.invalidate()
+        catPawSearchMemory.invalidate()
         presentation.lifecycleState = .verifying
         presentation.status = automatically
             ? L10n.string("cloud.authorization.resuming", fallback: "Authorization complete. Resuming playback…")
@@ -9721,6 +9956,10 @@ final class AppState: ObservableObject {
     private func cancelActiveCloudAuthorizationInteraction(
         nextIdentity: HomeContentIdentity?
     ) {
+        if let pending = pendingTVBoxConfigurationAction,
+           pending.refreshTarget.sourceIdentity != nextIdentity {
+            cancelPendingTVBoxConfigurationAction(pending.id)
+        }
         guard let context = cloudAuthorizationContext,
               context.sourceIdentity != nextIdentity else {
             return
@@ -9835,8 +10074,10 @@ final class AppState: ObservableObject {
         // above. Resetting the process-global legacy UI as well could erase a
         // newer request that has already superseded this one.
         guard resetBridgeUI, providerHandle == nil else { return }
-        Task {
-            try? await androidDexBridge?.resetAuthorizationUI()
+        let previousCleanup = configurationInteractionCleanupTask
+        configurationInteractionCleanupTask = Task {
+            await previousCleanup?.value
+            try? await androidDexBridge?.resetAuthorizationUI(interactionID: interactionID)
         }
     }
 
@@ -9957,7 +10198,6 @@ final class AppState: ObservableObject {
 
     func confirmCloudAuthorizationCompletion() async {
         guard let context = cloudAuthorizationContext,
-              context.operation.pendingPlayback == nil,
               isCurrentCloudAuthorizationContext(context),
               var prompt = cloudAuthorizationPrompt,
               prompt.interactionID == context.operationID,
@@ -9966,7 +10206,9 @@ final class AppState: ObservableObject {
             return
         }
         prompt.lifecyclePhase = .submitting
-        prompt.status = L10n.string("cloud.configuration.confirming", fallback: "Confirming the result and refreshing configuration…")
+        prompt.status = context.operation.pendingPlayback == nil
+            ? L10n.string("cloud.configuration.confirming", fallback: "Confirming the result and refreshing configuration…")
+            : L10n.string("cloud.authorization.playback-resuming", fallback: "Authorization successful. Resuming playback…")
         cloudAuthorizationPrompt = prompt
         _ = configurationInteractionCoordinator.transition(
             context.operationID,
@@ -10148,6 +10390,23 @@ final class AppState: ObservableObject {
         }
     }
 
+    func openCloudConfigurationWebLink(_ index: Int, interactionID: UUID) async {
+        guard let context = cloudAuthorizationContext,
+              context.operationID == interactionID,
+              configurationInteractionCoordinator.owns(interactionID),
+              isCurrentCloudAuthorizationContext(context),
+              let environment else { return }
+        do {
+            let state = try await environment.androidDexBridge.openConfigurationWebLink(
+                interactionID: interactionID, index: index)
+            guard cloudAuthorizationContext?.operationID == interactionID else { return }
+            await updateCloudAuthorizationPrompt(state)
+        } catch {
+            guard cloudAuthorizationContext?.operationID == interactionID else { return }
+            cloudAuthorizationPrompt?.status = localizedRuntimeErrorMessage(error)
+        }
+    }
+
     private func updateCloudAuthorizationPrompt(
         _ state: AndroidBridgeUIState
     ) async {
@@ -10215,7 +10474,8 @@ final class AppState: ObservableObject {
             status: status,
             allowsRetry: previous?.allowsRetry ?? false,
             allowsCompletionConfirmation:
-                context.operation.pendingPlayback == nil
+                context.operation.pendingPlayback == nil || state.playbackAwaitingAuthorization == true,
+            webLinks: state.webLinks ?? []
         )
         _ = configurationInteractionCoordinator.transition(
             operationID,
@@ -10683,7 +10943,7 @@ final class AppState: ObservableObject {
             ?? context.operation.initialSemantic
         if let actionStatusGeneration = context.actionStatusGeneration {
             publishSiteActionStatus(
-                providerResult.flatMap(Self.siteActionMessage),
+                providerResult.flatMap(Self.siteActionMessage) ?? L10n.string("configuration.action.finished", fallback: "Operation finished"),
                 title: configurationInteractionCoordinator.current?
                     .request.title
                     ?? L10n.string("cloud.configuration-action.title", fallback: "Configuration Action"),
@@ -10748,20 +11008,46 @@ final class AppState: ObservableObject {
             )
         case .detail(let summary):
             guard summary.siteKey == context.sourceIdentity.siteKey else { return }
-            if summary.resolvedContentKind == .action,
-               selectedSection == .home,
-               selectedSiteKey == context.sourceIdentity.siteKey {
+            if context.providerHandle != nil,
+               let provider = providers[summary.siteKey] as? AndroidDexSpiderSiteProvider {
+                // The original worker is authoritative for scoped TVBox UI.
+                // Configuration completion never replays its side effects.
+                switch provider.selectionAfterInteraction(providerResult ?? .null, summary: summary) {
+                case .detail(let detail):
+                    guard acceptsFavoriteDetail(detail) else { return }
+                    detailRouteSummary = summary
+                    selectedDetail = detail
+                    pendingDetailSummary = nil
+                    detailLoadState = .loaded
+                    detailRevision &+= 1
+                    await completeFavoriteDetail(detail)
+                case .action, .search:
+                    dismissDetail()
+                    if selectedSection == .home,
+                       selectedSiteKey == context.sourceIdentity.siteKey {
+                        await loadSelectedSiteHome(refreshConfigurationIfNeeded: false,
+                            forceCategoryRefresh: true, forceHomeRefresh: true)
+                    }
+                }
+            } else if summary.resolvedContentKind == .action,
+                      selectedSection == .home,
+                      selectedSiteKey == context.sourceIdentity.siteKey {
                 await loadSelectedSiteHome(refreshConfigurationIfNeeded: false)
             } else {
                 await loadDetail(summary)
             }
         case .homeAction:
-            if selectedSection == .home,
+            if let target = context.configurationRefreshTarget {
+                await refreshTVBoxConfigurationAfterAction(target)
+            } else if selectedSection == .home,
                selectedSiteKey == context.sourceIdentity.siteKey {
-                await loadSelectedSiteHome(refreshConfigurationIfNeeded: false)
+                await loadSelectedSiteHome(refreshConfigurationIfNeeded: false,
+                    forceCategoryRefresh: true, forceHomeRefresh: true)
             }
         case .siteAction:
-            if selectedSection == .home,
+            if let target = context.configurationRefreshTarget {
+                await refreshTVBoxConfigurationAfterAction(target)
+            } else if selectedSection == .home,
                selectedSiteKey == context.sourceIdentity.siteKey {
                 await loadSelectedSiteHome(refreshConfigurationIfNeeded: false)
             }
@@ -11671,6 +11957,12 @@ final class AppState: ObservableObject {
         _ keyword: String,
         context: SearchLaunchContext
     ) {
+        let normalized = keyword.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
+        if activeConfigurationUsesNodeRuntime, isSearching,
+           activeSearchKeyword == normalized, activeSearchContext == context,
+           activeSearchScope == searchSiteScope { return }
+        activeSearchContext = context
+        activeSearchScope = searchSiteScope
         if isSearching {
             previousSearchTermination = .supersededByNewSearch
         }
@@ -11752,10 +12044,19 @@ final class AppState: ObservableObject {
         // and older bundles may report `searchable == 0` even though their
         // route accepts a normal search request. Schedule every selected,
         // runnable provider and let the request's exact outcome decide.
-        let searchableProviders: [SiteProvider] = searchCatalogSites.compactMap { site in
+        var searchableProviders: [SiteProvider] = searchCatalogSites.compactMap { site in
             guard selectedKeys.contains(site.key) else { return nil }
             return providers[site.key]
         }
+        // Reorder only CatPaw slots. Every selected site still gets a first-page
+        // attempt, including unknown and previously slow providers.
+        var nodeOrder = searchableProviders.enumerated().compactMap { index, provider -> (Int, NodeHTTPSpiderSiteProvider)? in
+            (provider as? NodeHTTPSpiderSiteProvider).map { (index, $0) }
+        }.sorted {
+            let a = $0.1.aggregateSearchPriority, b = $1.1.aggregateSearchPriority
+            return a == b ? $0.0 < $1.0 : a < b
+        }.map(\.1).makeIterator()
+        searchableProviders = searchableProviders.map { $0 is NodeHTTPSpiderSiteProvider ? (nodeOrder.next()! as SiteProvider) : $0 }
         if refreshKeys == nil { searchPaging.order = searchableProviders.map { $0.site.key } }
         for provider in searchableProviders {
             let key = provider.site.key
@@ -11796,8 +12097,6 @@ final class AppState: ObservableObject {
         )
         var firstPageCompletedSiteKeys = Set<String>()
         var completedSiteKeys = Set<String>()
-        var pendingSnapshot: MultiSiteSearchSnapshot?
-        var lastSnapshotRefresh = Date.distantPast
         var successfulRefreshKeys = Set<String>()
         var latestRefreshItems: [VideoSummary] = []
 
@@ -11815,19 +12114,15 @@ final class AppState: ObservableObject {
             self.searchMaximumResultsPerSite = snapshot.maximumResultsPerSite
             self.searchDidDiscardCandidates = snapshot.didDiscardCandidates
         }
+        let snapshotPublisher = SearchSnapshotPublisher(publish: applySnapshot)
+        defer { snapshotPublisher.cancel() }
 
         for await event in stream {
             guard searchSessionGate.accepts(sessionID) else { return }
             switch event {
             case .snapshot(let snapshot):
                 latestRefreshItems = snapshot.items
-                pendingSnapshot = snapshot
-                let now = Date()
-                if now.timeIntervalSince(lastSnapshotRefresh) >= 0.12 {
-                    applySnapshot(snapshot)
-                    pendingSnapshot = nil
-                    lastSnapshotRefresh = now
-                }
+                snapshotPublisher.submit(snapshot)
             case .failure(let failure):
                 searchFailures.append(failure)
                 searchPaging.cursors[failure.siteKey]?.fail(failure.message, uncertain: failure.isPaginationUncertain)
@@ -11847,17 +12142,13 @@ final class AppState: ObservableObject {
                     searchCompletedSiteCount = completedSiteKeys.count
                 }
             case .finished(let termination):
-                if let pendingSnapshot {
-                    applySnapshot(pendingSnapshot)
-                }
+                snapshotPublisher.flush()
                 searchTermination = termination
                 isSearching = false
             }
         }
         if searchSessionGate.accepts(sessionID) {
-            if let pendingSnapshot {
-                applySnapshot(pendingSnapshot)
-            }
+            snapshotPublisher.flush()
             isSearching = false
             searchTask = nil
             if let selected = selectedSearchSiteKey,
@@ -12256,6 +12547,7 @@ final class AppState: ObservableObject {
 
     func refreshSearchPage(force: Bool = false) async {
         guard !searchPageIsLoading else { return }
+        catPawSearchMemory.invalidate()
         searchBrowseMemory.acceptPendingOrders()
         if let folder = currentSearchFolder {
             if let failedPage = folder.failedPage, failedPage > 1, folder.pagination?.hasMore == true {
@@ -12303,7 +12595,11 @@ final class AppState: ObservableObject {
         let failed = cursors.contains { $0.error != nil }
         let restricted = keys.contains { searchPaging.restricted.contains($0) && searchPaging.cursors[$0]?.ended != true }
         let text: String
-        if busy { text = L10n.string("search.browse.loading", fallback: "Searching for more results…") }
+        if busy {
+            text = searchResults.isEmpty
+                ? L10n.string("search.browse.loading", fallback: "Searching for more results…")
+                : L10n.string("search.browse.waiting-providers", fallback: "Results are ready; some providers are still searching…")
+        }
         else if searchPaging.stopped { text = L10n.string("search.browse.stopped", fallback: "Search stopped; results retained") }
         else if searchPaging.manualContinuation { text = L10n.string("search.browse.paused", fallback: "More sources found; continue loading when ready") }
         else if !ready.isEmpty {
@@ -13983,7 +14279,9 @@ final class AppState: ObservableObject {
         hasCompletedStartup = true
     }
 
-    func setLiveConfigurationForTesting(_ record: StoredConfiguration?, providers: [String: SiteProvider]) {
+    func setLiveConfigurationForTesting(_ record: StoredConfiguration?, providers: [String: SiteProvider], preservingDetailRoute: Bool = false) {
+        preservesDetailRouteOnProviderReplacement = preservingDetailRoute
+        defer { preservesDetailRouteOnProviderReplacement = false }
         invalidateXtreamLiveCatalog()
         activeConfigurationRecord = record
         activeConfiguration = record.flatMap { try? XtreamProviderConfiguration(data: $0.rawData).providerConfiguration }
@@ -16323,6 +16621,13 @@ final class AppState: ObservableObject {
         guard let player = environment?.player else { return }
         let previousStatus = playerSnapshot.status
         let shouldPlay: Bool
+        if previousStatus == .ended {
+            // Reload with a fresh playback/EOF owner. Merely unpausing a
+            // keep-open final frame cannot produce another end event.
+            await savePlaybackHistory(position: playerSnapshot.position, duration: playerSnapshot.duration)
+            await retryCurrentPlayback()
+            return
+        }
         if case .paused = previousStatus {
             shouldPlay = true
             playerSnapshot.status = .playing
@@ -18816,7 +19121,7 @@ final class AppState: ObservableObject {
                       self.configurationImportOperationID == nil else {
                     continue
                 }
-                self.invalidateDetailContext()
+                self.nodeProfileStorageDidChange()
                 _ = await self.refreshActiveConfigurationIfNeeded(
                     force: true,
                     reportErrors: false
@@ -18871,6 +19176,7 @@ final class AppState: ObservableObject {
         case .running(let endpoint):
             let previousEndpoint = lastReadyNodeRuntimeEndpoint
                 ?? activeConfigurationRecord?.baseURL
+            if previousEndpoint != endpoint { catPawSearchMemory.invalidate() }
             lastReadyNodeRuntimeEndpoint = endpoint
             activeNodeRuntimeEndpoint = endpoint
             rebindNodeConfigurationWebsite(to: endpoint)
@@ -19597,7 +19903,9 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func rebuildProviders() {
+    private func rebuildProviders(preservingDetailRoute: Bool = false) {
+        preservesDetailRouteOnProviderReplacement = preservingDetailRoute
+        defer { preservesDetailRouteOnProviderReplacement = false }
         invalidateXtreamLiveCatalog()
         guard let environment else {
             providers = [:]
@@ -19684,6 +19992,7 @@ final class AppState: ObservableObject {
                             baseURL: nodeFallbackBaseURL,
                             httpClient: httpClient,
                             aggregateSearchHTTPClient: aggregateSearchHTTPClient,
+                            searchMemory: catPawSearchMemory,
                             diagnosticReporter: {
                                 [weak runtime = nodeBundleRuntime] event in
                                 Task { await runtime?.recordDiagnosticEvent(event) }
@@ -19709,6 +20018,7 @@ final class AppState: ObservableObject {
                             baseURL: baseURL,
                             httpClient: httpClient,
                             aggregateSearchHTTPClient: aggregateSearchHTTPClient,
+                            searchMemory: catPawSearchMemory,
                             diagnosticReporter: {
                                 [weak runtime = nodeBundleRuntime] event in
                                 Task { await runtime?.recordDiagnosticEvent(event) }
@@ -19756,7 +20066,11 @@ final class AppState: ObservableObject {
                         configurationHosts: activeConfiguration?.hosts ?? [],
                         jarReference: jarReference,
                         baseURL: baseURL,
-                        bridge: environment.androidDexBridge
+                        bridge: environment.androidDexBridge,
+                        authorizationSites: supportedSites.filter {
+                            $0.type == 3 && ["csp_PanConfig", "csp_PanConfigGuard"].contains($0.api)
+                                && javaDexJarReference(for: $0, baseURL: baseURL) == jarReference
+                        }
                     )) ?? UnsupportedSiteProvider(site: site)
                 } else {
                     provider = UnsupportedSiteProvider(site: site)
@@ -20849,7 +21163,7 @@ final class AppState: ObservableObject {
                             )
                         }
                         if origin.permitsAutomaticAdvance {
-                            self.scheduleAdvanceAfterNaturalEnd(
+                            self.scheduleAdvanceAfterCompletedEnd(
                                 endedSessionID: endedSessionID
                             )
                         }
@@ -21023,7 +21337,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func scheduleAdvanceAfterNaturalEnd(endedSessionID: UUID) {
+    private func scheduleAdvanceAfterCompletedEnd(endedSessionID: UUID) {
         requestAdvanceToNextEpisode(
             reason: .naturalEnd,
             sessionID: endedSessionID
@@ -21051,6 +21365,13 @@ final class AppState: ObservableObject {
         episodeSessionID: UUID,
         automaticAdvanceRequestID: UUID
     ) async {
+        // Cached history may start playback before its full episode list is
+        // restored. Await that bounded request, then recheck all ownership
+        // below; a fast seek to EOF must not consume the session's one advance
+        // attempt while it still contains only the cached current episode.
+        if isRestoringPlayerEpisodeList, let restoration = playerEpisodeListRestoreTask {
+            await restoration.value
+        }
         guard automaticEpisodeAdvanceController.owns(
                   requestID: automaticAdvanceRequestID
               ),

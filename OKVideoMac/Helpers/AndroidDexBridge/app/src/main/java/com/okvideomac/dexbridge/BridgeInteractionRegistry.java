@@ -130,6 +130,9 @@ final class BridgeInteractionRegistry {
             interaction.uiSignature = signature;
             interaction.revision++;
         }
+        if (interaction.observesOptionalUI && surfaceDelegated) {
+            interaction.expectsProviderUI = true;
+        }
         interaction.lastUI = ui == null ? emptyUI() : ui;
         interaction.updatedAt = System.currentTimeMillis();
         if (!interaction.terminal()) {
@@ -140,6 +143,9 @@ final class BridgeInteractionRegistry {
                         "stay"
                 );
             } else if (visible) {
+                if (interaction.observesOptionalUI && surfaceRequestScoped) {
+                    interaction.expectsProviderUI = true;
+                }
                 interaction.sawUI = true;
                 interaction.uiVisible = true;
                 interaction.phase = "awaitingUser";
@@ -280,6 +286,55 @@ final class BridgeInteractionRegistry {
         } catch (Throwable ignored) {
         }
         return result;
+    }
+
+    static synchronized void awaitPlaybackAuthorization(String id) {
+        Interaction interaction = INTERACTIONS.get(id);
+        if (interaction != null && id.equals(latestID) && !interaction.terminal()
+                && "playback".equals(interaction.declaredKind)) {
+            interaction.playbackAwaitingAuthorization = true;
+            interaction.expectsProviderUI = true;
+        }
+    }
+
+    static synchronized void endPlaybackAuthorization(String id) {
+        Interaction interaction = INTERACTIONS.get(id);
+        if (interaction != null) interaction.playbackAwaitingAuthorization = false;
+    }
+
+    static synchronized void setWebLinks(String id, List<String> links) {
+        Interaction interaction = INTERACTIONS.get(id);
+        if (interaction != null && id.equals(latestID) && !interaction.terminal()
+                && (interaction.observesOptionalUI || interaction.playbackAwaitingAuthorization)) {
+            interaction.webLinks = new ArrayList<>(links);
+        }
+    }
+
+    static synchronized String webLink(String id, int index) {
+        Interaction interaction = INTERACTIONS.get(id);
+        if (interaction == null || !id.equals(latestID) || interaction.terminal()
+                || !interaction.sawUI || index < 0 || index >= interaction.webLinks.size()) return null;
+        return interaction.webLinks.get(index);
+    }
+
+    static synchronized void observeOptionalUI(String id) {
+        Interaction interaction = INTERACTIONS.get(id);
+        if (interaction != null && id.equals(latestID) && !interaction.terminal()) {
+            interaction.observesOptionalUI = true;
+        }
+    }
+
+    static synchronized void providerRequestedFinish(String id) {
+        Interaction interaction = INTERACTIONS.get(id);
+        if (interaction != null && id.equals(latestID) && !interaction.terminal()) {
+            interaction.providerRequestedFinish = true;
+            interaction.revision++;
+        }
+    }
+
+    static synchronized boolean hasProviderFinish(String id) {
+        Interaction interaction = INTERACTIONS.get(id);
+        return interaction != null && interaction.providerRequestedFinish;
     }
 
     static synchronized JSONObject expectProviderUI(String requestedID) {
@@ -629,6 +684,10 @@ final class BridgeInteractionRegistry {
         boolean sawUI;
         boolean uiVisible;
         boolean expectsProviderUI;
+        boolean observesOptionalUI;
+        boolean providerRequestedFinish;
+        boolean playbackAwaitingAuthorization;
+        List<String> webLinks = new ArrayList<>();
         boolean invocationReturned;
         boolean userConfirmed;
         boolean playbackResultReady;
@@ -837,6 +896,9 @@ final class BridgeInteractionRegistry {
                 value.put("expectsProviderUI", expectsProviderUI);
                 value.put("uiObserved", sawUI);
                 value.put("uiVisible", uiVisible);
+                value.put("playbackAwaitingAuthorization", playbackAwaitingAuthorization && !terminal());
+                value.put("webLinks", sawUI && !terminal()
+                        ? new JSONArray(webLinks) : new JSONArray());
                 putSurfaceFields(
                         value,
                         lastUI == null ? emptyUI() : lastUI,

@@ -2,6 +2,11 @@
 
 日期：2026-09-27
 
+> 文档类型：历史发布前验收记录。后续正式 `v0.7.3` 已于 2026-09-27 发布，固定提交
+> `55ffa9d55faced404b20034d7cfe5bcfbc1be581`；Developer ID、公证、Staple、Gatekeeper
+> 与安装 smoke 已完成，见 [GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.7.3)。
+> 下文保留当时验收状态，不作为 0.8.0 的新测试结果或当前未发布状态。
+
 ## 基线与候选
 
 - 最近一次正式 GitHub Release / Tag：`v0.6.1`，Build 101，提交

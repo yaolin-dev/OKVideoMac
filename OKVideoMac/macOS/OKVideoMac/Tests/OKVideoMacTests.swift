@@ -3524,24 +3524,28 @@ final class WindowTransitionRegressionTests: XCTestCase {
         let root = ZStack {
             Color.black
             Surface(view: view).ignoresSafeArea()
-            VStack {
-                Text("UI REFERENCE  ●  Fullscreen aspect baseline").foregroundStyle(.white)
-                Spacer()
-                HStack { Circle().fill(.orange).frame(width: 36, height: 36); Text("UI circle stays round").foregroundStyle(.white) }
-            }.padding(28)
         }
         let composition = PlayerFullscreenContentView(frame: window.contentView!.bounds)
         let hosting = NSHostingView(rootView: root)
         hosting.frame = composition.bounds; hosting.autoresizingMask = [.width, .height]
         composition.addSubview(hosting); window.contentView?.addSubview(composition)
+        let overlay = PlayerFullscreenOverlayView(frame: window.contentView!.bounds)
+        let controlHost = PlayerOverlayHostingView(rootView: VStack {
+            Text("UI REFERENCE  ●  Fullscreen aspect baseline").font(.system(size: 15)).foregroundStyle(.white)
+            Spacer()
+            HStack { Circle().fill(.orange).frame(width: 36, height: 36); Text("UI circle stays round").foregroundStyle(.white) }
+        }.padding(28).frame(maxWidth: .infinity, maxHeight: .infinity).ignoresSafeArea().transaction { $0.disablesAnimations = true })
+        if #available(macOS 13.0, *) { controlHost.sizingOptions = [] }
+        controlHost.frame = overlay.bounds; controlHost.autoresizingMask = [.width, .height]
+        overlay.addSubview(controlHost); window.contentView?.addSubview(overlay)
         prototype.composition = composition
         let transition = WindowTransitionCoordinator.state(for: window)
         window.center(); window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        var rows = ["uptime,event,phase,window_w,window_h,view_w,view_h,backing_w,backing_h,updates,renders,skips,layer,placement,redraw"]
+        var rows = ["uptime,event,phase,window_w,window_h,view_w,view_h,backing_w,backing_h,updates,renders,skips,layer,placement,redraw,overlay_x,overlay_y,overlay_w,overlay_h,host_w,host_h"]
         func record(_ event: String) {
             let backing = view.convertToBacking(view.bounds)
-            rows.append("\(ProcessInfo.processInfo.systemUptime),\(event.replacingOccurrences(of: ",", with: ";").replacingOccurrences(of: "\n", with: " ")),\(transition.phase),\(window.frame.width),\(window.frame.height),\(view.bounds.width),\(view.bounds.height),\(backing.width),\(backing.height),\(view.renderUpdatesForTesting),\(view.renderedFramesForTesting),\(view.skippedFramesForTesting),\(view.layer.map { String(describing: type(of: $0)) } ?? "none"),\(view.layerContentsPlacement.rawValue),\(view.layerContentsRedrawPolicy.rawValue)")
+            rows.append("\(ProcessInfo.processInfo.systemUptime),\(event.replacingOccurrences(of: ",", with: ";").replacingOccurrences(of: "\n", with: " ")),\(transition.phase),\(window.frame.width),\(window.frame.height),\(view.bounds.width),\(view.bounds.height),\(backing.width),\(backing.height),\(view.renderUpdatesForTesting),\(view.renderedFramesForTesting),\(view.skippedFramesForTesting),\(view.layer.map { String(describing: type(of: $0)) } ?? "none"),\(view.layerContentsPlacement.rawValue),\(view.layerContentsRedrawPolicy.rawValue),\(overlay.frame.minX),\(overlay.frame.minY),\(overlay.frame.width),\(overlay.frame.height),\(controlHost.frame.width),\(controlHost.frame.height)")
         }
         let names: [Notification.Name] = [
             NSWindow.willEnterFullScreenNotification, NSWindow.didEnterFullScreenNotification,
@@ -6308,11 +6312,11 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     func testTVBoxSeekRequiresCurrentPositionAndReadyTransport() {
-        XCTAssertFalse(PlayerSeekCompletionPolicy.accepts(target: 2515.844, position: 2477.52, nativeSeeking: false, pausedForCache: false))
-        XCTAssertFalse(PlayerSeekCompletionPolicy.accepts(target: 100, position: 100, nativeSeeking: true, pausedForCache: false))
-        XCTAssertFalse(PlayerSeekCompletionPolicy.accepts(target: 100, position: 100, nativeSeeking: false, pausedForCache: true))
-        XCTAssertTrue(PlayerSeekCompletionPolicy.accepts(target: 100, position: 98, nativeSeeking: false, pausedForCache: false))
-        XCTAssertFalse(PlayerSeekCompletionPolicy.accepts(target: 100, position: .nan, nativeSeeking: false, pausedForCache: false))
+        XCTAssertTrue(PlayerSeekCompletionPolicy.accepts(target: 2515.844, position: 2477.52, nativeSeeking: false, pausedForCache: false, seekRestarted: true))
+        XCTAssertFalse(PlayerSeekCompletionPolicy.accepts(target: 100, position: 100, nativeSeeking: true, pausedForCache: false, seekRestarted: true))
+        XCTAssertFalse(PlayerSeekCompletionPolicy.accepts(target: 100, position: 100, nativeSeeking: false, pausedForCache: true, seekRestarted: true))
+        XCTAssertTrue(PlayerSeekCompletionPolicy.accepts(target: 100, position: 98, nativeSeeking: false, pausedForCache: false, seekRestarted: true))
+        XCTAssertFalse(PlayerSeekCompletionPolicy.accepts(target: 100, position: .nan, nativeSeeking: false, pausedForCache: false, seekRestarted: true))
     }
 
     @MainActor
@@ -8211,7 +8215,7 @@ final class OKVideoMacTests: XCTestCase {
         let site = SiteConfiguration(
             key: "detail-fixture", name: "Detail Fixture", type: 1, api: "https://example.invalid/api"
         )
-        let capability: SiteCapability = .standardJSON
+        var capability: SiteCapability = .standardJSON
 
         func home() async throws -> SiteHome {
             SiteHome(categories: [], recommendations: [])
@@ -8235,9 +8239,9 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     @MainActor
-    private func searchDetailFixture() -> (AppState, SuspendedDetailRequests, [VideoSummary]) {
+    private func searchDetailFixture(capability: SiteCapability = .standardJSON) -> (AppState, SuspendedDetailRequests, [VideoSummary]) {
         let requests = SuspendedDetailRequests()
-        let provider = SuspendedDetailProvider(requests: requests)
+        let provider = SuspendedDetailProvider(requests: requests, capability: capability)
         let state = AppState(environment: nil, initialProviders: [provider.site.key: provider])
         let results = ["a", "b"].map {
             VideoSummary(
@@ -8265,6 +8269,33 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(state.activeSearchKeyword, "返回测试", file: file, line: line)
         XCTAssertEqual(state.selectedSearchSiteKey, "detail-fixture", file: file, line: line)
         XCTAssertEqual(state.searchResults, results, file: file, line: line)
+    }
+
+    @MainActor
+    func testTVBoxMediaNavigatesImmediatelyWhileOriginalDetailLoads() async throws {
+        let (state, requests, results) = searchDetailFixture(capability: .javaDexSpider)
+        let load = Task { await state.loadDetail(results[0]) }
+        try await requests.waitUntilStarted(results[0].videoID)
+        XCTAssertTrue(state.isDetailPagePresented)
+        XCTAssertEqual(state.pendingDetailSummary, results[0])
+        await requests.finish(results[0])
+        await load.value
+        XCTAssertTrue(state.isDetailPagePresented)
+        XCTAssertEqual(state.selectedDetail?.summary, results[0])
+        XCTAssertNil(state.pendingDetailSummary)
+    }
+
+    @MainActor
+    func testTVBoxSelectionCancelDoesNotPublishLateDetail() async throws {
+        let (state, requests, results) = searchDetailFixture(capability: .javaDexSpider)
+        let load = Task { await state.loadDetail(results[0]) }
+        try await requests.waitUntilStarted(results[0].videoID)
+        state.dismissDetail()
+        await requests.finish(results[0])
+        await load.value
+        XCTAssertFalse(state.isDetailPagePresented)
+        XCTAssertNil(state.pendingDetailSummary)
+        assertSearchDetailReturnContext(state, results: results)
     }
 
     @MainActor
@@ -12531,7 +12562,7 @@ final class OKVideoMacTests: XCTestCase {
             sortOrder: .sourceOrder
         )
 
-        XCTAssertEqual(values.map(\.episodeNumber), [nil, nil, nil, nil])
+        XCTAssertEqual(values.map(\.episodeNumber), [1, 2, 3, 4])
     }
 
     func testEpisodeListRecognizesStableDescendingFilenameSequence() {
@@ -12548,7 +12579,7 @@ final class OKVideoMacTests: XCTestCase {
             sortOrder: .sourceOrder
         )
 
-        XCTAssertEqual(values.map(\.episodeNumber), [nil, nil, nil, nil])
+        XCTAssertEqual(values.map(\.episodeNumber), [12, 11, 10, 9])
     }
 
     func testSingleFilenameStillUsesLocalEpisodeFallback() {
@@ -12862,10 +12893,6 @@ final class OKVideoMacTests: XCTestCase {
         )
         XCTAssertGreaterThan(
             PlayerActivityOverlayPolicy.presentationDelayNanoseconds,
-            0
-        )
-        XCTAssertGreaterThan(
-            PlayerActivityOverlayPolicy.minimumVisibleDuration,
             0
         )
     }
@@ -13529,9 +13556,9 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertFalse(guardState.isProtecting(requestGeneration: 21))
     }
 
-    func testOnlyNaturalEndPermitsAutomaticEpisodeAdvance() {
+    func testCompletedNaturalAndUserBoundaryEndsPermitAutomaticEpisodeAdvance() {
         XCTAssertTrue(PlaybackEndOrigin.natural.permitsAutomaticAdvance)
-        XCTAssertFalse(
+        XCTAssertTrue(
             PlaybackEndOrigin.userSeekBoundary.permitsAutomaticAdvance
         )
         XCTAssertFalse(
@@ -18394,6 +18421,49 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testTVBoxFinishEffectDoesNotChangeOrdinaryZeroEpisodeDetails() throws {
+        let site = SiteConfiguration(key: "fixture", name: "Fixture", type: 3, api: "csp_Fixture")
+        let summary = VideoSummary(siteKey: "fixture", siteName: "Fixture", videoID: "opaque", title: "Opaque")
+        let original: JSONValue = .object(["list": .array([.object([
+            "vod_id": .string("opaque"), "vod_name": .string("Name")
+        ])])])
+        XCTAssertEqual(try AndroidDexSpiderSiteProvider.foregroundSelection(
+            .object(["__okvideoFinishedSelection": original]), site: site, baseURL: nil, summary: summary), .action(original))
+        guard case .detail = try AndroidDexSpiderSiteProvider.foregroundSelection(original,
+            site: site, baseURL: nil, summary: summary) else { return XCTFail("A movie without episodes is not automatically a setting") }
+    }
+
+    func testTVBoxConfirmedConfigurationConsumesPlaceholderWithoutChangingSharedMapping() throws {
+        let site = SiteConfiguration(key: "fixture", name: "Fixture", type: 3, api: "csp_Fixture")
+        let summary = VideoSummary(siteKey: "fixture", siteName: "Fixture", videoID: "settings", title: "Settings")
+        let value: JSONValue = .object(["list": .array([.object([
+            "vod_id": .string("settings"), "vod_name": .string("Configured"),
+            "vod_content": .string("http://10.0.2.17:19988/config")
+        ])])])
+        XCTAssertEqual(AndroidDexSpiderSiteProvider.selectionAfterInteraction(value,
+            site: site, baseURL: nil, summary: summary), .action(value))
+        // Other engines retain the existing ordinary detail contract.
+        guard case .detail = try SpiderResponseMapper.selection(value, site: site,
+                baseURL: nil, fallbackSummary: summary) else {
+            return XCTFail("Shared detail mapping must remain unchanged")
+        }
+    }
+
+    func testTVBoxConfirmedDetailUsesOriginalPlayableResult() throws {
+        let site = SiteConfiguration(key: "fixture", name: "Fixture", type: 3, api: "csp_Fixture")
+        let summary = VideoSummary(siteKey: "fixture", siteName: "Fixture", videoID: "film", title: "Film")
+        let value: JSONValue = .object(["list": .array([.object([
+            "vod_id": .string("film"), "vod_name": .string("Film"),
+            "vod_play_from": .string("Line"),
+            "vod_play_url": .string("Episode$https://example.invalid/film.mp4")
+        ])])])
+        guard case .detail(let detail) = AndroidDexSpiderSiteProvider.selectionAfterInteraction(
+                value, site: site, baseURL: nil, summary: summary) else {
+            return XCTFail("The original playable response must be consumed")
+        }
+        XCTAssertEqual(detail.playSources.first?.episodes.first?.url, "https://example.invalid/film.mp4")
+    }
+
     func testAndroidDexAuthorizationMonitoringUsesStructuralActionContext() {
         XCTAssertFalse(
             AndroidDexBridgeClient.shouldMonitorAuthorization(
@@ -18993,13 +19063,13 @@ final class OKVideoMacTests: XCTestCase {
     func testPlayerPanelsRemainInsideMinimumViewportAndAboveControls() {
         for size in [CGSize(width: 640, height: 360), CGSize(width: 864, height: 360), CGSize(width: 1200, height: 675)] {
             let layout = PlayerOverlayLayout(viewportSize: size)
-            XCTAssertLessThanOrEqual(layout.panelMaximumSize.width + 42, size.width)
-            XCTAssertLessThanOrEqual(layout.panelMaximumSize.height + 106, size.height)
+            XCTAssertLessThanOrEqual(layout.panelMaximumSize.width + 36, size.width)
+            XCTAssertLessThanOrEqual(layout.panelMaximumSize.height + layout.panelBottomInset + 24, size.height)
             XCTAssertGreaterThan(layout.panelMaximumSize.height, 200)
         }
         XCTAssertTrue(PlayerOverlayLayout(viewportSize: CGSize(width: 640, height: 360)).isCompact)
         XCTAssertTrue(PlayerOverlayLayout(viewportSize: CGSize(width: 759, height: 450)).isCompact)
-        XCTAssertFalse(PlayerOverlayLayout(viewportSize: CGSize(width: 760, height: 450)).isCompact)
+        XCTAssertFalse(PlayerOverlayLayout(viewportSize: CGSize(width: 900, height: 450)).isCompact)
     }
 
     func testPlayerUtilityInteractionPreventsAutoHide() {
@@ -21499,11 +21569,13 @@ final class NodeBundleCompatibilityTests: XCTestCase {
         let firstData = try NodeBundleRuntimeService.normalizeConfiguration(
             source,
             bundleIdentity: "bundle",
+            profileIdentity: "account-1",
             profileRevision: "revision-1"
         )
         let secondData = try NodeBundleRuntimeService.normalizeConfiguration(
             source,
             bundleIdentity: "bundle",
+            profileIdentity: "account-2",
             profileRevision: "revision-2"
         )
         let first = try XCTUnwrap(ConfigurationParser().parse(firstData).sites.first)
@@ -28194,7 +28266,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             0
         )
         XCTAssertEqual(
-            PlayerProgressHoverPolicy.fraction(x: 50, width: 200),
+            PlayerProgressHoverPolicy.fraction(x: 56, width: 212),
             0.25
         )
         XCTAssertEqual(
@@ -33145,5 +33217,287 @@ final class AndroidADBRecoveryRegressionTests: XCTestCase {
             if process.isRunning { process.terminate(); process.waitUntilExit() }
             try? FileManager.default.removeItem(at: root)
         }
+    }
+}
+
+/// Exercises the actual AppState/card entry point, including work which fails
+/// before a native prompt exists. Fake providers deliberately ignore cancellation
+/// until released so stale-result rejection is tested independently of transport.
+final class TVBoxConfigurationActionStateTests: XCTestCase {
+    private actor Requests {
+        var waiting: [String: CheckedContinuation<SiteSelectionResult, Error>] = [:]
+        var calls: [String] = []
+        var categoryReads: [String] = []
+        var revision = 0
+        func invoke(_ key: String) async throws -> SiteSelectionResult {
+            calls.append(key)
+            return try await withCheckedThrowingContinuation { waiting[key] = $0 }
+        }
+        func waitFor(_ key: String) async throws {
+            for _ in 0..<250 {
+                if waiting[key] != nil { return }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            throw AppError.site("Fixture request did not start: \(key)")
+        }
+        func finish(_ key: String, failure: Bool = false) {
+            guard let continuation = waiting.removeValue(forKey: key) else { return }
+            if failure { continuation.resume(throwing: AppError.site("Fixture transport failed")) }
+            else {
+                revision += 1
+                continuation.resume(returning: .action(.object(["list": .array([
+                    .object(["vod_name": .string("设置成功后刷新配置中心")])
+                ])])))
+            }
+        }
+        func present(_ key: String, state: AndroidBridgeUIState) {
+            waiting.removeValue(forKey: key)?.resume(throwing: AndroidBridgeUIRequired(state: state))
+        }
+        func category(_ id: String, site: SiteConfiguration) -> VideoPage {
+            categoryReads.append(id)
+            return VideoPage(items: [VideoSummary(siteKey: site.key, siteName: site.name,
+                videoID: "a", title: "Settings", remarks: "revision \(revision)", contentKind: .action)],
+                pagination: Pagination(page: 1, pageCount: 1))
+        }
+        func callLog() -> [String] { calls }
+        func readLog() -> [String] { categoryReads }
+    }
+    private struct Provider: SiteProvider {
+        let requests: Requests
+        var capability: SiteCapability = .javaDexSpider
+        let site = SiteConfiguration(key: "configuration-fixture", name: "Config",
+            type: 3, api: "csp_PanConfigGuard")
+        func home() async throws -> SiteHome {
+            SiteHome(categories: [VideoCategory(id: "settings", name: "Settings"),
+                VideoCategory(id: "other", name: "Other")], recommendations: [])
+        }
+        func category(id: String, page: Int, filters: [String:String]) async throws -> VideoPage {
+            await requests.category(id, site: site)
+        }
+        func detail(id: String) async throws -> VideoDetail { throw AppError.site("Unexpected media detail") }
+        func select(action item: SiteActionItem) async throws -> SiteSelectionResult {
+            try await requests.invoke("detail:\(item.itemID)")
+        }
+        func action(_ action: String) async throws -> JSONValue {
+            if case .action(let value) = try await requests.invoke("action:\(action)") { return value }
+            return .null
+        }
+        func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
+            VideoPage(items: [], pagination: Pagination(page: page, pageCount: 1))
+        }
+        func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult { throw AppError.site("unused") }
+    }
+    @MainActor
+    private func fixture(timeout: TimeInterval = 90, capability: SiteCapability = .javaDexSpider) async throws -> (AppState, Requests, Provider) {
+        let requests = Requests(), provider = Provider(requests: requests, capability: capability)
+        let state = AppState(environment: nil, configurationActionTimeout: timeout)
+        state.seedCategoryHomeForTesting(record: StoredConfiguration(name: "Fixture", sourceKind: .pasted,
+            sourceValue: "{}", baseURL: nil, rawData: Data("{}".utf8)), provider: provider, home: try await provider.home())
+        let loaded = await state.loadCategory(id: "settings")
+        XCTAssertTrue(loaded)
+        return (state, requests, provider)
+    }
+    private func item(_ id: String = "a", command: String? = nil) -> SiteActionItem {
+        SiteActionItem(siteKey: "configuration-fixture", siteName: "Config", itemID: id,
+            title: "Settings \(id)", action: command)
+    }
+    @MainActor
+    func testFailureBeforePromptPublishesErrorUnlocksAndNextActionSucceeds() async throws {
+        let (state, requests, _) = try await fixture()
+        let first = Task { await state.performHomeAction(item()) }
+        try await requests.waitFor("detail:a")
+        XCTAssertTrue(state.isTVBoxConfigurationActionPending(item()))
+        XCTAssertFalse(state.isTVBoxConfigurationActionPending(item("b")))
+        XCTAssertNil(state.cloudAuthorizationPrompt)
+        XCTAssertFalse(state.isDetailPagePresented)
+        var changes = 0
+        let observer = state.objectWillChange.sink { changes += 1 }
+        await requests.finish("detail:a", failure: true); await first.value
+        XCTAssertGreaterThan(changes, 0)
+        XCTAssertNotNil(state.presentedError)
+        XCTAssertNil(state.pendingTVBoxConfigurationAction)
+        XCTAssertFalse(state.isConfigurationInteractionActive)
+        state.presentedError = nil
+        let second = Task { await state.performHomeAction(item("b")) }
+        try await requests.waitFor("detail:b")
+        await requests.finish("detail:b"); await second.value
+        XCTAssertNotNil(state.siteActionStatus)
+        XCTAssertNil(state.presentedError)
+        XCTAssertEqual(state.selectedCategoryID, "settings")
+        XCTAssertEqual(state.categoryPage?.items.first?.remarks, "revision 1")
+        let calls = await requests.callLog(), reads = await requests.readLog()
+        XCTAssertEqual(calls, ["detail:a", "detail:b"])
+        XCTAssertEqual(reads, ["settings", "settings"])
+        withExtendedLifetime(observer) {}
+    }
+    @MainActor
+    func testExplicitCommandUsesActionAndRefreshesExactlyOnce() async throws {
+        let (state, requests, _) = try await fixture()
+        let button = item(command: "toggle")
+        let work = Task { await state.performHomeAction(button) }
+        try await requests.waitFor("action:toggle")
+        XCTAssertTrue(state.isTVBoxConfigurationActionPending(button))
+        await requests.finish("action:toggle"); await work.value
+        XCTAssertNotNil(state.siteActionStatus)
+        let calls = await requests.callLog(), reads = await requests.readLog()
+        XCTAssertEqual(calls, ["action:toggle"])
+        XCTAssertEqual(reads, ["settings", "settings"])
+    }
+    @MainActor
+    func testDuplicateTapDoesNotRunSettingTwice() async throws {
+        let (state, requests, _) = try await fixture()
+        let first = Task { await state.performHomeAction(item()) }
+        try await requests.waitFor("detail:a")
+        await state.performHomeAction(item())
+        let calls = await requests.callLog(); XCTAssertEqual(calls, ["detail:a"])
+        await requests.finish("detail:a"); await first.value
+    }
+    @MainActor
+    func testCancelRejectsLateResultAndLeavesOtherButtonsUsable() async throws {
+        let (state, requests, _) = try await fixture()
+        let first = Task { await state.performHomeAction(item()) }
+        try await requests.waitFor("detail:a")
+        state.cancelPendingTVBoxConfigurationAction(try XCTUnwrap(state.pendingTVBoxConfigurationAction?.id))
+        XCTAssertNil(state.pendingTVBoxConfigurationAction)
+        XCTAssertFalse(state.isConfigurationInteractionActive)
+        let second = Task { await state.performHomeAction(item("b")) }
+        try await requests.waitFor("detail:b")
+        await requests.finish("detail:a"); await first.value
+        XCTAssertTrue(state.isTVBoxConfigurationActionPending(item("b")))
+        XCTAssertNil(state.siteActionStatus)
+        await requests.finish("detail:b"); await second.value
+        XCTAssertNotNil(state.siteActionStatus)
+        let reads = await requests.readLog(); XCTAssertEqual(reads.count, 2)
+    }
+    @MainActor
+    func testCallerCancellationUnlocksBeforeUncooperativeProviderReturns() async throws {
+        let (state, requests, _) = try await fixture()
+        let work = Task { await state.performHomeAction(item()) }
+        try await requests.waitFor("detail:a")
+        work.cancel()
+        for _ in 0..<100 {
+            if state.pendingTVBoxConfigurationAction == nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertNil(state.pendingTVBoxConfigurationAction)
+        XCTAssertFalse(state.isConfigurationInteractionActive)
+        await requests.finish("detail:a"); await work.value
+        XCTAssertNil(state.siteActionStatus)
+        XCTAssertNil(state.presentedError)
+    }
+    @MainActor
+    func testSelectingDifferentButtonSupersedesOldFailure() async throws {
+        let (state, requests, _) = try await fixture()
+        let first = Task { await state.performHomeAction(item()) }
+        try await requests.waitFor("detail:a")
+        let second = Task { await state.performHomeAction(item("b")) }
+        try await requests.waitFor("detail:b")
+        await requests.finish("detail:a", failure: true); await first.value
+        XCTAssertNil(state.presentedError)
+        XCTAssertTrue(state.isTVBoxConfigurationActionPending(item("b")))
+        await requests.finish("detail:b"); await second.value
+        XCTAssertFalse(state.isConfigurationInteractionActive)
+    }
+    @MainActor
+    func testTimeoutBeforePromptIsVisibleAndRejectsLateCompletion() async throws {
+        let (state, requests, _) = try await fixture(timeout: 0.1)
+        let work = Task { await state.performHomeAction(item()) }
+        try await requests.waitFor("detail:a")
+        for _ in 0..<100 {
+            if state.pendingTVBoxConfigurationAction == nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertNil(state.pendingTVBoxConfigurationAction)
+        XCTAssertNotNil(state.presentedError)
+        XCTAssertFalse(state.isConfigurationInteractionActive)
+        await requests.finish("detail:a"); await work.value
+        XCTAssertNil(state.siteActionStatus)
+        let reads = await requests.readLog(); XCTAssertEqual(reads.count, 1)
+    }
+    @MainActor
+    func testReadbackDoesNotNavigateOverNewCategory() async throws {
+        let (state, requests, _) = try await fixture()
+        let work = Task { await state.performHomeAction(item()) }
+        try await requests.waitFor("detail:a")
+        _ = await state.loadCategory(id: "other")
+        await requests.finish("detail:a"); await work.value
+        XCTAssertEqual(state.selectedCategoryID, "other")
+        let reads = await requests.readLog(); XCTAssertEqual(reads, ["settings", "other"])
+    }
+    @MainActor
+    func testKnownConfigurationEntryNeverOpensMediaRoute() async throws {
+        let (state, requests, provider) = try await fixture()
+        let summary = VideoSummary(siteKey: provider.site.key, siteName: provider.site.name,
+            videoID: "a", title: "Legacy cached config card")
+        let work = Task { await state.loadDetail(summary) }
+        try await requests.waitFor("detail:a")
+        XCTAssertFalse(state.isDetailPagePresented)
+        XCTAssertNotNil(state.pendingTVBoxConfigurationAction)
+        await requests.finish("detail:a"); await work.value
+        XCTAssertFalse(state.isDetailPagePresented)
+    }
+    @MainActor
+    func testNativeDialogReplacesInlineProgressAndCancelRestoresCards() async throws {
+        let (state, requests, _) = try await fixture(timeout: 0.2)
+        let work = Task { await state.performHomeAction(item()) }
+        try await requests.waitFor("detail:a")
+        let id = try XCTUnwrap(state.pendingTVBoxConfigurationAction?.id)
+        let json: [String: Any] = ["interactionID": id.uuidString, "revision": 1,
+            "kind": "configuration", "phase": "awaitingUser", "terminal": false,
+            "surfaceActive": true, "surfaceRequestScoped": true,
+            "surfaceInteractionID": id.uuidString, "surfaceMode": "providerWindow"]
+        let ui = try JSONDecoder().decode(AndroidBridgeUIState.self, from: JSONSerialization.data(withJSONObject: json))
+        await requests.present("detail:a", state: ui); await work.value
+        XCTAssertNil(state.pendingTVBoxConfigurationAction)
+        XCTAssertEqual(state.mainWindowCloudAuthorizationPrompt?.interactionID, id)
+        XCTAssertEqual(state.mainWindowCloudAuthorizationPrompt?.lifecyclePhase, .presenting)
+        XCTAssertTrue(state.isConfigurationInteractionActive)
+        try await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertNil(state.presentedError, "Preparation deadline must stop when the provider interface is handed to the user")
+        await state.cancelCloudAuthorization()
+        XCTAssertNil(state.cloudAuthorizationPrompt)
+        XCTAssertFalse(state.isConfigurationInteractionActive)
+        let next = Task { await state.performHomeAction(item("b")) }
+        try await requests.waitFor("detail:b")
+        await requests.finish("detail:b"); await next.value
+        XCTAssertNotNil(state.siteActionStatus)
+    }
+    @MainActor
+    func testCancelledNativeDialogCannotAppearOverNewAction() async throws {
+        let (state, requests, _) = try await fixture()
+        let first = Task { await state.performHomeAction(item()) }
+        try await requests.waitFor("detail:a")
+        let oldID = try XCTUnwrap(state.pendingTVBoxConfigurationAction?.id)
+        let next = Task { await state.performHomeAction(item("b")) }
+        try await requests.waitFor("detail:b")
+        let ui = try JSONDecoder().decode(AndroidBridgeUIState.self,
+            from: Data("{\"interactionID\":\"\(oldID)\",\"terminal\":false}".utf8))
+        await requests.present("detail:a", state: ui); await first.value
+        XCTAssertNil(state.cloudAuthorizationPrompt)
+        XCTAssertTrue(state.isTVBoxConfigurationActionPending(item("b")))
+        await requests.finish("detail:b"); await next.value
+    }
+    @MainActor
+    func testSwitchingSourceCancelsPendingConfigurationAndRejectsLateResult() async throws {
+        let (state, requests, _) = try await fixture()
+        let work = Task { await state.performHomeAction(item()) }
+        try await requests.waitFor("detail:a")
+        await state.selectSite("another-site")
+        XCTAssertNil(state.pendingTVBoxConfigurationAction)
+        XCTAssertFalse(state.isConfigurationInteractionActive)
+        await requests.finish("detail:a"); await work.value
+        XCTAssertNil(state.siteActionStatus)
+        XCTAssertNil(state.cloudAuthorizationPrompt)
+    }
+    @MainActor
+    func testNonTVBoxActionsKeepTheirExistingFeedbackBehavior() async throws {
+        let (state, requests, _) = try await fixture(capability: .standardJSON)
+        let work = Task { await state.performHomeAction(item()) }
+        try await requests.waitFor("detail:a")
+        XCTAssertNil(state.pendingTVBoxConfigurationAction)
+        XCTAssertFalse(state.isConfigurationInteractionActive)
+        await requests.finish("detail:a"); await work.value
+        XCTAssertNil(state.siteActionStatus)
+        let reads = await requests.readLog(); XCTAssertEqual(reads.count, 1)
     }
 }

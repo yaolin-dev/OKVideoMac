@@ -1,37 +1,39 @@
 # Immutable Corresponding-Source Release Process
 
-The 0.7.3 (Build 129) release candidate uses
-`OKVideoMac-0.7.3-macOS-arm64.zip` and `OKVideoMac-0.7.3.dmg`. Local ad-hoc
-verification does not replace the notarized public 0.6.1 release or create a tag.
+The 0.8.0 (Build 130) release candidate uses
+`OKVideoMac-0.8.0-macOS-arm64.zip` and `OKVideoMac-0.8.0.dmg`. Local ad-hoc
+verification does not replace the notarized public 0.7.3 release or create a tag.
 
-> The 0.6.1 DMG passed Developer ID signing, Apple notarization, stapling, Gatekeeper
-> and installation smoke tests. Tag `v0.6.1` pins release commit
-> `25155f52fb8c416f3245c9a829a93175dec9857b`; see the
-> [validation record](RELEASE_VALIDATION_0.6.1.md). Subsequent documentation updates
-> do not rewrite signed assets or build-time source/notes snapshots. The v0.6.0 set is unchanged.
+> The published 0.7.3 DMG passed Developer ID signing, Apple notarization,
+> stapling, Gatekeeper and installation smoke. Tag `v0.7.3` pins
+> `55ffa9d55faced404b20034d7cfe5bcfbc1be581`; see the
+> [GitHub release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.7.3).
+> Candidate documentation updates do not rewrite historical signed assets or
+> build-time source/notes snapshots.
 
 Each formal OKVideoMac binary must be published with a source set produced by
 `macOS/OKVideoMac/Scripts/create-source-release.sh` from the exact release Git
 commit. Moving branches and `latest` URLs are not corresponding-source links.
 
-For the formal 0.7.3 release (Build 129), the required public artifact set is:
+For the formal 0.8.0 release (Build 130), the required release artifact set is:
 
-- `OKVideoMac-0.7.3-build129-source.tar.gz`
-- `OKVideoMac-0.7.3-build129-third-party-source.tar.gz`
-- `OKVideoMac-0.7.3-build129-licenses.tar.gz`
-- `OKVideoMac-0.7.3-build129-SOURCE_RELEASE_INDEX.json`
-- `OKVideoMac-0.7.3-build129-SOURCE_RELEASE_MANIFEST.json`
-- `OKVideoMac-0.7.3-build129-SHA256SUMS`
-- `OKVideoMac-0.7.3-macOS-arm64.zip` (internal identity/archive carrier)
-- `OKVideoMac-0.7.3.dmg` (the public binary bound by the final manifest)
-- `OKVideoMac-0.7.3-AndroidDexBridge-release.apk`
+- `OKVideoMac-0.8.0-build130-source.tar.gz`
+- `OKVideoMac-0.8.0-build130-third-party-source.tar.gz`
+- `OKVideoMac-0.8.0-build130-licenses.tar.gz`
+- `OKVideoMac-0.8.0-build130-SOURCE_RELEASE_INDEX.json`
+- `OKVideoMac-0.8.0-build130-SOURCE_RELEASE_MANIFEST.json`
+- `OKVideoMac-0.8.0-build130-SHA256SUMS`
+- `OKVideoMac-0.8.0-macOS-arm64.zip` (internal identity/archive carrier)
+- `OKVideoMac-0.8.0.dmg` (the public binary bound by the final manifest)
+- `OKVideoMac-0.8.0.dmg.sha256` (checksum of the final stapled DMG)
+- `OKVideoMac-0.8.0-AndroidDexBridge-release.apk`
 - `THIRD_PARTY_NOTICES.md`
-- `RELEASE_NOTES_0.7.3.md`
+- `RELEASE_NOTES_0.8.0.md`
 
-The Build 129 release set must also include the macOS and Android SPDX/CycloneDX
+The Build 130 release set must also include the macOS and Android SPDX/CycloneDX
 files (`OKVideoMac-macOS.spdx.json`, `OKVideoMac-macOS.cdx.json`,
 `OKVideoMac-Android.spdx.json`, and `OKVideoMac-Android.cdx.json`), and the
-release-specific `OKVideoMac-0.7.3-build129-SHA256SUMS` that binds the release
+release-specific `OKVideoMac-0.8.0-build130-SHA256SUMS` that binds the release
 asset set. The ZIP remains the established internal `binary` identity carrier;
 it is not the public user download. The DMG is recorded separately as the
 public release artifact.
@@ -55,7 +57,9 @@ does not disguise exceptions: the missing original zlib 1.3.2 distfile and
 historical clang-11 input used by MacPorts libc++ remain explicit in the
 manifest and keep native provenance incomplete.
 
-For release 0.6.1 (101), the manifest records Xcode 16.2 and macOS SDK 15.2 as
+Candidate 0.8.0 validation also uses Xcode 16.2 / macOS SDK 15.2 on macOS
+14.8.9. Formal release manifests must record the actual final builder, not copy
+historical values. For release 0.6.1 (101), the manifest records Xcode 16.2 and macOS SDK 15.2 as
 the actual release package builder. Xcode 14.2 remains the older supported
 macOS 12 baseline, but is not reported as the tool that produced this audited
 binary.
@@ -89,8 +93,8 @@ OKVideoMac/macOS/OKVideoMac/Scripts/create-source-release.sh \
   --output-dir /path/to/release \
   --cache-dir /path/to/verified-source-cache \
   --commit HEAD \
-  --binary /path/to/OKVideoMac-0.7.3-macOS-arm64.zip \
-  --release-artifact /path/to/OKVideoMac-0.7.3.dmg
+  --binary /path/to/OKVideoMac-0.8.0-macOS-arm64.zip \
+  --release-artifact /path/to/OKVideoMac-0.8.0.dmg
 ```
 
 Use `--offline` for the second run or for an air-gapped release after every
@@ -98,8 +102,8 @@ locked input is present in the cache. The script fails on a dirty worktree,
 unknown commit, binary/version mismatch, unavailable input, or any checksum
 mismatch.
 
-The public Build 129 set must be generated from the exact clean commit selected
-for `v0.7.3`. After all distribution gates pass, the tag must point to that same
+The public Build 130 set must be generated from the exact clean commit selected
+for `v0.8.0`. After all distribution gates pass, the tag must point to that same
 commit. The notarized and stapled DMG, checksum, source archives, manifests, and
 SBOMs must be published together on the GitHub Release. Historical
 Build 62/63/64/65/94 records remain historical facts and must not be presented

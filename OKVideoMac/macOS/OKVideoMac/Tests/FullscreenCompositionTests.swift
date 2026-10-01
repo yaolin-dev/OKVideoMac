@@ -104,20 +104,28 @@ import OKVideoCore
         let root = ZStack {
             Color.black
             Surface(view: surface).ignoresSafeArea()
-            VStack { Text("原生控制层同步验收").foregroundColor(.white); Spacer(); Slider(value: .constant(0.4)).padding(40) }
         }
         let host = NSHostingView(rootView: root)
         host.frame = container.bounds; host.autoresizingMask = [.width, .height]
         container.addSubview(host)
+        let overlay = PlayerFullscreenOverlayView(frame: container.frame)
+        window.contentView?.addSubview(overlay)
+        let controls = PlayerOverlayHostingView(rootView: VStack {
+            Text("原生控制层同步验收").foregroundColor(.white)
+            Spacer()
+            Slider(value: .constant(0.4)).padding(40)
+        }.ignoresSafeArea())
+        controls.frame = overlay.bounds; controls.autoresizingMask = [.width, .height]
+        overlay.addSubview(controls)
         let button = NSButton(title: "播放", target: nil, action: nil)
         button.frame = NSRect(x: 280, y: 12, width: 80, height: 28)
-        button.wantsLayer = true; container.addSubview(button)
+        button.wantsLayer = true; overlay.addSubview(button)
         let presentation = PlayerFullscreenPresentation()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         do {
             for _ in 0..<100 where !ready { try await Task.sleep(nanoseconds: 30_000_000) }
-            XCTAssertTrue(ready, "A real OpenGL drawable must be ready")
+            XCTAssertTrue(ready, "A real OpenGL drawable must be ready; visible=\(window.isVisible) occlusion=\(window.occlusionState.rawValue) window=\(window.frame) surface=\(surface.bounds) visibleRect=\(surface.visibleRect) overlayOpaque=\(overlay.isOpaque) controlsOpaque=\(controls.isOpaque) render=\(surface.readinessDiagnosticsForTesting)")
             try await run(window, container, surface, button, presentation)
         } catch {
             presentation.cancel(); surface.tearDown(); window.close(); await player.shutdown(); throw error
@@ -132,7 +140,7 @@ import OKVideoCore
         func tree(_ view: NSView) -> String { "\(type(of:view)): frame=\(view.frame) bounds=\(view.bounds) animations=\(view.layer?.animationKeys() ?? [])\n" + view.subviews.map(tree).joined() }
         return try XCTUnwrap(nil as CABasicAnimation?, "Shared composition must receive fullscreen animation; window=\(String(describing: container.window?.frame)) tree=\(tree(container))")
     }
-    func testVideoAndControlsShareLiveTransformInBothDirections() async throws {
+    func testVideoScalesWhileControlsWaitForSettledLayoutAtFixedSize() async throws {
         try await withComposition { window, container, surface, button, presentation in
             let original = window.frame
             let originalOpaque = window.isOpaque
@@ -153,14 +161,22 @@ import OKVideoCore
             let from = try XCTUnwrap(animation.fromValue as? NSValue).caTransform3DValue
             XCTAssertGreaterThan(from.m11, 0); XCTAssertLessThan(from.m11, 1)
             XCTAssertEqual(from.m11, from.m22, accuracy: 0.000001)
-            XCTAssertTrue(surface.isDescendant(of: container)); XCTAssertTrue(button.isDescendant(of: container))
+            XCTAssertTrue(surface.isDescendant(of: container))
+            let overlay = try XCTUnwrap(button.superview as? PlayerFullscreenOverlayView)
+            XCTAssertFalse(overlay.isDescendant(of: container), "Controls must not inherit video scaling")
+            XCTAssertTrue(CATransform3DIsIdentity(overlay.layer!.transform))
             XCTAssertNil(surface.layer?.animation(forKey: "com.okvideomac.video.fullscreen"), "Never scale video a second time")
             XCTAssertTrue(CATransform3DIsIdentity(surface.layer!.transform))
             try await Task.sleep(nanoseconds: 100_000_000)
+            XCTAssertEqual(button.frame.size, NSSize(width: 80, height: 28))
+            XCTAssertEqual(overlay.alphaValue, 0, "Intermediate SwiftUI layouts must not flash during video animation")
+            XCTAssertTrue(CATransform3DIsIdentity(overlay.layer!.transform))
             let live = try XCTUnwrap(container.layer?.presentation()).transform
             XCTAssertGreaterThan(live.m11, from.m11); XCTAssertLessThan(live.m11, 1)
             XCTAssertEqual(live.m11, live.m22, accuracy: 0.000001)
             presentation.complete(window: window, isFullScreen: true); transition.completeFullScreen(isFullScreen: true)
+            try await Task.sleep(nanoseconds: 30_000_000)
+            XCTAssertEqual(overlay.alphaValue, 1)
             XCTAssertTrue(CATransform3DIsIdentity(container.layer!.transform))
             XCTAssertEqual(window.isOpaque, originalOpaque)
             XCTAssertEqual(window.hasShadow, originalShadow)
@@ -178,7 +194,11 @@ import OKVideoCore
             XCTAssertLessThan(to.m11, 1); XCTAssertEqual(to.m11, to.m22, accuracy: 0.000001)
             XCTAssertNil(surface.layer?.animation(forKey: "com.okvideomac.video.fullscreen"))
             presentation.complete(window: window, isFullScreen: false); transition.completeFullScreen(isFullScreen: false)
+            try await Task.sleep(nanoseconds: 30_000_000)
+            XCTAssertEqual(overlay.alphaValue, 1)
             XCTAssertEqual(window.frame, original)
+            XCTAssertEqual(overlay.frame, window.contentView?.bounds)
+            XCTAssertEqual(button.frame.size, NSSize(width: 80, height: 28))
             XCTAssertTrue(CATransform3DIsIdentity(container.layer!.transform))
             XCTAssertEqual(window.isOpaque, originalOpaque)
             XCTAssertEqual(window.hasShadow, originalShadow)
@@ -252,6 +272,7 @@ import OKVideoCore
         controller.prewarm(); defer { controller.dismiss() }
         let content = try XCTUnwrap(controller.windowForTesting?.contentView)
         XCTAssertEqual(content.subviews.filter { $0 is PlayerFullscreenContentView }.count, 1)
+        XCTAssertEqual(content.subviews.filter { $0 is PlayerFullscreenOverlayView }.count, 1)
     }
 }
 

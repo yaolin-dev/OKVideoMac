@@ -111,7 +111,7 @@ public enum PlaybackEndOrigin: Equatable, Sendable {
     case premature(String)
 
     public var permitsAutomaticAdvance: Bool {
-        self == .natural
+        self == .natural || self == .userSeekBoundary
     }
 }
 

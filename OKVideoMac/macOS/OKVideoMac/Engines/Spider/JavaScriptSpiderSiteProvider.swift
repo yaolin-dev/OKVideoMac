@@ -413,6 +413,10 @@ struct AndroidBridgeUIState: Decodable, Equatable, Sendable {
     var surfaceDisplayBounds: AndroidBridgeDisplayBounds? = nil
     var surfaceDialogStack: [AndroidBridgeDialogWindow]? = nil
     var surfaceDialogTrackerAvailable: Bool? = nil
+    var webLinks: [String]? = nil
+    var webAccepted: Bool? = nil
+    var playbackAwaitingAuthorization: Bool? = nil
+
     /// Cancellation is cooperative inside third-party DEX code. When the
     /// worker ignores interruption the Bridge asks the owned runtime to
     /// restart before another interaction is admitted.
@@ -1024,6 +1028,7 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
 
     private let configurationIdentity: String
     private let configurationHosts: [String]
+    private let authorizationSites: [SiteConfiguration]
     private let baseURL: URL?
     private let jarReference: String
     private let bridge: AndroidDexBridgeClient
@@ -1039,7 +1044,8 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         configurationHosts: [String],
         jarReference: String,
         baseURL: URL?,
-        bridge: AndroidDexBridgeClient
+        bridge: AndroidDexBridgeClient,
+        authorizationSites: [SiteConfiguration] = []
     ) throws {
         guard site.type == 3, site.api.hasPrefix("csp_") else {
             throw AppError.spider(
@@ -1053,6 +1059,7 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         self.jarReference = jarReference
         self.baseURL = baseURL
         self.bridge = bridge
+        self.authorizationSites = authorizationSites
         if let jar = try? AndroidDexBridgeClient.jarParts(
             jarReference,
             baseURL: baseURL
@@ -1203,8 +1210,12 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         page: Int,
         filters: [String: String]
     ) async throws -> VideoPage {
-        try SpiderResponseMapper.javaDexCategoryPage(
-            await categoryValue(id: id, page: page, filters: filters),
+        let value = try await categoryValue(id: id, page: page, filters: filters)
+        if Self.isPanConfigurationAPI(site.api) {
+            return try SpiderResponseMapper.actionPage(value, site: site, baseURL: baseURL, page: page)
+        }
+        return try SpiderResponseMapper.javaDexCategoryPage(
+            value,
             site: site,
             baseURL: baseURL,
             page: page
@@ -1308,16 +1319,54 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
     }
 
     func select(summary: VideoSummary) async throws -> SiteSelectionResult {
-        try SpiderResponseMapper.selection(
+        try Self.foregroundSelection(
             await invoke(
                 method: "detail",
-                arguments: [.array([.string(summary.videoID)])]
+                arguments: [.array([.string(summary.videoID)])],
+                monitorsAuthorization: true,
+                observesOptionalUI: true
             ),
             site: site,
             baseURL: baseURL,
-            fallbackSummary: summary,
-            allowsPlaceholderAction: summary.resolvedContentKind == .action
+            summary: summary
         )
+    }
+
+    static func isPanConfigurationAPI(_ api: String) -> Bool {
+        ["csp_PanConfig", "csp_PanConfigGuard"].contains(api)
+    }
+
+    /// Only TVBox foreground selections consume host-observed lifecycle effects.
+    /// Ordinary zero-episode movie records retain their existing media semantics.
+    static func foregroundSelection(_ value: JSONValue, site: SiteConfiguration,
+                                    baseURL: URL?, summary: VideoSummary) throws -> SiteSelectionResult {
+        if let original = value.objectValue?["__okvideoFinishedSelection"] {
+            return selectionAfterInteraction(original, site: site, baseURL: baseURL, summary: summary)
+        }
+        if isPanConfigurationAPI(site.api) {
+            return selectionAfterInteraction(value, site: site, baseURL: baseURL, summary: summary)
+        }
+        return try SpiderResponseMapper.selection(value, site: site, baseURL: baseURL,
+            fallbackSummary: summary, allowsPlaceholderAction: summary.resolvedContentKind == .action)
+    }
+
+    /// Consume the original detail worker after a real Android UI interaction.
+    /// A successful settings placeholder is not a movie, and must never cause
+    /// a second detailContent call (which can toggle a setting twice).
+    func selectionAfterInteraction(_ value: JSONValue, summary: VideoSummary) -> SiteSelectionResult {
+        Self.selectionAfterInteraction(value, site: site, baseURL: baseURL, summary: summary)
+    }
+
+    static func selectionAfterInteraction(_ value: JSONValue, site: SiteConfiguration,
+                                          baseURL: URL?, summary: VideoSummary) -> SiteSelectionResult {
+        let value = value.objectValue?["__okvideoFinishedSelection"] ?? value
+        if let mapped = try? SpiderResponseMapper.selection(value, site: site,
+                baseURL: baseURL, fallbackSummary: summary),
+           case .detail(let detail) = mapped,
+           detail.playSources.contains(where: { !$0.episodes.isEmpty }) {
+            return .detail(detail)
+        }
+        return .action(value)
     }
 
     func select(action item: SiteActionItem) async throws -> SiteSelectionResult {
@@ -1349,23 +1398,26 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
                     // commands whose normal result is empty. A provider may
                     // still create native UI regardless of its metadata tag.
                     monitorsAuthorization: interactionID != nil,
+                    observesOptionalUI: interactionID != nil,
                     interactionKind: interactionKind,
-                    interactionID: interactionID
+                    interactionID: interactionID,
+                    configurationSelectionText: item.remarks ?? ""
                 )
             )
         case .providerSelection(let itemID):
-            return try SpiderResponseMapper.selection(
+            return try Self.foregroundSelection(
                 await invoke(
                     method: "detail",
                     arguments: [.array([.string(itemID)])],
                     monitorsAuthorization: true,
+                    observesOptionalUI: true,
                     interactionKind: Self.interactionActionKind(tag: item.tag),
-                    interactionID: interactionID
+                    interactionID: interactionID,
+                    configurationSelectionText: item.remarks ?? ""
                 ),
                 site: site,
                 baseURL: baseURL,
-                fallbackSummary: item.selectionSummary,
-                allowsPlaceholderAction: true
+                summary: item.selectionSummary
             )
         }
     }
@@ -1485,8 +1537,8 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
             let providerValue = try await invoke(
                 method: "play",
                 arguments: [.string(flag), .string(episodeURL), .array([])],
-                monitorsAuthorization: interactionID != nil,
-                interactionKind: interactionID == nil ? nil : .playback,
+                monitorsAuthorization: true,
+                interactionKind: .playback,
                 refreshPlayback: refreshPlayback,
                 interactionID: interactionID
             )
@@ -1719,14 +1771,17 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
     func action(
         _ action: String,
         interactionID: UUID,
-        interactionKind: ConfigurationInteraction.ActionKind
+        interactionKind: ConfigurationInteraction.ActionKind,
+        configurationSelectionText: String? = nil
     ) async throws -> JSONValue {
         try await invoke(
             method: "action",
             arguments: [.string(action)],
             monitorsAuthorization: true,
+            observesOptionalUI: true,
             interactionKind: interactionKind,
-            interactionID: interactionID
+            interactionID: interactionID,
+            configurationSelectionText: configurationSelectionText
         )
     }
 
@@ -1734,9 +1789,11 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         method: String,
         arguments: [JSONValue],
         monitorsAuthorization: Bool = false,
+        observesOptionalUI: Bool = false,
         interactionKind: ConfigurationInteraction.ActionKind? = nil,
         refreshPlayback: Bool = false,
-        interactionID: UUID? = nil
+        interactionID: UUID? = nil,
+        configurationSelectionText: String? = nil
     ) async throws -> JSONValue {
         try await bridge.invoke(
             site: site,
@@ -1747,9 +1804,12 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
             method: method,
             arguments: arguments,
             monitorsAuthorization: monitorsAuthorization,
+            observesOptionalUI: observesOptionalUI,
             interactionKind: interactionKind,
             refreshPlayback: refreshPlayback,
-            requestedInteractionID: interactionID
+            requestedInteractionID: interactionID,
+            authorizationSites: method == "play" ? authorizationSites : [],
+            configurationSelectionText: configurationSelectionText
         )
     }
 
@@ -2303,6 +2363,11 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         /// are never copied into playback history or diagnostic output.
         let siteHeaders: [String: String]?
         let monitorsAuthorization: Bool
+        let observesOptionalUI: Bool?
+        /// Metadata from the configuration card explicitly clicked by the user.
+        /// Never populated from film details or playback authorization results.
+        let configurationSelectionText: String?
+        let authorizationSites: [JSONValue]?
         let interactionID: String?
         let interactionKind: String?
         let providerOwnerID: String
@@ -2315,6 +2380,7 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     private struct Response: Decodable {
         let ok: Bool
         let result: JSONValue?
+        let selectionEffect: String?
         let error: String?
         let interactionID: String?
         let interaction: InteractionResponse?
@@ -2662,18 +2728,23 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         method: String,
         arguments: [JSONValue],
         monitorsAuthorization explicitAuthorizationAction: Bool = false,
+        observesOptionalUI: Bool = false,
         interactionKind explicitInteractionKind:
             ConfigurationInteraction.ActionKind? = nil,
         refreshPlayback: Bool = false,
-        requestedInteractionID: UUID? = nil
+        requestedInteractionID: UUID? = nil,
+        authorizationSites: [SiteConfiguration] = [],
+        configurationSelectionText: String? = nil
     ) async throws -> JSONValue {
         try await operationAdmission.perform { [self] in
             try await invokeAdmitted(site: site, configurationID: configurationID,
                 configurationHosts: configurationHosts, jarReference: jarReference,
                 baseURL: baseURL, method: method, arguments: arguments,
                 monitorsAuthorization: explicitAuthorizationAction,
+                observesOptionalUI: observesOptionalUI,
                 interactionKind: explicitInteractionKind, refreshPlayback: refreshPlayback,
-                requestedInteractionID: requestedInteractionID)
+                requestedInteractionID: requestedInteractionID, authorizationSites: authorizationSites,
+                configurationSelectionText: configurationSelectionText)
         }
     }
 
@@ -2686,13 +2757,19 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         method: String,
         arguments: [JSONValue],
         monitorsAuthorization explicitAuthorizationAction: Bool = false,
+        observesOptionalUI: Bool = false,
         interactionKind explicitInteractionKind:
             ConfigurationInteraction.ActionKind? = nil,
         refreshPlayback: Bool = false,
-        requestedInteractionID: UUID? = nil
+        requestedInteractionID: UUID? = nil,
+        authorizationSites: [SiteConfiguration] = [],
+        configurationSelectionText: String? = nil
     ) async throws -> JSONValue {
+        try Task.checkCancellation()
         try await runtimePrerequisite()
+        try Task.checkCancellation()
         try await runtime.ensureReady()
+        try Task.checkCancellation()
         let monitorsAuthorization = Self.shouldMonitorAuthorization(
             for: method,
             explicitAuthorizationAction: explicitAuthorizationAction
@@ -2723,6 +2800,10 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                 interactionID: interactionID
             )
         }
+        if Task.isCancelled {
+            if let interactionID { await runtime.endActionSurfaceSession(interactionID: interactionID) }
+            throw CancellationError()
+        }
         let jar = try Self.jarParts(jarReference, baseURL: baseURL)
         let providerOwnerID = Self.providerOwnerID(
             configurationID: configurationID,
@@ -2749,6 +2830,13 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                     siteHeaders: site.header
                 ),
                 monitorsAuthorization: monitorsAuthorization,
+                observesOptionalUI: observesOptionalUI ? true : nil,
+                configurationSelectionText: ["detail", "action"].contains(method)
+                    ? configurationSelectionText : nil,
+                authorizationSites: authorizationSites.isEmpty ? nil : try authorizationSites.prefix(16).map {
+                    .object(["siteKey": .string($0.key), "api": .string($0.api),
+                             "ext": .string(try Self.extString($0.ext))])
+                },
                 interactionID: interactionID?.uuidString,
                 interactionKind: interactionID == nil
                     ? nil
@@ -2763,7 +2851,8 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
             switch try await sendMonitoringInteraction(
                 request,
                 requestID: interactionID!,
-                actionKind: actionKind
+                actionKind: actionKind,
+                observesOptionalUI: observesOptionalUI
             ) {
             case .completed(let terminal, let handle):
                 terminalResponse = terminal
@@ -2939,7 +3028,9 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         return ConfigurationInteractionTerminalResponse(
             requestID: requestID,
             outcome: outcome,
-            providerResult: bridgeResponse.result,
+            providerResult: bridgeResponse.selectionEffect == "providerFinished"
+                ? .object(["__okvideoFinishedSelection": bridgeResponse.result ?? .null])
+                : bridgeResponse.result,
             error: outcome == .failed
                 ? bridgeResponse.interaction?.error ?? bridgeResponse.error
                 : nil,
@@ -3197,6 +3288,24 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         }
     }
 
+    func openConfigurationWebLink(interactionID: UUID, index: Int) async throws -> AndroidBridgeUIState {
+        try await operationAdmission.perform { [self] in
+            var request = URLRequest(url: Self.interactionURL(interactionID, suffix: "web"))
+            request.httpMethod = "POST"
+            request.timeoutInterval = 5
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONEncoder().encode(["index": index])
+            let (data, response) = try await bridgeData(for: request, legacyURL: nil)
+            let state = try JSONDecoder().decode(AndroidBridgeUIState.self, from: data)
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  state.interactionID.flatMap(UUID.init(uuidString:)) == interactionID,
+                  state.webAccepted == true else {
+                throw AppError.spider("配置网页已失效，请重新打开配置操作")
+            }
+            return state
+        }
+    }
+
     func confirmInteractionCompletion(
         interactionID: UUID
     ) async throws -> AndroidBridgeUIState {
@@ -3331,7 +3440,8 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     private func sendMonitoringInteraction(
         _ request: URLRequest,
         requestID: UUID,
-        actionKind: ConfigurationInteraction.ActionKind
+        actionKind: ConfigurationInteraction.ActionKind,
+        observesOptionalUI: Bool = false
     ) async throws -> MonitoredInvocation {
         var preparedRequest = request
         preparedRequest.timeoutInterval = 600
@@ -3373,7 +3483,7 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                 data: data,
                 response: response,
                 requiresScopedIdentity: true,
-                allowsImmediateAuthoritativeResult: actionKind == .immediate
+                allowsImmediateAuthoritativeResult: actionKind == .immediate && !observesOptionalUI
             )
             return try await Self.awaitTerminalInteraction(
                 initial: initial,
@@ -3404,7 +3514,7 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                 }
                 gate.setTerminalObserver(terminalObserver)
                 let monitor = Task { [weak self] in
-                    for _ in 0..<2_400 {
+                    for _ in 0..<360 {
                         guard !Task.isCancelled else { return }
                         try? await Task.sleep(nanoseconds: 250_000_000)
                         guard !Task.isCancelled, let self else { return }
@@ -6014,8 +6124,8 @@ actor AndroidRuntimeStartupSingleFlight {
 }
 
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.45"
-    static let bridgeVersionCode = 57
+    static let bridgeVersion = "0.3.48"
+    static let bridgeVersionCode = 60
     static let bridgeApplicationID = "com.okvideomac.dexbridge"
     static let bridgeCertificateSHA256 =
         "33e95ef23b662f2629a23df892aaff52ae6216f7492cfb559a63d37247a059e0"
@@ -6226,6 +6336,7 @@ actor AndroidDexBridgeRuntime {
     /// top-level Dialog crop without changing the underlying Android UI.
     func beginActionSurfaceSession(interactionID: UUID) async throws {
         let (identity, _) = try await readyOwnedRuntime()
+        try Task.checkCancellation()
         actionSurfaceLease = ActionSurfaceLease(
             interactionID: interactionID,
             runtimeGeneration: identity.generation,

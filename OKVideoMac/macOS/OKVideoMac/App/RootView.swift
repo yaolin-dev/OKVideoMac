@@ -965,8 +965,7 @@ private struct ConfigurationCategoryView: View {
             LazyVStack(spacing: 0) {
                 ForEach(Array(presentation.items.enumerated()), id: \.element.id) { index, item in
                     ConfigurationCategoryRow(
-                        item: item,
-                        isDisabled: state.isConfigurationInteractionActive
+                        item: item
                     ) {
                         Task { await state.performHomeAction(item) }
                     }
@@ -1006,37 +1005,65 @@ private struct ConfigurationCategoryView: View {
     }
 }
 
+/// Pending provider work is visible and cancellable without inventing a sheet.
+struct TVBoxActionProgressControls: View {
+    @EnvironmentObject private var state: AppState
+    let item: SiteActionItem
+
+    var body: some View {
+        if state.isTVBoxConfigurationActionPending(item),
+           let pending = state.pendingTVBoxConfigurationAction {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(L10n.string("configuration.action.executing", fallback: "Performing configuration action…"))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                Button(L10n.string(.commonCancel)) {
+                    state.cancelPendingTVBoxConfigurationAction(pending.id)
+                }
+                .accessibilityIdentifier("tvbox.cancel.\(item.id)")
+            }
+            .font(.caption)
+            .padding(.bottom, 8)
+        }
+    }
+}
+
 private struct ConfigurationCategoryRow: View {
     let item: SiteActionItem
-    let isDisabled: Bool
+    @EnvironmentObject private var state: AppState
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 14) {
-                Image(systemName: "slider.horizontal.3")
-                    .frame(width: 24)
-                    .foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.title)
-                        .foregroundStyle(.primary)
-                    if let remarks = item.remarks?.trimmingCharacters(in: .whitespacesAndNewlines),
-                       !remarks.isEmpty {
-                        Text(remarks)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 0) {
+            Button(action: action) {
+                HStack(spacing: 14) {
+                    Image(systemName: "slider.horizontal.3")
+                        .frame(width: 24)
+                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(item.title)
+                            .foregroundStyle(.primary)
+                        if let remarks = item.remarks?.trimmingCharacters(in: .whitespacesAndNewlines),
+                           !remarks.isEmpty {
+                            Text(remarks)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .foregroundStyle(.tertiary)
                 }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .foregroundStyle(.tertiary)
+                .contentShape(Rectangle())
+                .padding(.horizontal, 18)
+                .frame(minHeight: 58)
             }
-            .contentShape(Rectangle())
-            .padding(.horizontal, 18)
-            .frame(minHeight: 58)
+            .buttonStyle(.plain)
+            .disabled(state.isTVBoxConfigurationActionPending(item))
+            TVBoxActionProgressControls(item: item)
+                .padding(.horizontal, 18)
         }
-        .buttonStyle(.plain)
-        .disabled(isDisabled)
     }
 }
 
@@ -1819,6 +1846,17 @@ struct CloudAuthorizationView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(isBusy || prompt.lifecyclePhase == .completed)
                 }
+                if !prompt.webLinks.isEmpty, !isTerminal {
+                    Menu {
+                        ForEach(Array(prompt.webLinks.enumerated()), id: \.offset) { index, link in
+                            Button(URL(string: link)?.host ?? "Web") {
+                                Task { await state.openCloudConfigurationWebLink(index, interactionID: prompt.interactionID) }
+                            }
+                        }
+                    } label: {
+                        Label(L10n.string("cloud.configuration.open-web", fallback: "Open Configuration Web Page"), systemImage: "globe")
+                    }
+                }
                 if prompt.allowsCompletionConfirmation,
                    !isTerminal {
                     Button {
@@ -1826,7 +1864,9 @@ struct CloudAuthorizationView: View {
                             await state.confirmCloudAuthorizationCompletion()
                         }
                     } label: {
-                        Label(L10n.string("cloud.complete-refresh", fallback: "Finish and Refresh"), systemImage: "checkmark.circle")
+                        Label(isPlayerAuthorization
+                            ? L10n.string("cloud.complete-resume", fallback: "Check Login and Resume")
+                            : L10n.string("cloud.complete-refresh", fallback: "Finish and Refresh"), systemImage: "checkmark.circle")
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(prompt.lifecyclePhase == .submitting)

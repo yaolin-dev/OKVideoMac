@@ -422,6 +422,20 @@ final class BridgeServer {
                     );
                     return;
                 }
+                String webInteraction = interactionID(path, "/web");
+                if ("POST".equals(method) && webInteraction != null) {
+                    JSONObject payload = readJSONPayload(input, headers, MAX_BODY_BYTES);
+                    String url = BridgeInteractionRegistry.webLink(webInteraction,
+                            payload.optInt("index", -1));
+                    BridgeActionActivity activity = BridgeActionActivity.currentActivity();
+                    boolean accepted = url != null && activity != null
+                            && BridgeActionActivity.isReadyFor(webInteraction);
+                    if (accepted) BridgeConfigurationWebView.show(activity, webInteraction, url);
+                    JSONObject state = BridgeActivity.uiState(context, webInteraction);
+                    state.put("webAccepted", accepted);
+                    writeJSON(output, accepted ? 200 : 409, state);
+                    return;
+                }
                 String textInteraction = interactionID(path, "/text");
                 if ("POST".equals(method) && textInteraction != null) {
                     JSONObject payload = readJSONPayload(
@@ -623,9 +637,8 @@ final class BridgeServer {
                     if (interactive) {
                         invocation = claimInteractionWorker(
                                 interactionID,
-                                () -> DexSpiderRegistry.get(context).invoke(
-                                        invokePayload
-                                )
+                                () -> BridgePlaybackAuthorization.invoke(context, invokePayload,
+                                        () -> DexSpiderRegistry.get(context).invoke(invokePayload))
                         );
                         if (invocation == null) {
                             writeJSON(
@@ -643,6 +656,42 @@ final class BridgeServer {
                         );
                     }
                     result = await(invocation);
+                    if (interactive && DexSpiderRegistry.observesOptionalUI(
+                            payload, payload.optString("method", ""))) {
+                        // Configuration providers can return a placeholder and
+                        // post their Dialog after the first Activity transition
+                        // (the real web-entry provider does this). Do not tear
+                        // down its owner during that handoff. Ordinary movie
+                        // details keep the existing short observation window.
+                        long settleMillis = payload.has("configurationSelectionText") ? 1500L : 400L;
+                        long deadline = android.os.SystemClock.uptimeMillis() + settleMillis;
+                        do {
+                            JSONObject surface = BridgeActivity.uiState(context, interactionID);
+                            if (surface.optBoolean("uiObserved", false)
+                                    || surface.optBoolean("surfaceDelegated", false)
+                                    || surface.optBoolean("terminal", false)) break;
+                            Thread.sleep(25L);
+                        } while (android.os.SystemClock.uptimeMillis() < deadline);
+                        BridgeInteractionRegistry.setWebLinks(interactionID,
+                                BridgeConfigurationWebView.linksFromResult(result));
+                        JSONObject observed = BridgeActivity.uiState(context, interactionID);
+                        String selectedWebLink = BridgeConfigurationWebView.selectedWebLink(payload, result);
+                        if (selectedWebLink != null
+                                && !observed.optBoolean("uiObserved", false)
+                                && !observed.optBoolean("surfaceDelegated", false)
+                                && !observed.optBoolean("terminal", false)) {
+                            BridgeActionActivity activity = BridgeActionActivity.currentActivity();
+                            if (activity == null || !BridgeActionActivity.isReadyFor(interactionID)) {
+                                throw new IllegalStateException("Configuration page host is unavailable");
+                            }
+                            // Reserve the UI before posting to main. Otherwise
+                            // invocationReturned would retire this exact owner
+                            // while its WebView is still queued for creation.
+                            BridgeInteractionRegistry.expectProviderUI(interactionID);
+                            BridgeConfigurationWebView.show(activity, interactionID, selectedWebLink);
+                            BridgeActivity.uiState(context, interactionID);
+                        }
+                    }
                     if (interactive) {
                         boolean playback = "play".equals(
                                 payload.optString("method", "")
@@ -706,6 +755,12 @@ final class BridgeServer {
                 JSONObject response = new JSONObject();
                 response.put("ok", true);
                 response.put("result", result);
+                // Host-observed lifecycle evidence travels outside the untrusted
+                // provider JSON. Swift consumes it only on the Java/Dex path.
+                if (interactive && "detail".equals(payload.optString("method"))
+                        && BridgeInteractionRegistry.hasProviderFinish(interactionID)) {
+                    response.put("selectionEffect", "providerFinished");
+                }
                 if (interactive) {
                     response.put("interactionID", interactionID);
                     response.put(
@@ -939,6 +994,7 @@ final class BridgeServer {
     ) {
         String id = interactionID == null ? "" : interactionID.trim();
         if (id.isEmpty()) return false;
+        BridgeConfigurationProxy.release(id);
         boolean workerReleased = cancelInteractionWorkerLocked(id);
         boolean uiReleased = false;
         try {

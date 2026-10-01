@@ -100,13 +100,19 @@ public final class BridgeActivity extends Activity {
     /** Starts the one opaque, request-owned Android surface for an action. */
     static void prepareDialogHandoff(Context context, String interactionID)
             throws Exception {
+        prepareDialogHandoff(context, interactionID, true);
+    }
+
+    static void prepareDialogHandoff(Context context, String interactionID,
+                                     boolean requiresUI) throws Exception {
         String id = clean(interactionID);
         if (id.isEmpty()
                 || !BridgeInteractionRegistry.ownsLatest(id)
                 || BridgeInteractionRegistry.terminal(id)) {
             throw new IllegalStateException("Interaction is no longer current");
         }
-        BridgeInteractionRegistry.expectProviderUI(id);
+        if (requiresUI) BridgeInteractionRegistry.expectProviderUI(id);
+        else BridgeInteractionRegistry.observeOptionalUI(id);
         BridgeActivity host = ensureHost(context, 2_000L);
         if (host == null) {
             throw new IllegalStateException("Bridge host activity is unavailable");

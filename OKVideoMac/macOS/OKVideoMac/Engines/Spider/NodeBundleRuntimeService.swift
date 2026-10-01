@@ -39,6 +39,13 @@ enum NodeConfigurationSemanticIdentity {
 
         var semanticRoot = root
         semanticRoot.removeValue(forKey: fieldName)
+        // Profile is a persistence document, including share caches written
+        // during detail requests. Its byte revision is not a catalogue change.
+        semanticRoot["sites"] = sites.map { site in
+            var contract = site
+            contract.removeValue(forKey: "okNodeProfileRevision")
+            return contract
+        }
         for key in runtimeProjectionKeys {
             semanticRoot.removeValue(forKey: key)
         }
@@ -1733,7 +1740,7 @@ actor NodeBundleRuntimeService {
 
     func profileRevisionUpdates() -> AsyncStream<NodeProfileRevisionSnapshot> {
         let id = UUID()
-        return AsyncStream { continuation in
+        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             profileRevisionContinuations[id] = continuation
             if let lastProfileRevisionSnapshot {
                 continuation.yield(lastProfileRevisionSnapshot)
@@ -1881,7 +1888,7 @@ actor NodeBundleRuntimeService {
         ) -> String {
             let value = [
                 bundleIdentity ?? "unknown-bundle",
-                profileRevision ?? "unconfigured",
+                profileIdentity ?? "default-profile",
                 kind.rawValue,
                 key
             ].joined(separator: "\u{0}")

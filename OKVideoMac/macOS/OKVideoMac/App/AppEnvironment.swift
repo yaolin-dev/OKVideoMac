@@ -7,6 +7,11 @@ import OKVideoPersistence
 import Security
 
 struct AppEnvironment {
+    static func catPawSearchConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.default
+        configuration.httpMaximumConnectionsPerHost = 20
+        return configuration
+    }
     let directories: AppDirectories
     let applicationInstanceLease: ApplicationInstanceLease
     let httpClient: URLSessionHTTPClient
@@ -48,7 +53,7 @@ struct AppEnvironment {
             )
         )
         let interactiveHTTPClient = URLSessionHTTPClient()
-        let aggregateSearchHTTPClient = URLSessionHTTPClient()
+        let aggregateSearchHTTPClient = URLSessionHTTPClient(configuration: Self.catPawSearchConfiguration())
         let xtreamHTTPClient = URLSessionHTTPClient.isolatedEphemeral()
         let imageConfiguration = URLSessionConfiguration.default
         imageConfiguration.httpMaximumConnectionsPerHost = 12

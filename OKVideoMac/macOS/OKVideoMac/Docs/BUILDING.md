@@ -1,33 +1,39 @@
 # Building OKVideoMac
 
-## 0.7.3 release candidate verification
+## 0.8.0 release candidate verification
 
-The current source candidate is 0.7.3 (Build 129). Its final automated test,
-static-check and local Release packaging results are recorded in the
-[0.7.3 release-readiness record](../../../../Docs/RELEASE_READINESS_0.7.3.md).
-The committed Xcode project must match `project.yml` when regenerated with
-XcodeGen 2.38.0 exactly; a newer generator is not an accepted substitute.
+The current source candidate is 0.8.0 (Build 130), compared against the published
+`v0.7.3` commit. Actual test, static-check and Release package results are in the
+[0.8.0 readiness record](../../../../Docs/RELEASE_READINESS_0.8.0.md); module/file
+coverage and Git suggestions are in the
+[release preparation record](../../../../Docs/RELEASE_PREPARATION_0.8.0.md).
 
-The release-candidate gate passed 47 Node tests, 24 SourceAudit tests (7
-conditional skips), 57 AndroidRuntimeKit tests (1 online-install skip), 1029
-OKVideoKit tests (22 performance/network experiment skips), and 1154 repeatable
-App tests (11 conditional skips), with no failures. Three focused App regressions
-and the audio preference writer/reader in separate processes also passed. The
-Android bridge passed 34 JVM tests, lint and `assembleRelease`; the signed APK
-build completed. Four real-Emulator lifecycle tests remain explicit opt-in gates;
-the real application-termination cleanup test was also run separately and passed.
+Keep `project.yml` and the committed Xcode project version/build synchronized.
+Use XcodeGen 2.38.0 exactly for regeneration comparisons; a newer generator is
+not an accepted substitute. `Info.plist` uses the shared version/build settings.
+Android Bridge has its own version, currently 0.3.48 (60), and preserves its
+pinned Release certificate and locked dependency graph.
 
-AGP 8.7.3 lint reports non-fatal Kotlin metadata diagnostics because the pinned
-OkHttp 5.1.0 dependency uses Kotlin 2.2 metadata while that analyzer supports
-Kotlin 2.0 metadata. Lint still completed with zero errors and six warnings. Do
-not suppress these diagnostics or describe this host-tooling limitation as a
-successful real-device compatibility matrix.
+Default tests cover the app, OKVideoKit, AndroidRuntimeKit, Node and SourceAudit.
+Four real-emulator lifecycle tests are explicit opt-in gates. The real libmpv
+long-GOP seek case needs `OKVIDEOMAC_SEEK_FIXTURE` and a visible OpenGL surface;
+it is run separately from the default suite. Distinguish prior Android device
+instrumentation from tests rerun for this candidate.
 
-Local ad-hoc Release packaging verifies the app bundle before installation, but
-formal publication still requires an exact clean release commit followed by
-Developer ID signing, notarization, stapling, Gatekeeper, installation smoke and
-the complete source/SBOM/hash asset set. Debug builds and earlier local candidates
-are never release deliverables.
+AGP 8.7.3 lint prints Kotlin metadata diagnostics for pinned OkHttp 5.1.0/Kotlin
+2.2 metadata while its analyzer supports Kotlin 2.0. Record the final lint result
+and warnings; do not suppress diagnostics or claim that this verifies every
+real-provider/device combination.
+
+For a dirty development branch, `Scripts/package-local-acceptance.sh` freezes
+tracked and non-ignored implementation files outside the worktree and calls the
+standard `Scripts/package-app.sh`. It verifies a local ad-hoc **Release** package,
+never a Debug deliverable; only a verified package may replace the Desktop app.
+The snapshot records local acceptance identity, not a public release commit.
+
+Formal publication still requires the final clean release commit, Developer ID
+signing, notarization, stapling, Gatekeeper, installation smoke and a complete
+source/SBOM/hash asset set. The notarized public download remains 0.7.3.
 
 ## 0.6.1 historical release verification
 

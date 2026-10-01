@@ -6,23 +6,41 @@ import OKVideoPersistence
 @testable import OKVideoMac
 
 @MainActor final class PlayerTooltipTests: XCTestCase {
-    func testHoverIsImmediateAndOldExitCannotClearNewButton() {
-        let model = PlayerControlTooltipState()
+    func testHoverWaitsAndOldExitCannotClearNewButton() async throws {
+        let model = PlayerControlTooltipState(delayNanoseconds: 20_000_000)
         let a = UUID(), b = UUID()
         model.hover(a, inside: true)
-        XCTAssertEqual(model.activeID, a)
+        XCTAssertNil(model.activeID)
         model.hover(b, inside: true)
         model.hover(a, inside: false)
+        try await Task.sleep(nanoseconds: 60_000_000)
         XCTAssertEqual(model.activeID, b)
         model.hover(b, inside: false)
         XCTAssertNil(model.activeID)
-        model.hover(a, inside: true)
-        model.dismiss()
+    }
+
+    func testShortHoverDismissAndDisabledInteractionCancelDelayedPresentation() async throws {
+        let model = PlayerControlTooltipState(delayNanoseconds: 20_000_000), id = UUID()
+        model.hover(id, inside: true); model.hover(id, inside: false)
+        try await Task.sleep(nanoseconds: 60_000_000)
         XCTAssertNil(model.activeID)
+        model.hover(id, inside: true); model.dismiss()
+        try await Task.sleep(nanoseconds: 60_000_000)
+        XCTAssertNil(model.activeID)
+        model.hover(id, inside: true); model.setEnabled(false)
+        model.hover(id, inside: true)
+        try await Task.sleep(nanoseconds: 60_000_000)
+        XCTAssertNil(model.activeID, "Drag/fullscreen must suppress delayed and fresh hover events")
+        model.setEnabled(true)
+        try await Task.sleep(nanoseconds: 60_000_000)
+        XCTAssertNil(model.activeID, "Re-enabling must not restore stale hover")
+        model.hover(id, inside: true)
+        try await Task.sleep(nanoseconds: 60_000_000)
+        XCTAssertEqual(model.activeID, id)
     }
 
     func testTooltipOffscreenLayoutAndFocusDismissal() async throws {
-        let model = PlayerControlTooltipState(), id = UUID()
+        let model = PlayerControlTooltipState(delayNanoseconds: 20_000_000), id = UUID()
         let host = NSHostingView(rootView:
             ZStack {
                 Color(red: 0.24, green: 0.35, blue: 0.46)
@@ -262,6 +280,69 @@ import OKVideoPersistence
         state.dismissDetail()
         XCTAssertFalse(state.isDetailPagePresented)
         XCTAssertEqual(state.searchResults.count, 1)
+    }
+
+    func testCatPawStorageWritesDuringDetailDoNotCancelOrCacheOldGeneration() async throws {
+        let recorder = DetailFixtureRecorder()
+        let state = AppState(environment: nil, initialProviders: ["detail": DetailFixture(recorder: recorder)])
+        let load = Task { await state.loadDetail(summary()) }
+        try await recorder.waitForCalls(1)
+        // Share caches can be persisted several times while one detail resolves.
+        for _ in 0..<3 { state.nodeProfileStorageDidChange() }
+        XCTAssertTrue(state.isDetailPagePresented)
+        await load.value
+        XCTAssertEqual(state.detailLoadState, .loaded)
+        XCTAssertNotNil(state.selectedDetail)
+        let cancelled = await recorder.cancelled
+        XCTAssertEqual(cancelled, 0)
+        state.dismissDetail()
+        await state.loadDetail(summary())
+        let calls = await recorder.calls
+        XCTAssertEqual(calls, 2, "A request started before a storage/account update must not repopulate reusable cache")
+    }
+
+    func testCatPawStorageUpdateCannotReopenDismissedOrPreviousFilm() async throws {
+        let recorder = DetailFixtureRecorder()
+        let state = AppState(environment: nil, initialProviders: ["detail": DetailFixture(recorder: recorder)])
+        let load = Task { await state.loadDetail(summary("old")) }
+        try await recorder.waitForCalls(1)
+        state.nodeProfileStorageDidChange()
+        state.dismissDetail()
+        await load.value
+        state.nodeProfileStorageDidChange()
+        XCTAssertFalse(state.isDetailPagePresented)
+        await state.loadDetail(summary("new"))
+        state.nodeProfileStorageDidChange()
+        XCTAssertEqual(state.selectedDetail?.summary.videoID, "new")
+    }
+
+    func testCatPawShareCacheRevisionDoesNotChangeCatalogueIdentity() throws {
+        let raw = Data(#"{"video":{"sites":[{"key":"fixture","name":"Fixture","type":3,"api":"/spider/fixture/3"}]}}"#.utf8)
+        let first = try NodeBundleRuntimeService.normalizeConfiguration(raw,
+            bundleIdentity: "bundle", profileIdentity: "account-a", profileRevision: "before-cache-write")
+        let second = try NodeBundleRuntimeService.normalizeConfiguration(raw,
+            bundleIdentity: "bundle", profileIdentity: "account-a", profileRevision: "after-cache-write")
+        let other = try NodeBundleRuntimeService.normalizeConfiguration(raw,
+            bundleIdentity: "bundle", profileIdentity: "account-b", profileRevision: "after-cache-write")
+        XCTAssertNotEqual(first, second, "Keep the storage revision available for authorization")
+        XCTAssertEqual(NodeConfigurationSemanticIdentity.revision(in: first), NodeConfigurationSemanticIdentity.revision(in: second))
+        XCTAssertNotEqual(NodeConfigurationSemanticIdentity.revision(in: first), NodeConfigurationSemanticIdentity.revision(in: other))
+    }
+
+    func testBackgroundCatalogueReplacementKeepsRouteButRejectsOldDetails() async throws {
+        let recorder = DetailFixtureRecorder()
+        let provider = DetailFixture(recorder: recorder)
+        let state = AppState(environment: nil, initialProviders: ["detail": provider])
+        let load = Task { await state.loadDetail(summary()) }
+        try await recorder.waitForCalls(1)
+        state.setLiveConfigurationForTesting(nil, providers: ["detail": provider], preservingDetailRoute: true)
+        await load.value
+        XCTAssertTrue(state.isDetailPagePresented)
+        XCTAssertNil(state.selectedDetail)
+        XCTAssertNotNil(state.detailLoadState.message)
+        await state.refreshDetail()
+        XCTAssertEqual(state.detailLoadState, .loaded)
+        XCTAssertEqual(state.selectedDetail?.synopsis, "request 2")
     }
 
     func testProviderInternalCancellationKeepsRetryablePage() async {
@@ -542,4 +623,83 @@ private struct FilterFixture: SiteProvider {
     func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage { try await category(id: keyword, page: page, filters: [:]) }
     func detail(id: String) async throws -> VideoDetail { throw AppError.site("Unused fixture detail") }
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult { throw AppError.site("Unused fixture player") }
+}
+
+@MainActor final class CatPawSearchImprovementTests: XCTestCase {
+    func testTrailingResultPublishesWithoutAnotherProvider() async throws {
+        var values: [Int] = []
+        let publisher = SearchSnapshotPublisher<Int>(interval: 0.03) { values.append($0) }
+        publisher.submit(1); publisher.submit(2); publisher.submit(3)
+        XCTAssertEqual(values, [1])
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(values, [1, 3])
+        publisher.submit(4); publisher.flush()
+        XCTAssertEqual(values.last, 4)
+    }
+    func testCancelledSearchCannotPublishTrailingResults() async throws {
+        var values: [Int] = []
+        let publisher = SearchSnapshotPublisher<Int>(interval: 0.03) { values.append($0) }
+        publisher.submit(1); publisher.submit(2); publisher.cancel()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(values, [1])
+    }
+    func testCacheExpiryAccountScopeAndLateGeneration() {
+        var clock: TimeInterval = 100
+        let memory = CatPawSearchMemory(now: { clock })
+        let key = CatPawSearchMemory.Key(owner: "account-a", keyword: "film", page: 1, quick: false)
+        let other = CatPawSearchMemory.Key(owner: "account-b", keyword: "film", page: 1, quick: false)
+        let page = VideoPage(items: [.init(siteKey: "site", siteName: "Site", videoID: "1", title: "Film")], pagination: .init(page: 1, pageCount: 1))
+        let generation = memory.lookup(key).0
+        memory.insert(page, for: key, generation: generation)
+        XCTAssertEqual(memory.lookup(key).1, page)
+        XCTAssertNil(memory.lookup(other).1)
+        clock += 31
+        XCTAssertNil(memory.lookup(key).1)
+        memory.invalidate()
+        memory.insert(page, for: key, generation: generation)
+        XCTAssertNil(memory.lookup(key).1, "A request from before an account change must not repopulate the cache")
+        memory.insert(.init(items: [], pagination: .init(page: 1, pageCount: 1)), for: key, generation: memory.lookup(key).0)
+        XCTAssertNil(memory.lookup(key).1)
+    }
+    func testRecentFastProvidersArePrioritizedAndCostsExpire() {
+        var clock: TimeInterval = 100
+        let memory = CatPawSearchMemory(now: { clock })
+        memory.record(owner: "fast", elapsed: 0.15, succeeded: true)
+        memory.record(owner: "failed", elapsed: 0.1, succeeded: false)
+        XCTAssertLessThan(memory.priority(owner: "fast"), memory.priority(owner: "unknown"))
+        XCTAssertGreaterThan(memory.priority(owner: "failed"), memory.priority(owner: "unknown"))
+        clock += 1801
+        XCTAssertEqual(memory.priority(owner: "fast"), memory.priority(owner: "unknown"))
+        XCTAssertEqual(AppEnvironment.catPawSearchConfiguration().httpMaximumConnectionsPerHost, 20)
+    }
+    func testProviderCacheAvoidsRepeatTransportButRespectsInvalidationAndPages() async throws {
+        let client = CatPawSearchFixtureHTTPClient()
+        let memory = CatPawSearchMemory()
+        let provider = try NodeHTTPSpiderSiteProvider(site: .init(key: "nodejs_search_fixture", name: "Fixture", type: 3, api: "/spider/fixture/3", extra: ["okNodeRuntime": .bool(true)]), baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:18988/")), httpClient: client, aggregateSearchHTTPClient: client, searchMemory: memory)
+        let first = try await provider.aggregateSearch(keyword: "film", page: 1, quick: false)
+        XCTAssertEqual(first.items.count, 1)
+        let repeated = try await provider.aggregateSearch(keyword: "film", page: 1, quick: false)
+        XCTAssertEqual(first, repeated)
+        var calls = await client.count
+        XCTAssertEqual(calls, 1)
+        _ = try await provider.aggregateSearch(keyword: "film", page: 2, quick: false)
+        memory.invalidate()
+        _ = try await provider.aggregateSearch(keyword: "film", page: 1, quick: false)
+        calls = await client.count
+        XCTAssertEqual(calls, 3)
+        _ = try await provider.search(keyword: "film", page: 1, quick: false)
+        calls = await client.count
+        XCTAssertEqual(calls, 4, "Interactive requests retain their independent transport path")
+    }
+}
+private actor CatPawSearchFixtureHTTPClient: HTTPClient {
+    private(set) var count = 0
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        if request.url.path.hasSuffix("/init") { return .init(url: request.url, statusCode: 404, headers: [:], body: Data()) }
+        count += 1
+        let payload = try JSONSerialization.jsonObject(with: request.body ?? Data()) as? [String: Any]
+        let page = payload?["page"] as? String ?? "1"
+        let json = #"{"list":[{"vod_id":"film-1","vod_name":"Film"}],"page":PAGE,"pagecount":2}"#.replacingOccurrences(of: "PAGE", with: page)
+        return .init(url: request.url, statusCode: 200, headers: [:], body: Data(json.utf8))
+    }
 }

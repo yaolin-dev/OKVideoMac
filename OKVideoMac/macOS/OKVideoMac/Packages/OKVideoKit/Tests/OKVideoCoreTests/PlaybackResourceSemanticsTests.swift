@@ -2,6 +2,97 @@ import XCTest
 @testable import OKVideoCore
 
 final class PlaybackResourceSemanticsTests: XCTestCase {
+    private func namedFiles(_ numbers: [Int], stem: String = "ZIYA", suffix: String = ".mkv") -> [PlayEpisode] {
+        numbers.enumerated().map { index, number in
+            PlayEpisode(name: "[4.\(90 + index)GB] \(stem) \(number)\(suffix)", url: "fixture:\(stem):\(index)")
+        }
+    }
+
+    func testNamedVideoSequenceProvidesOnlyLocalEpisodeContext() {
+        let episodes = namedFiles([23, 21, 22])
+        for category in [nil, "剧情 爱情 古装", "电视剧"] as [String?] {
+            let values = PlaybackResourceAnalyzer.analyzeList(episodes, categoryName: category)
+            XCTAssertEqual(values.map(\.episode), [23, 21, 22])
+            XCTAssertTrue(values.allSatisfy { $0.form == .series && $0.evidence == .contextual })
+            XCTAssertTrue(values.allSatisfy { !$0.hasReliableEpisode && $0.season == nil })
+            XCTAssertNil(PlaybackResourceAnalyzer.trustedEpisode(episodes[2], categoryName: category))
+        }
+    }
+
+    func testNamedVideoSequenceRejectsInsufficientOrAmbiguousEvidence() {
+        let rejected = [
+            namedFiles([22]), namedFiles([21, 22]), namedFiles([21, 23, 25]),
+            namedFiles([21, 22, 22, 23]), namedFiles([2024, 2025, 2026]),
+            namedFiles([21, 22, 23], suffix: ".mp3"),
+            namedFiles([21, 22, 23], stem: "ZIYA 花絮"),
+            namedFiles([21, 22, 23], stem: "Movie Part"),
+            (21...23).map { PlayEpisode(name: "ZIYA \($0)", url: "fixture:\($0)") }
+        ]
+        for episodes in rejected {
+            XCTAssertTrue(PlaybackResourceAnalyzer.analyzeList(episodes).allSatisfy { $0.episode == nil }, episodes.map(\.name).description)
+        }
+        XCTAssertTrue(PlaybackResourceAnalyzer.analyzeList(namedFiles([21, 22, 23]), categoryName: "电影").allSatisfy { $0.episode == nil })
+        XCTAssertTrue(PlaybackResourceAnalyzer.analyzeList(namedFiles([21, 22, 23]), categoryName: "综艺").allSatisfy { $0.episode == nil })
+    }
+
+    func testNumberedVideoNamingVariantsAndMissingUploads() {
+        for names in [
+            ["ZIYA021.mkv", "新前缀_022.mp4", "023 不同后缀.webm"],
+            ["[4.9GB] ZIYA 21", "22 [4.8GB]", "[4.7GB] NEW 23"],
+            ["Show.2026.021.1080p.H265.mkv", "Other.2026.022.1080p.H264.mkv", "023.1080p.60fps.10bit.mp4"],
+            ["ZIYA ２１.mkv", "NEW ２２.mp4【全38集】", "第三个 ２３.mkv"],
+            ["ZIYA%2021.mkv", "OTHER%2022.mkv", "23.mkv"],
+            ["21.mkv", "22.mkv", "23.mkv", "25.mkv", "28.mkv"]
+        ] {
+            let episodes = names.map { PlayEpisode(name: $0, url: "fixture:\($0)") }
+            let expected = names.count == 5 ? [21, 22, 23, 25, 28] : [21, 22, 23]
+            XCTAssertEqual(PlaybackResourceAnalyzer.analyzeList(episodes).compactMap(\.episode), expected, names.description)
+        }
+    }
+
+    func testKnownSeriesCanUseShortListsAndTitlesWithoutExtensions() {
+        let episodes = ["ZIYA22", "另一个前缀 23"].map { PlayEpisode(name: $0, url: "fixture:\($0)") }
+        XCTAssertEqual(PlaybackResourceAnalyzer.analyzeList(episodes, categoryName: "电视剧").map(\.episode), [22, 23])
+        XCTAssertTrue(PlaybackResourceAnalyzer.analyzeList(episodes).allSatisfy { $0.episode == nil })
+        XCTAssertTrue(PlaybackResourceAnalyzer.analyzeList(episodes, categoryName: "电影").allSatisfy { $0.episode == nil })
+    }
+
+    func testNumericNoiseCannotSupplyAnEpisodeSequence() {
+        for names in [
+            ["Movie.5.1.mkv", "Movie.6.1.mkv", "Movie.7.1.mkv"],
+            ["Movie.2024.mkv", "Movie.2025.mkv", "Movie.2026.mkv"],
+            ["Show.21-22.mkv", "Show.22-23.mkv", "Show.23-24.mkv"],
+            ["20260921.mkv", "20260922.mkv", "20260923.mkv"],
+            ["1080p.mkv", "720p.mkv", "2160p.mkv"],
+            ["ZIYA21.mp3", "ZIYA22.mp3", "ZIYA23.mp3"],
+            ["ZIYA21.srt", "ZIYA22.srt", "ZIYA23.srt"]
+        ] {
+            let episodes = names.map { PlayEpisode(name: $0, url: "fixture:\($0)") }
+            XCTAssertTrue(PlaybackResourceAnalyzer.analyzeList(episodes).allSatisfy { $0.episode == nil }, names.description)
+        }
+    }
+
+    func testVideoSequenceCanChangePrefixesAndMixNumericAndExplicitNames() {
+        let episodes = ["[4.9GB] ZIYA 21.mkv", "[4.8GB] NEW 22.mkv", "[4.7GB] 23.mkv", "[4.6GB] EP24.mkv"]
+            .map { PlayEpisode(name: $0, url: "fixture:\($0)") }
+        for category in [nil, "剧情 爱情 古装", "电视剧"] as [String?] {
+            let values = PlaybackResourceAnalyzer.analyzeList(episodes, categoryName: category)
+            XCTAssertEqual(values.map(\.episode), [21, 22, 23, 24])
+            XCTAssertFalse(values[1].hasReliableEpisode)
+            XCTAssertTrue(values[3].hasReliableEpisode)
+        }
+    }
+
+    func testNamedVideoSequenceExcludesAudioAndKeepsVersionsSeparate() {
+        let episodes = namedFiles([21, 22, 23], suffix: "_4K.mkv")
+            + namedFiles([21, 22, 23], suffix: "_1080p.mkv")
+            + namedFiles([21, 22, 23], suffix: ".mp3")
+        let values = PlaybackResourceAnalyzer.analyzeList(episodes)
+        XCTAssertEqual(values.map(\.episode), [21, 22, 23, 21, 22, 23, nil, nil, nil])
+        XCTAssertEqual(values[0].versionLabels, ["4K"])
+        XCTAssertEqual(values[3].versionLabels, ["1080p"])
+    }
+
     private func parse(_ name: String, _ category: String? = nil) -> PlaybackResourceSemantics {
         PlaybackResourceAnalyzer.analyze(PlayEpisode(name: name, url: "fixture:media"), categoryName: category)
     }

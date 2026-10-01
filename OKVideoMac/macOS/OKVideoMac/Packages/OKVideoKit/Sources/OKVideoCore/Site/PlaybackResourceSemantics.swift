@@ -48,9 +48,10 @@ public struct PlaybackResourceSemantics: Equatable, Sendable {
 }
 
 /// Pure, conservative parsing shared by presentation, history and playback.
-/// Ordinary numeric sequences never establish a series context.
+/// Bare numbers do not establish identity. A verified numbered-file family
+/// may supply local queue context without changing persistent identities.
 public enum PlaybackResourceAnalyzer {
-    public static let rulesVersion = 2
+    public static let rulesVersion = 4
     private static let number = "[0-9零〇一二两三四五六七八九十百千万]+"
 
     public static func compactName(_ raw: String, preserveTechnicalPrefix: Bool = false) -> String {
@@ -143,9 +144,10 @@ public enum PlaybackResourceAnalyzer {
     }
 
     /// List evidence is presentation-only: it never upgrades persistent identity.
-    /// Require multiple explicit anchors overlapping a technical-only numeric family.
+    /// Use a numbered video sequence or multiple overlapping explicit anchors.
     public static func analyzeList(_ episodes: [PlayEpisode], categoryName: String? = nil) -> [PlaybackResourceSemantics] {
         var values = episodes.map { analyze($0, categoryName: categoryName) }
+        inferNumberedVideoSequence(episodes, values: &values)
         guard PlaybackContentForm.category(categoryName) == .unknown else { return values }
         let anchors = values.filter { $0.hasReliableEpisode }
         guard Set(anchors.compactMap(\.episode)).count >= 2,
@@ -166,10 +168,75 @@ public enum PlaybackResourceAnalyzer {
         return values
     }
 
-    private static func contextualNumber(_ name: String) -> Int? {
+    public static func isNonVideoResource(_ item: PlayEpisode) -> Bool {
+        let raw = (item.name.removingPercentEncoding ?? item.name).precomposedStringWithCompatibilityMapping
+        return match(#"(?i)\.(mp3|flac|aac|m4a|wav|ogg|srt|ass|vtt)(?=$|[?#\s【\[])"#, raw) != nil
+    }
+
+    /// Names such as [4.93GB] ZIYA 22.mkv need the whole line to establish
+    /// an episode sequence. Prefixes may change between uploads; continuity
+    /// comes from the numbers within one version, never from array positions.
+    /// Keep this evidence local to presentation and autoplay, not persistence.
+    private static func inferNumberedVideoSequence(_ episodes: [PlayEpisode], values: inout [PlaybackResourceSemantics]) {
+        guard !values.contains(where: { $0.form == .movie || $0.evidence == .conflict }) else { return }
+        var families: [String: [(index: Int, number: Int)]] = [:]
+        for index in values.indices {
+            let value = values[index]
+            let raw = (episodes[index].name.removingPercentEncoding ?? episodes[index].name).precomposedStringWithCompatibilityMapping
+            guard value.form == .unknown || value.form == .series,
+                  value.role == .main, value.endEpisode == nil, value.date == nil,
+                  !isNonVideoResource(episodes[index]) else { continue }
+            let hasVideoExtension = match(#"(?i)\.(mp4|mkv|m4v|mov|avi|ts|m2ts|flv|webm|m3u8)(?=$|[?#\s【\[])"#, raw) != nil
+            let hasFileSize = match(#"(?i)\[[0-9]+(?:\.[0-9]+)?\s*(GB|MB|TB)\]"#, raw) != nil
+            guard value.form == .series || hasVideoExtension || hasFileSize else { continue }
+            let number = value.episode ?? contextualNumber(value.name) ?? numberedFileNumber(value.name)
+            guard let number, valid(number) else { continue }
+            let key = "\(value.season ?? -1):\(value.versionLabels.joined(separator: "|"))"
+            families[key, default: []].append((index, number))
+        }
+        for family in families.values {
+            let numbers = family.map(\.number).sorted()
+            // A known series may have only two remaining uploads. Otherwise
+            // require a run of three to establish the pattern, allowing gaps
+            // elsewhere in an already established sequence.
+            let knownSeries = family.allSatisfy { values[$0.index].form == .series }
+            let hasConsecutiveRun = numbers.indices.dropFirst(2).contains {
+                numbers[$0] == numbers[$0 - 1] + 1 && numbers[$0 - 1] == numbers[$0 - 2] + 1
+            }
+            guard Set(numbers).count == numbers.count,
+                  (knownSeries && family.count >= 2) || hasConsecutiveRun else { continue }
+            for candidate in family where values[candidate.index].evidence == .none {
+                values[candidate.index].form = .series
+                values[candidate.index].episode = candidate.number
+                values[candidate.index].evidence = .contextual
+            }
+        }
+    }
+
+    private static func numberedFileNumber(_ name: String) -> Int? {
+        var text = removingTechnicalLabels(name)
+        for pattern in [
+            #"(?i)(?<![A-Z0-9])(?:[HX][ ._-]?26[45]|AV1|[0-9]+(?:\.[0-9]+)?FPS|[0-9]+BIT)(?![A-Z0-9])"#,
+            #"(?<![0-9])(?:19|20)[0-9]{2}(?![0-9])"#
+        ] {
+            text = text.replacingOccurrences(of: pattern, with: " ", options: .regularExpression)
+        }
+        // Exactly one remaining numeric token: no ranges, part numbers,
+        // channel counts, sizes or conflicting episode hints.
+        let tokens = captures(#"([0-9]+)"#, text)
+        guard tokens.count == 1, let token = tokens.first?[0], token.count <= 3,
+              let number = Int(token), valid(number) else { return nil }
+        return number
+    }
+
+    private static func removingTechnicalLabels(_ name: String) -> String {
         var value = name.replacingOccurrences(of: #"(?i)\[[0-9]+(?:\.[0-9]+)?\s*(?:GB|MB|TB)\]"#, with: " ", options: .regularExpression)
         value = value.replacingOccurrences(of: #"(?i)(?<![A-Z0-9])(?:4K(?:SDR|HDR(?:10\+?)?)?|2160p|1080p|720p|SDR|HDR(?:10\+?)?)(?![A-Z0-9])"#, with: " ", options: .regularExpression)
-        value = value.trimmingCharacters(in: CharacterSet(charactersIn: " ._-"))
+        return value.trimmingCharacters(in: CharacterSet(charactersIn: " ._-"))
+    }
+
+    private static func contextualNumber(_ name: String) -> Int? {
+        let value = removingTechnicalLabels(name)
         guard let match = captures(#"^([0-9]{1,3})$"#, value).first,
               let number = Int(match[0]), valid(number) else { return nil }
         return number

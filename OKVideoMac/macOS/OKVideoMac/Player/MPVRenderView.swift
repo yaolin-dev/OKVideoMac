@@ -254,9 +254,8 @@ enum MPVRenderVisibilityPolicy {
     }
 }
 
-/// An AppKit-owned composition boundary for video, subtitles, danmaku and
-/// controls. A single Core Animation transform moves the entire live subtree.
-/// The window backdrop is clipped separately during fullscreen transitions.
+/// The video composition scales uniformly during custom fullscreen. Controls
+/// live in a sibling viewport so their point sizes never inherit this transform.
 final class PlayerFullscreenContentView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -264,6 +263,56 @@ final class PlayerFullscreenContentView: NSView {
         autoresizingMask = [.width, .height]
     }
     required init?(coder: NSCoder) { super.init(coder: coder); wantsLayer = true }
+}
+
+/// The overlay's own finite viewport defines its layout, including while it
+/// occupies a subrectangle of the temporary fullscreen-sized window.
+final class PlayerOverlayHostingView<Content: View>: NSHostingView<Content> {
+    override var safeAreaInsets: NSEdgeInsets { NSEdgeInsetsZero }
+}
+
+/// Keep interactive chrome out of the video's scale transform. During a
+/// fullscreen transition SwiftUI may commit a resized layout a frame later
+/// than Core Animation; suppress that intermediate layout and reveal only the
+/// settled controls. Video and danmaku continue rendering throughout.
+final class PlayerFullscreenOverlayView: NSView {
+    private var presentationRevision = 0
+    private var savedAlpha: CGFloat?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        autoresizingMask = [.width, .height]
+    }
+    required init?(coder: NSCoder) { super.init(coder: coder); wantsLayer = true }
+
+    func suspendPresentation() {
+        presentationRevision &+= 1
+        if savedAlpha == nil { savedAlpha = alphaValue }
+        layer?.removeAnimation(forKey: "com.okvideomac.controls.reveal")
+        alphaValue = 0
+    }
+
+    func resumePresentation() {
+        guard let alpha = savedAlpha else { return }
+        presentationRevision &+= 1
+        let ticket = presentationRevision
+        // Allow AppKit's final frame and the hosting view's finite layout to
+        // settle outside the fullscreen completion notification stack.
+        DispatchQueue.main.async { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.window != nil, self.presentationRevision == ticket else { return }
+                self.layoutSubtreeIfNeeded()
+                self.savedAlpha = nil
+                self.alphaValue = alpha
+                guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+                let fade = CABasicAnimation(keyPath: "opacity")
+                fade.fromValue = 0; fade.toValue = alpha; fade.duration = 0.16
+                fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                self.layer?.add(fade, forKey: "com.okvideomac.controls.reveal")
+            }
+        }
+    }
 }
 
 /// The window keeps a full-size drawable, but only the animated viewport is
@@ -279,10 +328,12 @@ private final class PlayerFullscreenBackdrop {
     private let oldOpaque: Bool
     private let oldShadow: Bool
     private let mask = CAShapeLayer()
+    private let overlays: [PlayerFullscreenOverlayView]
 
     init?(window: NSWindow, entering: Bool, expectedFrame: NSRect, windowedFrame: NSRect) {
         guard let root = window.contentView, let rootLayer = root.layer else { return nil }
         self.window = window; self.root = root; self.rootLayer = rootLayer
+        overlays = root.subviews.compactMap { $0 as? PlayerFullscreenOverlayView }
         oldMask = rootLayer.mask; oldLayerColor = rootLayer.backgroundColor
         oldBackground = window.backgroundColor; oldOpaque = window.isOpaque; oldShadow = window.hasShadow
         let full = NSRect(origin: .zero, size: expectedFrame.size)
@@ -296,6 +347,7 @@ private final class PlayerFullscreenBackdrop {
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
+        overlays.forEach { $0.suspendPresentation() }
         CATransaction.commit()
     }
 
@@ -318,6 +370,7 @@ private final class PlayerFullscreenBackdrop {
     func restore() {
         guard let window else { return }
         CATransaction.begin(); CATransaction.setDisableActions(true)
+        overlays.forEach { $0.resumePresentation() }
         if rootLayer.mask === mask { rootLayer.mask = oldMask }
         mask.removeAllAnimations()
         rootLayer.backgroundColor = oldLayerColor
@@ -373,7 +426,7 @@ final class PlayerFullscreenPresentation {
         guard self.window === window,
               !WindowTransitionCoordinator.state(for: window).isClosing else { return }
         if let windowedSurfaceFrame {
-            surface?.beginFullscreenPresentation(entering: true, duration: duration,
+            surface?.beginFullscreenPresentation(entering: true, duration: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : duration,
                 windowedSurfaceFrame: windowedSurfaceFrame, aspectRatio: aspectRatio,
                 expectedWindowFrame: screen.frame, presentationView: presentationView)
         }
@@ -385,7 +438,7 @@ final class PlayerFullscreenPresentation {
     func startExiting(window: NSWindow, duration: TimeInterval) {
         guard self.window === window, let windowedSurfaceFrame,
               !WindowTransitionCoordinator.state(for: window).isClosing else { return }
-        surface?.beginFullscreenPresentation(entering: false, duration: duration,
+        surface?.beginFullscreenPresentation(entering: false, duration: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : duration,
             windowedSurfaceFrame: windowedSurfaceFrame, aspectRatio: aspectRatio,
             expectedWindowFrame: window.frame, presentationView: presentationView)
     }
@@ -393,6 +446,8 @@ final class PlayerFullscreenPresentation {
     func complete(window: NSWindow, isFullScreen: Bool) {
         guard self.window === window else { return }
         guard !WindowTransitionCoordinator.state(for: window).isClosing else { cancel(); return }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        surface?.finishFullscreenPresentation()
         if !isFullScreen, let windowedFrame {
             let visibleFrames = NSScreen.screens.map(\.visibleFrame)
             let frame = AppWindowLayoutPolicy.adjustedFrame(windowedFrame,
@@ -400,7 +455,7 @@ final class PlayerFullscreenPresentation {
                 fallbackVisibleFrame: window.screen?.visibleFrame ?? windowedFrame)
             window.setFrame(frame, display: false)
         }
-        surface?.finishFullscreenPresentation()
+        CATransaction.commit()
         if !isFullScreen { cancel() }
     }
 
@@ -453,6 +508,9 @@ final class MPVOpenGLView: NSOpenGLView {
     private(set) var skippedFramesForTesting = 0
     private(set) var renderedFramesForTesting = 0
     private(set) var lastPresentedPixelSizeForTesting: NSSize?
+    var readinessDiagnosticsForTesting: String {
+        "canPresent=\(canPresent) contextMatches=\(openGLContext === renderOpenGLContext) renderContext=\(renderContext != nil) needsDisplay=\(needsDisplay) renders=\(renderedFramesForTesting) updates=\(renderUpdatesForTesting) closing=\(window.map { WindowTransitionCoordinator.state(for: $0).isClosing } ?? false)"
+    }
     var collectRenderTimingsForTesting = false
     private(set) var renderTimingsForTesting: [String] = []
 #endif

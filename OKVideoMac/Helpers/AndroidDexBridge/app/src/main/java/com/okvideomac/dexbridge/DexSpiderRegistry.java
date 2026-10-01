@@ -101,7 +101,8 @@ final class DexSpiderRegistry {
         if (requiresDialogHandoff(payload, method)) {
             BridgeActivity.prepareDialogHandoff(
                     context,
-                    payload.optString("interactionID", "")
+                    payload.optString("interactionID", ""),
+                    !observesOptionalUI(payload, method)
             );
         }
         if ("play".equals(method)) {
@@ -155,6 +156,34 @@ final class DexSpiderRegistry {
         return decodeRawResult(raw);
     }
 
+    /** Executes a verified login as a child of the original playback owner.
+     * Does NOT rebind the interaction to the configuration site or invoke RPC.
+     * Candidates come from the host's same-configuration, same-JAR site list.
+     */
+    boolean presentPlaybackLogin(JSONObject payload, Object result) throws Exception {
+        String realm = TVBoxAuthorizationRoute.realm(result);
+        if (realm.isEmpty()) return false;
+        JSONObject candidate = TVBoxAuthorizationRoute.candidate(payload);
+        if (candidate == null) return false;
+        String id = payload.optString("interactionID");
+        if (!BridgeInteractionRegistry.ownsLatest(id) || BridgeInteractionRegistry.terminal(id)) return false;
+        JSONObject child = new JSONObject(payload.toString());
+        child.put("siteKey", candidate.getString("siteKey"));
+        child.put("api", candidate.getString("api"));
+        child.put("ext", candidate.optString("ext"));
+        try (ProviderLifecycle.Lease lease = lifecycle.acquire(jarKey(payload), false);
+             ConfigurationHostPolicy.Lease ignored = hostPolicy.acquire(payload)) {
+            Spider config = spider(child);
+            Object category = decodeRawResult(config.categoryContent(realm, "1", false, new HashMap<>()));
+            if (!TVBoxAuthorizationRoute.advertisesLogin(realm, category)) return false;
+            if (!BridgeInteractionRegistry.ownsLatest(id) || BridgeInteractionRegistry.terminal(id)
+                    || Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
+            BridgeActivity.prepareDialogHandoff(context, id, false);
+            config.detailContent(java.util.Collections.singletonList(realm));
+            return true;
+        }
+    }
+
     private void destroySpider(JSONObject payload, String siteKey) {
         String key = spiderKey(payload, siteKey);
         Object lock = spiderLocks.computeIfAbsent(key, ignored -> new Object());
@@ -166,6 +195,14 @@ final class DexSpiderRegistry {
                     item -> item.startsWith(key + "\u0000")
             );
         }
+    }
+
+    // Opt-in only for TVBox foreground selections/actions. Background reads
+    // and playback retain their existing contracts.
+    static boolean observesOptionalUI(JSONObject payload, String method) {
+        return payload.optBoolean("monitorsAuthorization", false)
+                && payload.optBoolean("observesOptionalUI", false)
+                && ("detail".equals(method) || "action".equals(method));
     }
 
     static boolean requiresDialogHandoff(
@@ -185,6 +222,7 @@ final class DexSpiderRegistry {
         // Never infer this behavior from source keys, API class names,
         // domains, localized labels, or provider names.
         if (!payload.optBoolean("monitorsAuthorization", false)) return false;
+        if (observesOptionalUI(payload, method)) return true;
         String interactionKind = payload
                 .optString("interactionKind", "")
                 .trim()

@@ -2471,11 +2471,13 @@ public final class BridgeProtocolTest extends TestCase {
                 BridgeProviderOwnerRegistry.Binding.class
         );
         invokePlayer.setAccessible(true);
-        Field locksField = DexSpiderRegistry.class.getDeclaredField(
-                "playbackLocks"
-        );
-        locksField.setAccessible(true);
-        Map<?, ?> locks = (Map<?, ?>) locksField.get(registry);
+        // Proxy ownership is serialized before the per-resource lock. Keep
+        // the original three-generation cache assertion; observe the actual
+        // admission boundary rather than an unreachable inner lock waiter.
+        Field proxyLockField = DexSpiderRegistry.class.getDeclaredField("PLAYER_CONTENT_PROXY_LOCK");
+        proxyLockField.setAccessible(true);
+        java.util.concurrent.locks.ReentrantLock proxyLock =
+                (java.util.concurrent.locks.ReentrantLock) proxyLockField.get(null);
 
         String suffix = UUID.randomUUID().toString();
         String siteKey = "refresh-site-" + suffix;
@@ -2544,20 +2546,13 @@ public final class BridgeProtocolTest extends TestCase {
             long deadline = System.currentTimeMillis() + 2_000L;
             boolean refreshRetainedLock = false;
             while (System.currentTimeMillis() < deadline) {
-                Object lock = locks.get(playbackKey);
-                if (lock != null) {
-                    Field retainCount = lock.getClass().getDeclaredField(
-                            "retainCount"
-                    );
-                    retainCount.setAccessible(true);
-                    if (retainCount.getInt(lock) >= 2) {
-                        refreshRetainedLock = true;
-                        break;
-                    }
+                if (proxyLock.hasQueuedThread(refreshThread)) {
+                    refreshRetainedLock = true;
+                    break;
                 }
                 Thread.sleep(10L);
             }
-            assertTrue("refresh did not queue on playback lock", refreshRetainedLock);
+            assertTrue("refresh did not queue on provider admission lock", refreshRetainedLock);
         } finally {
             allowFirstReturn.countDown();
         }
@@ -3368,7 +3363,8 @@ public final class BridgeProtocolTest extends TestCase {
                 "com.android.calendar",
                 "com.android.contacts",
                 "com.android.gallery3d",
-                "com.android.music"
+                "com.android.music",
+                "com.android.settings"
         }) {
             Intent intent = context.getPackageManager()
                     .getLaunchIntentForPackage(packageName);

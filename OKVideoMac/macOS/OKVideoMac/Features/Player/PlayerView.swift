@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 
 struct PlayerView: View {
     @EnvironmentObject private var state: AppState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject private var playerSnapshotState: PlayerSnapshotState
     @State private var scrubPosition: Double?
     @State private var controlsVisible = true
@@ -21,12 +22,15 @@ struct PlayerView: View {
     @State private var playerEpisodeLocateRevision = 0
     @State private var playerEpisodePageIndex = 0
     @State private var isWindowFullScreen = false
-    @State private var isProgressHovering = false
+    @State private var fullscreenTopInset: CGFloat = 0
+    @State private var isFullScreenTransitioning = false
+    @State private var settledViewportSize: CGSize?
+    @State private var frozenViewportSize: CGSize?
+    @State private var progressHoverRevision = 0
     @State private var progressHoverFraction: Double?
     @State private var liveLoadingVisible = false
     @State private var liveLoadingSlow = false
     @State private var playbackActivityOverlayVisible = false
-    @State private var playbackActivityOverlayShownAt: Date?
     @State private var playbackActivityOverlayTask: Task<Void, Never>?
     let onWindowChromeRestored: () -> Void
 
@@ -39,12 +43,15 @@ struct PlayerView: View {
     }
 
     private let speeds: [Double] = [0.5, 0.75, 1, 1.25, 1.5, 2]
-    private let utilityIconSize: CGFloat = 19
+    private let utilityIconSize: CGFloat = 18
     private let utilityButtonSize: CGFloat = 38
 
     var body: some View {
         GeometryReader { geometry in
-            let layout = PlayerOverlayLayout(viewportSize: geometry.size)
+            let layout = PlayerOverlayLayout(
+                viewportSize: frozenViewportSize ?? geometry.size,
+                timeLabelWidth: playbackTimeWidth
+            )
         ZStack {
             // fullDestroy intentionally leaves no embedded client between
             // sessions. While the next client is being recreated, the normal
@@ -63,13 +70,6 @@ struct PlayerView: View {
                 onDoubleClick: handleSurfaceDoubleClick
             )
 
-            if !state.isLivePlayback {
-                PlayerDanmakuLayer(
-                    coordinator: state.danmaku,
-                    snapshotState: playerSnapshotState
-                )
-                .allowsHitTesting(false)
-            }
 
             if controlsVisible {
                 Group {
@@ -80,6 +80,10 @@ struct PlayerView: View {
                     }
                 }
                 .transition(.opacity)
+            }
+
+            if state.playerSnapshot.status == .ended && !state.isLivePlayback {
+                playbackEndedOverlay
             }
 
             playbackStatusOverlay
@@ -115,14 +119,13 @@ struct PlayerView: View {
                 VStack(spacing: 0) {
                     floatingHeader
                     Spacer(minLength: 24)
-                    floatingControls(isCompact: layout.isCompact)
+                    floatingControls(layout: layout)
                 }
                 .padding(.horizontal, 18)
-                .padding(.top, 12)
-                .padding(.bottom, 12)
+                .padding(.top, max(10, fullscreenTopInset))
+                .padding(.bottom, layout.bottomInset)
                 .opacity(controlsVisible ? 1 : 0)
-                .offset(y: controlsVisible ? 0 : 12)
-                .allowsHitTesting(controlsVisible)
+                .allowsHitTesting(controlsVisible && !isFullScreenTransitioning)
                 .environment(\.colorScheme, .dark)
             }
 
@@ -136,8 +139,8 @@ struct PlayerView: View {
                         utilityPanel(activeUtilityPanel, maximumSize: layout.panelMaximumSize)
                     }
                 }
-                .padding(.trailing, 18)
-                .padding(.bottom, 82)
+                .padding(.trailing, layout.panelTrailingInset)
+                .padding(.bottom, layout.panelBottomInset)
                 .transition(.identity)
                 .zIndex(50)
                 .environment(\.colorScheme, .dark)
@@ -152,17 +155,37 @@ struct PlayerView: View {
                 // a new episode, or a different route reports another ratio.
                 videoAspectRatio: nil,
                 onRestore: onWindowChromeRestored,
-                onFullScreenChange: { isWindowFullScreen = $0 }
+                onFullScreenChange: { fullScreen in
+                    isWindowFullScreen = fullScreen
+                    fullscreenTopInset = fullScreen ? (NSApp.keyWindow?.screen?.safeAreaInsets.top ?? 0) : 0
+                },
+                onTransitionChange: handleFullScreenTransition
             )
                 .frame(width: 0, height: 0)
         }
         .frame(width: geometry.size.width, height: geometry.size.height)
+        .onAppear { settledViewportSize = geometry.size }
+        .onChange(of: geometry.size) { size in
+            if !isFullScreenTransitioning { settledViewportSize = size }
+        }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.clear)
+        .modifier(PlayerProgressPreviewOverlay(
+            fraction: progressPreviewFraction,
+            text: progressPreviewFraction.flatMap { PlayerProgressHoverPolicy.time(fraction: $0, duration: state.playerSnapshot.duration) }.map(formatTime)
+        ))
         .modifier(PlayerControlTooltipOverlay(model: controlTooltip))
-        .onChange(of: controlsVisible) { if !$0 { controlTooltip.dismiss() } }
-        .onChange(of: scrubPosition != nil) { if $0 { controlTooltip.dismiss() } }
+        .onChange(of: controlsVisible) { visible in
+            if !visible { dismissProgressPreview() }
+            updateTooltipAvailability()
+        }
+        .onChange(of: state.playbackPresentationID) { _ in
+            dismissProgressPreview(); scrubPosition = nil; controlTooltip.dismiss()
+        }
+        .onChange(of: state.isPlayerWindowKey) { if !$0 { dismissProgressPreview(); controlTooltip.dismiss() } }
+        .onChange(of: scrubPosition != nil) { _ in updateTooltipAvailability() }
+        .onChange(of: isFullScreenTransitioning) { _ in updateTooltipAvailability() }
         .onAppear {
             revealControls()
             updatePlaybackActivityOverlay(
@@ -170,6 +193,7 @@ struct PlayerView: View {
             )
         }
         .onDisappear {
+            dismissProgressPreview()
             controlTooltip.dismiss()
             hideControlsTask?.cancel()
             isLiveVolumeControlPresented = false
@@ -180,7 +204,6 @@ struct PlayerView: View {
             playbackActivityOverlayTask?.cancel()
             playbackActivityOverlayTask = nil
             playbackActivityOverlayVisible = false
-            playbackActivityOverlayShownAt = nil
         }
         .task(id: liveLoadingTaskID) {
             liveLoadingVisible = false
@@ -228,9 +251,37 @@ struct PlayerView: View {
             handleEscapeShortcut()
         }
         .animation(
-            .easeInOut(duration: 0.22),
+            reduceMotion || isFullScreenTransitioning ? nil : .easeInOut(duration: 0.18),
             value: controlsVisible
         )
+    }
+
+    private var playbackEndedOverlay: some View {
+        VStack(spacing: 14) {
+            Text(L10n.string("player.ended.title", fallback: "Playback Finished"))
+                .font(.headline)
+            HStack(spacing: 12) {
+                Button(L10n.string("player.ended.replay", fallback: "Replay")) {
+                    Task { await state.togglePlayPause() }
+                }.buttonStyle(.borderedProminent)
+                if state.hasNextEpisode {
+                    Button(state.nextPlayerResourceTitle) {
+                        Task { await state.playAdjacentEpisode(offset: 1) }
+                    }.buttonStyle(.bordered)
+                }
+            }
+            if state.isRestoringPlayerEpisodeList || state.isPlayerEpisodeListPreparing {
+                Text(L10n.string("player.ended.preparing", fallback: "Preparing the episode list…"))
+            } else if state.isPlayerEpisodeListIncomplete {
+                Button(L10n.string("player.ended.reload-list", fallback: "Reload episode list")) { state.retryPlayerEpisodeList() }
+            } else if !state.hasNextEpisode {
+                Text(L10n.string("player.ended.no-next", fallback: "No next episode is available in this playback line and version."))
+            }
+        }
+        .font(.callout).foregroundStyle(.white)
+        .padding(22)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .environment(\.colorScheme, .dark)
     }
 
     private var unavailablePlayer: some View {
@@ -262,13 +313,13 @@ struct PlayerView: View {
             LinearGradient(
                 colors: [
                     Color.black.opacity(0),
-                    Color.black.opacity(0.03),
-                    Color.black.opacity(0.14)
+                    Color.black.opacity(0.20),
+                    Color.black.opacity(0.68)
                 ],
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .frame(height: 160)
+            .frame(height: 190)
         }
         .ignoresSafeArea()
         .allowsHitTesting(false)
@@ -314,7 +365,7 @@ struct PlayerView: View {
             }
         }
         .opacity(controlsVisible ? 1 : 0)
-        .offset(y: controlsVisible ? 0 : 10)
+        .offset(y: controlsVisible || reduceMotion ? 0 : 10)
         .allowsHitTesting(controlsVisible)
     }
 
@@ -617,32 +668,21 @@ struct PlayerView: View {
     }
 
     private var floatingHeader: some View {
-        ZStack {
-            HStack(spacing: 5) {
-                Text(state.currentPlaybackContentTitle ?? state.currentPlaybackTitle)
-                    .lineLimit(1).truncationMode(.tail)
-                if let current = state.currentPlayerEpisodePresentation,
-                   current.displayName != state.currentPlaybackContentTitle {
-                    Text("· " + current.displayName)
-                        .lineLimit(1).truncationMode(.middle).layoutPriority(1)
+        VStack(spacing: 5) {
+            PlayerTitleView(
+                title: state.currentPlaybackContentTitle ?? state.currentPlaybackTitle,
+                episode: state.currentPlayerEpisodePresentation.flatMap {
+                    $0.displayName == state.currentPlaybackContentTitle ? nil : $0.displayName
                 }
-            }
-                .help(playbackDisplayTitle)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(.white.opacity(0.92))
-                .lineLimit(1)
-                .frame(maxWidth: 760)
-                .truncationMode(.tail)
-                .shadow(color: .black.opacity(0.82), radius: 4, y: 1)
+            )
+            .help(playbackDisplayTitle)
+            // Reserve equal space for native window buttons on the left and
+            // the opposite edge, keeping long titles genuinely centered.
+            .padding(.horizontal, 90)
+            .frame(height: 28)
 
-            HStack(spacing: 12) {
-                if state.playbackResolutionState != .playing,
-                   !shouldShowStatusOverlay {
-                    statusPill
-                        .layoutPriority(1)
-                }
-
-                Spacer(minLength: 24)
+            if state.playbackResolutionState != .playing, !shouldShowStatusOverlay {
+                statusPill
             }
         }
         .frame(maxWidth: .infinity)
@@ -794,42 +834,34 @@ struct PlayerView: View {
         }
     }
 
-    private func floatingControls(isCompact: Bool) -> some View {
-        VStack(spacing: 2) {
+    private func floatingControls(layout: PlayerOverlayLayout) -> some View {
+        VStack(spacing: 3) {
             progressControls
-                .padding(.horizontal, 3)
-
-            if isCompact {
-                HStack(spacing: 8) {
-                    compactVolumeButton
+            PlayerControlRow(layout: layout) {
+                HStack(spacing: 10) {
+                    if layout.mode == .expanded { volumeControls }
+                    else { compactVolumeButton }
                     playbackTimeLabel
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    transportControls
-                    Spacer(minLength: 8)
-                    compactUtilityMenu
-                    fullScreenButton
                 }
-            } else {
-            ZStack {
-                HStack(spacing: 12) {
-                    HStack(spacing: 10) {
-                        volumeControls
-                        playbackTimeLabel
-                    }
-                    .frame(minWidth: 230, alignment: .leading)
-
-                    Spacer(minLength: 8)
-                    utilityControls
-                }
-
+            } transport: {
                 transportControls
-            }
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5))
+            } trailing: {
+                if layout.showsAllTools { utilityControls }
+                else {
+                    HStack(spacing: 3) {
+                        compactUtilityMenu
+                        fullScreenButton
+                    }
+                }
             }
         }
         .foregroundColor(.white)
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, 2)
-        .padding(.top, 1)
+        .padding(.horizontal, 12)
+        .padding(.top, 5)
+        .padding(.bottom, 9)
+        .frame(width: layout.controlWidth)
         .environment(\.colorScheme, .dark)
         .contentShape(Rectangle())
         .onHover { inside in
@@ -838,13 +870,25 @@ struct PlayerView: View {
         }
     }
 
+    private var playbackTimeText: String {
+        "\(formatTime(displayedPosition)) / \(formatTime(state.playerSnapshot.duration))"
+    }
+
+    private var playbackTimeWidth: CGFloat {
+        PlayerOverlayLayout.timeWidth(playbackTimeText)
+    }
+
     private var playbackTimeLabel: some View {
-        Text("\(formatTime(displayedPosition)) / \(formatTime(state.playerSnapshot.duration))")
-            .font(.system(size: 12, weight: .semibold).monospacedDigit())
-            .foregroundColor(.white.opacity(0.94))
-            .shadow(color: .black.opacity(0.48), radius: 2, y: 1)
+        Text(playbackTimeText)
+            .font(.system(size: 12, weight: .medium).monospacedDigit())
+            .foregroundColor(.white.opacity(0.9))
+            .frame(width: playbackTimeWidth, alignment: .leading)
             .lineLimit(1)
-            .minimumScaleFactor(0.85)
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func updateTooltipAvailability() {
+        controlTooltip.setEnabled(controlsVisible && !isFullScreenTransitioning && scrubPosition == nil)
     }
 
     private var compactVolumeButton: some View {
@@ -856,6 +900,7 @@ struct PlayerView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(L10n.string("player.volume", fallback: "Volume"))
+        .playerControlHelp(L10n.string("player.volume", fallback: "Volume"))
         .popover(isPresented: $isCompactVolumePresented, arrowEdge: .top) {
             volumeControls.padding(12).environment(\.colorScheme, .dark)
         }
@@ -886,6 +931,23 @@ struct PlayerView: View {
         }
     }
 
+    private var isProgressHovering: Bool {
+        progressHoverFraction != nil || scrubPosition != nil
+    }
+
+    private var progressPreviewFraction: Double? {
+        guard controlsVisible, state.isPlayerWindowKey, !isFullScreenTransitioning, state.canSeekPlayback else { return nil }
+        if let scrubPosition {
+            return PlayerTimelinePolicy.fraction(value: scrubPosition, total: state.playerSnapshot.duration)
+        }
+        return progressHoverFraction
+    }
+
+    private func dismissProgressPreview() {
+        progressHoverFraction = nil
+        progressHoverRevision &+= 1
+    }
+
     private var progressControls: some View {
         PlayerTimelineControl(
             value: Binding(
@@ -906,20 +968,22 @@ struct PlayerView: View {
             }
         )
         .disabled(!state.canSeekPlayback)
-        .frame(height: 12)
+        .frame(height: 24)
         .shadow(
-            color: playerAccentColor.opacity(isProgressHovering ? 0.42 : 0),
+            color: playerAccentColor.opacity(isProgressHovering ? 0.18 : 0),
             radius: isProgressHovering ? 5 : 0
         )
         .animation(
-            .easeOut(duration: 0.16),
+            reduceMotion ? nil : .easeOut(duration: 0.16),
             value: isProgressHovering
         )
-        .contentShape(Rectangle().inset(by: -5))
+        .contentShape(Rectangle())
         .background {
-            ProgressHoverTrackingView { fraction in
+            ProgressHoverTrackingView(
+                isEnabled: controlsVisible && !isFullScreenTransitioning && state.canSeekPlayback,
+                revision: progressHoverRevision
+            ) { fraction in
                 progressHoverFraction = fraction
-                isProgressHovering = fraction != nil
                 if fraction != nil {
                     keepControlsVisible()
                 } else {
@@ -927,36 +991,7 @@ struct PlayerView: View {
                 }
             }
         }
-        .overlay {
-            GeometryReader { geometry in
-                if let fraction = progressHoverFraction,
-                   let time = PlayerProgressHoverPolicy.time(
-                       fraction: fraction,
-                       duration: state.playerSnapshot.duration
-                   ) {
-                    Text(formatTime(time))
-                        .font(
-                            .system(size: 11, weight: .semibold)
-                                .monospacedDigit()
-                        )
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 8)
-                        .frame(height: 25)
-                        .shadow(color: .black.opacity(0.65), radius: 2, y: 1)
-                        .position(
-                            x: PlayerProgressHoverPolicy.tooltipCenterX(
-                                fraction: fraction,
-                                width: geometry.size.width,
-                                tooltipWidth: 58
-                            ),
-                            y: -13
-                        )
-                        .transition(.opacity.combined(with: .scale(scale: 0.94)))
-                }
-            }
-            .allowsHitTesting(false)
-        }
-        .animation(.easeOut(duration: 0.12), value: progressHoverFraction != nil)
+        .anchorPreference(key: PlayerProgressTrackAnchorKey.self, value: .bounds) { $0 }
     }
 
     private func commitScrubPosition() {
@@ -1014,11 +1049,23 @@ struct PlayerView: View {
         state.requestPlayerVolume(volume)
     }
 
+    private func adjacentResourceHelp(previous: Bool) -> String {
+        let title = previous ? state.previousPlayerResourceTitle : state.nextPlayerResourceTitle
+        if previous ? state.hasPreviousEpisode : state.hasNextEpisode { return title }
+        if state.isPlayerEpisodeListPreparing {
+            return title + " · " + L10n.string("player.queue.preparing", fallback: "Loading episode list")
+        }
+        if state.playerEpisodes.isEmpty {
+            return title + " · " + L10n.string("player.queue.unavailable", fallback: "No episode list available")
+        }
+        return title + " · " + L10n.string("player.queue.no-adjacent", fallback: "No adjacent episode available")
+    }
+
     private var transportControls: some View {
         HStack(spacing: 6) {
             playerIconButton(
                 systemImage: "backward.end.fill",
-                help: state.previousPlayerResourceTitle,
+                help: adjacentResourceHelp(previous: true),
                 disabled: !state.hasPreviousEpisode
             ) {
                 Task { await state.playAdjacentEpisode(offset: -1) }
@@ -1065,7 +1112,7 @@ struct PlayerView: View {
 
             playerIconButton(
                 systemImage: "forward.end.fill",
-                help: state.nextPlayerResourceTitle,
+                help: adjacentResourceHelp(previous: false),
                 disabled: !state.hasNextEpisode
             ) {
                 Task { await state.playAdjacentEpisode(offset: 1) }
@@ -1138,9 +1185,9 @@ struct PlayerView: View {
             activeUtilityPanel = isActive ? nil : panel
             keepControlsVisible()
         } label: {
-            utilityPanelGlyph(systemImage: systemImage, panel: panel)
+            Image(systemName: systemImage)
                 .symbolRenderingMode(.monochrome)
-                .font(.system(size: utilityIconSize, weight: .semibold))
+                .font(.system(size: utilityIconSize, weight: .medium))
                 .foregroundStyle(Color.white.opacity(isActive ? 1 : 0.96))
                 .frame(width: utilityButtonSize, height: utilityButtonSize)
                 .contentShape(Rectangle())
@@ -1154,38 +1201,6 @@ struct PlayerView: View {
                 ? L10n.string("player.panel.open", fallback: "Panel Open")
                 : L10n.string("player.panel.closed", fallback: "Panel Closed")
         )
-    }
-
-    @ViewBuilder
-    private func utilityPanelGlyph(
-        systemImage: String,
-        panel: PlayerUtilityPanel
-    ) -> some View {
-        switch panel {
-        case .subtitles:
-            ZStack {
-                RoundedRectangle(cornerRadius: 2.5, style: .continuous)
-                    .stroke(lineWidth: 1.5)
-                    .frame(width: 19, height: 14)
-                Text("CC")
-                    .font(.system(size: 7.5, weight: .heavy, design: .rounded))
-            }
-            .accessibilityHidden(true)
-        case .danmaku:
-            HStack(spacing: 1.5) {
-                VStack(alignment: .leading, spacing: 2.5) {
-                    Capsule().frame(width: 11, height: 1.5)
-                    Capsule().frame(width: 8, height: 1.5)
-                    Capsule().frame(width: 12, height: 1.5)
-                }
-                Image(systemName: "chevron.right.2")
-                    .font(.system(size: 6.5, weight: .bold))
-            }
-            .frame(width: 21, height: 15)
-            .accessibilityHidden(true)
-        default:
-            Image(systemName: systemImage)
-        }
     }
 
     @ViewBuilder
@@ -2036,7 +2051,7 @@ struct PlayerView: View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .symbolRenderingMode(.monochrome)
-                .font(.system(size: utilityIconSize, weight: .semibold))
+                .font(.system(size: utilityIconSize, weight: .medium))
                 .foregroundStyle(Color.white)
                 .frame(width: utilityButtonSize, height: utilityButtonSize)
                 .contentShape(Circle())
@@ -2051,7 +2066,7 @@ struct PlayerView: View {
     private func utilityMenuIcon(_ systemImage: String) -> some View {
         Image(systemName: systemImage)
             .symbolRenderingMode(.monochrome)
-            .font(.system(size: utilityIconSize, weight: .semibold))
+            .font(.system(size: utilityIconSize, weight: .medium))
             .foregroundStyle(Color.white)
             .frame(width: utilityButtonSize, height: utilityButtonSize)
             .contentShape(Rectangle())
@@ -2120,7 +2135,6 @@ struct PlayerView: View {
                     try Task.checkCancellation()
                     guard hasTransientPlaybackActivity else { return }
                     playbackActivityOverlayVisible = true
-                    playbackActivityOverlayShownAt = Date()
                 } catch {
                     return
                 }
@@ -2128,32 +2142,10 @@ struct PlayerView: View {
             return
         }
 
-        guard playbackActivityOverlayVisible else {
-            playbackActivityOverlayShownAt = nil
-            return
-        }
-        let elapsed = playbackActivityOverlayShownAt.map {
-            Date().timeIntervalSince($0)
-        } ?? PlayerActivityOverlayPolicy.minimumVisibleDuration
-        let remaining = max(
-            0,
-            PlayerActivityOverlayPolicy.minimumVisibleDuration - elapsed
-        )
-        playbackActivityOverlayTask = Task { @MainActor in
-            do {
-                if remaining > 0 {
-                    try await Task.sleep(
-                        nanoseconds: UInt64(remaining * 1_000_000_000)
-                    )
-                }
-                try Task.checkCancellation()
-                guard !hasTransientPlaybackActivity else { return }
-                playbackActivityOverlayVisible = false
-                playbackActivityOverlayShownAt = nil
-            } catch {
-                return
-            }
-        }
+        // Once the current seek/cache wait ends, hide immediately. The delay
+        // before showing already prevents flicker; a minimum visible duration
+        // would obscure frames after playback has recovered.
+        playbackActivityOverlayVisible = false
     }
 
     private var displayedPosition: Double {
@@ -2164,10 +2156,7 @@ struct PlayerView: View {
     }
 
     private var isPaused: Bool {
-        if case .paused = state.playerSnapshot.status {
-            return true
-        }
-        return false
+        state.playerSnapshot.status == .paused || state.playerSnapshot.status == .ended
     }
 
     private var shouldAutoHideControls: Bool {
@@ -2175,7 +2164,7 @@ struct PlayerView: View {
             isLivePlayback: state.isLivePlayback,
             controlsHovering: controlsHovering,
             isFailed: isFailed,
-            keepsControlsVisible: activeUtilityPanel != nil || isCompactVolumePresented || isVolumeEditing || scrubPosition != nil,
+            keepsControlsVisible: isFullScreenTransitioning || activeUtilityPanel != nil || isCompactVolumePresented || isVolumeEditing || scrubPosition != nil,
             isPlaying: {
                 if case .playing = state.playerSnapshot.status { return true }
                 return false
@@ -2184,6 +2173,7 @@ struct PlayerView: View {
     }
 
     private func revealControls() {
+        guard !isFullScreenTransitioning else { return }
         hideControlsTask?.cancel()
         if !controlsVisible {
             withAnimation(.easeInOut(duration: 0.18)) {
@@ -2224,6 +2214,22 @@ struct PlayerView: View {
                 return
             }
         }
+    }
+
+    private func handleFullScreenTransition(_ transitioning: Bool) {
+        guard isFullScreenTransitioning != transitioning else { return }
+        var transaction = Transaction(); transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            isFullScreenTransitioning = transitioning
+            frozenViewportSize = transitioning ? settledViewportSize : nil
+            dismissProgressPreview()
+            controlTooltip.dismiss()
+            controlsHovering = false
+            activeUtilityPanel = nil
+            isCompactVolumePresented = false
+        }
+        if transitioning { hideControlsTask?.cancel() }
+        else { scheduleControlsHide() }
     }
 
     private func toggleFullScreen() {
@@ -2923,18 +2929,86 @@ private struct PlayerUtilityPanelHeightKey: PreferenceKey {
     }
 }
 
+struct PlayerTitleView: View {
+    let title: String
+    let episode: String?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.system(size: 15, weight: .semibold))
+                .lineLimit(1).truncationMode(.tail)
+            if let episode, !episode.isEmpty {
+                Text("· " + episode)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.68))
+                    .lineLimit(1).truncationMode(.middle)
+                    .frame(maxWidth: 180)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .layoutPriority(1)
+            }
+        }
+        .foregroundColor(.white.opacity(0.94))
+        .frame(maxWidth: 760)
+        .shadow(color: .black.opacity(0.4), radius: 2, y: 1)
+    }
+}
+
 struct PlayerOverlayLayout {
+    enum Mode { case expanded, compactVolume, compactTools, stacked }
     let viewportSize: CGSize
-
-    // Full controls require two 230-point side regions, the 216-point
-    // transport group, separation, and the viewport's horizontal padding.
-    var isCompact: Bool { viewportSize.width < 760 }
-
+    var timeLabelWidth: CGFloat = 106
+    static let transportWidth: CGFloat = 216
+    var horizontalInset: CGFloat { 18 + max(0, viewportSize.width - 800) * 0.05 }
+    var controlWidth: CGFloat { max(1, viewportSize.width - horizontalInset * 2) }
+    var bottomInset: CGFloat { min(36, max(20, viewportSize.height * 0.025)) }
+    var innerWidth: CGFloat { max(1, controlWidth - 24) }
+    var sideWidth: CGFloat { max(0, (innerWidth - Self.transportWidth - 24) / 2) }
+    var mode: Mode {
+        if sideWidth >= max(243, 121 + 10 + timeLabelWidth) { return .expanded }
+        if sideWidth >= max(243, 38 + 10 + timeLabelWidth) { return .compactVolume }
+        if sideWidth >= max(79, 38 + 10 + timeLabelWidth) { return .compactTools }
+        return .stacked
+    }
+    var showsAllTools: Bool { mode == .expanded || mode == .compactVolume }
+    var isCompact: Bool { mode != .expanded }
+    var panelBottomInset: CGFloat { bottomInset + (mode == .stacked ? 138 : 93) }
+    var panelTrailingInset: CGFloat { max(18, (viewportSize.width - controlWidth) / 2) }
     var panelMaximumSize: CGSize {
-        CGSize(
-            width: max(1, viewportSize.width - 42),
-            height: max(1, min(560, viewportSize.height - 106))
-        )
+        CGSize(width: max(1, controlWidth), height: max(1, min(560, viewportSize.height - panelBottomInset - 24)))
+    }
+    static func timeWidth(_ text: String) -> CGFloat {
+        ceil((text as NSString).size(withAttributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        ]).width) + 2
+    }
+}
+
+/// Equal side columns keep transport centered even with long timestamps.
+/// The narrowest mode places transport on its own row before any overlap.
+struct PlayerControlRow<Leading: View, Transport: View, Trailing: View>: View {
+    let layout: PlayerOverlayLayout
+    @ViewBuilder let leading: () -> Leading
+    @ViewBuilder let transport: () -> Transport
+    @ViewBuilder let trailing: () -> Trailing
+
+    var body: some View {
+        if layout.mode == .stacked {
+            VStack(spacing: 5) {
+                transport().frame(width: PlayerOverlayLayout.transportWidth)
+                HStack(spacing: 12) {
+                    leading()
+                    Spacer(minLength: 12)
+                    trailing()
+                }
+            }
+        } else {
+            HStack(spacing: 12) {
+                leading().frame(width: layout.sideWidth, alignment: .leading)
+                transport().frame(width: PlayerOverlayLayout.transportWidth)
+                trailing().frame(width: layout.sideWidth, alignment: .trailing)
+            }
+        }
     }
 }
 
@@ -2959,7 +3033,6 @@ enum PlayerActivityOverlayPolicy {
     /// Avoid flashing an indicator for seeks that complete within one or two
     /// rendered frames, while still acknowledging a real network/decoder wait.
     static let presentationDelayNanoseconds: UInt64 = 200_000_000
-    static let minimumVisibleDuration: TimeInterval = 0.30
 
     static func isActive(snapshot: PlayerSnapshot) -> Bool {
         if snapshot.isSeeking || snapshot.isPausedForCache {
@@ -3146,11 +3219,13 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
     let videoAspectRatio: Double?
     let onRestore: () -> Void
     let onFullScreenChange: (Bool) -> Void
+    var onTransitionChange: (Bool) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             onRestore: onRestore,
-            onFullScreenChange: onFullScreenChange
+            onFullScreenChange: onFullScreenChange,
+            onTransitionChange: onTransitionChange
         )
     }
 
@@ -3174,6 +3249,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
     ) {
         context.coordinator.onRestore = onRestore
         context.coordinator.onFullScreenChange = onFullScreenChange
+        context.coordinator.onTransitionChange = onTransitionChange
         context.coordinator.attach(to: nsView.window)
         context.coordinator.configure(
             isLivePlayback: isLivePlayback,
@@ -3229,13 +3305,16 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
         private var windowLifetime: WindowLifetime?
         var onRestore: () -> Void
         var onFullScreenChange: (Bool) -> Void
+        var onTransitionChange: (Bool) -> Void
 
         init(
             onRestore: @escaping () -> Void,
-            onFullScreenChange: @escaping (Bool) -> Void = { _ in }
+            onFullScreenChange: @escaping (Bool) -> Void = { _ in },
+            onTransitionChange: @escaping (Bool) -> Void = { _ in }
         ) {
             self.onRestore = onRestore
             self.onFullScreenChange = onFullScreenChange
+            self.onTransitionChange = onTransitionChange
         }
 
         func attach(to newWindow: NSWindow?) {
@@ -3560,6 +3639,8 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             removeFullScreenObservers()
             let center = NotificationCenter.default
             for name in [
+                NSWindow.willEnterFullScreenNotification,
+                NSWindow.willExitFullScreenNotification,
                 NSWindow.didEnterFullScreenNotification,
                 NSWindow.didExitFullScreenNotification,
                 WindowTransitionCoordinator.didFailFullScreen
@@ -3569,11 +3650,14 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                         forName: name,
                         object: window,
                         queue: .main
-                    ) { [weak self, weak window] _ in
+                    ) { [weak self, weak window] note in
                         MainActor.assumeIsolated {
                             guard let self,
                                   let window,
                                   self.window === window else { return }
+                            let transitioning = note.name == NSWindow.willEnterFullScreenNotification || note.name == NSWindow.willExitFullScreenNotification
+                            self.onTransitionChange(transitioning)
+                            if transitioning { return }
                             self.onFullScreenChange(
                                 window.styleMask.contains(.fullScreen)
                             )
@@ -3730,10 +3814,55 @@ enum PlayerWindowAspectPolicy {
     }
 }
 
+struct PlayerProgressTrackAnchorKey: PreferenceKey {
+    static var defaultValue: Anchor<CGRect>?
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+        if let next = nextValue() { value = next }
+    }
+}
+
+/// Draw outside the controls' hierarchy: panel/background clipping cannot cut
+/// off the timestamp. The track anchor also survives window/fullscreen resize.
+struct PlayerProgressPreviewOverlay: ViewModifier {
+    let fraction: Double?
+    let text: String?
+    static let height: CGFloat = 28
+    static func width(for text: String) -> CGFloat {
+        ceil((text as NSString).size(withAttributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        ]).width) + 20
+    }
+    static func rect(track: CGRect, viewport: CGSize, fraction: Double, text: String) -> CGRect {
+        let width = min(Self.width(for: text), max(1, viewport.width - 16))
+        let x = track.minX + PlayerProgressHoverPolicy.tooltipCenterX(fraction: fraction,
+            width: track.width, tooltipWidth: width)
+        return CGRect(x: min(max(x - width / 2, 8), max(8, viewport.width - width - 8)),
+            y: max(8, track.minY - height - 8), width: width, height: height)
+    }
+    func body(content: Content) -> some View {
+        content.overlayPreferenceValue(PlayerProgressTrackAnchorKey.self) { anchor in
+            GeometryReader { geometry in
+                if let anchor, let fraction, let text {
+                    let rect = Self.rect(track: geometry[anchor], viewport: geometry.size, fraction: fraction, text: text)
+                    Text(text)
+                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                        .foregroundColor(.white)
+                        .frame(width: rect.width, height: rect.height)
+                        .background(Color.black.opacity(0.84), in: RoundedRectangle(cornerRadius: 7))
+                        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5))
+                        .position(x: rect.midX, y: rect.midY)
+                        .accessibilityHidden(true)
+                        .transaction { $0.disablesAnimations = true }
+                }
+            }.allowsHitTesting(false)
+        }
+    }
+}
+
 enum PlayerProgressHoverPolicy {
     static func fraction(x: CGFloat, width: CGFloat) -> Double? {
         guard width.isFinite, width > 0, x.isFinite else { return nil }
-        return min(1, max(0, Double(x / width)))
+        return PlayerTimelinePolicy.fraction(x: x, width: width, horizontalInset: 6)
     }
 
     static func time(fraction: Double, duration: TimeInterval) -> TimeInterval? {
@@ -3790,7 +3919,7 @@ enum PlayerTimelinePolicy {
     }
 }
 
-private struct PlayerTimelineControl: View {
+struct PlayerTimelineControl: View {
     @Binding var value: Double
     let total: Double
     let bufferedPercent: Double
@@ -3813,7 +3942,7 @@ private struct PlayerTimelineControl: View {
             )
             let horizontalInset = thumbDiameter / 2
             let trackWidth = max(geometry.size.width - thumbDiameter, 0)
-            let trackHeight: CGFloat = isEmphasized ? 6 : 4
+            let trackHeight: CGFloat = isEmphasized ? 5 : 3
             let playedWidth = trackWidth * CGFloat(playedFraction)
             let bufferedWidth = trackWidth * CGFloat(bufferedFraction)
             let thumbX = horizontalInset + playedWidth
@@ -3902,81 +4031,190 @@ private struct PlayerTimelineControl: View {
     }
 }
 
-private struct ProgressHoverTrackingView: NSViewRepresentable {
+struct ProgressHoverTrackingView: NSViewRepresentable {
+    let isEnabled: Bool
+    let revision: Int
     let onFractionChange: (Double?) -> Void
 
     func makeNSView(context: Context) -> ProgressHoverTrackingNSView {
         let view = ProgressHoverTrackingNSView()
-        view.onFractionChange = onFractionChange
+        view.configure(enabled: isEnabled, revision: revision, onChange: onFractionChange)
         return view
     }
 
-    func updateNSView(
-        _ nsView: ProgressHoverTrackingNSView,
-        context: Context
-    ) {
-        nsView.onFractionChange = onFractionChange
+    func updateNSView(_ view: ProgressHoverTrackingNSView, context: Context) {
+        view.configure(enabled: isEnabled, revision: revision, onChange: onFractionChange)
+    }
+
+    static func dismantleNSView(_ view: ProgressHoverTrackingNSView, coordinator: ()) {
+        view.detach()
     }
 }
 
-private final class ProgressHoverTrackingNSView: NSView {
-    var onFractionChange: ((Double?) -> Void)?
+/// Tracks the same rectangular interaction area as the timeline's drag gesture.
+/// Reconciles the current pointer rather than trusting queued enter/exit pairs.
+class ProgressHoverTrackingNSView: NSView {
+    private var onFractionChange: ((Double?) -> Void)?
     private var trackingAreaReference: NSTrackingArea?
+    private var eventMonitor: Any?
+    private var observers: [NSObjectProtocol] = []
+    private var enabled = false
+    private var revision = 0
+    private var publicationRevision = 0
+    private var lastFraction: Double?
+    private var transitioning = false
+    private var waitingForMovement = false
+
+    // Overridable input seams let AppKit lifecycle tests use a deterministic
+    // pointer and focus without moving the user's actual cursor.
+    var pointerInWindow: NSPoint? { window?.mouseLocationOutsideOfEventStream }
+    var isTrackingWindowActive: Bool { window?.isKeyWindow == true }
+
+    func configure(enabled: Bool, revision: Int, onChange: @escaping (Double?) -> Void) {
+        onFractionChange = onChange
+        let changed = self.enabled != enabled || self.revision != revision
+        if self.revision != revision { waitingForMovement = true }
+        self.enabled = enabled
+        self.revision = revision
+        if changed { scheduleReconciliation() }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        removeObservers()
+        transitioning = false
+        if let window {
+            let center = NotificationCenter.default
+            for name in [NSWindow.didResignKeyNotification, NSWindow.didBecomeKeyNotification,
+                         NSWindow.didResizeNotification, NSWindow.didMoveNotification,
+                         NSWindow.willEnterFullScreenNotification, NSWindow.willExitFullScreenNotification,
+                         NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification,
+                         WindowTransitionCoordinator.didFailFullScreen] {
+                observers.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self] note in
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        if note.name == NSWindow.willEnterFullScreenNotification || note.name == NSWindow.willExitFullScreenNotification {
+                            self.transitioning = true
+                        } else if note.name == NSWindow.didEnterFullScreenNotification || note.name == NSWindow.didExitFullScreenNotification || note.name == WindowTransitionCoordinator.didFailFullScreen {
+                            self.transitioning = false
+                        }
+                        self.scheduleReconciliation()
+                    }
+                })
+            }
+            // A local monitor also observes movement outside the narrow track,
+            // including mouse-up after a drag. It never consumes input events.
+            eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
+                MainActor.assumeIsolated {
+                    self?.pointerDidMove()
+                }
+                return event
+            }
+        }
+        scheduleReconciliation()
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        if let trackingAreaReference {
-            removeTrackingArea(trackingAreaReference)
-        }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [
-                .activeInKeyWindow,
-                .inVisibleRect,
-                .mouseEnteredAndExited,
-                .mouseMoved
-            ],
-            owner: self,
-            userInfo: nil
-        )
+        if let trackingAreaReference { removeTrackingArea(trackingAreaReference) }
+        let area = NSTrackingArea(rect: bounds,
+            options: [.activeInKeyWindow, .inVisibleRect, .mouseEnteredAndExited, .mouseMoved, .enabledDuringMouseDrag],
+            owner: self, userInfo: nil)
         addTrackingArea(area)
         trackingAreaReference = area
+        scheduleReconciliation()
     }
 
-    override func mouseEntered(with event: NSEvent) {
-        publishFraction(for: event)
+    override func mouseEntered(with event: NSEvent) { pointerDidMove() }
+    override func mouseMoved(with event: NSEvent) { pointerDidMove() }
+    override func mouseExited(with event: NSEvent) { pointerDidMove() }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func pointerDidMove() {
+        waitingForMovement = false
+        scheduleReconciliation()
     }
 
-    override func mouseMoved(with event: NSEvent) {
-        publishFraction(for: event)
+    func scheduleReconciliation() {
+        publicationRevision &+= 1
+        let ticket = publicationRevision
+        // AppKit may invoke updateTrackingAreas during SwiftUI layout. Publish
+        // after that pass, and discard work queued for old geometry/lifetimes.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, ticket == self.publicationRevision else { return }
+            let fraction = self.currentFraction()
+            guard fraction != self.lastFraction else { return }
+            self.lastFraction = fraction
+            self.onFractionChange?(fraction)
+        }
     }
 
-    override func mouseExited(with event: NSEvent) {
-        onFractionChange?(nil)
+    private func currentFraction() -> Double? {
+        guard enabled, !transitioning, !waitingForMovement,
+              window != nil, isTrackingWindowActive, !isHiddenOrHasHiddenAncestor,
+              let location = pointerInWindow else { return nil }
+        let point = convert(location, from: nil)
+        guard bounds.contains(point), visibleRect.contains(point) else { return nil }
+        return PlayerProgressHoverPolicy.fraction(x: point.x - bounds.minX, width: bounds.width)
     }
 
-    // The tracking view observes pointer motion, while the native Slider below
-    // remains responsible for clicks and drag gestures.
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
+    func detach() {
+        enabled = false
+        scheduleReconciliation()
+        removeObservers()
     }
 
-    private func publishFraction(for event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        onFractionChange?(
-            PlayerProgressHoverPolicy.fraction(x: point.x, width: bounds.width)
-        )
+    private func removeObservers() {
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers.removeAll()
+        if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
+        eventMonitor = nil
+    }
+
+    deinit {
+        observers.forEach(NotificationCenter.default.removeObserver)
+        if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
     }
 }
 
 final class PlayerControlTooltipState: ObservableObject {
     @Published private(set) var activeID: UUID?
+    private var candidateID: UUID?
+    private var pending: Task<Void, Never>?
+    private var enabled = true
+    private let delayNanoseconds: UInt64
+
+    init(delayNanoseconds: UInt64 = 350_000_000) {
+        self.delayNanoseconds = delayNanoseconds
+    }
 
     func hover(_ id: UUID, inside: Bool) {
-        if inside { activeID = id }
-        else if activeID == id { activeID = nil }
+        guard inside else {
+            if candidateID == id { dismiss() }
+            return
+        }
+        guard enabled, candidateID != id else { return }
+        dismiss()
+        candidateID = id
+        pending = Task { @MainActor [weak self, delayNanoseconds] in
+            do { try await Task.sleep(nanoseconds: delayNanoseconds) }
+            catch { return }
+            guard let self, !Task.isCancelled, self.enabled, self.candidateID == id else { return }
+            self.activeID = id
+            self.pending = nil
+        }
     }
-    func dismiss() { activeID = nil }
+
+    func setEnabled(_ enabled: Bool) {
+        self.enabled = enabled
+        if !enabled { dismiss() }
+    }
+
+    func dismiss() {
+        pending?.cancel(); pending = nil
+        candidateID = nil; activeID = nil
+    }
+    deinit { pending?.cancel() }
 }
 
 private struct PlayerControlTooltipEnvironmentKey: EnvironmentKey {
@@ -4040,15 +4278,17 @@ struct PlayerControlTooltipOverlay: ViewModifier {
                 GeometryReader { geometry in
                     if let id = model.activeID, let item = anchors[id] {
                         let rect = geometry[item.bounds]
-                        let textWidth = (item.title as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11, weight: .medium)]).width + 4
+                        let textWidth = (item.title as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11, weight: .medium)]).width + 16
                         let width = max(0, min(textWidth, 260, geometry.size.width - 16))
                         Text(item.title)
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(.white)
                             .lineLimit(2)
                             .multilineTextAlignment(.center)
-                            .frame(width: width)
-                            .shadow(color: .black.opacity(0.75), radius: 2, y: 1)
+                            .frame(width: max(0, width - 16))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .background(Color.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 6))
                             .position(
                                 x: min(max(rect.midX, width / 2 + 8), geometry.size.width - width / 2 - 8),
                                 y: rect.minY >= 36 ? rect.minY - 20 : rect.maxY + 20
@@ -4064,6 +4304,7 @@ struct PlayerControlTooltipOverlay: ViewModifier {
 }
 
 private struct PlayerControlHoverEffect: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovering = false
     let enabled: Bool
 
@@ -4077,14 +4318,13 @@ private struct PlayerControlHoverEffect: ViewModifier {
                 Color.white.opacity(enabled && isHovering ? 0.14 : 0),
                 in: Circle()
             )
-            .scaleEffect(enabled && isHovering ? 1.09 : 1)
             .shadow(
-                color: .black.opacity(0.46),
-                radius: enabled && isHovering ? 3 : 2,
+                color: .black.opacity(0.16),
+                radius: 1,
                 y: 1
             )
             .animation(
-                .easeOut(duration: 0.13),
+                reduceMotion ? nil : .easeOut(duration: 0.13),
                 value: isHovering
             )
             .onHover { inside in

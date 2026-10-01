@@ -31,3 +31,31 @@ The Release APK is written to
 the same task through `macOS/OKVideoMac/Scripts/build-android-dex-bridge.sh`.
 Do not regenerate dependency locks during a release build; review and commit
 lock changes separately.
+
+## 0.3.48 (60), bundled with OKVideoMac 0.8.0
+
+The published OKVideoMac 0.7.3 bundle used Bridge 0.3.45 (57). This update adds
+selected TVBox configuration-card and native playback-authorization interactions.
+Optional UI observation is limited to foreground detail/action calls. Delayed
+owned dialogs remain alive; silent actions can finish without waiting for a
+window. Cancellation/terminal cleanup closes only the current interaction's UI.
+
+`BridgeConfigurationWebView` handles explicit clicked HTTP(S) configuration
+entries whose URL is repeated by the provider result. Native provider dialogs
+have priority. Suggested links come from explanatory text, not media or arbitrary
+response fields. The temporary configuration proxy preserves forms and scopes
+requests to the current interaction, provider/JAR and session; it expires on cleanup.
+
+`BridgePlaybackAuthorization` keeps the original playback owner through native
+login UI and retries the same episode/flag at most once after confirmation.
+`TVBoxAuthorizationRoute` accepts only a verified `[realm](auth)` contract with
+an unambiguous same-configuration/JAR configuration site. Arbitrary HTML and
+localized Cookie errors do not select an authorization route. Closing a dialog
+does not prove authentication or playable media.
+
+Release dependencies and signing identity are unchanged. API 35 instrumentation
+covers owned dialogs, delayed/silent actions, browser entry, proxy expiry,
+authorization continuation and cancellation; live accounts and all third-party
+configuration pages are outside that deterministic coverage. See the
+[0.8.0 release notes](../../../Docs/RELEASE_NOTES_0.8.0.md) and
+[readiness record](../../../Docs/RELEASE_READINESS_0.8.0.md).

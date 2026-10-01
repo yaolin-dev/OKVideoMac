@@ -669,6 +669,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
     private let baseURL: URL
     private let httpClient: HTTPClient
     private let aggregateSearchHTTPClient: HTTPClient
+    private let searchMemory: CatPawSearchMemory?
+    private var searchOwner: String {
+        [configurationIdentity ?? "", configurationSemanticRevision ?? "", baseURL.absoluteString, site.key, site.api]
+            .map { "\($0.utf8.count):\($0)" }.joined()
+    }
+    var aggregateSearchPriority: TimeInterval { searchMemory?.priority(owner: searchOwner) ?? 2 }
     private let diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)?
     private let ensureRuntimeReady: (@Sendable () async throws -> URL)?
     private let configurationIdentity: String?
@@ -815,6 +821,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         baseURL: URL,
         httpClient: HTTPClient,
         aggregateSearchHTTPClient: HTTPClient? = nil,
+        searchMemory: CatPawSearchMemory? = nil,
         diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)? = nil,
         ensureRuntimeReady: (@Sendable () async throws -> URL)? = nil,
         quarkPasscodeStore: QuarkPasscodeStoring = QuarkPasscodeDisabledStore(),
@@ -828,6 +835,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         self.baseURL = baseURL
         self.httpClient = httpClient
         self.aggregateSearchHTTPClient = aggregateSearchHTTPClient ?? httpClient
+        self.searchMemory = searchMemory
         self.diagnosticReporter = diagnosticReporter
         self.ensureRuntimeReady = ensureRuntimeReady
         routeClient = CatPawRouteClient(
@@ -1105,12 +1113,23 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         page: Int,
         quick: Bool
     ) async throws -> VideoPage {
-        try await search(
-            keyword: keyword,
-            page: page,
-            quick: quick,
-            usesAggregateSearchTransport: true
-        )
+        try Task.checkCancellation()
+        let key = CatPawSearchMemory.Key(owner: searchOwner, keyword: keyword, page: page, quick: quick)
+        let cached = searchMemory?.lookup(key)
+        if let page = cached?.1 { return page }
+        let started = ProcessInfo.processInfo.systemUptime
+        do {
+            let result = try await search(keyword: keyword, page: page, quick: quick, usesAggregateSearchTransport: true)
+            try Task.checkCancellation()
+            searchMemory?.record(owner: searchOwner, elapsed: ProcessInfo.processInfo.systemUptime - started, succeeded: true)
+            if let generation = cached?.0 { searchMemory?.insert(result, for: key, generation: generation) }
+            return result
+        } catch {
+            if !Task.isCancelled {
+                searchMemory?.record(owner: searchOwner, elapsed: ProcessInfo.processInfo.systemUptime - started, succeeded: false)
+            }
+            throw error
+        }
     }
 
     private func search(

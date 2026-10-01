@@ -13,7 +13,7 @@
 使用 Swift 和 SwiftUI/AppKit 构建。Android 是部分 Java/Dex Provider 按需使用的
 可选兼容层。
 
-当前发布候选为 **0.7.3（Build 129）**。下方仍列出最近一个已完成 Apple 公证的
+当前发布候选为 **0.8.0（Build 130）**。下方仍列出最近一个已完成 Apple 公证的
 稳定版本。
 
 **原生 macOS · Xtream · IPTV/点播 · M3U/XMLTV · libmpv · 多 Provider 搜索 ·
@@ -23,11 +23,11 @@ QuickJS/Node Spider**
 
 ### [下载最新稳定版本 →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-最新稳定版本为 **0.6.1（Build 101）** · macOS 12.0+ · 仅支持 Apple Silicon
-（`arm64`）。本次补丁增加 Android 组件存储管理与卸载。
+最新稳定版本为 **0.7.3（Build 129）** · macOS 12.0+ · 仅支持 Apple Silicon
+（`arm64`）。该版本包含完整节目单、原生弹幕及来源感知的历史与收藏。
 
 下载已完成 Developer ID 签名和 Apple 公证的
-[v0.6.1 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.6.1)。
+[v0.7.3 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.7.3)。
 本版本已通过 Staple、Gatekeeper 评估和安装 smoke test。
 
 打开 DMG，将 `OKVideoMac.app` 拖入“应用程序”即可。无需关闭 Gatekeeper 或 SIP。
@@ -36,7 +36,25 @@ QuickJS/Node Spider**
 > OKVideoMac 是播放器与 Provider 客户端，不内置第三方影视源、账号、Cookie、
 > 解析服务或 DRM 密钥。
 
-## 0.7.3 发布候选
+## 0.8.0 发布候选：相对 0.7.3 的变化
+
+- **部分 TVBox 配置与授权：** 配置卡片可取消，原生对话框/网页按当前交互管理；
+  确认原生授权后最多重新解析一次同一集，不推测未知登录协议。
+- **CatPaw 搜索与详情：** 30 秒有界搜索缓存、相同进行中搜索复用、及时显示部分结果；
+  Node 缓存写入不再打断详情。搜索并发上限仍为 20。
+- **播放器控件与定位：** 控件按窗口布局，与全屏视频动画分开；边缘时间预览与提示完整
+  显示，Seek 由当前 mpv 请求的完成事件确认。
+- **自动连播：** 在同季同版本、序号明确的列表中，文件名前缀变化也可按集号连播；
+  历史续播等待列表恢复再切集，结束后重播重新加载媒体。
+- **Android Runtime 恢复：** 私有 ADB 绑定变化后恢复自有模拟器，诊断导出不启动 ADB；
+  Bridge 更新为 0.3.48（60）。
+
+0.8.0 正在准备发布；最近已公证下载仍为 0.7.3。前后行为对照见
+[0.8.0 发布说明](Docs/RELEASE_NOTES_0.8.0.md)，验证见
+[发布就绪记录](Docs/RELEASE_READINESS_0.8.0.md)，文件与 Git 建议见
+[发布准备记录](Docs/RELEASE_PREPARATION_0.8.0.md)。
+
+## 0.7.3 新增内容
 
 - **原生完整节目单：** 支持有界加载 XMLTV 与 Native Xtream 节目数据，提供日期导航、
   回到当前时刻、虚拟化频道行和节目详情。
@@ -49,7 +67,7 @@ QuickJS/Node Spider**
 - **界面统一：** 点播、直播、历史和收藏统一原生悬浮与选中反馈；有内容的列表保留
   行分割线，空白区域不再出现网格线。
 
-该源码候选尚未替代已公证的 0.6.1 下载。范围与限制见
+这些能力已在 0.7.3 发布，不属于 0.8.0 新增功能。范围与限制见
 [0.7.3 发布说明](Docs/RELEASE_NOTES_0.7.3.md)。
 
 ## 0.6.1 新增内容
@@ -256,12 +274,11 @@ Managed Runtime 安装与 Android Emulator Session 分开；安装和 Session �
 
 ## 发布完整性
 
-0.6.1 / Build 101 DMG 已按 [DMG 发布流程](Docs/DMG_RELEASE_PROCESS.md)通过 Release
+0.7.3 / Build 129 DMG 已按 [DMG 发布流程](Docs/DMG_RELEASE_PROCESS.md)通过 Release
 打包、Developer ID 签名、Apple 公证（`Accepted`）、Staple、Gatekeeper 和安装 smoke test。
-Tag `v0.6.1` 固定发布提交 `25155f52fb8c416f3245c9a829a93175dec9857b`，下载随附对应
-源码归档、SBOM 和校验和。后续文档更新不改变已签名二进制或其源码快照。
-已有 v0.6.0 发布和资产保持不变。详见
-[0.6.1 发布说明](Docs/RELEASE_NOTES_0.6.1.md)与[源码发布流程](Docs/SOURCE_RELEASE_PROCESS.md)。
+Tag `v0.7.3` 固定发布提交 `55ffa9d55faced404b20034d7cfe5bcfbc1be581`，下载随附对应
+源码归档、SBOM 和校验和。文档状态更新不改变历史签名资产或其源码快照。详见
+[0.7.3 发布说明](Docs/RELEASE_NOTES_0.7.3.md)与[源码发布流程](Docs/SOURCE_RELEASE_PROCESS.md)。
 
 ## 文档
 
@@ -271,6 +288,8 @@ Tag `v0.6.1` 固定发布提交 `25155f52fb8c416f3245c9a829a93175dec9857b`，下
 - [从源码构建](OKVideoMac/macOS/OKVideoMac/Docs/BUILDING.md)
 - [架构说明](OKVideoMac/macOS/OKVideoMac/Docs/ARCHITECTURE.md)
 - [Android 存储与卸载](Docs/ANDROID_MANAGED_UNINSTALL.md)
+- [0.8.0 发布说明](Docs/RELEASE_NOTES_0.8.0.md)
+- [0.8.0 发布准备与 Git 建议](Docs/RELEASE_PREPARATION_0.8.0.md)
 - [0.7.3 发布说明](Docs/RELEASE_NOTES_0.7.3.md)
 - [0.6.1 发布说明](Docs/RELEASE_NOTES_0.6.1.md)
 - [更新日志](CHANGELOG.md)

@@ -1,6 +1,94 @@
 import Foundation
 import OKVideoCore
 
+/// Publish the first result immediately and the trailing batch on a timer,
+/// even when no further providers return. Cancel when the search owner leaves.
+@MainActor final class SearchSnapshotPublisher<Value> {
+    private let interval: TimeInterval
+    private let publish: (Value) -> Void
+    private var lastPublication: TimeInterval?
+    private var pending: Value?
+    private var timer: Task<Void, Never>?
+    init(interval: TimeInterval = 0.12, publish: @escaping (Value) -> Void) {
+        self.interval = interval; self.publish = publish
+    }
+    func submit(_ value: Value) {
+        pending = value
+        let remaining = interval - (ProcessInfo.processInfo.systemUptime - (lastPublication ?? -.infinity))
+        if remaining <= 0 { flush(); return }
+        guard timer == nil else { return }
+        timer = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000)) }
+            catch { return }
+            guard !Task.isCancelled else { return }
+            self?.flush()
+        }
+    }
+    func flush() {
+        timer?.cancel(); timer = nil
+        guard let value = pending else { return }
+        pending = nil
+        lastPublication = ProcessInfo.processInfo.systemUptime
+        publish(value)
+    }
+    func cancel() { timer?.cancel(); timer = nil; pending = nil }
+    deinit { timer?.cancel() }
+}
+
+/// Bounded, memory-only CatPaw search data. Profile/account edits advance the
+/// generation so an old request cannot repopulate the new account's cache.
+final class CatPawSearchMemory: @unchecked Sendable {
+    struct Key: Hashable {
+        let owner: String
+        let keyword: String
+        let page: Int
+        let quick: Bool
+    }
+    private struct Entry { let page: VideoPage; let expires: TimeInterval; var accessed: TimeInterval }
+    private let lock = NSLock()
+    private let now: () -> TimeInterval
+    private let lifetime: TimeInterval
+    private var generation = UUID()
+    private var entries: [Key: Entry] = [:]
+    private var costs: [String: (seconds: TimeInterval, recorded: TimeInterval)] = [:]
+    init(lifetime: TimeInterval = 30, now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.lifetime = lifetime; self.now = now
+    }
+    func lookup(_ key: Key) -> (UUID, VideoPage?) {
+        lock.lock(); defer { lock.unlock() }
+        guard var entry = entries[key], entry.expires > now() else {
+            entries[key] = nil; return (generation, nil)
+        }
+        entry.accessed = now(); entries[key] = entry
+        return (generation, entry.page)
+    }
+    func insert(_ page: VideoPage, for key: Key, generation expected: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        guard expected == generation, !page.items.isEmpty, page.items.count <= 200 else { return }
+        entries[key] = Entry(page: page, expires: now() + lifetime, accessed: now())
+        while entries.count > 64 || entries.values.reduce(0, { $0 + $1.page.items.count }) > 5_000 {
+            guard let oldest = entries.min(by: { $0.value.accessed < $1.value.accessed })?.key else { break }
+            entries[oldest] = nil
+        }
+    }
+    func invalidate(clearPerformance: Bool = false) {
+        lock.lock(); defer { lock.unlock() }
+        generation = UUID(); entries.removeAll()
+        if clearPerformance { costs.removeAll() }
+    }
+    func record(owner: String, elapsed: TimeInterval, succeeded: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        let sample = succeeded ? max(0, elapsed) : max(20, elapsed)
+        costs[owner] = ((costs[owner]?.seconds ?? sample) * 0.3 + sample * 0.7, now())
+        if costs.count > 512, let oldest = costs.min(by: { $0.value.recorded < $1.value.recorded })?.key { costs[oldest] = nil }
+    }
+    func priority(owner: String) -> TimeInterval {
+        lock.lock(); defer { lock.unlock() }
+        guard let cost = costs[owner], now() - cost.recorded < 1_800 else { return 2 }
+        return cost.seconds
+    }
+}
+
 /// No scroll-position publication: recording an anchor must not invalidate the
 /// SwiftUI graph during native scrolling. Keys belong to one search session.
 @MainActor final class SearchBrowseMemory {

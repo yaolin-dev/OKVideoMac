@@ -220,7 +220,6 @@ struct HomeView: View {
                                                 await state.performHomeAction(item)
                                             }
                                         }
-                                        .disabled(state.isConfigurationInteractionActive)
                                     }
                                 }
                             }
@@ -422,7 +421,6 @@ struct HomeView: View {
                     HomeActionCard(item: item) {
                         Task { await state.performHomeAction(item) }
                     }
-                    .disabled(state.isConfigurationInteractionActive)
                 }
             }
         }
@@ -1574,49 +1572,55 @@ struct SourceSwitchFeedbackView: View {
 }
 
 private struct HomeActionCard: View {
+    @EnvironmentObject private var state: AppState
     let item: SiteActionItem
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.title2)
-                    .foregroundColor(.accentColor)
-                    .frame(width: 34, height: 34)
-                    .background(Color.accentColor.opacity(0.1))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.title)
-                        .font(.headline)
-                        .foregroundColor(.primary)
-                    if let remarks = item.remarks,
-                       !remarks.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text(remarks)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .lineLimit(2)
-                    } else {
-                        Text(L10n.string("home.action-menu", fallback: "Provider Actions"))
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+        VStack(alignment: .leading, spacing: 6) {
+            Button(action: action) {
+                HStack(spacing: 12) {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.title2)
+                        .foregroundColor(.accentColor)
+                        .frame(width: 34, height: 34)
+                        .background(Color.accentColor.opacity(0.1))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(item.title)
+                            .font(.headline)
+                            .foregroundColor(.primary)
+                        if let remarks = item.remarks,
+                           !remarks.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Text(remarks)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .lineLimit(2)
+                        } else {
+                            Text(L10n.string("home.action-menu", fallback: "Provider Actions"))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
                     }
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
                 }
-                Spacer(minLength: 8)
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(.secondary)
+                .padding(12)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                )
             }
-            .padding(12)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-            )
+            .buttonStyle(.plain)
+            .disabled(state.isTVBoxConfigurationActionPending(item))
+            .accessibilityLabel(L10n.string("home.action-accessibility", fallback: "Action: %@", item.title))
+            TVBoxActionProgressControls(item: item)
+                .padding(.horizontal, 12)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(L10n.string("home.action-accessibility", fallback: "Action: %@", item.title))
     }
 }
 

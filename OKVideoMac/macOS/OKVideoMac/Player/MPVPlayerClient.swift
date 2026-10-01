@@ -524,13 +524,34 @@ final class PlayerPlaybackStartSignal {
 
 enum PlayerSeekCompletionPolicy {
     static func accepts(target: TimeInterval, position: TimeInterval,
-                        nativeSeeking: Bool, pausedForCache: Bool) -> Bool {
-        // Keyframe seeks may land before the requested time. The position is
-        // read synchronously from mpv after the command, never from an old
-        // queued time-pos notification. Cache/restart alone cannot confirm it.
-        target.isFinite && position.isFinite && target >= 0 && position >= 0
-            && !nativeSeeking && !pausedForCache && abs(position - target) <= 5
+                        nativeSeeking: Bool, pausedForCache: Bool,
+                        seekRestarted: Bool) -> Bool {
+        // Readiness and keyframe accuracy are independent. Only the current
+        // command's native seek lifecycle may release its waiting indicator.
+        seekRestarted && target.isFinite && position.isFinite && target >= 0 && position >= 0
+            && !nativeSeeking && !pausedForCache
     }
+}
+
+struct PlayerSeekActivityOwner {
+    private var owner: (request: UInt64, seek: UInt64)?
+    private var started = false
+    private var restarted = false
+    mutating func begin(request: UInt64, seek: UInt64) {
+        owner = (request, seek); started = false; restarted = false
+    }
+    mutating func markStarted(request: UInt64, seek: UInt64) {
+        guard owner?.request == request, owner?.seek == seek else { return }
+        started = true
+    }
+    mutating func markRestarted(request: UInt64, seek: UInt64) {
+        guard owner?.request == request, owner?.seek == seek, started else { return }
+        restarted = true
+    }
+    func hasRestarted(request: UInt64, seek: UInt64) -> Bool {
+        owner?.request == request && owner?.seek == seek && started && restarted
+    }
+    mutating func reset() { owner = nil; started = false; restarted = false }
 }
 
 enum PlayerSeekPolicy {
@@ -977,6 +998,7 @@ final class MPVPlayerClient: PlayerClient {
     private var tvBoxFormatFallbackAvailable = false
     private var playbackRequestGeneration: UInt64 = 0
     private var postSeekEndGuard = PlayerPostSeekEndGuard()
+    private var seekActivityOwner = PlayerSeekActivityOwner()
     private var pendingEOFSignal: (
         requestGeneration: UInt64,
         seekGeneration: UInt64?
@@ -1207,6 +1229,7 @@ final class MPVPlayerClient: PlayerClient {
                     self.tvBoxFormatFallbackAvailable = media.transportProfile == .tvBox
                         && MPVTVBoxPlaybackPolicy.formatHint(for: media) != nil
                     self.postSeekEndGuard.reset()
+                    self.seekActivityOwner.reset()
                     self.pendingEOFSignal = nil
                     self.completedTVBoxSeekGeneration = nil
                     self.isReplacingMedia = true
@@ -1370,6 +1393,9 @@ final class MPVPlayerClient: PlayerClient {
 
     func seek(to position: TimeInterval) async throws {
         try await perform { client in
+            // Retire queued native events before assigning a new UI owner.
+            // All command/event processing is serialized on this queue.
+            self.drainNativeEvents(limit: 4096)
             guard let target = PlayerSeekPolicy.target(
                 requested: position,
                 duration: self.snapshot.duration
@@ -1400,6 +1426,7 @@ final class MPVPlayerClient: PlayerClient {
             let tvBoxGeneration: UInt64?
             if self.currentMediaTransportProfile == .tvBox {
                 self.completedTVBoxSeekGeneration = nil
+                self.seekActivityOwner.begin(request: requestGeneration, seek: seekGeneration)
                 tvBoxGeneration = seekGeneration
             } else {
                 tvBoxGeneration = nil
@@ -1408,7 +1435,7 @@ final class MPVPlayerClient: PlayerClient {
             do {
                 self.beginSeekReadDiagnostics(request: requestGeneration, seek: seekGeneration)
                 self.logSeekReadState(phase: "seek_read_before")
-                try self.command(Self.seekCommand(to: target), client: client)
+                try self.command(Self.seekCommand(to: target, duration: self.snapshot.duration), client: client)
                 if let tvBoxGeneration {
                     self.queue.asyncAfter(deadline: .now() + .seconds(15)) {
                         guard self.currentMediaTransportProfile == .tvBox,
@@ -1435,6 +1462,7 @@ final class MPVPlayerClient: PlayerClient {
                     requestGeneration: requestGeneration,
                     seekGeneration: seekGeneration
                 )
+                self.seekActivityOwner.reset()
                 self.snapshot.isSeeking = false
                 self.snapshot.seekTarget = nil
                 self.emitSnapshot()
@@ -1443,13 +1471,14 @@ final class MPVPlayerClient: PlayerClient {
         }
     }
 
-    static func seekCommand(to position: TimeInterval) -> [String] {
+    static func seekCommand(to position: TimeInterval, duration: TimeInterval? = nil) -> [String] {
         let targetValue = String(
             format: "%.3f",
             locale: Locale(identifier: "en_US_POSIX"),
             position
         )
-        return ["seek", targetValue, "absolute+keyframes"]
+        let isEnd = duration.map { $0.isFinite && $0 > 0 && position >= $0 } ?? false
+        return ["seek", targetValue, isEnd ? "absolute+exact" : "absolute+keyframes"]
     }
 
     func setVolume(_ volume: Double) async throws {
@@ -2178,14 +2207,15 @@ final class MPVPlayerClient: PlayerClient {
         }
     }
 
-    private func pollEvents() {
-        guard isRunning, let client else { return }
+    @discardableResult
+    private func drainNativeEvents(limit: Int) -> Int {
+        guard isRunning, let client else { return 0 }
         // Drain a bounded batch instead of reading only one event every 16 ms.
         // A seek or volume drag can produce several property notifications at
         // once; the old one-at-a-time loop let native events and UI commands
         // queue behind each other.
         var processedCount = 0
-        while processedCount < 64, isRunning {
+        while processedCount < limit, isRunning {
             var event = NativeMPVEvent()
             let result = withUnsafeMutablePointer(to: &event) { eventPointer in
                 library.waitEvent(
@@ -2207,6 +2237,11 @@ final class MPVPlayerClient: PlayerClient {
             process(event)
             processedCount += 1
         }
+        return processedCount
+    }
+
+    private func pollEvents() {
+        let processedCount = drainNativeEvents(limit: 64)
         guard isRunning else { return }
         let delay: DispatchTimeInterval = processedCount == 64
             ? .milliseconds(0)
@@ -2468,6 +2503,9 @@ final class MPVPlayerClient: PlayerClient {
             processProperty(event)
         case NativeEvent.seek:
             if currentMediaTransportProfile == .tvBox {
+                if let generation = postSeekEndGuard.activeSeekGeneration(requestGeneration: playbackRequestGeneration) {
+                    seekActivityOwner.markStarted(request: playbackRequestGeneration, seek: generation)
+                }
                 refreshTVBoxSeekCompletion()
                 if snapshot.seekTarget == nil, let client {
                     snapshot.isSeeking = propertyString("seeking", client: client) == "yes"
@@ -2490,6 +2528,9 @@ final class MPVPlayerClient: PlayerClient {
             logSeekObservation(phase: "seek_playback_restart")
             logSeekReadState(phase: "seek_read_restart")
             if currentMediaTransportProfile == .tvBox {
+                if let activeSeekGeneration {
+                    seekActivityOwner.markRestarted(request: playbackRequestGeneration, seek: activeSeekGeneration)
+                }
                 refreshTVBoxSeekCompletion()
             } else {
                 snapshot.isSeeking = false
@@ -2534,11 +2575,13 @@ final class MPVPlayerClient: PlayerClient {
               let seeking = propertyString("seeking", client: client),
               let cachePause = propertyString("paused-for-cache", client: client),
               PlayerSeekCompletionPolicy.accepts(target: target, position: position,
-                nativeSeeking: seeking != "no", pausedForCache: cachePause != "no") else { return }
+                nativeSeeking: seeking != "no", pausedForCache: cachePause != "no",
+                seekRestarted: seekActivityOwner.hasRestarted(request: playbackRequestGeneration, seek: generation)) else { return }
         snapshot.position = position
         snapshot.positionSampleUptime = ProcessInfo.processInfo.systemUptime
         snapshot.isSeeking = false
         snapshot.seekTarget = nil
+        snapshot.isPausedForCache = false
         completedTVBoxSeekGeneration = generation
         snapshot.status = propertyString("pause", client: client) == "yes" ? .paused : .playing
         logSeekObservation(phase: "seek_position_confirmed")
@@ -2868,6 +2911,7 @@ final class MPVPlayerClient: PlayerClient {
     private func clearTransientPlaybackActivity() {
         endSeekReadDiagnostics()
         postSeekEndGuard.reset()
+        seekActivityOwner.reset()
         pendingEOFSignal = nil
         snapshot.isSeeking = false
         snapshot.isPausedForCache = false

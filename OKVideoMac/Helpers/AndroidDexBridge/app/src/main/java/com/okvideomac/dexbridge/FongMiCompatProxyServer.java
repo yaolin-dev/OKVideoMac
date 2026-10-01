@@ -194,7 +194,7 @@ final class FongMiCompatProxyServer {
         }
     }
 
-    private static void handle(Socket socket, Lease lease) {
+    static void handle(Socket socket, Lease lease) {
         boolean providerDispatched = false;
         try (Socket client = socket;
              BufferedInputStream input = new BufferedInputStream(
@@ -236,7 +236,10 @@ final class FongMiCompatProxyServer {
                 );
                 return;
             }
-            if (lease == null || !lease.current()) {
+            boolean configuration = BridgeConfigurationProxy.hasCapability(headers);
+            BridgeProviderOwnerRegistry.Binding configurationOwner = configuration
+                    ? BridgeConfigurationProxy.resolve(headers) : null;
+            if (configuration ? configurationOwner == null : lease == null || !lease.current()) {
                 BridgeServer.writeJSON(
                         output,
                         410,
@@ -254,12 +257,12 @@ final class FongMiCompatProxyServer {
             // This matches FongMi's merge order: request headers are added to
             // the same parameter map after query/form data.
             params.putAll(headers);
-            lease.recordRequest();
+            if (!configuration) lease.recordRequest();
             Object[] response = DexSpiderRegistry.get(applicationContext)
-                    .proxy(lease.owner, params);
+                    .proxy(configuration ? configurationOwner : lease.owner, params);
             providerDispatched = true;
             if (!validProxyResponse(response)) {
-                lease.recordFailure(Failure.SPIDER_INTERNAL);
+                if (!configuration) lease.recordFailure(Failure.SPIDER_INTERNAL);
                 BridgeServer.writeJSON(
                         output,
                         502,

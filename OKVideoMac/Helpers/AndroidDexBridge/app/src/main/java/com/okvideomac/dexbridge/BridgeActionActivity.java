@@ -31,6 +31,7 @@ public final class BridgeActionActivity extends Activity {
     private volatile boolean sawProviderWindow;
     private volatile long surfaceGeneration;
     private BridgeDialogWindowTracker dialogWindowTracker;
+    private android.app.Dialog configurationWebDialog;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -65,6 +66,17 @@ public final class BridgeActionActivity extends Activity {
         );
         setContentView(sessionBackground);
         dialogWindowTracker = new BridgeDialogWindowTracker(this, interactionID);
+    }
+
+    @Override
+    public void startActivity(Intent intent, Bundle options) {
+        if (intent != null && Intent.ACTION_VIEW.equals(intent.getAction())
+                && intent.getData() != null && isCurrentRequest(interactionID)
+                && BridgeConfigurationWebView.isWebURL(intent.getData().toString())) {
+            BridgeConfigurationWebView.show(this, interactionID, intent.getData().toString());
+            return;
+        }
+        super.startActivity(intent, options);
     }
 
     @Override
@@ -157,6 +169,9 @@ public final class BridgeActionActivity extends Activity {
         // session reaches a terminal state; only Bridge cleanup may authorize
         // the real Activity finish.
         if (!terminalReleaseAuthorized && isCurrentRequest(interactionID)) {
+            // finish may end a silent setting OR precede a Dialog. Record the
+            // event, but only an actual window can require user interaction.
+            BridgeInteractionRegistry.providerRequestedFinish(interactionID);
             com.github.catvod.Init.set(this);
             return;
         }
@@ -167,8 +182,17 @@ public final class BridgeActionActivity extends Activity {
         super.finish();
     }
 
+    void attachConfigurationWebDialog(android.app.Dialog dialog) {
+        if (configurationWebDialog != null) configurationWebDialog.dismiss();
+        configurationWebDialog = dialog;
+    }
+
     @Override
     protected void onDestroy() {
+        if (configurationWebDialog != null) {
+            configurationWebDialog.dismiss();
+            configurationWebDialog = null;
+        }
         resumed = false;
         stopped = true;
         if (dialogWindowTracker != null) dialogWindowTracker.release();
@@ -364,6 +388,11 @@ public final class BridgeActionActivity extends Activity {
 
     private void releaseAndFinish() {
         terminalReleaseAuthorized = true;
+        if (configurationWebDialog != null) {
+            configurationWebDialog.dismiss();
+            configurationWebDialog = null;
+        }
+        if (dialogWindowTracker != null) dialogWindowTracker.dismissOwnedWindows();
         finish();
     }
 

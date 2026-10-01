@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.8.0] - Unreleased
+
+Compared with published `v0.7.3` (Build 129). Candidate: **0.8.0 (Build 130)**.
+
+### Added
+
+- Selected Java/Dex TVBox configuration-card interactions with inline preparation,
+  cancellation, owned native dialogs and Android configuration web pages. Web/form
+  handoff is scoped to the current interaction and provider/JAR.
+- Native playback authorization continuation: keep the original request through
+  a delayed login window, then retry the same episode at most once after confirmation.
+  Targeted login routes require the verified `[realm](auth)` configuration contract.
+- Bounded, memory-only CatPaw search reuse (30-second TTL, 64 entries/5,000 items),
+  identical active-search reuse, and recent-response-based ordering of Node attempts.
+
+### Changed
+
+- Search publishes the first results immediately and trailing batches on a 120 ms
+  timer. All selected runnable providers still attempt page one; global and shared
+  Node concurrency remain 20. Partial-result status explains unfinished providers.
+- Separate Node cache revisions from configuration semantics and authorization
+  identity. Cache writes invalidate reusable data without cancelling page-owned
+  details; genuine provider changes preserve the route and allow retry.
+- Adapt player title, volume, time and tools to window width. Full-screen video,
+  subtitle and danmaku transforms no longer scale the sibling controls and panels.
+- Use current-request mpv seek/restart events for seek readiness, accepting valid
+  keyframe landing differences and rejecting events from an older seek.
+- Android Dex Bridge: **0.3.45 (57) → 0.3.48 (60)**. App build: **129 → 130**.
+
+### Fixed
+
+- Configuration actions no longer wait indefinitely for a nonexistent window,
+  refresh a departed category, replay a completed action, or steal a newer request.
+  Ambiguous configuration/auth protocols and plain Cookie error text are not guessed.
+- Prevent Node profile cache writes from replacing a provider or interrupting detail
+  loading; account/configuration/endpoint changes still invalidate relevant caches.
+- Fix clipped progress timestamps/tooltips and stale hover after dragging, focus,
+  resize, media changes and full-screen transitions.
+- Infer unambiguous numbered video-file sequences across different prefixes,
+  descending lists and gaps in established sequences, grouped by season/version.
+  Exclude non-main/audio/subtitle resources and avoid arbitrary duplicate-number
+  selection; list inference does not create trusted persistent resource identities.
+- Wait for history episode-list restoration before automatic continuation, show
+  incomplete queue state, reload media on replay, and honor autoplay at a confirmed
+  user-seek boundary while keeping premature EOF excluded.
+- Recover an owned emulator after private ADB binding changes without launching a
+  second copy of its AVD. Failed port probes no longer mean a port is free; diagnostic
+  export uses recorded observations without starting ADB. Includes commit `5780acd`.
+
+### Compatibility and release
+
+- Apple Silicon / arm64 and macOS 12.0+ remain required. Java/Dex remains Experimental;
+  configuration, authorization, Node and filename inference support bounded subsets.
+- Full Guide, danmaku, source-aware History/Favorites and backup schema v4 were already
+  published in 0.7.3. No new backup schema or native/Maven dependency upgrade is included.
+- Formal 0.8.0 signing, notarization, tag and publication remain pending; 0.7.3 is the
+  notarized public download. See [release notes](Docs/RELEASE_NOTES_0.8.0.md),
+  [validation](Docs/RELEASE_READINESS_0.8.0.md) and
+  [file/commit preparation](Docs/RELEASE_PREPARATION_0.8.0.md).
+
 ## [0.7.3] - 2026-09-27
 
 ### Added
@@ -52,8 +112,10 @@
 ### Compatibility and release
 
 - Apple Silicon (`arm64`) and macOS 12.0 or later remain required.
-- The latest notarized public release remains 0.6.1 until 0.7.3 completes the
-  Developer ID, notarization, staple, Gatekeeper and installation gates.
+- Published as `v0.7.3` (Build 129), Developer ID signed and Apple notarized
+  (`Accepted`), with stapling, Gatekeeper and installation smoke verified. The
+  [GitHub release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.7.3)
+  records the immutable commit and asset hashes.
 - See `Docs/RELEASE_NOTES_0.7.3.md` and the release-readiness record for the final
   validation results and known limitations.
 

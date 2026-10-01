@@ -90,6 +90,29 @@ source declaration / imported XML / configured service
 每次播放请求和媒体代际拥有自己的弹幕加载与绑定。手动选择高于保存/来源/自动匹配；
 换片、Seek、暂停和缓存不会复用旧的运动状态。弹幕失败不阻塞视频起播。
 
+## 搜索、配置交互与播放队列（0.8.0）
+
+`NodeConfigurationSemanticIdentity` 比较配置语义时移除站点缓存 revision；实际账号/配置
+变化与普通缓存写入分流。授权持久身份用 profile identity，页面拥有自己的详情请求。
+`CatPawSearchMemory` 以来源语义与 runtime endpoint 标识 owner，使用内存 TTL、容量和
+代际保护；耗时只调整 Node slots 的尝试次序。`SearchSnapshotPublisher` 立即发布首批，
+以有界定时器发布末批，离开当前搜索时取消。
+
+配置卡片先有独立、可取消、带期限的准备 owner，实际原生 Android UI 出现后才交接到
+交互 owner。完成回读携带原分类/筛选/展示身份，仅仍可见时刷新，不重放 action。
+Android 配置 WebView、临时网页代理和原生对话框绑定当前 Provider/JAR 与 interaction；
+终态清理窗口、Cookie/代理租约及扫码轮询。播放授权保留原 media owner，只在确认后
+最多重试一次原集/线路；`TVBoxAuthorizationRoute` 不把任意 HTML 或错误文字当作协议。
+
+`PlaybackResourceAnalyzer` rulesVersion 4 的列表推断按季/版本建立唯一编号视频序列；
+列表推断不进入 `trustedEpisode` 的单资源持久身份。自动切集等待历史完整列表恢复，
+并重新核验 session、当前集与 autoplay。Replay 从 ended 创建新的媒体/EOF owner。
+Seek 先排空旧 native 事件，再建立新的请求代际；完成/重启信号与缓存状态共同判定 ready。
+
+全屏 transform 只作用于视频、字幕与弹幕 composition；控件、提示、面板和结束状态
+挂在独立 sibling overlay。viewport 变化和全屏过渡有独立 owner，旧完成回调不能显示
+新过渡的控件。AppKit 进度追踪读取当前 pointer，不消费原输入事件。
+
 ## Android Runtime 边界
 
 Android 安装与 Emulator Session 是两套独立状态机：
@@ -115,7 +138,10 @@ schema 及 Emulator 兼容指纹保护；不兼容时 fail closed，不静默删
 
 安装 single-flight 与 Session 启动 single-flight 独立。原有 Session 继续负责 private
 ADB 高位端口与 keypair、进程 ownership、GPU fallback、offline recovery、Bridge
-健康和安全关闭。
+健康和安全关闭。0.8.0 将进程 ownership 与 ADB binding 分开：旧进程仍有私有 AVD
+证明而 binding 已失效时，先有界退役原进程再恢复，不并行启动同一 AVD。停止流程保留
+记录的 daemon/端口；监听探测失败是 unknown，不能当作空闲。诊断导出使用缓存观察，
+不启动 ADB，不以当前选中端口重写原进程身份。
 
 ## App 退出生命周期
 
