@@ -81,13 +81,22 @@ Full Guide、原生弹幕、历史/收藏来源身份、便携备份 v4 和 Nati
 
 ## 版本、验证与发布状态
 
-- 应用版本 **0.8.0（Build 130）**；最低 macOS 12.0，仅 Apple Silicon / arm64。
-  XcodeGen、Xcode project、Info.plist 引用、native lock、Notices 和发布资产命名同步。
-- 验证范围和实际结果见 [发布就绪记录](RELEASE_READINESS_0.8.0.md)；文件清单及提交建议见
-  [发布准备记录](RELEASE_PREPARATION_0.8.0.md)。
-- 本文是发布候选稿。0.8.0 的正式 Tag、Developer ID 分发签名、Apple 公证、Staple、
-  Gatekeeper 和公开上传需从最终干净 release commit 执行；本地 Release 验证不等于公开发布。
-  最近已公证公开版本是 [0.7.3（Build 129）](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.7.3)。
+- 正式版本 **0.8.0（Build 130）**，Android Dex Bridge **0.3.48（60）**。
+  最低 macOS 12.0，仅 Apple Silicon / arm64；版本和构建信息保持同步。
+- [GitHub Release v0.8.0](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.0)
+  提供正式 DMG、APK、对应源码、四份 SBOM、许可证、声明、清单与校验文件，共 15 个公开资产。
+  ZIP 仅作内部二进制身份归档，不作为公开下载。
+- exact release commit：`b049b381db52b5bbbeec9cf58bf54a5bd50a4f39`；`v0.8.0` 固定此提交。
+  Release / arm64 构建、29 个 Mach-O 的 Developer ID / Hardened Runtime / secure timestamp、
+  动态依赖闭包、App/DMG 签名与源码绑定均通过。
+- Apple notarization：**Accepted**，Submission：`bc1f6ef5-5d19-4888-91f9-dbf5737d865d`。
+  DMG Staple、stapler validate、DMG/盘内 App Gatekeeper 与全新安装 smoke 均通过。
+- 最终 DMG SHA-256：`f082a380ffb1d2d059f228e0b6f0d7b59424f80edff57e81230d2efe6496b97a`。
+- 自动回归及跳过项见 [发布就绪记录](RELEASE_READINESS_0.8.0.md)；
+  正式分发与资产核验见 [发布验证记录](RELEASE_VALIDATION_0.8.0.md)；
+  模块/文件清单见 [发布准备记录](RELEASE_PREPARATION_0.8.0.md)。
+- 随资产提供的 Release Notes 和源码归档保留 exact release commit 的构建时快照。
+  GitHub Release 页面及 main 文档补录最终分发状态，不移动 tag 或改写已签名资产。
 
 ## 已知限制
 
@@ -104,7 +113,7 @@ Full Guide、原生弹幕、历史/收藏来源身份、便携备份 v4 和 Nati
 
 # OKVideoMac 0.8.0 (Build 130)
 
-Compared with the published v0.7.3 (Build 129), this candidate adds selected
+Compared with the published v0.7.3 (Build 129), this release adds selected
 TVBox Java/Dex configuration and native authorization interactions, bounded
 CatPaw search reuse, and more reliable detail ownership. Configuration work is
 cancellable; confirmed playback authorization can retry the same episode once.
@@ -123,6 +132,10 @@ recorded observations without starting ADB. Full Guide, danmaku, source-aware
 History/Favorites and backup schema v4 were already shipped in 0.7.3.
 
 Apple Silicon and macOS 12.0 or later remain required. Provider compatibility
-remains bounded. The search changes do not promise a fixed speedup. This candidate
-has not completed formal distribution or publication; 0.7.3 remains the notarized
-public download. See the readiness record for validation and remaining gates.
+remains bounded. The search changes do not promise a fixed speedup. The official
+0.8.0 DMG passed Developer ID signing, Apple notarization, stapling, Gatekeeper
+and fresh-installation runtime smoke checks. Tag `v0.8.0` pins commit
+`b049b381db52b5bbbeec9cf58bf54a5bd50a4f39`. The final DMG SHA-256 is
+`f082a380ffb1d2d059f228e0b6f0d7b59424f80edff57e81230d2efe6496b97a`. The release includes 15 public assets;
+source and asset notes retain their immutable build-time snapshots. See the
+readiness and release validation records for actual test coverage and limitations.

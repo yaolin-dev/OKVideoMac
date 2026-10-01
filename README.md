@@ -13,8 +13,8 @@ selected TVBox/CatVod/CatPaw-style providers, and libmpv playback.**
 Built with Swift and SwiftUI/AppKit. Android is an optional compatibility layer
 for selected Java/Dex providers.
 
-The current release candidate is **0.8.0 (Build 130)**. The latest notarized
-stable release remains listed below.
+The latest stable release is **0.8.0 (Build 130)**, Developer ID signed and
+Apple-notarized.
 
 **Native macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · Multi-provider Search ·
 QuickJS/Node Spiders**
@@ -23,11 +23,12 @@ QuickJS/Node Spiders**
 
 ### [Download the latest stable release →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-The latest stable release is **0.7.3 (Build 129)** · macOS 12.0+ · Apple Silicon
-(`arm64`) only. It includes Full Guide, native danmaku and source-aware History/Favorites.
+The latest stable release is **0.8.0 (Build 130)** · macOS 12.0+ · Apple Silicon
+(`arm64`) only. It improves selected TVBox interactions, CatPaw search/details,
+player controls, seeking, automatic episode continuation and Android Runtime recovery.
 
 Download the Developer ID signed and Apple-notarized
-[v0.7.3 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.7.3).
+[v0.8.0 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.0).
 This release passed stapling, Gatekeeper assessment and installation smoke tests.
 
 Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to
@@ -37,7 +38,7 @@ and notices are published with each release.
 > OKVideoMac is a player and provider client. It does not include third-party
 > video sources, accounts, cookies, parsing services, or DRM keys.
 
-## 0.8.0 release candidate — changes from 0.7.3
+## New in 0.8.0 — changes from 0.7.3
 
 - **Selected TVBox configuration and authorization:** cancellable configuration
   cards, owned Android dialogs/web pages, and one same-episode retry after
@@ -54,10 +55,10 @@ and notices are published with each release.
 - **Android Runtime recovery:** owned emulators recover after private ADB binding
   changes; exporting diagnostics does not start ADB. Bridge is now 0.3.48 (60).
 
-0.8.0 is being prepared for release; 0.7.3 remains the notarized download. See the
+The formal 0.8.0 release is available. See the
 [0.8.0 release notes](Docs/RELEASE_NOTES_0.8.0.md) for the before/after comparison,
-[readiness record](Docs/RELEASE_READINESS_0.8.0.md) for checks, and
-[submission list](Docs/RELEASE_PREPARATION_0.8.0.md) for Git preparation.
+[release validation](Docs/RELEASE_VALIDATION_0.8.0.md) for distribution checks, and
+[readiness record](Docs/RELEASE_READINESS_0.8.0.md) for regression coverage.
 
 ## New in 0.7.3
 
@@ -315,13 +316,13 @@ checks; a local Debug compile is not a public release artifact.
 
 ## Release integrity
 
-The 0.7.3 / Build 129 DMG passed Release packaging, Developer ID signing,
+The 0.8.0 / Build 130 DMG passed Release packaging, Developer ID signing,
 Apple notarization (`Accepted`), stapling, Gatekeeper and installation smoke tests
-under the [DMG release process](Docs/DMG_RELEASE_PROCESS.md). Tag `v0.7.3` pins
-release commit `55ffa9d55faced404b20034d7cfe5bcfbc1be581`; matching source archives,
+under the [DMG release process](Docs/DMG_RELEASE_PROCESS.md). Tag `v0.8.0` pins
+release commit `b049b381db52b5bbbeec9cf58bf54a5bd50a4f39`; matching source archives,
 SBOMs and checksums accompany the download. Documentation status updates do not
 change historical signed assets or their source snapshots. See the
-[0.7.3 release notes](Docs/RELEASE_NOTES_0.7.3.md) and
+[0.8.0 release validation](Docs/RELEASE_VALIDATION_0.8.0.md) and
 [source release process](Docs/SOURCE_RELEASE_PROCESS.md).
 
 ## Documentation
@@ -333,6 +334,7 @@ change historical signed assets or their source snapshots. See the
 - [Architecture](OKVideoMac/macOS/OKVideoMac/Docs/ARCHITECTURE.md)
 - [Android storage and uninstall](Docs/ANDROID_MANAGED_UNINSTALL.md)
 - [0.8.0 release notes](Docs/RELEASE_NOTES_0.8.0.md)
+- [0.8.0 release validation](Docs/RELEASE_VALIDATION_0.8.0.md)
 - [0.8.0 readiness and Git preparation](Docs/RELEASE_PREPARATION_0.8.0.md)
 - [0.7.3 release notes](Docs/RELEASE_NOTES_0.7.3.md)
 - [0.6.1 release notes](Docs/RELEASE_NOTES_0.6.1.md)

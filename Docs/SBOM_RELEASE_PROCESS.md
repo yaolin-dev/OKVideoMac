@@ -2,8 +2,9 @@
 
 Date: 2026-10-01
 
-Current candidate: OKVideoMac 0.8.0 (Build 130). Historical published hashes below
-remain unchanged.
+Current published release: OKVideoMac 0.8.0 (Build 130). All four SBOMs are
+provided with [v0.8.0](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.0);
+see [release validation](RELEASE_VALIDATION_0.8.0.md). Historical hashes below remain unchanged.
 
 Every packaged release contains four machine-readable documents under
 `Contents/Resources/Legal/Compliance/SBOM/`:

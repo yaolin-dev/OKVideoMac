@@ -2,7 +2,7 @@
 
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于
 原生 Xtream、M3U/XMLTV、配置格式和运行时，而不是简单以 TVBox、FongMi、MiraPlay 或 CatPawOpen
-等生态名称判断。最新稳定版本为 **0.7.3（Build 129）**，支持
+等生态名称判断。最新稳定版本为 **0.8.0（Build 130）**，支持
 **arm64**，最低系统为 **macOS 12.0**。公开二进制通过 Developer ID 签名、Apple 公证、
 Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
@@ -11,9 +11,9 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
 ## 当前版本
 
-- 当前发布候选：0.8.0（Build 130）
-- 目标 tag：`v0.8.0`；只有 exact release commit 的正式分发门禁全部通过后才创建。
-- 预期 source release index：`OKVideoMac-0.8.0-build130-SOURCE_RELEASE_INDEX.json`。
+- 当前稳定版本：0.8.0（Build 130）
+- Tag：`v0.8.0`；固定 exact release commit `b049b381db52b5bbbeec9cf58bf54a5bd50a4f39`。
+- source release index：`OKVideoMac-0.8.0-build130-SOURCE_RELEASE_INDEX.json`。
 - 最低系统：macOS 12.0
 - 支持架构：Apple Silicon / arm64
 - 播放历史与收藏保留配置、站点和稳定媒体身份；旧记录经过迁移后仍可准确恢复，
@@ -30,11 +30,12 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 - 0.8.0 的模块对照、验证结果与待提交文件见
   [发布就绪记录](../Docs/RELEASE_READINESS_0.8.0.md)和
   [发布准备记录](../Docs/RELEASE_PREPARATION_0.8.0.md)
-- 对外分发：0.7.3 Build 129 已完成 Developer ID、Apple notarization（`Accepted`）、
+- 对外分发：0.8.0 Build 130 已完成 Developer ID、Apple notarization（`Accepted`）、
   Staple、Gatekeeper 与安装 smoke；见
-  [GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.7.3)
+  [GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.0)；
+  [正式验证记录](../Docs/RELEASE_VALIDATION_0.8.0.md)
 
-## 0.8.0 发布候选：相对 0.7.3 的变化
+## 0.8.0 新增与改进：相对 0.7.3 的变化
 
 - 部分 TVBox Java/Dex 配置卡片改用可取消的准备与原生交互，支持明确配置入口的网页与表单；
   无窗口动作可以结束，延迟原生窗口仍归当前请求。完成后只回读仍可见的原分类，不重放动作。
@@ -54,7 +55,7 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
   启动 ADB。Bridge 从 0.3.45（57）更新为 0.3.48（60）。中英文交互文字同步。
 
 具体前后行为、识别阈值及限制见 [0.8.0 发布说明](../Docs/RELEASE_NOTES_0.8.0.md)。
-0.8.0 尚未执行正式分发门禁，最新已公证公开版仍为 0.7.3。
+0.8.0 正式分发门禁已通过，并提供已公证的公开 DMG；具体结果见正式验证记录。
 
 ## 0.7.3 已发布内容
 

@@ -85,13 +85,15 @@
   `OKVIDEOMAC_MPV_RENDER_CONTROL=legacy` 可关闭 advanced render control，
   两个回滚开关相互独立。
 
-## 发布候选验证
+## 0.8.0 发布验证
 
 0.8.0（Build 130）的全量测试、静态检查和本地 Release 包验证结果记录在
-[`RELEASE_READINESS_0.8.0.md`](../../../../Docs/RELEASE_READINESS_0.8.0.md)。
+[`RELEASE_READINESS_0.8.0.md`](../../../../Docs/RELEASE_READINESS_0.8.0.md)；
+正式分发、安装 smoke 与资产核验见
+[`RELEASE_VALIDATION_0.8.0.md`](../../../../Docs/RELEASE_VALIDATION_0.8.0.md)。
 自动化通过只证明相应合同和发布门禁可运行，不等价于 Instruments 性能基线。
 0.3.41（Build 63）的 198 项 Xcode / 94 项 OKVideoKit 结果仅是历史记录，不再作为
-当前候选状态。
+当前发布状态。
 
 ## 仍待完成的性能验收
 

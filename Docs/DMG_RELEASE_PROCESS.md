@@ -3,8 +3,11 @@
 OKVideoMac 0.8.0（Build 130）的正式用户下载格式固定为
 `OKVideoMac-0.8.0.dmg`。ZIP 仅为内部归档，不是 GitHub Release 的主下载。
 
-0.8.0 当前处于发布候选阶段；以下正式流水线尚未执行。最新已验证并公开的 DMG
-仍是 0.7.3（Build 129）。
+0.8.0（Build 130）已完成下方正式流水线并公开发布。Tag `v0.8.0` 固定
+`b049b381db52b5bbbeec9cf58bf54a5bd50a4f39`；Apple notarization `Accepted`，Submission：
+`bc1f6ef5-5d19-4888-91f9-dbf5737d865d`。最终 DMG SHA-256：
+`f082a380ffb1d2d059f228e0b6f0d7b59424f80edff57e81230d2efe6496b97a`。
+详见 [0.8.0 正式验证记录](RELEASE_VALIDATION_0.8.0.md)。
 
 ## 0.7.3 / Build 129 已完成验证
 
@@ -25,6 +28,18 @@ Submission：`6da1497c-d7c2-4e0f-b19c-3498e244ffa2`。
 The 0.6.1 DMG passed Developer ID signing, Apple notarization, stapling, Gatekeeper
 and installation smoke tests. The tag pins the release commit above. Later documentation
 updates preserve the signed binary, tag and build-time source/notes snapshots.
+
+## 复用现有凭据 / Reuse existing credentials
+
+先只读核对既有 Developer ID 和 `OKVideoMac-Notary`。工具沙箱内查询可能返回假阴性；
+在判断凭据缺失或要求重新输入前，须在获准的宿主上下文复核。0.7.3 与 0.8.0 的正式
+发布均直接复用已可用的同一签名身份与公证 profile，未重新导入证书或修改钥匙串。
+只有确认缺少可用签名身份、确需从备份导入时，才执行下方临时专用钥匙串流程。
+
+Check the existing identity/profile in the authorized host context before importing
+anything; sandbox-only checks can return false negatives. The 0.7.3 and 0.8.0
+releases reused the available signing identity and notary profile. The temporary
+keychain procedure below applies only when a certificate backup must be imported.
 
 ## 临时专用钥匙串 / Temporary dedicated keychain
 

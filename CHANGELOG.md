@@ -1,8 +1,8 @@
 # Changelog
 
-## [0.8.0] - Unreleased
+## [0.8.0] - 2026-10-01
 
-Compared with published `v0.7.3` (Build 129). Candidate: **0.8.0 (Build 130)**.
+Compared with published `v0.7.3` (Build 129). Release: **0.8.0 (Build 130)**.
 
 ### Added
 
@@ -55,9 +55,11 @@ Compared with published `v0.7.3` (Build 129). Candidate: **0.8.0 (Build 130)**.
   configuration, authorization, Node and filename inference support bounded subsets.
 - Full Guide, danmaku, source-aware History/Favorites and backup schema v4 were already
   published in 0.7.3. No new backup schema or native/Maven dependency upgrade is included.
-- Formal 0.8.0 signing, notarization, tag and publication remain pending; 0.7.3 is the
-  notarized public download. See [release notes](Docs/RELEASE_NOTES_0.8.0.md),
-  [validation](Docs/RELEASE_READINESS_0.8.0.md) and
+- Formal 0.8.0 passed Developer ID signing, Apple notarization, stapling, Gatekeeper
+  and fresh-installation smoke. Tag `v0.8.0` pins `b049b381db52b5bbbeec9cf58bf54a5bd50a4f39`;
+  15 public assets include the DMG and corresponding source/SBOM/checksum material.
+  See [release notes](Docs/RELEASE_NOTES_0.8.0.md),
+  [validation](Docs/RELEASE_VALIDATION_0.8.0.md) and
   [file/commit preparation](Docs/RELEASE_PREPARATION_0.8.0.md).
 
 ## [0.7.3] - 2026-09-27

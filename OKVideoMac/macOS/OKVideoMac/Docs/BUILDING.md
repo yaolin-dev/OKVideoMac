@@ -1,8 +1,8 @@
 # Building OKVideoMac
 
-## 0.8.0 release candidate verification
+## 0.8.0 release verification
 
-The current source candidate is 0.8.0 (Build 130), compared against the published
+The current release is 0.8.0 (Build 130), compared against the published
 `v0.7.3` commit. Actual test, static-check and Release package results are in the
 [0.8.0 readiness record](../../../../Docs/RELEASE_READINESS_0.8.0.md); module/file
 coverage and Git suggestions are in the
@@ -18,7 +18,7 @@ Default tests cover the app, OKVideoKit, AndroidRuntimeKit, Node and SourceAudit
 Four real-emulator lifecycle tests are explicit opt-in gates. The real libmpv
 long-GOP seek case needs `OKVIDEOMAC_SEEK_FIXTURE` and a visible OpenGL surface;
 it is run separately from the default suite. Distinguish prior Android device
-instrumentation from tests rerun for this candidate.
+instrumentation from tests rerun for this release.
 
 AGP 8.7.3 lint prints Kotlin metadata diagnostics for pinned OkHttp 5.1.0/Kotlin
 2.2 metadata while its analyzer supports Kotlin 2.0. Record the final lint result
@@ -31,9 +31,10 @@ standard `Scripts/package-app.sh`. It verifies a local ad-hoc **Release** packag
 never a Debug deliverable; only a verified package may replace the Desktop app.
 The snapshot records local acceptance identity, not a public release commit.
 
-Formal publication still requires the final clean release commit, Developer ID
-signing, notarization, stapling, Gatekeeper, installation smoke and a complete
-source/SBOM/hash asset set. The notarized public download remains 0.7.3.
+The formal 0.8.0 package from clean commit `b049b381db52b5bbbeec9cf58bf54a5bd50a4f39` passed
+Developer ID signing, notarization, stapling, Gatekeeper and installation smoke.
+The public release has the complete source/SBOM/hash asset set; see
+[formal verification](../../../../Docs/RELEASE_VALIDATION_0.8.0.md).
 
 ## 0.6.1 historical release verification
 

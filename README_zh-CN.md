@@ -13,8 +13,7 @@
 使用 Swift 和 SwiftUI/AppKit 构建。Android 是部分 Java/Dex Provider 按需使用的
 可选兼容层。
 
-当前发布候选为 **0.8.0（Build 130）**。下方仍列出最近一个已完成 Apple 公证的
-稳定版本。
+最新稳定版本为 **0.8.0（Build 130）**，已完成 Developer ID 签名和 Apple 公证。
 
 **原生 macOS · Xtream · IPTV/点播 · M3U/XMLTV · libmpv · 多 Provider 搜索 ·
 QuickJS/Node Spider**
@@ -23,11 +22,12 @@ QuickJS/Node Spider**
 
 ### [下载最新稳定版本 →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-最新稳定版本为 **0.7.3（Build 129）** · macOS 12.0+ · 仅支持 Apple Silicon
-（`arm64`）。该版本包含完整节目单、原生弹幕及来源感知的历史与收藏。
+最新稳定版本为 **0.8.0（Build 130）** · macOS 12.0+ · 仅支持 Apple Silicon
+（`arm64`）。该版本改进部分 TVBox 配置与授权、CatPaw 搜索与详情、播放器控件、
+定位和自动连播，以及 Android Runtime 恢复。
 
 下载已完成 Developer ID 签名和 Apple 公证的
-[v0.7.3 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.7.3)。
+[v0.8.0 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.0)。
 本版本已通过 Staple、Gatekeeper 评估和安装 smoke test。
 
 打开 DMG，将 `OKVideoMac.app` 拖入“应用程序”即可。无需关闭 Gatekeeper 或 SIP。
@@ -36,7 +36,7 @@ QuickJS/Node Spider**
 > OKVideoMac 是播放器与 Provider 客户端，不内置第三方影视源、账号、Cookie、
 > 解析服务或 DRM 密钥。
 
-## 0.8.0 发布候选：相对 0.7.3 的变化
+## 0.8.0 新增与改进：相对 0.7.3 的变化
 
 - **部分 TVBox 配置与授权：** 配置卡片可取消，原生对话框/网页按当前交互管理；
   确认原生授权后最多重新解析一次同一集，不推测未知登录协议。
@@ -49,9 +49,9 @@ QuickJS/Node Spider**
 - **Android Runtime 恢复：** 私有 ADB 绑定变化后恢复自有模拟器，诊断导出不启动 ADB；
   Bridge 更新为 0.3.48（60）。
 
-0.8.0 正在准备发布；最近已公证下载仍为 0.7.3。前后行为对照见
+0.8.0 正式版已发布。前后行为对照见
 [0.8.0 发布说明](Docs/RELEASE_NOTES_0.8.0.md)，验证见
-[发布就绪记录](Docs/RELEASE_READINESS_0.8.0.md)，文件与 Git 建议见
+[正式发布验证](Docs/RELEASE_VALIDATION_0.8.0.md)，回归范围与文件清单见
 [发布准备记录](Docs/RELEASE_PREPARATION_0.8.0.md)。
 
 ## 0.7.3 新增内容
@@ -274,11 +274,11 @@ Managed Runtime 安装与 Android Emulator Session 分开；安装和 Session �
 
 ## 发布完整性
 
-0.7.3 / Build 129 DMG 已按 [DMG 发布流程](Docs/DMG_RELEASE_PROCESS.md)通过 Release
+0.8.0 / Build 130 DMG 已按 [DMG 发布流程](Docs/DMG_RELEASE_PROCESS.md)通过 Release
 打包、Developer ID 签名、Apple 公证（`Accepted`）、Staple、Gatekeeper 和安装 smoke test。
-Tag `v0.7.3` 固定发布提交 `55ffa9d55faced404b20034d7cfe5bcfbc1be581`，下载随附对应
+Tag `v0.8.0` 固定发布提交 `b049b381db52b5bbbeec9cf58bf54a5bd50a4f39`，下载随附对应
 源码归档、SBOM 和校验和。文档状态更新不改变历史签名资产或其源码快照。详见
-[0.7.3 发布说明](Docs/RELEASE_NOTES_0.7.3.md)与[源码发布流程](Docs/SOURCE_RELEASE_PROCESS.md)。
+[0.8.0 正式发布验证](Docs/RELEASE_VALIDATION_0.8.0.md)与[源码发布流程](Docs/SOURCE_RELEASE_PROCESS.md)。
 
 ## 文档
 
@@ -289,6 +289,7 @@ Tag `v0.7.3` 固定发布提交 `55ffa9d55faced404b20034d7cfe5bcfbc1be581`，下
 - [架构说明](OKVideoMac/macOS/OKVideoMac/Docs/ARCHITECTURE.md)
 - [Android 存储与卸载](Docs/ANDROID_MANAGED_UNINSTALL.md)
 - [0.8.0 发布说明](Docs/RELEASE_NOTES_0.8.0.md)
+- [0.8.0 正式发布验证](Docs/RELEASE_VALIDATION_0.8.0.md)
 - [0.8.0 发布准备与 Git 建议](Docs/RELEASE_PREPARATION_0.8.0.md)
 - [0.7.3 发布说明](Docs/RELEASE_NOTES_0.7.3.md)
 - [0.6.1 发布说明](Docs/RELEASE_NOTES_0.6.1.md)

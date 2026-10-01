@@ -2,9 +2,10 @@
 
 - 对照版本：0.8.0（Build 130）
 - 最近更新：2026-10-01
-- 当前发布候选：0.8.0（Build 130），Apple Silicon / arm64 / macOS 12.0+
-- 最新公开公证 DMG：0.7.3（Build 129）；Developer ID、Apple Accepted、Staple、Gatekeeper 与安装 smoke 均通过
-- 0.8.0 的目标 tag `v0.8.0` 仅在 exact release commit 的正式门禁完成后创建。
+- 当前稳定版本：0.8.0（Build 130），Apple Silicon / arm64 / macOS 12.0+
+- 最新公开公证 DMG：0.8.0（Build 130）；Developer ID、Apple Accepted、Staple、Gatekeeper 与安装 smoke 均通过
+- 发布 tag `v0.8.0` 固定 `b049b381db52b5bbbeec9cf58bf54a5bd50a4f39`；正式门禁结果见
+  [发布验证记录](../../../../Docs/RELEASE_VALIDATION_0.8.0.md)。
 
 ## 概述
 

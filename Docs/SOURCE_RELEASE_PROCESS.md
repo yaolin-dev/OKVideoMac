@@ -1,15 +1,15 @@
 # Immutable Corresponding-Source Release Process
 
-The 0.8.0 (Build 130) release candidate uses
-`OKVideoMac-0.8.0-macOS-arm64.zip` and `OKVideoMac-0.8.0.dmg`. Local ad-hoc
-verification does not replace the notarized public 0.7.3 release or create a tag.
+The published 0.8.0 (Build 130) release uses
+`OKVideoMac-0.8.0-macOS-arm64.zip` as the internal identity carrier and
+`OKVideoMac-0.8.0.dmg` as the notarized public download.
 
-> The published 0.7.3 DMG passed Developer ID signing, Apple notarization,
-> stapling, Gatekeeper and installation smoke. Tag `v0.7.3` pins
-> `55ffa9d55faced404b20034d7cfe5bcfbc1be581`; see the
-> [GitHub release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.7.3).
-> Candidate documentation updates do not rewrite historical signed assets or
-> build-time source/notes snapshots.
+> The published 0.8.0 DMG passed Developer ID signing, Apple notarization,
+> stapling, Gatekeeper and installation smoke. Tag `v0.8.0` pins
+> `b049b381db52b5bbbeec9cf58bf54a5bd50a4f39`; see the
+> [GitHub release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.0) and
+> [release validation](RELEASE_VALIDATION_0.8.0.md). Documentation status updates
+> preserve signed assets and immutable build-time source/notes snapshots.
 
 Each formal OKVideoMac binary must be published with a source set produced by
 `macOS/OKVideoMac/Scripts/create-source-release.sh` from the exact release Git
@@ -57,7 +57,7 @@ does not disguise exceptions: the missing original zlib 1.3.2 distfile and
 historical clang-11 input used by MacPorts libc++ remain explicit in the
 manifest and keep native provenance incomplete.
 
-Candidate 0.8.0 validation also uses Xcode 16.2 / macOS SDK 15.2 on macOS
+The formal 0.8.0 package was built with Xcode 16.2 / macOS SDK 15.2 on macOS
 14.8.9. Formal release manifests must record the actual final builder, not copy
 historical values. For release 0.6.1 (101), the manifest records Xcode 16.2 and macOS SDK 15.2 as
 the actual release package builder. Xcode 14.2 remains the older supported
