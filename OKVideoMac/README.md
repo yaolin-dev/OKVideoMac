@@ -27,7 +27,7 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 - 搜索框有文字时第一次 Esc 只清空并保持焦点，空框再次 Esc 才退出搜索
 - 0.6.0 历史另行执行的 4 项真实 Android 生命周期测试与 API 35 隔离矩阵通过；
   本轮正式收口不把这些历史实机结果冒充为重跑结果
-- 0.8.0 的模块对照、验证结果与待提交文件见
+- 0.8.0 的模块对照、回归结果与发布准备阶段文件分组见
   [发布就绪记录](../Docs/RELEASE_READINESS_0.8.0.md)和
   [发布准备记录](../Docs/RELEASE_PREPARATION_0.8.0.md)
 - 对外分发：0.8.0 Build 130 已完成 Developer ID、Apple notarization（`Accepted`）、
@@ -150,22 +150,22 @@ Android Compatibility 分类显示组件、缓存、用户数据和备份，并�
 
 ## 安装
 
-最新正式版本为 0.7.3（Build 129），已完成 Apple 公证。安装步骤：
+最新正式版本为 0.8.0（Build 130），已完成 Apple 公证。安装步骤：
 
-1. 只从本仓库 [v0.7.3 GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.7.3) 下载 macOS arm64 发布包；
-2. 打开 `OKVideoMac-0.7.3.dmg`；
+1. 只从本仓库 [v0.8.0 GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.0) 下载 macOS arm64 发布包；
+2. 打开 `OKVideoMac-0.8.0.dmg`；
 3. 将 `OKVideoMac.app` 移入 `/Applications`；
 4. 从 Applications 或 Finder 正常启动。
 
 不要使用来源不明或无法与本仓库发布哈希对应的第三方二进制。
 
-0.7.3（Build 129）的 DMG 与 Source Release 绑定到 tag `v0.7.3` 指向的 exact
+0.8.0（Build 130）的 DMG 与 Source Release 绑定到 tag `v0.8.0` 指向的 exact
 commit。最终公证并 Staple 后的 DMG SHA-256 由 GitHub Release 同名 `.sha256`
 文件提供。
 
 ### Gatekeeper 与 macOS 安全
 
-0.7.3（Build 129）正式 DMG 使用 Developer ID Application: Yao Lin
+0.8.0（Build 130）正式 DMG 使用 Developer ID Application: Yao Lin
 （KGG363ABK9）签名，启用 Hardened Runtime，并通过 Apple notarization、staple
 和 Gatekeeper 验证。安装和运行不需要关闭任何 macOS 安全机制。
 
@@ -273,7 +273,7 @@ Build 62 阶段留存的历史工程准备记录见
 [`Docs/ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md`](../Docs/ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md)，
 同期 juniversalchardet 兼容性审计见
 [`Docs/JUNIVERSALCHARDET_ELIMINATION_AUDIT.md`](../Docs/JUNIVERSALCHARDET_ELIMINATION_AUDIT.md)。
-这些材料保留为历史工程证据；Build 62/63/64/65 均不是当前候选 Build 130 的验证状态，
+这些材料保留为历史工程证据；Build 62/63/64/65 均不是当前 Build 130 的验证状态，
 也不构成法律意见
 或“无风险”保证。
 
@@ -317,7 +317,7 @@ Git tag 指向的 exact release commit 才是项目源码基准；不要把移�
 - license package：`OKVideoMac-0.8.0-build130-licenses.tar.gz`；
 - macOS artifact：`OKVideoMac-0.8.0.dmg`。
 
-目标 Tag `v0.8.0` 仅在最终干净 release commit 完成正式分发门禁后创建。
+Tag `v0.8.0` 已在最终干净 release commit 完成正式分发门禁后创建，并固定该提交。
 本地验收快照不是正式 commit 身份；0.7.3 的已发布二进制、源码/发布说明快照与哈希保持不变。
 0.8.0 Build 130 文件清单与生成规则见
 [`Docs/SOURCE_RELEASE_PROCESS.md`](../Docs/SOURCE_RELEASE_PROCESS.md)。Build 62/63
