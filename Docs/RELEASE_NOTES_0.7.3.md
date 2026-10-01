@@ -1,5 +1,7 @@
 # OKVideoMac 0.7.3（Build 129）Release Notes
 
+日期：2026-09-27 · Tag：`v0.7.3` · [GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.7.3)
+
 0.7.3 是一次覆盖直播节目单、弹幕、浏览、历史、收藏和播放器稳定性的完整更新。
 它不内置任何内容源、账号、Cookie、解析服务或 DRM 密钥。
 
@@ -57,11 +59,6 @@
 - 最终 DMG SHA-256：`9cf6c79f9c6d4a8bc7e37e72612e3debc98ca22ffffc3e5e9084c61efe42dbfc`。
 - 15 个公开资产包含 DMG、独立校验和、对应源码、第三方源码、许可证、Android Bridge APK、四份 SBOM、manifest、统一 SHA-256、发布说明和第三方声明；内部 ZIP 不公开上传。
 
-
-以上结果据 [v0.7.3 GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.7.3)
-补录；原构建时源码与发布资产不变。发布前验收保留在
-[0.7.3 发布就绪记录](RELEASE_READINESS_0.7.3.md)。
-
 ---
 
 # OKVideoMac 0.7.3 (Build 129)
@@ -78,7 +75,10 @@ from replacing a newer page or media session.
 
 Native Xtream supports authentication, Movies, Series, search, Basic Live and
 short EPG. Catch-up/timeshift and `direct_source` remain unsupported. Apple Silicon
-and macOS 12.0 or later are required. Version 0.7.3 was published on 2026-09-27
-with Developer ID signing, Apple notarization (`Accepted`), stapling, Gatekeeper
-and installation smoke verified; see the linked GitHub release. This status update
-does not alter the immutable build-time notes or assets.
+and macOS 12.0 or later are required.
+
+The distribution is Developer ID signed and Apple notarized (`Accepted`, submission
+`133c1043-d3b8-429a-b502-6dc586de6ab9`). Stapling, Gatekeeper, the final DMG install
+smoke, source/SBOM manifests and SHA-256 verification passed. Tag `v0.7.3` pins
+`55ffa9d55faced404b20034d7cfe5bcfbc1be581`; the final DMG SHA-256 is
+`9cf6c79f9c6d4a8bc7e37e72612e3debc98ca22ffffc3e5e9084c61efe42dbfc`.

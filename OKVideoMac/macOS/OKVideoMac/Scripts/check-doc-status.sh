@@ -67,7 +67,7 @@ assert_contains_either() {
   fi
 }
 
-assert_exact_line "$README" "- 当前发布候选：${VERSION}（Build ${BUILD}）"
+assert_contains_either "$README" "- 当前发布候选：${VERSION}（Build ${BUILD}）" "- 当前稳定版本：${VERSION}（Build ${BUILD}）"
 assert_exact_line "$COMPATIBILITY" "- 对照版本：${VERSION}（Build ${BUILD}）"
 assert_exact_line "$PERFORMANCE" "- 对照版本：${VERSION}（Build ${BUILD}）"
 assert_contains_either "$ROOT_README" "current release candidate is **${VERSION} (Build ${BUILD})**" "latest stable release is **${VERSION} (Build ${BUILD})**"
@@ -79,10 +79,13 @@ assert_contains "$SOURCE_RELEASE_PROCESS" "OKVideoMac-${VERSION}.dmg"
 assert_contains "$SOURCE_RELEASE_PROCESS" "OKVideoMac-${VERSION}-macOS-arm64.zip"
 assert_contains "$SOURCE_RELEASE_PROCESS" "OKVideoMac-${VERSION}-build${BUILD}-SOURCE_RELEASE_INDEX.json"
 assert_exact_line "$REPOSITORY_ROOT/Docs/RELEASE_NOTES_${VERSION}.md" "# OKVideoMac ${VERSION}（Build ${BUILD}）Release Notes"
-assert_contains_either "$README" "目标 tag：\`v${VERSION}\`" "Tag \`v${VERSION}\` 在全部正式分发门禁通过后创建"
+assert_contains_either "$README" "目标 tag：\`v${VERSION}\`" "Tag：\`v${VERSION}\`"
 assert_contains "$README" "OKVideoMac-${VERSION}-build${BUILD}-SOURCE_RELEASE_INDEX.json"
 assert_contains "$COMPATIBILITY" "tag \`v${VERSION}\`"
 assert_exact_line "$READINESS" "# OKVideoMac ${VERSION}（Build ${BUILD}）发布就绪记录"
+if grep -Fqx -- "- 当前稳定版本：${VERSION}（Build ${BUILD}）" "$README"; then
+  assert_exact_line "$REPOSITORY_ROOT/Docs/RELEASE_VALIDATION_${VERSION}.md" "# OKVideoMac ${VERSION}（Build ${BUILD}）正式发布验证记录"
+fi
 
 PYTHONDONTWRITEBYTECODE=1 python3 - "$PROJECT_DIR" "$VERSION" "$BUILD" <<'PY'
 import pathlib

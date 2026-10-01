@@ -112,12 +112,11 @@ Compared with published `v0.7.3` (Build 129). Candidate: **0.8.0 (Build 130)**.
 ### Compatibility and release
 
 - Apple Silicon (`arm64`) and macOS 12.0 or later remain required.
-- Published as `v0.7.3` (Build 129), Developer ID signed and Apple notarized
-  (`Accepted`), with stapling, Gatekeeper and installation smoke verified. The
-  [GitHub release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.7.3)
-  records the immutable commit and asset hashes.
-- See `Docs/RELEASE_NOTES_0.7.3.md` and the release-readiness record for the final
-  validation results and known limitations.
+- The Developer ID signed 0.7.3 distribution passed Apple notarization, stapling,
+  Gatekeeper and final DMG installation smoke. Tag `v0.7.3` pins exact release
+  commit `55ffa9d55faced404b20034d7cfe5bcfbc1be581`.
+- See `Docs/RELEASE_NOTES_0.7.3.md` and `Docs/RELEASE_VALIDATION_0.7.3.md` for the
+  final validation results, artifact hashes and known limitations.
 
 ## [0.6.1] - 2026-09-09
 
