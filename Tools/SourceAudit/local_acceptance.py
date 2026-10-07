@@ -18,6 +18,8 @@ MANIFEST = "LOCAL_ACCEPTANCE_SNAPSHOT.json"
 # Untracked reports/user samples are not build inputs. Never sweep arbitrary
 # personal files into an artifact; new implementation files use these roots.
 UNTRACKED_ROOTS = ("OKVideoMac/macOS/OKVideoMac/", "OKVideoMac/Helpers/", "Tools/SourceAudit/")
+UPDATE_INPUTS = {"ThirdParty/sparkle-lock.json", "ThirdParty/approved-macho-paths.json",
+                 "OKVideoMac/THIRD_PARTY_LICENSES/Sparkle-LICENSE.txt", "Docs/AUTOMATIC_UPDATES.md"}
 RELEASE_DOCUMENT_PATTERN = re.compile(
     r"Docs/RELEASE_(?:NOTES|READINESS)_\d+\.\d+\.\d+\.md\Z"
 )
@@ -55,7 +57,7 @@ def selected_files(repo: Path) -> list[str]:
     tracked = files("--cached") - files("--deleted")
     new = {
         p for p in files("--others", "--exclude-standard")
-        if p.startswith(UNTRACKED_ROOTS) or RELEASE_DOCUMENT_PATTERN.fullmatch(p)
+        if p.startswith(UNTRACKED_ROOTS) or p in UPDATE_INPUTS or RELEASE_DOCUMENT_PATTERN.fullmatch(p)
     }
     return sorted(p for p in (tracked | new) - {"AGENTS.md", MANIFEST}
                   if not p.startswith("Docs/DemoSource/"))

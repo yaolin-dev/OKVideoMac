@@ -28,6 +28,11 @@ cp -R "$SOURCE_APP" "$DESTINATION_APP"
 FRAMEWORKS="$DESTINATION_APP/Contents/Frameworks"
 
 libmpv="$(find "$MPV_PREFIX/lib" -type f -name 'libmpv*.dylib' | head -1)"
+python3 "$SCRIPT_DIR/mpv-coreaudio-provenance.py" verify \
+  --library "$libmpv" --receipt "$MPV_PREFIX/coreaudio-build.json"
+cp "$MPV_PREFIX/coreaudio-build.json" "$DESTINATION_APP/Contents/Resources/Legal/ModifiedSources/"
+cp "$PROJECT_DIR/Patches/"mpv-0.41.0-coreaudio-{init-cleanup,late-hotplug,disposed-unit,hotplug-init-failure}.patch \
+  "$DESTINATION_APP/Contents/Resources/Legal/ModifiedSources/"
 cp "$libmpv" "$FRAMEWORKS/libmpv.dylib"
 cp "$MPV_PREFIX/lib/libOKMPVBridge.dylib" "$FRAMEWORKS/libOKMPVBridge.dylib"
 replaced=(

@@ -9,6 +9,7 @@ struct AppRelaunchRequest: Equatable, Sendable {
 }
 
 enum AppRelaunchError: Error, Equatable {
+    case updateInProgress
     case invalidApplicationBundle
     case helperMissing
     case helperLaunchFailed
@@ -53,9 +54,10 @@ final class AppRelaunchCoordinator {
         case terminationRequested
     }
 
-    static let shared = AppRelaunchCoordinator()
+    static let shared = AppRelaunchCoordinator(restartGate: .shared)
 
     private(set) var state: State = .idle
+    private let restartGate: AppRestartGate
     private let helperLauncher: any AppRelaunchHelperLaunching
     private let bundleURLProvider: () -> URL
     private let bundleIdentifierProvider: () -> String?
@@ -75,8 +77,10 @@ final class AppRelaunchCoordinator {
         terminationRequest: @escaping @MainActor () -> Void = {
             NSApp.terminate(nil)
         },
-        terminationScheduler: (any AppTerminationRequestScheduling)? = nil
+        terminationScheduler: (any AppTerminationRequestScheduling)? = nil,
+        restartGate: AppRestartGate? = nil
     ) {
+        self.restartGate = restartGate ?? AppRestartGate()
         self.helperLauncher = helperLauncher ?? ProcessAppRelaunchHelperLauncher()
         self.bundleURLProvider = bundleURLProvider
         self.bundleIdentifierProvider = bundleIdentifierProvider
@@ -97,6 +101,7 @@ final class AppRelaunchCoordinator {
             throw AppRelaunchError.invalidApplicationBundle
         }
 
+        guard restartGate.claim(.application) else { throw AppRelaunchError.updateInProgress }
         state = .preparingHelper
         let request = AppRelaunchRequest(
             parentProcessIdentifier: processIdentifierProvider(),
@@ -107,6 +112,7 @@ final class AppRelaunchCoordinator {
         do {
             try await helperLauncher.prepareRelaunch(request)
         } catch {
+            restartGate.release(.application)
             state = .idle
             throw error
         }

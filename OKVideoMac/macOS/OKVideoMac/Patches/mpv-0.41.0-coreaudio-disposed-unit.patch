@@ -1,0 +1,16 @@
+Subject: [PATCH] ao_coreaudio: clear disposed AudioUnit on init failure
+
+Local minimal follow-up to upstream #18383: init_audiounit already disposes
+the instance on failure. Do not pass that freed instance to uninit again.
+The exact-source fault harness reproduces the invalid second cleanup.
+
+--- a/audio/out/ao_coreaudio.c
++++ b/audio/out/ao_coreaudio.c
+@@ -349,6 +349,7 @@
+     AudioUnitUninitialize(p->audio_unit);
+ coreaudio_error_component:
+     AudioComponentInstanceDispose(p->audio_unit);
++    p->audio_unit = NULL;
+ coreaudio_error:
+     return false;
+ }

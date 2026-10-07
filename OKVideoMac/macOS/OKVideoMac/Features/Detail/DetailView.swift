@@ -803,6 +803,7 @@ struct EpisodePresentationSnapshot: Sendable {
     let rangeOptions: [EpisodeRangeOption]
     let playbackOrder: [PlayEpisode]
     let versionOrders: [String: [PlayEpisode]]
+    let navigation: PlayerEpisodeNavigationIndex
 }
 
 private struct EpisodePresentationRepositoryKey: Hashable, Sendable {
@@ -859,7 +860,8 @@ actor EpisodePresentationRepository {
             ),
             rangeOptions: EpisodeListPresentation.rangeOptions(from: values),
             playbackOrder: PlayerEpisodeAdvancePolicy.orderedEpisodes(in: source.episodes, categoryName: categoryName),
-            versionOrders: PlayerEpisodeAdvancePolicy.versionOrders(in: source.episodes, categoryName: categoryName)
+            versionOrders: PlayerEpisodeAdvancePolicy.versionOrders(in: source.episodes, categoryName: categoryName),
+            navigation: PlayerEpisodeNavigationIndex(episodes: source.episodes, categoryName: categoryName)
         )
         if snapshots.count >= capacity, let oldestKey = snapshots.keys.first {
             snapshots.removeValue(forKey: oldestKey)

@@ -351,6 +351,11 @@ def make_source_release(args: argparse.Namespace) -> None:
             "OKVideoMac/Helpers/AndroidDexBridge/THIRD_PARTY_NOTICES.md",
             "OKVideoMac/Helpers/AndroidDexBridge/app/gradle.lockfile",
             "OKVideoMac/Helpers/AndroidDexBridge/gradle/wrapper/gradle-wrapper.properties",
+            "OKVideoMac/macOS/OKVideoMac/Patches/mpv-0.41.0-coreaudio-init-cleanup.patch",
+            "OKVideoMac/macOS/OKVideoMac/Patches/mpv-0.41.0-coreaudio-late-hotplug.patch",
+            "OKVideoMac/macOS/OKVideoMac/Patches/mpv-0.41.0-coreaudio-disposed-unit.patch",
+            "OKVideoMac/macOS/OKVideoMac/Patches/mpv-0.41.0-coreaudio-hotplug-init-failure.patch",
+            "OKVideoMac/macOS/OKVideoMac/Scripts/mpv-coreaudio-provenance.py",
             "OKVideoMac/macOS/OKVideoMac/Patches/mpv-0.41.0-coreaudio-without-cocoa.patch",
             "OKVideoMac/macOS/OKVideoMac/Patches/mpv-0.41.0-coreaudio-without-cocoa.NOTICE.md",
             "OKVideoMac/macOS/OKVideoMac/Scripts/build-libmpv.sh",
@@ -485,6 +490,7 @@ def make_source_release(args: argparse.Namespace) -> None:
             "mpv": {
                 "source": "mpv-v0.41.0.tar.gz",
                 "source_sha256": "ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209",
+                "coreaudio_backports": {p.name: sha256(p) for p in sorted((repo / "OKVideoMac/macOS/OKVideoMac/Patches").glob("mpv-0.41.0-coreaudio-*.patch"))},
                 "patch": "mpv-0.41.0-coreaudio-without-cocoa.patch",
                 "patch_sha256": sha256(repo / "OKVideoMac/macOS/OKVideoMac/Patches/mpv-0.41.0-coreaudio-without-cocoa.patch"),
                 "build_recipe": "OKVideoMac/macOS/OKVideoMac/Scripts/build-libmpv.sh",
@@ -560,12 +566,13 @@ def make_source_release(args: argparse.Namespace) -> None:
             artifact_input = Path(value).expanduser().resolve()
             if not artifact_input.is_file():
                 fail(f"Release artifact does not exist: {artifact_input}")
-            expected_artifact_name = f"OKVideoMac-{version}.dmg"
-            if artifact_input.name != expected_artifact_name:
-                fail(
-                    f"Public release artifact must be {expected_artifact_name}: "
-                    f"{artifact_input.name}"
-                )
+            approved_artifacts = {
+                f"OKVideoMac-{version}.dmg": ("application/x-apple-diskimage", "primary-user-download"),
+                "appcast.xml": ("application/rss+xml", "signed-update-feed"),
+            }
+            if artifact_input.name not in approved_artifacts:
+                fail(f"Unapproved public release artifact: {artifact_input.name}")
+            media_type, role = approved_artifacts[artifact_input.name]
             artifact = output / artifact_input.name
             if artifact_input != artifact:
                 temporary_artifact = artifact.with_suffix(artifact.suffix + ".tmp")
@@ -574,8 +581,8 @@ def make_source_release(args: argparse.Namespace) -> None:
             release_artifacts.append(
                 {
                     "filename": artifact.name,
-                    "media_type": "application/x-apple-diskimage",
-                    "role": "primary-user-download",
+                    "media_type": media_type,
+                    "role": role,
                     "sha256": sha256(artifact),
                 }
             )

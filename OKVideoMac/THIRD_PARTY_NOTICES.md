@@ -1,6 +1,6 @@
 # OKVideoMac Third-Party Notices
 
-This is the authoritative third-party index for OKVideoMac 0.8.0 (Build 130). It
+This is the authoritative third-party index for OKVideoMac 0.8.1 (Build 134). It
 covers executable material actually shipped in the macOS App and its embedded
 Android APK. Third-party software remains under its original terms; the
 project's `GPL-3.0-only` license does not relicense it.
@@ -86,3 +86,10 @@ The repository tracks the Gradle 8.9 wrapper JAR. The wrapper properties lock
 the official Gradle 8.9 binary distribution SHA-256. Gradle is Apache-2.0 and
 its distribution NOTICE is retained as `Gradle-NOTICE.txt`. Gradle itself is
 build tooling and is not included in the Release App.
+
+## Sparkle 2.10.0
+
+Official distribution and source are pinned in ThirdParty/sparkle-lock.json.
+Copyright notices and the MIT, BSD-2-Clause and Zlib component licenses are
+reproduced in THIRD_PARTY_LICENSES/Sparkle-LICENSE.txt. The five embedded
+framework/helper executables are included in the exact packaged inventory.

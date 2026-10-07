@@ -1,6 +1,6 @@
 # Compatibility
 
-- 对照版本：0.8.0（Build 130）
+- 对照版本：0.8.1（Build 134）
 - 最近更新：2026-10-01
 - 当前稳定版本：0.8.0（Build 130），Apple Silicon / arm64 / macOS 12.0+
 - 最新公开公证 DMG：0.8.0（Build 130）；Developer ID、Apple Accepted、Staple、Gatekeeper 与安装 smoke 均通过
@@ -397,3 +397,5 @@ App 支持范围和 Managed Android Runtime 实机验证是两个不同结论：
 
 0.8.0 完整前后行为对照见 [发布说明](../../../../Docs/RELEASE_NOTES_0.8.0.md)，
 本轮结果及前序证据边界见 [发布就绪记录](../../../../Docs/RELEASE_READINESS_0.8.0.md)。
+
+本地更新候选说明：0.8.1 尚未公开发布；更新流程验收见 Docs/AUTOMATIC_UPDATES.md。以下既有兼容性与性能记录不代表本轮已重新测试全部媒体或硬件。未来目标 tag `v0.8.1` 本轮不创建。

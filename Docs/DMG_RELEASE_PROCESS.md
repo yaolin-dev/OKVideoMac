@@ -117,3 +117,16 @@ App、DMG、source release、SBOM 和 checksums，完成公证与安装 smoke te
 
 该资产已作为非 Draft、非 Prerelease 的 GitHub Release 发布。后续文档 commit
 不会重写、重签或重新公证这份不可变的 0.4.0 DMG。
+
+## 0.8.1 stable updater additions
+
+0.8.1 (Build 134) uses the same clean-main-commit, Developer ID, Accepted, staple
+and Gatekeeper gates above. The production updater configuration is tracked in
+`Supporting/StableUpdateConfiguration.plist`; local/unconfigured feeds fail the
+distribution bundle gate. After final DMG stapling, the pipeline generates and
+verifies `appcast.xml` with the pinned official Sparkle tools and the dedicated
+Keychain account. It is included in the outer manifest/checksums and published
+with the existing 15 assets. ZIP remains internal. See [automatic updates](AUTOMATIC_UPDATES.md).
+
+If notary preflight fails, retain Apple's actual diagnostic. Do not infer missing
+credentials from an agreement-related HTTP 403 or bypass the Accepted requirement.

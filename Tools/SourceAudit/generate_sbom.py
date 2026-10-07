@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
+from approved_inventory import require_approved
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -21,6 +22,7 @@ SPDX_NS = uuid.UUID("2a2eb62c-ad1f-4e9b-99b9-6d3ee855ecf7")
 CDX_NS = uuid.UUID("ce6fdc54-4547-4142-b70f-3ed50cbd18f8")
 
 NATIVE = {
+    **{name: ("2.10.0", "MIT AND BSD-2-Clause AND Zlib") for name in ("Sparkle", "Autoupdate", "Updater", "Downloader", "Installer")},
     "OKVideoMac": ("OKVideoMac", "GPL-3.0-only"),
     "OKVideoMacRelauncher": ("0.5.0", "GPL-3.0-only"),
     "node": ("22.23.0", "MIT"),
@@ -104,7 +106,7 @@ def is_macho(path: Path) -> bool:
 def native_inventory(app: Path) -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
     for path in sorted((app / "Contents").rglob("*")):
-        if not path.is_file() or not is_macho(path):
+        if path.is_symlink() or not path.is_file() or not is_macho(path):
             continue
         relative = path.relative_to(app).as_posix()
         basename = path.name
@@ -120,8 +122,7 @@ def native_inventory(app: Path) -> list[dict[str, str]]:
                 "sha256": "" if relative == "Contents/MacOS/OKVideoMac" else sha256(path),
             }
         )
-    if len(result) != 29:
-        raise SystemExit(f"Expected 29 bundled Mach-O objects, found {len(result)}")
+    require_approved(row["path"] for row in result)
     return result
 
 

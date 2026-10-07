@@ -1,0 +1,130 @@
+#include <CoreAudio/CoreAudio.h>
+#include <AudioUnit/AudioUnit.h>
+#include <dispatch/dispatch.h>
+#include <Block.h>
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// Fake boundary types only. Lifecycle function bodies below come from source.
+struct priv {
+    AudioDeviceID device;
+    AudioUnit audio_unit;
+    uint64_t hw_latency_ns;
+    AudioStreamBasicDescription original_asbd;
+    AudioStreamID original_asbd_stream;
+    bool change_physical_format;
+    dispatch_block_t idle_work;
+    dispatch_queue_t queue;
+    int hotplug_cb_registration_times;
+};
+struct ao { struct priv *priv; int format, init_flags, samplerate, device_buffer;
+            const char *device, *redirect; int events; };
+#define CONTROL_OK 1
+#define CONTROL_ERROR -2
+#define AO_INIT_EXCLUSIVE 8
+#define MP_ARRAY_SIZE(x) (sizeof(x)/sizeof((x)[0]))
+#define CHECK_CA_ERROR_L(label, ...) do { if (err != noErr) goto label; } while (0)
+#define CHECK_CA_ERROR(...) CHECK_CA_ERROR_L(coreaudio_error, __VA_ARGS__)
+#define CHECK_CA_WARN(...) ((void)err)
+// Reading the context also makes a stale registered callback visible to ASan.
+#define MP_VERBOSE(ao, ...) do { (ao)->events++; } while (0)
+#define MP_ERR(ao, ...) MP_VERBOSE(ao, __VA_ARGS__)
+static int fail_at, calls, units, callbacks, registered_before_unit;
+static void *listeners[2];
+static AudioObjectPropertyListenerProc listener_proc[2];
+static uint32_t hotplug_properties[] = {kAudioHardwarePropertyDevices,
+                                      kAudioHardwarePropertyDefaultOutputDevice};
+static bool fail(void) { return ++calls == fail_at; }
+static bool af_fmt_is_pcm(int f) { return f == 1; }
+static OSStatus ca_select_device(struct ao *ao, const char *s, AudioDeviceID *d)
+{ *d = 1; return fail() ? -1 : noErr; }
+static bool ca_init_chmap(struct ao *ao, AudioDeviceID d) { return !fail(); }
+static void ca_fill_asbd(struct ao *ao, AudioStreamBasicDescription *d) { memset(d, 0, sizeof(*d)); }
+static AudioChannelLayout *ca_get_acl(struct ao *ao, size_t *n)
+{ *n = sizeof(AudioChannelLayout); return calloc(1, *n); }
+static void talloc_free(void *p) { free(p); }
+static int64_t av_rescale(int64_t a, int64_t b, int64_t c) { return a*b/c; }
+static void init_physical_format(struct ao *ao) { }
+static void reinit_latency(struct ao *ao) { ao->priv->hw_latency_ns = 1000000; }
+static void ao_hotplug_event(struct ao *ao) { ao->events++; callbacks++; }
+static char *mp_tag_str(int t) { return "mock"; }
+#define CA_SET(...) noErr
+static OSStatus render_cb_lpcm(void *c, AudioUnitRenderActionFlags *f,
+    const AudioTimeStamp *t, UInt32 b, UInt32 n, AudioBufferList *l) { return noErr; }
+static AudioComponent mock_find(AudioComponent c, const AudioComponentDescription *d)
+{ return fail() ? NULL : (AudioComponent)1; }
+static OSStatus mock_new(AudioComponent c, AudioComponentInstance *u)
+{ if (fail()) return -1; *u = (AudioUnit)malloc(1); units++; return noErr; }
+static OSStatus mock_initialize(AudioUnit u) { return fail() ? -1 : noErr; }
+static OSStatus mock_set(AudioUnit u, AudioUnitPropertyID p, AudioUnitScope s,
+    AudioUnitElement e, const void *v, UInt32 n) { return fail() ? -1 : noErr; }
+static OSStatus mock_stop(AudioUnit u) { assert(units > 0); return noErr; }
+static OSStatus mock_uninitialize(AudioUnit u) { assert(units > 0); return noErr; }
+static OSStatus mock_dispose(AudioComponentInstance u) { free(u); units--; return noErr; }
+static int slot(const AudioObjectPropertyAddress *a)
+{ return a->mSelector == kAudioHardwarePropertyDevices ? 0 : 1; }
+static OSStatus mock_add(AudioObjectID o, const AudioObjectPropertyAddress *a,
+    AudioObjectPropertyListenerProc p, void *ctx)
+{ if (!units) registered_before_unit++; if (fail()) return -1;
+  int i=slot(a); assert(!listeners[i]); listeners[i]=ctx; listener_proc[i]=p; return noErr; }
+static OSStatus mock_remove(AudioObjectID o, const AudioObjectPropertyAddress *a,
+    AudioObjectPropertyListenerProc p, void *ctx)
+{ int i=slot(a); assert(!listeners[i] || listeners[i]==ctx); listeners[i]=NULL; return noErr; }
+#define AudioComponentFindNext mock_find
+#define AudioComponentInstanceNew mock_new
+#define AudioUnitInitialize mock_initialize
+#define AudioUnitSetProperty mock_set
+#define AudioOutputUnitStop mock_stop
+#define AudioUnitUninitialize mock_uninitialize
+#define AudioComponentInstanceDispose mock_dispose
+#define AudioObjectAddPropertyListener mock_add
+#define AudioObjectRemovePropertyListener mock_remove
+
+/* PRODUCTION_FUNCTIONS */
+
+static void fire(void) {
+    for (int i=0; i<2; i++) if (listeners[i]) {
+        AudioObjectPropertyAddress a = {hotplug_properties[i], 0, 0};
+        listener_proc[i](kAudioObjectSystemObject, 1, &a, listeners[i]);
+    }
+}
+static struct ao *create(void) {
+    struct ao *a=calloc(1,sizeof(*a)); a->priv=calloc(1,sizeof(struct priv));
+    a->samplerate=48000; a->format=1; return a;
+}
+int main(int argc, char **argv) {
+    int selected=argc>1 ? atoi(argv[1]) : -1;
+    for (int round=0; round<200; round++) {
+        for (int stage=0; stage<=11; stage++) {
+            if (selected>=0 && stage!=selected) continue;
+            fail_at=stage; calls=0; registered_before_unit=0; struct ao *a=create();
+            int r=init(a);
+            if (r==CONTROL_OK) {
+                assert(stage==0); assert(listeners[0] && listeners[1]);
+                assert(registered_before_unit==0);
+                fire(); assert(a->events>=4);
+                // Pending idle work must be cancelled and released on teardown.
+                a->priv->idle_work=dispatch_block_create(0, ^{});
+                uninit(a);
+            } else assert(stage>0);
+            free(a->priv); free(a);
+            // Dispatch only callbacks still registered with the fake OS.
+            fire();
+            assert(!listeners[0] && !listeners[1]); assert(units==0);
+        }
+        if (selected<0) for (int stage=0; stage<=3; stage++) {
+            fail_at=stage; calls=0; struct ao *a=create();
+            int r=hotplug_init(a);
+            if (r==0) { assert(stage==0); fire(); hotplug_uninit(a); }
+            else assert(stage>0);
+            free(a->priv); free(a); fire(); assert(!listeners[0] && !listeners[1]);
+        }
+    }
+    printf("PASS: 200 rounds, case=%d, callbacks=%d, live_units=%d, listeners=0\n",
+           selected, callbacks, units);
+    return 0;
+}

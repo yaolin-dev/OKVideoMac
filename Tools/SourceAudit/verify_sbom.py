@@ -8,6 +8,7 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
+from approved_inventory import require_approved
 
 
 def sha256(path: Path) -> str:
@@ -17,7 +18,7 @@ def sha256(path: Path) -> str:
 def macho_paths(app: Path) -> set[str]:
     result = set()
     for path in (app / "Contents").rglob("*"):
-        if path.is_file():
+        if path.is_file() and not path.is_symlink():
             detected = subprocess.run(["file", str(path)], check=True, capture_output=True, text=True)
             if "Mach-O" in detected.stdout:
                 result.add(path.relative_to(app).as_posix())
@@ -51,8 +52,9 @@ def main() -> None:
             f"Mach-O/SBOM mismatch: missing={sorted(actual_paths-declared_paths)}, "
             f"stale={sorted(declared_paths-actual_paths)}"
         )
-    if len(actual_paths) != 29:
-        raise SystemExit(f"Expected 29 Mach-O objects, found {len(actual_paths)}")
+    require_approved(actual_paths)
+    if len(declared_paths) != len(mac["packages"]):
+        raise SystemExit("Duplicate Mach-O paths in SBOM")
     for package in mac["packages"]:
         relative = package["packageFileName"]
         if relative == "Contents/MacOS/OKVideoMac":

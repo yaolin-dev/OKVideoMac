@@ -1,5 +1,7 @@
 # OKVideoMac
 
+当前发布候选为 **0.8.1（Build 134）**，包含自动更新、分集导航与 CoreAudio 生命周期修复；正式发布须完成签名、公证和全部发布门禁。见[自动更新说明](Docs/AUTOMATIC_UPDATES.md)。
+
 [English](README.md) | 简体中文
 
 **面向 Apple Silicon 的原生 macOS IPTV/点播播放器，支持 Xtream、M3U/XMLTV、

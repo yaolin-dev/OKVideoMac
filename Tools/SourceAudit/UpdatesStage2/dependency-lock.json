@@ -1,0 +1,8 @@
+{
+  "version": "2.10.0",
+  "commit": "eef1a539a373c1f1a320624b1130fc5de7b2e100",
+  "distribution_url": "https://github.com/sparkle-project/Sparkle/releases/download/2.10.0/Sparkle-2.10.0.tar.xz",
+  "distribution_sha256": "c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c",
+  "spm_sha256": "17e28312b8e18ab7cdbbe09a6fb28cc55a5479ec6c371dbc07cdecd2a14fd959",
+  "minimum_macos": "12.0"
+}

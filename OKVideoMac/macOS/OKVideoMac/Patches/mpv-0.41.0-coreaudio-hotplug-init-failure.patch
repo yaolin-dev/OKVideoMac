@@ -1,0 +1,20 @@
+Subject: [PATCH] ao_coreaudio: undo partial hotplug-only registration
+
+Local minimal failure cleanup: ao_get_device_list frees ao after hotplug_init
+fails without calling hotplug_uninit. Remove the first listener if registering
+the second fails. Exact-source ASan harness reproduces the stale callback.
+
+--- a/audio/out/ao_coreaudio.c
++++ b/audio/out/ao_coreaudio.c
+@@ -486,8 +486,10 @@
+     if (!reinit_device(ao))
+         return -1;
+ 
+-    if (!register_hotplug_cb(ao))
++    if (!register_hotplug_cb(ao)) {
++        unregister_hotplug_cb(ao);
+         return -1;
++    }
+ 
+     return 0;
+ }

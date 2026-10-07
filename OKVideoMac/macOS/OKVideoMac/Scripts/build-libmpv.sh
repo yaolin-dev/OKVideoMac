@@ -69,15 +69,17 @@ if [[ "$actual_sha256" != "$EXPECTED_SHA256" ]]; then
   echo "mpv source checksum mismatch: $actual_sha256" >&2
   exit 1
 fi
-if [[ ! -d "$SOURCE_DIR" ]]; then
-  tar -xzf "$ARCHIVE" -C "$SOURCE_ROOT"
-fi
+# Re-extract the locked archive: never build stale or locally patched source.
+rm -rf "$SOURCE_DIR"
+tar -xzf "$ARCHIVE" -C "$SOURCE_ROOT"
 if ! grep -q "sources += files('osdep/utils-mac.c')" "$SOURCE_DIR/meson.build"; then
   /usr/bin/patch -d "$SOURCE_DIR" -p1 -i "$PATCH_FILE"
 fi
 if ! grep -q '#if HAVE_COCOA && HAVE_SWIFT' "$SOURCE_DIR/player/clipboard/clipboard.c"; then
   /usr/bin/patch -d "$SOURCE_DIR" -p1 -i "$VIDEOTOOLBOX_GL_PATCH_FILE"
 fi
+
+python3 "$SCRIPT_DIR/mpv-coreaudio-provenance.py" apply --source "$SOURCE_DIR"
 
 rm -rf "$MESON_BUILD_DIR" "$INSTALL_STAGE"
 MACOSX_DEPLOYMENT_TARGET=12.0 /opt/local/bin/meson setup "$MESON_BUILD_DIR" "$SOURCE_DIR" \
@@ -183,5 +185,8 @@ for binary in "$LIBMPV_PATH" "$BRIDGE_OUTPUT"; do
 done
 otool -L "$LIBMPV_PATH"
 otool -L "$BRIDGE_OUTPUT"
+python3 "$SCRIPT_DIR/mpv-coreaudio-provenance.py" record \
+  --source "$SOURCE_DIR" --library "$LIBMPV_PATH" \
+  --receipt "$BUILD_ROOT/coreaudio-build.json"
 echo "libmpv built at $LIBMPV_PATH"
 echo "mpv bridge built at $BRIDGE_OUTPUT"

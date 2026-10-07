@@ -28,6 +28,7 @@ struct OKVideoMacApp: App {
                 .frame(minWidth: 900, minHeight: 600)
                 .onAppear {
                     appDelegate.install(appState: state)
+                    AppUpdateCoordinator.shared.install(appState: state)
                     AppAppearanceController.apply(state.appTheme)
                 }
                 .onChange(of: state.appTheme) { theme in
@@ -102,6 +103,8 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
     private var terminationState = TerminationState.idle
     private var terminationTask: Task<Void, Never>?
     private var terminationTimeoutTask: Task<Void, Never>?
+    private var updateShutdownWindow: NSWindow?
+    private var allowsTerminationTimeoutFallback = true
 
     func install(appState: AppState) {
         guard self.appState !== appState
@@ -186,6 +189,12 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
         case .waiting:
             return .terminateLater
         case .idle:
+            let updates = AppUpdateCoordinator.shared
+            guard updates.terminationPolicy.permitsTermination else {
+                updates.focusInstallationChoice()
+                return .terminateCancel
+            }
+            allowsTerminationTimeoutFallback = updates.terminationPolicy.permitsTimeoutFallback
             guard let appState else { return .terminateNow }
             terminationState = .waiting
             orderOutVisibleWindowsForTermination(sender)
@@ -222,6 +231,8 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
 
     private func finishTerminationAfterShutdown() {
         guard terminationState == .waiting else { return }
+        updateShutdownWindow?.close()
+        updateShutdownWindow = nil
         terminationTimeoutTask?.cancel()
         terminationTimeoutTask = nil
         replyToTerminationRequest()
@@ -229,9 +240,25 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
 
     private func finishTerminationAfterTimeout() {
         guard terminationState == .waiting else { return }
+        guard allowsTerminationTimeoutFallback else {
+            showUpdateShutdownWait()
+            return
+        }
         terminationTask?.cancel()
         terminationTask = nil
         replyToTerminationRequest()
+    }
+
+    private func showUpdateShutdownWait() {
+        let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 460, height: 130),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = L10n.string("updates.finishing.title", fallback: "Finishing playback cleanup")
+        let label = NSTextField(wrappingLabelWithString: L10n.string("updates.finishing.message", fallback: "The update is waiting for playback and history cleanup. Installation will continue when cleanup finishes."))
+        label.frame = NSRect(x: 24, y: 24, width: 412, height: 80)
+        window.contentView?.addSubview(label)
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        updateShutdownWindow = window
     }
 
     private func replyToTerminationRequest() {
@@ -1787,8 +1814,16 @@ enum AppAppearanceController {
 
 struct AppCommands: Commands {
     @ObservedObject var state: AppState
+    @ObservedObject private var updates = AppUpdateCoordinator.shared
 
     var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button(L10n.string("updates.check", fallback: "Check for Updates…")) { updates.checkForUpdates() }
+                .disabled(!updates.canCheckForUpdates)
+            if let version = updates.availableVersion {
+                Button(L10n.string("updates.available", fallback: "Update Available") + " \(version)") { updates.checkForUpdates() }
+            }
+        }
         CommandMenu(L10n.string("menu.navigation", fallback: "Navigate")) {
             ForEach(Array(AppSection.allCases.enumerated()), id: \.element.id) {
                 index, section in

@@ -143,6 +143,10 @@ if [[ ! -f "$FRAMEWORKS/libmpv.dylib" ]]; then
   echo "Bundled libmpv is missing." >&2
   exit 1
 fi
+python3 "$SCRIPT_DIR/mpv-coreaudio-provenance.py" verify-bundle \
+  --library "$FRAMEWORKS/libmpv.dylib" \
+  --receipt "$APP/Contents/Resources/Legal/ModifiedSources/coreaudio-build.json"
+
 if [[ ! -f "$FRAMEWORKS/libOKMPVBridge.dylib" ]]; then
   echo "Bundled libmpv bridge is missing." >&2
   exit 1
@@ -428,6 +432,7 @@ if ! grep -Fq 'juniversalchardet-1.0.3-sources.jar' \
   echo "The source release index does not map MPL covered source." >&2
   exit 1
 fi
+approved_macho_count="$(PYTHONDONTWRITEBYTECODE=1 python3 "$REPOSITORY_ROOT/Tools/SourceAudit/verify_update_bundle.py" --app "$APP")"
 OUTPUT_HASH_MANIFEST="$LEGAL_ROOT/Compliance/BUILD_OUTPUT_SHA256.txt"
 expected_hash_entries=0
 mach_o_entries=0
@@ -455,9 +460,9 @@ if ! grep -Fqx "$apk_sha  $apk_relative" "$OUTPUT_HASH_MANIFEST"; then
 fi
 actual_hash_entries="$(grep -Ec '^[0-9a-f]{64}  Contents/' \
   "$OUTPUT_HASH_MANIFEST")"
-if [[ "$mach_o_entries" -ne 29 ]] ||
-   [[ "$expected_hash_entries" -ne 28 ]] ||
-   [[ "$actual_hash_entries" -ne 29 ]]; then
+if [[ "$mach_o_entries" -ne "$approved_macho_count" ]] ||
+   [[ "$expected_hash_entries" -ne "$((approved_macho_count - 1))" ]] ||
+   [[ "$actual_hash_entries" -ne "$approved_macho_count" ]]; then
   echo "Unexpected generated output hash inventory: $actual_hash_entries entries" >&2
   exit 1
 fi
@@ -509,8 +514,8 @@ while IFS= read -r binary; do
   fi
 done < <(find "$APP/Contents" -type f \( -perm -111 -o -name '*.dylib' \))
 
-if [[ "$mach_o_count" -ne 29 ]]; then
-  echo "Unexpected Mach-O inventory count: $mach_o_count (expected 29)" >&2
+if [[ "$mach_o_count" -ne "$approved_macho_count" ]]; then
+  echo "Unexpected Mach-O inventory count: $mach_o_count (expected $approved_macho_count)" >&2
   failure=1
 fi
 

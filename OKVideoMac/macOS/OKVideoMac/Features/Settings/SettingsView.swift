@@ -34,6 +34,7 @@ private enum SettingsL10n {
 private enum SettingsLanguageAlert: String, Identifiable {
     case restartRequired
     case restartFailed
+    case updateInProgress
 
     var id: String { rawValue }
 }
@@ -292,6 +293,8 @@ struct SettingsView: View {
                 )
             }
 
+            AppUpdateSettingsSection()
+
             SettingsSectionTitle(SettingsL10n.string("settings.general.privacy.section", "Privacy & History"))
             SettingsCard {
                 SettingsControlRow(
@@ -364,6 +367,11 @@ struct SettingsView: View {
                     Text(L10n.string(.languageRestartLater))
                 )
             )
+        case .updateInProgress:
+            return Alert(
+                title: Text(L10n.string("updates.busy.title", fallback: "Update in Progress")),
+                message: Text(L10n.string("updates.restart-busy", fallback: "Finish the current update before restarting the app.")),
+                dismissButton: .default(Text(L10n.string(.commonOK))))
         case .restartFailed:
             return Alert(
                 title: Text(L10n.string(.languageRestartFailureTitle)),
@@ -377,6 +385,8 @@ struct SettingsView: View {
         Task { @MainActor in
             do {
                 try await AppRelaunchCoordinator.shared.restartApplication()
+            } catch AppRelaunchError.updateInProgress {
+                languageAlert = .updateInProgress
             } catch {
                 languageAlert = .restartFailed
             }
@@ -2014,5 +2024,51 @@ struct SettingsDivider: View {
     var body: some View {
         Divider()
             .padding(.leading, 61)
+    }
+}
+
+
+private struct AppUpdateSettingsSection: View {
+    @ObservedObject private var updates = AppUpdateCoordinator.shared
+
+    var body: some View {
+        SettingsSectionTitle(L10n.string("updates.title", fallback: "Software Updates"))
+        SettingsCard {
+            SettingsControlRow(icon: "arrow.triangle.2.circlepath", color: .blue,
+                title: L10n.string("updates.automatic", fallback: "Automatically Check for Updates"),
+                subtitle: L10n.string("updates.consent-note", fallback: "Checks once a day. Download and installation require your confirmation.")) {
+                Toggle(L10n.string("updates.automatic", fallback: "Automatically Check for Updates"),
+                    isOn: Binding(get: { updates.automaticallyChecksForUpdates }, set: updates.setAutomaticChecks))
+                    .labelsHidden().toggleStyle(.switch)
+                    .disabled(!updates.canCheckForUpdates)
+            }
+            SettingsDivider()
+            SettingsControlRow(icon: "app.badge", color: .indigo,
+                title: versionTitle, subtitle: status) {
+                Button(L10n.string("updates.check", fallback: "Check for Updates…")) { updates.checkForUpdates() }
+                    .disabled(!updates.canCheckForUpdates)
+            }
+            if let error = updates.configurationError {
+                Text(error).font(.caption).foregroundColor(.red).padding(18)
+            }
+        }
+    }
+    private var versionTitle: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        return "OKVideoMac \(info["CFBundleShortVersionString"] as? String ?? "") (\(info["CFBundleVersion"] as? String ?? ""))"
+    }
+    private var status: String {
+        if updates.configuration == nil {
+            return L10n.string("updates.unconfigured", fallback: "This build has no update feed configured.")
+        }
+        var message = updates.configuration?.channel == "local-test"
+            ? L10n.string("updates.local-channel", fallback: "Local test channel · Keep the local update server running.")
+            : L10n.string("updates.stable-channel", fallback: "Stable channel")
+        if let version = updates.availableVersion {
+            message += " · " + L10n.string("updates.available", fallback: "Update Available") + " " + version
+        } else if let date = updates.lastCheckDate {
+            message += " · " + L10n.string("updates.last-check", fallback: "Last checked") + " " + date.formatted(date: .abbreviated, time: .shortened)
+        }
+        return message
     }
 }

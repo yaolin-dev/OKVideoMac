@@ -19,8 +19,12 @@ settings:
     MACOSX_DEPLOYMENT_TARGET: "12.0"
     SWIFT_VERSION: "5.7"
     CLANG_ENABLE_MODULES: true
-    MARKETING_VERSION: 0.8.0
-    CURRENT_PROJECT_VERSION: 130
+    MARKETING_VERSION: 0.8.1
+    CURRENT_PROJECT_VERSION: 134
+    OKVIDEOMAC_SPARKLE_ROOT: $(SRCROOT)/Vendor/Build/Sparkle
+    OKVIDEOMAC_UPDATE_FEED_URL: ""
+    OKVIDEOMAC_UPDATE_PUBLIC_KEY: ""
+    OKVIDEOMAC_UPDATE_CHANNEL: unconfigured
 
 targets:
   OKVideoMacRelauncher:
@@ -66,6 +70,16 @@ targets:
         LSApplicationCategoryType: public.app-category.entertainment
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         LSMultipleInstancesProhibited: true
+        SUFeedURL: $(OKVIDEOMAC_UPDATE_FEED_URL)
+        SUPublicEDKey: $(OKVIDEOMAC_UPDATE_PUBLIC_KEY)
+        OKUpdateChannel: $(OKVIDEOMAC_UPDATE_CHANNEL)
+        SUAutomaticallyUpdate: false
+        SUAllowsAutomaticUpdates: false
+        SUScheduledCheckInterval: 86400
+        SUEnableSystemProfiling: false
+        SUVerifyUpdateBeforeExtraction: true
+        SURequireSignedFeed: true
+        SUSignedFeedFailureExpirationInterval: 0
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         NSHumanReadableCopyright: "Copyright © 2026 Yao Lin"
@@ -195,6 +209,9 @@ targets:
           chmod 755 "${NODE_DIR}/node"
           cp "${NODE_ROOT}/LICENSE" "${LICENSES_DIR}/Node.js-LICENSE.txt"
     dependencies:
+      - framework: $(OKVIDEOMAC_SPARKLE_ROOT)/Sparkle.framework
+        embed: true
+        codeSign: false
       - target: OKVideoMacRelauncher
         link: false
         embed: false
@@ -225,6 +242,8 @@ targets:
     sources:
       - path: Tests
     dependencies:
+      - framework: $(OKVIDEOMAC_SPARKLE_ROOT)/Sparkle.framework
+        embed: false
       - target: OKVideoMac
     settings:
       base:

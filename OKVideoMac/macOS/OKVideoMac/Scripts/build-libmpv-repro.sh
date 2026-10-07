@@ -61,6 +61,8 @@ tar -xzf "$ARCHIVE" -C "$REPRO_ROOT/src"
 /usr/bin/patch -d "$SOURCE_DIR" -p1 -i "$PATCH_FILE"
 /usr/bin/patch -d "$SOURCE_DIR" -p1 -i "$VIDEOTOOLBOX_GL_PATCH_FILE"
 
+python3 "$SCRIPT_DIR/mpv-coreaudio-provenance.py" apply --source "$SOURCE_DIR"
+
 export MACOSX_DEPLOYMENT_TARGET=12.0
 /opt/local/bin/meson setup "$BUILD_DIR" "$SOURCE_DIR" \
   --prefix "$PREFIX" \
@@ -133,4 +135,6 @@ clang -arch arm64 -std=c11 -Wall -Wextra -Werror \
   otool -L "$LIBMPV"
 } > "$REPORT_DIR/MPV_REPRO_BUILD.txt"
 
+python3 "$SCRIPT_DIR/mpv-coreaudio-provenance.py" record \
+  --source "$SOURCE_DIR" --library "$LIBMPV" --receipt "$PREFIX/coreaudio-build.json"
 echo "Repro libmpv experiment completed: $PREFIX"

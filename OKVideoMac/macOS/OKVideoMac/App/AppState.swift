@@ -3668,15 +3668,9 @@ enum PlayerEpisodeAdvancePolicy {
 
     static func nextEpisode(in episodes: [PlayEpisode], currentEpisodeID: String,
                             enabled: Bool, categoryName: String? = nil) -> PlayEpisode? {
-        let all = orderedEpisodes(in: episodes, categoryName: categoryName)
-        let current = episodes.first { $0.id == currentEpisodeID }
-        let versions = versionOrders(in: episodes, categoryName: categoryName)
-        let ordered = (all.isEmpty || versions.count > 1) ? (current.flatMap {
-            versions[versionKey($0)]
-        } ?? []) : all
-        guard enabled, let index = ordered.firstIndex(where: { $0.id == currentEpisodeID }),
-              ordered.indices.contains(index + 1) else { return nil }
-        return ordered[index + 1]
+        guard enabled else { return nil }
+        return PlayerEpisodeNavigationIndex(episodes: episodes, categoryName: categoryName)
+            .adjacent(to: currentEpisodeID, offset: 1).uniqueEpisode
     }
 }
 
@@ -4331,6 +4325,7 @@ private struct PlayerEpisodePresentationCache {
     let valuesByEpisodeID: [String: EpisodePresentation]
     let playbackOrder: [PlayEpisode]
     let versionOrders: [String: [PlayEpisode]]
+    let navigation: PlayerEpisodeNavigationIndex
 }
 
 private enum PendingNodeOperation {
@@ -5355,6 +5350,7 @@ final class AppState: ObservableObject {
     private var playerEpisodeListHistoryRecord: HistoryRecord?
     private var playerEpisodeListRestoreTask: Task<Void, Never>?
     private var playerEpisodeListRestoreID: UUID?
+    @Published private var pendingEpisodeNavigationChoice: PlayerEpisodeNavigationChoice?
     @Published private(set) var playerEpisodePresentations: [EpisodePresentation] = []
     @Published private(set) var isPlayerEpisodeListPreparing = false
     @Published private(set) var playerRenderClient: MPVPlayerClient?
@@ -14237,6 +14233,23 @@ final class AppState: ObservableObject {
     }
 
     #if DEBUG || OKVIDEO_PERFORMANCE_TEST
+    func seedEpisodeNavigationForTesting(source: PlaySource, current: PlayEpisode,
+        category: String? = nil, videoID: String = "navigation-fixture", waitForPreparation: Bool = true) async {
+        clearPlayerEpisodeListRecovery()
+        let request = UUID()
+        playbackSessionID = request
+        activePlayerRequestID = request
+        let detail = VideoDetail(summary: VideoSummary(siteKey: "fixture", siteName: "Fixture",
+            videoID: videoID, title: "Navigation Fixture", categoryName: category), playSources: [source])
+        activePlayback = ActivePlaybackContext(configurationID: UUID(), detail: detail, source: source, episode: current,
+            media: ResolvedMedia(url: URL(string: "https://example.invalid/media")!, headers: [:],
+                siteKey: "fixture", sourceName: source.name, episodeName: current.name), requestID: request)
+        isPlayerPresented = true
+        playbackResolutionState = .playing
+        preparePlayerEpisodePresentations(detail: detail, source: source, sessionID: request)
+        if waitForPreparation { await playerEpisodePreparationTask?.value }
+    }
+
     func seedFavoriteConfigurationsForTesting(_ records: [StoredConfiguration]) { configurations = records }
 
     func seedHistoryPlaybackForTesting(configuration: StoredConfiguration, videoID: String = "video", position: Double, duration: Double) {
@@ -17247,22 +17260,39 @@ final class AppState: ObservableObject {
     }
 
     func playAdjacentEpisode(offset: Int) async {
-        guard let playback = activePlayback,
-              let currentIndex = manuallyOrderedPlayerEpisodes.firstIndex(
-                where: { $0.id == playback.episode.id }
-              ) else { return }
-        let nextIndex = currentIndex + offset
-        guard manuallyOrderedPlayerEpisodes.indices.contains(nextIndex) else { return }
-        await startPlayback(
-            detail: playback.detail,
-            source: playback.source,
-            episode: manuallyOrderedPlayerEpisodes[nextIndex],
-            configurationID: playback.configurationID,
-            windowActivation: .preserveFocus
-        )
+        guard let playback = activePlayback else { return }
+        switch playerEpisodeNavigation(offset: offset) {
+        case .available(let episode):
+            await startPlayback(detail: playback.detail, source: playback.source,
+                episode: episode, configurationID: playback.configurationID,
+                windowActivation: .preserveFocus)
+        case .choice(let episodes):
+            pendingEpisodeNavigationChoice = PlayerEpisodeNavigationChoice(
+                sessionID: playbackSessionID, source: playback.source,
+                currentEpisodeID: playback.episode.id, offset: offset, episodes: episodes)
+        case .boundary, .unavailable, .preparing: break
+        }
+    }
+
+    var playerEpisodeNavigationChoice: PlayerEpisodeNavigationChoice? {
+        guard let choice = pendingEpisodeNavigationChoice,
+              choice.sessionID == playbackSessionID,
+              choice.source == activePlayback?.source,
+              choice.currentEpisodeID == activePlayback?.episode.id,
+              playerEpisodeNavigation(offset: choice.offset) == .choice(choice.episodes) else { return nil }
+        return choice
+    }
+
+    func dismissPlayerEpisodeNavigationChoice() { pendingEpisodeNavigationChoice = nil }
+
+    var playerPanelEpisodePresentations: [EpisodePresentation] {
+        guard let choice = playerEpisodeNavigationChoice else { return playerEpisodePresentations }
+        let ids = Set(choice.episodes.map(\.id))
+        return playerEpisodePresentations.filter { ids.contains($0.id) }
     }
 
     private func clearPlayerEpisodeListRecovery() {
+        dismissPlayerEpisodeNavigationChoice()
         playerEpisodeListRestoreTask?.cancel()
         playerEpisodeListRestoreTask = nil
         playerEpisodeListRestoreID = nil
@@ -17892,19 +17922,46 @@ final class AppState: ObservableObject {
     }
 
     private var automaticNextEpisode: PlayEpisode? {
-        guard let playback = activePlayback, let cache = playerEpisodePresentationCache,
-              cache.key.source == playback.source, cache.key.categoryName == playback.detail.summary.categoryName,
-              let index = episodeQueue(cache, current: playback.episode).firstIndex(where: { $0.id == playback.episode.id }),
-              episodeQueue(cache, current: playback.episode).indices.contains(index + 1) else { return nil }
-        return episodeQueue(cache, current: playback.episode)[index + 1]
+        playerEpisodeNavigation(offset: 1, automatic: true).uniqueEpisode
     }
 
-    var hasPreviousEpisode: Bool {
-        hasAdjacentEpisode(offset: -1)
+    func playerEpisodeNavigation(offset: Int, automatic: Bool = false) -> PlayerEpisodeNavigationResult {
+        guard offset == -1 || offset == 1 else { return .unavailable }
+        guard let playback = activePlayback else { return pendingPlayback == nil ? .unavailable : .preparing }
+        guard !isRestoringPlayerEpisodeList, !isPlayerEpisodeListPreparing,
+              playbackResolutionState == .playing else { return .preparing }
+        guard !isPlayerEpisodeListIncomplete else { return .unavailable }
+        guard let cache = playerEpisodePresentationCache,
+              cache.key.source == playback.source,
+              cache.key.videoID == playback.detail.summary.id,
+              cache.key.categoryName == playback.detail.summary.categoryName else { return .preparing }
+        let result = cache.navigation.adjacent(to: playback.episode.id, offset: offset)
+        // Keep manual resource navigation for movies and unnumbered lists.
+        // Automatic continuation only accepts a uniquely numbered neighbour.
+        if result == .unavailable, !automatic, !playerHasEpisodeNames,
+           let current = playback.source.episodes.firstIndex(where: { $0.id == playback.episode.id }) {
+            let target = current + offset
+            return playback.source.episodes.indices.contains(target)
+                ? .available(playback.source.episodes[target]) : .boundary
+        }
+        return result
     }
 
-    var hasNextEpisode: Bool {
-        hasAdjacentEpisode(offset: 1)
+    var hasPreviousEpisode: Bool { playerEpisodeNavigation(offset: -1).canNavigate }
+    var hasNextEpisode: Bool { playerEpisodeNavigation(offset: 1).canNavigate }
+
+    func playerEpisodeNavigationExplanation(offset: Int) -> String? {
+        switch playerEpisodeNavigation(offset: offset) {
+        case .available: return nil
+        case .choice(let episodes):
+            return L10n.string("player.queue.choose-resource", fallback: "This episode has %d resources. Choose one to continue.", episodes.count)
+        case .boundary:
+            return L10n.string("player.queue.no-adjacent", fallback: "No adjacent episode available")
+        case .unavailable:
+            return L10n.string("player.queue.unresolved", fallback: "Cannot determine an adjacent episode. Choose from the episode list.")
+        case .preparing:
+            return L10n.string("player.queue.preparing", fallback: "Loading episode list")
+        }
     }
 
     var playerEpisodes: [PlayEpisode] {
@@ -17948,25 +18005,16 @@ final class AppState: ObservableObject {
     }
 
     var previousPlayerResourceTitle: String {
-        L10n.string(playerHasEpisodeNames ? "player.previous-episode" : "player.previous-resource", fallback: "Previous Resource")
+        if case .choice = playerEpisodeNavigation(offset: -1) {
+            return L10n.string("player.previous-episode.choose", fallback: "Choose Previous Episode…")
+        }
+        return L10n.string(playerHasEpisodeNames ? "player.previous-episode" : "player.previous-resource", fallback: "Previous Resource")
     }
     var nextPlayerResourceTitle: String {
-        L10n.string(playerHasEpisodeNames ? "player.next-episode" : "player.next-resource", fallback: "Next Resource")
-    }
-
-    private func episodeQueue(_ cache: PlayerEpisodePresentationCache, current: PlayEpisode) -> [PlayEpisode] {
-        (cache.playbackOrder.isEmpty || cache.versionOrders.count > 1)
-            ? cache.versionOrders[PlayerEpisodeAdvancePolicy.versionKey(current)] ?? []
-            : cache.playbackOrder
-    }
-
-    private var manuallyOrderedPlayerEpisodes: [PlayEpisode] {
-        guard let playback = activePlayback else { return [] }
-        let ordered = playerEpisodePresentationCache.flatMap { cache in
-            cache.key.source == playback.source && cache.key.categoryName == playback.detail.summary.categoryName
-                ? episodeQueue(cache, current: playback.episode) : nil
-        } ?? []
-        return ordered.contains(where: { $0.id == playback.episode.id }) ? ordered : (playerHasEpisodeNames ? [] : playback.source.episodes)
+        if case .choice = playerEpisodeNavigation(offset: 1) {
+            return L10n.string("player.next-episode.choose", fallback: "Choose Next Episode…")
+        }
+        return L10n.string(playerHasEpisodeNames ? "player.next-episode" : "player.next-resource", fallback: "Next Resource")
     }
 
     var playerUsesVersionNames: Bool {
@@ -18016,7 +18064,8 @@ final class AppState: ObservableObject {
                 values: snapshot.values,
                 valuesByEpisodeID: snapshot.valuesByEpisodeID,
                 playbackOrder: snapshot.playbackOrder,
-                versionOrders: snapshot.versionOrders
+                versionOrders: snapshot.versionOrders,
+                navigation: snapshot.navigation
             )
             self.playerEpisodePresentationCache = cache
             self.playerEpisodePresentations = snapshot.values
@@ -20895,14 +20944,6 @@ final class AppState: ObservableObject {
         "\(sourceName)::\(channel.id)"
     }
 
-    private func hasAdjacentEpisode(offset: Int) -> Bool {
-        guard let playback = activePlayback,
-              let currentIndex = manuallyOrderedPlayerEpisodes.firstIndex(
-                where: { $0.id == playback.episode.id }
-              ) else { return false }
-        return manuallyOrderedPlayerEpisodes.indices.contains(currentIndex + offset)
-    }
-
     private func resetPlaybackSkipSession() {
         playbackSkipSession = nil
         playbackSkipOpeningEnd = nil
@@ -21372,6 +21413,7 @@ final class AppState: ObservableObject {
         if isRestoringPlayerEpisodeList, let restoration = playerEpisodeListRestoreTask {
             await restoration.value
         }
+        if let preparation = playerEpisodePreparationTask { await preparation.value }
         guard automaticEpisodeAdvanceController.owns(
                   requestID: automaticAdvanceRequestID
               ),
@@ -21381,12 +21423,7 @@ final class AppState: ObservableObject {
               livePlaybackChannel == nil,
               (!reason.requiresAutoPlay || autoPlayNextEpisode),
               let playback = activePlayback,
-              let nextEpisode = PlayerEpisodeAdvancePolicy.nextEpisode(
-                  in: playback.source.episodes,
-                  currentEpisodeID: playback.episode.id,
-                  enabled: true,
-                  categoryName: playback.detail.summary.categoryName
-              ) else {
+              let nextEpisode = automaticNextEpisode else {
             return
         }
         if reason == .endingSkip || reason == .manualEndingSkip {
@@ -21407,6 +21444,11 @@ final class AppState: ObservableObject {
                 )
             }
         }
+        guard !Task.isCancelled, playbackSessionID == episodeSessionID,
+              automaticEpisodeAdvanceController.owns(requestID: automaticAdvanceRequestID),
+              activePlayback?.source == playback.source,
+              activePlayback?.episode.id == playback.episode.id,
+              automaticNextEpisode == nextEpisode else { return }
         await startPlayback(
             detail: playback.detail,
             source: playback.source,

@@ -108,3 +108,16 @@ commit. The notarized and stapled DMG, checksum, source archives, manifests, and
 SBOMs must be published together on the GitHub Release. Historical
 Build 62/63/64/65/94 records remain historical facts and must not be presented
 as the current release.
+
+## 0.8.1 release candidate
+
+Release artifact names (publication requires the distribution gates): `OKVideoMac-0.8.1.dmg`, `OKVideoMac-0.8.1-macOS-arm64.zip`,
+and `OKVideoMac-0.8.1-build134-SOURCE_RELEASE_INDEX.json`.
+These retain captured-source acceptanceOnly/publicReleaseEligible flags. Signing
+with Developer ID for a loopback Sparkle test does not authorize public release.
+
+The formal 0.8.1 pipeline additionally binds signed `appcast.xml` as a release
+artifact after DMG notarization and stapling. It references the immutable DMG
+URL and embeds release notes. Publish it with the existing 15-asset layout;
+the ZIP remains an internal identity carrier. Local acceptance artifacts and
+test signing keys remain ineligible for publication.

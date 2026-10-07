@@ -10,6 +10,10 @@ source "$SCRIPT_DIR/build-environment.sh"
 usage() {
   cat <<'USAGE'
 Usage: package-app.sh [--mode local|distribution] [--notarize]
+       package-app.sh --mode local --local-acceptance --local-developer-id
+
+--local-developer-id signs a captured, local-only acceptance build using
+DEVELOPER_ID_APPLICATION. It does not make it eligible for public release.
 
 Modes:
   local         Ad-hoc Hardened Runtime package for local testing (default).
@@ -24,6 +28,7 @@ USAGE
 PACKAGE_MODE="${OKVIDEOMAC_PACKAGE_MODE:-local}"
 NOTARIZE=0
 LOCAL_ACCEPTANCE=0
+LOCAL_DEVELOPER_ID=0
 ISOLATED_IDENTITY_ACCEPTANCE=0
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
@@ -41,6 +46,10 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --local-acceptance)
       LOCAL_ACCEPTANCE=1
+      shift
+      ;;
+    --local-developer-id)
+      LOCAL_DEVELOPER_ID=1
       shift
       ;;
     --isolated-identity-acceptance)
@@ -79,7 +88,14 @@ if [[ "$LOCAL_ACCEPTANCE" -eq 1 ]]; then
     --repo "$REPOSITORY_ROOT" --verify
 fi
 
-case "$PACKAGE_MODE" in
+if [[ "$LOCAL_DEVELOPER_ID" -eq 1 ]] && { [[ "$LOCAL_ACCEPTANCE" -ne 1 ]] || [[ "$PACKAGE_MODE" != "local" ]] || [[ "$NOTARIZE" -ne 0 ]]; }; then
+  echo "Local Developer ID signing requires a captured local acceptance build without notarization." >&2
+  exit 64
+fi
+SIGNING_MODE="$PACKAGE_MODE"
+if [[ "$LOCAL_DEVELOPER_ID" -eq 1 ]]; then SIGNING_MODE=distribution; fi
+
+case "$SIGNING_MODE" in
   local)
     SIGN_IDENTITY="-"
     APP_ENTITLEMENTS="$PROJECT_DIR/Supporting/OKVideoMac.dev.entitlements"
@@ -116,8 +132,8 @@ fi
 if [[ "$NOTARIZE" -eq 1 ]] &&
    ! xcrun notarytool history \
      --keychain-profile "$OKVIDEOMAC_NOTARY_PROFILE" \
-     --output-format json >/dev/null 2>&1; then
-  echo "notary profile unavailable: $OKVIDEOMAC_NOTARY_PROFILE" >&2
+     --output-format json >/dev/null; then
+  echo "Notary preflight failed for $OKVIDEOMAC_NOTARY_PROFILE; see the Apple diagnostic above." >&2
   exit 2
 fi
 
@@ -219,7 +235,20 @@ if [[ ! -d "$PROJECT_DIR/OKVideoMac.xcodeproj" ]]; then
   exit 1
 fi
 
-echo "Packaging mode: $PACKAGE_MODE"
+SPARKLE_ROOT="${OKVIDEOMAC_SPARKLE_ROOT:-$OKVIDEOMAC_BUILD_ROOT/Sparkle}"
+PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/prepare-sparkle.py" --output "$SPARKLE_ROOT"
+update_build_arguments=("OKVIDEOMAC_SPARKLE_ROOT=$SPARKLE_ROOT")
+if [[ "$PACKAGE_MODE" == "distribution" && -z "${OKVIDEOMAC_UPDATE_CONFIG:-}" ]]; then
+  OKVIDEOMAC_UPDATE_CONFIG="$PROJECT_DIR/Supporting/StableUpdateConfiguration.plist"
+fi
+if [[ -n "${OKVIDEOMAC_UPDATE_CONFIG:-}" ]]; then
+  update_build_arguments+=(
+    "OKVIDEOMAC_UPDATE_FEED_URL=$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$OKVIDEOMAC_UPDATE_CONFIG")"
+    "OKVIDEOMAC_UPDATE_PUBLIC_KEY=$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$OKVIDEOMAC_UPDATE_CONFIG")"
+    "OKVIDEOMAC_UPDATE_CHANNEL=$(/usr/libexec/PlistBuddy -c 'Print :OKUpdateChannel' "$OKVIDEOMAC_UPDATE_CONFIG")"
+  )
+fi
+echo "Packaging mode: $PACKAGE_MODE; signing policy: $SIGNING_MODE"
 if [[ "${OKVIDEOMAC_SKIP_ANDROID_BRIDGE_BUILD:-0}" != "1" ]]; then
   "$SCRIPT_DIR/build-android-dex-bridge.sh"
 fi
@@ -245,6 +274,7 @@ xcodebuild \
   CODE_SIGNING_ALLOWED=NO \
   ENABLE_CODE_COVERAGE=NO \
   "${identity_build_arguments[@]}" \
+  "${update_build_arguments[@]}" \
   clean build
 
 if [[ ! -d "$APP_SOURCE" ]]; then
@@ -318,6 +348,9 @@ mkdir -p \
   "$LEGAL_ROOT/Compliance/MPL_GPL_COUNSEL_PACKAGE" \
   "$LEGAL_ROOT/Compliance/MPL_GPL_EVIDENCE" \
   "$LEGAL_ROOT/ModifiedSources"
+cp "$SPARKLE_ROOT/provenance.json" "$LEGAL_ROOT/Compliance/SPARKLE_PROVENANCE.json"
+cp "$REPOSITORY_ROOT/ThirdParty/sparkle-lock.json" "$LEGAL_ROOT/Compliance/SPARKLE_LOCK.json"
+cp "$REPOSITORY_ROOT/ThirdParty/approved-macho-paths.json" "$LEGAL_ROOT/Compliance/APPROVED_MACHO_PATHS.json"
 cp "$SOURCE_ROOT/LICENSE" "$LEGAL_ROOT/LICENSE"
 cp "$SOURCE_ROOT/NOTICE.md" "$LEGAL_ROOT/NOTICE.md"
 cp "$SOURCE_ROOT/THIRD_PARTY_NOTICES.md" \
@@ -413,6 +446,11 @@ if [[ ! -f "$MPV_BRIDGE" ]]; then
   echo "libOKMPVBridge is missing; rerun build-libmpv.sh." >&2
   exit 1
 fi
+python3 "$SCRIPT_DIR/mpv-coreaudio-provenance.py" verify \
+  --library "$LIBMPV_PATH" --receipt "$LIBMPV_ROOT/coreaudio-build.json"
+cp "$LIBMPV_ROOT/coreaudio-build.json" "$LEGAL_ROOT/ModifiedSources/"
+cp "$PROJECT_DIR/Patches/"mpv-0.41.0-coreaudio-{init-cleanup,late-hotplug,disposed-unit,hotplug-init-failure}.patch \
+  "$LEGAL_ROOT/ModifiedSources/"
 cp "$LIBMPV_PATH" "$FRAMEWORKS/libmpv.dylib"
 install_name_tool -id '@rpath/libmpv.dylib' "$FRAMEWORKS/libmpv.dylib"
 cp "$MPV_BRIDGE" "$FRAMEWORKS/libOKMPVBridge.dylib"
@@ -534,6 +572,15 @@ for ((index=${#processed[@]} - 1; index >= 0; index--)); do
   fi
   sign_code "$binary"
 done
+# Sparkle's helpers and their containers must be sealed inside out.
+SPARKLE_FRAMEWORK="$APP_DESTINATION/Contents/Frameworks/Sparkle.framework"
+while IFS= read -r -d '' binary; do
+  if file "$binary" | grep -q 'Mach-O'; then sign_code "$binary"; fi
+done < <(find "$SPARKLE_FRAMEWORK" -type f -print0)
+sign_code "$SPARKLE_FRAMEWORK/Versions/B/Updater.app"
+sign_code "$SPARKLE_FRAMEWORK/Versions/B/XPCServices/Downloader.xpc"
+sign_code "$SPARKLE_FRAMEWORK/Versions/B/XPCServices/Installer.xpc"
+sign_code "$SPARKLE_FRAMEWORK"
 sign_code "$NODE_RUNTIME" "$NODE_ENTITLEMENTS"
 sign_code "$RELAUNCHER"
 sign_code "$EXECUTABLE" "$APP_ENTITLEMENTS"
@@ -598,8 +645,12 @@ PYTHONDONTWRITEBYTECODE=1 python3 \
 /usr/bin/xattr -cr "$APP_DESTINATION"
 sign_code "$APP_DESTINATION" "$APP_ENTITLEMENTS"
 
+if [[ "$PACKAGE_MODE" == "distribution" ]]; then
+  PYTHONDONTWRITEBYTECODE=1 python3 "$REPOSITORY_ROOT/Tools/SourceAudit/verify_update_bundle.py" \
+    --app "$APP_DESTINATION" --require-stable
+fi
 "$SCRIPT_DIR/verify-bundle.sh" "$APP_DESTINATION"
-"$SCRIPT_DIR/verify-release-signing.sh" --mode "$PACKAGE_MODE" "$APP_DESTINATION"
+"$SCRIPT_DIR/verify-release-signing.sh" --mode "$SIGNING_MODE" "$APP_DESTINATION"
 
 create_archive() {
   rm -f "$ARCHIVE" "$ARCHIVE.sha256"
@@ -643,7 +694,7 @@ create_dmg() {
     shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256"
   )
   "$SCRIPT_DIR/verify-dmg.sh" \
-    --mode "$PACKAGE_MODE" \
+    --mode "$SIGNING_MODE" \
     --source-index "$SOURCE_RELEASE_INDEX" \
     --apk "$ANDROID_BRIDGE_APK" \
     "$DMG"
@@ -657,7 +708,7 @@ if [[ "$LOCAL_ACCEPTANCE" -eq 1 ]]; then
   mkdir "$ACCEPTANCE_EXTRACT"
   ditto -x -k "$ARCHIVE" "$ACCEPTANCE_EXTRACT"
   "$SCRIPT_DIR/verify-bundle.sh" "$ACCEPTANCE_EXTRACT/OKVideoMac.app"
-  "$SCRIPT_DIR/verify-release-signing.sh" --mode local "$ACCEPTANCE_EXTRACT/OKVideoMac.app"
+  "$SCRIPT_DIR/verify-release-signing.sh" --mode "$SIGNING_MODE" "$ACCEPTANCE_EXTRACT/OKVideoMac.app"
 fi
 if [[ "$NOTARIZE" -eq 1 ]]; then
   NOTARY_RESULT="$ARTIFACTS/OKVideoMac-${APP_VERSION}-notarization.json"
@@ -711,6 +762,15 @@ if [[ "$LOCAL_ACCEPTANCE" -eq 1 ]]; then
   final_source_arguments+=(--local-acceptance)
 fi
 final_source_arguments+=(--release-artifact "$DMG")
+if [[ "$NOTARIZE" -eq 1 ]]; then
+  UPDATE_FEED="$ARTIFACTS/appcast.xml"
+  PYTHONDONTWRITEBYTECODE=1 python3 "$REPOSITORY_ROOT/Tools/SourceAudit/create_update_feed.py" \
+    --dmg "$DMG" --app "$APP_DESTINATION" --notary-result "$NOTARY_RESULT" \
+    --archive "${OKVIDEOMAC_SPARKLE_ARCHIVE:-$OKVIDEOMAC_BUILD_ROOT/Downloads/Sparkle-2.10.0.tar.xz}" \
+    --notes "$REPOSITORY_ROOT/Docs/RELEASE_NOTES_${APP_VERSION}.md" \
+    --account "${OKVIDEOMAC_SPARKLE_KEY_ACCOUNT:-OKVideoMac-release}" --output "$UPDATE_FEED"
+  final_source_arguments+=(--release-artifact "$UPDATE_FEED")
+fi
 "$SCRIPT_DIR/create-source-release.sh" "${final_source_arguments[@]}" \
   --offline
 
@@ -739,7 +799,7 @@ rm -rf "$FINAL_APP_DESTINATION"
 mv "$FINAL_APP_STAGING" "$FINAL_APP_DESTINATION"
 if [[ "$LOCAL_ACCEPTANCE" -eq 1 ]]; then
   "$SCRIPT_DIR/verify-bundle.sh" "$FINAL_APP_DESTINATION"
-  "$SCRIPT_DIR/verify-release-signing.sh" --mode local "$FINAL_APP_DESTINATION"
+  "$SCRIPT_DIR/verify-release-signing.sh" --mode "$SIGNING_MODE" "$FINAL_APP_DESTINATION"
 fi
 
 echo "Packaged app: $FINAL_APP_DESTINATION"

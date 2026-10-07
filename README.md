@@ -1,5 +1,7 @@
 # OKVideoMac
 
+The current release candidate is **0.8.1 (Build 134)**, prepared for the public release of automatic updates, episode navigation, and CoreAudio lifecycle fixes. Publication is pending the formal signing and notarization gates. See [automatic updates](Docs/AUTOMATIC_UPDATES.md).
+
 English | [简体中文](README_zh-CN.md)
 
 **A native macOS IPTV/VOD player for Apple Silicon with Xtream, M3U/XMLTV,

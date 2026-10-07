@@ -200,6 +200,7 @@ struct PlayerView: View {
             isCompactVolumePresented = false
             isLiveVolumeHovering = false
             activeUtilityPanel = nil
+            state.dismissPlayerEpisodeNavigationChoice()
             inspectedPlayerEpisode = nil
             playbackActivityOverlayTask?.cancel()
             playbackActivityOverlayTask = nil
@@ -229,6 +230,7 @@ struct PlayerView: View {
         .onChange(of: activeUtilityPanel) { panel in
             controlTooltip.dismiss()
             if panel != .episodes {
+                state.dismissPlayerEpisodeNavigationChoice()
                 inspectedPlayerEpisode = nil
             }
             panel == nil ? scheduleControlsHide() : keepControlsVisible()
@@ -246,6 +248,13 @@ struct PlayerView: View {
             if activeUtilityPanel == .episodes {
                 alignPlayerEpisodePageWithCurrentEpisode()
             }
+        }
+        .onChange(of: state.playerEpisodeNavigationChoice?.id) { id in
+            guard id != nil else { return }
+            inspectedPlayerEpisode = nil
+            playerEpisodePageIndex = 0
+            activeUtilityPanel = .episodes
+            revealControls()
         }
         .onChange(of: state.shortcutPlayerEscapeRequest) { _ in
             handleEscapeShortcut()
@@ -274,8 +283,8 @@ struct PlayerView: View {
                 Text(L10n.string("player.ended.preparing", fallback: "Preparing the episode list…"))
             } else if state.isPlayerEpisodeListIncomplete {
                 Button(L10n.string("player.ended.reload-list", fallback: "Reload episode list")) { state.retryPlayerEpisodeList() }
-            } else if !state.hasNextEpisode {
-                Text(L10n.string("player.ended.no-next", fallback: "No next episode is available in this playback line and version."))
+            } else if let explanation = state.playerEpisodeNavigationExplanation(offset: 1) {
+                Text(explanation)
             }
         }
         .font(.callout).foregroundStyle(.white)
@@ -1051,14 +1060,8 @@ struct PlayerView: View {
 
     private func adjacentResourceHelp(previous: Bool) -> String {
         let title = previous ? state.previousPlayerResourceTitle : state.nextPlayerResourceTitle
-        if previous ? state.hasPreviousEpisode : state.hasNextEpisode { return title }
-        if state.isPlayerEpisodeListPreparing {
-            return title + " · " + L10n.string("player.queue.preparing", fallback: "Loading episode list")
-        }
-        if state.playerEpisodes.isEmpty {
-            return title + " · " + L10n.string("player.queue.unavailable", fallback: "No episode list available")
-        }
-        return title + " · " + L10n.string("player.queue.no-adjacent", fallback: "No adjacent episode available")
+        return state.playerEpisodeNavigationExplanation(offset: previous ? -1 : 1)
+            .map { title + " · " + $0 } ?? title
     }
 
     private var transportControls: some View {
@@ -1229,7 +1232,7 @@ struct PlayerView: View {
     }
 
     private func episodePanel(maximumSize: CGSize) -> some View {
-        let presentations = state.playerEpisodePresentations
+        let presentations = state.playerPanelEpisodePresentations
         let pageCount = PlayerEpisodePagePolicy.pages(presentations).count
         let selectionSessionID = state.playerEpisodeSelectionSessionID
         let safePageIndex = min(max(0, playerEpisodePageIndex), max(0, pageCount - 1))
@@ -1244,6 +1247,14 @@ struct PlayerView: View {
                     detail: state.playerResourceCountText
                 )
 
+                if let choice = state.playerEpisodeNavigationChoice {
+                    Text(L10n.string("player.queue.choose-resource", fallback: "This episode has %d resources. Choose one to continue.", choice.episodes.count))
+                        .font(.callout)
+                    Button(L10n.string("player.queue.show-all", fallback: "Show All Episodes")) {
+                        state.dismissPlayerEpisodeNavigationChoice()
+                        alignPlayerEpisodePageWithCurrentEpisode()
+                    }.buttonStyle(.link)
+                }
                 VStack(alignment: .leading, spacing: 5) {
                     Text(L10n.string(state.hasLoadedPlayerEpisode ? "player.episode.now" : "player.episode.pending", fallback: "Current Resource: %@", state.currentPlayerEpisodePresentation?.displayName ?? state.currentPlaybackTitle))
                         .font(.callout.weight(.semibold)).lineLimit(2)
@@ -1251,6 +1262,7 @@ struct PlayerView: View {
                         Text([state.currentPlayerSourceName, state.currentPlayerVersionText].filter { !$0.isEmpty }.joined(separator: " · ")).lineLimit(1).font(.caption).foregroundColor(.secondary)
                         Spacer()
                         Button(L10n.string("player.episode.locate", fallback: "Locate Current")) {
+                            state.dismissPlayerEpisodeNavigationChoice()
                             alignPlayerEpisodePageWithCurrentEpisode()
                             playerEpisodeLocateRevision += 1
                         }.buttonStyle(.bordered).controlSize(.small)
@@ -1394,7 +1406,7 @@ struct PlayerView: View {
 
     private func alignPlayerEpisodePageWithCurrentEpisode() {
         playerEpisodePageIndex = PlayerEpisodePagePolicy.pageIndex(
-            presentations: state.playerEpisodePresentations,
+            presentations: state.playerPanelEpisodePresentations,
             selectedEpisodeID: state.currentPlayerEpisodeID
         )
     }

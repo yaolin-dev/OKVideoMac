@@ -1,0 +1,7 @@
+[
+  "Versions/B/Autoupdate",
+  "Versions/B/Sparkle",
+  "Versions/B/Updater.app/Contents/MacOS/Updater",
+  "Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader",
+  "Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer"
+]
