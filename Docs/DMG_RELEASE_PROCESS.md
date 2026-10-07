@@ -1,5 +1,11 @@
 # DMG Release Process
 
+当前公开版本为 OKVideoMac 0.8.1（Build 134），正式用户下载为 `OKVideoMac-0.8.1.dmg`。ZIP 仅为内部归档。
+
+Tag `v0.8.1` 固定 `4b18f10134a88a6b7d66e6f8e293fdbd01da86f2`；本次 Apple notarization `Accepted`，Submission：`fad950f0-a03f-465a-812a-d4f232d635f5`。最终 DMG SHA-256：`cd03a46b6f9a6e5bb75c70478e530c4713989f8fd0d9b46c1d80657a563a6922`。签名、staple、Gatekeeper、最终 DMG 与全新安装 smoke、16 个公开资产核验已通过；见[0.8.1 正式验证](RELEASE_VALIDATION_0.8.1.md)。
+
+## 0.8.0 历史正式发布
+
 OKVideoMac 0.8.0（Build 130）的正式用户下载格式固定为
 `OKVideoMac-0.8.0.dmg`。ZIP 仅为内部归档，不是 GitHub Release 的主下载。
 
@@ -102,7 +108,7 @@ OKVideoMac/macOS/OKVideoMac/Scripts/package-app.sh \
 分支上的预发布 DMG 仅用于确认流水线。开发分支以不重写历史的 merge 或可审计的
 fast-forward 进入 `main` 后，必须从 `main` 的 exact release commit 重新构建
 App、DMG、source release、SBOM 和 checksums，完成公证与安装 smoke test 后才
-允许创建 `v0.8.0`。不得把分支预发布 DMG 直接复用为正式发布资产。
+允许创建该版本的正式 tag。不得把分支预发布 DMG 直接复用为正式发布资产。
 
 ## 0.4.0 历史正式发布记录
 

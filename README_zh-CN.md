@@ -1,7 +1,5 @@
 # OKVideoMac
 
-当前发布候选为 **0.8.1（Build 134）**，包含自动更新、分集导航与 CoreAudio 生命周期修复；正式发布须完成签名、公证和全部发布门禁。见[自动更新说明](Docs/AUTOMATIC_UPDATES.md)。
-
 [English](README.md) | 简体中文
 
 **面向 Apple Silicon 的原生 macOS IPTV/点播播放器，支持 Xtream、M3U/XMLTV、
@@ -15,7 +13,7 @@
 使用 Swift 和 SwiftUI/AppKit 构建。Android 是部分 Java/Dex Provider 按需使用的
 可选兼容层。
 
-最新稳定版本为 **0.8.0（Build 130）**，已完成 Developer ID 签名和 Apple 公证。
+最新稳定版本为 **0.8.1（Build 134）**，已完成 Developer ID 签名和 Apple 公证。
 
 **原生 macOS · Xtream · IPTV/点播 · M3U/XMLTV · libmpv · 多 Provider 搜索 ·
 QuickJS/Node Spider**
@@ -24,12 +22,12 @@ QuickJS/Node Spider**
 
 ### [下载最新稳定版本 →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-最新稳定版本为 **0.8.0（Build 130）** · macOS 12.0+ · 仅支持 Apple Silicon
-（`arm64`）。该版本改进部分 TVBox 配置与授权、CatPaw 搜索与详情、播放器控件、
-定位和自动连播，以及 Android Runtime 恢复。
+最新稳定版本为 **0.8.1（Build 134）** · macOS 12.0+ · 仅支持 Apple Silicon
+（`arm64`）。该版本加入可选自动检查更新，修复蓝牙音频设备变化崩溃，以及其他集
+存在重复上传时分集导航与自动连播失效的问题。
 
 下载已完成 Developer ID 签名和 Apple 公证的
-[v0.8.0 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.0)。
+[v0.8.1 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.8.1/OKVideoMac-0.8.1.dmg)。
 本版本已通过 Staple、Gatekeeper 评估和安装 smoke test。
 
 打开 DMG，将 `OKVideoMac.app` 拖入“应用程序”即可。无需关闭 Gatekeeper 或 SIP。
@@ -38,7 +36,16 @@ QuickJS/Node Spider**
 > OKVideoMac 是播放器与 Provider 客户端，不内置第三方影视源、账号、Cookie、
 > 解析服务或 DRM 密钥。
 
-## 0.8.0 新增与改进：相对 0.7.3 的变化
+## 0.8.1 新增与修复
+
+- 修复 CoreAudio 初始化失败后，蓝牙音频设备变化可能引起的崩溃。
+- 加入 Sparkle 2.10.0 可选每日检查更新，下载和安装由用户确认；播放时延后自动提示，更新安装与普通重启互斥。
+- 修复其他集存在重复上传时，上一集/下一集按钮和自动连播被一起禁用的问题；相邻资源有歧义时手动选择。
+- 正式发布签名更新清单，并精确核验包内 34 个可执行文件。
+
+0.8.0 或本地测试更新源版本需手动安装本版。见[发布说明](Docs/RELEASE_NOTES_0.8.1.md)、[正式验证](Docs/RELEASE_VALIDATION_0.8.1.md)与[自动更新说明](Docs/AUTOMATIC_UPDATES.md)。
+
+## 0.8.0 历史改进：相对 0.7.3 的变化
 
 - **部分 TVBox 配置与授权：** 配置卡片可取消，原生对话框/网页按当前交互管理；
   确认原生授权后最多重新解析一次同一集，不推测未知登录协议。
@@ -276,13 +283,17 @@ Managed Runtime 安装与 Android Emulator Session 分开；安装和 Session �
 
 ## 发布完整性
 
-0.8.0 / Build 130 DMG 已按 [DMG 发布流程](Docs/DMG_RELEASE_PROCESS.md)通过 Release
+0.8.1 / Build 134 DMG 已按 [DMG 发布流程](Docs/DMG_RELEASE_PROCESS.md)通过 Release
 打包、Developer ID 签名、Apple 公证（`Accepted`）、Staple、Gatekeeper 和安装 smoke test。
-Tag `v0.8.0` 固定发布提交 `b049b381db52b5bbbeec9cf58bf54a5bd50a4f39`，下载随附对应
+Tag `v0.8.1` 固定发布提交 `4b18f10134a88a6b7d66e6f8e293fdbd01da86f2`，下载随附对应
 源码归档、SBOM 和校验和。文档状态更新不改变历史签名资产或其源码快照。详见
-[0.8.0 正式发布验证](Docs/RELEASE_VALIDATION_0.8.0.md)与[源码发布流程](Docs/SOURCE_RELEASE_PROCESS.md)。
+[0.8.1 正式发布验证](Docs/RELEASE_VALIDATION_0.8.1.md)与[源码发布流程](Docs/SOURCE_RELEASE_PROCESS.md)。
 
 ## 文档
+
+- [0.8.1 发布说明](Docs/RELEASE_NOTES_0.8.1.md)
+- [0.8.1 正式验证](Docs/RELEASE_VALIDATION_0.8.1.md)
+- [自动更新说明](Docs/AUTOMATIC_UPDATES.md)
 
 - [详细项目文档](OKVideoMac/README.md)
 - [兼容性指南](OKVideoMac/macOS/OKVideoMac/Docs/COMPATIBILITY.md)

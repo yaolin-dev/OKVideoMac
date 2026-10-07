@@ -1,10 +1,10 @@
 # Release SBOM Process
 
-Date: 2026-10-01
+Date: 2026-10-08
 
-Current published release: OKVideoMac 0.8.0 (Build 130). All four SBOMs are
-provided with [v0.8.0](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.0);
-see [release validation](RELEASE_VALIDATION_0.8.0.md). Historical hashes below remain unchanged.
+Current published release: OKVideoMac 0.8.1 (Build 134). All four SBOMs are
+provided with [v0.8.1](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.1);
+see [release validation](RELEASE_VALIDATION_0.8.1.md). Historical hashes below remain unchanged.
 
 Every packaged release contains four machine-readable documents under
 `Contents/Resources/Legal/Compliance/SBOM/`:
@@ -15,8 +15,10 @@ Every packaged release contains four machine-readable documents under
 - `OKVideoMac-Android.cdx.json` (CycloneDX 1.6).
 
 `Tools/SourceAudit/generate_sbom.py` inventories the built App, not a static
-expected-file list. It refuses an unknown Mach-O and requires exactly 29
-arm64 Mach-O components. Every nested Mach-O has a final post-signing SHA-256.
+expected-file list. It refuses unknown or missing executables by comparing the exact approved Mach-O
+path set in `ThirdParty/approved-macho-paths.json`. The 0.8.1 package contains
+34 arm64 Mach-O components, including five Sparkle executables; the count is
+derived from that exact path set and is not a lower-bound allowance. Every nested Mach-O has a final post-signing SHA-256.
 The main executable deliberately has no embedded-SBOM hash because signing the
 outer App rewrites its code signature, which would create a circular resource
 hash. Its integrity is checked by `codesign` after outer signing.

@@ -1,14 +1,13 @@
 # Changelog
 
 
-## [0.8.1] - 2026-10-08 (release candidate; unreleased)
+## [0.8.1] - 2026-10-08
 
 - Fix previous/next navigation and autoplay when another episode in the same line has duplicate uploads; ambiguous adjacent uploads require a user choice.
-
 - Add opt-in daily update checks, manual checking, playback-aware permission/reminders, and explicit download/install confirmation with Sparkle 2.10.0.
 - Keep update installation and the ordinary relaunch helper mutually exclusive; installation waits for actual asynchronous cleanup.
-- Preserve the CoreAudio #18383 Bluetooth lifecycle backport.
-- Prepare Build 134 for the stable HTTPS update feed; reject local/unconfigured update channels in distribution packages. Publication remains gated on signing, notarization and final artifact verification.
+- Fix CoreAudio Bluetooth device-change crashes using the #18383 backport and fault-tested failure cleanup.
+- Release Build 134 for the stable HTTPS update feed; reject local/unconfigured update channels in distribution packages. Developer ID, Apple notarization, stapling and final artifact verification passed; see [formal verification](Docs/RELEASE_VALIDATION_0.8.1.md).
 
 ## [0.8.0] - 2026-10-01
 

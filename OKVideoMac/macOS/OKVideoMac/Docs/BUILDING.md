@@ -1,12 +1,12 @@
 # Building OKVideoMac
 
-## 0.8.0 release verification
+## 0.8.1 release verification
 
-The current release is 0.8.0 (Build 130), compared against the published
-`v0.7.3` commit. Actual test, static-check and Release package results are in the
-[0.8.0 readiness record](../../../../Docs/RELEASE_READINESS_0.8.0.md); module/file
-coverage and Git suggestions are in the
-[release preparation record](../../../../Docs/RELEASE_PREPARATION_0.8.0.md).
+The current release is 0.8.1 (Build 134), built from the clean main release
+commit pinned by `v0.8.1`. Actual test, static-check and Release package results are in the
+[0.8.1 readiness record](../../../../Docs/RELEASE_READINESS_0.8.1.md); coverage and hardware
+limits are explicit in that record and the
+[formal verification](../../../../Docs/RELEASE_VALIDATION_0.8.1.md).
 
 Keep `project.yml` and the committed Xcode project version/build synchronized.
 Use XcodeGen 2.38.0 exactly for regeneration comparisons; a newer generator is
@@ -31,10 +31,16 @@ standard `Scripts/package-app.sh`. It verifies a local ad-hoc **Release** packag
 never a Debug deliverable; only a verified package may replace the Desktop app.
 The snapshot records local acceptance identity, not a public release commit.
 
-The formal 0.8.0 package from clean commit `b049b381db52b5bbbeec9cf58bf54a5bd50a4f39` passed
+The formal 0.8.1 package from clean commit `4b18f10134a88a6b7d66e6f8e293fdbd01da86f2` passed
 Developer ID signing, notarization, stapling, Gatekeeper and installation smoke.
 The public release has the complete source/SBOM/hash asset set; see
-[formal verification](../../../../Docs/RELEASE_VALIDATION_0.8.0.md).
+[formal verification](../../../../Docs/RELEASE_VALIDATION_0.8.1.md).
+
+The stable updater configuration is tracked in `Supporting/StableUpdateConfiguration.plist`.
+Distribution packaging rejects local/unconfigured feeds, verifies the exact 34-path
+Mach-O inventory, and generates a signed appcast after final DMG notarization and
+stapling. Keep the existing Developer ID/notary profile and the dedicated Sparkle
+Keychain signing account available. See [automatic updates](../../../../Docs/AUTOMATIC_UPDATES.md).
 
 ## 0.6.1 historical release verification
 

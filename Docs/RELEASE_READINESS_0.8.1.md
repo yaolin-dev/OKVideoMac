@@ -1,6 +1,8 @@
 # OKVideoMac 0.8.1（Build 134）发布就绪记录
 
-状态：正式发布候选；最终签名、公证、staple、安装及 GitHub 状态以正式验证记录为准。
+状态：正式发布已完成。签名、公证 Accepted、staple、安装及 GitHub 资产核验见[正式验证记录](RELEASE_VALIDATION_0.8.1.md)。
+
+以下保留本轮发布准备时实际执行的测试与环境边界。
 
 ## 本轮范围
 

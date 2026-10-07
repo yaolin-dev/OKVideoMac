@@ -1,10 +1,10 @@
 # Historical OKVideoMac 0.6.1 (Build 101) Source Provenance Audit
 
 > This file preserves the 0.6.1 native-input audit and its historical output hashes; it is
-> not the current binary manifest. For 0.8.0 use the generated
-> `OKVideoMac-0.8.0-build130-SOURCE_RELEASE_INDEX.json`,
-> `OKVideoMac-0.8.0-build130-SOURCE_RELEASE_MANIFEST.json` and the
-> [0.8.0 final validation record](RELEASE_VALIDATION_0.8.0.md).
+> not the current binary manifest. For 0.8.1 use the generated
+> `OKVideoMac-0.8.1-build134-SOURCE_RELEASE_INDEX.json`,
+> `OKVideoMac-0.8.1-build134-SOURCE_RELEASE_MANIFEST.json` and the
+> [0.8.1 final validation record](RELEASE_VALIDATION_0.8.1.md).
 >
 > The 0.6.1 third-party input set is unchanged from 0.6.0. Audited output hashes below are
 > historical evidence; the generated 0.6.1 source index and manifest bind current
@@ -93,7 +93,7 @@ promoted to `VERIFIED`.
 | zlib 1.3.2 | [zlib-1.3.2.tar.gz](https://www.zlib.net/zlib-1.3.2.tar.gz) | retained Portfile expects `d7a0654783a4da529d1bb793b7ad9c3318020af77667bcae35f95d0e42a792f3` | `Zlib` | MacPorts receipt; current upstream URL yields a regenerated different hash, so equivalence is not claimed | `9b5d38572e4d584ec4354b8721f77bcff30ac6f70ad5385e226d8cbb0d13a5f7` | `PARTIAL` |
 | MacPorts libc++ / libc++abi 11.1.0 | no independent distfile; receipt copies its clang-11 input | not available | `Apache-2.0 WITH LLVM-exception` plus retained legacy notices | MacPorts receipt; historical clang input and build flags incomplete | libc++ `9b883e2304d73fb4c2ae9ee8a4ff934b7f5f9c676719b461122b97515e72347c`; libc++abi `9f7d551daa6b311e6528fb0ca6d466e9384cad8da983fbd1313ec472bfea51bb` | `PARTIAL` |
 
-## Audited Release output inventory
+## Historical audited Release output inventory
 
 The stable native third-party hashes below freeze the audited inputs reused by
 0.6.0 (Build 100). Some unchanged inputs were first audited for the Build 63 candidate.
