@@ -15955,6 +15955,9 @@ final class OKVideoMacTests: XCTestCase {
         try Data("continuity".utf8).write(
             to: runtime.appendingPathComponent("runtime-continuity.json")
         )
+        let fingerprintURL = avdHome.appendingPathComponent("runtime-compatibility.json")
+        let fingerprint = Data("original-system-image-fingerprint".utf8)
+        try fingerprint.write(to: fingerprintURL)
         let unrelatedADBMarker = root.appendingPathComponent(
             "default-5037-adb-running"
         )
@@ -15972,6 +15975,11 @@ final class OKVideoMacTests: XCTestCase {
                 ]
             )
         )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fingerprintURL.path),
+                       "A rebuilt AVD must not inherit the previous system-image identity")
+        XCTAssertEqual(try Data(contentsOf: result.directory.appendingPathComponent(
+            "runtime-compatibility.json")), fingerprint)
+        XCTAssertTrue(result.movedItemNames.contains("runtime-compatibility.json"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: privateAVD.path))
         XCTAssertFalse(
             FileManager.default.fileExists(
@@ -29132,6 +29140,41 @@ private actor NodeProxyEndpointTransitionHTTPClient: HTTPClient {
 }
 
 final class AndroidRuntimeModeCompatibilityTests: XCTestCase {
+    func testInterruptedRebuildIsRecoveredBeforeExternalCompatibilityAdmission() async throws {
+        for recover in [false, true] {
+            let fixture = try makeFixture()
+            defer { fixture.cleanup() }
+            let sdk = fixture.root.appendingPathComponent("ExternalSDK")
+            fixture.defaults.set(sdk.path, forKey: AndroidRuntimeModeStore.legacySDKRootDefaultsKey)
+            try makeSDK(at: sdk, includeAVDManager: false)
+            try makeSystemImage(at: sdk)
+            try makeAVD(in: fixture.support)
+            let layout = AndroidRuntimeLayout(applicationSupportDirectory: fixture.support)
+            let rebuild = PrivateAVDRebuildStore(layout: layout)
+            _ = try rebuild.begin()
+            try makeAVD(in: fixture.support, variant: "google_apis")
+            let coordinator = try AndroidRuntimeModeCoordinator(
+                store: fixture.store, layout: layout, catalog: try BundledRuntimeCatalog.load(),
+                externalValidator: makeValidator(fixture: fixture, javaRuntime: nil),
+                managedRuntimeUsableAtMigration: false, managedUsability: { false },
+                ensureManagedReady: { XCTFail("external recovery must not install managed components") },
+                cancelManagedAdmission: {}, configureSession: { _, _ in },
+                sessionStatus: { .stopped },
+                recoverPrivateAVD: recover ? { try rebuild.recover() } : nil)
+            if recover {
+                try await coordinator.prepareRuntime()
+                XCTAssertFalse(rebuild.hasPendingTransaction)
+                let validation = makeValidator(fixture: fixture, javaRuntime: nil).validate(sdkRoot: sdk)
+                XCTAssertTrue(validation.canPrepareRuntime)
+                XCTAssertEqual(validation.avdFingerprintStatus, .compatible)
+            } else {
+                do { try await coordinator.prepareRuntime(); XCTFail("pending rebuild must block admission") }
+                catch { XCTAssertEqual(error as? RuntimeMaintenanceError, .pendingRecovery) }
+                XCTAssertTrue(rebuild.hasPendingTransaction)
+            }
+        }
+    }
+
     func testNewUserMigratesToManagedAndPersistsAcrossRelaunch() throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }
@@ -33499,5 +33542,158 @@ final class TVBoxConfigurationActionStateTests: XCTestCase {
         await requests.finish("detail:a"); await work.value
         XCTAssertNil(state.siteActionStatus)
         let reads = await requests.readLog(); XCTAssertEqual(reads.count, 1)
+    }
+}
+
+final class AndroidAVDRebuildRegressionTests: XCTestCase {
+    func testChangedImageRebuildWritesFreshFingerprintAndStillRejectsOldIdentity() throws {
+        for tag in ["default", "google_apis"] {
+            let support = FileManager.default.temporaryDirectory.appendingPathComponent("AVDImageRegression-\(UUID())")
+            defer { try? FileManager.default.removeItem(at: support) }
+            let layout = AndroidRuntimeLayout(applicationSupportDirectory: support)
+            try FileManager.default.createDirectory(at: layout.avdDirectory, withIntermediateDirectories: true)
+            let store = AndroidRuntimeAVDFingerprintStore(layout: layout, fileManager: .default)
+            func fingerprint(_ tag: String) -> AndroidRuntimeAVDCompatibilityFingerprint {
+                AndroidRuntimeAVDCompatibilityFingerprint(avdSchema: 1, runtimeSource: .external,
+                    runtimeIdentity: "fixture-sdk", systemImagePackageID: "system-images;android-35;\(tag);arm64-v8a",
+                    apiLevel: 35, abi: "arm64-v8a", tag: tag, emulatorRevision: "36.6.11")
+            }
+            let old = fingerprint("default"), new = fingerprint(tag)
+            try store.write(old)
+            let rebuild = PrivateAVDRebuildStore(layout: layout)
+            _ = try rebuild.begin()
+            try FileManager.default.createDirectory(at: layout.avdDirectory, withIntermediateDirectories: true)
+            let status = store.inspect(expected: new, hasAVD: true, legacyManagedManifestExists: false)
+            XCTAssertEqual(status, .adoptableLegacy)
+            try store.adoptOrRefresh(new, status: status)
+            XCTAssertEqual(store.inspect(expected: new, hasAVD: true, legacyManagedManifestExists: false), .compatible)
+            if tag != "default" {
+                XCTAssertEqual(store.inspect(expected: old, hasAVD: true, legacyManagedManifestExists: false), .incompatible("system-image"))
+            }
+            try rebuild.commit()
+        }
+    }
+
+    func testFingerprintRejectionsRemainStrictAfterRebuildFix() throws {
+        let support = FileManager.default.temporaryDirectory.appendingPathComponent("AVDStrictFingerprint-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: support) }
+        let layout = AndroidRuntimeLayout(applicationSupportDirectory: support)
+        let store = AndroidRuntimeAVDFingerprintStore(layout: layout, fileManager: .default)
+        func fingerprint(source: AndroidRuntimeAVDSource = .external, identity: String = "sdk-a",
+                         abi: String = "arm64-v8a", emulator: String = "36.6.11") -> AndroidRuntimeAVDCompatibilityFingerprint {
+            AndroidRuntimeAVDCompatibilityFingerprint(avdSchema: 1, runtimeSource: source,
+                runtimeIdentity: identity, systemImagePackageID: "system-images;android-35;default;arm64-v8a",
+                apiLevel: 35, abi: abi, tag: "default", emulatorRevision: emulator)
+        }
+        let original = fingerprint()
+        try store.write(original)
+        let bytes = try Data(contentsOf: store.url)
+        for (expected, reason) in [(fingerprint(source: .managed), "runtime-source"),
+                                   (fingerprint(identity: "sdk-b"), "external-sdk-identity"),
+                                   (fingerprint(abi: "x86_64"), "system-image"),
+                                   (fingerprint(emulator: "37.1.0"), "emulator-major-version")] {
+            let status = store.inspect(expected: expected, hasAVD: true, legacyManagedManifestExists: false)
+            XCTAssertEqual(status, .incompatible(reason))
+            XCTAssertThrowsError(try store.adoptOrRefresh(expected, status: status))
+            XCTAssertEqual(try Data(contentsOf: store.url), bytes)
+        }
+        try Data("damaged-fingerprint".utf8).write(to: store.url)
+        XCTAssertEqual(store.inspect(expected: original, hasAVD: true, legacyManagedManifestExists: false),
+                       .incompatible("fingerprint-unreadable"))
+    }
+
+    func testSpaceBudgetUsesCreatedAVDPartitionAndSDCard() {
+        let calculate = AndroidDexBridgeRuntime.privateAVDRequiredFreeBytes
+        XCTAssertEqual(calculate(nil), 5 * 1_024 * 1_024 * 1_024)
+        XCTAssertEqual(calculate("disk.dataPartition.size=10G\nsdcard.size=512 MB\n"), 10 * 1_024 * 1_024 * 1_024 + 512 * 1_024 * 1_024)
+        XCTAssertEqual(calculate("disk.dataPartition.size=9223372036854775807G"), Int64.max)
+        XCTAssertEqual(calculate("disk.dataPartition.size=invalid"), calculate(nil))
+    }
+
+    func testDiskFailureRecognizesActualEmulatorMessages() {
+        XCTAssertTrue(AndroidDexBridgeRuntime.isInsufficientDiskSpace("Your device does not have enough disk space to run avd"))
+        XCTAssertTrue(AndroidDexBridgeRuntime.isInsufficientDiskSpace("Not enough space to create userdata partition"))
+        XCTAssertTrue(AndroidDexBridgeRuntime.isInsufficientDiskSpace("No space left on device"))
+        XCTAssertFalse(AndroidDexBridgeRuntime.isInsufficientDiskSpace("Disk space requirements to run avd are met"))
+    }
+
+    func testRebuildPreflightFailureDoesNotLeavePreparingStatusOrMoveData() async throws {
+        let support = FileManager.default.temporaryDirectory.appendingPathComponent("AVDFailedRebuild-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: support) }
+        let layout = AndroidRuntimeLayout(applicationSupportDirectory: support)
+        try FileManager.default.createDirectory(at: layout.avdDirectory, withIntermediateDirectories: true)
+        let marker = layout.avdDirectory.appendingPathComponent("userdata-qemu.img")
+        try Data("unchanged-userdata".utf8).write(to: marker)
+        let runtime = AndroidDexBridgeRuntime(applicationSupportDirectory: support, environment: [:])
+        await runtime.setRuntimeSelection(mode: .external, externalSDKRoot: support.appendingPathComponent("MissingSDK"))
+        do { try await runtime.rebuildPrivateAVD(); XCTFail("incomplete SDK must fail preflight") }
+        catch { }
+        let status = await runtime.status()
+        XCTAssertEqual(status.phase, .failed)
+        XCTAssertEqual(status.stage, .preparingAVD)
+        XCTAssertEqual(try Data(contentsOf: marker), Data("unchanged-userdata".utf8))
+        XCTAssertFalse(PrivateAVDRebuildStore(layout: layout).hasPendingTransaction)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: layout.backups.path))
+    }
+
+    func testRepeatedRebuildAndRollbackKeepsMatchingOriginals() throws {
+        let support = FileManager.default.temporaryDirectory.appendingPathComponent("AVDRepeatedRebuild-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: support) }
+        let layout = AndroidRuntimeLayout(applicationSupportDirectory: support)
+        let rebuild = PrivateAVDRebuildStore(layout: layout)
+        try FileManager.default.createDirectory(at: layout.avdDirectory, withIntermediateDirectories: true)
+        let config = layout.avdDirectory.appendingPathComponent("config.ini")
+        let fingerprint = layout.avdHome.appendingPathComponent("runtime-compatibility.json")
+        try Data("original".utf8).write(to: config)
+        try Data("original".utf8).write(to: fingerprint)
+        for _ in 0..<50 {
+            _ = try rebuild.begin()
+            try FileManager.default.createDirectory(at: layout.avdDirectory, withIntermediateDirectories: true)
+            try Data("incomplete-new".utf8).write(to: config)
+            try rebuild.recover()
+            XCTAssertEqual(try Data(contentsOf: config), try Data(contentsOf: fingerprint))
+            XCTAssertFalse(rebuild.hasPendingTransaction)
+        }
+    }
+
+    func testRealIsolatedAVDRebuildBootBridgeAndRestart() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let root = env["OKVIDEOMAC_AVD_REBUILD_E2E_ROOT"],
+              let sdk = env["OKVIDEOMAC_AVD_REBUILD_E2E_SDK"] else {
+            throw XCTSkip("requires an explicit isolated AVD root and local SDK")
+        }
+        let support = URL(fileURLWithPath: root)
+        // Never point this test at the user's live Runtime.
+        guard support.lastPathComponent.hasPrefix("OKVideoMac-AVD-Rebuild-E2E-") else {
+            XCTFail("E2E must use a dedicated isolated directory"); return
+        }
+        let runtime = AndroidDexBridgeRuntime(applicationSupportDirectory: support)
+        await runtime.setRuntimeSelection(mode: .external, externalSDKRoot: URL(fileURLWithPath: sdk))
+        let layout = AndroidRuntimeLayout(applicationSupportDirectory: support)
+        do {
+            try await runtime.start()
+            let first = await runtime.status()
+            XCTAssertTrue(first.isRunning)
+            await runtime.stop()
+            try await runtime.rebuildPrivateAVD()
+            let rebuilt = await runtime.status()
+            XCTAssertTrue(rebuilt.isRunning)
+            XCTAssertFalse(PrivateAVDRebuildStore(layout: layout).hasPendingTransaction)
+            let validation = ExternalAndroidRuntimeValidator(applicationSupportDirectory: support)
+                .validate(sdkRoot: URL(fileURLWithPath: sdk))
+            XCTAssertTrue(validation.canPrepareRuntime)
+            XCTAssertEqual(validation.avdFingerprintStatus, .compatible)
+            await runtime.stop()
+            try await runtime.start()
+            let restarted = await runtime.status()
+            XCTAssertTrue(restarted.isRunning)
+            await runtime.stop()
+            let stopped = await runtime.diagnosticSnapshot()
+            XCTAssertFalse(stopped.emulatorProcessRunning)
+            XCTAssertEqual(stopped.shutdownMechanism, .adbEmuKill)
+        } catch {
+            await runtime.stop()
+            throw error
+        }
     }
 }

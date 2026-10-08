@@ -762,6 +762,12 @@ enum AndroidRuntimeUserFacingErrorMapper {
         let key: String
         let fallback: String
         switch category {
+        case .privateAVDRebuildFailed:
+            key = "android.error.avd-rebuild-failed"
+            fallback = "Android Runtime rebuilding or recovery failed. The retained data was not deleted. Export diagnostics and retry recovery."
+        case .insufficientDiskSpace:
+            key = "android.failure.disk-space"
+            fallback = "There is not enough free space on the disk containing the Android Runtime. Free space on that disk and try again; rebuilding does not free the retained backup."
         case .sdkIncomplete:
             key = "android.error.sdk-incomplete"
             fallback = "The selected Android SDK is incomplete. Choose an SDK that includes ADB, Emulator, and a compatible system image in Settings."
@@ -17712,11 +17718,14 @@ final class AppState: ObservableObject {
         do {
             try await environment.androidRuntimeModeCoordinator
                 .prepareRuntimeRepair()
-            androidRuntimeStatus = try await environment.androidDexBridge
-                .rebuildRuntime()
+            let status = try await environment.androidDexBridge.rebuildRuntime()
+            progressTask.cancel()
+            androidRuntimeStatus = status
         } catch {
-            androidRuntimeStatus = await environment.androidDexBridge
-                .runtimeStatus()
+            progressTask.cancel()
+            let status = await environment.androidDexBridge.runtimeStatus()
+            androidRuntimeStatus = status.phase == .failed ? status
+                : .failed(LogRedactor.text(error.localizedDescription), stage: .preparingAVD)
             show(error, title: L10n.string("android.runtime.rebuild.failed", fallback: "Unable to Rebuild Android Runtime"))
         }
     }

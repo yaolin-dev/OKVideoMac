@@ -126,3 +126,14 @@ Java 或 `avdmanager` 也可启动；新建或重建 AVD 才需要两者。缺�
 Android SDK/Emulator 的上游条款与信息以
 [Android Developers](https://developer.android.com/studio)为准；Zulu JRE 信息以
 [Azul](https://www.azul.com/downloads/)为准。
+
+## 可恢复的 AVD 重建（0.8.2）
+
+“修复 Android Runtime”将专用 AVD、INI、AVD manifest、兼容性指纹与连续性记录一起备份。
+重建期间固定所选 system image；创建失败时恢复匹配的旧数据，将未完成的新数据保留在
+`Backups/<backup>/FailedRebuild`。中断记录在正常兼容性准入前处理；所有权不明确或原始
+文件缺失时停止恢复，不删除 userdata。新环境创建成功后若仅启动失败，保留该一致的新环境。
+
+磁盘预检针对 AVD 所在卷，而非 SDK 所在卷；检查启动最低空间及新建配置的 userdata/SD 卡
+容量，Emulator 自身的空间检查继续保留。重建会保留旧备份，不能借此释放备份占用的空间。
+旧版本遗留备份应继续保留；不要直接删除不匹配指纹，恢复时必须核对 SDK 与原 system image。

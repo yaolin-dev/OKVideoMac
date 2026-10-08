@@ -1,5 +1,7 @@
 # OKVideoMac
 
+当前发布候选为 **0.8.2（Build 135）**，修复 Android Runtime 重建与恢复；正式签名、公证及发布待完成，稳定下载仍为 0.8.1。见[候选版说明](Docs/RELEASE_NOTES_0.8.2.md)。
+
 [English](README.md) | 简体中文
 
 **面向 Apple Silicon 的原生 macOS IPTV/点播播放器，支持 Xtream、M3U/XMLTV、

@@ -1045,6 +1045,7 @@ actor AndroidRuntimeModeCoordinator {
     private let managedAVDAdmission: ManagedAVDAdmission?
     private let configureSession: SessionConfiguration
     private let sessionStatus: SessionStatus
+    private let recoverPrivateAVD: ManagedAdmission?
     private var maintenanceToken: UUID?
     private var maintenanceEpoch = 0
     private var record: AndroidRuntimeModeRecord
@@ -1061,7 +1062,8 @@ actor AndroidRuntimeModeCoordinator {
         cancelManagedAdmission: @escaping ManagedCancellation,
         managedAVDAdmission: ManagedAVDAdmission? = nil,
         configureSession: @escaping SessionConfiguration,
-        sessionStatus: @escaping SessionStatus
+        sessionStatus: @escaping SessionStatus,
+        recoverPrivateAVD: ManagedAdmission? = nil
     ) throws {
         self.store = store
         self.layout = layout
@@ -1073,6 +1075,7 @@ actor AndroidRuntimeModeCoordinator {
         self.managedAVDAdmission = managedAVDAdmission
         self.configureSession = configureSession
         self.sessionStatus = sessionStatus
+        self.recoverPrivateAVD = recoverPrivateAVD
         record = try store.loadOrMigrate(
             managedRuntimeUsable: managedRuntimeUsableAtMigration
         )
@@ -1099,6 +1102,12 @@ actor AndroidRuntimeModeCoordinator {
 
     func prepareRuntime() async throws {
         let epoch = maintenanceEpoch
+        try requireMaintenanceIdle(epoch: epoch)
+        if PrivateAVDRebuildStore(layout: layout).hasPendingTransaction {
+            try await recoverPrivateAVD?()
+            try requireMaintenanceIdle(epoch: epoch)
+            try PrivateAVDRebuildStore(layout: layout).requireNoPendingTransaction()
+        }
         while true {
             try requireMaintenanceIdle(epoch: epoch)
             let admitted = record

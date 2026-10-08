@@ -128,3 +128,20 @@ incompatible components are reported without falling through to another SDK.
 
 Refer to [Android Developers](https://developer.android.com/studio) for upstream
 Android terms and [Azul](https://www.azul.com/downloads/) for Zulu JRE details.
+
+## Recoverable AVD rebuilds (0.8.2)
+
+Repair Android Runtime backs up the AVD, companion INI, AVD manifest, compatibility
+fingerprint and continuity metadata together. New creation uses one selected
+system image. Creation failure restores the matching old data and preserves
+partial new data in `Backups/<backup>/FailedRebuild`. An interrupted transaction
+is recovered before normal compatibility admission; ambiguous ownership or
+missing original files blocks recovery without deleting userdata. A successfully
+created environment remains in place if its subsequent boot fails.
+
+Free space is checked on the AVD disk, not the SDK disk. Android documents a
+[5 GB startup minimum](https://developer.android.com/studio/run/emulator-troubleshooting#disk-space);
+the created AVD's userdata/SD-card settings are also checked. Emulator retains
+its own allocation checks. Rebuilding retains backups and does not free their
+space. Preserve backups from earlier versions; do not blindly delete a mismatched
+fingerprint. A restored AVD must match the selected SDK and image.

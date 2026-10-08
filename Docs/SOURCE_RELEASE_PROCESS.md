@@ -1,5 +1,13 @@
 # Immutable Corresponding-Source Release Process
 
+The 0.8.2 (Build 135) release candidate uses `OKVideoMac-0.8.2.dmg`,
+`OKVideoMac-0.8.2-macOS-arm64.zip`, and
+`OKVideoMac-0.8.2-build135-SOURCE_RELEASE_INDEX.json`. The formal release uses the
+same clean-main-commit, Developer ID, Accepted notarization, staple, Gatekeeper,
+signed appcast and exact 16-public-asset workflow established by 0.8.1 below.
+The local acceptance package cannot be reused as the public binary. Publication
+is pending those gates; the immutable 0.8.1 artifacts remain available.
+
 The published 0.8.1 (Build 134) release uses
 `OKVideoMac-0.8.1-macOS-arm64.zip` as the internal identity carrier and
 `OKVideoMac-0.8.1.dmg` as the notarized public download.

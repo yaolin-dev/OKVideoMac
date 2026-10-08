@@ -1,5 +1,7 @@
 # OKVideoMac
 
+The current release candidate is **0.8.2 (Build 135)** with recoverable Android Runtime rebuilds. Formal signing, notarization and publication are pending; the stable download remains 0.8.1. See the [candidate notes](Docs/RELEASE_NOTES_0.8.2.md).
+
 English | [简体中文](README_zh-CN.md)
 
 **A native macOS IPTV/VOD player for Apple Silicon with Xtream, M3U/XMLTV,

@@ -1918,6 +1918,8 @@ enum AndroidRuntimeFailureCategory: String, Codable, Sendable {
     case hostGPUADBOfflineTimeout
     case softwareGPUADBOfflineTimeout
     case privateAVDRecoveryRequired
+    case privateAVDRebuildFailed
+    case insufficientDiskSpace
     case emulatorLaunchFailed
     case emulatorLaunchTimedOut
     case emulatorExitedBeforeADB
@@ -2167,6 +2169,10 @@ struct AndroidRuntimeFailureError: LocalizedError, Sendable {
 
     var userFacingMessage: String {
         switch record.category {
+        case .privateAVDRebuildFailed:
+            return record.message
+        case .insufficientDiskSpace:
+            return L10n.string("android.failure.disk-space", fallback: "There is not enough free space on the disk containing the Android Runtime. Free space on that disk and try again; rebuilding does not free the retained backup.")
         case .sdkIncomplete:
             return L10n.string("android.failure.sdk-incomplete", fallback: "The Android SDK is incomplete. In Settings, choose an SDK containing ADB, Emulator, and a system image.")
         case .javaRuntimeMissing:
@@ -6760,7 +6766,9 @@ actor AndroidDexBridgeRuntime {
         let message = LogRedactor.text(error.localizedDescription)
         let lowercased = message.lowercased()
         let category: AndroidRuntimeFailureCategory
-        if failedStage == .probingBridge,
+        if Self.isInsufficientDiskSpace(message) {
+            category = .insufficientDiskSpace
+        } else if failedStage == .probingBridge,
            let bridgeCategory = Self.bridgeFailureCategory(
                for: probeErrorCategory
            ) {
@@ -7573,91 +7581,119 @@ actor AndroidDexBridgeRuntime {
         )
     }
 
-    func rebuildPrivateAVD() async throws {
+    /// Called before compatibility admission, so an interrupted rebuild cannot
+    /// leave a partial AVD/fingerprint pair to be adopted by ordinary startup.
+    func recoverInterruptedPrivateAVDRebuild() async throws {
+        let layout = AndroidRuntimeLayout(runtimeRoot: runtimeDirectory)
+        let store = PrivateAVDRebuildStore(layout: layout, fileManager: fileManager)
+        guard store.hasPendingTransaction else { return }
         guard maintenanceStopToken == nil else { throw RuntimeMaintenanceError.busy }
-        let stopToken = await Self.startupSingleFlight.beginStopping(
-            permanent: false
-        )
+        maintenanceStopToken = UUID()
+        let token = await Self.startupSingleFlight.beginStopping(permanent: false)
+        maintenanceStopToken = token
         do {
-            guard let toolchain = resolver().resolve() else {
-                throw AppError.spider(
-                    "未找到用户选择的完整 Android SDK；未修改现有 Runtime"
-                )
+            let lease = try RuntimeMaintenanceLease(layout: layout, exclusive: true)
+            defer { withExtendedLifetime(lease) {} }
+            // Never restore files under a running or ambiguously owned Emulator.
+            guard try matchingAVDProcessCount() == 0, emulatorProcess?.isRunning != true else {
+                throw RuntimeMaintenanceError.sessionNotStopped
             }
-            guard toolchain.avdManager != nil else {
-                throw AppError.spider(
-                    "所选 Android SDK 缺少 Command-line Tools（avdmanager）；未修改现有 Runtime"
-                )
+            try store.recover()
+            clearRuntimeRecord()
+            resetResolvedRuntimeState()
+            operationStatus = nil
+            appendEvent(stage: .preparingAVD, event: "privateAVDRebuildRecovered")
+        } catch {
+            operationStatus = nil
+            let failure = AndroidRuntimeFailureError(record: AndroidRuntimeFailureRecord(
+                occurredAt: Date(), stage: .preparingAVD,
+                category: error is CancellationError ? .appRequestedTermination
+                    : (Self.isInsufficientDiskSpace(error.localizedDescription) ? .insufficientDiskSpace : .privateAVDRebuildFailed),
+                message: LogRedactor.text(error.localizedDescription)))
+            preserveFailure(failure)
+            maintenanceStopToken = nil
+            await Self.startupSingleFlight.finishStopping(token)
+            throw error
+        }
+        maintenanceStopToken = nil
+        await Self.startupSingleFlight.finishStopping(token)
+    }
+
+    func rebuildPrivateAVD() async throws {
+        try await recoverInterruptedPrivateAVDRebuild()
+        guard maintenanceStopToken == nil else { throw RuntimeMaintenanceError.busy }
+        // Reserve before yielding; two repair callers must not share a backup.
+        maintenanceStopToken = UUID()
+        let stopToken = await Self.startupSingleFlight.beginStopping(permanent: false)
+        maintenanceStopToken = stopToken
+        let layout = AndroidRuntimeLayout(runtimeRoot: runtimeDirectory)
+        let store = PrivateAVDRebuildStore(layout: layout, fileManager: fileManager)
+        do {
+            let lease = try RuntimeMaintenanceLease(layout: layout, exclusive: true)
+            defer { withExtendedLifetime(lease) {} }
+            try RuntimeMaintenanceService.requireNoPendingTransaction(layout: layout)
+            try Task.checkCancellation()
+            guard let toolchain = resolver().resolve(), let _ = toolchain.avdManager else {
+                throw AppError.spider("所选 Android SDK 缺少完整工具（avdmanager）；未修改现有 Runtime")
             }
-            guard !resolver().interactiveSystemImages(in: toolchain).isEmpty
-            else {
-                throw AppError.spider(
-                    "所选 Android SDK 没有可用的 arm64 可视 system image；本版本不会自动下载"
-                )
+            let context = try managedAVDContext(for: toolchain)
+            let candidates = resolver().interactiveSystemImages(in: toolchain)
+            let selectedImage = context.map { context in
+                candidates.first { $0.packageID == context.systemImagePackageID }
+            } ?? candidates.first
+            guard let selectedImage else {
+                throw AppError.spider("所选 Android SDK 没有可用的 arm64 可视 system image；未修改现有 Runtime")
             }
             guard resolver().resolveJavaRuntime() != nil else {
-                throw AppError.spider(
-                    "重建 Android Runtime 需要 Java Runtime；未修改现有 Runtime"
-                )
+                throw AppError.spider("重建 Android Runtime 需要 Java Runtime；未修改现有 Runtime")
             }
-            // A rebuilt guest must see the same app-owned key used by the
-            // private ADB daemon on its very first boot.
+            try checkPrivateAVDRebuildSpace()
             try ensurePrivateADBKeypair(toolchain)
-
-            let metadataSnapshots = Self.privateAVDMetadataSnapshots(
-                runtimeDirectory: runtimeDirectory,
-                fileManager: fileManager
-            )
+            let metadata = Self.privateAVDMetadataSnapshots(runtimeDirectory: runtimeDirectory,
+                                                           fileManager: fileManager)
             await performStop(reason: "privateAVDRepair")
-            let matchingProcessCount = try matchingAVDProcessCount()
-            guard Self.privateAVDRepairMayProceed(
-                shutdownMechanism: lastShutdownMechanism,
-                matchingAVDProcessCount: matchingProcessCount
-            ) else {
-                throw AppError.spider(
-                    "无法明确确认 OKVideoMac 专用 Emulator 已停止，已拒绝重建"
-                )
+            guard Self.privateAVDRepairMayProceed(shutdownMechanism: lastShutdownMechanism,
+                                                   matchingAVDProcessCount: try matchingAVDProcessCount()) else {
+                throw AppError.spider("无法明确确认 OKVideoMac 专用 Emulator 已停止，已拒绝重建")
             }
-
-            appendEvent(
-                stage: .preparingAVD,
-                event: "privateAVDBackupStart"
-            )
-            let backup = try Self.movePrivateAVDToRecoverableBackup(
-                runtimeDirectory: runtimeDirectory,
-                fileManager: fileManager,
-                metadataSnapshots: metadataSnapshots
-            )
-            lastPrivateAVDRecoveryBackup = backup.map {
-                "<app-support>/AndroidRuntime/Backups/"
-                    + $0.directory.lastPathComponent
-            }
-            if let backup {
-                appendEvent(
-                    stage: .preparingAVD,
-                    event: "privateAVDBackupCreated",
-                    detail: backup.directory.lastPathComponent
-                )
-            }
+            try Task.checkCancellation()
+            appendEvent(stage: .preparingAVD, event: "privateAVDBackupStart")
+            let backup = try store.begin(metadataSnapshots: metadata)
+            lastPrivateAVDRecoveryBackup = "<app-support>/AndroidRuntime/Backups/" + backup.directory.lastPathComponent
+            appendEvent(stage: .preparingAVD, event: "privateAVDBackupCreated",
+                        detail: backup.directory.lastPathComponent)
             clearRuntimeRecord()
-            ready = false
-            acceptsNewerBridge = false
-            lastNetworkCheck = nil
+            resetResolvedRuntimeState()
             lastFailure = nil
             transition(to: .preparingAVD)
-            try ensureManagedAVD(
-                toolchain,
-                gpuBackend: preferredGPUBackend
-            )
-            appendEvent(
-                stage: .preparingAVD,
-                event: "privateAVDRecreated",
-                detail: "gpu=\(preferredGPUBackend.rawValue)"
-            )
+            do {
+                try Task.checkCancellation()
+                try ensureManagedAVD(toolchain, gpuBackend: preferredGPUBackend,
+                                     rebuildImage: selectedImage)
+                try Task.checkCancellation()
+                let config = try String(contentsOf: avdDirectory.appendingPathComponent("config.ini"), encoding: .utf8)
+                try checkPrivateAVDRebuildSpace(configuration: config)
+                try store.commit()
+            } catch {
+                do { try store.recover() }
+                catch { throw AppError.spider("Android 重建恢复尚未完成；已保留旧备份与新建数据，停止启动。请重试恢复。") }
+                throw error
+            }
+            appendEvent(stage: .preparingAVD, event: "privateAVDRecreated",
+                        detail: selectedImage.packageID)
         } catch {
+            operationStatus = nil
+            let failure = AndroidRuntimeFailureError(record: AndroidRuntimeFailureRecord(
+                occurredAt: Date(), stage: .preparingAVD,
+                category: error is CancellationError ? .appRequestedTermination
+                    : (Self.isInsufficientDiskSpace(error.localizedDescription) ? .insufficientDiskSpace : .privateAVDRebuildFailed),
+                message: LogRedactor.text(error.localizedDescription)))
+            preserveFailure(failure)
+            maintenanceStopToken = nil
             await Self.startupSingleFlight.finishStopping(stopToken)
             throw error
         }
+        maintenanceStopToken = nil
         await Self.startupSingleFlight.finishStopping(stopToken)
         try await ensureRuntimeStartup(forceInstall: true)
     }
@@ -8043,6 +8079,7 @@ actor AndroidDexBridgeRuntime {
     }
 
     func ensureReady(forceNetworkCheck: Bool = false) async throws {
+        try await recoverInterruptedPrivateAVDRebuild()
         try RuntimeMaintenanceService.requireNoPendingTransaction(layout: AndroidRuntimeLayout(applicationSupportDirectory: applicationSupportDirectory))
         guard !(await Self.startupSingleFlight.isRejectingStartup()) else {
             throw AndroidRuntimeAdmissionError.terminating
@@ -8162,6 +8199,8 @@ actor AndroidDexBridgeRuntime {
         forceInstall: Bool = false,
         retryKnownFailedNetworkCommand: Bool = true
     ) async throws {
+        try PrivateAVDRebuildStore(layout: AndroidRuntimeLayout(runtimeRoot: runtimeDirectory))
+            .requireNoPendingTransaction()
         try await Self.startupSingleFlight.ensureRuntime { [self] in
             try await prepareRuntime(
                 forceInstall: forceInstall,
@@ -10467,6 +10506,58 @@ actor AndroidDexBridgeRuntime {
         return output
     }
 
+    static func isInsufficientDiskSpace(_ output: String) -> Bool {
+        let lower = output.lowercased()
+        return lower.contains("not enough disk space")
+            || lower.contains("does not have enough disk space")
+            || lower.contains("not enough space to create userdata")
+            || lower.contains("no space left on device")
+            || lower.contains("insufficient disk space")
+    }
+
+    /// Android documents a 5 GB startup minimum. For a freshly created AVD,
+    /// also budget its configured userdata and SD card, on the AVD volume.
+    /// This early check never replaces Emulator's own allocation checks.
+    static func privateAVDRequiredFreeBytes(configuration: String?) -> Int64 {
+        let minimum: Int64 = 5 * 1_024 * 1_024 * 1_024
+        guard let configuration else { return minimum }
+        func bytes(_ key: String) -> Int64 {
+            guard let raw = AndroidManagedAVDConfiguration.value(for: key, in: configuration) else { return 0 }
+            let text = raw.uppercased().replacingOccurrences(of: " ", with: "")
+            let digits = text.prefix(while: { $0.isNumber })
+            guard let count = Int64(digits) else { return 0 }
+            let unit = String(text.dropFirst(digits.count))
+            let multiplier: Int64
+            switch unit {
+            case "G", "GB": multiplier = 1_024 * 1_024 * 1_024
+            case "M", "MB": multiplier = 1_024 * 1_024
+            case "K", "KB": multiplier = 1_024
+            case "", "B": multiplier = 1
+            default: return 0
+            }
+            let result = count.multipliedReportingOverflow(by: multiplier)
+            return result.overflow ? Int64.max : result.partialValue
+        }
+        let sum = bytes("disk.dataPartition.size").addingReportingOverflow(bytes("sdcard.size"))
+        return max(minimum, sum.overflow ? Int64.max : sum.partialValue)
+    }
+
+    private func checkPrivateAVDRebuildSpace(configuration: String? = nil) throws {
+        var volumePath = avdDirectory
+        while !fileManager.fileExists(atPath: volumePath.path), volumePath.path != "/" {
+            volumePath.deleteLastPathComponent()
+        }
+        let attributes = try fileManager.attributesOfFileSystem(forPath: volumePath.path)
+        guard let free = attributes[.systemFreeSize] as? NSNumber else {
+            throw AppError.spider("无法检查 Android Runtime 所在磁盘的可用空间；未开始重建")
+        }
+        let required = Self.privateAVDRequiredFreeBytes(configuration: configuration)
+        guard free.int64Value >= required else {
+            throw AppError.spider(String(format: "Insufficient disk space: Android Runtime requires %.2f GiB; %.2f GiB available on the AVD volume. Old data is preserved.",
+                                        Double(required) / 1_073_741_824, Double(free.int64Value) / 1_073_741_824))
+        }
+    }
+
     static func privateAVDMetadataSnapshots(
         runtimeDirectory: URL,
         fileManager: FileManager
@@ -10493,105 +10584,14 @@ actor AndroidDexBridgeRuntime {
         identifier: String = UUID().uuidString,
         metadataSnapshots: [String: Data] = [:]
     ) throws -> AndroidPrivateAVDBackupResult? {
-        let avdHome = runtimeDirectory.appendingPathComponent(
-            "avd",
-            isDirectory: true
-        )
-        let avd = avdHome.appendingPathComponent(
-            "\(Self.avdName).avd",
-            isDirectory: true
-        )
-        let companion = avdHome.appendingPathComponent(
-            "\(Self.avdName).ini"
-        )
-        let avdManifest = avdHome.appendingPathComponent(
-            "avd-manifest.json"
-        )
-        let continuity = runtimeDirectory.appendingPathComponent(
-            "runtime-continuity.json"
-        )
-        let movable = [avd, companion, avdManifest, continuity].filter {
-            fileManager.fileExists(atPath: $0.path)
-        }
-        let allowedMetadataNames = Set([
-            "runtime-manifest.json",
-            "runtime-continuity.json",
-            "runtime-profile.json"
-        ])
-        let metadata = metadataSnapshots.filter {
-            allowedMetadataNames.contains($0.key)
-        }
-        guard !movable.isEmpty || !metadata.isEmpty else { return nil }
-
-        let backups = runtimeDirectory.appendingPathComponent(
-            "Backups",
-            isDirectory: true
-        )
-        try fileManager.createDirectory(
-            at: backups,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let safeIdentifier = identifier.filter {
-            $0.isLetter || $0.isNumber || $0 == "-"
-        }
-        let suffix = String(safeIdentifier.prefix(8))
-        let backup = backups.appendingPathComponent(
-            "\(Self.avdName)-\(formatter.string(from: now))-\(suffix)",
-            isDirectory: true
-        )
-        try fileManager.createDirectory(
-            at: backup,
-            withIntermediateDirectories: false,
-            attributes: [.posixPermissions: 0o700]
-        )
-
-        var completedMoves: [(source: URL, destination: URL)] = []
-        var writtenMetadata: [String] = []
-        do {
-            for source in movable {
-                let destination = backup.appendingPathComponent(
-                    source.lastPathComponent,
-                    isDirectory: source.pathExtension == "avd"
-                )
-                try fileManager.moveItem(at: source, to: destination)
-                completedMoves.append((source, destination))
-            }
-            for (name, data) in metadata.sorted(by: { $0.key < $1.key }) {
-                let destination = backup.appendingPathComponent(name)
-                if !fileManager.fileExists(atPath: destination.path) {
-                    try data.write(to: destination, options: [.atomic])
-                    try fileManager.setAttributes(
-                        [.posixPermissions: 0o600],
-                        ofItemAtPath: destination.path
-                    )
-                }
-                writtenMetadata.append(name)
-            }
-        } catch {
-            var restoreFailed = false
-            for move in completedMoves.reversed() {
-                if fileManager.fileExists(atPath: move.source.path) {
-                    restoreFailed = true
-                    continue
-                }
-                do { try fileManager.moveItem(at: move.destination, to: move.source) }
-                catch { restoreFailed = true }
-            }
-            if !restoreFailed { try? fileManager.removeItem(at: backup) }
-            throw error
-        }
-        return AndroidPrivateAVDBackupResult(
-            directory: backup,
-            movedItemNames: completedMoves.map {
-                $0.destination.lastPathComponent
-            }.sorted(),
-            metadataItemNames: writtenMetadata.sorted()
-        )
+        let layout = AndroidRuntimeLayout(runtimeRoot: runtimeDirectory)
+        let store = PrivateAVDRebuildStore(layout: layout, fileManager: fileManager)
+        let backup = try store.begin(now: now, identifier: identifier,
+                                     metadataSnapshots: metadataSnapshots)
+        try store.commit()
+        return AndroidPrivateAVDBackupResult(directory: backup.directory,
+                                            movedItemNames: backup.movedItemNames,
+                                            metadataItemNames: backup.metadataItemNames)
     }
 
     private func backupManagedAVDForRenderingUpgrade() throws {
@@ -10666,7 +10666,8 @@ actor AndroidDexBridgeRuntime {
 
     private func ensureManagedAVD(
         _ toolchain: AndroidToolchain,
-        gpuBackend: AndroidEmulatorGPUBackend
+        gpuBackend: AndroidEmulatorGPUBackend,
+        rebuildImage: AndroidSystemImage? = nil
     ) throws {
         try createRuntimeDirectories()
         let managedContext = try managedAVDContext(for: toolchain)
@@ -10785,11 +10786,16 @@ actor AndroidDexBridgeRuntime {
             )
         }
         let image: AndroidSystemImage?
-        if let managedContext {
+        if let rebuildImage {
+            guard managedContext == nil
+                    || managedContext?.systemImagePackageID == rebuildImage.packageID,
+                  resolver().interactiveSystemImages(in: toolchain).contains(rebuildImage) else {
+                throw AppError.spider("重建期间所选 Android system image 已变化；已停止")
+            }
+            image = rebuildImage
+        } else if let managedContext {
             image = resolver().interactiveSystemImages(in: toolchain)
-                .first(where: {
-                    $0.packageID == managedContext.systemImagePackageID
-                })
+                .first(where: { $0.packageID == managedContext.systemImagePackageID })
         } else {
             image = resolver().interactiveSystemImages(in: toolchain).first
         }

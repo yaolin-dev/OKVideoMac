@@ -1,5 +1,14 @@
 # Building OKVideoMac
 
+## 0.8.2 release preparation
+
+Build 135 repairs recoverable AVD rebuilds. Local candidate testing has passed;
+formal distribution must be rebuilt from the exact clean main commit with
+`package-app.sh --mode distribution --notarize`. Reuse the existing Developer ID,
+notary profile and stable updater configuration. Require Apple Accepted, staple,
+Gatekeeper, final DMG and installation checks before publication. Tests and scope
+are in [release readiness](../../../../Docs/RELEASE_READINESS_0.8.2.md).
+
 ## 0.8.1 release verification
 
 The current release is 0.8.1 (Build 134), built from the clean main release

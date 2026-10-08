@@ -117,6 +117,9 @@ struct AppEnvironment {
             },
             sessionStatus: {
                 await androidSession.status()
+            },
+            recoverPrivateAVD: {
+                try await androidSession.recoverInterruptedPrivateAVDRebuild()
             }
         )
         let androidDexBridge = AndroidDexBridgeClient(

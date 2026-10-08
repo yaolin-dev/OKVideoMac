@@ -1,7 +1,8 @@
 # Compatibility
 
-- 对照版本：0.8.1（Build 134）
+- 对照版本：0.8.2（Build 135）
 - 最近更新：2026-10-08
+- 发布候选 0.8.2 修复 AVD 重建恢复；目标 tag `v0.8.2` 须等待正式分发门禁。公开稳定版仍为 0.8.1；本轮未新增性能保证。
 - 当前稳定版本：0.8.1（Build 134），Apple Silicon / arm64 / macOS 12.0+
 - 最新公开公证 DMG：0.8.1（Build 134）；Developer ID、Apple Accepted、Staple、Gatekeeper 与安装 smoke 均通过
 - 发布 tag `v0.8.1` 固定 `4b18f10134a88a6b7d66e6f8e293fdbd01da86f2`；正式门禁结果见

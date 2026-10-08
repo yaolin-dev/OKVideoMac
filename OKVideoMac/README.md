@@ -12,6 +12,10 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
 ## 当前版本
 
+- 当前发布候选：0.8.2（Build 135），待正式签名、公证与发布。
+- 目标 tag：`v0.8.2`，全部发布门禁通过后创建；对应源码索引名称为 `OKVideoMac-0.8.2-build135-SOURCE_RELEASE_INDEX.json`。
+- 修复专用 AVD 重建后沿用旧 system-image 指纹的问题，失败时恢复旧环境，保留备份与失败现场；见[候选说明](../Docs/RELEASE_NOTES_0.8.2.md)。
+
 - 当前稳定版本：0.8.1（Build 134）
 - Tag：`v0.8.1`；固定 exact release commit `4b18f10134a88a6b7d66e6f8e293fdbd01da86f2`。
 - source release index：`OKVideoMac-0.8.1-build134-SOURCE_RELEASE_INDEX.json`。

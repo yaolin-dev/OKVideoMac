@@ -57,7 +57,7 @@ GitHub Release：[v0.8.1](https://github.com/yaolin-dev/OKVideoMac/releases/tag/
 - 固定的官方 Sparkle 工具生成并验证 signed appcast 和 EdDSA DMG 签名；生成前后最终 DMG 哈希相同。Keychain 保存更新私钥，未导出或提交。
 - 稳定更新源：`https://github.com/yaolin-dev/OKVideoMac/releases/latest/download/appcast.xml`；enclosure 固定 `v0.8.1/OKVideoMac-0.8.1.dmg`。
 - 从最终 DMG 复制全新安装副本，文件/符号链接清单与 DMG 和已打包 App 一致；安装签名、Gatekeeper、Hardened Runtime 启动验证通过。
-- 桌面入口指向 `/Users/linyao/Applications/OKVideoMac-Release081-build134/OKVideoMac.app`；旧本地 App 保留。
+- 桌面入口指向 `~/Applications/OKVideoMac-Release081-build134/OKVideoMac.app`；旧本地 App 保留。
 - 实际最终 DMG runtime 加载包内 `Contents/Frameworks/libmpv.dylib`；UUID `342C8BC5-C6E1-374D-A04E-9AE9BEDE7800`。安装副本同库字节一致。
 
 Apple 预检曾因团队协议返回 HTTP 403。用户本人完成协议后，复用原 Developer ID 和 `OKVideoMac-Notary` 获得本次 Accepted；未更换公证凭据或导入证书。Sparkle 签名工具的系统 Keychain 授权由用户完成；私钥未进入仓库、日志或发布包。
