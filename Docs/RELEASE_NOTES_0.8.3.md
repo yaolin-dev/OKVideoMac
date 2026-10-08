@@ -14,3 +14,5 @@
 AppKit 整窗像素与几何回归不等同 Mission Control 的人工合成验收；本轮不宣称完整第三方站点、云盘账号、真实蓝牙硬件或完整更新安装流程均已测试。
 
 English: removes the primary sidebar divider slot while keeping independent native sidebar and detail materials; stabilizes the window-owned sidebar toggle, synchronizes appearance changes, restores readable native search hints, and fails Release builds with a missing Android Bridge APK. Bridge/native dependencies and existing data boundaries are unchanged.
+
+发布后补录：正式 v0.8.3 已公开，Apple notarization Accepted（`105f049e-55f9-4c61-b365-e5dab1ab3f9f`），staple、Gatekeeper、安装及 16 个资产验证通过；见[正式验证](RELEASE_VALIDATION_0.8.3.md)。GitHub 资产中的构建时说明快照保留原字节。

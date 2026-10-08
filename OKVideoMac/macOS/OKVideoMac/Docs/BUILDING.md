@@ -1,12 +1,14 @@
 # Building OKVideoMac
 
-## 0.8.3 preparation
+## 0.8.3 release verification
 
-Release builds now fail if `AndroidDexBridge-release.apk` is absent. Run `Scripts/build-android-dex-bridge.sh` with the existing SDK/JDK/signing configuration first; do not bypass the embed phase. Formal packaging remains `Scripts/package-app.sh --mode distribution --notarize` from an exact clean main commit. The performance-test startup harness is excluded from normal distribution builds.
+Build 136 was rebuilt from the exact clean main commit pinned by v0.8.3 using `Scripts/package-app.sh --mode distribution --notarize`. Existing Developer ID, Hardened Runtime, stable update configuration, Apple Accepted, staple, Gatekeeper, DMG and installation gates passed. See [formal verification](../../../../Docs/RELEASE_VALIDATION_0.8.3.md).
 
-## 0.8.2 release verification
+Release builds now reject a missing `AndroidDexBridge-release.apk`; build it with `Scripts/build-android-dex-bridge.sh` and existing SDK/JDK/signing configuration. Do not bypass the embed phase. The performance-test startup harness is excluded from normal distribution builds.
 
-The current public release is 0.8.2 (Build 135), rebuilt from the exact clean
+## Historical 0.8.2 release verification
+
+The historical public release is 0.8.2 (Build 135), rebuilt from the exact clean
 main commit pinned by v0.8.2. The existing distribution pipeline passed
 Developer ID, Hardened Runtime, Apple Accepted, staple, Gatekeeper, signed
 appcast, corresponding-source binding and installation smoke. Actual results

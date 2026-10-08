@@ -2,7 +2,7 @@
 
 ## [0.8.3] - 2026-10-09
 
-- Release Build 136; formal distribution and publication remain gated on current validation.
+- Release Build 136 passed Developer ID / Hardened Runtime, Apple Accepted, staple, Gatekeeper and final publication checks; see [verification](Docs/RELEASE_VALIDATION_0.8.3.md).
 - Remove the primary sidebar divider slot through public AppKit split APIs, preserving independent sidebar/detail materials and full-height titlebar coverage.
 - Keep the sidebar toggle attached to the window across navigation; synchronize native controls and SwiftUI content during appearance changes.
 - Restore native gray search styling, blue symbols and readable localized search hints.

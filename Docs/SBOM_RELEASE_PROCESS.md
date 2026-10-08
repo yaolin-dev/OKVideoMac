@@ -1,12 +1,10 @@
 # Release SBOM Process
 
-0.8.3 (Build 136) preparation: regenerate all four SBOMs and corresponding-source manifests from the exact clean release commit. Android Bridge/native dependency versions are unchanged; use the existing exact bundle-inventory verification. The published 0.8.2 results below remain historical.
+Date: 2026-10-09
 
-Date: 2026-10-08
-
-Current published release: OKVideoMac 0.8.2 (Build 135). All four SBOMs are
-provided with [v0.8.2](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.2);
-see [release validation](RELEASE_VALIDATION_0.8.2.md). Historical hashes below remain unchanged.
+Current published release: OKVideoMac 0.8.3 (Build 136). All four SBOMs are
+provided with [v0.8.3](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.3);
+see [release validation](RELEASE_VALIDATION_0.8.3.md). Historical hashes below remain unchanged.
 
 Every packaged release contains four machine-readable documents under
 `Contents/Resources/Legal/Compliance/SBOM/`:
@@ -18,7 +16,7 @@ Every packaged release contains four machine-readable documents under
 
 `Tools/SourceAudit/generate_sbom.py` inventories the built App, not a static
 expected-file list. It refuses unknown or missing executables by comparing the exact approved Mach-O
-path set in `ThirdParty/approved-macho-paths.json`. The 0.8.2 package contains
+path set in `ThirdParty/approved-macho-paths.json`. The 0.8.3 package contains
 34 arm64 Mach-O components, including five Sparkle executables; the count is
 derived from that exact path set and is not a lower-bound allowance. Every nested Mach-O has a final post-signing SHA-256.
 The main executable deliberately has no embedded-SBOM hash because signing the
