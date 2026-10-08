@@ -1,5 +1,11 @@
 # OKVideoMac
 
+- 当前发布候选：0.8.3（Build 136）
+- 目标 tag：`v0.8.3`，正式分发门禁通过后创建。
+- source release index：`OKVideoMac-0.8.3-build136-SOURCE_RELEASE_INDEX.json`。
+
+本轮修复主侧栏分隔槽、标题栏按钮闪动、外观切换错色与搜索提示；Android APK 缺失不再误报 ADB 映射失败，Release 缺少 APK 会终止构建。稳定版和下方历史验证仍为 0.8.2；见[0.8.3 发布说明](../Docs/RELEASE_NOTES_0.8.3.md)。
+
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于
 原生 Xtream、M3U/XMLTV、配置格式和运行时，而不是简单以 TVBox、FongMi、MiraPlay 或 CatPawOpen
 等生态名称判断。最新稳定版本为 **0.8.2（Build 135）**，支持

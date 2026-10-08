@@ -278,77 +278,325 @@ import OKVideoCore
 
 @MainActor
 final class BrowserSplitDividerTests: XCTestCase {
-    func testBackingCoversDividerWithoutChangingNativeGeometry() throws {
-        let split = NSSplitView(frame: NSRect(x: 0, y: 0, width: 960, height: 600))
-        split.isVertical = true; split.dividerStyle = .thin
-        let sidebar = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 220, height: 600))
-        AppSidebarNativePolicy.configure(background: sidebar)
-        let content = NSView(frame: NSRect(x: 221, y: 0, width: 739, height: 600))
-        split.addArrangedSubview(sidebar); split.addArrangedSubview(content)
-        let window = NSWindow(contentRect: split.frame, styleMask: [.titled, .resizable], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false; window.contentView = split
-        defer { window.close() }
-        split.adjustSubviews()
-        let frames = split.arrangedSubviews.map(\.frame)
-        let probe = BrowserSplitDividerBacking.Probe(frame: sidebar.bounds)
-        sidebar.addSubview(probe)
-        XCTAssertEqual(split.arrangedSubviews.map(\.frame), frames)
-        XCTAssertTrue(probe.backing.superlayer === split.layer)
-        for width: CGFloat in [900, 1280, 1537] {
-            split.setFrameSize(NSSize(width: width, height: 601))
-            split.adjustSubviews()
-            probe.refresh()
-            XCTAssertFalse(probe.backing.isHidden)
-            XCTAssertLessThan(probe.backing.frame.minX, sidebar.frame.maxX)
-            XCTAssertGreaterThan(probe.backing.frame.maxX, content.frame.minX)
-            XCTAssertEqual(probe.backing.frame.height, split.bounds.height)
-            XCTAssertEqual(probe.backing.backgroundColor?.alpha, 1)
-            XCTAssertEqual(split.arrangedSubviews.count, 2, "Backing must never become a third pane")
-            XCTAssertEqual(sidebar.material, .sidebar)
-            XCTAssertEqual(sidebar.blendingMode, .behindWindow)
-        }
-        sidebar.isHidden = true; probe.refresh()
-        XCTAssertTrue(probe.backing.isHidden)
-        sidebar.isHidden = false; split.adjustSubviews(); probe.refresh()
-        XCTAssertFalse(probe.backing.isHidden)
-        probe.detach()
-        XCTAssertNil(probe.backing.superlayer)
-    }
-
-    func testRealRootDividerAppearanceAndNarrowWindow() async throws {
+    private func withBrowser(_ run: (AppState, NSWindow) async throws -> Void) async throws {
         let state = AppState(environment: nil)
-        let host = NSHostingController(rootView: RootView().environmentObject(state).environmentObject(state.navigation))
-        let window = NSWindow(contentRect: NSRect(x: 160, y: 180, width: 1280, height: 720),
+        state.selectSection(.settings)
+        let host = NSHostingController(rootView: RootView()
+            .environmentObject(state).environmentObject(state.navigation))
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 1370, height: 780),
             styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false; window.contentViewController = host
-        window.title = "OKVideoMac 分栏验证 126"
+        window.isReleasedWhenClosed = false
+        window.contentViewController = host
+        BrowserWindowChromeController.configure(window)
+        window.title = "OKVideoMac native sidebar verification"
         window.makeKeyAndOrderFront(nil)
         defer { window.close() }
-        let directory = URL(fileURLWithPath: "/private/tmp/ok126-seam-renders")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        for name in [NSAppearance.Name.aqua, .darkAqua] {
-            for width: CGFloat in [900, 1280] {
-                window.appearance = NSAppearance(named: name)
-                window.setContentSize(NSSize(width: width, height: 720))
-                try await Task.sleep(nanoseconds: 150_000_000)
-                let probe = try XCTUnwrap(BrowserKeyboardView.descendants(of: window.contentView)
-                    .compactMap { $0 as? BrowserSplitDividerBacking.Probe }.first)
-                probe.attach()
-                XCTAssertNotNil(probe.backing.superlayer, "Must attach inside the actual NavigationSplitView hierarchy")
-                XCTAssertFalse(probe.backing.isHidden)
-                XCTAssertGreaterThan(probe.backing.bounds.height, 500)
-                XCTAssertEqual(probe.backing.backgroundColor?.alpha, 1)
-                let color = try XCTUnwrap(probe.backing.backgroundColor.flatMap(NSColor.init(cgColor:))?.usingColorSpace(.deviceRGB))
-                if name == .aqua { XCTAssertGreaterThan(color.redComponent, 0.9) }
-                else { XCTAssertLessThan(color.redComponent, 0.3) }
-                let view = try XCTUnwrap(window.contentView)
-                let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
-                view.cacheDisplay(in: view.bounds, to: bitmap)
-                try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to:
-                    directory.appendingPathComponent("root-\(name.rawValue)-\(Int(width)).png"))
+        try await run(state, window)
+    }
+
+    private func settle(_ window: NSWindow) async throws {
+        try await Task.sleep(nanoseconds: 200_000_000)
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+    }
+
+    private func primarySplit(in window: NSWindow) throws -> NSSplitView {
+        try XCTUnwrap(BrowserKeyboardView.descendants(of: window.contentView)
+            .compactMap { $0 as? NSSplitView }.first { split in
+                split.isVertical && split.arrangedSubviews.count == 2 &&
+                BrowserKeyboardView.descendants(of: split.arrangedSubviews[0])
+                    .contains { $0 is BrowserSidebarOutlineView }
+            })
+    }
+
+    func testSettingsBoundaryHasNoBrightBand() async throws {
+        try await withBrowser { _, window in
+            for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+                window.appearance = NSAppearance(named: appearance)
+                for width: CGFloat in [1120, 1370, 1537] {
+                    window.setContentSize(NSSize(width: width, height: 780))
+                    try await self.settle(window)
+                    let split = try self.primarySplit(in: window)
+                    let view = try XCTUnwrap(window.contentView)
+                    let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+                    view.cacheDisplay(in: view.bounds, to: bitmap)
+                    let left = view.convert(NSPoint(x: split.arrangedSubviews[0].frame.maxX, y: 0), from: split).x
+                    let right = view.convert(NSPoint(x: split.arrangedSubviews[1].frame.minX, y: 0), from: split).x
+                    let scale = CGFloat(bitmap.pixelsWide) / view.bounds.width
+                    let start = Int(floor(left * scale)) - 2
+                    let end = Int(ceil(right * scale)) + 2
+                    // Sample empty areas next to the primary boundary. Compare
+                    // against both adjacent surfaces instead of hardcoding a
+                    // theme color, so native materials can follow the system.
+                    for fraction: CGFloat in [0.60, 0.75, 0.90] {
+                        let y = Int(CGFloat(bitmap.pixelsHigh) * fraction)
+                        func brightness(_ x: Int) throws -> CGFloat {
+                            let color = try XCTUnwrap(bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB))
+                            return (color.redComponent + color.greenComponent + color.blueComponent) / 3
+                        }
+                        let adjacent = max(try brightness(start - 6), try brightness(end + 6))
+                        for x in start...end {
+                            XCTAssertLessThanOrEqual(try brightness(x), adjacent + 0.075,
+                                "Bright stripe at x=\(x), y=\(y), \(appearance.rawValue), width=\(width)")
+                        }
+                    }
+                    let attachment = XCTAttachment(data: try XCTUnwrap(bitmap.representation(using: .png, properties: [:])),
+                                                   uniformTypeIdentifier: "public.png")
+                    attachment.name = "settings-\(appearance.rawValue)-\(Int(width))"
+                    attachment.lifetime = .keepAlways
+                    self.add(attachment)
+                }
             }
         }
-        window.appearance = NSAppearance(named: .aqua)
+    }
 
+    func testNativeSidebarGeometrySurvivesPageAndSizeChanges() async throws {
+        try await withBrowser { state, window in
+            for section: AppSection in [.home, .live, .favorites, .history, .settings] {
+                state.selectSection(section)
+                for width: CGFloat in [1120, 1370] {
+                    window.setContentSize(NSSize(width: width, height: 780))
+                    try await self.settle(window)
+                    let split = try self.primarySplit(in: window)
+                    let controller = try XCTUnwrap(split.delegate as? NSSplitViewController)
+                    XCTAssertEqual(controller.splitViewItems.first?.behavior, .sidebar,
+                        "AppKit must own the primary sidebar's material and divider")
+                    let panes = split.arrangedSubviews
+                    XCTAssertFalse(split.isSubviewCollapsed(panes[0]))
+                    XCTAssertEqual(panes[0].frame.width, AppSidebarMetrics.width, accuracy: 1)
+                    XCTAssertEqual(split.dividerThickness, 0)
+                    XCTAssertEqual(panes[1].frame.minX, panes[0].frame.maxX, accuracy: 0.001,
+                        "The fixed sidebar must not reserve a separator slot")
+                    XCTAssertEqual(panes[1].frame.maxX, split.bounds.maxX, accuracy: 1)
+                    let sidebar = try XCTUnwrap(BrowserKeyboardView.descendants(of: panes[0])
+                        .compactMap { $0 as? NSVisualEffectView }.first { $0.material == .sidebar })
+                    XCTAssertEqual(sidebar.blendingMode, .behindWindow)
+                    XCTAssertTrue(window.isOpaque)
+                    XCTAssertTrue(controller.splitViewItems[0].allowsFullHeightLayout)
+                    let sidebarFrame = sidebar.convert(sidebar.bounds, to: window.contentView)
+                    XCTAssertEqual(sidebarFrame.maxY, window.contentView!.bounds.maxY, accuracy: 0.5)
+                    let material = try XCTUnwrap(BrowserKeyboardView.descendants(of: panes[1])
+                        .compactMap { $0 as? NSVisualEffectView }.first { $0.material == .titlebar })
+                    XCTAssertEqual(material.blendingMode, .withinWindow)
+                    let items = try XCTUnwrap(window.toolbar?.items)
+                    XCTAssertFalse(items.contains { $0.itemIdentifier == .sidebarTrackingSeparator })
+                    XCTAssertEqual(window.titlebarAccessoryViewControllers.filter { $0 is BrowserSidebarTitlebarController }.count, 1)
+                }
+            }
+        }
+    }
+
+    func testTitlebarBoundaryAcrossPagesAndAppearances() async throws {
+        try await withBrowser { state, window in
+            for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+                window.appearance = NSAppearance(named: appearance)
+                for section: AppSection in [.home, .live, .favorites, .history, .settings] {
+                    state.selectSection(section)
+                    try await self.settle(window)
+                    let split = try self.primarySplit(in: window)
+                    // Include the native titlebar: contentView-only snapshots
+                    // missed the user's remaining stripe above the body.
+                    let frame = try XCTUnwrap(window.contentView?.superview)
+                    let bitmap = try XCTUnwrap(frame.bitmapImageRepForCachingDisplay(in: frame.bounds))
+                    frame.cacheDisplay(in: frame.bounds, to: bitmap)
+                    let boundary = frame.convert(NSPoint(x: split.arrangedSubviews[1].frame.minX, y: 0), from: split).x
+                    let scale = CGFloat(bitmap.pixelsWide) / frame.bounds.width
+                    let x = Int((boundary * scale).rounded())
+                    for yPoint: CGFloat in [8, 16, 32, 40] {
+                        let y = Int(yPoint * scale)
+                        func brightness(_ column: Int) throws -> CGFloat {
+                            let color = try XCTUnwrap(bitmap.colorAt(x: column, y: y)?.usingColorSpace(.sRGB))
+                            return (color.redComponent + color.greenComponent + color.blueComponent) / 3
+                        }
+                        let adjacent = max(try brightness(x - 8), try brightness(x + 8))
+                        for column in (x - 2)...(x + 3) {
+                            XCTAssertLessThanOrEqual(try brightness(column), adjacent + 0.01,
+                                "Titlebar stripe: \(section), \(appearance), x=\(column), y=\(y)")
+                        }
+                    }
+                    let attachment = XCTAttachment(data: try XCTUnwrap(bitmap.representation(using: .png, properties: [:])),
+                                                   uniformTypeIdentifier: "public.png")
+                    attachment.name = "whole-window-\(section)-\(appearance.rawValue)"
+                    attachment.lifetime = .keepAlways
+                    self.add(attachment)
+                }
+            }
+        }
+    }
+
+    func testSidebarButtonRemainsMountedDuringNavigation() async throws {
+        try await withBrowser { state, window in
+            try await self.settle(window)
+            let split = try self.primarySplit(in: window)
+            let controller = try XCTUnwrap(split.delegate as? BrowserRootSplitController)
+            let accessory = controller.sidebarTitlebar
+            let button = accessory.toggleButton
+            let parent = button.superview
+            let originalFrame = button.convert(button.bounds, to: nil)
+            for section: AppSection in [.home, .live, .favorites, .history, .settings, .home] {
+                state.selectSection(section)
+                // Sample intermediate run-loop turns, not just settled views.
+                for _ in 0..<20 {
+                    try await Task.sleep(nanoseconds: 10_000_000)
+                    window.contentView?.layoutSubtreeIfNeeded()
+                    XCTAssertTrue(button.window === window)
+                    XCTAssertTrue(button.superview === parent)
+                    XCTAssertTrue(window.titlebarAccessoryViewControllers.contains { $0 === accessory })
+                    XCTAssertFalse(button.isHiddenOrHasHiddenAncestor)
+                    XCTAssertEqual(button.alphaValue, 1)
+                    let current = button.convert(button.bounds, to: nil)
+                    XCTAssertEqual(current.minX, originalFrame.minX, accuracy: 0.5)
+                    XCTAssertEqual(current.midY, originalFrame.midY, accuracy: 0.5)
+                }
+            }
+        }
+    }
+
+    func testSidebarControlsKeepNativeVibrantAppearance() async throws {
+        try await withBrowser { _, window in
+            for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+                window.appearance = NSAppearance(named: appearance)
+                try await self.settle(window)
+                let split = try self.primarySplit(in: window)
+                let container = try XCTUnwrap(BrowserKeyboardView.descendants(of: split.arrangedSubviews[0])
+                    .compactMap { $0 as? NativeSidebarSourceList.ContainerView }.first)
+                let search = container.searchField
+                XCTAssertEqual(search.effectiveAppearance.bestMatch(from: [.vibrantLight, .vibrantDark]),
+                               appearance == .darkAqua ? .vibrantDark : .vibrantLight)
+                search.isEnabled = true
+                window.makeFirstResponder(nil)
+                window.displayIfNeeded()
+                let bitmap = try XCTUnwrap(search.bitmapImageRepForCachingDisplay(in: search.bounds))
+                search.cacheDisplay(in: search.bounds, to: bitmap)
+                let color = try XCTUnwrap(bitmap.colorAt(x: bitmap.pixelsWide - 30, y: bitmap.pixelsHigh / 2)?.usingColorSpace(.sRGB))
+                if appearance == .aqua {
+                    XCTAssertLessThan(color.redComponent, 0.97, "The resting sidebar search must not regress to an opaque white field")
+                }
+                let outline = container.outlineView
+                for row in 0..<outline.numberOfRows {
+                    let cell = try XCTUnwrap(outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? NSTableCellView)
+                    let symbol = try XCTUnwrap(cell.imageView)
+                    let image = try XCTUnwrap(symbol.bitmapImageRepForCachingDisplay(in: symbol.bounds))
+                    symbol.cacheDisplay(in: symbol.bounds, to: image)
+                    let hasBlue = (0..<image.pixelsHigh).contains { y in
+                        (0..<image.pixelsWide).contains { x in
+                            guard let color = image.colorAt(x: x, y: y)?.usingColorSpace(.sRGB), color.alphaComponent > 0.5 else { return false }
+                            return color.blueComponent - color.redComponent > 0.2
+                        }
+                    }
+                    XCTAssertTrue(hasBlue, "Sidebar glyph \(row) lost its native blue palette")
+                }
+            }
+        }
+    }
+
+    func testSearchPlaceholderRemainsReadableAcrossThemeChanges() async throws {
+        try await withBrowser { _, window in
+            for appearance in [NSAppearance.Name.aqua, .darkAqua, .aqua] {
+                window.appearance = NSAppearance(named: appearance)
+                try await self.settle(window)
+                let split = try self.primarySplit(in: window)
+                let container = try XCTUnwrap(BrowserKeyboardView.descendants(of: split.arrangedSubviews[0])
+                    .compactMap { $0 as? NativeSidebarSourceList.ContainerView }.first)
+                let search = container.searchField
+                XCTAssertFalse(search.placeholderAttributedString?.string.isEmpty ?? true)
+                search.isEnabled = true
+                search.stringValue = ""
+                window.makeFirstResponder(nil)
+                window.displayIfNeeded()
+                let bitmap = try XCTUnwrap(search.bitmapImageRepForCachingDisplay(in: search.bounds))
+                search.cacheDisplay(in: search.bounds, to: bitmap)
+                let scale = CGFloat(bitmap.pixelsWide) / search.bounds.width
+                let background = try XCTUnwrap(bitmap.colorAt(x: bitmap.pixelsWide - 30, y: bitmap.pixelsHigh / 2)?.usingColorSpace(.sRGB))
+                // Ignore the magnifier, border and empty trailing area. Require
+                // actual placeholder glyphs to contrast with the field fill.
+                var readablePixels = 0
+                for y in Int(6 * scale)..<Int((search.bounds.height - 6) * scale) {
+                    for x in Int(30 * scale)..<Int(120 * scale) {
+                        guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                        if abs(color.redComponent - background.redComponent) > 0.16 { readablePixels += 1 }
+                    }
+                }
+                XCTAssertGreaterThan(readablePixels, 30, "Placeholder disappeared in \(appearance.rawValue)")
+                let attachment = XCTAttachment(data: try XCTUnwrap(bitmap.representation(using: .png, properties: [:])), uniformTypeIdentifier: "public.png")
+                attachment.name = "Readable search placeholder \(appearance.rawValue)"
+                attachment.lifetime = .keepAlways
+                self.add(attachment)
+            }
+        }
+    }
+
+    func testThemeSwitchUpdatesMaterialsAndContentTogether() async throws {
+        let original = NSApp.appearance
+        defer { NSApp.appearance = original }
+        try await withBrowser { _, window in
+            window.appearance = nil
+            try await self.settle(window)
+            let split = try self.primarySplit(in: window)
+            let container = try XCTUnwrap(BrowserKeyboardView.descendants(of: split.arrangedSubviews[0])
+                .compactMap { $0 as? NativeSidebarSourceList.ContainerView }.first)
+            let frame = try XCTUnwrap(window.contentView?.superview)
+            for theme: AppTheme in [.dark, .light, .dark, .light, .system] {
+                AppAppearanceController.apply(theme)
+                let dark = window.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                // Assert the first frames after the actual app-level theme
+                // change, without waiting for a settled 200 ms screenshot.
+                for sample in 0..<3 {
+                    try await Task.sleep(nanoseconds: 16_000_000)
+                    frame.layoutSubtreeIfNeeded()
+                    window.displayIfNeeded()
+                    XCTAssertNil(container.appearance, "The container must inherit live window appearance")
+                    XCTAssertEqual(container.searchField.effectiveAppearance.bestMatch(from: [.vibrantLight, .vibrantDark]),
+                                   dark ? .vibrantDark : .vibrantLight)
+                    let bitmap = try XCTUnwrap(frame.bitmapImageRepForCachingDisplay(in: frame.bounds))
+                    frame.cacheDisplay(in: frame.bounds, to: bitmap)
+                    let scale = CGFloat(bitmap.pixelsWide) / frame.bounds.width
+                    let points = [
+                        NSPoint(x: 20, y: frame.bounds.height * 0.7),
+                        NSPoint(x: frame.bounds.width - 25, y: 18),
+                        NSPoint(x: frame.bounds.width - 25, y: frame.bounds.height * 0.7)
+                    ]
+                    for (region, point) in points.enumerated() {
+                        let color = try XCTUnwrap(bitmap.colorAt(x: Int(point.x * scale), y: Int(point.y * scale))?.usingColorSpace(.sRGB))
+                        let brightness = (color.redComponent + color.greenComponent + color.blueComponent) / 3
+                        if dark {
+                            XCTAssertLessThan(brightness, 0.55, "Stale light region \(region), frame \(sample)")
+                        } else {
+                            XCTAssertGreaterThan(brightness, 0.65, "Stale dark region \(region), frame \(sample)")
+                        }
+                    }
+                    if sample == 0 {
+                        let attachment = XCTAttachment(data: try XCTUnwrap(bitmap.representation(using: .png, properties: [:])),
+                                                       uniformTypeIdentifier: "public.png")
+                        attachment.name = "theme-first-frame-\(theme)"
+                        attachment.lifetime = .keepAlways
+                        self.add(attachment)
+                    }
+                }
+            }
+        }
+    }
+
+    func testSidebarCollapseAndExpandPreservesZeroGap() async throws {
+        try await withBrowser { _, window in
+            try await self.settle(window)
+            let split = try self.primarySplit(in: window)
+            let controller = try XCTUnwrap(split.delegate as? BrowserRootSplitController)
+            let item = controller.splitViewItems[0]
+            for _ in 0..<3 {
+                controller.sidebarTitlebar.toggleButton.performClick(nil)
+                try await Task.sleep(nanoseconds: 350_000_000)
+                try await self.settle(window)
+                XCTAssertTrue(item.isCollapsed)
+                XCTAssertEqual(controller.detailHost.view.convert(controller.detailHost.view.bounds, to: split).minX, 0, accuracy: 0.001)
+                controller.sidebarTitlebar.toggleButton.performClick(nil)
+                try await Task.sleep(nanoseconds: 350_000_000)
+                try await self.settle(window)
+                XCTAssertFalse(item.isCollapsed)
+                let panes = split.arrangedSubviews
+                XCTAssertEqual(panes[0].frame.width, 220, accuracy: 0.001)
+                XCTAssertEqual(panes[1].frame.minX, panes[0].frame.maxX, accuracy: 0.001)
+            }
+        }
     }
 }

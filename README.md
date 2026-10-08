@@ -1,5 +1,7 @@
 # OKVideoMac
 
+The current release candidate is **0.8.3 (Build 136)**. It removes the sidebar divider slot while preserving separate native materials, stabilizes the sidebar toggle, synchronizes theme changes, restores readable search hints and reports missing Android Bridge resources accurately. Formal distribution gates are pending; the stable download below remains 0.8.2. See [0.8.3 release notes](Docs/RELEASE_NOTES_0.8.3.md) and [readiness](Docs/RELEASE_READINESS_0.8.3.md).
+
 English | [简体中文](README_zh-CN.md)
 
 **A native macOS IPTV/VOD player for Apple Silicon with Xtream, M3U/XMLTV,

@@ -1,5 +1,9 @@
 # Android Bridge 设置
 
+## 包内 Bridge 缺失（0.8.3）
+
+APK 缺失准确报告为 `installingBridge` 阶段的 `bridgeAPKMissing`，不再误报 ADB 映射失败。Release 构建拒绝缺失 APK，需通过既有打包流程重新构建；本修复不重置 AVD、登录数据、私钥或备份。
+
 [English](ANDROID_BRIDGE_SETUP.md)
 
 Android Bridge 只服务于受支持的 Java/Dex `csp_` Provider。Native、QuickJS、

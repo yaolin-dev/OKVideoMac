@@ -67,7 +67,7 @@ struct SettingsView: View {
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-            .ignoresSafeArea()
+            .ignoresSafeArea(edges: [.horizontal, .bottom])
 
             HSplitView {
                 settingsSidebar

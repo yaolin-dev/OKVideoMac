@@ -7039,6 +7039,64 @@ actor AndroidDexBridgeRuntime {
         return Int64(seconds)
     }
 
+#if OKVIDEO_PERFORMANCE_TEST
+    /// Runs through the real app launch path when explicitly requested, without
+    /// XCTest/LaunchServices changing the host's process and file access context.
+    static func runStartupAcceptanceIfRequested() async {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["OKVIDEOMAC_ANDROID_STARTUP_ACCEPTANCE"] == "1",
+              let sdk = environment["OKVIDEOMAC_ANDROID_INTEGRATION_SDK_ROOT"],
+              let output = environment["OKVIDEOMAC_ANDROID_ACCEPTANCE_OUTPUT"] else { return }
+        let runtime = AndroidDexBridgeRuntime()
+        await runtime.setUserSelectedSDKRoot(URL(fileURLWithPath: sdk))
+        do {
+            try await runtime.start()
+        } catch {
+            // Failure and command observations are already retained by the
+            // runtime. Read only those, so collecting evidence never triggers
+            // a second SDK scan that could hide the original error.
+        }
+        let started = await runtime.startupAcceptanceObservations()
+        await runtime.stop()
+        let stopped = await runtime.startupAcceptanceObservations()
+        do {
+            let report = ["startup": started, "shutdown": stopped]
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(report).write(to: URL(fileURLWithPath: output), options: .atomic)
+        } catch {
+            NSLog("Android startup acceptance report failed: %@", error.localizedDescription)
+        }
+        // AppKit's nested termination loop must run from a run-loop callback,
+        // outside both actor jobs and dispatch queue drains, so asynchronous
+        // delegate cleanup can reacquire the main executor.
+        await MainActor.run {
+            Timer.scheduledTimer(withTimeInterval: 0.01, repeats: false) { _ in
+                NSApp.terminate(nil)
+            }
+        }
+    }
+
+    struct StartupAcceptanceObservations: Codable {
+        let ready: Bool
+        let stage: AndroidRuntimeStartupStage
+        let failure: AndroidRuntimeFailureRecord?
+        let commands: [AndroidRuntimeCommandRecord]
+        let timeline: [AndroidRuntimeEventRecord]
+        let shutdownMechanism: AndroidRuntimeShutdownMechanism
+        let shutdownCompleted: Bool
+    }
+
+    func startupAcceptanceObservations() -> StartupAcceptanceObservations {
+        StartupAcceptanceObservations(
+            ready: ready, stage: currentStage, failure: lastFailure,
+            commands: recentCommands, timeline: timeline,
+            shutdownMechanism: lastShutdownMechanism,
+            shutdownCompleted: lastShutdownCompletedAt != nil
+        )
+    }
+#endif
+
     private func preserveFailure(_ failure: AndroidRuntimeFailureError) {
         lastFailure = failure.record
         completeCurrentStage(error: failure.record.message)
@@ -8514,7 +8572,6 @@ actor AndroidDexBridgeRuntime {
                 activeIdentity = identity
             }
 
-            transition(to: .configuringPortForward)
             let packageContinuityBeforeInstall = installedBridgeContinuity(
                 identity,
                 toolchain: toolchain
@@ -8548,6 +8605,7 @@ actor AndroidDexBridgeRuntime {
             } else {
                 requiresBundledInstall = true
             }
+            transition(to: .configuringPortForward)
             try configurePortForwards(identity, toolchain: toolchain)
 
             transition(to: .checkingEmulatorNetwork)
@@ -9225,14 +9283,22 @@ actor AndroidDexBridgeRuntime {
     }
 
     private func bridgeAPK() throws -> URL {
-        let bundled = Bundle.main.resourceURL?
-            .appendingPathComponent("AndroidDexBridge-release.apk")
+        try Self.bundledBridgeAPK(in: Bundle.main.resourceURL)
+    }
+
+    static func bundledBridgeAPK(in resources: URL?) throws -> URL {
+        let bundled = resources?.appendingPathComponent("AndroidDexBridge-release.apk")
         if let bundled, FileManager.default.fileExists(atPath: bundled.path) {
             return bundled
         }
-        throw AppError.spider(
-            "应用包缺少 AndroidDexBridge-release.apk，请重新构建 OKVideoMac"
-        )
+        // Preserve the real cause regardless of the surrounding startup
+        // stage. A missing bundle resource is not an ADB forwarding failure.
+        throw AndroidRuntimeFailureError(record: AndroidRuntimeFailureRecord(
+            occurredAt: Date(),
+            stage: .installingBridge,
+            category: .bridgeAPKMissing,
+            message: "应用包缺少 AndroidDexBridge-release.apk，请重新构建 OKVideoMac"
+        ))
     }
 
     private func installedBridgeVersionCode(

@@ -16533,6 +16533,15 @@ final class OKVideoMacTests: XCTestCase {
                 .filter { $0.lowercased().contains("lock") }
             XCTAssertTrue(remainingLocks.isEmpty)
         } catch {
+#if OKVIDEO_PERFORMANCE_TEST
+            let snapshot = await firstRuntime.startupAcceptanceObservations()
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let attachment = XCTAttachment(data: try encoder.encode(snapshot), uniformTypeIdentifier: "public.json")
+            attachment.name = "Android startup failure diagnostics"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+#endif
             await firstRuntime.stop()
             throw error
         }
@@ -18053,6 +18062,23 @@ final class OKVideoMacTests: XCTestCase {
         let suffix = packageLine[start.upperBound...]
         guard let end = suffix.firstIndex(of: "'") else { return nil }
         return String(suffix[..<end])
+    }
+
+    func testMissingBundledBridgeHasResourceFailureCategory() throws {
+        let resources = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MissingBridge-\(UUID().uuidString)")
+        for directory in [nil, resources] {
+            XCTAssertThrowsError(try AndroidDexBridgeRuntime.bundledBridgeAPK(in: directory)) { error in
+                let failure = error as? AndroidRuntimeFailureError
+                XCTAssertEqual(failure?.record.category, .bridgeAPKMissing)
+                XCTAssertEqual(failure?.record.stage, .installingBridge)
+            }
+        }
+        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: resources) }
+        let apk = resources.appendingPathComponent("AndroidDexBridge-release.apk")
+        try Data("resource fixture".utf8).write(to: apk)
+        XCTAssertEqual(try AndroidDexBridgeRuntime.bundledBridgeAPK(in: resources), apk)
     }
 
     func testAndroidBridgeForwardInspectionIsScopedToVerifiedSerial() {
@@ -20758,19 +20784,15 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     @MainActor
-    func testBrowserSidebarUsesNativeSourceListMetricsAndMaterial() {
+    func testBrowserSidebarUsesNativeSourceListMetrics() {
         XCTAssertEqual(AppSidebarMetrics.width, 220)
         XCTAssertEqual(AppSidebarMetrics.horizontalInset, 10)
         XCTAssertEqual(AppSidebarMetrics.topInset, 0)
         XCTAssertEqual(AppSidebarMetrics.searchToListSpacing, 16)
         XCTAssertEqual(AppSidebarMetrics.rowHeight, 36)
 
-        let background = NSVisualEffectView()
-        AppSidebarNativePolicy.configure(background: background)
-        XCTAssertEqual(background.material, .sidebar)
-        XCTAssertEqual(background.blendingMode, .behindWindow)
-        XCTAssertEqual(background.state, .followsWindowActiveState)
-        XCTAssertTrue(background.isEmphasized)
+        // The actual RootView integration test checks the system-owned
+        // sidebar material, rather than configuring a duplicate effect here.
         XCTAssertTrue(
             AppSidebarNativePolicy.iconTint.isEqual(NSColor.systemBlue)
         )
@@ -20876,7 +20898,7 @@ final class OKVideoMacTests: XCTestCase {
         BrowserWindowChromeController.configure(window)
 
         XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))
-        XCTAssertFalse(window.titlebarAppearsTransparent)
+        XCTAssertTrue(window.titlebarAppearsTransparent)
         XCTAssertEqual(window.titleVisibility, .hidden)
         XCTAssertEqual(window.toolbarStyle, .unified)
         XCTAssertEqual(window.titlebarSeparatorStyle, .none)
@@ -33216,12 +33238,19 @@ final class AndroidADBRecoveryRegressionTests: XCTestCase {
             process.arguments = ["-avd", "OKVideoMac_Runtime", "-port", "5682",
                                  openPrivateAVD ? userdata.path : "/dev/null", ready.path]
             try process.run()
-            for _ in 0..<100 where !fm.fileExists(atPath: ready.path) {
+            // Cold process admission can exceed one second while the full
+            // Release suite is busy. Wait for the same explicit readiness
+            // marker with a bounded deadline; never relax ownership checks.
+            let readinessDeadline = Date().addingTimeInterval(5)
+            while !fm.fileExists(atPath: ready.path), process.isRunning,
+                  Date() < readinessDeadline {
                 Thread.sleep(forTimeInterval: 0.01)
             }
             guard fm.fileExists(atPath: ready.path) else {
-                process.terminate()
-                throw NSError(domain: "RecoveryFixture", code: 2)
+                let status = process.isRunning ? "readiness timeout" : "exit \(process.terminationStatus)"
+                if process.isRunning { process.terminate() }
+                throw NSError(domain: "RecoveryFixture", code: 2,
+                              userInfo: [NSLocalizedDescriptionKey: status])
             }
             var info = proc_bsdinfo()
             let size = Int32(MemoryLayout.size(ofValue: info))

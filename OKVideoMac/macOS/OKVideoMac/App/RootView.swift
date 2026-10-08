@@ -41,17 +41,22 @@ enum AppSidebarNativePolicy {
     static var iconTint: NSColor { .systemBlue }
     static let rowSizeStyle = NSTableView.RowSizeStyle.large
 
-    static func configure(background: NSVisualEffectView) {
-        background.material = .sidebar
-        background.blendingMode = .behindWindow
-        background.state = .followsWindowActiveState
-        background.isEmphasized = true
-    }
-
     static func configure(searchField: NSSearchField) {
         searchField.controlSize = .large
         searchField.sendsSearchStringImmediately = false
         searchField.sendsWholeSearchString = true
+    }
+
+    static func setPlaceholder(_ text: String, on searchField: NSSearchField) {
+        // The default placeholder color in a vibrant appearance is nearly
+        // indistinguishable from the native gray field. Keep AppKit drawing
+        // the control and use its semantic secondary text color for the hint.
+        searchField.effectiveAppearance.performAsCurrentDrawingAppearance {
+            searchField.placeholderAttributedString = NSAttributedString(
+                string: text,
+                attributes: [.foregroundColor: NSColor.secondaryLabelColor]
+            )
+        }
     }
 
     static func configure(outlineView: NSOutlineView) {
@@ -64,133 +69,6 @@ enum AppSidebarNativePolicy {
         outlineView.allowsEmptySelection = false
         outlineView.allowsMultipleSelection = false
         outlineView.autosaveExpandedItems = false
-    }
-}
-
-private struct BrowserWindowVibrancyBackground: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = .underWindowBackground
-        view.blendingMode = .behindWindow
-        view.state = .followsWindowActiveState
-        view.isEmphasized = false
-        return view
-    }
-
-    func updateNSView(_ view: NSVisualEffectView, context: Context) {
-        if view.material != .underWindowBackground {
-            view.material = .underWindowBackground
-        }
-        if view.blendingMode != .behindWindow {
-            view.blendingMode = .behindWindow
-        }
-        if view.state != .followsWindowActiveState {
-            view.state = .followsWindowActiveState
-        }
-    }
-}
-
-/// Back the native divider at its actual AppKit coordinates. A canvas behind
-/// NavigationSplitView does not cover every independently composited edge of
-/// the sidebar's behind-window material during window overview scaling.
-struct BrowserSplitDividerBacking: NSViewRepresentable {
-    func makeNSView(context: Context) -> Probe { Probe() }
-    func updateNSView(_ view: Probe, context: Context) { view.attach() }
-    static func dismantleNSView(_ view: Probe, coordinator: ()) { view.detach() }
-
-    final class Probe: NSView {
-        private weak var split: NSSplitView?
-        let backing = CALayer()
-        private let separator = CALayer()
-
-        override init(frame: NSRect) {
-            super.init(frame: frame)
-            backing.name = "OKVideoMac.opaqueSidebarDivider"
-            backing.zPosition = 1 // Stay above AppKit-owned divider/material layers.
-            backing.isOpaque = true
-            separator.isOpaque = true
-            backing.addSublayer(separator)
-            NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(refresh),
-                name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
-        }
-        required init?(coder: NSCoder) { nil }
-        deinit {
-            NotificationCenter.default.removeObserver(self)
-            NSWorkspace.shared.notificationCenter.removeObserver(self)
-            backing.removeFromSuperlayer()
-        }
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
-        override func viewDidMoveToSuperview() { super.viewDidMoveToSuperview(); attach() }
-        override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); attach() }
-        override func layout() { super.layout(); attach() }
-        override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); refresh() }
-
-        func attach() {
-            guard window != nil else { detach(); return }
-            var ancestor = superview
-            while let view = ancestor {
-                if let candidate = view as? NSSplitView, candidate.isVertical {
-                    if split !== candidate {
-                        detach()
-                        split = candidate
-                        candidate.wantsLayer = true
-                        candidate.layer?.addSublayer(backing)
-                        let center = NotificationCenter.default
-                        center.addObserver(self, selector: #selector(refresh),
-                            name: NSSplitView.didResizeSubviewsNotification, object: candidate)
-                        center.addObserver(self, selector: #selector(refresh),
-                            name: NSWindow.didChangeBackingPropertiesNotification, object: window)
-                    }
-                    refresh()
-                    return
-                }
-                ancestor = view.superview
-            }
-            detach()
-        }
-        func detach() {
-            NotificationCenter.default.removeObserver(self)
-            backing.removeFromSuperlayer()
-            split = nil
-        }
-        @objc func refresh() {
-            guard let split else { return }
-            let panes = split.arrangedSubviews
-            guard panes.count == 2, !panes[0].isHidden, !panes[1].isHidden,
-                  !split.isSubviewCollapsed(panes[0]), !split.isSubviewCollapsed(panes[1]) else {
-                backing.isHidden = true
-                return
-            }
-            let scale = max(1, window?.backingScaleFactor ?? 1)
-            let pixel = 1 / scale
-            let left = panes[0].frame.maxX
-            let right = panes[1].frame.minX
-            guard right >= left, left > split.bounds.minX, right < split.bounds.maxX else {
-                backing.isHidden = true
-                return
-            }
-            // One physical pixel of overlap on each side closes fractional
-            // sampling edges without adding a layout gap or a hit-test view.
-            let start = floor(left * scale) / scale - pixel
-            let end = ceil(right * scale) / scale + pixel
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            backing.isHidden = false
-            backing.contentsScale = scale
-            backing.frame = NSRect(x: start, y: split.bounds.minY,
-                                   width: end - start, height: split.bounds.height)
-            separator.contentsScale = scale
-            separator.frame = NSRect(x: floor((left + right) * 0.5 * scale) / scale - start,
-                                     y: 0, width: pixel, height: split.bounds.height)
-            effectiveAppearance.performAsCurrentDrawingAppearance {
-                let background = NSColor.textBackgroundColor
-                let contrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
-                let line = background.blended(withFraction: contrast ? 0.35 : 0.12, of: .labelColor) ?? background
-                backing.backgroundColor = background.withAlphaComponent(1).cgColor
-                separator.backgroundColor = line.withAlphaComponent(1).cgColor
-            }
-            CATransaction.commit()
-        }
     }
 }
 
@@ -463,13 +341,9 @@ struct RootView: View {
     @StateObject private var liveSession = LiveBrowserSession()
 
     var body: some View {
-        ZStack {
-            // Base canvas; the native divider has its own opaque edge backing.
-            AppSurfacePalette.background
-                .ignoresSafeArea()
-
-            browsingContent
-        }
+        // The native split owns the sidebar material and window boundary.
+        // Each content page supplies its own canvas inside the detail pane.
+        browsingContent
         .alert(item: $state.presentedError) { error in
             Alert(
                 title: Text(error.title),
@@ -543,38 +417,197 @@ struct RootView: View {
         }
     }
 
-    @ViewBuilder
     private var browsingContent: some View {
-        if #available(macOS 13.0, *) {
-            ModernRootSplitView(liveSession: liveSession)
-        } else {
-            NavigationView {
-                SidebarView(liveSession: liveSession)
-                SectionContentView(
-                    liveSession: liveSession,
-                    showsCollapsedSearch: false
-                )
-            }
-            .navigationViewStyle(.columns)
-        }
+        BrowserRootSplitView(liveSession: liveSession)
+            .ignoresSafeArea()
     }
 }
 
-@available(macOS 13.0, *)
-private struct ModernRootSplitView: View {
+/// Own the AppKit split so its fixed-width navigation pane can meet the detail
+/// pane directly. NavigationSplitView does not expose divider thickness.
+private struct BrowserRootSplitView: NSViewControllerRepresentable {
+    @EnvironmentObject private var state: AppState
     @ObservedObject var liveSession: LiveBrowserSession
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
-    var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
+    func makeNSViewController(context: Context) -> BrowserRootSplitController {
+        let controller = BrowserRootSplitController()
+        updateNSViewController(controller, context: context)
+        return controller
+    }
+
+    func updateNSViewController(_ controller: BrowserRootSplitController, context: Context) {
+        controller.sidebarHost.rootView = AnyView(
             SidebarView(liveSession: liveSession)
-        } detail: {
-            SectionContentView(
-                liveSession: liveSession,
-                showsCollapsedSearch: columnVisibility == .detailOnly
-            )
+                // Forward app-specific values, not a snapshot of colorScheme
+                // or display traits. Each host must follow its NSWindow's
+                // live appearance in the same update as the native materials.
+                .environment(\.imageRepository, context.environment.imageRepository)
+                .environment(\.locale, context.environment.locale)
+                .environment(\.layoutDirection, context.environment.layoutDirection)
+                .environment(\.isEnabled, context.environment.isEnabled)
+                .environmentObject(state)
+                .environmentObject(state.navigation)
+        )
+        controller.detailHost.rootView = AnyView(
+            SectionContentView(liveSession: liveSession)
+                .background { BrowserDetailTitlebarMaterial().ignoresSafeArea() }
+                // Forward app-specific values, not a snapshot of colorScheme
+                // or display traits. Each host must follow its NSWindow's
+                // live appearance in the same update as the native materials.
+                .environment(\.imageRepository, context.environment.imageRepository)
+                .environment(\.locale, context.environment.locale)
+                .environment(\.layoutDirection, context.environment.layoutDirection)
+                .environment(\.isEnabled, context.environment.isEnabled)
+                .environmentObject(state)
+                .environmentObject(state.navigation)
+        )
+    }
+}
+
+/// Both overrides are necessary: custom divider drawing makes AppKit use the
+/// supplied thickness instead of installing its separate 1 pt vibrant divider.
+/// No layer overlap, private view mutation, or replacement split delegate.
+final class BrowserRootSplitViewSurface: NSSplitView {
+    override var dividerThickness: CGFloat { 0 }
+    override func drawDivider(in rect: NSRect) {}
+}
+
+/// The right pane owns its titlebar material independently of AppKit's sidebar.
+/// Page backgrounds stop at the top safe area, leaving this semantic material
+/// behind the toolbar. It covers the entire right column, including its edge.
+private struct BrowserDetailTitlebarMaterial: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .titlebar
+        view.blendingMode = .withinWindow
+        view.state = .followsWindowActiveState
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
+}
+
+/// A window command belongs to the window, not to a page's changing toolbar.
+/// AppKit positions a left titlebar accessory next to the traffic lights.
+@MainActor
+final class BrowserSidebarTitlebarController: NSTitlebarAccessoryViewController {
+    let toggleButton = NSButton()
+
+    init(target: NSSplitViewController) {
+        super.init(nibName: nil, bundle: nil)
+        layoutAttribute = .left
+        view = NSView(frame: NSRect(x: 0, y: 0, width: 44, height: 32))
+        let label = L10n.string("sidebar.toggle", fallback: "Toggle Sidebar")
+        toggleButton.image = NSImage(systemSymbolName: "sidebar.leading", accessibilityDescription: label)
+        toggleButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 17, weight: .regular)
+        toggleButton.imagePosition = .imageOnly
+        toggleButton.isBordered = false
+        toggleButton.toolTip = label
+        toggleButton.setAccessibilityLabel(label)
+        toggleButton.identifier = NSUserInterfaceItemIdentifier("browser.toggleSidebar")
+        toggleButton.target = target
+        toggleButton.action = #selector(NSSplitViewController.toggleSidebar(_:))
+        toggleButton.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(toggleButton)
+        NSLayoutConstraint.activate([
+            toggleButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 6),
+            toggleButton.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            toggleButton.widthAnchor.constraint(equalToConstant: 32),
+            toggleButton.heightAnchor.constraint(equalToConstant: 32)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+}
+
+@MainActor
+final class BrowserRootSplitController: NSSplitViewController {
+    let sidebarHost = NSHostingController(rootView: AnyView(EmptyView()))
+    let detailHost = NSHostingController(rootView: AnyView(EmptyView()))
+    private(set) lazy var sidebarTitlebar = BrowserSidebarTitlebarController(target: self)
+    private weak var observedWindow: NSWindow?
+    private var toolbarObservation: NSKeyValueObservation?
+    private var accessoryLayoutScheduled = false
+    private lazy var fallbackToolbar: NSToolbar = {
+        let toolbar = NSToolbar(identifier: "OKVideoMac.browser.sidebar")
+        toolbar.displayMode = .iconOnly
+        return toolbar
+    }()
+
+    init() {
+        super.init(nibName: nil, bundle: nil)
+        // Apple requires a custom split view to be supplied before view loading.
+        splitView = BrowserRootSplitViewSurface()
+        splitView.isVertical = true
+        splitView.dividerStyle = .thin
+        let sidebar = NSSplitViewItem(sidebarWithViewController: sidebarHost)
+        sidebar.minimumThickness = AppSidebarMetrics.width
+        sidebar.maximumThickness = AppSidebarMetrics.width
+        sidebar.canCollapseFromWindowResize = false
+        // Keep the system sidebar material behind the traffic lights as well.
+        sidebar.allowsFullHeightLayout = true
+        addSplitViewItem(sidebar)
+        addSplitViewItem(NSSplitViewItem(viewController: detailHost))
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    deinit { toolbarObservation?.invalidate() }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        attachWindowChrome()
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        attachWindowChrome()
+        updateTitlebarWidth()
+    }
+
+    private func attachWindowChrome() {
+        guard let window = view.window, observedWindow !== window else { return }
+        toolbarObservation?.invalidate()
+        if let oldWindow = observedWindow,
+           let index = oldWindow.titlebarAccessoryViewControllers.firstIndex(where: { $0 === sidebarTitlebar }) {
+            oldWindow.removeTitlebarAccessoryViewController(at: index)
         }
-        .navigationSplitViewStyle(.balanced)
+        observedWindow = window
+        window.addTitlebarAccessoryViewController(sidebarTitlebar)
+        // Loading/empty pages can temporarily remove the SwiftUI toolbar.
+        // Keep the titlebar height stable without reinserting any page items.
+        toolbarObservation = window.observe(\.toolbar, options: [.initial, .new]) { [weak self] window, _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if window.toolbar == nil { window.toolbar = self.fallbackToolbar }
+            }
+        }
+        scheduleTitlebarLayout()
+    }
+
+    private func scheduleTitlebarLayout() {
+        guard !accessoryLayoutScheduled else { return }
+        accessoryLayoutScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.accessoryLayoutScheduled = false
+            self.updateTitlebarWidth()
+        }
+    }
+
+    private func updateTitlebarWidth() {
+        let accessory = sidebarTitlebar.view
+        guard accessory.window != nil else { return }
+        let origin = accessory.convert(.zero, to: nil).x
+        let boundary = detailHost.view.convert(.zero, to: nil).x
+        // Reserve only the sidebar's header. No tracking separator or slot is
+        // needed: the two native materials already meet at the split boundary.
+        let width = splitViewItems[0].isCollapsed ? 44 : max(44, boundary - origin)
+        if abs(accessory.frame.width - width) > 0.01 {
+            accessory.setFrameSize(NSSize(width: width, height: accessory.frame.height))
+        }
     }
 }
 
@@ -2262,8 +2295,6 @@ private struct SidebarView: View {
             onExitSearch: exitSearchField,
             onSelect: state.selectSection
         )
-        .modifier(SidebarColumnWidthModifier())
-        .background { BrowserSplitDividerBacking() }
     }
 
     private var searchPresentation: SidebarSearchPresentation {
@@ -2356,15 +2387,16 @@ struct NativeSidebarSourceList: NSViewRepresentable {
         }
     }
 
-    final class ContainerView: NSVisualEffectView {
+    // NSSplitViewItem.behavior.sidebar provides the sidebar's material.
+    // A second behind-window
+    // effect here creates an independent compositing surface inside that pane.
+    final class ContainerView: NSView {
         let searchField = NSSearchField()
         let scrollView = NSScrollView()
         let outlineView = BrowserSidebarOutlineView()
 
         init(coordinator: Coordinator) {
             super.init(frame: .zero)
-
-            AppSidebarNativePolicy.configure(background: self)
 
             searchField.translatesAutoresizingMaskIntoConstraints = false
             AppSidebarNativePolicy.configure(searchField: searchField)
@@ -2416,6 +2448,31 @@ struct NativeSidebarSourceList: NSViewRepresentable {
             ])
         }
 
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            refreshControlAppearance()
+        }
+
+        override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance()
+            refreshControlAppearance()
+        }
+
+        private func refreshControlAppearance() {
+            // Keep this container inheriting AppKit's live appearance. Only
+            // its native controls need the corresponding vibrant variant.
+            // Deriving this from a copied SwiftUI colorScheme creates a frame
+            // where the material and its text use opposite themes.
+            let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            let name: NSAppearance.Name = dark ? .vibrantDark : .vibrantLight
+            for control in [searchField as NSView, outlineView] where control.appearance?.name != name {
+                control.appearance = NSAppearance(named: name)
+            }
+            let placeholder = searchField.placeholderAttributedString?.string
+                ?? searchField.placeholderString ?? ""
+            AppSidebarNativePolicy.setPlaceholder(placeholder, on: searchField)
+        }
+
         @available(*, unavailable)
         required init?(coder: NSCoder) {
             fatalError("init(coder:) has not been implemented")
@@ -2432,6 +2489,9 @@ struct NativeSidebarSourceList: NSViewRepresentable {
             rowSizeStyle = AppSidebarNativePolicy.rowSizeStyle
             symbolView.imageScaling = .scaleProportionallyDown
             symbolView.contentTintColor = AppSidebarNativePolicy.iconTint
+            symbolView.symbolConfiguration = NSImage.SymbolConfiguration(
+                paletteColors: [AppSidebarNativePolicy.iconTint]
+            )
 
             label.lineBreakMode = .byTruncatingTail
             label.maximumNumberOfLines = 1
@@ -2519,7 +2579,7 @@ struct NativeSidebarSourceList: NSViewRepresentable {
             guard parent.selection == parent.navigation.selection,
                   parent.selection.revision >= (latestUserSelection?.revision ?? 0) else { return }
             let field = view.searchField
-            field.placeholderString = parent.presentation.placeholder
+            AppSidebarNativePolicy.setPlaceholder(parent.presentation.placeholder, on: field)
             field.setAccessibilityLabel(parent.presentation.accessibilityLabel)
             field.toolTip = parent.presentation.help
             field.isEnabled = parent.isSearchEnabled
@@ -2845,30 +2905,10 @@ private struct SidebarSearchControl: NSViewRepresentable {
     }
 }
 
-private struct SidebarColumnWidthModifier: ViewModifier {
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if #available(macOS 13.0, *) {
-            content.navigationSplitViewColumnWidth(
-                min: AppSidebarMetrics.width,
-                ideal: AppSidebarMetrics.width,
-                max: AppSidebarMetrics.width
-            )
-        } else {
-            content.frame(
-                minWidth: AppSidebarMetrics.width,
-                idealWidth: AppSidebarMetrics.width,
-                maxWidth: AppSidebarMetrics.width
-            )
-        }
-    }
-}
-
 private struct SectionContentView: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var navigation: AppNavigationState
     @ObservedObject var liveSession: LiveBrowserSession
-    let showsCollapsedSearch: Bool
 
     var body: some View {
         Group {
@@ -2879,7 +2919,7 @@ private struct SectionContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(AppSurfacePalette.background)
+        .background(AppSurfacePalette.background, ignoresSafeAreaEdges: [.horizontal, .bottom])
         .environment(\.browserNavigationSelection, navigation.selection)
         .transaction { transaction in
             // AppKit hosts SwiftUI toolbar items in constraint-based views.
@@ -3014,7 +3054,7 @@ private struct BrowserDetailRouteContainer: View {
             )
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(AppSurfacePalette.background)
+        .background(AppSurfacePalette.background, ignoresSafeAreaEdges: [.horizontal, .bottom])
     }
 }
 

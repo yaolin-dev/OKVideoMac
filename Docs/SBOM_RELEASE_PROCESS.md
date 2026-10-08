@@ -1,5 +1,7 @@
 # Release SBOM Process
 
+0.8.3 (Build 136) preparation: regenerate all four SBOMs and corresponding-source manifests from the exact clean release commit. Android Bridge/native dependency versions are unchanged; use the existing exact bundle-inventory verification. The published 0.8.2 results below remain historical.
+
 Date: 2026-10-08
 
 Current published release: OKVideoMac 0.8.2 (Build 135). All four SBOMs are

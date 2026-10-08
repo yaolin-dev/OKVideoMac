@@ -1,5 +1,9 @@
 # Automatic updates
 
+## 0.8.3 distribution preparation
+
+The preview build deliberately has no stable feed/key, so Check for Updates is disabled with an unconfigured-source message. A formal 0.8.3 distribution must embed `StableUpdateConfiguration.plist`; `verify_update_bundle.py --require-stable` rejects missing or non-stable feed/key configuration. Retain the existing HTTPS feed and signing key, then generate a signed appcast only from the final Accepted, stapled DMG. Publication and latest-feed checks are recorded after completion. The 0.8.2 update observations below remain historical.
+
 Sparkle is pinned to the official 2.10.0 distribution and source commit in
 `ThirdParty/sparkle-lock.json`. `Scripts/prepare-sparkle.py` checks the archive
 SHA-256 before extracting it, verifies its five executable paths, thins those

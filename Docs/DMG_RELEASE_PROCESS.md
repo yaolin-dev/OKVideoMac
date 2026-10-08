@@ -1,5 +1,7 @@
 # DMG Release Process
 
+0.8.3（Build 136）正在准备正式发布，沿用下述流程；最终签名、公证及发布结果将在 [0.8.3 验证记录](RELEASE_VALIDATION_0.8.3.md)补录，门禁通过前不替换稳定下载。
+
 当前公开版本为 OKVideoMac 0.8.2（Build 135），正式用户下载为 `OKVideoMac-0.8.2.dmg`。ZIP 仅为内部归档。
 
 Tag `v0.8.2` 固定 `42be0560a168a949d7f7b61e1c3837a8b4aab189`；Apple notarization `Accepted`，Submission：`a086cfe3-5803-45e1-b37b-b31889724c9d`。最终 DMG SHA-256：`65e214a912f7f764ce731e84cdd82adc3561bfab681896e3cbbf7b03db1428f3`。签名、staple、Gatekeeper、最终 DMG 与全新安装 smoke、16 个公开资产和旧版更新检测已通过；见[0.8.2 正式验证](RELEASE_VALIDATION_0.8.2.md)。

@@ -1,5 +1,9 @@
 # Android Bridge Setup
 
+## Missing bundled Bridge (0.8.3)
+
+A missing bundled APK is reported as `bridgeAPKMissing` at `installingBridge`, not an ADB forwarding failure. Release builds reject the missing resource. Rebuild through the existing packaging process; this fix does not reset AVD data, login state, private keys or backups.
+
 [中文](ANDROID_BRIDGE_SETUP_zh-CN.md)
 
 Android Bridge is used only by supported Java/Dex `csp_` providers. Native,

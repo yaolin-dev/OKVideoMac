@@ -1,5 +1,7 @@
 # OKVideoMac
 
+当前发布候选为 **0.8.3（Build 136）**：移除主侧栏分隔槽并保留左右原生独立材质，稳定侧栏按钮、同步主题切换、恢复搜索提示，并准确报告 Android Bridge 资源缺失。正式分发门禁待完成；下方稳定下载仍为 0.8.2。见[发布说明](Docs/RELEASE_NOTES_0.8.3.md)和[就绪记录](Docs/RELEASE_READINESS_0.8.3.md)。
+
 [English](README.md) | 简体中文
 
 **面向 Apple Silicon 的原生 macOS IPTV/点播播放器，支持 Xtream、M3U/XMLTV、

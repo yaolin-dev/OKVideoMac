@@ -1,5 +1,7 @@
 # Immutable Corresponding-Source Release Process
 
+The 0.8.3 (Build 136) candidate uses `OKVideoMac-0.8.3.dmg`, the internal `OKVideoMac-0.8.3-macOS-arm64.zip`, and `OKVideoMac-0.8.3-build136-SOURCE_RELEASE_INDEX.json`. Rebuild from the exact clean main commit with the existing distribution pipeline. Publish the existing 16-asset set only after signing, Apple Accepted, staple, Gatekeeper and installation checks. The 0.8.2 results below are historical; candidate binaries cannot be reused.
+
 The published 0.8.2 (Build 135) release uses
 `OKVideoMac-0.8.2-macOS-arm64.zip` as the internal identity carrier and
 `OKVideoMac-0.8.2.dmg` as the notarized public download.

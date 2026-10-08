@@ -143,6 +143,9 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         mainMenuLocalizer.start()
+#if OKVIDEO_PERFORMANCE_TEST
+        Task { await AndroidDexBridgeRuntime.runStartupAcceptanceIfRequested() }
+#endif
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -1161,11 +1164,11 @@ enum BrowserWindowChromeController {
         guard !transition.browserChromeConfigured, transition.canChangeGeometry else { return }
         transition.browserChromeConfigured = true
         if !window.styleMask.contains(.fullSizeContentView) { window.styleMask.insert(.fullSizeContentView) }
-        // Keep the full-size titlebar so the Sidebar can extend behind the
-        // traffic lights, but let AppKit draw the unified toolbar material.
-        // A transparent titlebar exposes scrolled posters underneath the real
-        // toolbar controls once the old custom overlay is removed.
-        window.titlebarAppearsTransparent = false
+        // Each split pane supplies its own native material through the titlebar:
+        // AppKit's full-height sidebar on the left, .titlebar on the right.
+        // Page backgrounds respect the top safe area. A second system titlebar
+        // fill would reserve a 1 pt split seam and expose the page underneath.
+        window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.toolbarStyle = .unified
         window.titlebarSeparatorStyle = .none

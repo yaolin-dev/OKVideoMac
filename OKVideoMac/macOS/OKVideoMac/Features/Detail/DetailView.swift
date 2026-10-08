@@ -33,7 +33,7 @@ struct DetailLoadingView: View {
             }
             .browserToolbarScrollSurface(named: DetailPageLayout.coordinateSpaceName)
         }
-        .background(AppSurfacePalette.background.ignoresSafeArea())
+        .background(AppSurfacePalette.background, ignoresSafeAreaEdges: [.horizontal, .bottom])
     }
 }
 
@@ -224,7 +224,7 @@ struct DetailView: View {
             }
             .browserToolbarScrollSurface(named: DetailPageLayout.coordinateSpaceName)
         }
-        .background(AppSurfacePalette.background.ignoresSafeArea())
+        .background(AppSurfacePalette.background, ignoresSafeAreaEdges: [.horizontal, .bottom])
         .onAppear {
             performInitialSelection()
             // Report after SwiftUI has mounted the real detail tree and the

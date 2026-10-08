@@ -1,5 +1,9 @@
 # Building OKVideoMac
 
+## 0.8.3 preparation
+
+Release builds now fail if `AndroidDexBridge-release.apk` is absent. Run `Scripts/build-android-dex-bridge.sh` with the existing SDK/JDK/signing configuration first; do not bypass the embed phase. Formal packaging remains `Scripts/package-app.sh --mode distribution --notarize` from an exact clean main commit. The performance-test startup harness is excluded from normal distribution builds.
+
 ## 0.8.2 release verification
 
 The current public release is 0.8.2 (Build 135), rebuilt from the exact clean

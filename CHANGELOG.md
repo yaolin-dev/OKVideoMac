@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.3] - 2026-10-09
+
+- Release Build 136; formal distribution and publication remain gated on current validation.
+- Remove the primary sidebar divider slot through public AppKit split APIs, preserving independent sidebar/detail materials and full-height titlebar coverage.
+- Keep the sidebar toggle attached to the window across navigation; synchronize native controls and SwiftUI content during appearance changes.
+- Restore native gray search styling, blue symbols and readable localized search hints.
+- Classify missing Android Bridge APKs as resource failures and reject incomplete Release builds.
+
 ## [0.8.2] - 2026-10-08
 
 - Release Build 135 repairs Android Runtime rebuild and recovery. Developer ID, Hardened Runtime, Apple Accepted, staple, Gatekeeper and final publication checks passed; see [verification](Docs/RELEASE_VALIDATION_0.8.2.md).

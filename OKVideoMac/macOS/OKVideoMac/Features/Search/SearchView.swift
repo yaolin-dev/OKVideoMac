@@ -29,7 +29,7 @@ struct SearchView: View {
                     projection = result
                 }
                 .navigationTitle("")
-                .background(AppSurfacePalette.background.ignoresSafeArea())
+                .background(AppSurfacePalette.background, ignoresSafeAreaEdges: [.horizontal, .bottom])
                 .toolbar {
                     ToolbarItem(placement: .navigation) {
                         SearchToolbarLeadingItem(
@@ -241,7 +241,7 @@ struct SearchView: View {
                     .allowsHitTesting(false)
             }
         }
-        .background(AppSurfacePalette.background)
+        .background(AppSurfacePalette.background, ignoresSafeAreaEdges: [.horizontal, .bottom])
     }
 
     private var visibleRawResults: [VideoSummary] {

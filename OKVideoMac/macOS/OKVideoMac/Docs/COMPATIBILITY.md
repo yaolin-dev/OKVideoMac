@@ -1,6 +1,8 @@
 # Compatibility
 
-- 对照版本：0.8.2（Build 135）
+0.8.3 为发布候选，目标 tag `v0.8.3`；本轮门禁和覆盖边界见[就绪记录](../../../../Docs/RELEASE_READINESS_0.8.3.md)。以下 0.8.2 正式分发结果保留为历史依据；本轮不新增性能保证。
+
+- 对照版本：0.8.3（Build 136）
 - 最近更新：2026-10-08
 - 当前稳定版本：0.8.2（Build 135），Apple Silicon / arm64 / macOS 12.0+
 - 最新公开公证 DMG：0.8.2（Build 135）；Developer ID、Apple Accepted、Staple、Gatekeeper 与安装 smoke 均通过
