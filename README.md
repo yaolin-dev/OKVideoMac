@@ -1,7 +1,5 @@
 # OKVideoMac
 
-The current release candidate is **0.8.2 (Build 135)** with recoverable Android Runtime rebuilds. Formal signing, notarization and publication are pending; the stable download remains 0.8.1. See the [candidate notes](Docs/RELEASE_NOTES_0.8.2.md).
-
 English | [简体中文](README_zh-CN.md)
 
 **A native macOS IPTV/VOD player for Apple Silicon with Xtream, M3U/XMLTV,
@@ -15,7 +13,7 @@ selected TVBox/CatVod/CatPaw-style providers, and libmpv playback.**
 Built with Swift and SwiftUI/AppKit. Android is an optional compatibility layer
 for selected Java/Dex providers.
 
-The latest stable release is **0.8.1 (Build 134)**, Developer ID signed and
+The latest stable release is **0.8.2 (Build 135)**, Developer ID signed and
 Apple-notarized.
 
 **Native macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · Multi-provider Search ·
@@ -25,12 +23,12 @@ QuickJS/Node Spiders**
 
 ### [Download the latest stable release →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-The latest stable release is **0.8.1 (Build 134)** · macOS 12.0+ · Apple Silicon
-(`arm64`) only. It adds optional update checks and fixes Bluetooth audio-device
-lifecycle crashes and episode navigation when another episode has duplicate uploads.
+The latest stable release is **0.8.2 (Build 135)** · macOS 12.0+ · Apple Silicon
+(`arm64`) only. It fixes Android Runtime rebuilds, restores matching data after
+creation failure or interruption, and checks free space on the AVD disk.
 
 Download the Developer ID signed and Apple-notarized
-[v0.8.1 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.8.1/OKVideoMac-0.8.1.dmg).
+[v0.8.2 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.8.2/OKVideoMac-0.8.2.dmg).
 This release passed stapling, Gatekeeper assessment and installation smoke tests.
 
 Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to
@@ -40,14 +38,22 @@ and notices are published with each release.
 > OKVideoMac is a player and provider client. It does not include third-party
 > video sources, accounts, cookies, parsing services, or DRM keys.
 
-## New in 0.8.1
+## New in 0.8.2
+
+- Back up the private AVD and compatibility fingerprint together, fixing stale system-image rejection after rebuild.
+- Recover matching original data after creation failure or interruption; retain backups and failed new data.
+- Freeze the selected image, preflight AVD-disk space and preserve terminal errors. Existing strict compatibility checks remain.
+
+Version 0.8.1 on the stable channel can detect 0.8.2 through the existing updater; automatic checks require prior consent and follow the daily/playback-aware schedule. Downloading and installation need confirmation. Version 0.8.0 and local test-feed builds require a manual install. See [release notes](Docs/RELEASE_NOTES_0.8.2.md), [verified release](Docs/RELEASE_VALIDATION_0.8.2.md) and [automatic updates](Docs/AUTOMATIC_UPDATES.md).
+
+## Earlier 0.8.1 changes
 
 - Fix Bluetooth audio-device-change crashes after failed CoreAudio initialization.
 - Add optional daily update checks with Sparkle 2.10.0; users confirm downloading and installation. Playback-aware prompts and exclusive restart ownership protect active playback and shutdown.
 - Restore previous/next controls and autoplay when a different episode has duplicate uploads. Ambiguous adjacent resources require a manual choice.
 - Publish a signed stable update feed and require an exact 34-executable bundle inventory.
 
-Install this release manually when upgrading from 0.8.0 or a local test-feed build. See [release notes](Docs/RELEASE_NOTES_0.8.1.md), [release verification](Docs/RELEASE_VALIDATION_0.8.1.md) and [automatic updates](Docs/AUTOMATIC_UPDATES.md).
+See the [0.8.1 release notes](Docs/RELEASE_NOTES_0.8.1.md) for the historical changes.
 
 ## Earlier 0.8.0 changes from 0.7.3
 
@@ -327,19 +333,19 @@ checks; a local Debug compile is not a public release artifact.
 
 ## Release integrity
 
-The 0.8.1 / Build 134 DMG passed Release packaging, Developer ID signing,
+The 0.8.2 / Build 135 DMG passed Release packaging, Developer ID signing,
 Apple notarization (`Accepted`), stapling, Gatekeeper and installation smoke tests
-under the [DMG release process](Docs/DMG_RELEASE_PROCESS.md). Tag `v0.8.1` pins
-release commit `4b18f10134a88a6b7d66e6f8e293fdbd01da86f2`; matching source archives,
+under the [DMG release process](Docs/DMG_RELEASE_PROCESS.md). Tag `v0.8.2` pins
+release commit `42be0560a168a949d7f7b61e1c3837a8b4aab189`; matching source archives,
 SBOMs and checksums accompany the download. Documentation status updates do not
 change historical signed assets or their source snapshots. See the
-[0.8.1 release validation](Docs/RELEASE_VALIDATION_0.8.1.md) and
+[0.8.2 release validation](Docs/RELEASE_VALIDATION_0.8.2.md) and
 [source release process](Docs/SOURCE_RELEASE_PROCESS.md).
 
 ## Documentation
 
-- [0.8.1 release notes](Docs/RELEASE_NOTES_0.8.1.md)
-- [0.8.1 release verification](Docs/RELEASE_VALIDATION_0.8.1.md)
+- [0.8.2 release notes](Docs/RELEASE_NOTES_0.8.2.md)
+- [0.8.2 release verification](Docs/RELEASE_VALIDATION_0.8.2.md)
 - [Automatic updates](Docs/AUTOMATIC_UPDATES.md)
 
 - [Detailed project documentation](OKVideoMac/README.md)

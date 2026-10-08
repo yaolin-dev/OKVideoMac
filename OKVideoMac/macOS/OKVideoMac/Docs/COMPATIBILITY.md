@@ -2,11 +2,10 @@
 
 - 对照版本：0.8.2（Build 135）
 - 最近更新：2026-10-08
-- 发布候选 0.8.2 修复 AVD 重建恢复；目标 tag `v0.8.2` 须等待正式分发门禁。公开稳定版仍为 0.8.1；本轮未新增性能保证。
-- 当前稳定版本：0.8.1（Build 134），Apple Silicon / arm64 / macOS 12.0+
-- 最新公开公证 DMG：0.8.1（Build 134）；Developer ID、Apple Accepted、Staple、Gatekeeper 与安装 smoke 均通过
-- 发布 tag `v0.8.1` 固定 `4b18f10134a88a6b7d66e6f8e293fdbd01da86f2`；正式门禁结果见
-  [发布验证记录](../../../../Docs/RELEASE_VALIDATION_0.8.1.md)。
+- 当前稳定版本：0.8.2（Build 135），Apple Silicon / arm64 / macOS 12.0+
+- 最新公开公证 DMG：0.8.2（Build 135）；Developer ID、Apple Accepted、Staple、Gatekeeper 与安装 smoke 均通过
+- 发布 tag `v0.8.2` 固定 `42be0560a168a949d7f7b61e1c3837a8b4aab189`；正式门禁结果见
+  [发布验证记录](../../../../Docs/RELEASE_VALIDATION_0.8.2.md)。
 
 ## 概述
 
@@ -379,12 +378,13 @@ App 支持范围和 Managed Android Runtime 实机验证是两个不同结论：
 | macOS 12.0+ | Supported | Info.plist 和全部 Mach-O `minos` 由包体脚本验证 |
 | Intel Mac / Universal Binary | Unsupported | 当前只交付 arm64 |
 | 本地 Hardened Runtime 包 | Supported | ad-hoc 签名，仅主 App 使用开发期 Library Validation 例外 |
-| Developer ID 分发 | Supported | 0.7.3（Build 129）正式 DMG 使用 Developer ID Application 与 secure timestamp 签名，Hardened Runtime、嵌套签名和权限边界由发布门禁验证 |
-| Notarization / Staple / Gatekeeper | Supported | 0.7.3（Build 129）已取得 Apple notarization `Accepted`，并通过 staple、`stapler validate` 与 Gatekeeper |
+| Developer ID 分发 | Supported | 0.8.2（Build 135）正式 DMG 使用 Developer ID Application 与 secure timestamp 签名，Hardened Runtime、嵌套签名和权限边界由发布门禁验证 |
+| Notarization / Staple / Gatekeeper | Supported | 0.8.2（Build 135）已取得 Apple notarization `Accepted`，并通过 staple、`stapler validate` 与 Gatekeeper |
 | 0.6.0（Build 100）正式发布 | Supported | DMG、内部 ZIP、源码、四份 SBOM、Notices 和 APK 由外层 manifest/SHA256SUMS 绑定到 tag `v0.6.0` 指向的 exact commit |
 | 0.6.1（Build 101）正式发布 | Supported | 1060 项自动测试通过，9 项条件测试跳过；tag `v0.6.1` 固定提交 `25155f52fb8c416f3245c9a829a93175dec9857b`；正式 DMG 独立完成公证、Gatekeeper 与安装 smoke |
 | 0.7.3（Build 129）正式发布 | Supported | tag v0.7.3 固定 55ffa9d；Developer ID、公证、Staple、Gatekeeper 与安装 smoke 已完成，见 GitHub Release |
-| 0.8.0（Build 130）发布候选 | Pending formal distribution | 模块验证与本地 Release 包结果见 0.8.0 发布就绪记录；正式 tag、分发签名、公证与上传待执行 |
+| 0.8.0（Build 130）历史正式发布 | Supported | tag v0.8.0、Developer ID、公证、Staple、Gatekeeper 与安装 smoke 已完成，见[历史验证](../../../../Docs/RELEASE_VALIDATION_0.8.0.md) |
+| 0.8.2（Build 135）正式发布 | Supported | tag v0.8.2 固定发布提交；签名、公证、Staple、Gatekeeper、公开资产及旧版更新检测通过，见[正式验证](../../../../Docs/RELEASE_VALIDATION_0.8.2.md) |
 | App Sandbox | Not Applicable | 当前为 Developer ID 外部分发目标；Sandbox 与 Hardened Runtime 是不同边界 |
 
 ## 明确不提供
@@ -399,4 +399,4 @@ App 支持范围和 Managed Android Runtime 实机验证是两个不同结论：
 0.8.0 完整前后行为对照见 [发布说明](../../../../Docs/RELEASE_NOTES_0.8.0.md)，
 本轮结果及前序证据边界见 [发布就绪记录](../../../../Docs/RELEASE_READINESS_0.8.0.md)。
 
-本地更新候选说明：0.8.1 尚未公开发布；更新流程验收见 Docs/AUTOMATIC_UPDATES.md。以下既有兼容性与性能记录不代表本轮已重新测试全部媒体或硬件。未来目标 tag `v0.8.1` 本轮不创建。
+0.8.2 已正式发布，更新通道验收见[自动更新说明](../../../../Docs/AUTOMATIC_UPDATES.md)。既有兼容性与性能记录不代表本轮已重新测试全部媒体或硬件；本轮范围与结果见[正式验证](../../../../Docs/RELEASE_VALIDATION_0.8.2.md)。

@@ -2,9 +2,9 @@
 
 Date: 2026-10-08
 
-Current published release: OKVideoMac 0.8.1 (Build 134). All four SBOMs are
-provided with [v0.8.1](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.1);
-see [release validation](RELEASE_VALIDATION_0.8.1.md). Historical hashes below remain unchanged.
+Current published release: OKVideoMac 0.8.2 (Build 135). All four SBOMs are
+provided with [v0.8.2](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.2);
+see [release validation](RELEASE_VALIDATION_0.8.2.md). Historical hashes below remain unchanged.
 
 Every packaged release contains four machine-readable documents under
 `Contents/Resources/Legal/Compliance/SBOM/`:
@@ -16,7 +16,7 @@ Every packaged release contains four machine-readable documents under
 
 `Tools/SourceAudit/generate_sbom.py` inventories the built App, not a static
 expected-file list. It refuses unknown or missing executables by comparing the exact approved Mach-O
-path set in `ThirdParty/approved-macho-paths.json`. The 0.8.1 package contains
+path set in `ThirdParty/approved-macho-paths.json`. The 0.8.2 package contains
 34 arm64 Mach-O components, including five Sparkle executables; the count is
 derived from that exact path set and is not a lower-bound allowance. Every nested Mach-O has a final post-signing SHA-256.
 The main executable deliberately has no embedded-SBOM hash because signing the

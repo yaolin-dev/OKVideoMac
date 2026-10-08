@@ -2,7 +2,7 @@
 
 ## [0.8.2] - 2026-10-08
 
-- Release Build 135 repairs Android Runtime rebuild and recovery; formal publication requires the existing Apple distribution gates.
+- Release Build 135 repairs Android Runtime rebuild and recovery. Developer ID, Hardened Runtime, Apple Accepted, staple, Gatekeeper and final publication checks passed; see [verification](Docs/RELEASE_VALIDATION_0.8.2.md).
 - Back up the private AVD compatibility fingerprint with the AVD, preventing stale system-image rejection after a rebuild.
 - Record rebuild progress, restore matching original data after creation failure or interruption, and preserve failed new data for recovery.
 - Freeze the selected system image during rebuild, preflight space on the AVD volume, and retain terminal failures in Settings.

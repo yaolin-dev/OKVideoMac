@@ -1,6 +1,6 @@
 # OKVideoMac 0.8.2（Build 135）发布就绪记录
 
-日期：2026-10-08。状态：正式发布准备，待本次测试与 Apple 分发门禁完成。
+日期：2026-10-08。状态：已完成正式发布；Apple 分发门禁、公开资产与旧版更新检测通过。
 
 基线：开源 main `bec6206`（0.8.1 / Build 134）。商业隔离目录未修改。
 
@@ -26,8 +26,10 @@
 
 ## 交付门禁
 
-本地候选已通过 captured local acceptance 流程、Developer ID / Hardened Runtime、打包与桌面安装验证，并在安装 App 中完成 Android 启动、停止、再次启动和 App 退出重启；原备份再次逐文件验证未变。本次正式发布将重新检查当前代码并执行现有 `package-app.sh --mode distribution --notarize`，从干净 main exact commit 构建。
+本地候选的 captured local acceptance、Developer ID / Hardened Runtime 和 Android 启动、停止、重启验证仅作为前置证据。本次正式产物从干净 main exact commit `42be0560a168a949d7f7b61e1c3837a8b4aab189` 经现有 `package-app.sh --mode distribution --notarize` 重新构建，没有复用本地候选二进制。
 
-发布要求：现有 Developer ID、Hardened Runtime、Apple Accepted、公证 staple、Gatekeeper、最终 DMG / 安装 smoke、签名 appcast 及对应源码绑定全部通过后，才推送 main、创建固定同一提交的 tag v0.8.2 并公开 16 个资产。最终实际结果在发布后补录的 `RELEASE_VALIDATION_0.8.2.md` 中记录，不改变已签名产物或 tag。
+Developer ID、Hardened Runtime、Apple Accepted、staple、Gatekeeper、最终 DMG / 安装 smoke、签名 appcast 和对应源码绑定全部通过后，才推送 main 与固定同一提交的 tag v0.8.2、公开 16 个资产。公开下载文件逐项 SHA-256 验证通过；未修改的正式 0.8.1 App 已实际检测到 0.8.2。桌面 App 已指向正式公证版本。
+
+完整实际结果见 [正式验证记录](RELEASE_VALIDATION_0.8.2.md)。发布后文档补录不移动 tag，不改写签名资产或构建时源码与说明快照。
 
 原始失败日志保留：首轮事务名称验证不匹配与 App 错误分类遗漏已修复后重跑，未删除测试或降低断言。真实硬件/云盘账号/完整第三方站点矩阵不在本轮自动通过范围。

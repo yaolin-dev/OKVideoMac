@@ -1,17 +1,17 @@
 # Building OKVideoMac
 
-## 0.8.2 release preparation
+## 0.8.2 release verification
 
-Build 135 repairs recoverable AVD rebuilds. Local candidate testing has passed;
-formal distribution must be rebuilt from the exact clean main commit with
-`package-app.sh --mode distribution --notarize`. Reuse the existing Developer ID,
-notary profile and stable updater configuration. Require Apple Accepted, staple,
-Gatekeeper, final DMG and installation checks before publication. Tests and scope
-are in [release readiness](../../../../Docs/RELEASE_READINESS_0.8.2.md).
+The current public release is 0.8.2 (Build 135), rebuilt from the exact clean
+main commit pinned by v0.8.2. The existing distribution pipeline passed
+Developer ID, Hardened Runtime, Apple Accepted, staple, Gatekeeper, signed
+appcast, corresponding-source binding and installation smoke. Actual results
+and coverage limits are in [formal verification](../../../../Docs/RELEASE_VALIDATION_0.8.2.md)
+and [release readiness](../../../../Docs/RELEASE_READINESS_0.8.2.md).
 
-## 0.8.1 release verification
+## Historical 0.8.1 release verification
 
-The current release is 0.8.1 (Build 134), built from the clean main release
+The historical release is 0.8.1 (Build 134), built from the clean main release
 commit pinned by `v0.8.1`. Actual test, static-check and Release package results are in the
 [0.8.1 readiness record](../../../../Docs/RELEASE_READINESS_0.8.1.md); coverage and hardware
 limits are explicit in that record and the

@@ -1,48 +1,40 @@
 # Immutable Corresponding-Source Release Process
 
-The 0.8.2 (Build 135) release candidate uses `OKVideoMac-0.8.2.dmg`,
-`OKVideoMac-0.8.2-macOS-arm64.zip`, and
-`OKVideoMac-0.8.2-build135-SOURCE_RELEASE_INDEX.json`. The formal release uses the
-same clean-main-commit, Developer ID, Accepted notarization, staple, Gatekeeper,
-signed appcast and exact 16-public-asset workflow established by 0.8.1 below.
-The local acceptance package cannot be reused as the public binary. Publication
-is pending those gates; the immutable 0.8.1 artifacts remain available.
+The published 0.8.2 (Build 135) release uses
+`OKVideoMac-0.8.2-macOS-arm64.zip` as the internal identity carrier and
+`OKVideoMac-0.8.2.dmg` as the notarized public download.
 
-The published 0.8.1 (Build 134) release uses
-`OKVideoMac-0.8.1-macOS-arm64.zip` as the internal identity carrier and
-`OKVideoMac-0.8.1.dmg` as the notarized public download.
-
-> The published 0.8.1 DMG passed Developer ID signing, Apple notarization,
-> stapling, Gatekeeper and installation smoke. Tag `v0.8.1` pins
-> `4b18f10134a88a6b7d66e6f8e293fdbd01da86f2`; see the
-> [GitHub release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.1) and
-> [release validation](RELEASE_VALIDATION_0.8.1.md). Documentation status updates
+> The published 0.8.2 DMG passed Developer ID signing, Apple notarization,
+> stapling, Gatekeeper and installation smoke. Tag `v0.8.2` pins
+> `42be0560a168a949d7f7b61e1c3837a8b4aab189`; see the
+> [GitHub release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.2) and
+> [release validation](RELEASE_VALIDATION_0.8.2.md). Documentation status updates
 > preserve signed assets and immutable build-time source/notes snapshots.
 
 Each formal OKVideoMac binary must be published with a source set produced by
 `macOS/OKVideoMac/Scripts/create-source-release.sh` from the exact release Git
 commit. Moving branches and `latest` URLs are not corresponding-source links.
 
-For the formal 0.8.1 release (Build 134), the required release artifact set is:
+For the formal 0.8.2 release (Build 135), the required release artifact set is:
 
-- `OKVideoMac-0.8.1-build134-source.tar.gz`
-- `OKVideoMac-0.8.1-build134-third-party-source.tar.gz`
-- `OKVideoMac-0.8.1-build134-licenses.tar.gz`
-- `OKVideoMac-0.8.1-build134-SOURCE_RELEASE_INDEX.json`
-- `OKVideoMac-0.8.1-build134-SOURCE_RELEASE_MANIFEST.json`
-- `OKVideoMac-0.8.1-build134-SHA256SUMS`
-- `OKVideoMac-0.8.1-macOS-arm64.zip` (internal identity/archive carrier)
-- `OKVideoMac-0.8.1.dmg` (the public binary bound by the final manifest)
-- `OKVideoMac-0.8.1.dmg.sha256` (checksum of the final stapled DMG)
-- `OKVideoMac-0.8.1-AndroidDexBridge-release.apk`
+- `OKVideoMac-0.8.2-build135-source.tar.gz`
+- `OKVideoMac-0.8.2-build135-third-party-source.tar.gz`
+- `OKVideoMac-0.8.2-build135-licenses.tar.gz`
+- `OKVideoMac-0.8.2-build135-SOURCE_RELEASE_INDEX.json`
+- `OKVideoMac-0.8.2-build135-SOURCE_RELEASE_MANIFEST.json`
+- `OKVideoMac-0.8.2-build135-SHA256SUMS`
+- `OKVideoMac-0.8.2-macOS-arm64.zip` (internal identity/archive carrier)
+- `OKVideoMac-0.8.2.dmg` (the public binary bound by the final manifest)
+- `OKVideoMac-0.8.2.dmg.sha256` (checksum of the final stapled DMG)
+- `OKVideoMac-0.8.2-AndroidDexBridge-release.apk`
 - `THIRD_PARTY_NOTICES.md`
-- `RELEASE_NOTES_0.8.1.md`
+- `RELEASE_NOTES_0.8.2.md`
 - `appcast.xml` (signed stable feed; immutable DMG URL and embedded release notes)
 
-The Build 134 release set must also include the macOS and Android SPDX/CycloneDX
+The Build 135 release set must also include the macOS and Android SPDX/CycloneDX
 files (`OKVideoMac-macOS.spdx.json`, `OKVideoMac-macOS.cdx.json`,
 `OKVideoMac-Android.spdx.json`, and `OKVideoMac-Android.cdx.json`), and the
-release-specific `OKVideoMac-0.8.1-build134-SHA256SUMS` that binds the release
+release-specific `OKVideoMac-0.8.2-build135-SHA256SUMS` that binds the release
 asset set. The ZIP remains the established internal `binary` identity carrier;
 it is not the public user download. The DMG is recorded separately as the
 public release artifact.
@@ -66,7 +58,7 @@ does not disguise exceptions: the missing original zlib 1.3.2 distfile and
 historical clang-11 input used by MacPorts libc++ remain explicit in the
 manifest and keep native provenance incomplete.
 
-The formal 0.8.1 package was built with Xcode 16.2 / macOS SDK 15.2 on macOS
+The formal 0.8.2 package was built with Xcode 16.2 / macOS SDK 15.2 on macOS
 14.8.9. Formal release manifests must record the actual final builder, not copy
 historical values. For release 0.6.1 (101), the manifest records Xcode 16.2 and macOS SDK 15.2 as
 the actual release package builder. Xcode 14.2 remains the older supported
@@ -102,8 +94,8 @@ OKVideoMac/macOS/OKVideoMac/Scripts/create-source-release.sh \
   --output-dir /path/to/release \
   --cache-dir /path/to/verified-source-cache \
   --commit HEAD \
-  --binary /path/to/OKVideoMac-0.8.1-macOS-arm64.zip \
-  --release-artifact /path/to/OKVideoMac-0.8.1.dmg
+  --binary /path/to/OKVideoMac-0.8.2-macOS-arm64.zip \
+  --release-artifact /path/to/OKVideoMac-0.8.2.dmg
 ```
 
 Use `--offline` for the second run or for an air-gapped release after every
@@ -111,22 +103,22 @@ locked input is present in the cache. The script fails on a dirty worktree,
 unknown commit, binary/version mismatch, unavailable input, or any checksum
 mismatch.
 
-The public Build 134 set must be generated from the exact clean commit selected
-for `v0.8.1`. After all distribution gates pass, the tag must point to that same
+The public Build 135 set must be generated from the exact clean commit selected
+for `v0.8.2`. After all distribution gates pass, the tag must point to that same
 commit. The notarized and stapled DMG, checksum, source archives, manifests, and
 SBOMs must be published together on the GitHub Release. Historical
 Build 62/63/64/65/94 records remain historical facts and must not be presented
 as the current release.
 
-## 0.8.1 release
+## 0.8.2 release
 
-Release artifact names (publication requires the distribution gates): `OKVideoMac-0.8.1.dmg`, `OKVideoMac-0.8.1-macOS-arm64.zip`,
-and `OKVideoMac-0.8.1-build134-SOURCE_RELEASE_INDEX.json`.
+Release artifact names (distribution gates passed; see [verification](RELEASE_VALIDATION_0.8.2.md)): `OKVideoMac-0.8.2.dmg`, `OKVideoMac-0.8.2-macOS-arm64.zip`,
+and `OKVideoMac-0.8.2-build135-SOURCE_RELEASE_INDEX.json`.
 Formal artifacts bind the clean main release commit. Earlier local snapshots retain
 acceptanceOnly/publicReleaseEligible flags and cannot be published, even when
 signed with Developer ID for loopback Sparkle testing.
 
-The formal 0.8.1 pipeline additionally binds signed `appcast.xml` as a release
+The formal 0.8.2 pipeline additionally binds signed `appcast.xml` as a release
 artifact after DMG notarization and stapling. It references the immutable DMG
 URL and embeds release notes. Publish it with the existing 15-asset layout;
 the ZIP remains an internal identity carrier. Local acceptance artifacts and

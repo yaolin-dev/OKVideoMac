@@ -91,3 +91,13 @@ Do not export a private key into the repository, build artifacts or logs. Keep
 the signing account available for subsequent releases; replacing it requires
 Sparkle's documented key-rotation process. Developer ID and notary credentials
 remain the existing release identities.
+
+## Published 0.8.2 update
+
+The stable latest feed now offers 0.8.2 (135), with the same public key and HTTPS
+feed used by the formal 0.8.1 (134) App. The final notarized/stapled DMG and signed
+feed were verified after public download. The unmodified 0.8.1 App's native
+Check for Updates UI detected 0.8.2; that verifies feed/version compatibility,
+not a 24-hour scheduled-timer run or a complete updater installation. Automatic
+checks still require consent and defer during playback. Users confirm download
+and installation. See [release verification](RELEASE_VALIDATION_0.8.2.md).
