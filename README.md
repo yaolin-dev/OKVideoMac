@@ -1,11 +1,6 @@
 # OKVideoMac
 
-The current release candidate is **0.8.4 (Build 137)**, prepared for formal release. It removes the AppKit toolbar
-write-back associated with the reported 0.8.3 startup crash while preserving the native
-sidebar. The user confirmed successful testing on macOS 27.0.1 on 2026-10-09.
-The final package is rebuilt from a clean main commit and must pass the distribution
-gates before publication. See [release notes](Docs/RELEASE_NOTES_0.8.4.md) and
-[readiness](Docs/RELEASE_READINESS_0.8.4.md). Stable downloads below remain 0.8.3 until publication.
+**0.8.4 (Build 137)** fixes the SwiftUI/AppKit toolbar ownership path associated with the 0.8.3 startup crash. The user confirmed successful macOS 27.0.1 testing; see [release notes](Docs/RELEASE_NOTES_0.8.4.md) and [formal verification](Docs/RELEASE_VALIDATION_0.8.4.md).
 
 English | [简体中文](README_zh-CN.md)
 
@@ -20,7 +15,7 @@ selected TVBox/CatVod/CatPaw-style providers, and libmpv playback.**
 Built with Swift and SwiftUI/AppKit. Android is an optional compatibility layer
 for selected Java/Dex providers.
 
-The latest stable release is **0.8.3 (Build 136)**, Developer ID signed and Apple-notarized.
+The latest stable release is **0.8.4 (Build 137)**, Developer ID signed and Apple-notarized.
 
 **Native macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · Multi-provider Search · QuickJS/Node Spiders**
 
@@ -28,22 +23,21 @@ The latest stable release is **0.8.3 (Build 136)**, Developer ID signed and Appl
 
 ### [Download the latest stable release →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-**0.8.3 (Build 136)** · macOS 12.0+ · Apple Silicon (`arm64`) only.
+**0.8.4 (Build 137)** · macOS 12.0+ · Apple Silicon (`arm64`) only.
 
-Download the Developer ID signed and Apple-notarized [v0.8.3 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.8.3/OKVideoMac-0.8.3.dmg). Stapling, Gatekeeper, final DMG and fresh-install smoke checks passed.
+Download the Developer ID signed and Apple-notarized [v0.8.4 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.8.4/OKVideoMac-0.8.4.dmg). Stapling, Gatekeeper, final DMG and fresh-install smoke checks passed.
 
 Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to disable Gatekeeper or SIP. Checksums, release notes, source archives, SBOMs and notices accompany the release.
 
 > OKVideoMac is a player and provider client. It does not include third-party video sources, accounts, cookies, parsing services or DRM keys.
 
-## New in 0.8.3
+## New in 0.8.4
 
-- Remove the primary sidebar divider slot while preserving separate native sidebar, detail and titlebar materials.
-- Keep the sidebar toggle attached to the window across navigation and synchronize the first frames of appearance changes.
-- Restore native gray search controls, blue symbols and readable localized hints.
-- Report missing Android Bridge APKs accurately and reject incomplete Release builds.
+- Remove synchronous AppKit toolbar write-back during SwiftUI toolbar teardown.
+- Keep a real home title while configuration is loading or unavailable, with separate Search and Detail toolbars.
+- Preserve native sidebar materials, the zero-width split and macOS 12 compatibility; add startup and window lifecycle regressions.
 
-Versions 0.8.1 and 0.8.2 on the stable channel can check for this update. Automatic checks require consent; downloading and installation require confirmation. Version 0.8.0 and local test-feed builds need a manual install. See [release notes](Docs/RELEASE_NOTES_0.8.3.md), [verified release](Docs/RELEASE_VALIDATION_0.8.3.md) and [automatic updates](Docs/AUTOMATIC_UPDATES.md).
+Versions 0.8.1–0.8.3 on the stable channel can check for this update. Automatic checks require consent; downloading and installation require confirmation. Version 0.8.0 and local test-feed builds need a manual install. See [release notes](Docs/RELEASE_NOTES_0.8.4.md), [verified release](Docs/RELEASE_VALIDATION_0.8.4.md) and [automatic updates](Docs/AUTOMATIC_UPDATES.md).
 
 ## Earlier 0.8.2 changes
 
@@ -340,12 +334,12 @@ checks; a local Debug compile is not a public release artifact.
 
 ## Release integrity
 
-The 0.8.3 / Build 136 DMG passed Release packaging, Developer ID / Hardened Runtime, Apple Accepted, stapling, Gatekeeper and installation smoke under the [existing release process](Docs/DMG_RELEASE_PROCESS.md). Tag `v0.8.3` pins `2d00518dbdf0eba6f91c60483d522fd10e7bee3d`. All 16 public asset digests and anonymous downloads match the verified files. Post-publication documentation preserves signed assets, source snapshots and tags. See [verification](Docs/RELEASE_VALIDATION_0.8.3.md) and [source release process](Docs/SOURCE_RELEASE_PROCESS.md).
+The 0.8.4 / Build 137 DMG passed Release packaging, Developer ID / Hardened Runtime, Apple Accepted, stapling, Gatekeeper and installation smoke under the [existing release process](Docs/DMG_RELEASE_PROCESS.md). Tag `v0.8.4` pins `58e83d0aa29c7a7ffa9a00b15011875678395481`. All 16 public asset digests and anonymous downloads match the verified files. Post-publication documentation preserves signed assets, source snapshots and tags. See [verification](Docs/RELEASE_VALIDATION_0.8.4.md) and [source release process](Docs/SOURCE_RELEASE_PROCESS.md).
 
 ## Documentation
 
-- [0.8.3 release notes](Docs/RELEASE_NOTES_0.8.3.md)
-- [0.8.3 release verification](Docs/RELEASE_VALIDATION_0.8.3.md)
+- [0.8.4 release notes](Docs/RELEASE_NOTES_0.8.4.md)
+- [0.8.4 release verification](Docs/RELEASE_VALIDATION_0.8.4.md)
 - [Automatic updates](Docs/AUTOMATIC_UPDATES.md)
 
 - [Detailed project documentation](OKVideoMac/README.md)

@@ -2,17 +2,13 @@
 
 - 对照版本：0.8.4（Build 137）
 - 最近更新：2026-10-09
-- 当前稳定版本：0.8.3（Build 136），Apple Silicon / arm64 / macOS 12.0+
-- 最新公开公证 DMG：0.8.3（Build 136）；Developer ID、Apple Accepted、Staple、Gatekeeper 与安装 smoke 均通过
-- 发布 tag `v0.8.3` 固定 `2d00518dbdf0eba6f91c60483d522fd10e7bee3d`；正式门禁结果见
-  [发布验证记录](../../../../Docs/RELEASE_VALIDATION_0.8.3.md)。
+- 当前稳定版本：0.8.4（Build 137），Apple Silicon / arm64 / macOS 12.0+
+- 最新公开公证 DMG：0.8.4（Build 137）；Developer ID、Apple Accepted、Staple、Gatekeeper 与安装 smoke 均通过
+- 发布 tag `v0.8.4` 固定 `58e83d0aa29c7a7ffa9a00b15011875678395481`；正式门禁结果见[发布验证记录](../../../../Docs/RELEASE_VALIDATION_0.8.4.md)。
 
 ## 0.8.4 验证边界
 
-目标 tag `v0.8.4` 在正式分发门禁全部通过后创建。
-工具栏条件分支采用兼容 macOS 12 的 View 层声明。macOS 14.8.9 定向回归通过；
-2026-10-09 用户确认 macOS 27.0.1 实机测试正常，未提供逐项日志。
-正式版本仍须从干净 main 重建并通过全部分发门禁。未新增 macOS 12 实机测试。
+工具栏条件分支采用兼容 macOS 12 的 View 层声明。本机 macOS 14.8.9 的 48 项相关回归通过，用户于 2026-10-09 确认 macOS 27.0.1 实机测试正常；未附逐项日志，未新增 macOS 12 实机测试。
 
 ## 概述
 
@@ -392,6 +388,7 @@ App 支持范围和 Managed Android Runtime 实机验证是两个不同结论：
 | 0.7.3（Build 129）正式发布 | Supported | tag v0.7.3 固定 55ffa9d；Developer ID、公证、Staple、Gatekeeper 与安装 smoke 已完成，见 GitHub Release |
 | 0.8.0（Build 130）历史正式发布 | Supported | tag v0.8.0、Developer ID、公证、Staple、Gatekeeper 与安装 smoke 已完成，见[历史验证](../../../../Docs/RELEASE_VALIDATION_0.8.0.md) |
 | 0.8.2（Build 135）历史正式发布 | Supported | tag v0.8.2 固定发布提交；签名、公证、Staple、Gatekeeper、公开资产及旧版更新检测通过，见[历史验证](../../../../Docs/RELEASE_VALIDATION_0.8.2.md) |
+| 0.8.4（Build 137）正式发布 | Supported | tag v0.8.4 固定 main 发布提交；签名、公证、staple、Gatekeeper、安装、公开资产及稳定 feed 通过；用户确认 macOS 27.0.1 实机正常，见[正式验证](../../../../Docs/RELEASE_VALIDATION_0.8.4.md) |
 | 0.8.3（Build 136）正式发布 | Supported | tag v0.8.3 固定发布提交；签名、公证、Staple、Gatekeeper、公开资产、更新源签名和版本兼容性通过，见[正式验证](../../../../Docs/RELEASE_VALIDATION_0.8.3.md)；未重跑旧版原生更新窗口 |
 | App Sandbox | Not Applicable | 当前为 Developer ID 外部分发目标；Sandbox 与 Hardened Runtime 是不同边界 |
 

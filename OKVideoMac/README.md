@@ -2,7 +2,7 @@
 
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于
 原生 Xtream、M3U/XMLTV、配置格式和运行时，而不是简单以 TVBox、FongMi、MiraPlay 或 CatPawOpen
-等生态名称判断。最新稳定版本为 **0.8.3（Build 136）**，支持
+等生态名称判断。最新稳定版本为 **0.8.4（Build 137）**，支持
 **arm64**，最低系统为 **macOS 12.0**。公开二进制通过 Developer ID 签名、Apple 公证、
 Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
@@ -11,19 +11,10 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
 ## 当前版本
 
-- 当前发布候选：0.8.4（Build 137）；本轮准备正式发布；工具栏归属修复，保留左右独立材质、零宽分隔与原生控件。
-- 目标 tag：`v0.8.4`；用户已确认 macOS 27.0.1 实机测试正常，正式资产须从干净 main 重建并通过分发门禁。
-- 候选 source release index：`OKVideoMac-0.8.4-build137-SOURCE_RELEASE_INDEX.json`。
-- [候选发布说明](../Docs/RELEASE_NOTES_0.8.4.md) / [候选就绪记录](../Docs/RELEASE_READINESS_0.8.4.md)。
-- 候选的 Developer ID、Apple 公证（Accepted）、staple、Gatekeeper 和本机启动验证已通过；见[候选实际验证](../Docs/CANDIDATE_VALIDATION_0.8.4.md)。
-
-以下为已公开 0.8.3 的历史发布状态：
-
-- 修复主侧栏分隔槽、按钮闪动、主题切换错色、搜索提示及缺失 APK 的错误分类；见[发布说明](../Docs/RELEASE_NOTES_0.8.3.md)。
-
-- 当前稳定版本：0.8.3（Build 136）
-- Tag：`v0.8.3`；固定 exact release commit `2d00518dbdf0eba6f91c60483d522fd10e7bee3d`。
-- source release index：`OKVideoMac-0.8.3-build136-SOURCE_RELEASE_INDEX.json`。
+- 当前稳定版本：0.8.4（Build 137）
+- Tag：`v0.8.4`；固定 exact release commit `58e83d0aa29c7a7ffa9a00b15011875678395481`。
+- source release index：`OKVideoMac-0.8.4-build137-SOURCE_RELEASE_INDEX.json`。
+- 本轮修复工具栏归属与首页加载/空态标题，保留独立材质和零宽分隔；见[发布说明](../Docs/RELEASE_NOTES_0.8.4.md)与[正式验证](../Docs/RELEASE_VALIDATION_0.8.4.md)。
 - 最低系统：macOS 12.0
 - 支持架构：Apple Silicon / arm64
 - 播放历史与收藏保留配置、站点和稳定媒体身份；旧记录经过迁移后仍可准确恢复，
@@ -37,15 +28,20 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 - 搜索框有文字时第一次 Esc 只清空并保持焦点，空框再次 Esc 才退出搜索
 - 0.6.0 历史另行执行的 4 项真实 Android 生命周期测试与 API 35 隔离矩阵通过；
   本轮正式收口不把这些历史实机结果冒充为重跑结果
-- 0.8.3 的回归结果、覆盖边界与更新行为见
-  [发布就绪记录](../Docs/RELEASE_READINESS_0.8.3.md)和
+- 0.8.4 的回归结果、覆盖边界与更新行为见
+  [发布就绪记录](../Docs/RELEASE_READINESS_0.8.4.md)和
   [自动更新流程](../Docs/AUTOMATIC_UPDATES.md)
-- 对外分发：0.8.3 Build 136 已完成 Developer ID、Apple notarization（`Accepted`）、
+- 对外分发：0.8.4 Build 137 已完成 Developer ID、Apple notarization（`Accepted`）、
   Staple、Gatekeeper 与安装 smoke；见
-  [GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.3)；
-  [正式验证记录](../Docs/RELEASE_VALIDATION_0.8.3.md)
+  [GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.4)；
+  [正式验证记录](../Docs/RELEASE_VALIDATION_0.8.4.md)
 
-## 0.8.3 新增与修复
+## 0.8.4 新增与修复
+
+- 移除工具栏 KVO 同步回写，SwiftUI 统一管理工具栏；首页加载/空态保留真实标题。
+- 48 项相关回归通过；用户确认 macOS 27.0.1 实机测试正常。
+
+## 0.8.3 历史修复
 
 - 移除主侧栏分隔槽，保留左侧原生半透明材质及右侧独立内容、标题栏材质。
 - 侧栏按钮由窗口持续持有，切换菜单不再拆装；浅深色切换同步最初绘制帧。
@@ -181,22 +177,22 @@ Android Compatibility 分类显示组件、缓存、用户数据和备份，并�
 
 ## 安装
 
-最新正式版本为 0.8.3（Build 136），已完成 Apple 公证。安装步骤：
+最新正式版本为 0.8.4（Build 137），已完成 Apple 公证。安装步骤：
 
-1. 只从本仓库 [v0.8.3 GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.3) 下载 macOS arm64 发布包；
-2. 打开 `OKVideoMac-0.8.3.dmg`；
+1. 只从本仓库 [v0.8.4 GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.4) 下载 macOS arm64 发布包；
+2. 打开 `OKVideoMac-0.8.4.dmg`；
 3. 将 `OKVideoMac.app` 移入 `/Applications`；
 4. 从 Applications 或 Finder 正常启动。
 
 不要使用来源不明或无法与本仓库发布哈希对应的第三方二进制。
 
-0.8.3（Build 136）的 DMG 与 Source Release 绑定到 tag `v0.8.3` 指向的 exact
+0.8.4（Build 137）的 DMG 与 Source Release 绑定到 tag `v0.8.4` 指向的 exact
 commit。最终公证并 Staple 后的 DMG SHA-256 由 GitHub Release 同名 `.sha256`
 文件提供。
 
 ### Gatekeeper 与 macOS 安全
 
-0.8.3（Build 136）正式 DMG 使用 Developer ID Application: Yao Lin
+0.8.4（Build 137）正式 DMG 使用 Developer ID Application: Yao Lin
 （KGG363ABK9）签名，启用 Hardened Runtime，并通过 Apple notarization、staple
 和 Gatekeeper 验证。安装和运行不需要关闭任何 macOS 安全机制。
 
@@ -304,7 +300,7 @@ Build 62 阶段留存的历史工程准备记录见
 [`Docs/ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md`](../Docs/ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md)，
 同期 juniversalchardet 兼容性审计见
 [`Docs/JUNIVERSALCHARDET_ELIMINATION_AUDIT.md`](../Docs/JUNIVERSALCHARDET_ELIMINATION_AUDIT.md)。
-这些材料保留为历史工程证据；Build 62/63/64/65 均不是当前 Build 136 的验证状态，
+这些材料保留为历史工程证据；Build 62/63/64/65 均不是当前 Build 137 的验证状态，
 也不构成法律意见
 或“无风险”保证。
 
@@ -331,27 +327,27 @@ Git tag 指向的 exact release commit 才是项目源码基准；不要把移�
 `master` 或 `latest` 当作对应源码。正式 Release 应同时提供并由统一
 `SHA256SUMS` 绑定：
 
-- source release index：`OKVideoMac-0.8.3-build136-SOURCE_RELEASE_INDEX.json`；
+- source release index：`OKVideoMac-0.8.4-build137-SOURCE_RELEASE_INDEX.json`；
 - binary-to-source mapping：
   [`Docs/BINARY_SOURCE_MAPPING.md`](../Docs/BINARY_SOURCE_MAPPING.md)；
 - binary/source manifest：
-  `OKVideoMac-0.8.3-build136-SOURCE_RELEASE_MANIFEST.json`；
-- hashes：`OKVideoMac-0.8.3-build136-SHA256SUMS`；
+  `OKVideoMac-0.8.4-build137-SOURCE_RELEASE_MANIFEST.json`；
+- hashes：`OKVideoMac-0.8.4-build137-SHA256SUMS`；
 - macOS SPDX / CycloneDX：`OKVideoMac-macOS.spdx.json`、
   `OKVideoMac-macOS.cdx.json`；
 - Android SPDX / CycloneDX：`OKVideoMac-Android.spdx.json`、
   `OKVideoMac-Android.cdx.json`；
-- exact APK：`OKVideoMac-0.8.3-AndroidDexBridge-release.apk`；
-- exact project source：`OKVideoMac-0.8.3-build136-source.tar.gz`；
+- exact APK：`OKVideoMac-0.8.4-AndroidDexBridge-release.apk`；
+- exact project source：`OKVideoMac-0.8.4-build137-source.tar.gz`；
 - third-party source package：
-  `OKVideoMac-0.8.3-build136-third-party-source.tar.gz`；
-- license package：`OKVideoMac-0.8.3-build136-licenses.tar.gz`；
-- macOS artifact：`OKVideoMac-0.8.3.dmg`；
+  `OKVideoMac-0.8.4-build137-third-party-source.tar.gz`；
+- license package：`OKVideoMac-0.8.4-build137-licenses.tar.gz`；
+- macOS artifact：`OKVideoMac-0.8.4.dmg`；
 - stable update feed：`appcast.xml`，签名绑定固定版本 DMG。
 
-Tag `v0.8.3` 已在最终干净 release commit 完成正式分发门禁后创建，并固定该提交。
+Tag `v0.8.4` 已在最终干净 release commit 完成正式分发门禁后创建，并固定该提交。
 本地验收快照不是正式 commit 身份；0.7.3 的已发布二进制、源码/发布说明快照与哈希保持不变。
-0.8.3 Build 136 文件清单与生成规则见
+0.8.4 Build 137 文件清单与生成规则见
 [`Docs/SOURCE_RELEASE_PROCESS.md`](../Docs/SOURCE_RELEASE_PROCESS.md)。Build 62/63
 发布准备阶段的历史工程状态保留在
 [Historical Build 62 Release Readiness Record](../Docs/IMMUTABLE_RELEASE_READINESS.md)。

@@ -1,8 +1,6 @@
 # OKVideoMac
 
-当前发布候选为 **0.8.4（Build 137）**，本轮准备正式发布。移除与 0.8.3 启动崩溃相关的工具栏监听回写，
-保留原生侧栏外观。2026-10-09 用户确认 macOS 27.0.1 实机测试正常。
-最终产物从干净 main 提交重建，全部分发验证通过后发布。见[发布说明](Docs/RELEASE_NOTES_0.8.4.md)和[就绪记录](Docs/RELEASE_READINESS_0.8.4.md)。正式发布前，下方稳定下载仍为 0.8.3。
+**0.8.4（Build 137）**修复与 0.8.3 启动崩溃相关的工具栏归属路径，用户已确认 macOS 27.0.1 实机测试正常。见[发布说明](Docs/RELEASE_NOTES_0.8.4.md)和[正式验证](Docs/RELEASE_VALIDATION_0.8.4.md)。
 
 [English](README.md) | 简体中文
 
@@ -17,7 +15,7 @@
 使用 Swift 和 SwiftUI/AppKit 构建。Android 是部分 Java/Dex Provider 按需使用的
 可选兼容层。
 
-最新稳定版本为 **0.8.3（Build 136）**，已完成 Developer ID 签名和 Apple 公证。
+最新稳定版本为 **0.8.4（Build 137）**，已完成 Developer ID 签名和 Apple 公证。
 
 **原生 macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · 多站搜索 · QuickJS/Node Spider**
 
@@ -25,22 +23,21 @@
 
 ### [下载最新稳定版本 →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-**0.8.3（Build 136）** · macOS 12.0+ · 仅支持 Apple Silicon（arm64）。
+**0.8.4（Build 137）** · macOS 12.0+ · 仅支持 Apple Silicon（arm64）。
 
-下载已签名、公证的 [v0.8.3 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.8.3/OKVideoMac-0.8.3.dmg)，Staple、Gatekeeper、最终 DMG 与全新安装 smoke 均通过。
+下载已签名、公证的 [v0.8.4 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.8.4/OKVideoMac-0.8.4.dmg)，Staple、Gatekeeper、最终 DMG 与全新安装 smoke 均通过。
 
 打开 DMG，将 `OKVideoMac.app` 拖入 Applications，无需关闭 Gatekeeper 或 SIP。校验和、发布说明、源码、许可证、SBOM 随发布提供。
 
 > 本项目是播放器与源客户端，不内置第三方内容源、账号、Cookie、解析服务或 DRM 密钥。
 
-## 0.8.3 新增与修复
+## 0.8.4 新增与修复
 
-- 移除主侧栏分隔槽，保留左侧原生半透明材质及右侧独立内容、标题栏材质。
-- 侧栏按钮由窗口持续持有，切换菜单不再拆装；浅深色切换同步最初绘制帧。
-- 恢复原生灰色搜索框、蓝色系统图标及清晰的本地化提示。
-- APK 缺失准确报告资源错误，Release 构建拒绝不完整应用包。
+- 移除 SwiftUI 清理工具栏时的同步 AppKit 回写。
+- 加载/无配置首页保持真实标题，搜索和详情独立管理工具栏。
+- 保留原生侧栏材质、零宽分隔和 macOS 12 支持，增加启动与窗口生命周期回归。
 
-0.8.1 / 0.8.2 稳定通道可检查更新。自动检查需授权，下载和安装需确认；0.8.0 或本地测试源版本需手动安装。见[发布说明](Docs/RELEASE_NOTES_0.8.3.md)、[正式验证](Docs/RELEASE_VALIDATION_0.8.3.md)与[自动更新说明](Docs/AUTOMATIC_UPDATES.md)。
+0.8.1–0.8.3 稳定通道可检查更新。自动检查需授权，下载和安装需确认；0.8.0 或本地测试源版本需手动安装。见[发布说明](Docs/RELEASE_NOTES_0.8.4.md)、[正式验证](Docs/RELEASE_VALIDATION_0.8.4.md)与[自动更新说明](Docs/AUTOMATIC_UPDATES.md)。
 
 ## 0.8.2 历史改进
 
@@ -296,12 +293,12 @@ Managed Runtime 安装与 Android Emulator Session 分开；安装和 Session �
 
 ## 发布完整性
 
-0.8.3 / Build 136 DMG 已通过 Release 打包、Developer ID / Hardened Runtime、Apple Accepted、Staple、Gatekeeper 与安装 smoke。Tag `v0.8.3` 固定 `2d00518dbdf0eba6f91c60483d522fd10e7bee3d`；16 个公开资产的服务端摘要与匿名下载均与最终文件一致。发布后补录保留已签名资产、构建时源码/说明快照和 tag，见[正式验证](Docs/RELEASE_VALIDATION_0.8.3.md)。
+0.8.4 / Build 137 DMG 已通过 Release 打包、Developer ID / Hardened Runtime、Apple Accepted、Staple、Gatekeeper 与安装 smoke。Tag `v0.8.4` 固定 `58e83d0aa29c7a7ffa9a00b15011875678395481`；16 个公开资产的服务端摘要与匿名下载均与最终文件一致。发布后补录保留已签名资产、构建时源码/说明快照和 tag，见[正式验证](Docs/RELEASE_VALIDATION_0.8.4.md)。
 
 ## 文档
 
-- [0.8.3 发布说明](Docs/RELEASE_NOTES_0.8.3.md)
-- [0.8.3 正式验证](Docs/RELEASE_VALIDATION_0.8.3.md)
+- [0.8.4 发布说明](Docs/RELEASE_NOTES_0.8.4.md)
+- [0.8.4 正式验证](Docs/RELEASE_VALIDATION_0.8.4.md)
 - [自动更新说明](Docs/AUTOMATIC_UPDATES.md)
 
 - [详细项目文档](OKVideoMac/README.md)

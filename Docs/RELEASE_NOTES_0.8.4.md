@@ -16,3 +16,5 @@
 构建时说明记录正式发布准备。只有从干净 main 重建的 Developer ID / Hardened Runtime、Apple Notarization Accepted、staple、Gatekeeper、最终 DMG 与安装验证全部通过才发布。实际结果在发布后补录；对应源码、许可证、四份 SBOM、校验和及签名 appcast 随附，ZIP 仅作内部身份载体。现有 zlib 原始归档和历史 clang 输入等 native provenance 例外保留。
 
 English: removes synchronous AppKit toolbar write-back during SwiftUI toolbar teardown, supplies a real title for loading/empty home states, and preserves native sidebar appearance and macOS 12 compatibility. The user confirmed successful testing on macOS 27.0.1 before formal release preparation.
+
+发布后补录：正式 [v0.8.4](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.4) 已公开，Apple Notarization Accepted（`3ac3de16-0c86-4166-b8bf-b81b4c9fa61e`），staple、Gatekeeper、安装及 16 个资产验证通过；见[正式验证](RELEASE_VALIDATION_0.8.4.md)。GitHub 资产中的构建时说明快照保留原字节。

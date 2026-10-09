@@ -38,3 +38,5 @@ SHA-256：`5da633b3e3594665034a36956c5ccc55ad1f98b0334576a8776e91db5cc9241e`
 ## 后续状态
 
 2026-10-09 用户确认 macOS 27.0.1 实机测试正常，已授权正式收尾发布。本文的候选包哈希、公证和构建提交仍为历史候选证据；正式版本从 main 重新生成，不复用该候选产物。
+
+正式 [v0.8.4](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.4) 已从 main 提交 `58e83d0aa29c7a7ffa9a00b15011875678395481` 重建、公证并发布；结果见[正式验证](RELEASE_VALIDATION_0.8.4.md)。候选历史记录及哈希保持不变。

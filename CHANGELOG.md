@@ -2,6 +2,7 @@
 
 ## [0.8.4] - 2026-10-09
 
+- Release Build 137 passed Developer ID / Hardened Runtime, Apple Accepted, staple, Gatekeeper, final installation and all 16 published asset checks; see [formal verification](Docs/RELEASE_VALIDATION_0.8.4.md).
 - Build 137 removes synchronous AppKit toolbar write-back from the browser
   window, avoiding reentry into SwiftUI toolbar/observer teardown. The macOS 27.0.1
   startup crash report motivates this fix; the user confirmed successful testing

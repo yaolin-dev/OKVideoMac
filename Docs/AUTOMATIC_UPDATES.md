@@ -1,10 +1,10 @@
 # Automatic updates
 
-## Published 0.8.3 update
+## Published 0.8.4 update
 
-The stable latest feed offers 0.8.3 (136), using the existing HTTPS URL and public key. The final signed appcast/DMG match, and all 16 anonymous public downloads have matching SHA-256. Stable 0.8.1/0.8.2 feed/key/version compatibility is retained. This does not claim a new native old-App UI run, a complete 24-hour schedule or end-to-end update installation.
+The stable latest feed offers 0.8.4 (137), using the existing HTTPS URL and public key. The final signed appcast/DMG match, and all 16 anonymous public downloads have matching SHA-256. Stable 0.8.1–0.8.3 feed/key/version compatibility is retained. This does not claim a new native old-App UI run, a complete 24-hour schedule or end-to-end update installation.
 
-Local previews without feed/key correctly disable Check for Updates. The formal App embeds `StableUpdateConfiguration.plist` and passes `verify_update_bundle.py --require-stable`. See [formal verification](RELEASE_VALIDATION_0.8.3.md). The earlier published observations below remain historical.
+Local previews without feed/key correctly disable Check for Updates. The formal App embeds `StableUpdateConfiguration.plist` and passes `verify_update_bundle.py --require-stable`. See [formal verification](RELEASE_VALIDATION_0.8.4.md). The earlier published observations below remain historical.
 
 Sparkle is pinned to the official 2.10.0 distribution and source commit in
 `ThirdParty/sparkle-lock.json`. `Scripts/prepare-sparkle.py` checks the archive
