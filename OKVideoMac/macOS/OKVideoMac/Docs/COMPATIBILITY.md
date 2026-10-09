@@ -1,11 +1,17 @@
 # Compatibility
 
-- 对照版本：0.8.3（Build 136）
+- 对照版本：0.8.4（Build 137）
 - 最近更新：2026-10-09
 - 当前稳定版本：0.8.3（Build 136），Apple Silicon / arm64 / macOS 12.0+
 - 最新公开公证 DMG：0.8.3（Build 136）；Developer ID、Apple Accepted、Staple、Gatekeeper 与安装 smoke 均通过
 - 发布 tag `v0.8.3` 固定 `2d00518dbdf0eba6f91c60483d522fd10e7bee3d`；正式门禁结果见
   [发布验证记录](../../../../Docs/RELEASE_VALIDATION_0.8.3.md)。
+
+## 0.8.4 候选验证边界
+
+目标 tag `v0.8.4` 尚未创建。工具栏条件分支采用兼容 macOS 12 的 View 层声明；
+本机 macOS 14.8.9 定向回归通过，不代表 macOS 12 或反馈者的 macOS 27.0.1 已实机验证。
+macOS 27.0.1 原故障路径复测通过前，不发布正式版本。历史 0.8.3 分发验证不等同无崩溃保证。
 
 ## 概述
 

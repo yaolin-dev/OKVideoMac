@@ -1,5 +1,9 @@
 # OKVideoMac
 
+当前发布候选为 **0.8.4（Build 137）**。本轮移除与 0.8.3 启动崩溃相关的工具栏监听回写，
+保留原生侧栏外观。尚未正式发布；反馈者的 macOS 27.0.1 复测仍是发布门禁。
+见[候选说明](Docs/RELEASE_NOTES_0.8.4.md)和[验证进展](Docs/RELEASE_READINESS_0.8.4.md)。下方稳定下载仍为 0.8.3。
+
 [English](README.md) | 简体中文
 
 **面向 Apple Silicon 的原生 macOS IPTV/点播播放器，支持 Xtream、M3U/XMLTV、

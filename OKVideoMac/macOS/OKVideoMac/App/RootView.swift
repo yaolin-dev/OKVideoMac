@@ -527,13 +527,7 @@ final class BrowserRootSplitController: NSSplitViewController {
     let detailHost = NSHostingController(rootView: AnyView(EmptyView()))
     private(set) lazy var sidebarTitlebar = BrowserSidebarTitlebarController(target: self)
     private weak var observedWindow: NSWindow?
-    private var toolbarObservation: NSKeyValueObservation?
     private var accessoryLayoutScheduled = false
-    private lazy var fallbackToolbar: NSToolbar = {
-        let toolbar = NSToolbar(identifier: "OKVideoMac.browser.sidebar")
-        toolbar.displayMode = .iconOnly
-        return toolbar
-    }()
 
     init() {
         super.init(nibName: nil, bundle: nil)
@@ -554,8 +548,6 @@ final class BrowserRootSplitController: NSSplitViewController {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    deinit { toolbarObservation?.invalidate() }
-
     override func viewDidAppear() {
         super.viewDidAppear()
         attachWindowChrome()
@@ -569,21 +561,16 @@ final class BrowserRootSplitController: NSSplitViewController {
 
     private func attachWindowChrome() {
         guard let window = view.window, observedWindow !== window else { return }
-        toolbarObservation?.invalidate()
         if let oldWindow = observedWindow,
            let index = oldWindow.titlebarAccessoryViewControllers.firstIndex(where: { $0 === sidebarTitlebar }) {
             oldWindow.removeTitlebarAccessoryViewController(at: index)
         }
         observedWindow = window
         window.addTitlebarAccessoryViewController(sidebarTitlebar)
-        // Loading/empty pages can temporarily remove the SwiftUI toolbar.
-        // Keep the titlebar height stable without reinserting any page items.
-        toolbarObservation = window.observe(\.toolbar, options: [.initial, .new]) { [weak self] window, _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                if window.toolbar == nil { window.toolbar = self.fallbackToolbar }
-            }
-        }
+        // SwiftUI owns the window toolbar, including temporary removal during
+        // a route update. Never write it back from a KVO callback: that reenters
+        // SwiftUI's toolbar/observer teardown. Empty home states declare their
+        // real page title through HomeLiveToolbarModifier instead.
         scheduleTitlebarLayout()
     }
 
@@ -3075,7 +3062,6 @@ private struct HomeLiveSectionContainer: View {
         showsHome
             && !state.isHomeSearchPresented
             && !state.isDetailPagePresented
-            && state.activeConfiguration != nil
     }
 
     var body: some View {
@@ -3100,6 +3086,7 @@ private struct HomeLiveSectionContainer: View {
             .modifier(
                 HomeLiveToolbarModifier(
                     showsHomeToolbar: showsHomeToolbar,
+                    showsHomeProviderControls: state.activeConfiguration != nil,
                     showsLiveToolbar: !showsHome,
                     isInteractionBlocked:
                         state.mainWindowCloudAuthorizationPrompt != nil,
@@ -3132,6 +3119,7 @@ private struct HomeLiveSectionContainer: View {
 
 private struct HomeLiveToolbarModifier: ViewModifier {
     let showsHomeToolbar: Bool
+    let showsHomeProviderControls: Bool
     let showsLiveToolbar: Bool
     let isInteractionBlocked: Bool
     let layout: HomeToolbarLayout
@@ -3140,11 +3128,20 @@ private struct HomeLiveToolbarModifier: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
         if showsHomeToolbar {
-            content.toolbar {
-                HomeBrowserToolbarContent(
-                    layout: layout,
-                    isInteractionBlocked: isInteractionBlocked
-                )
+            // Branch at the View layer: conditional ToolbarContent requires
+            // macOS 13. A title-only toolbar also avoids an empty action group
+            // on our macOS 12 minimum deployment target.
+            if showsHomeProviderControls {
+                content.toolbar {
+                    HomeBrowserToolbarContent(
+                        layout: layout,
+                        isInteractionBlocked: isInteractionBlocked
+                    )
+                }
+            } else {
+                content.toolbar {
+                    PrimaryPageToolbarLeadingContent(title: L10n.string(.sectionBrowse))
+                }
             }
         } else if showsLiveToolbar {
             content.toolbar {

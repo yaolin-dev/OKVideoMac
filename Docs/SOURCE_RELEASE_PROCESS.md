@@ -1,5 +1,11 @@
 # Immutable Corresponding-Source Release Process
 
+The 0.8.4 (Build 137) candidate uses `OKVideoMac-0.8.4.dmg`, internal
+`OKVideoMac-0.8.4-macOS-arm64.zip`, and
+`OKVideoMac-0.8.4-build137-SOURCE_RELEASE_INDEX.json`. It is not a formal release.
+The existing clean-main rebuild and final publication gates still apply; see
+[candidate readiness](RELEASE_READINESS_0.8.4.md).
+
 The published 0.8.3 (Build 136) release uses
 `OKVideoMac-0.8.3-macOS-arm64.zip` as the internal identity carrier and
 `OKVideoMac-0.8.3.dmg` as the notarized public download.

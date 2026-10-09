@@ -1,5 +1,10 @@
 # DMG Release Process
 
+0.8.4（Build 137）正在分支上生成工具栏修复候选，尚未正式发布。
+受影响 macOS 27.0.1 复测是额外发布门禁。分支候选通过后，仍按本文流程从
+干净 main exact commit 重建并验证最终资产；不能直接把分支候选晋升为正式资产。
+见[候选就绪记录](RELEASE_READINESS_0.8.4.md)。
+
 当前公开版本为 OKVideoMac 0.8.3（Build 136），正式用户下载为 `OKVideoMac-0.8.3.dmg`。ZIP 仅为内部归档。
 
 Tag `v0.8.3` 固定 `2d00518dbdf0eba6f91c60483d522fd10e7bee3d`；Apple notarization **Accepted**，Submission `105f049e-55f9-4c61-b365-e5dab1ab3f9f`。最终 DMG SHA-256：`4f5352fc717c7e514d7840ae4ce5394eb309291b309d6df97ea67f0b23bc3697`。签名、Hardened Runtime、staple、Gatekeeper、DMG/安装 smoke 和 16 个公开资产验证通过，见[正式验证](RELEASE_VALIDATION_0.8.3.md)。

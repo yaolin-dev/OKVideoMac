@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.4] - Unreleased
+
+- Candidate Build 137 removes synchronous AppKit toolbar write-back from the browser
+  window, avoiding reentry into SwiftUI toolbar/observer teardown. The macOS 27.0.1
+  crash report motivates this fix; validation on that OS remains pending.
+- Give loading and empty home states their real SwiftUI title without exposing
+  provider actions; keep Search and Detail toolbar ownership separate. Preserve
+  macOS 12 support, independent materials, the zero-width split and stable sidebar button.
+- Add real WindowGroup startup/navigation/reopen, stored configuration recovery,
+  toolbar ownership and sidebar accessory lifecycle regressions. See
+  [candidate readiness](Docs/RELEASE_READINESS_0.8.4.md).
+
 ## [0.8.3] - 2026-10-09
 
 - Release Build 136 passed Developer ID / Hardened Runtime, Apple Accepted, staple, Gatekeeper and final publication checks; see [verification](Docs/RELEASE_VALIDATION_0.8.3.md).
