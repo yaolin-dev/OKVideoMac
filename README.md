@@ -1,10 +1,11 @@
 # OKVideoMac
 
-The current release candidate is **0.8.4 (Build 137)**. It removes the AppKit toolbar
-write-back involved in the reported 0.8.3 startup crash while preserving the native
-sidebar. It is not published: validation on the reported macOS 27.0.1 system is
-still required. See [candidate notes](Docs/RELEASE_NOTES_0.8.4.md) and
-[verification gates](Docs/RELEASE_READINESS_0.8.4.md). Developer ID signing, Apple notarization, stapling, Gatekeeper and local startup checks passed; see [candidate validation](Docs/CANDIDATE_VALIDATION_0.8.4.md). Stable downloads below remain 0.8.3.
+The current release candidate is **0.8.4 (Build 137)**, prepared for formal release. It removes the AppKit toolbar
+write-back associated with the reported 0.8.3 startup crash while preserving the native
+sidebar. The user confirmed successful testing on macOS 27.0.1 on 2026-10-09.
+The final package is rebuilt from a clean main commit and must pass the distribution
+gates before publication. See [release notes](Docs/RELEASE_NOTES_0.8.4.md) and
+[readiness](Docs/RELEASE_READINESS_0.8.4.md). Stable downloads below remain 0.8.3 until publication.
 
 English | [简体中文](README_zh-CN.md)
 
