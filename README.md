@@ -4,7 +4,7 @@ The current release candidate is **0.8.4 (Build 137)**. It removes the AppKit to
 write-back involved in the reported 0.8.3 startup crash while preserving the native
 sidebar. It is not published: validation on the reported macOS 27.0.1 system is
 still required. See [candidate notes](Docs/RELEASE_NOTES_0.8.4.md) and
-[verification gates](Docs/RELEASE_READINESS_0.8.4.md). Stable downloads below remain 0.8.3.
+[verification gates](Docs/RELEASE_READINESS_0.8.4.md). Developer ID signing, Apple notarization, stapling, Gatekeeper and local startup checks passed; see [candidate validation](Docs/CANDIDATE_VALIDATION_0.8.4.md). Stable downloads below remain 0.8.3.
 
 English | [简体中文](README_zh-CN.md)
 

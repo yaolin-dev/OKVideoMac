@@ -2,7 +2,7 @@
 
 当前发布候选为 **0.8.4（Build 137）**。本轮移除与 0.8.3 启动崩溃相关的工具栏监听回写，
 保留原生侧栏外观。尚未正式发布；反馈者的 macOS 27.0.1 复测仍是发布门禁。
-见[候选说明](Docs/RELEASE_NOTES_0.8.4.md)和[验证进展](Docs/RELEASE_READINESS_0.8.4.md)。下方稳定下载仍为 0.8.3。
+签名、Apple 公证、staple、Gatekeeper 和本机启动检查已通过。见[候选说明](Docs/RELEASE_NOTES_0.8.4.md)、[验证进展](Docs/RELEASE_READINESS_0.8.4.md)和[实际验证记录](Docs/CANDIDATE_VALIDATION_0.8.4.md)。下方稳定下载仍为 0.8.3。
 
 [English](README.md) | 简体中文
 

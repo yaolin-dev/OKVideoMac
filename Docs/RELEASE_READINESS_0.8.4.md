@@ -13,7 +13,7 @@
 
 ## 分发门禁
 
-- 签名、公证、staple、Gatekeeper、DMG 及安装 smoke：本文件提交时待执行，结果另行补录；不使用历史 0.8.3 结果替代。
+- 签名、Hardened Runtime、Apple 公证（Accepted）、DMG/App staple、Gatekeeper、DMG 及安装 smoke 已通过；三轮隔离启动与正常退出、现有配置持续运行检查通过。见[本候选实际验证记录](CANDIDATE_VALIDATION_0.8.4.md)。这些结果在候选构建完成后补录。
 - `package-app.sh --mode distribution --notarize` 从干净分支提交生成候选，保留源码/SBOM/签名 appcast/哈希绑定。候选不上传稳定更新源。
 - 正式发布仍须从干净 main exact commit 重建、完成所有分发验证和最终实机确认；不会把分支候选直接当作正式资产。
 

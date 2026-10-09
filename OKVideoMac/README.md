@@ -15,6 +15,7 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 - 目标 tag：`v0.8.4`；尚未创建，须先通过 macOS 27.0.1 受影响环境复测及正式分发门禁。
 - 候选 source release index：`OKVideoMac-0.8.4-build137-SOURCE_RELEASE_INDEX.json`。
 - [候选发布说明](../Docs/RELEASE_NOTES_0.8.4.md) / [候选就绪记录](../Docs/RELEASE_READINESS_0.8.4.md)。
+- 候选的 Developer ID、Apple 公证（Accepted）、staple、Gatekeeper 和本机启动验证已通过；见[候选实际验证](../Docs/CANDIDATE_VALIDATION_0.8.4.md)。
 
 以下为已公开 0.8.3 的历史发布状态：
 

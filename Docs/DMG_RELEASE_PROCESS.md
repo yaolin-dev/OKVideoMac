@@ -1,6 +1,6 @@
 # DMG Release Process
 
-0.8.4（Build 137）正在分支上生成工具栏修复候选，尚未正式发布。
+0.8.4（Build 137）工具栏修复候选已完成签名、公证、staple、Gatekeeper 和本机启动验证，尚未正式发布；见[候选验证](CANDIDATE_VALIDATION_0.8.4.md)。
 受影响 macOS 27.0.1 复测是额外发布门禁。分支候选通过后，仍按本文流程从
 干净 main exact commit 重建并验证最终资产；不能直接把分支候选晋升为正式资产。
 见[候选就绪记录](RELEASE_READINESS_0.8.4.md)。
