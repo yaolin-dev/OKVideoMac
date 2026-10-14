@@ -119,7 +119,7 @@ final class PlayerOverlayLayoutTests: XCTestCase {
                                                  timeLabelWidth: PlayerOverlayLayout.timeWidth(time))
                 modes.insert(String(describing: layout.mode))
                 let leading = (layout.mode == .expanded ? 121.0 : 38.0) + 10 + layout.timeLabelWidth
-                let trailing = layout.showsAllTools ? 243.0 : 79.0
+                let trailing = layout.showsAllTools ? 284.0 : 120.0
                 if layout.mode == .stacked {
                     XCTAssertLessThanOrEqual(leading + trailing + 24, layout.innerWidth)
                 } else {
@@ -136,7 +136,7 @@ final class PlayerOverlayLayoutTests: XCTestCase {
         let long = PlayerOverlayLayout(viewportSize: .init(width: 640, height: 360), timeLabelWidth: 180)
         XCTAssertEqual(long.mode, .stacked)
         let middle = PlayerOverlayLayout(viewportSize: .init(width: 800, height: 450), timeLabelWidth: 190)
-        XCTAssertEqual(middle.mode, .compactVolume)
+        XCTAssertEqual(middle.mode, .compactTools)
         XCTAssertTrue(modes.contains("expanded")); XCTAssertTrue(modes.contains("compactTools"))
     }
 

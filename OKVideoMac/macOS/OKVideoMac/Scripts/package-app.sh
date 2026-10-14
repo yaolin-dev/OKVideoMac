@@ -81,12 +81,6 @@ while [[ "$#" -gt 0 ]]; do
   esac
 done
 
-crash_configuration_arguments=(--mode "$PACKAGE_MODE" --repo "$REPOSITORY_ROOT")
-if [[ -n "$CRASH_CONFIG" ]]; then
-  crash_configuration_arguments+=(--config "$CRASH_CONFIG")
-fi
-PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/configure-crash-reporting.py" check "${crash_configuration_arguments[@]}"
-
 identity_build_arguments=(ONLY_ACTIVE_ARCH=YES)
 if [[ "$ISOLATED_IDENTITY_ACCEPTANCE" -eq 1 ]]; then
   if [[ "$LOCAL_ACCEPTANCE" -ne 1 || "$PACKAGE_MODE" != "local" || "$NOTARIZE" -ne 0 ]]; then
@@ -111,6 +105,12 @@ if [[ "$LOCAL_DEVELOPER_ID" -eq 1 ]] && { [[ "$LOCAL_ACCEPTANCE" -ne 1 ]] || [[ 
   echo "Local Developer ID signing requires a captured local acceptance build without notarization." >&2
   exit 64
 fi
+crash_configuration_arguments=(--mode "$PACKAGE_MODE" --repo "$REPOSITORY_ROOT")
+if [[ -n "$CRASH_CONFIG" ]]; then
+  crash_configuration_arguments+=(--config "$CRASH_CONFIG")
+fi
+PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/configure-crash-reporting.py" check "${crash_configuration_arguments[@]}"
+
 SIGNING_MODE="$PACKAGE_MODE"
 if [[ "$LOCAL_DEVELOPER_ID" -eq 1 ]]; then SIGNING_MODE=distribution; fi
 
@@ -254,6 +254,14 @@ if [[ ! -d "$PROJECT_DIR/OKVideoMac.xcodeproj" ]]; then
   exit 1
 fi
 
+# The local SDK is intentionally ignored by Git and absent from a clean
+# checkout/frozen source snapshot. Rebuild the pinned static input before SPM
+# resolves its local binary target; do not rely on a developer's Vendor cache.
+CRASH_REPORTER_INPUT="$PROJECT_DIR/Packages/OKCrashDiagnostics/Vendor/CrashReporter.xcframework/macos-arm64/CrashReporter.framework/Versions/A/CrashReporter"
+if [[ ! -f "$CRASH_REPORTER_INPUT" ]]; then
+  "$SCRIPT_DIR/prepare-crash-reporter.sh"
+fi
+
 SPARKLE_ROOT="${OKVIDEOMAC_SPARKLE_ROOT:-$OKVIDEOMAC_BUILD_ROOT/Sparkle}"
 PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/prepare-sparkle.py" --output "$SPARKLE_ROOT"
 update_build_arguments=("OKVIDEOMAC_SPARKLE_ROOT=$SPARKLE_ROOT")
@@ -312,9 +320,11 @@ PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/normalize-static-sdk-stubs.py" "$
 # Keep debug files outside the distributable before any stripping. A new directory
 # prevents a later build with the same version from replacing earlier symbols.
 CRASH_SYMBOL_ARCHIVE="$(mktemp -d "$ARTIFACTS/CrashSymbols.XXXXXX")"
+CRASH_SYMBOL_KIND=delivery
+if [[ "$LOCAL_ACCEPTANCE" -eq 1 ]]; then CRASH_SYMBOL_KIND=acceptance; fi
 PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/crash-symbols.py" archive \
   --app "$APP_SOURCE" --symbols "$DERIVED_DATA/Build/Products/Release" \
-  --repo "$REPOSITORY_ROOT" --kind delivery --output "$CRASH_SYMBOL_ARCHIVE"
+  --repo "$REPOSITORY_ROOT" --kind "$CRASH_SYMBOL_KIND" --output "$CRASH_SYMBOL_ARCHIVE"
 # Xcode keeps DWARF sections in unsigned Release executables even when it also
 # emits external dSYMs. Strip those sections before signing so absolute build
 # paths cannot leak into either project-owned executable; runtime symbols remain.

@@ -95,6 +95,21 @@ class LocalAcceptanceTests(unittest.TestCase):
             self.assertEqual(tar.getnames(), ["source/App.swift", "source/" + acceptance.MANIFEST])
             self.assertEqual(tar.extractfile("source/App.swift").read(), b"let value = 1\n")
 
+    def testPinnedSDKBuildOutputIsExcludedButAdjacentInputsReject(self):
+        self.freeze()
+        vendor = self.snapshot / "OKVideoMac/macOS/OKVideoMac/Packages/OKCrashDiagnostics/Vendor"
+        sdk = vendor / "CrashReporter.xcframework/macos-arm64/CrashReporter.framework/Versions/A/CrashReporter"
+        sdk.parent.mkdir(parents=True)
+        sdk.write_bytes(b"generated pinned SDK input")
+        self.assertEqual(acceptance.validate(self.snapshot)["kind"], "local-uncommitted-acceptance")
+        archive = self.root / "source.tar.gz"
+        acceptance.archive_snapshot(self.snapshot, archive, "source")
+        with tarfile.open(archive) as tar:
+            self.assertEqual(tar.getnames(), ["source/App.swift", "source/" + acceptance.MANIFEST])
+        (vendor / "Injected.swift").write_text("unexpected source")
+        with self.assertRaisesRegex(ValueError, "Uncaptured file"):
+            acceptance.validate(self.snapshot)
+
     def testManifestInventoryTamperRejects(self):
         self.freeze()
         path = self.snapshot / acceptance.MANIFEST

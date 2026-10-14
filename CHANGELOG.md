@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+- Add a visible Playback Information button for on-demand and live playback, with source resolution, codecs, media frame rate, selected audio parameters and estimated bitrates. Expand playback statistics for decoder, output frame rate, network speed, buffered duration and dropped frames.
+- Copy known playback information without URL credentials, query strings or parent file paths. Missing values remain unavailable; bitrate and download speed use distinct bit/byte units.
+- Show last-played specifications on Detail only for the exact configuration revision, source and episode observed in the current session. No pre-play probing or title-based quality inference.
+- Phase 1 is a local acceptance change; catch-up playback and public release remain pending. See [feature scope and validation](OKVideoMac/macOS/OKVideoMac/Docs/PLAYBACK_INFORMATION.md).
+
 ## [0.8.6] - 2026-10-14
 
 - Configure consent-based crash uploads for the official DMG through an owner-only packaging input outside the checkout; public source keeps an empty endpoint. Management tokens never enter the App.

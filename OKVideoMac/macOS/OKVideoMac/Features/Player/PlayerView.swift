@@ -129,8 +129,7 @@ struct PlayerView: View {
                 .environment(\.colorScheme, .dark)
             }
 
-            if !state.isLivePlayback,
-               controlsVisible,
+            if controlsVisible,
                let activeUtilityPanel {
                 VStack(spacing: 0) {
                     Spacer(minLength: 24)
@@ -200,6 +199,7 @@ struct PlayerView: View {
             isCompactVolumePresented = false
             isLiveVolumeHovering = false
             activeUtilityPanel = nil
+            state.setPlaybackInformationVisible(false)
             state.dismissPlayerEpisodeNavigationChoice()
             inspectedPlayerEpisode = nil
             playbackActivityOverlayTask?.cancel()
@@ -228,6 +228,7 @@ struct PlayerView: View {
             updatePlaybackActivityOverlay(isActive: isActive)
         }
         .onChange(of: activeUtilityPanel) { panel in
+            state.setPlaybackInformationVisible(panel == .information)
             controlTooltip.dismiss()
             if panel != .episodes {
                 state.dismissPlayerEpisodeNavigationChoice()
@@ -397,13 +398,8 @@ struct PlayerView: View {
             .font(.system(size: 14))
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            Image(systemName: "tv")
-                .font(.system(size: 22, weight: .medium))
-                .frame(width: 48, height: 48)
-                .overlay {
-                    Circle()
-                        .stroke(Color.white.opacity(0.64), lineWidth: 2.5)
-                }
+            utilityPanelButton(systemImage: "info.circle", panel: .information,
+                help: L10n.string("player.info.title", fallback: "Playback Information"))
         }
         .foregroundColor(.white)
         .padding(.horizontal, 20)
@@ -861,6 +857,7 @@ struct PlayerView: View {
                 else {
                     HStack(spacing: 3) {
                         compactUtilityMenu
+                        utilityPanelButton(systemImage: "info.circle", panel: .information, help: L10n.string("player.info.title", fallback: "Playback Information"))
                         fullScreenButton
                     }
                 }
@@ -921,6 +918,7 @@ struct PlayerView: View {
             compactPanelAction(.audio, title: L10n.string("player.audio-tracks", fallback: "Audio Tracks"))
             compactPanelAction(.subtitles, title: L10n.string("player.subtitles", fallback: "Subtitles"))
             compactPanelAction(.danmaku, title: "弹幕")
+            compactPanelAction(.information, title: L10n.string("player.info.title", fallback: "Playback Information"))
             compactPanelAction(.settings, title: L10n.string("player.settings", fallback: "Playback Settings"))
         } label: {
             utilityMenuIcon("ellipsis.circle")
@@ -1147,6 +1145,7 @@ struct PlayerView: View {
                 panel: .danmaku,
                 help: state.danmaku.isEnabled ? "弹幕已开启" : "弹幕已关闭"
             )
+            utilityPanelButton(systemImage: "info.circle", panel: .information, help: L10n.string("player.info.title", fallback: "Playback Information"))
             utilityPanelButton(
                 systemImage: "gearshape",
                 panel: .settings,
@@ -1199,6 +1198,7 @@ struct PlayerView: View {
         .buttonStyle(.plain)
         .playerControlHelp(help)
         .accessibilityLabel(help)
+        .accessibilityIdentifier(panel == .information ? "player.playback-info" : "player.utility.\(panel)")
         .accessibilityValue(
             isActive
                 ? L10n.string("player.panel.open", fallback: "Panel Open")
@@ -1217,6 +1217,13 @@ struct PlayerView: View {
             subtitlePanel(maximumSize: maximumSize)
         case .danmaku:
             danmakuPanel(maximumSize: maximumSize)
+        case .information:
+            playerPanel(width: 420, maximumSize: maximumSize) {
+                PlaybackInformationPanel(info: state.playerSnapshot.mediaInfo,
+                    originalName: state.playerSnapshot.mediaInfo == nil ? nil : state.currentPlayerEpisodePresentation?.originalName,
+                    duration: state.playerSnapshot.duration,
+                    selectedAudioTrack: state.playerSnapshot.tracks.first { $0.type == .audio && $0.isSelected })
+            }
         case .settings:
             playbackSettingsPanel(maximumSize: maximumSize)
         }
@@ -2885,6 +2892,7 @@ enum PlayerEpisodePagePolicy {
 }
 
 private enum PlayerUtilityPanel: Equatable {
+    case information
     case episodes
     case audio
     case subtitles
@@ -2977,9 +2985,9 @@ struct PlayerOverlayLayout {
     var innerWidth: CGFloat { max(1, controlWidth - 24) }
     var sideWidth: CGFloat { max(0, (innerWidth - Self.transportWidth - 24) / 2) }
     var mode: Mode {
-        if sideWidth >= max(243, 121 + 10 + timeLabelWidth) { return .expanded }
-        if sideWidth >= max(243, 38 + 10 + timeLabelWidth) { return .compactVolume }
-        if sideWidth >= max(79, 38 + 10 + timeLabelWidth) { return .compactTools }
+        if sideWidth >= max(284, 121 + 10 + timeLabelWidth) { return .expanded }
+        if sideWidth >= max(284, 38 + 10 + timeLabelWidth) { return .compactVolume }
+        if sideWidth >= max(120, 38 + 10 + timeLabelWidth) { return .compactTools }
         return .stacked
     }
     var showsAllTools: Bool { mode == .expanded || mode == .compactVolume }

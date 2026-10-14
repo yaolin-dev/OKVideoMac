@@ -146,6 +146,12 @@ def validate(repo: Path) -> dict:
             continue
         if relative.as_posix() == "OKVideoMac/Helpers/AndroidDexBridge/local.properties":
             continue
+        # prepare-crash-reporter.sh generates this ignored binary input from
+        # the pinned upstream revision. Like Gradle products, it is rebuilt
+        # after capture and never enters the frozen source archive.
+        if relative.as_posix().startswith(
+                "OKVideoMac/macOS/OKVideoMac/Packages/OKCrashDiagnostics/Vendor/CrashReporter.xcframework/"):
+            continue
         if path.is_file() and relative.as_posix() not in captured:
             raise ValueError("Uncaptured file added to snapshot source tree")
     return metadata

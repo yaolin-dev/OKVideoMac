@@ -973,6 +973,9 @@ final class MPVPlayerClient: PlayerClient {
     private let playbackStartSignal = PlayerPlaybackStartSignal()
     private let continuation: AsyncStream<PlayerEvent>.Continuation
     private var client: OpaquePointer?
+    private var mediaInfoVisible = false
+    private var mediaInfoTimer: DispatchSourceTimer?
+    private var mediaInfoRefreshCount = 0
     private var snapshot = PlayerSnapshot()
     private var lifecycleState = LifecycleState.running
     private var shutdownWaiters: [CheckedContinuation<Void, Never>] = []
@@ -1246,6 +1249,8 @@ final class MPVPlayerClient: PlayerClient {
                     self.snapshot.isSeeking = false
                     self.snapshot.isPausedForCache = false
                     self.snapshot.seekTarget = nil
+                    self.snapshot.mediaInfo = nil
+                    self.snapshot.tracks = []
                     self.snapshot.videoWidth = 0
                     self.snapshot.videoHeight = 0
                     self.snapshot.status = .loading
@@ -1367,6 +1372,7 @@ final class MPVPlayerClient: PlayerClient {
                 do {
                     try self.command(["stop"], client: client)
                     self.clearTransientPlaybackActivity()
+                    self.snapshot.mediaInfo = nil
                     self.snapshot.status = .stopped
                     self.emitSnapshot()
                     if releasedRequestID == nil {
@@ -1662,6 +1668,9 @@ final class MPVPlayerClient: PlayerClient {
             queue.async {
                 self.completeLoad(.failure(CancellationError()))
                 self.diagnosticsGeneration = UUID()
+                self.mediaInfoTimer?.cancel()
+                self.mediaInfoTimer = nil
+                self.snapshot.mediaInfo = nil
                 if let client = self.client {
                     _ = try? self.command(["stop"], client: client)
                     self.library.wakeup(client)
@@ -1964,6 +1973,64 @@ final class MPVPlayerClient: PlayerClient {
         )
     }
 
+    /// Serialized with load/unload. A hidden inspector never adds a polling
+    /// loop, and queued property events from replaced media are not data sources.
+    func setMediaInfoVisible(_ visible: Bool) {
+        queue.async { [weak self] in
+            guard let self, self.isRunning else { return }
+            self.mediaInfoVisible = visible
+            self.mediaInfoTimer?.cancel()
+            self.mediaInfoTimer = nil
+            if let client = self.client { self.refreshMediaInfo(client: client) }
+            self.emitSnapshot()
+            guard visible else { return }
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
+            timer.setEventHandler { [weak self] in
+                guard let self, self.isRunning, self.mediaInfoVisible,
+                      let client = self.client else { return }
+                self.refreshMediaInfo(client: client)
+                self.emitSnapshot()
+            }
+            self.mediaInfoTimer = timer
+            timer.resume()
+        }
+    }
+
+    private func refreshMediaInfo(client: OpaquePointer) {
+        guard !isReplacingMedia, didEmitFileLoadedForCurrentMedia,
+              let owner = activeMediaRequestID, owner == currentRequestID,
+              let media = currentMedia else { return }
+        switch snapshot.status {
+        case .idle, .stopped, .failed: return
+        default: break
+        }
+        let staticNames = ["filename", "file-format", "file-size", "video-dec-params/w", "video-dec-params/h",
+            "video-params/w", "video-params/h", "current-tracks/video/codec", "current-tracks/video/demux-fps", "container-fps",
+            "current-tracks/audio/codec", "audio-params/channels", "audio-params/samplerate",
+            "current-tracks/audio/demux-channels", "current-tracks/audio/demux-samplerate"]
+        let dynamicNames = ["video-bitrate", "audio-bitrate", "estimated-vf-fps", "hwdec-current",
+            "cache-speed", "demuxer-cache-duration", "frame-drop-count"]
+        var properties: [String: String] = [:]
+        for name in staticNames + (mediaInfoVisible ? dynamicNames : []) {
+            properties[name] = propertyString(name, client: client)
+        }
+        let segmented = ["hls", "dash"].contains(properties["file-format"] ?? "")
+            || ["m3u8", "mpd"].contains(media.url.pathExtension.lowercased())
+        snapshot.mediaInfo = PlaybackMediaInfo(properties: properties,
+            includeStatistics: mediaInfoVisible, isNetwork: !media.url.isFileURL,
+            includesFileSize: !segmented && !["live", "xtream-live"].contains(media.siteKey))
+        mediaInfoRefreshCount += 1
+    }
+
+#if DEBUG || OKVIDEO_PERFORMANCE_TEST
+    func mediaInfoRefreshCountForTesting() async -> Int {
+        await withCheckedContinuation { continuation in
+            queue.async { continuation.resume(returning: self.mediaInfoRefreshCount) }
+        }
+    }
+#endif
+
     private func propertyString(
         _ name: String,
         client: OpaquePointer
@@ -2195,7 +2262,17 @@ final class MPVPlayerClient: PlayerClient {
             (12, "eof-reached", NativeFormat.flag),
             (13, "dwidth", NativeFormat.int64),
             (14, "dheight", NativeFormat.int64),
-            (15, "seeking", NativeFormat.flag)
+            (15, "seeking", NativeFormat.flag),
+            (16, "video-dec-params/w", NativeFormat.int64),
+            (17, "video-dec-params/h", NativeFormat.int64),
+            (18, "audio-params/samplerate", NativeFormat.int64),
+            (19, "audio-params/channels", NativeFormat.string),
+            (20, "current-tracks/video/codec", NativeFormat.string),
+            (21, "current-tracks/audio/codec", NativeFormat.string),
+            (22, "hwdec-current", NativeFormat.string),
+            (23, "current-tracks/video/demux-fps", NativeFormat.double),
+            (24, "current-tracks/audio/demux-samplerate", NativeFormat.int64),
+            (25, "current-tracks/audio/demux-channels", NativeFormat.string)
         ]
         for (identifier, name, format) in observations {
             try name.withCString { pointer in
@@ -2329,6 +2406,7 @@ final class MPVPlayerClient: PlayerClient {
                 }
             }
             refreshTracks(client: client)
+            refreshMediaInfo(client: client)
             emitSnapshot()
             if isFirstFileLoaded {
                 if let currentRequestID {
@@ -2558,6 +2636,7 @@ final class MPVPlayerClient: PlayerClient {
         guard let releasedRequestID = activeMediaRequestID else { return }
         activeMediaRequestID = nil
         replacingMediaRequestID = nil
+        snapshot.mediaInfo = nil
         continuation.yield(.mediaReleased(requestID: releasedRequestID))
         resumeMediaReleaseWaiters(requestID: releasedRequestID)
     }
@@ -2694,9 +2773,15 @@ final class MPVPlayerClient: PlayerClient {
                     snapshot.status = .idle
                 }
             }
+        case "video-dec-params/w", "video-dec-params/h", "audio-params/samplerate",
+             "audio-params/channels", "current-tracks/video/codec", "current-tracks/audio/codec",
+             "hwdec-current", "current-tracks/video/demux-fps",
+             "current-tracks/audio/demux-samplerate", "current-tracks/audio/demux-channels":
+            if let client { refreshMediaInfo(client: client) }
         case "track-list":
             if let client {
                 refreshTracks(client: client)
+                refreshMediaInfo(client: client)
             }
         default:
             return
@@ -3073,6 +3158,7 @@ final class PlayerLifecycleController {
     var onRenderClientChanged: ((MPVPlayerClient?) -> Void)?
 
     private let continuation: AsyncStream<PlayerEvent>.Continuation
+    private var mediaInfoVisible = false
     private var currentClient: PlayerClient?
     private var eventForwardingTask: Task<Void, Never>?
     private var lifecycleBarrier: Task<Void, Never>?
@@ -3614,6 +3700,7 @@ final class PlayerLifecycleController {
             throw error
         }
         currentClient = player
+        player.setMediaInfoVisible(mediaInfoVisible)
         startForwardingEvents(from: player)
         onRenderClientChanged?(player)
         PlayerStartupTraceStore.shared.markClientReady(
@@ -3628,6 +3715,11 @@ final class PlayerLifecycleController {
         eventForwardingTask = nil
         currentClient = nil
         onRenderClientChanged?(nil)
+    }
+
+    func setMediaInfoVisible(_ visible: Bool) {
+        mediaInfoVisible = visible
+        currentClient?.setMediaInfoVisible(visible)
     }
 
     private func requireClient() throws -> PlayerClient {

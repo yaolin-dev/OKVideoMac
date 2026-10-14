@@ -257,6 +257,13 @@ struct DetailView: View {
     private func detailHero(availableWidth: CGFloat) -> some View {
         DetailHeroHeader(summary: detail.summary, availableWidth: availableWidth, description: {
             detailDescription
+            if let configuration = state.activeConfigurationRecord, let source = selectedSource, let episode = primaryEpisode {
+                DetailPlaybackSpecifications(cache: state.playbackMediaInfoCache,
+                    key: .init(configurationID: configuration.id, configurationUpdatedAt: configuration.updatedAt,
+                        videoID: detail.summary.id, sourceID: source.id, episodeID: episode.id),
+                    episodeName: EpisodeNameParser.presentation(for: episode).displayName)
+                    .padding(.top, 6)
+            }
         }, actions: {
             HStack(spacing: 10) {
                 Button(action: playPrimaryEpisode) {

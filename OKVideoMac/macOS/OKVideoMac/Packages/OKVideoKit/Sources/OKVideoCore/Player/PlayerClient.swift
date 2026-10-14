@@ -64,6 +64,7 @@ public struct PlayerSnapshot: Equatable, Sendable {
     public var isMuted: Bool
     public var speed: Double
     public var tracks: [MediaTrack]
+    public var mediaInfo: PlaybackMediaInfo? = nil
     public var videoWidth: Int
     public var videoHeight: Int
 
@@ -151,7 +152,12 @@ public protocol PlayerClient: AnyObject {
     func setAspectRatio(_ ratio: String?) async throws
     func setHardwareDecoding(enabled: Bool) async throws
     func screenshot(to url: URL) async throws
+    func setMediaInfoVisible(_ visible: Bool)
     func shutdown() async
+}
+
+public extension PlayerClient {
+    func setMediaInfoVisible(_ visible: Bool) {}
 }
 
 public final class UnavailablePlayerClient: PlayerClient {

@@ -3898,6 +3898,7 @@ struct PlayerSubtitleTrackPreference: Equatable {
 
 struct ActivePlaybackContext {
     let configurationID: UUID
+    var configurationUpdatedAt: Date? = nil
     var detail: VideoDetail
     var source: PlaySource
     var episode: PlayEpisode
@@ -5340,6 +5341,8 @@ final class AppState: ObservableObject {
     @Published private(set) var favoriteLiveChannelIDs: Set<String> = []
     @Published private(set) var deletedLiveChannelIDs: Set<String> = []
     let playerWindowPreferences = PlayerWindowPreferenceStore()
+    let playbackMediaInfoCache = PlaybackMediaInfoCache()
+    private var playerMediaInfoRequestID: UUID?
     let playerSnapshotState = PlayerSnapshotState()
     let danmaku = DanmakuSessionCoordinator()
     private(set) var playerSnapshot: PlayerSnapshot {
@@ -5586,7 +5589,9 @@ final class AppState: ObservableObject {
     private let configurationActionTimeout: TimeInterval
     private var siteActionStatusGeneration: UInt64 = 0
     private var siteActionStatusDismissTask: Task<Void, Never>?
-    private var activePlayback: ActivePlaybackContext?
+    private var activePlayback: ActivePlaybackContext? {
+        didSet { cacheCurrentPlaybackMediaInfo() }
+    }
     private var pendingPlayback: PendingCloudPlayback?
     /// Retains only a CatPaw-owned Node proxy generation. TVBox, ordinary
     /// direct media and cloud bridge sessions never create this lease.
@@ -5638,6 +5643,7 @@ final class AppState: ObservableObject {
         didSet {
             playbackDisplaySleep.beginSession(activePlayerRequestID)
             if oldValue != activePlayerRequestID {
+                playerMediaInfoRequestID = nil
                 playbackPresentationID = activePlayerRequestID
                 hasCurrentPlaybackStarted = false
                 playerPresentedError = nil
@@ -17022,6 +17028,7 @@ final class AppState: ObservableObject {
             }
             activePlayback = ActivePlaybackContext(
                 configurationID: playback.configurationID,
+                configurationUpdatedAt: playback.configurationUpdatedAt,
                 detail: playback.detail,
                 source: playback.source,
                 episode: playback.episode,
@@ -21084,6 +21091,20 @@ final class AppState: ObservableObject {
         }
     }
 
+    func setPlaybackInformationVisible(_ visible: Bool) {
+        environment?.player.setMediaInfoVisible(visible)
+    }
+
+    private func cacheCurrentPlaybackMediaInfo() {
+        guard let playback = activePlayback, let owner = playerMediaInfoRequestID,
+              owner == activePlayerRequestID, playback.requestID == owner,
+              let info = playerSnapshot.mediaInfo,
+              let configurationUpdatedAt = playback.configurationUpdatedAt else { return }
+        playbackMediaInfoCache.store(info, for: .init(configurationID: playback.configurationID,
+            configurationUpdatedAt: configurationUpdatedAt, videoID: playback.detail.summary.id,
+            sourceID: playback.source.id, episodeID: playback.episode.id))
+    }
+
     private func startPlayerEventLoop() {
         guard !isShutdownRequested,
               playerEventTask == nil,
@@ -21106,7 +21127,10 @@ final class AppState: ObservableObject {
                                 paused: snapshot.status == .paused))
                     }
                     let previousHistoryStatus = self.playerSnapshot.status
+                    let infoChanged = snapshot.mediaInfo?.withoutStatistics != self.playerSnapshot.mediaInfo?.withoutStatistics
                     self.playerSnapshot = snapshot
+                    self.playerMediaInfoRequestID = snapshot.mediaInfo == nil ? nil : requestID
+                    if infoChanged { self.cacheCurrentPlaybackMediaInfo() }
                     self.handlePlaybackSkipSnapshot(
                         snapshot,
                         requestID: requestID
@@ -21736,6 +21760,8 @@ final class AppState: ObservableObject {
         )
         let playback = ActivePlaybackContext(
             configurationID: configurationID,
+            configurationUpdatedAt: configurations.first { $0.id == configurationID }?.updatedAt
+                ?? activeConfigurationRecord.flatMap { $0.id == configurationID ? $0.updatedAt : nil },
             detail: detail,
             source: source,
             episode: episode,

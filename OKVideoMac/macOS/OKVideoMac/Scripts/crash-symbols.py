@@ -56,6 +56,19 @@ def inventory(app):
 
 
 def source_state(repo):
+    # Frozen local acceptance source has no .git directory. Validate every
+    # captured byte and preserve its explicit non-release identity instead of
+    # pretending the baseline commit contains the implementation changes.
+    if (repo / 'LOCAL_ACCEPTANCE_SNAPSHOT.json').is_file():
+        sys.path.insert(0, str(repo / 'Tools/SourceAudit'))
+        from local_acceptance import validate
+        snapshot = validate(repo)
+        return {'commit': None, 'baseline_commit': snapshot['base_git_commit'],
+                'branch': snapshot['branch'], 'dirty': True,
+                'working_files_sha256': snapshot['source_sha256'],
+                'source_digest_format': 'local-acceptance-manifest-v1',
+                'acceptanceOnly': True, 'publicReleaseEligible': False,
+                'gitCommitBound': False}
     # This local-only manifest records the exact modified source contents, not secrets or a source archive.
     names = subprocess.check_output(['git', '-C', str(repo), 'ls-files', '-z', '--cached',
                                      '--others', '--exclude-standard']).split(b'\0')
