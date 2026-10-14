@@ -196,6 +196,7 @@ struct NativeLiveChannelPage: NSViewRepresentable {
                 guard let self, let state = self.state else { return }
                 Task { await state.toggleLiveFavorite(sourceID: page.source, channel: channel) }
             }
+            item.card.catchupAction = { [weak self] in self?.showCatchup(channel) }
             item.card.menuProvider = { [weak self] in self?.menu(channel) ?? NSMenu() }
             updateProgramme(item.card, channel: channel)
         }
@@ -275,6 +276,14 @@ struct NativeLiveChannelPage: NSViewRepresentable {
             page.session.playDefault(channel: channel, source: page.source, catalog: page.catalog,
                 channels: channels, state: state)
         }
+        private func showCatchup(_ channel: LiveChannel) {
+            guard let page, currentKey == page.browseKey,
+                  page.session.selectedSourceID == page.source,
+                  channels.contains(where: { $0.id == channel.id }) else { return }
+            page.session.catchupChannelID = channel.id
+            page.session.showsCatchupList = true
+            page.session.setDisplayMode(.guide)
+        }
         private func menu(_ channel: LiveChannel) -> NSMenu {
             let menu = NSMenu()
             guard let page, let state else { return menu }
@@ -297,6 +306,11 @@ struct NativeLiveChannelPage: NSViewRepresentable {
                 }
             }
             menu.addItem(.separator())
+            if LiveCatchupPresentation.canBrowse(channel) {
+                menu.addItem(LiveChannelMenuItem(L10n.string("live.catchup.list", fallback: "Channel Catch-up List")) { [weak self] in
+                    self?.showCatchup(channel)
+                })
+            }
             menu.addItem(LiveChannelMenuItem(L10n.string(favorites.contains(channel.id) ? "live.unfavorite" : "live.favorite",
                 fallback: favorites.contains(channel.id) ? "Remove from Favorites" : "Favorite Channel")) {
                 Task { await state.toggleLiveFavorite(sourceID: page.source, channel: channel) }
@@ -380,12 +394,14 @@ final class LiveChannelNativeCard: NSView, BrowserHoverTarget {
     private let star = NSButton()
     private let routes = NSButton()
     private let programmeInfo = NSButton()
+    private let catchupButton = NSButton()
     private var programmePopover: NSPopover?
     private var imageTask: Task<Void, Never>?
     private var imageKey = ""
     var selected = false { didSet { if oldValue != selected { needsDisplay = true } } }
     var activate: (() -> Void)?
     var favoriteAction: (() -> Void)?
+    var catchupAction: (() -> Void)?
     var menuProvider: (() -> NSMenu)?
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -399,6 +415,14 @@ final class LiveChannelNativeCard: NSView, BrowserHoverTarget {
             addSubview(field)
         }
         addSubview(logo); addSubview(star); addSubview(routes); addSubview(progress); addSubview(number); addSubview(programmeInfo)
+        addSubview(catchupButton)
+        catchupButton.isBordered = false
+        catchupButton.image = NSImage(systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: nil)
+        catchupButton.target = self; catchupButton.action = #selector(showCatchup)
+        catchupButton.toolTip = L10n.string("live.catchup.list", fallback: "Channel Catch-up List")
+        catchupButton.setAccessibilityLabel(catchupButton.toolTip)
+        catchupButton.identifier = NSUserInterfaceItemIdentifier("live.catchup.open")
+        catchupButton.isHidden = true
         next.isHidden = true; time.isHidden = true
         programmeInfo.isBordered = false
         programmeInfo.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: nil)
@@ -418,6 +442,7 @@ final class LiveChannelNativeCard: NSView, BrowserHoverTarget {
         let artHeight = bounds.width * 9 / 16
         logo.frame = NSRect(x: 20, y: 16, width: max(0, bounds.width - 40), height: max(0, artHeight - 32))
         star.frame = NSRect(x: bounds.width - 38, y: 4, width: 26, height: 26)
+        catchupButton.frame = NSRect(x: bounds.width - 70, y: 4, width: 26, height: 26)
         number.frame = NSRect(x: 17, y: 17, width: min(80, max(26, number.intrinsicContentSize.width + 10)), height: 18)
         name.frame = NSRect(x: 8, y: artHeight + 8, width: max(0, bounds.width - 76), height: 20)
         routes.frame = NSRect(x: bounds.width - 36, y: artHeight + 6, width: 28, height: 22)
@@ -459,6 +484,7 @@ final class LiveChannelNativeCard: NSView, BrowserHoverTarget {
     override func accessibilityPerformPress() -> Bool { activate?(); return true }
     override func menu(for event: NSEvent) -> NSMenu? { menuProvider?() }
     @objc private func favorite() { favoriteAction?() }
+    @objc private func showCatchup() { catchupAction?() }
     @objc private func showRoutes() {
         if let menu = menuProvider?() { menu.popUp(positioning: nil, at: NSPoint(x: 0, y: routes.bounds.maxY), in: routes) }
     }
@@ -478,6 +504,7 @@ final class LiveChannelNativeCard: NSView, BrowserHoverTarget {
     func bind(channel: LiveChannel, favorite: Bool, urls: [URL], pixels: Int, repository: ImageRepository?) {
         if name.stringValue != channel.name { programmePopover?.close() }
         name.stringValue = channel.name
+        catchupButton.isHidden = !LiveCatchupPresentation.canBrowse(channel)
         number.stringValue = channel.number ?? ""
         number.isHidden = number.stringValue.isEmpty
         needsLayout = true

@@ -116,19 +116,22 @@ public struct LiveStream: Codable, Equatable, Identifiable, Sendable {
     public var headers: [String: String]
     public var format: String?
     public var needsParsing: Bool
+    public var catchup: LiveCatchupConfiguration?
 
     public init(
         name: String,
         url: URL,
         headers: [String: String] = [:],
         format: String? = nil,
-        needsParsing: Bool = false
+        needsParsing: Bool = false,
+        catchup: LiveCatchupConfiguration? = nil
     ) {
         self.name = name
         self.target = .direct(url)
         self.headers = headers
         self.format = format
         self.needsParsing = needsParsing
+        self.catchup = catchup
     }
 
     public init(
@@ -136,24 +139,42 @@ public struct LiveStream: Codable, Equatable, Identifiable, Sendable {
         target: LiveStreamTarget,
         headers: [String: String] = [:],
         format: String? = nil,
-        needsParsing: Bool = false
+        needsParsing: Bool = false,
+        catchup: LiveCatchupConfiguration? = nil
     ) throws {
         self.name = name
         self.target = target
         self.headers = headers
         self.format = format
         self.needsParsing = needsParsing
+        self.catchup = catchup
         try validateProviderTarget()
     }
 
+    /// FongMi's standard IPTV fallback is structural, never based on a source
+    /// or channel name. Explicit configuration (including disabled) wins.
+    public var effectiveCatchup: LiveCatchupConfiguration? {
+        if let catchup { return catchup }
+        guard let url, url.path.contains("/PLTV/"),
+              ["http", "https", "rtsp"].contains(url.scheme?.lowercased() ?? "") else { return nil }
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        components.percentEncodedPath = components.percentEncodedPath.replacingOccurrences(of: "/PLTV/", with: "/TVOD/")
+        guard let archive = components.url else { return nil }
+        let separator = archive.query == nil ? "?" : "&"
+        return LiveCatchupConfiguration(mode: "default",
+            template: archive.absoluteString + separator + "playseek={utc:YmdHMS}-{utcend:YmdHMS}",
+            retentionDays: 7, timeZoneID: TimeZone.current.identifier, seekPolicy: .request)
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case name, url, headers, format, needsParsing
+        case name, url, headers, format, needsParsing, catchup
         case targetVersion, providerResourceReference
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         name = try container.decode(String.self, forKey: .name)
+        catchup = try container.decodeIfPresent(LiveCatchupConfiguration.self, forKey: .catchup)
         format = try container.decodeIfPresent(String.self, forKey: .format)
         if container.contains(.targetVersion) || container.contains(.providerResourceReference) {
             guard !container.contains(.url),
@@ -180,6 +201,7 @@ public struct LiveStream: Codable, Equatable, Identifiable, Sendable {
         try validateProviderTarget()
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(name, forKey: .name)
+        try container.encodeIfPresent(catchup, forKey: .catchup)
         try container.encodeIfPresent(format, forKey: .format)
         switch target {
         case .direct(let url):
@@ -195,7 +217,7 @@ public struct LiveStream: Codable, Equatable, Identifiable, Sendable {
     private func validateProviderTarget() throws {
         guard case .provider(let reference) = target else { return }
         guard let locator = reference.xtreamLiveLocator,
-              headers.isEmpty, !needsParsing,
+              headers.isEmpty, !needsParsing, catchup == nil,
               format == nil || format == locator.outputFormat.rawValue else {
             throw LiveModelError.invalidProviderTarget
         }

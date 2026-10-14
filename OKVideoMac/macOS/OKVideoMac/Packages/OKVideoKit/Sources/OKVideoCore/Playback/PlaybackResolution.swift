@@ -77,6 +77,8 @@ public enum MediaNetworkPolicy: Equatable, Sendable {
 }
 
 public struct ResolvedMedia: Equatable, Sendable {
+    /// File-local stop boundary for a bounded catch-up programme.
+    public var playbackDurationLimit: TimeInterval? = nil
     public var url: URL
     public var headers: HTTPHeaders
     public var format: String?

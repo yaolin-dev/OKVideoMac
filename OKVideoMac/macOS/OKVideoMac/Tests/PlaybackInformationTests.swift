@@ -91,6 +91,42 @@ import OKVideoCore
         }
     }
 
+    func testCatchupStopsAtProgrammeBoundaryAndNextMediaHasNoLimit() async throws {
+        guard let directory = ProcessInfo.processInfo.environment["OKVIDEO_MEDIA_INFO_FIXTURES"] else {
+            throw XCTSkip("Requires the explicit synthetic media gate")
+        }
+        let player = try MPVPlayerClient(teardownMode: .fullDestroy, audioPreference: .init(muted: true), mediaProxyResolver: { _ in .direct })
+        let window = NSWindow(contentRect: .init(x: 100, y: 100, width: 640, height: 360), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        var ready = false, latest = PlayerSnapshot(), ends: [PlaybackEndOrigin] = []
+        let reader = Task { @MainActor in
+            for await event in player.events {
+                if case .snapshot(let snapshot, _) = event { latest = snapshot }
+                if case .ended(_, let origin) = event { ends.append(origin) }
+            }
+        }
+        window.contentView = MPVOpenGLView(player: player, onError: { XCTFail($0.localizedDescription) }, onSurfaceReady: { _ in ready = true }, onSurfaceUnavailable: { _ in })
+        NSApp.activate(ignoringOtherApps: true); window.orderFrontRegardless()
+        do {
+            try await waitUntil { ready }
+            var media = ResolvedMedia(url: URL(fileURLWithPath: directory).appendingPathComponent("fixture-A.mp4"), headers: [:], siteKey: "live-catchup", sourceName: "Synthetic", episodeName: "Synthetic")
+            media.playbackDurationLimit = 3
+            try await player.load(media, startPosition: nil, requestID: UUID())
+            try await waitUntil { latest.isSeekable == true && latest.position > 0 }
+            XCTAssertEqual(latest.duration, 3, accuracy: 0.01)
+            try await waitUntil({ latest.status == .ended }, timeout: 8)
+            XCTAssertEqual(ends, [.natural])
+            media.playbackDurationLimit = nil; media.siteKey = "live"
+            try await player.load(media, startPosition: nil, requestID: UUID())
+            try await waitUntil { latest.duration > 30 && latest.position > 3.5 }
+            XCTAssertEqual(latest.status, .playing)
+            reader.cancel(); window.close(); await player.shutdown()
+        } catch {
+            reader.cancel(); window.close(); await player.shutdown(); throw error
+        }
+    }
+
     func testBundledMPVLocalNetworkAudioReplacementAndHiddenPolling() async throws {
         guard let directory = ProcessInfo.processInfo.environment["OKVIDEO_MEDIA_INFO_FIXTURES"],
               let network = ProcessInfo.processInfo.environment["OKVIDEO_MEDIA_INFO_HTTP"] else {

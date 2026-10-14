@@ -145,6 +145,9 @@ enum MPVTVBoxPlaybackPolicy {
             options.append("start=" + String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), position))
             options.append("pause=yes")
         }
+        if let limit = media.playbackDurationLimit, limit.isFinite, limit > 0 {
+            options.append("end=" + String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), limit))
+        }
         if media.compatibilityPolicy == .nativeXtreamLive, media.hlsStartupSelection != nil {
             options.append("demuxer-lavf-format=hls")
         }
@@ -1249,6 +1252,7 @@ final class MPVPlayerClient: PlayerClient {
                     self.snapshot.isSeeking = false
                     self.snapshot.isPausedForCache = false
                     self.snapshot.seekTarget = nil
+                    self.snapshot.isSeekable = nil
                     self.snapshot.mediaInfo = nil
                     self.snapshot.tracks = []
                     self.snapshot.videoWidth = 0
@@ -2019,7 +2023,7 @@ final class MPVPlayerClient: PlayerClient {
             || ["m3u8", "mpd"].contains(media.url.pathExtension.lowercased())
         snapshot.mediaInfo = PlaybackMediaInfo(properties: properties,
             includeStatistics: mediaInfoVisible, isNetwork: !media.url.isFileURL,
-            includesFileSize: !segmented && !["live", "xtream-live"].contains(media.siteKey))
+            includesFileSize: !segmented && !["live", "live-catchup", "xtream-live"].contains(media.siteKey))
         mediaInfoRefreshCount += 1
     }
 
@@ -2272,7 +2276,8 @@ final class MPVPlayerClient: PlayerClient {
             (22, "hwdec-current", NativeFormat.string),
             (23, "current-tracks/video/demux-fps", NativeFormat.double),
             (24, "current-tracks/audio/demux-samplerate", NativeFormat.int64),
-            (25, "current-tracks/audio/demux-channels", NativeFormat.string)
+            (25, "current-tracks/audio/demux-channels", NativeFormat.string),
+            (26, "seekable", NativeFormat.flag)
         ]
         for (identifier, name, format) in observations {
             try name.withCString { pointer in
@@ -2355,6 +2360,8 @@ final class MPVPlayerClient: PlayerClient {
                 )
             }
             activeMediaRequestID = currentRequestID
+            snapshot.isSeekable = propertyString("seekable", client: client).map { $0 == "yes" }
+            if let limit = currentMedia?.playbackDurationLimit { snapshot.duration = limit }
             pendingEOFSignal = nil
             // One native boundary owns autoplay. TVBox has already applied
             // its start position while paused; there is no post-start seek.
@@ -2704,7 +2711,7 @@ final class MPVPlayerClient: PlayerClient {
                 startupTimelinePosition = position
             }
         case "duration":
-            snapshot.duration = max(0, event.doubleValue)
+            snapshot.duration = currentMedia?.playbackDurationLimit ?? max(0, event.doubleValue)
         case "pause":
             if snapshot.status != .loading
                 && snapshot.status != .buffering
@@ -2737,6 +2744,9 @@ final class MPVPlayerClient: PlayerClient {
                 snapshot.status = .playing
             }
             if currentMediaTransportProfile == .tvBox { refreshTVBoxSeekCompletion() }
+        case "seekable":
+            guard !isReplacingMedia else { return }
+            snapshot.isSeekable = event.flagValue != 0
         case "seeking":
             if currentMediaTransportProfile == .tvBox {
                 if snapshot.seekTarget != nil { refreshTVBoxSeekCompletion() }

@@ -4793,11 +4793,17 @@ private final class LivePlaybackNavigationContext {
     let channels: [LiveChannel]
     let importedCatalog: AcceptedImportedCatalog?
     var attemptedTransports = Set<ImportedRouteTransport>()
+    let catchupProgramme: EPGProgramme?
+    let catchupOffset: TimeInterval
+    let catchupNow = Date()
 
-    init(sourceID: LiveSourceID, channels: [LiveChannel], importedCatalog: AcceptedImportedCatalog? = nil) {
+    init(sourceID: LiveSourceID, channels: [LiveChannel], importedCatalog: AcceptedImportedCatalog? = nil,
+         catchupProgramme: EPGProgramme? = nil, catchupOffset: TimeInterval = 0) {
         self.sourceID = sourceID
         self.channels = channels
         self.importedCatalog = importedCatalog
+        self.catchupProgramme = catchupProgramme
+        self.catchupOffset = catchupOffset
     }
 }
 
@@ -5314,6 +5320,7 @@ final class AppState: ObservableObject {
     @Published private(set) var epgFailures: [UUID: String] = [:]
     @Published private(set) var liveSourceEPGStatuses:
         [UUID: LiveSourceEPGStatus] = [:]
+    @Published private(set) var liveCatchupProgramme: EPGProgramme?
     @Published private(set) var livePlaybackChannel: LiveChannel? {
         didSet { scheduleEPGRefresh() }
     }
@@ -11890,6 +11897,7 @@ final class AppState: ObservableObject {
             activePlayback = nil
         }
         livePlaybackChannel = nil
+        liveCatchupProgramme = nil
         livePlaybackStream = nil
         livePlaybackSourceID = nil
         livePlaybackNavigationContext = nil
@@ -13036,6 +13044,7 @@ final class AppState: ObservableObject {
             sessionID: sessionID
         )
         livePlaybackChannel = nil
+        liveCatchupProgramme = nil
         livePlaybackStream = nil
         livePlaybackSourceID = nil
         livePlaybackNavigationContext = nil
@@ -14701,6 +14710,77 @@ final class AppState: ObservableObject {
         await beginImportedLive(selection, navigationChannels: navigationChannels, windowActivation: windowActivation)
     }
 
+    func playImportedCatchup(_ selection: ImportedRouteSelection, programme: EPGProgramme,
+                             navigationChannels: [LiveChannel]) async {
+        guard acceptedImportedCatalogs[selection.catalog.sourceID] === selection.catalog,
+              presentedLiveCatalog(for: .imported(selection.catalog.sourceID)) != nil,
+              programme.channelID == selection.channel.id,
+              LiveCatchupPolicy.availability(configuration: selection.stream.effectiveCatchup,
+                  programme: programme, now: Date()) == .available else { return }
+        cancelLiveSourceValidation(selection.catalog.sourceID)
+        await beginImportedLive(selection, navigationChannels: navigationChannels,
+            windowActivation: .userInitiated, catchupProgramme: programme)
+    }
+
+    func returnToLive() async {
+        guard let context = livePlaybackNavigationContext, context.catchupProgramme != nil,
+              let channel = livePlaybackChannel, let stream = livePlaybackStream,
+              let catalog = context.importedCatalog, liveFlowMayLoad(context),
+              let key = catalog.routeContext?.key(for: stream),
+              let selection = catalog.selection(for: channel, key: key) else { return }
+        await beginImportedLive(selection, navigationChannels: context.channels, windowActivation: .preserveFocus)
+    }
+
+    var nextLiveCatchupProgramme: EPGProgramme? {
+        guard let context = livePlaybackNavigationContext, let current = context.catchupProgramme,
+              let channel = livePlaybackChannel, let snapshot = liveGuide.snapshot,
+              snapshot.source == EPGSourceKey(context.sourceID),
+              let next = snapshot.rows.first(where: { $0.id == channel.id })?.programmes
+                .filter({ $0.start >= current.end }).min(by: { $0.start < $1.start }) else { return nil }
+        let programme = EPGProgramme(channelID: channel.id, title: next.title, start: next.start, end: next.end)
+        guard channel.streams.contains(where: { LiveCatchupPolicy.availability(
+            configuration: $0.effectiveCatchup, programme: programme, now: Date()) == .available }) else { return nil }
+        return programme
+    }
+
+    func playNextLiveCatchupProgramme() async {
+        guard let programme = nextLiveCatchupProgramme,
+              let context = livePlaybackNavigationContext, let catalog = context.importedCatalog,
+              let channel = livePlaybackChannel, liveFlowMayLoad(context),
+              let selection = catalog.selections(for: channel).first(where: { LiveCatchupPolicy.availability(
+                configuration: $0.stream.effectiveCatchup, programme: programme, now: Date()) == .available }) else { return }
+        await beginImportedLive(selection, navigationChannels: context.channels, windowActivation: .preserveFocus,
+            catchupProgramme: programme)
+    }
+
+    func replayCurrentCatchup() async {
+        guard let context = livePlaybackNavigationContext, let programme = context.catchupProgramme,
+              let catalog = context.importedCatalog, let channel = livePlaybackChannel,
+              let stream = livePlaybackStream, liveFlowMayLoad(context),
+              let key = catalog.routeContext?.key(for: stream),
+              let selection = catalog.selection(for: channel, key: key) else { return }
+        await beginImportedLive(selection, navigationChannels: context.channels, windowActivation: .preserveFocus,
+            catchupProgramme: programme)
+    }
+
+    private func seekCatchup(to position: TimeInterval) async {
+        guard position.isFinite, position >= 0,
+              let context = livePlaybackNavigationContext, let programme = context.catchupProgramme,
+              position < min(programme.end, context.catchupNow).timeIntervalSince(programme.start),
+              let channel = livePlaybackChannel, let stream = livePlaybackStream,
+              let catalog = context.importedCatalog, liveFlowMayLoad(context),
+              let key = catalog.routeContext?.key(for: stream),
+              let selection = catalog.selection(for: channel, key: key) else { return }
+        let wasPaused = playerSnapshot.status == .paused
+        let next = LivePlaybackNavigationContext(sourceID: context.sourceID, channels: context.channels,
+            importedCatalog: catalog, catchupProgramme: programme, catchupOffset: position)
+        await beginLivePlayback(channel: selection.channel, stream: selection.stream, context: next,
+            windowActivation: .preserveFocus)
+        if wasPaused, ownsLiveFlow(next) {
+            try? await environment?.player.pause()
+        }
+    }
+
     private func importedPlaybackSourceIsActive(_ id: UUID) -> Bool {
         !deletingImportedSourceIDs.contains(id) && liveSources.contains { $0.id == id }
     }
@@ -14721,7 +14801,9 @@ final class AppState: ObservableObject {
     private func beginImportedLive(
         _ selection: ImportedRouteSelection,
         navigationChannels: [LiveChannel],
-        windowActivation: PlayerWindowActivationPolicy
+        windowActivation: PlayerWindowActivationPolicy,
+        catchupProgramme: EPGProgramme? = nil,
+        catchupOffset: TimeInterval = 0
     ) async {
         guard importedPlaybackSourceIsActive(selection.catalog.sourceID),
               selection.catalog.selection(for: selection.channel, key: selection.id) != nil,
@@ -14730,7 +14812,7 @@ final class AppState: ObservableObject {
               Set(navigationChannels.map(\.id)).count == navigationChannels.count else { return }
         let context = LivePlaybackNavigationContext(
             sourceID: .imported(selection.catalog.sourceID), channels: navigationChannels,
-            importedCatalog: selection.catalog
+            importedCatalog: selection.catalog, catchupProgramme: catchupProgramme, catchupOffset: catchupOffset
         )
         await beginLivePlayback(channel: selection.channel, stream: selection.stream, context: context, windowActivation: windowActivation)
     }
@@ -14803,6 +14885,8 @@ final class AppState: ObservableObject {
         playerPresentedError = nil
         livePlaybackAttemptedIdentifiers = []
         livePlaybackNavigationContext = context
+        liveCatchupProgramme = context.catchupProgramme
+        activeSeekConfirmationID = nil
 
         captureHistoryBeforePlaybackTransition()
         activePlayback = nil
@@ -14900,7 +14984,10 @@ final class AppState: ObservableObject {
         }
         var skippedCount = 0
         var pendingInitialRequestID = initialRequestID
-        for candidate in candidates {
+        for candidate in candidates where context.catchupProgramme.map({ programme in
+            candidate.channel.id == startingChannel.id && LiveCatchupPolicy.availability(
+                configuration: candidate.stream.effectiveCatchup, programme: programme, now: context.catchupNow) == .available
+        }) ?? true {
             guard ownsLiveFlow(context) else { return }
             guard liveFlowMayLoad(context), !Task.isCancelled,
                   !isShutdownRequested,
@@ -14963,6 +15050,14 @@ final class AppState: ObservableObject {
                     )
                 default:
                     throw XtreamLivePlaybackError.invalidReference
+                }
+                if let programme = context.catchupProgramme {
+                    let request = try LiveCatchupPolicy.request(stream: candidate.stream, programme: programme,
+                        now: context.catchupNow, offset: context.catchupOffset)
+                    media.url = request.url
+                    media.siteKey = "live-catchup"
+                    media.episodeName = programme.title
+                    media.playbackDurationLimit = request.remainingDuration
                 }
                 // Prepare the first Native attempt too: a provider's .ts route
                 // can redirect to a multi-variant HLS master. The bounded loader
@@ -15164,6 +15259,11 @@ final class AppState: ObservableObject {
         requestID: UUID?,
         message: String? = nil
     ) {
+        if liveCatchupProgramme != nil,
+           PlaybackRequestOwnershipPolicy.accepts(requestID: requestID, activeRequestID: activePlayerRequestID) {
+            finishExhaustedLivePlayback()
+            return
+        }
         guard !isShutdownRequested,
               isPlayerPresented,
               !isRecoveringLivePlayback,
@@ -15213,7 +15313,9 @@ final class AppState: ObservableObject {
         livePlaybackNoticeTask?.cancel()
         livePlaybackNoticeTask = nil
         livePlaybackNotice = nil
-        playbackFailureSummary = L10n.string("live.channel-unavailable", fallback: "This channel could not be loaded. Try again or choose another channel.")
+        playbackFailureSummary = liveCatchupProgramme != nil
+            ? L10n.string("live.catchup.failed", fallback: "Catch-up could not be loaded. Retry or return to live.")
+            : L10n.string("live.channel-unavailable", fallback: "This channel could not be loaded. Try again or choose another channel.")
         playbackResolutionState = .failed
         playerSnapshot.status = .failed(playbackFailureSummary!)
     }
@@ -16618,6 +16720,7 @@ final class AppState: ObservableObject {
         activePlayback = nil
         pendingPlayback = nil
         livePlaybackChannel = nil
+        liveCatchupProgramme = nil
         livePlaybackStream = nil
         livePlaybackSourceID = nil
         livePlaybackNavigationContext = nil
@@ -16749,6 +16852,10 @@ final class AppState: ObservableObject {
 
     func seek(to position: TimeInterval) async {
         guard canSeekPlayback else { return }
+        if liveCatchupProgramme != nil, livePlaybackStream?.effectiveCatchup?.seekPolicy == .request {
+            await seekCatchup(to: position)
+            return
+        }
         guard let player = environment?.player else { return }
         guard let target = PlayerSeekPolicy.target(
             requested: position,
@@ -17799,6 +17906,7 @@ final class AppState: ObservableObject {
     }
 
     var currentPlaybackTitle: String {
+        if let programme = liveCatchupProgramme { return programme.title }
         if let playback = activePlayback {
             return playback.episode.name
         }
@@ -17818,10 +17926,15 @@ final class AppState: ObservableObject {
     }
 
     var isLivePlayback: Bool {
-        livePlaybackChannel != nil
+        livePlaybackChannel != nil && liveCatchupProgramme == nil
     }
 
     var canSeekPlayback: Bool {
+        if liveCatchupProgramme != nil {
+            guard !isRecoveringLivePlayback, !hasExhaustedLivePlayback,
+                  let policy = livePlaybackStream?.effectiveCatchup?.seekPolicy else { return false }
+            return policy == .request || (policy == .native && playerSnapshot.isSeekable == true)
+        }
         guard !isLivePlayback, activePlayback != nil else {
             return false
         }
@@ -21113,12 +21226,18 @@ final class AppState: ObservableObject {
             for await event in player.events {
                 guard let self else { return }
                 switch event {
-                case .snapshot(let snapshot, let requestID):
+                case .snapshot(var snapshot, let requestID):
                     guard PlaybackRequestOwnershipPolicy.accepts(
                         requestID: requestID,
                         activeRequestID: self.activePlayerRequestID
                     ) else {
                         continue
+                    }
+                    if let context = self.livePlaybackNavigationContext, let programme = context.catchupProgramme {
+                        let duration = min(programme.end, context.catchupNow).timeIntervalSince(programme.start)
+                        snapshot.position = min(duration, max(0, snapshot.position + context.catchupOffset))
+                        snapshot.duration = duration
+                        snapshot.seekTarget = snapshot.seekTarget.map { $0 + context.catchupOffset }
                     }
                     if snapshot.status == .playing || snapshot.status == .paused,
                        let requestID {
@@ -21242,6 +21361,10 @@ final class AppState: ObservableObject {
                             requestID: requestID
                         )
                     case .natural, .userSeekBoundary:
+                        if self.liveCatchupProgramme != nil {
+                            self.playerSnapshot.status = .ended
+                            continue
+                        }
                         if self.livePlaybackChannel != nil {
                             self.recoverLivePlaybackAfterFailure(
                                 requestID: requestID
@@ -21781,6 +21904,7 @@ final class AppState: ObservableObject {
             requestID: sessionID
         )
         livePlaybackChannel = nil
+        liveCatchupProgramme = nil
         livePlaybackStream = nil
         livePlaybackSourceID = nil
         livePlaybackNavigationContext = nil

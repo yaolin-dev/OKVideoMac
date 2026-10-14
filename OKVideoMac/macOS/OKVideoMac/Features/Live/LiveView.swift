@@ -106,6 +106,8 @@ final class LiveBrowserSession: ObservableObject {
         }
     }
     @Published var showsFavoritesOnly = false
+    @Published var showsCatchupList = false
+    @Published var catchupChannelID: String?
     @Published private(set) var displayMode: LiveDisplayMode = .channels
     var showsGuide: Bool {
         get { displayMode == .guide }
@@ -518,7 +520,10 @@ struct LiveGuideScreen: View {
     @State private var showsDatePicker = false
 
     private var boundedChannels: [LiveChannel] {
-        Array(channels[LiveGuideChannelPager.range(page: channelPage, total: channels.count)])
+        if session.showsCatchupList, let channel = channels.first(where: { $0.id == session.catchupChannelID }) ?? channels.first {
+            return [channel]
+        }
+        return Array(channels[LiveGuideChannelPager.range(page: channelPage, total: channels.count)])
     }
 
     private var windowEnd: Date {
@@ -529,7 +534,9 @@ struct LiveGuideScreen: View {
         VStack(spacing: 0) {
             navigationBar
             Divider()
-            LiveGuideViewportHost { content }
+            LiveGuideViewportHost {
+                if session.showsCatchupList { catchupList } else { content }
+            }
             if let selection {
                 Divider()
                 detailBar(selection)
@@ -568,6 +575,8 @@ struct LiveGuideScreen: View {
             let clamped = LiveGuideChannelPager.clampedPage(channelPage, total: channels.count)
             if channelPage == clamped { requestGuide() } else { channelPage = clamped }
         }
+        .onChange(of: session.catchupChannelID) { _ in session.guideVisibleRange = 0..<1; requestGuide() }
+        .onChange(of: session.showsCatchupList) { _ in session.guideVisibleRange = 0..<1; requestGuide() }
         .onChange(of: channelPage) { _ in
             session.guideVisibleRange = 0..<1
             selection = nil
@@ -606,6 +615,11 @@ struct LiveGuideScreen: View {
                         .padding(12)
                         .onChange(of: session.guideWindowStart) { _ in showsDatePicker = false }
                 }
+                Button { session.showsCatchupList.toggle() } label: {
+                    Image(systemName: session.showsCatchupList ? "rectangle.split.3x3" : "list.bullet.rectangle")
+                }
+                .buttonStyle(.borderless)
+                .help(L10n.string("live.catchup.list", fallback: "Channel Catch-up List"))
                 Divider().frame(height: 18)
                 HStack(spacing: 4) {
                     Button { moveWindow(-12 * 60 * 60) } label: {
@@ -700,9 +714,9 @@ struct LiveGuideScreen: View {
                         selection = LiveGuideSelection(rowID: row.id, title: programme.title,
                             start: programme.start, end: programme.end)
                     },
-                    onProgrammeActivated: { row, _ in
+                    onProgrammeActivated: { row, programme in
                         guard modelPresenter.acceptsCallback(scope: scope, revision: revision) else { return }
-                        playChannel(row.id)
+                        playProgramme(LiveGuideSelection(rowID: row.id, title: programme.title, start: programme.start, end: programme.end))
                     },
                     onChannelActivated: { row in
                         guard modelPresenter.acceptsCallback(scope: scope, revision: revision) else { return }
@@ -797,17 +811,78 @@ struct LiveGuideScreen: View {
                     .font(.system(size: 11).monospacedDigit()).foregroundColor(.secondary).lineLimit(1)
             }
             Spacer()
-            Button {
-                playChannel(value.rowID)
-            } label: {
-                Label(L10n.string("live.guide.play-channel", fallback: "Play Channel"),
-                      systemImage: "play.fill")
-            }
-            .disabled(boundedChannels.first(where: { $0.id == value.rowID }).map(canPlay) != true)
+            programmeButton(value)
         }
         .padding(.horizontal, 16)
         .frame(height: 64)
         .background(.regularMaterial)
+    }
+
+    private var catchupList: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Picker(L10n.string("live.catchup.channel", fallback: "Channel"), selection: Binding(
+                get: { session.catchupChannelID ?? channels.first?.id ?? "" },
+                set: { session.catchupChannelID = $0 })) {
+                ForEach(channels) { Text($0.name).tag($0.id) }
+            }
+            .padding(.horizontal, 16).padding(.top, 12)
+            if modelPresenter.scope == viewScope, let row = modelPresenter.model?.rows.first, !row.programmes.isEmpty {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(row.programmes) { programme in
+                            let value = LiveGuideSelection(rowID: row.id, title: programme.title,
+                                start: programme.start, end: programme.end)
+                            HStack(spacing: 12) {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(programme.title).font(.headline)
+                                    (Text(programme.start, format: .dateTime.month().day().hour().minute())
+                                        + Text(" – ") + Text(programme.end, format: .dateTime.hour().minute()))
+                                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                programmeButton(value)
+                            }
+                            .padding(16)
+                            Divider()
+                        }
+                    }
+                }
+            } else if guide.isRefreshing {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                Text(L10n.string("live.catchup.no-guide", fallback: "No programme guide for this date. Archive support and guide coverage are separate."))
+                    .foregroundStyle(.secondary).padding(20)
+                Spacer()
+            }
+        }
+    }
+
+    private func programme(_ value: LiveGuideSelection) -> EPGProgramme {
+        EPGProgramme(channelID: value.rowID, title: value.title, start: value.start, end: value.end)
+    }
+
+    private func availability(_ value: LiveGuideSelection) -> LiveCatchupAvailability {
+        guard let channel = boundedChannels.first(where: { $0.id == value.rowID }) else { return .unsupported }
+        return LiveCatchupPresentation.availability(channel: channel, programme: programme(value), now: Date())
+    }
+
+    private func programmeButton(_ value: LiveGuideSelection) -> some View {
+        let availability = availability(value)
+        return Button { playProgramme(value) } label: {
+            Label(LiveCatchupPresentation.label(availability), systemImage: availability == .available ? "clock.arrow.circlepath" : "play.fill")
+        }
+        .disabled(availability != .available && availability != .current)
+    }
+
+    private func playProgramme(_ value: LiveGuideSelection) {
+        let availability = availability(value)
+        if availability == .current { playChannel(value.rowID); return }
+        guard availability == .available, let channel = boundedChannels.first(where: { $0.id == value.rowID }),
+              let selection = importedCatalog?.selections(for: channel).first(where: {
+                  LiveCatchupPolicy.availability(configuration: $0.stream.effectiveCatchup,
+                      programme: programme(value), now: Date()) == .available
+              }) else { return }
+        Task { await state.playImportedCatchup(selection, programme: programme(value), navigationChannels: boundedChannels) }
     }
 
     private var guideDateBinding: Binding<Date> {
@@ -1430,6 +1505,15 @@ private struct LiveChannelCard: View {
                         badge(number)
                     }
                     Spacer()
+                    if LiveCatchupPresentation.canBrowse(channel) {
+                        Button {
+                            session.catchupChannelID = channel.id
+                            session.showsCatchupList = true
+                            session.setDisplayMode(.guide)
+                        } label: { Image(systemName: "clock.arrow.circlepath") }
+                        .buttonStyle(.borderless)
+                        .help(L10n.string("live.catchup.list", fallback: "Channel Catch-up List"))
+                    }
                     favoriteButton
                 }
                 .frame(maxHeight: .infinity, alignment: .top)

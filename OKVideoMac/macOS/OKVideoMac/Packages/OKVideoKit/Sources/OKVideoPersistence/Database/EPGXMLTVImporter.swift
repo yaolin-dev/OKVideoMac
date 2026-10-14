@@ -89,6 +89,12 @@ final class EPGXMLTVImporter {
                 minimumStart: summary.minProgrammeStart, maximumEnd: summary.maxProgrammeEnd,
                 emittedChannelRecordCount: summary.emittedChannelRecordCount), checkCancellation: control.check)
             try boundaryForTesting?("validated")
+            do {
+                try store.retainCatchupHistory(handle, checkCancellation: control.check)
+            } catch EPGCacheError.budgetExceeded {
+                // Optional history must not discard a validated fresh guide.
+                // The retention transaction rolled back before this fallback.
+            }
             let active = try store.activate(handle, control: control)
             // No cancellation checks after COMMIT. Reclamation cannot undo it.
             let cleanupIncomplete = !cleanup()

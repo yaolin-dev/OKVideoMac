@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Add local catch-up acceptance: programme-aware M3U archive requests, channel/date programme lists, bounded programme playback, seek policy and return to live. Retain previously observed XMLTV history within source and revision boundaries. Full TVBox JSON and Native Xtream archive integration remain pending. See [scope and validation](OKVideoMac/macOS/OKVideoMac/Docs/LIVE_CATCHUP.md).
 - Add a visible Playback Information button for on-demand and live playback, with source resolution, codecs, media frame rate, selected audio parameters and estimated bitrates. Expand playback statistics for decoder, output frame rate, network speed, buffered duration and dropped frames.
 - Copy known playback information without URL credentials, query strings or parent file paths. Missing values remain unavailable; bitrate and download speed use distinct bit/byte units.
 - Show last-played specifications on Detail only for the exact configuration revision, source and episode observed in the current session. No pre-play probing or title-based quality inference.

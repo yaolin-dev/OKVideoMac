@@ -106,6 +106,7 @@ public struct LiveSourceParser {
         var metadata = M3UMetadata()
         var epgURL: URL?
         var globalHeaders: [String: String] = [:]
+        var globalCatchup: [String: String] = [:]
 
         for rawLine in text.components(separatedBy: "\n") {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -113,6 +114,7 @@ public struct LiveSourceParser {
 
             if line.hasPrefix("#EXTM3U") {
                 let attributes = parseAttributes(line)
+                globalCatchup = attributes.filter { $0.key.hasPrefix("catchup") }
                 // Preserve existing precedence; add x-tvg-url as a third alias.
                 if let rawEPG = ["tvg-url", "url-tvg", "x-tvg-url"].compactMap({ attributes[$0] })
                     .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
@@ -130,7 +132,8 @@ public struct LiveSourceParser {
                     tvgName: attributes["tvg-name"],
                     headers: globalHeaders,
                     format: nil,
-                    needsParsing: false
+                    needsParsing: false,
+                    catchup: LiveCatchupConfiguration.m3u(attributes: globalCatchup.merging(attributes) { _, local in local })
                 )
                 if let userAgent = attributes["http-user-agent"] {
                     metadata.headers["User-Agent"] = userAgent
@@ -162,7 +165,7 @@ public struct LiveSourceParser {
             } else if !line.hasPrefix("#"), line.contains("://") || baseURL != nil {
                 let groupName = metadata.group.isEmpty ? "未分组" : metadata.group
                 let channelName = metadata.name.isEmpty ? "未命名频道" : metadata.name
-                guard let stream = makeStream(
+                guard var stream = makeStream(
                     raw: line,
                     defaultName: "线路 1",
                     inheritedHeaders: metadata.headers,
@@ -172,6 +175,7 @@ public struct LiveSourceParser {
                 ) else {
                     continue
                 }
+                stream.catchup = metadata.catchup
                 if let observationSink {
                     ordinal += 1
                     observationSink(LiveParserObservation(format: .m3u, ordinal: ordinal,
@@ -504,6 +508,7 @@ private struct M3UMetadata {
     var headers: [String: String] = [:]
     var format: String?
     var needsParsing: Bool = false
+    var catchup: LiveCatchupConfiguration?
 }
 
 private struct GroupBuilder {

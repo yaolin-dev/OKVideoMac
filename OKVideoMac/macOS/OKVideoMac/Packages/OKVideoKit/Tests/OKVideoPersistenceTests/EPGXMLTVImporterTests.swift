@@ -59,6 +59,49 @@ final class EPGXMLTVImporterTests: XCTestCase {
         importer.boundaryForTesting = boundary
         return try await Task.detached { try importer.importLocal(file, key: key, control: control) }.value
     }
+    private func historicalXML(_ entries: [(String, Date, Date, String)]) -> Data {
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0); formatter.dateFormat = "yyyyMMddHHmmss Z"
+        let channels = Set(entries.map { $0.0 }).sorted().map { "<channel id='\($0)'><display-name>\($0)</display-name></channel>" }.joined()
+        let programmes = entries.map { "<programme channel='\($0.0)' start='\(formatter.string(from: $0.1))' stop='\(formatter.string(from: $0.2))'><title>\($0.3)</title></programme>" }.joined()
+        return Data(("<tv>" + channels + programmes + "</tv>").utf8)
+    }
+
+    func testRefreshRetainsObservedHistoryAndFreshOverlappingProgrammeWins() async throws {
+        let now = Date()
+        _ = try await run(historicalXML([
+            ("a", now.addingTimeInterval(-7200), now.addingTimeInterval(-3600), "Observed history"),
+            ("a", now, now.addingTimeInterval(3600), "Old current title")]))
+        let fresh = try await run(historicalXML([("a", now, now.addingTimeInterval(3600), "Corrected current title")]))
+        XCTAssertEqual(fresh.active.programmeCount, 2)
+        let channel = LiveChannel(groupName: "", name: "a", tvgID: "a", streams: [])
+        let past = try store.queryNowNext([channel], for: key, at: now.addingTimeInterval(-5400))
+        XCTAssertEqual(past.entries.first?.current?.title, "Observed history")
+        let current = try store.queryNowNext([channel], for: key, at: now.addingTimeInterval(30))
+        XCTAssertEqual(current.entries.first?.current?.title, "Corrected current title")
+        let repeated = try await run(historicalXML([("a", now, now.addingTimeInterval(3600), "Corrected current title")]))
+        XCTAssertEqual(repeated.active.programmeCount, 2, "Repeated refreshes must not duplicate history")
+    }
+
+    func testHistoryExpirationAndRemovedChannelsDoNotResurrect() async throws {
+        let now = Date()
+        _ = try await run(historicalXML([
+            ("a", now.addingTimeInterval(-8 * 86400), now.addingTimeInterval(-8 * 86400 + 3600), "Expired"),
+            ("b", now.addingTimeInterval(-7200), now.addingTimeInterval(-3600), "Removed channel")]))
+        let fresh = try await run(historicalXML([("a", now, now.addingTimeInterval(3600), "Current")]))
+        XCTAssertEqual(fresh.active.programmeCount, 1)
+        let removed = LiveChannel(groupName: "", name: "b", tvgID: "b", streams: [])
+        XCTAssertNil(try store.queryNowNext([removed], for: key, at: now.addingTimeInterval(-5400)).entries.first?.current)
+    }
+
+    func testRevisionChangeCannotCarryHistoryFromPreviousResource() async throws {
+        let now = Date()
+        _ = try await run(historicalXML([("a", now.addingTimeInterval(-7200), now.addingTimeInterval(-3600), "Old resource")]))
+        key = EPGRequestKey(source: .imported(key.source.id), revision: String(repeating: "b", count: 64), resource: "xmltv")
+        let fresh = try await run(historicalXML([("a", now, now.addingTimeInterval(3600), "New resource")]))
+        XCTAssertEqual(fresh.active.programmeCount, 1)
+    }
+
     func testPlainAndGzipPublishEquivalentQueryableGeneration() async throws {
         let data = Data(fixture(600).utf8)
         for payload in [data, try gzip(data)] {

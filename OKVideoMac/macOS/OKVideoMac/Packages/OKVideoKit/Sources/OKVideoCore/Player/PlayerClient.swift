@@ -65,6 +65,7 @@ public struct PlayerSnapshot: Equatable, Sendable {
     public var speed: Double
     public var tracks: [MediaTrack]
     public var mediaInfo: PlaybackMediaInfo? = nil
+    public var isSeekable: Bool? = nil
     public var videoWidth: Int
     public var videoHeight: Int
 

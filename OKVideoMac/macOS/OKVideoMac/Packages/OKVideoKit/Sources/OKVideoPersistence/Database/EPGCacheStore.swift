@@ -532,6 +532,76 @@ final class EPGCacheStore: @unchecked Sendable {
         }
     }
 
+    /// Carry previously observed, finished programmes into the next coherent
+    /// generation. Fresh provider data wins; no aliases or removed channels are
+    /// resurrected. This never manufactures missing historical schedules.
+    func retainCatchupHistory(_ handle: EPGCacheImportHandle, now: Date = Date(),
+                              checkCancellation: @escaping () throws -> Void = { try Task.checkCancellation() }) throws {
+        try queue.sync {
+            guard now.timeIntervalSince1970.isFinite else { throw EPGCacheError.invalidInput }
+            try checkCancellation()
+            let db = try connection()
+            var interruption: Error?
+            try db.installProgressHandler(stepInterval: 1000) { [self] in
+                do {
+                    try checkCancellation()
+                    if queryStateLock.withLock({ isClosing }) { throw EPGCacheError.closed }
+                    return false
+                } catch { interruption = error; return true }
+            }
+            defer { db.clearProgressHandler() }
+            do { try db.transaction {
+                try eligible(handle, state: "validated", db: db)
+                guard let old = try db.string("""
+                    SELECT g.id FROM resources r JOIN generations g ON g.id=r.active_generation
+                    WHERE r.id=? AND g.source_epoch=? AND g.state='active'
+                    """, [.text(handle.resource), .text(handle.epoch)]) else { return }
+                let facts = try db.statement("SELECT raw_count,field_bytes FROM generations WHERE id=?")
+                try facts.bind([.text(handle.generation)])
+                guard try facts.step() else { throw EPGCacheError.invalidState }
+                let firstOrdinal = facts.integer(0)
+                let remainingCount = Int64(Self.maximumProgrammes) - firstOrdinal
+                let remainingBytes = Int64(Self.maximumFieldBytes) - facts.integer(1)
+                guard remainingCount > 0, remainingBytes > 0 else { return }
+                try db.execute("""
+                    WITH fresh AS (
+                      SELECT channel_key,MIN(start) AS first_start FROM programmes
+                      WHERE generation_id=? GROUP BY channel_key
+                    ), candidates AS (
+                      SELECT p.*,
+                        SUM(length(CAST(p.channel_reference AS BLOB))+length(CAST(p.title AS BLOB))+64)
+                          OVER(ORDER BY p.start DESC,p.ordinal) AS running_bytes
+                      FROM programmes p JOIN fresh f ON f.channel_key=p.channel_key
+                      WHERE p.generation_id=? AND p.start>=? AND p.end<=? AND p.end<=f.first_start
+                    ), bounded AS (
+                      SELECT * FROM candidates WHERE running_bytes<=?
+                      ORDER BY start DESC,ordinal LIMIT ?
+                    )
+                    INSERT INTO programmes(generation_id,ordinal,channel_reference,channel_key,start,end,title)
+                    SELECT ?,?+ROW_NUMBER() OVER(ORDER BY start,ordinal)-1,
+                      channel_reference,channel_key,start,end,title FROM bounded
+                    """, [.text(handle.generation), .text(old),
+                          .double(now.addingTimeInterval(-7 * 86400).timeIntervalSince1970),
+                          .double(now.timeIntervalSince1970), .integer(remainingBytes), .integer(remainingCount),
+                          .text(handle.generation), .integer(firstOrdinal)])
+                let added = Int64(db.changes)
+                guard added > 0 else { return }
+                try db.execute("""
+                    UPDATE generations SET count=count+?,raw_count=raw_count+?,
+                      last_ordinal=raw_count+?-1,
+                      field_bytes=(SELECT COALESCE(SUM(length(CAST(channel_reference AS BLOB))+length(CAST(title AS BLOB))+64),0)
+                        FROM programmes WHERE generation_id=?),
+                      min_start=(SELECT MIN(start) FROM programmes WHERE generation_id=?),
+                      max_end=(SELECT MAX(end) FROM programmes WHERE generation_id=?)
+                    WHERE id=?
+                    """, [.integer(added), .integer(added), .integer(added),
+                          .text(handle.generation), .text(handle.generation), .text(handle.generation), .text(handle.generation)])
+                try checkCancellation()
+                try checkDiskBudget()
+            } } catch { throw interruption ?? error }
+        }
+    }
+
     func activate(_ handle: EPGCacheImportHandle, control: EPGImportControl? = nil) throws -> EPGCacheActiveIdentity {
         try queue.sync {
             try Task.checkCancellation()

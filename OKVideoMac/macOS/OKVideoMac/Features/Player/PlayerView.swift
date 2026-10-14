@@ -83,7 +83,7 @@ struct PlayerView: View {
             }
 
             if state.playerSnapshot.status == .ended && !state.isLivePlayback {
-                playbackEndedOverlay
+                if state.liveCatchupProgramme != nil { catchupEndedOverlay } else { playbackEndedOverlay }
             }
 
             playbackStatusOverlay
@@ -264,6 +264,28 @@ struct PlayerView: View {
             reduceMotion || isFullScreenTransitioning ? nil : .easeInOut(duration: 0.18),
             value: controlsVisible
         )
+    }
+
+    private var catchupEndedOverlay: some View {
+        VStack(spacing: 14) {
+            Text(L10n.string("live.catchup.ended", fallback: "Catch-up Finished")).font(.headline)
+            HStack(spacing: 12) {
+                Button(L10n.string("player.ended.replay", fallback: "Replay")) {
+                    Task { await state.replayCurrentCatchup() }
+                }.buttonStyle(.borderedProminent)
+                if state.nextLiveCatchupProgramme != nil {
+                    Button(L10n.string("live.catchup.next", fallback: "Next Programme")) {
+                        Task { await state.playNextLiveCatchupProgramme() }
+                    }.buttonStyle(.bordered)
+                }
+                Button(L10n.string("live.catchup.return-live", fallback: "Return to Live")) {
+                    Task { await state.returnToLive() }
+                }.buttonStyle(.bordered)
+            }
+        }
+        .padding(22).foregroundStyle(.white)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .environment(\.colorScheme, .dark)
     }
 
     private var playbackEndedOverlay: some View {
@@ -673,21 +695,20 @@ struct PlayerView: View {
     }
 
     private var floatingHeader: some View {
-        VStack(spacing: 5) {
-            PlayerTitleView(
-                title: state.currentPlaybackContentTitle ?? state.currentPlaybackTitle,
-                episode: state.currentPlayerEpisodePresentation.flatMap {
-                    $0.displayName == state.currentPlaybackContentTitle ? nil : $0.displayName
-                }
-            )
-            .help(playbackDisplayTitle)
-            // Reserve equal space for native window buttons on the left and
-            // the opposite edge, keeping long titles genuinely centered.
-            .padding(.horizontal, 90)
-            .frame(height: 28)
-
-            if state.playbackResolutionState != .playing, !shouldShowStatusOverlay {
-                statusPill
+        Group {
+            if let programme = state.liveCatchupProgramme {
+                CatchupPlayerHeader(title: programme.title, channel: state.livePlaybackDisplayTitle,
+                    start: programme.start, returnToLive: { Task { await state.returnToLive() } })
+            } else {
+                PlayerTitleView(
+                    title: state.currentPlaybackContentTitle ?? state.currentPlaybackTitle,
+                    episode: state.currentPlayerEpisodePresentation.flatMap {
+                        $0.displayName == state.currentPlaybackContentTitle ? nil : $0.displayName
+                    }
+                )
+                .help(playbackDisplayTitle)
+                .padding(.horizontal, 90)
+                .frame(height: 28)
             }
         }
         .frame(maxWidth: .infinity)
@@ -695,25 +716,6 @@ struct PlayerView: View {
             controlsHovering = inside
             inside ? keepControlsVisible() : scheduleControlsHide()
         }
-    }
-
-    private var statusPill: some View {
-        HStack(spacing: 7) {
-            if !isFailed {
-                AppActivityIndicator(size: .mini, tint: .white)
-            }
-            Text(state.playbackStageDescription)
-                .lineLimit(1)
-            Text("·")
-                .foregroundColor(.white.opacity(0.5))
-            Text(state.playerNetworkSpeedDescription)
-                .monospacedDigit()
-        }
-        .font(.caption)
-        .foregroundColor(.white.opacity(0.88))
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .shadow(color: .black.opacity(0.65), radius: 2, y: 1)
     }
 
     @ViewBuilder

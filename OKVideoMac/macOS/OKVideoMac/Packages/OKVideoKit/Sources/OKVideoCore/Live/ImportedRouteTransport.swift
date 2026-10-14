@@ -8,6 +8,7 @@ public struct ImportedRouteTransport: Hashable, Sendable, CustomStringConvertibl
     private let headers: [Header]
     private let format: Data?
     private let needsParsing: Bool
+    private let catchup: LiveCatchupConfiguration?
 
     public init?(_ stream: LiveStream) {
         guard case .direct(let value) = stream.target else { return nil }
@@ -16,6 +17,7 @@ public struct ImportedRouteTransport: Hashable, Sendable, CustomStringConvertibl
             .sorted { $0.name.lexicographicallyPrecedes($1.name) }
         format = stream.format.map { Data($0.utf8) }
         needsParsing = stream.needsParsing
+        catchup = stream.catchup
     }
 
     public static func same(_ lhs: LiveStream, _ rhs: LiveStream) -> Bool {

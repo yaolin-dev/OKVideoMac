@@ -1,6 +1,328 @@
 {
   "sourceLanguage": "en",
   "strings": {
+  "live.catchup.play": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Play Catch-up"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "播放回放"
+        }
+      },
+      "zh-Hant": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "播放回放"
+        }
+      }
+    }
+  },
+  "live.catchup.watch-live": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Watch Live"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "观看直播"
+        }
+      },
+      "zh-Hant": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "觀看直播"
+        }
+      }
+    }
+  },
+  "live.catchup.future": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Upcoming Programme"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "未来节目"
+        }
+      },
+      "zh-Hant": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "未來節目"
+        }
+      }
+    }
+  },
+  "live.catchup.expired": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Catch-up Window Expired"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "已过回放期限"
+        }
+      },
+      "zh-Hant": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "已過回放期限"
+        }
+      }
+    }
+  },
+  "live.catchup.unsupported": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Source Does Not Provide Catch-up"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "该来源未提供回放"
+        }
+      },
+      "zh-Hant": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "該來源未提供回放"
+        }
+      }
+    }
+  },
+  "live.catchup.invalid": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Catch-up Configuration Unavailable"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "回放配置不可用"
+        }
+      },
+      "zh-Hant": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "回放設定不可用"
+        }
+      }
+    }
+  },
+  "live.catchup.failed": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Catch-up could not be loaded. Retry or return to live."
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "回放加载失败，请重试或返回直播。"
+        }
+      },
+      "zh-Hant": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "回放載入失敗，請重試或返回直播。"
+        }
+      }
+    }
+  },
+  "live.catchup.list": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Channel Catch-up List"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "查看频道回放"
+        }
+      },
+      "zh-Hant": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "查看頻道回放"
+        }
+      }
+    }
+  },
+  "live.catchup.channel": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Channel"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "频道"
+        }
+      },
+      "zh-Hant": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "頻道"
+        }
+      }
+    }
+  },
+  "live.catchup.no-guide": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "No programme guide for this date. Archive support and guide coverage are separate."
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "当前日期暂无节目表。节目表覆盖范围与回放能力不同。"
+        }
+      },
+      "zh-Hant": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "目前日期暫無節目表。節目表涵蓋範圍與回放能力不同。"
+        }
+      }
+    }
+  },
+  "live.catchup.mode": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Catch-up"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "回放"
+        }
+      },
+      "zh-Hant": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "回放"
+        }
+      }
+    }
+  },
+  "live.catchup.return-live": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Return to Live"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "返回直播"
+        }
+      },
+      "zh-Hant": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "返回直播"
+        }
+      }
+    }
+  },
+  "live.catchup.ended": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Catch-up Finished"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "回放结束"
+        }
+      },
+      "zh-Hant": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "回放結束"
+        }
+      }
+    }
+  },
+  "live.catchup.next": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Next Programme"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "下一节目"
+        }
+      },
+      "zh-Hant": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "下一節目"
+        }
+      }
+    }
+  },
     "player.info.audio-bitrate": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Audio Bitrate (Estimated)"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "音频码率（估算）"}}}},
     "player.info.audio-channels": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Channels"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "声道"}}}},
     "player.info.audio-codec": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Audio Codec"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "音频编码"}}}},
