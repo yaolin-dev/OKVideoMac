@@ -1,12 +1,12 @@
 # DMG Release Process
 
-## 0.8.7 release candidate
+## Published 0.8.7
 
-The next candidate is 0.8.7 (Build 140). Run the existing clean-main distribution/notarization pipeline below. Validation is pending; record actual results in [readiness](RELEASE_READINESS_0.8.7.md), and create the immutable tag and Release only after all required gates pass.
+当前正式版本为 0.8.7（Build 140），tag 固定 `8208c1ea6db514cb35bbd32bbed8a15ade06cb03`。Developer ID、Hardened Runtime、Apple Accepted `7fdc4022-c334-4d22-b702-a71103687b49`、DMG／安装 App staple、Gatekeeper、安装和16项公开资产均通过。DMG SHA-256 `c7edf4f13db98098d5872e3bed04a611ef42c58e53167e46e9a4551fb5d34204`；见[正式验证](RELEASE_VALIDATION_0.8.7.md)。
 
 ## Published 0.8.6
 
-当前公开版本为 0.8.6（Build139），DMG `8deb4d638740f3f3d6358f9789bb28955bc23a2b86bd83a2c93b184d833c3daf`；tag固定 `590a065d93116d341f94b925b46d8fed0d719744`，Apple Accepted `e6f34fba-656a-44e3-b416-e2a898371aae`。签名、公证、安装与16项公开资产通过；见[正式验证](RELEASE_VALIDATION_0.8.6.md)。
+历史公开版本为 0.8.6（Build139），DMG `8deb4d638740f3f3d6358f9789bb28955bc23a2b86bd83a2c93b184d833c3daf`；tag固定 `590a065d93116d341f94b925b46d8fed0d719744`，Apple Accepted `e6f34fba-656a-44e3-b416-e2a898371aae`。签名、公证、安装与16项公开资产通过；见[正式验证](RELEASE_VALIDATION_0.8.6.md)。
 
 ## 0.8.5 historical release
 

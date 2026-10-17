@@ -2,7 +2,7 @@
 
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于
 原生 Xtream、M3U/XMLTV、配置格式和运行时，而不是简单以 TVBox、FongMi、MiraPlay 或 CatPawOpen
-等生态名称判断。最新稳定版本为 **0.8.6（Build 139）**，支持
+等生态名称判断。最新稳定版本为 **0.8.7（Build 140）**，支持
 **arm64**，最低系统为 **macOS 12.0**。公开二进制通过 Developer ID 签名、Apple 公证、
 Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
@@ -11,8 +11,8 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
 ## 当前版本
 
-- 当前发布候选：0.8.7（Build 140）
-- 目标 tag：`v0.8.7`，仅在正式发布门禁通过后创建。
+- 当前稳定版本：0.8.7（Build 140）
+- Tag：`v0.8.7`，固定 release commit `8208c1ea6db514cb35bbd32bbed8a15ade06cb03`。
 - source release index：`OKVideoMac-0.8.7-build140-SOURCE_RELEASE_INDEX.json`。
 - 本轮包含直播回放、原生画中画、播放信息、启动／播放器界面和历史／详情修复。见[发布说明](../Docs/RELEASE_NOTES_0.8.7.md)与[发布就绪](../Docs/RELEASE_READINESS_0.8.7.md)。
 - 最低系统：macOS 12.0
@@ -30,10 +30,10 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
   本轮正式收口不把这些历史实机结果冒充为重跑结果
 - 本轮完整测试与正式发布门禁见[发布就绪记录](../Docs/RELEASE_READINESS_0.8.7.md)；稳定更新保留既有 HTTPS feed 与用户确认流程，见[自动更新](../Docs/AUTOMATIC_UPDATES.md)。
 
-## 0.8.7 发布候选
+## 0.8.7 正式发布
 
 - 版本由 0.8.6 / 139 递增为 0.8.7 / 140；Android Bridge 与固定依赖版本保持。
-- 回放、画中画及播放信息的具体边界见本轮发布说明。正式构建从干净 main 的固定提交生成；签名、公证、staple、Gatekeeper 和安装验证通过后才公开。
+- 回放、画中画及播放信息的具体边界见本轮发布说明。正式构建从干净 main 的固定提交生成；签名、公证、staple、Gatekeeper、安装和16项公开资产验证均通过，见[正式验证](../Docs/RELEASE_VALIDATION_0.8.7.md)。
 
 ## 0.8.6 历史正式发布
 

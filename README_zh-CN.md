@@ -1,6 +1,6 @@
 # OKVideoMac
 
-当前发布候选为 **0.8.7（Build 140）**，包含直播回放、原生画中画、播放信息、启动／播放器界面以及历史与详情修复。现有公开稳定下载仍为 0.8.6，待全部发布门禁通过后更新。见[发布说明](Docs/RELEASE_NOTES_0.8.7.md)与[发布就绪](Docs/RELEASE_READINESS_0.8.7.md)。
+当前稳定版本为 **0.8.7（Build 140）**，包含直播回放、原生画中画、播放信息、启动／播放器界面以及历史与详情修复。Developer ID、Apple Accepted、staple、Gatekeeper、安装和全部16项公开资产核验通过。见[发布说明](Docs/RELEASE_NOTES_0.8.7.md)与[正式验证](Docs/RELEASE_VALIDATION_0.8.7.md)。
 
 **0.8.4（Build 137）**修复与 0.8.3 启动崩溃相关的工具栏归属路径，用户已确认 macOS 27.0.1 实机测试正常。见[发布说明](Docs/RELEASE_NOTES_0.8.4.md)和[正式验证](Docs/RELEASE_VALIDATION_0.8.4.md)。
 
@@ -17,7 +17,7 @@
 使用 Swift 和 SwiftUI/AppKit 构建。Android 是部分 Java/Dex Provider 按需使用的
 可选兼容层。
 
-最新稳定版本为 **0.8.6（Build 139）**，已完成 Developer ID 签名和 Apple 公证。
+最新稳定版本为 **0.8.7（Build 140）**，已完成 Developer ID 签名和 Apple 公证。
 
 **原生 macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · 多站搜索 · QuickJS/Node Spider**
 
@@ -25,15 +25,15 @@
 
 ### [下载最新稳定版本 →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-**0.8.6（Build 139）** · macOS 12.0+ · 仅支持 Apple Silicon（arm64）。
+**0.8.7（Build 140）** · macOS 12.0+ · 仅支持 Apple Silicon（arm64）。
 
-下载已签名、公证的 [v0.8.6 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.8.6/OKVideoMac-0.8.6.dmg)，Staple、Gatekeeper、最终 DMG 与全新安装 smoke 均通过。
+下载已签名、公证的 [v0.8.7 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.8.7/OKVideoMac-0.8.7.dmg)，Staple、Gatekeeper、最终 DMG 与全新安装 smoke 均通过。
 
 打开 DMG，将 `OKVideoMac.app` 拖入 Applications，无需关闭 Gatekeeper 或 SIP。校验和、发布说明、源码、许可证、SBOM 随发布提供。
 
 > 本项目是播放器与源客户端，不内置第三方内容源、账号、Cookie、解析服务或 DRM 密钥。
 
-## 0.8.7 新增与修复（发布候选）
+## 0.8.7 新增与修复
 
 - 支持所声明 M3U／TVBox／FongMi 回放规则、日期式节目表与 Native Xtream 归档，提供节目进度、下一档可回放节目及返回直播。
 - 增加原生画中画、统一的自适应播放器控制栏、设置中的播放信息，以及原生启动占位界面。

@@ -1,8 +1,8 @@
 # Immutable Corresponding-Source Release Process
 
-## 0.8.7 release candidate identity
+## Published 0.8.7 identity
 
-The candidate uses `OKVideoMac-0.8.7.dmg`, internal `OKVideoMac-0.8.7-macOS-arm64.zip` and `OKVideoMac-0.8.7-build140-SOURCE_RELEASE_INDEX.json`. Generate the complete source/SBOM/checksum set from the exact clean main release commit. Developer ID, Accepted notarization, staple, Gatekeeper and final artifact checks must pass before tag/publication; see [readiness](RELEASE_READINESS_0.8.7.md). The 0.8.6 artifacts below remain historical and immutable.
+Release `v0.8.7` pins clean main commit `8208c1ea6db514cb35bbd32bbed8a15ade06cb03`. The notarized/stapled public download is `OKVideoMac-0.8.7.dmg`; `OKVideoMac-0.8.7-macOS-arm64.zip` remains internal. Source index `OKVideoMac-0.8.7-build140-SOURCE_RELEASE_INDEX.json`, source/licence archives, APK, SBOMs, notices, notes and signed feed bind the final release. All 16 public assets passed local/GitHub/anonymous SHA-256 checks. See [formal verification](RELEASE_VALIDATION_0.8.7.md); earlier tags/assets remain immutable.
 
 ## Published 0.8.6 identity
 

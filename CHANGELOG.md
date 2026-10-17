@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-No additional changes beyond the 0.8.7 candidate.
+No additional changes beyond 0.8.7.
 
 ## [0.8.7] - 2026-10-17
 
@@ -13,7 +13,7 @@ No additional changes beyond the 0.8.7 candidate.
 - Show the native browser shell during startup, restore local content/theme before optional Android checks, remove the light titlebar split-section stripe with a continuous native backdrop, and retain recovery and initialization gates.
 - Preserve single-click History/Favorites selection during progress refresh and defer row changes until native mouse tracking ends. Double-click and the Play button retain their existing playback behavior; Cmd/Shift and keyboard selection remain available.
 - Keep the browser detail route, its scroll position and independent detail loading through playback preparation, failure, success and episode changes. Refresh Quark history through fresh detail and retain verified file identity instead of persisting expiring play tokens.
-- Release candidate: **0.8.7 / Build 140**; Android Bridge remains **0.3.48 / 60** and dependency versions remain pinned. Formal test/signing/notarization/publication results are recorded in [release readiness](Docs/RELEASE_READINESS_0.8.7.md).
+- Release **0.8.7 / Build 140** passed Release regression, Developer ID / Hardened Runtime, Apple Accepted, staple, Gatekeeper, installation and all 16 public asset checks. Android Bridge remains **0.3.48 / 60**, with pinned dependencies. See [formal verification](Docs/RELEASE_VALIDATION_0.8.7.md).
 
 ## [0.8.6] - 2026-10-14
 

@@ -1,12 +1,12 @@
 # Automatic updates
 
-## 0.8.7 release candidate
+## Published 0.8.7
 
-Build 140 is greater than the published Build 139. Keep the current stable HTTPS feed, pinned Sparkle and existing signing account. Generate and validate the appcast against the final notarized/stapled 0.8.7 DMG before publication; until then the public feed still offers 0.8.6. See [readiness](RELEASE_READINESS_0.8.7.md).
+The stable latest feed offers 0.8.7 (140), above Build 139, retaining the existing HTTPS feed, public key and pinned Sparkle. All 16 public assets, latest feed bytes, XML signature and final downloaded DMG EdDSA signature pass. This does not claim a new complete Sparkle update-installation cycle. See [formal verification](RELEASE_VALIDATION_0.8.7.md).
 
 ## Published 0.8.6
 
-The stable latest feed offers 0.8.6 (139), retaining the existing HTTPS feed and public key. Its XML/DMG signatures and all 16 anonymous asset hashes pass. This does not claim a new complete Sparkle update-installation cycle. See [verification](RELEASE_VALIDATION_0.8.6.md).
+At 0.8.6 publication, the stable latest feed offered 0.8.6 (139), retaining the existing HTTPS feed and public key. Its XML/DMG signatures and all 16 anonymous asset hashes pass. This does not claim a new complete Sparkle update-installation cycle. See [verification](RELEASE_VALIDATION_0.8.6.md).
 
 ## Published 0.8.5 update
 
