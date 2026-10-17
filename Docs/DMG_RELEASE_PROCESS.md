@@ -1,5 +1,9 @@
 # DMG Release Process
 
+## 0.8.7 release candidate
+
+The next candidate is 0.8.7 (Build 140). Run the existing clean-main distribution/notarization pipeline below. Validation is pending; record actual results in [readiness](RELEASE_READINESS_0.8.7.md), and create the immutable tag and Release only after all required gates pass.
+
 ## Published 0.8.6
 
 当前公开版本为 0.8.6（Build139），DMG `8deb4d638740f3f3d6358f9789bb28955bc23a2b86bd83a2c93b184d833c3daf`；tag固定 `590a065d93116d341f94b925b46d8fed0d719744`，Apple Accepted `e6f34fba-656a-44e3-b416-e2a898371aae`。签名、公证、安装与16项公开资产通过；见[正式验证](RELEASE_VALIDATION_0.8.6.md)。

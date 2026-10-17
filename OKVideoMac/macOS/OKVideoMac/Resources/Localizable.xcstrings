@@ -1,6 +1,149 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "provider.history.resource-not-unique": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Unable to uniquely locate the original stream and episode in current details. Choose the resource again."}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "无法从最新详情唯一定位原线路和集数，请重新选择资源。"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "無法從最新詳情唯一定位原線路和集數，請重新選擇資源。"}}}},
+    "provider.quark.resource-refresh-required": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Quark login is valid, but the file could not be played. Refresh the resource details and retry."}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "夸克登录有效，但当前文件无法播放，请刷新资源详情后重试。"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "夸克登入有效，但目前檔案無法播放，請重新整理資源詳情後重試。"}}}},
+    "player.channel.search": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Search channel name or number"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "搜索频道名称、编号"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "搜尋頻道名稱、編號"}}}},
+    "player.channel.no-results": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "No matching channels"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "没有找到相关频道"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "沒有找到相關頻道"}}}},
+    "player.channel.clear": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Clear Search"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "清空搜索"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "清空搜尋"}}}},
+    "player.channel.playing": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Playing"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "正在播放"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "正在播放"}}}},
+  "player.pip.active": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Playing in Picture in Picture"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "正在画中画播放"
+        }
+      }
+    }
+  },
+  "player.pip.enter": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Picture in Picture"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "画中画"
+        }
+      }
+    }
+  },
+  "player.pip.failed": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Picture in Picture could not be opened. Playback has returned to the player."
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "暂时无法开启画中画，已返回播放器继续播放。"
+        }
+      }
+    }
+  },
+  "player.pip.return": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Return to Player"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "返回播放器"
+        }
+      }
+    }
+  },
+  "live.catchup.ambiguous-server-time": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "The server cannot distinguish this repeated local time. Choose another programme."
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "这个时段的本地时间因夏令时重复，服务端无法准确区分，请选择其他节目。"
+        }
+      },
+      "zh-Hant": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "此時段的本地時間因日光節約時間重複，服務端無法準確區分，請選擇其他節目。"
+        }
+      }
+    }
+  },
+  "live.catchup.server-timezone-unavailable": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "The server did not provide a usable archive time zone."
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "服务端未提供有效回放时区，暂时无法回放。"
+        }
+      },
+      "zh-Hant": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "服務端未提供有效回看時區，暫時無法回看。"
+        }
+      }
+    }
+  },
+  "live.catchup.programme-unavailable": {
+    "extractionState": "manual",
+    "localizations": {
+      "en": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "Programme Not Available for Catch-up"
+        }
+      },
+      "zh-Hans": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "该节目暂不可回放"
+        }
+      },
+      "zh-Hant": {
+        "stringUnit": {
+          "state": "translated",
+          "value": "此節目暫不可回看"
+        }
+      }
+    }
+  },
   "live.catchup.play": {
     "extractionState": "manual",
     "localizations": {
@@ -5369,6 +5512,7 @@
     "live.loading-channel": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Loading %@…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在加载 %@…"}},"zh-Hant":{"stringUnit":{"state":"translated","value":"正在載入 %@…"}}}},
     "live.next-channel": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Next Channel"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"下一个频道"}},"zh-Hant":{"stringUnit":{"state":"translated","value":"下一個頻道"}}}},
     "live.channel-unavailable": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"This channel could not be loaded. Try again or choose another channel."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"当前频道暂时无法播放，请重试或切换频道。"}},"zh-Hant":{"stringUnit":{"state":"translated","value":"目前頻道暫時無法播放，請重試或切換頻道。"}}}},
+    "player.danmaku": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Danmaku"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "弹幕"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "彈幕"}}}},
     "detail.synopsis-title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Synopsis"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"简介"}},"zh-Hant":{"stringUnit":{"state":"translated","value":"簡介"}}}}
   },
   "version": "1.0"

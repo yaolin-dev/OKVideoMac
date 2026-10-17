@@ -172,7 +172,7 @@ final class LiveGuideState: ObservableObject {
         case (.xmltv, .xmltv(let token)):
             return token.serviceIncarnation == identity.serviceIncarnation
                 && token.demandRevision == identity.demandRevision
-        case (.xtreamShort, .perRowToken):
+        case (.xtreamShort, .perRowToken), (.xtreamArchive, .perRowToken), (.tvboxDay, .perRowToken):
             return value.rows.allSatisfy { row in
                 guard let token = row.token else { return row.programmes.isEmpty }
                 return token.serviceIncarnation == identity.serviceIncarnation
@@ -188,7 +188,7 @@ final class LiveGuideState: ObservableObject {
         switch (identity.capability, value.coherence) {
         case (.xmltv, .xmltv(let token)):
             return token.serviceIncarnation == identity.serviceIncarnation
-        case (.xtreamShort, .perRowToken):
+        case (.xtreamShort, .perRowToken), (.xtreamArchive, .perRowToken), (.tvboxDay, .perRowToken):
             return value.rows.allSatisfy {
                 $0.token?.serviceIncarnation == identity.serviceIncarnation
                     || ($0.token == nil && $0.programmes.isEmpty)
@@ -234,12 +234,14 @@ struct LiveGuideGridProgramme: Equatable, Identifiable, Sendable {
     let title: String
     let start: Date
     let end: Date
+    let catchupAvailable: Bool?
 
     init(_ value: EPGWindowProgramme) {
         id = value.id
         title = value.title
         start = value.start
         end = value.end
+        catchupAvailable = value.programme.catchupAvailable
     }
 }
 

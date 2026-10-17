@@ -1,14 +1,11 @@
 # Compatibility
 
-- 对照版本：0.8.6（Build 139）
-- 最近更新：2026-10-14
-- 当前稳定版本：0.8.6（Build 139），Apple Silicon / arm64 / macOS 12.0+
-- 最新公开公证 DMG：0.8.6（Build 139）；Developer ID、Apple Accepted、Staple、Gatekeeper 与安装 smoke 均通过
-- 发布 tag `v0.8.6` 固定 `590a065d93116d341f94b925b46d8fed0d719744`；正式门禁结果见[发布验证记录](../../../../Docs/RELEASE_VALIDATION_0.8.6.md)。
+- 对照版本：0.8.7（Build 140）
+- 最近更新：2026-10-17
+- 当前发布候选：0.8.7（Build 140），Apple Silicon / arm64 / macOS 12.0+
+- 目标 tag `v0.8.7`；测试、签名、公证、安装与公开资产结果见[发布就绪](../../../../Docs/RELEASE_READINESS_0.8.7.md)。
 
-本轮发布与安装门禁通过。既有性能数字及跨平台保证不会自动扩大为本次覆盖，未新增全面性能采样；见[正式验证](../../../../Docs/RELEASE_VALIDATION_0.8.6.md)。
-
-0.8.6 已正式发布并安装，最终源码行/UUID与公开资产门禁通过。下方既有实机与性能覆盖仍按原范围记录，见[正式验证](../../../../Docs/RELEASE_VALIDATION_0.8.6.md)。
+本轮新增回放、画中画、播放信息与交互修复；实际来源兼容性及其他系统／硬件保证按已验证范围记录。尚未完成的发布检查不能视为通过；既有性能数字不代表本轮重新测量。
 
 ## 0.8.4 验证边界
 
@@ -82,7 +79,8 @@ Native Provider 处理 type 0、1、4，不依赖 QuickJS、Node 或 Android。�
 | Search | Supported | Movie + Series 本地索引和聚合搜索接入 |
 | Basic Live | Supported | 分类、频道、搜索、收藏/隐藏、刷新及同频道 TS/HLS 有限回退 |
 | Short EPG | Supported | 频道短节目单和 Full Guide 由 Xtream EPG API 按频道、日期及有限时间窗加载 |
-| catch-up / timeshift / direct_source | Unsupported | 这些能力没有完整执行链，不能从 EPG 或导入直播能力推导 |
+| programme catch-up | Selected | 支持明确声明归档能力、有效服务端时区和有效节目区间的 Native Xtream 来源；不支持连续时移缓冲 |
+| direct_source | Unsupported | 不使用此字段绕过既有媒体会话和凭据边界 |
 
 Native Live 单独使用静态 HTTP 代理和 HTTPS CONNECT 决策，进入/离开该策略时
 销毁旧播放器实例，避免网络参数残留。普通 VOD 为 30 秒、导入 Live 为 8 秒，
@@ -198,10 +196,10 @@ deployment support 不代表 macOS 12、13、15 已完成 Managed Runtime 实机
 | --- | --- | --- |
 | M3U 频道列表 | Supported | 通过独立直播源导入器使用 |
 | TXT 频道列表 | Supported | 支持 `#genre#` 分组和多线路格式 |
-| JSON Live 列表 | Supported | 顶层为直播分组数组，不是点播配置 JSON |
+| JSON Live 列表 | Selected | 支持分组数组、带 groups 的 Live 对象及仅含一个直播项的 lives 包装；多直播项主配置沿用点播配置导入入口 |
 | HLS `.m3u8` 媒体 URL | Supported | 作为频道媒体地址播放；HLS segment manifest 不是频道列表 |
-| TVBox/FongMi 配置顶层 `lives` | Unsupported | 字段可以解析和保存，但尚未接入独立直播源导入器 |
-| catchup / timeshift | Unsupported | 当前未实现 |
+| TVBox/FongMi 配置顶层 `lives` | Selected | 支持独立单项列表、内嵌分组及一层远程引用；主配置多项使用既有导入路径，拒绝循环引用 |
+| catchup / programme archive | Selected | 支持所声明的 M3U、TVBox/FongMi 模板和日期 EPG；依赖服务端保留期与节目表覆盖，不提供任意连续时移 |
 
 Native Xtream Basic Live 使用独立的 Provider 目录和引用；不导出带账号的媒体 URL。
 
@@ -211,8 +209,7 @@ XMLTV EPG 可由 M3U 的 `tvg-url` / `url-tvg` 指定，支持远程 HTTP/HTTPS�
 缓存和按 `tvg-id`、`tvg-name`、频道名匹配。Native Xtream 通过短 EPG API 按频道
 加载节目；Full Guide 只查询可见频道附近的有限日期/时间窗，限制请求数、并发和缓存。
 两条路径都消费频道、开始/结束时间和标题，并支持日期导航、回到当前时刻和节目详情。
-这不等同于通用 XML 配置支持；TXT/JSON 直播列表当前没有 playlist-level EPG URL
-执行链。
+这不等同于通用 XML 配置支持；TXT 不提供通用 EPG 元数据。声明日期 EPG 的 TVBox JSON 可按频道／日期查询，其他频道沿用 XMLTV；自定义 XMLTV 和禁用设置优先。
 
 ## 播放解析
 
@@ -309,7 +306,7 @@ OKVideoMac 实现了 CatVod/CatPaw 风格 Node 视频接口的兼容子集，包
 
 ## 已知限制
 
-- TVBox/FongMi 顶层 `lives` 尚未接入独立 Live importer；
+- TVBox/FongMi 多项主配置不作为独立单源列表导入；仅支持有界的一层 HTTP/HTTPS 列表引用；
 - parser type 2、3、4 可解析但不会执行；
 - 顶层 `flags` 不作为通用解析器选择器；
 - `proxy/doh/rules/hosts/ads` 没有确认到完整执行链；
@@ -318,7 +315,7 @@ OKVideoMac 实现了 CatVod/CatPaw 风格 Node 视频接口的兼容子集，包
 - Android Bridge 仅为受支持的 `csp_` Java/Dex 源所需；Managed API 35 Runtime
   在 macOS 12、13、15 尚未获得真实机器 Emulator E2E；
 - XML CMS 自动化覆盖窄于 JSON CMS；
-- Xtream EPG 受服务端数据质量和请求窗口限制；不支持 catchup/timeshift、
+- Xtream EPG 受服务端数据质量和请求窗口限制；回放要求明确归档能力和服务端有效时区；不支持任意连续时移、
   `direct_source` 或 DRM；
 - 弹幕服务只覆盖已实现的 XML/JSON 和 CatPaw 兼容子集；第三方服务必须由用户配置；
 - 实际播放仍取决于 libmpv、codec、服务器和媒体行为。

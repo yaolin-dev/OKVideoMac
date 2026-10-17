@@ -125,6 +125,7 @@ public struct XtreamURLBuilder: Sendable {
         }
         queryItems.append(contentsOf: parameters)
         components.queryItems = queryItems
+        components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
         guard let url = components.url else {
             throw XtreamEndpointError.invalidURL
         }
@@ -160,6 +161,29 @@ public struct XtreamURLBuilder: Sendable {
             throw XtreamEndpointError.invalidURL
         }
         return url
+    }
+
+    public func archiveRequest(credentials: XtreamCredentials, streamID: String, outputFormat: String,
+                               programme: EPGProgramme, offset: TimeInterval = 0, now: Date = Date(),
+                               serverTimeZoneID: String?) throws -> XtreamArchiveRequest {
+        guard ["ts", "m3u8"].contains(outputFormat) else { throw XtreamEndpointError.invalidPathComponent }
+        let window = try XtreamArchivePolicy.window(programme: programme, offset: offset, now: now, timeZoneID: serverTimeZoneID)
+        guard var rest = URLComponents(url: endpoint.serverURL, resolvingAgainstBaseURL: false),
+              var legacy = URLComponents(url: endpoint.serverURL, resolvingAgainstBaseURL: false) else {
+            throw XtreamEndpointError.invalidURL
+        }
+        let parts = ["timeshift", credentials.username, credentials.password, String(window.minutes),
+                     window.time, streamID + "." + outputFormat]
+        for part in parts { rest.percentEncodedPath = appending(encodedPathComponent: try encodedPathComponent(part), to: rest.percentEncodedPath) }
+        for part in ["streaming", "timeshift.php"] {
+            legacy.percentEncodedPath = appending(encodedPathComponent: part, to: legacy.percentEncodedPath)
+        }
+        legacy.queryItems = [.init(name: "username", value: credentials.username), .init(name: "password", value: credentials.password),
+                             .init(name: "stream", value: streamID), .init(name: "start", value: window.time),
+                             .init(name: "duration", value: String(window.minutes)), .init(name: "extension", value: outputFormat)]
+        legacy.percentEncodedQuery = legacy.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        guard let url = rest.url, let legacyURL = legacy.url else { throw XtreamEndpointError.invalidURL }
+        return XtreamArchiveRequest(url: url, legacyURL: legacyURL, leadIn: window.leadIn, remainingDuration: window.remaining)
     }
 
     private func encodedPathComponent(_ value: String) throws -> String {

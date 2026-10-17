@@ -2,6 +2,7 @@ import Foundation
 import CoreFoundation
 
 public struct LiveSourceParser {
+    private var defaults: LiveSourceDefaults?
     private var observationSink: ((LiveParserObservation) -> Void)?
     public init() {}
 
@@ -18,6 +19,11 @@ public struct LiveSourceParser {
         guard data.count <= 32 * 1_024 * 1_024 else {
             throw AppError.live("直播源超过 32 MiB 限制")
         }
+        if let (original, configuration) = try LiveSourceDocument.unwrap(data) {
+            var parser = self
+            parser.defaults = configuration
+            return try parser.parse(original, baseURL: baseURL)
+        }
         guard let text = decodeText(data) else {
             throw AppError.live("直播源文本编码无法识别")
         }
@@ -33,6 +39,14 @@ public struct LiveSourceParser {
             throw AppError.live("直播源为空")
         }
 
+        if trimmed.hasPrefix("{"), let data = trimmed.data(using: .utf8) {
+            if try LiveSourceDocument.unwrap(data) != nil { return try parse(data, baseURL: baseURL) }
+            let live = try JSONDecoder().decode(LiveConfiguration.self, from: data)
+            guard !live.groups.isEmpty else { throw AppError.live("直播 JSON 未包含频道分组，请从配置中导入外部直播列表") }
+            var parser = self
+            parser.defaults = LiveSourceDefaults(live)
+            return try parser.parseJSON(String(decoding: JSONEncoder().encode(live.groups), as: UTF8.self), baseURL: baseURL)
+        }
         if trimmed.hasPrefix("[") {
             return try parseJSON(trimmed, baseURL: baseURL)
         }
@@ -55,25 +69,22 @@ public struct LiveSourceParser {
         var ordinal = 0
         let mapped = groups.compactMap { group -> LiveGroup? in
             let channels = group.channels.compactMap { channel -> LiveChannel? in
-                var channelHeaders = channel.header
-                if let userAgent = channel.userAgent {
-                    channelHeaders["User-Agent"] = userAgent
-                }
-                if let referer = channel.referer {
-                    channelHeaders["Referer"] = referer
-                }
-                if let origin = channel.origin {
-                    channelHeaders["Origin"] = origin
-                }
-                let streams = channel.urls.enumerated().compactMap { index, raw in
-                    makeStream(
+                let context = defaults ?? LiveSourceDefaults(LiveConfiguration(name: ""))
+                let channelHeaders = context.headers(channel: channel, current: channel.header)
+                let streams: [LiveStream] = channel.urls.enumerated().compactMap { index, raw in
+                    guard var stream = makeStream(
                         raw: raw,
                         defaultName: "线路 \(index + 1)",
                         inheritedHeaders: channelHeaders,
                         format: channel.format,
                         needsParsing: channel.parse == 1,
                         baseURL: baseURL
-                    )
+                    ) else { return nil }
+                    if let url = stream.url {
+                        let explicit = channel.catchup.flatMap { $0.isEmpty ? nil : $0 } ?? defaults?.catchup
+                        stream.catchup = explicit?.normalized(for: url)
+                    }
+                    return stream
                 }
                 guard !channel.name.isEmpty, !streams.isEmpty else { return nil }
                 if let observationSink, !group.name.isEmpty {
@@ -91,13 +102,14 @@ public struct LiveSourceParser {
                     tvgName: channel.tvgName,
                     // Observations above retain every parsed occurrence. Only
                     // routes inside this existing channel are deduplicated.
-                    streams: ImportedRouteTransport.deduplicated(streams)
+                    streams: ImportedRouteTransport.deduplicated(streams),
+                    epgAPI: context.epgConfiguration(channel: channel)
                 )
             }
             guard !group.name.isEmpty, !channels.isEmpty else { return nil }
             return LiveGroup(name: group.name, password: group.pass, channels: channels)
         }
-        return LivePlaylist(format: .json, groups: mapped)
+        return LivePlaylist(format: .json, groups: mapped, epgURL: defaults?.xmltvURL)
     }
 
     private func parseM3U(_ text: String, baseURL: URL?) throws -> LivePlaylist {
@@ -175,7 +187,8 @@ public struct LiveSourceParser {
                 ) else {
                     continue
                 }
-                stream.catchup = metadata.catchup
+                stream.headers = defaults?.headers(current: stream.headers) ?? stream.headers
+                stream.catchup = metadata.catchup ?? stream.url.flatMap { defaults?.catchup?.normalized(for: $0) }
                 if let observationSink {
                     ordinal += 1
                     observationSink(LiveParserObservation(format: .m3u, ordinal: ordinal,
@@ -198,7 +211,7 @@ public struct LiveSourceParser {
         return LivePlaylist(
             format: .m3u,
             groups: builders.map(\.value),
-            epgURL: epgURL
+            epgURL: epgURL ?? defaults?.xmltvURL
         )
     }
 
@@ -255,7 +268,7 @@ public struct LiveSourceParser {
             guard rawURLs.contains("://") || baseURL != nil else { continue }
             var diagnosticStreams: [LiveStream]? = observationSink == nil ? nil : []
             for (index, rawURL) in rawURLs.components(separatedBy: "#").enumerated() {
-                guard let stream = makeStream(
+                guard var stream = makeStream(
                     raw: rawURL,
                     defaultName: "线路 \(index + 1)",
                     inheritedHeaders: inheritedHeaders,
@@ -265,6 +278,8 @@ public struct LiveSourceParser {
                 ) else {
                     continue
                 }
+                stream.headers = defaults?.headers(current: stream.headers) ?? stream.headers
+                stream.catchup = stream.url.flatMap { defaults?.catchup?.normalized(for: $0) }
                 diagnosticStreams?.append(stream)
                 append(
                     stream: stream,
@@ -283,7 +298,7 @@ public struct LiveSourceParser {
             }
         }
 
-        return LivePlaylist(format: .text, groups: builders.map(\.value))
+        return LivePlaylist(format: .text, groups: builders.map(\.value), epgURL: defaults?.xmltvURL)
     }
 
     private func makeStream(
@@ -417,7 +432,9 @@ public struct LiveSourceParser {
                     },
                     tvgID: metadata.tvgID,
                     tvgName: metadata.tvgName,
-                    streams: []
+                    streams: [],
+                    epgAPI: defaults?.epgConfiguration(channel: LiveChannelConfiguration(
+                        name: channelName, urls: [], tvgID: metadata.tvgID, tvgName: metadata.tvgName))
                 )
             )
             channelIndex = builders[groupIndex].channels.count - 1

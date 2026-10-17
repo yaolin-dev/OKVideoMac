@@ -15,8 +15,6 @@ struct PlayerView: View {
     @State private var hideControlsTask: Task<Void, Never>?
     @State private var isVolumeEditing = false
     @State private var isCompactVolumePresented = false
-    @State private var isLiveVolumeControlPresented = false
-    @State private var isLiveVolumeHovering = false
     @State private var activeUtilityPanel: PlayerUtilityPanel?
     @State private var inspectedPlayerEpisode: EpisodePresentation?
     @State private var playerEpisodeLocateRevision = 0
@@ -24,8 +22,7 @@ struct PlayerView: View {
     @State private var isWindowFullScreen = false
     @State private var fullscreenTopInset: CGFloat = 0
     @State private var isFullScreenTransitioning = false
-    @State private var settledViewportSize: CGSize?
-    @State private var frozenViewportSize: CGSize?
+    @State private var viewportState = PlayerOverlayViewportState()
     @State private var progressHoverRevision = 0
     @State private var progressHoverFraction: Double?
     @State private var liveLoadingVisible = false
@@ -49,7 +46,7 @@ struct PlayerView: View {
     var body: some View {
         GeometryReader { geometry in
             let layout = PlayerOverlayLayout(
-                viewportSize: frozenViewportSize ?? geometry.size,
+                viewportSize: viewportState.frozenSize ?? geometry.size,
                 timeLabelWidth: playbackTimeWidth
             )
         ZStack {
@@ -72,19 +69,15 @@ struct PlayerView: View {
 
 
             if controlsVisible {
-                Group {
-                    if state.isLivePlayback {
-                        liveControlReadabilityGradient
-                    } else {
-                        controlReadabilityGradient
-                    }
-                }
-                .transition(.opacity)
+                controlReadabilityGradient.transition(.opacity)
             }
 
             if state.playerSnapshot.status == .ended && !state.isLivePlayback {
                 if state.liveCatchupProgramme != nil { catchupEndedOverlay } else { playbackEndedOverlay }
             }
+
+            PlayerPictureInPicturePlaceholder(coordinator: state.pictureInPicture)
+                .zIndex(44)
 
             playbackStatusOverlay
                 .allowsHitTesting(isFailed || liveLoadingSlow || state.hasHistoryPlaybackChoices)
@@ -112,22 +105,33 @@ struct PlayerView: View {
                     .zIndex(46)
             }
 
-            if state.isLivePlayback {
-                livePlayerOverlay
-                    .environment(\.colorScheme, .dark)
-            } else {
-                VStack(spacing: 0) {
-                    floatingHeader
-                    Spacer(minLength: 24)
-                    floatingControls(layout: layout)
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, max(10, fullscreenTopInset))
-                .padding(.bottom, layout.bottomInset)
-                .opacity(controlsVisible ? 1 : 0)
-                .allowsHitTesting(controlsVisible && !isFullScreenTransitioning)
-                .environment(\.colorScheme, .dark)
+            VStack(spacing: 0) {
+                if !state.isLivePlayback { floatingHeader }
+                Spacer(minLength: 24)
+                floatingControls(layout: layout)
             }
+            .padding(.horizontal, 18)
+            .padding(.top, isWindowFullScreen ? max(20, fullscreenTopInset + 12) : 32)
+            .padding(.bottom, layout.bottomInset)
+            // The live header no longer stretches this stack. Anchor the card
+            // to the whole viewport, not the narrower adaptive control row.
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .topTrailing) {
+                if state.isLivePlayback, activeUtilityPanel == nil,
+                   !isFullScreenTransitioning,
+                   let channel = state.livePlaybackChannel,
+                   let source = state.livePlaybackSourceID {
+                    PlayerLiveProgrammeCard(epg: state.liveEPG, channel: channel,
+                        source: source, stream: state.livePlaybackStream)
+                        .frame(width: min(310, max(1, geometry.size.width - layout.programmeTrailingInset * 2)))
+                        .padding(.trailing, layout.programmeTrailingInset)
+                        .padding(.top, layout.programmeTopInset + (isWindowFullScreen ? fullscreenTopInset : 0))
+                        .allowsHitTesting(false)
+                }
+            }
+            .opacity(controlsVisible ? 1 : 0)
+            .allowsHitTesting(controlsVisible && !isFullScreenTransitioning)
+            .environment(\.colorScheme, .dark)
 
             if controlsVisible,
                let activeUtilityPanel {
@@ -154,18 +158,18 @@ struct PlayerView: View {
                 // a new episode, or a different route reports another ratio.
                 videoAspectRatio: nil,
                 onRestore: onWindowChromeRestored,
-                onFullScreenChange: { fullScreen in
+                onFullScreenChange: { fullScreen, topInset in
                     isWindowFullScreen = fullScreen
-                    fullscreenTopInset = fullScreen ? (NSApp.keyWindow?.screen?.safeAreaInsets.top ?? 0) : 0
+                    fullscreenTopInset = topInset
                 },
                 onTransitionChange: handleFullScreenTransition
             )
                 .frame(width: 0, height: 0)
         }
         .frame(width: geometry.size.width, height: geometry.size.height)
-        .onAppear { settledViewportSize = geometry.size }
+        .onAppear { viewportState.update(geometry.size) }
         .onChange(of: geometry.size) { size in
-            if !isFullScreenTransitioning { settledViewportSize = size }
+            viewportState.update(size)
         }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -195,9 +199,7 @@ struct PlayerView: View {
             dismissProgressPreview()
             controlTooltip.dismiss()
             hideControlsTask?.cancel()
-            isLiveVolumeControlPresented = false
             isCompactVolumePresented = false
-            isLiveVolumeHovering = false
             activeUtilityPanel = nil
             state.setPlaybackInformationVisible(false)
             state.dismissPlayerEpisodeNavigationChoice()
@@ -357,304 +359,6 @@ struct PlayerView: View {
         .allowsHitTesting(false)
     }
 
-    private var liveControlReadabilityGradient: some View {
-        VStack(spacing: 0) {
-            Spacer()
-            LinearGradient(
-                colors: [
-                    Color.black.opacity(0),
-                    Color.black.opacity(0.54)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .frame(height: 132)
-        }
-        .ignoresSafeArea()
-        .allowsHitTesting(false)
-    }
-
-    private var livePlayerOverlay: some View {
-        GeometryReader { geometry in
-            let metrics = LivePlayerOverlayMetrics(
-                viewportSize: geometry.size
-            )
-            ZStack(alignment: .topTrailing) {
-                VStack(spacing: 0) {
-                    Spacer(minLength: metrics.minimumTopSpace)
-                    HStack(alignment: .bottom) {
-                        livePrimaryControls(metrics: metrics)
-                        Spacer(minLength: metrics.minimumControlSeparation)
-                        liveFullScreenButton(metrics: metrics)
-                    }
-                    .padding(.horizontal, metrics.outerHorizontalPadding)
-                    .padding(.bottom, metrics.outerBottomPadding)
-                }
-
-                liveChannelInfoCard
-                    .padding(.top, max(24, metrics.outerBottomPadding))
-                    .padding(.trailing, metrics.outerHorizontalPadding)
-            }
-        }
-        .opacity(controlsVisible ? 1 : 0)
-        .offset(y: controlsVisible || reduceMotion ? 0 : 10)
-        .allowsHitTesting(controlsVisible)
-    }
-
-    private var liveChannelInfoCard: some View {
-        HStack(spacing: 16) {
-            VStack(alignment: .leading, spacing: 7) {
-                Text(state.livePlaybackDisplayTitle)
-                    .font(.system(size: 22, weight: .bold))
-                    .lineLimit(1)
-
-                Text(liveStreamSummary)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.68))
-                    .lineLimit(1)
-
-                if let channel = state.livePlaybackChannel, let source = state.livePlaybackSourceID {
-                    LiveNowNextView(epg: state.liveEPG, channel: channel, source: source)
-                }
-            }
-            .font(.system(size: 14))
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            utilityPanelButton(systemImage: "info.circle", panel: .information,
-                help: L10n.string("player.info.title", fallback: "Playback Information"))
-        }
-        .foregroundColor(.white)
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
-        .frame(width: 430)
-        .background(Color.black.opacity(0.28))
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color.white.opacity(0.08), lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.18), radius: 12, y: 5)
-        .onHover { inside in
-            controlsHovering = inside
-            inside ? keepControlsVisible() : scheduleControlsHide()
-        }
-    }
-
-    private func livePrimaryControls(
-        metrics: LivePlayerOverlayMetrics
-    ) -> some View {
-        HStack(alignment: .bottom, spacing: metrics.controlSpacing) {
-            liveBroadcastIndicator(metrics: metrics)
-
-            Button {
-                Task { await state.togglePlayPause() }
-            } label: {
-                Image(systemName: isPaused ? "play.fill" : "pause.fill")
-                    .font(
-                        .system(
-                            size: metrics.primaryIconSize,
-                            weight: .semibold
-                        )
-                    )
-                    .frame(
-                        width: metrics.controlDiameter,
-                        height: metrics.controlDiameter
-                    )
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(
-                isPaused
-                    ? L10n.string("common.play", fallback: "Play")
-                    : L10n.string("common.pause", fallback: "Pause")
-            )
-            .playerControlHelp(
-                isPaused
-                    ? L10n.string("common.play", fallback: "Play")
-                    : L10n.string("common.pause", fallback: "Pause")
-            )
-            .modifier(PlayerControlHoverEffect())
-
-            liveVolumeControl(metrics: metrics)
-        }
-        .foregroundColor(.white.opacity(0.96))
-        .onHover { inside in
-            controlsHovering = inside
-            inside ? keepControlsVisible() : scheduleControlsHide()
-        }
-    }
-
-    private func liveBroadcastIndicator(
-        metrics: LivePlayerOverlayMetrics
-    ) -> some View {
-        ZStack {
-            Image(systemName: "dot.radiowaves.left.and.right")
-                .font(
-                    .system(
-                        size: metrics.liveIconSize,
-                        weight: .semibold
-                    )
-                )
-            Circle()
-                .fill(Color.red)
-                .frame(
-                    width: metrics.liveDotDiameter,
-                    height: metrics.liveDotDiameter
-                )
-        }
-        .frame(
-            width: metrics.controlDiameter,
-            height: metrics.controlDiameter
-        )
-        .contentShape(Circle())
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(L10n.string("player.live", fallback: "Live"))
-        .playerControlHelp(L10n.string("player.live", fallback: "Live"))
-    }
-
-    private func liveVolumeControl(
-        metrics: LivePlayerOverlayMetrics
-    ) -> some View {
-        VStack(spacing: metrics.volumePopoverSpacing) {
-            if isLiveVolumeControlPresented {
-                Slider(
-                    value: Binding(
-                        get: {
-                            state.playerAudioPreference.volume
-                        },
-                        set: enqueueLivePlayerVolume
-                    ),
-                    in: 0...130,
-                    onEditingChanged: { editing in
-                        isVolumeEditing = editing
-                        if editing {
-                            keepControlsVisible()
-                        } else {
-                            enqueueLivePlayerVolume(
-                                state.playerAudioPreference.volume
-                            )
-                            if !isLiveVolumeHovering {
-                                isLiveVolumeControlPresented = false
-                            }
-                            scheduleControlsHide()
-                        }
-                    }
-                )
-                .tint(.white)
-                .controlSize(.mini)
-                .frame(width: metrics.volumeSliderWidth)
-                .padding(.horizontal, metrics.volumePopoverHorizontalPadding)
-                .padding(.vertical, metrics.volumePopoverVerticalPadding)
-                .background(Color.black.opacity(0.42))
-                .background(.ultraThinMaterial)
-                .clipShape(Capsule())
-                .overlay {
-                    Capsule()
-                        .stroke(Color.white.opacity(0.10), lineWidth: 1)
-                }
-                .shadow(color: .black.opacity(0.34), radius: 8, y: 3)
-                .transition(
-                    .opacity.combined(with: .move(edge: .bottom))
-                )
-            }
-
-            Button {
-                Task { await state.togglePlayerMute() }
-            } label: {
-                Image(
-                    systemName: state.playerAudioPreference.muted
-                        ? "speaker.slash.fill"
-                        : "speaker.wave.2.fill"
-                )
-                .font(
-                    .system(
-                        size: metrics.secondaryIconSize,
-                        weight: .medium
-                    )
-                )
-                .frame(
-                    width: metrics.controlDiameter,
-                    height: metrics.controlDiameter
-                )
-                .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(
-                state.playerAudioPreference.muted
-                    ? L10n.string("player.unmute", fallback: "Unmute")
-                    : L10n.string("player.mute-volume", fallback: "Mute and Volume")
-            )
-            .playerControlHelp(
-                state.playerAudioPreference.muted
-                    ? L10n.string("player.unmute", fallback: "Unmute")
-                    : L10n.string("player.mute-volume", fallback: "Mute and Volume")
-            )
-            .modifier(PlayerControlHoverEffect())
-        }
-        .onHover { inside in
-            isLiveVolumeHovering = inside
-            if inside {
-                isLiveVolumeControlPresented = true
-            } else if !isVolumeEditing {
-                isLiveVolumeControlPresented = false
-            }
-        }
-        .animation(
-            .easeOut(duration: 0.16),
-            value: isLiveVolumeControlPresented
-        )
-        // Keep the permanent icon row fixed while the wider slider temporarily
-        // overflows above the speaker button.
-        .frame(width: metrics.controlDiameter, alignment: .bottom)
-    }
-
-    private func liveFullScreenButton(
-        metrics: LivePlayerOverlayMetrics
-    ) -> some View {
-        Button {
-            toggleFullScreen()
-        } label: {
-            Image(
-                systemName: isWindowFullScreen
-                    ? "arrow.down.right.and.arrow.up.left"
-                    : "arrow.up.left.and.arrow.down.right"
-            )
-            .font(
-                .system(
-                    size: metrics.secondaryIconSize,
-                    weight: .medium
-                )
-            )
-            .frame(
-                width: metrics.controlDiameter,
-                height: metrics.controlDiameter
-            )
-            .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(
-            isWindowFullScreen
-                ? L10n.string("player.exit-full-screen", fallback: "Exit Full Screen")
-                : L10n.string("player.enter-full-screen", fallback: "Enter Full Screen")
-        )
-        .foregroundColor(.white.opacity(0.96))
-        .playerControlHelp(
-            isWindowFullScreen
-                ? L10n.string("player.exit-full-screen", fallback: "Exit Full Screen")
-                : L10n.string("player.enter-full-screen", fallback: "Enter Full Screen")
-        )
-        .modifier(PlayerControlHoverEffect())
-        .onHover { inside in
-            controlsHovering = inside
-            inside ? keepControlsVisible() : scheduleControlsHide()
-        }
-    }
-
-    private func enqueueLivePlayerVolume(_ volume: Double) {
-        state.requestPlayerVolume(volume)
-    }
-
     private var playbackDisplayTitle: String {
         let contentTitle = state.currentPlaybackContentTitle?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -670,22 +374,6 @@ struct PlayerView: View {
             return presentation.displayName
         }
         return PlayerEpisodeTitlePolicy.title(content: contentTitle, resource: presentation.displayName)
-    }
-
-    private var liveStreamSummary: String {
-        guard let channel = state.livePlaybackChannel else {
-            return L10n.string("player.live", fallback: "Live")
-        }
-        let format = state.livePlaybackStream?.format?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .uppercased()
-        return [
-            format?.isEmpty == false ? format : nil,
-            channel.groupName,
-            L10n.string("player.stream-count", fallback: "%d streams", channel.streams.count)
-        ]
-        .compactMap { $0 }
-        .joined(separator: " · ")
     }
 
     private func episodePanelDisplayName(
@@ -708,7 +396,7 @@ struct PlayerView: View {
                 )
                 .help(playbackDisplayTitle)
                 .padding(.horizontal, 90)
-                .frame(height: 28)
+                .frame(height: 36)
             }
         }
         .frame(maxWidth: .infinity)
@@ -842,24 +530,26 @@ struct PlayerView: View {
     }
 
     private func floatingControls(layout: PlayerOverlayLayout) -> some View {
-        VStack(spacing: 3) {
-            progressControls
+        VStack(spacing: 8) {
+            if !state.isLivePlayback { progressControls }
             PlayerControlRow(layout: layout) {
                 HStack(spacing: 10) {
                     if layout.mode == .expanded { volumeControls }
                     else { compactVolumeButton }
-                    playbackTimeLabel
+                    if state.isLivePlayback {
+                        Label(L10n.string("player.live", fallback: "Live"), systemImage: "dot.radiowaves.left.and.right")
+                            .font(.system(size: 12, weight: .medium))
+                    } else { playbackTimeLabel }
                 }
             } transport: {
                 transportControls
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5))
+                    .background(Color.black.opacity(0.16), in: Capsule())
             } trailing: {
                 if layout.showsAllTools { utilityControls }
                 else {
                     HStack(spacing: 3) {
                         compactUtilityMenu
-                        utilityPanelButton(systemImage: "info.circle", panel: .information, help: L10n.string("player.info.title", fallback: "Playback Information"))
+                        PlayerPictureInPictureButton(coordinator: state.pictureInPicture)
                         fullScreenButton
                     }
                 }
@@ -916,11 +606,8 @@ struct PlayerView: View {
 
     private var compactUtilityMenu: some View {
         Menu {
-            compactPanelAction(.episodes, title: state.playerResourcePanelTitle)
-            compactPanelAction(.audio, title: L10n.string("player.audio-tracks", fallback: "Audio Tracks"))
+            compactPanelAction(.episodes, title: resourceControlTitle)
             compactPanelAction(.subtitles, title: L10n.string("player.subtitles", fallback: "Subtitles"))
-            compactPanelAction(.danmaku, title: "弹幕")
-            compactPanelAction(.information, title: L10n.string("player.info.title", fallback: "Playback Information"))
             compactPanelAction(.settings, title: L10n.string("player.settings", fallback: "Playback Settings"))
         } label: {
             utilityMenuIcon("ellipsis.circle")
@@ -1066,22 +753,26 @@ struct PlayerView: View {
 
     private var transportControls: some View {
         HStack(spacing: 6) {
-            playerIconButton(
-                systemImage: "backward.end.fill",
-                help: adjacentResourceHelp(previous: true),
-                disabled: !state.hasPreviousEpisode
-            ) {
-                Task { await state.playAdjacentEpisode(offset: -1) }
-            }
+            if showsAdjacentResources {
+                playerIconButton(
+                    systemImage: "backward.end.fill",
+                    help: adjacentResourceHelp(previous: true),
+                    disabled: !state.hasPreviousEpisode
+                ) {
+                    Task { await state.playAdjacentEpisode(offset: -1) }
+                }
 
-            playerIconButton(
-                systemImage: "gobackward.10",
-                help: state.canSeekPlayback
-                    ? L10n.string("player.seek-back-10", fallback: "Back 10 Seconds")
-                    : L10n.string("player.seek-unavailable", fallback: "Seeking is unavailable for this stream"),
-                disabled: !state.canSeekPlayback
-            ) {
-                Task { await state.seek(by: -10) }
+            }
+            if !state.isLivePlayback {
+                playerIconButton(
+                    systemImage: "gobackward.10",
+                    help: state.canSeekPlayback
+                        ? L10n.string("player.seek-back-10", fallback: "Back 10 Seconds")
+                        : L10n.string("player.seek-unavailable", fallback: "Seeking is unavailable for this stream"),
+                    disabled: !state.canSeekPlayback
+                ) {
+                    Task { await state.seek(by: -10) }
+                }
             }
 
             Button {
@@ -1103,58 +794,51 @@ struct PlayerView: View {
                     : L10n.string("common.pause", fallback: "Pause")
             )
 
-            playerIconButton(
-                systemImage: "goforward.10",
-                help: state.canSeekPlayback
-                    ? L10n.string("player.seek-forward-10", fallback: "Forward 10 Seconds")
-                    : L10n.string("player.seek-unavailable", fallback: "Seeking is unavailable for this stream"),
-                disabled: !state.canSeekPlayback
-            ) {
-                Task { await state.seek(by: 10) }
+            if !state.isLivePlayback {
+                playerIconButton(
+                    systemImage: "goforward.10",
+                    help: state.canSeekPlayback
+                        ? L10n.string("player.seek-forward-10", fallback: "Forward 10 Seconds")
+                        : L10n.string("player.seek-unavailable", fallback: "Seeking is unavailable for this stream"),
+                    disabled: !state.canSeekPlayback
+                ) {
+                    Task { await state.seek(by: 10) }
+                }
             }
-
-            playerIconButton(
-                systemImage: "forward.end.fill",
-                help: adjacentResourceHelp(previous: false),
-                disabled: !state.hasNextEpisode
-            ) {
-                Task { await state.playAdjacentEpisode(offset: 1) }
+            if showsAdjacentResources {
+                playerIconButton(
+                    systemImage: "forward.end.fill",
+                    help: adjacentResourceHelp(previous: false),
+                    disabled: !state.hasNextEpisode
+                ) {
+                    Task { await state.playAdjacentEpisode(offset: 1) }
+                }
             }
         }
     }
 
-    private var utilityControls: some View {
-        HStack(spacing: 3) {
-            utilityPanelButton(
-                systemImage: "list.bullet",
-                panel: .episodes,
-                help: state.playerResourcePanelTitle
-            )
-            utilityPanelButton(
-                systemImage: "waveform",
-                panel: .audio,
-                help: L10n.string("player.audio-tracks", fallback: "Audio Tracks")
-            )
-            utilityPanelButton(
-                systemImage: "captions.bubble",
-                panel: .subtitles,
-                help: state.playerSubtitlesEnabled
-                    ? L10n.string("player.subtitles.on", fallback: "Subtitles On")
-                    : L10n.string("player.subtitles.off", fallback: "Subtitles Off")
-            )
-            utilityPanelButton(
-                systemImage: "text.bubble",
-                panel: .danmaku,
-                help: state.danmaku.isEnabled ? "弹幕已开启" : "弹幕已关闭"
-            )
-            utilityPanelButton(systemImage: "info.circle", panel: .information, help: L10n.string("player.info.title", fallback: "Playback Information"))
-            utilityPanelButton(
-                systemImage: "gearshape",
-                panel: .settings,
-                help: L10n.string("player.settings", fallback: "Playback Settings")
-            )
+    private var showsAdjacentResources: Bool {
+        state.livePlaybackChannel == nil && state.playerEpisodes.count > 1
+    }
 
-            fullScreenButton
+    private var resourceControlTitle: String {
+        state.livePlaybackChannel != nil
+            ? L10n.string("live.guide.channels", fallback: "Channels") : state.playerResourcePanelTitle
+    }
+
+    private var utilityControls: some View {
+        HStack(spacing: 14) {
+            HStack(spacing: 3) {
+                utilityPanelButton(systemImage: "list.bullet", panel: .episodes, help: resourceControlTitle)
+                utilityPanelButton(systemImage: "captions.bubble", panel: .subtitles,
+                    help: L10n.string("player.subtitles", fallback: "Subtitles"))
+                utilityPanelButton(systemImage: "gearshape", panel: .settings,
+                    help: L10n.string("player.settings", fallback: "Playback Settings"))
+            }
+            HStack(spacing: 3) {
+                PlayerPictureInPictureButton(coordinator: state.pictureInPicture)
+                fullScreenButton
+            }
         }
     }
 
@@ -1212,7 +896,8 @@ struct PlayerView: View {
     private func utilityPanel(_ panel: PlayerUtilityPanel, maximumSize: CGSize) -> some View {
         switch panel {
         case .episodes:
-            episodePanel(maximumSize: maximumSize)
+            if state.livePlaybackChannel != nil { channelPanel(maximumSize: maximumSize) }
+            else { episodePanel(maximumSize: maximumSize) }
         case .audio:
             audioTrackPanel(maximumSize: maximumSize)
         case .subtitles:
@@ -1237,6 +922,22 @@ struct PlayerView: View {
                 coordinator: state.danmaku,
                 importXML: chooseDanmakuXML
             )
+        }
+    }
+
+    private func channelPanel(maximumSize: CGSize) -> some View {
+        playerPanel(width: 370, maximumSize: maximumSize, scrollContent: false) {
+            PlayerChannelPicker(channels: state.playerLiveChannels, currentID: state.livePlaybackChannel?.id,
+                title: resourceControlTitle, select: { id in
+                    guard let source = state.livePlaybackSourceID else { return }
+                    Task { await state.selectPlayerLiveChannel(id, source: source) }
+                    activeUtilityPanel = nil
+                    scheduleControlsHide()
+                }, close: {
+                    activeUtilityPanel = nil
+                    scheduleControlsHide()
+                })
+                .frame(height: min(490, max(1, maximumSize.height - 64)))
         }
     }
 
@@ -1565,6 +1266,10 @@ struct PlayerView: View {
             Group {
                 VStack(alignment: .leading, spacing: 12) {
                     panelHeader(title: L10n.string("player.settings", fallback: "Playback Settings"), detail: nil)
+                    settingsDestination(.audio, symbol: "waveform", title: L10n.string("player.audio-tracks", fallback: "Audio Tracks"))
+                    settingsDestination(.danmaku, symbol: "text.bubble", title: L10n.string("player.danmaku", fallback: "Danmaku"))
+                    settingsDestination(.information, symbol: "info.circle", title: L10n.string("player.info.title", fallback: "Playback Information"))
+                    panelDivider
 
                     HStack {
                         Text(L10n.string("player.autoplay-next", fallback: "Autoplay Next Episode"))
@@ -1871,6 +1576,23 @@ struct PlayerView: View {
         .transition(.opacity.combined(with: .move(edge: .bottom)))
     }
 
+    private func settingsDestination(_ panel: PlayerUtilityPanel, symbol: String, title: String) -> some View {
+        Button {
+            activeUtilityPanel = panel
+            keepControlsVisible()
+        } label: {
+            HStack(spacing: 10) {
+                Label(title, systemImage: symbol)
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 7)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("player.settings.\(panel)")
+    }
+
     private func playerPanel<Content: View>(
         width: CGFloat,
         maximumSize: CGSize,
@@ -1879,6 +1601,17 @@ struct PlayerView: View {
     ) -> some View {
         VStack(spacing: 8) {
             HStack {
+                if activeUtilityPanel == .audio || activeUtilityPanel == .danmaku || activeUtilityPanel == .information {
+                    Button {
+                        activeUtilityPanel = .settings
+                        keepControlsVisible()
+                    } label: {
+                        Label(L10n.string("player.settings", fallback: "Playback Settings"), systemImage: "chevron.left")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("player.settings.back")
+                }
                 Spacer()
                 Button {
                     activeUtilityPanel = nil
@@ -2242,7 +1975,7 @@ struct PlayerView: View {
         var transaction = Transaction(); transaction.disablesAnimations = true
         withTransaction(transaction) {
             isFullScreenTransitioning = transitioning
-            frozenViewportSize = transitioning ? settledViewportSize : nil
+            viewportState.setTransitioning(transitioning)
             dismissProgressPreview()
             controlTooltip.dismiss()
             controlsHovering = false
@@ -2254,6 +1987,7 @@ struct PlayerView: View {
     }
 
     private func toggleFullScreen() {
+        guard !state.pictureInPicture.isPresented else { state.pictureInPicture.returnToPlayer(); return }
         state.togglePlayerFullScreen()
     }
 
@@ -2893,6 +2627,39 @@ enum PlayerEpisodePagePolicy {
     }
 }
 
+/// Kept in the shared control overlay so native fullscreen hides and restores
+/// programme information together with the controls, without moving video.
+struct PlayerLiveProgrammeCard: View {
+    @ObservedObject var epg: LiveEPGState
+    let channel: LiveChannel
+    let source: LiveSourceID
+    let stream: LiveStream?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text(channel.name)
+                .font(.callout.weight(.semibold))
+                .lineLimit(1)
+            LiveNowNextView(epg: epg, channel: channel, source: source,
+                usesPlayerProgressColors: true)
+            if let stream, !stream.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Label(stream.name, systemImage: "point.3.connected.trianglepath.dotted")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(14)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.08), lineWidth: 1)
+        }
+        .environment(\.colorScheme, .dark)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("player.live.programme-card")
+    }
+}
+
 private enum PlayerUtilityPanel: Equatable {
     case information
     case episodes
@@ -2951,14 +2718,30 @@ private struct PlayerUtilityPanelHeightKey: PreferenceKey {
     }
 }
 
+private struct PlayerLiveTitleView: View {
+    @ObservedObject var epg: LiveEPGState
+    let channel: LiveChannel
+    let source: LiveSourceID
+    let displayTitle: String
+
+    var body: some View {
+        let info = epg.nowNext(channel: channel, source: source, at: Date())
+        let boundaries = [info.current?.end, info.next?.start, info.next?.end].compactMap { $0 }
+        TimelineView(EPGTimelineSchedule(boundaries: boundaries)) { context in
+            PlayerTitleView(title: displayTitle,
+                episode: epg.nowNext(channel: channel, source: source, at: context.date).current?.title)
+        }
+    }
+}
+
 struct PlayerTitleView: View {
     let title: String
     let episode: String?
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(title)
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 15, weight: .medium))
                 .lineLimit(1).truncationMode(.tail)
             if let episode, !episode.isEmpty {
                 Text("· " + episode)
@@ -2976,6 +2759,26 @@ struct PlayerTitleView: View {
     }
 }
 
+/// Retain the latest geometry even while metrics are frozen. The next
+/// transition must start from the size reached by the previous transition.
+struct PlayerOverlayViewportState {
+    private(set) var latestSize: CGSize?
+    private(set) var frozenSize: CGSize?
+
+    mutating func update(_ size: CGSize) {
+        guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return }
+        latestSize = size
+    }
+
+    mutating func setTransitioning(_ transitioning: Bool) {
+        if transitioning {
+            if frozenSize == nil { frozenSize = latestSize }
+        } else {
+            frozenSize = nil
+        }
+    }
+}
+
 struct PlayerOverlayLayout {
     enum Mode { case expanded, compactVolume, compactTools, stacked }
     let viewportSize: CGSize
@@ -2984,17 +2787,21 @@ struct PlayerOverlayLayout {
     var horizontalInset: CGFloat { 18 + max(0, viewportSize.width - 800) * 0.05 }
     var controlWidth: CGFloat { max(1, viewportSize.width - horizontalInset * 2) }
     var bottomInset: CGFloat { min(36, max(20, viewportSize.height * 0.025)) }
+    // Align the card with the inset control content, and give larger screens
+    // more breathing room without moving the card deep into the video.
+    var programmeTrailingInset: CGFloat { max(40, horizontalInset + 12) }
+    var programmeTopInset: CGFloat { min(72, max(44, viewportSize.height * 0.06)) }
     var innerWidth: CGFloat { max(1, controlWidth - 24) }
     var sideWidth: CGFloat { max(0, (innerWidth - Self.transportWidth - 24) / 2) }
     var mode: Mode {
-        if sideWidth >= max(284, 121 + 10 + timeLabelWidth) { return .expanded }
-        if sideWidth >= max(284, 38 + 10 + timeLabelWidth) { return .compactVolume }
+        if sideWidth >= max(213, 121 + 10 + timeLabelWidth) { return .expanded }
+        if sideWidth >= max(213, 38 + 10 + timeLabelWidth) { return .compactVolume }
         if sideWidth >= max(120, 38 + 10 + timeLabelWidth) { return .compactTools }
         return .stacked
     }
     var showsAllTools: Bool { mode == .expanded || mode == .compactVolume }
     var isCompact: Bool { mode != .expanded }
-    var panelBottomInset: CGFloat { bottomInset + (mode == .stacked ? 138 : 93) }
+    var panelBottomInset: CGFloat { bottomInset + (mode == .stacked ? 143 : 98) }
     var panelTrailingInset: CGFloat { max(18, (viewportSize.width - controlWidth) / 2) }
     var panelMaximumSize: CGSize {
         CGSize(width: max(1, controlWidth), height: max(1, min(560, viewportSize.height - panelBottomInset - 24)))
@@ -3240,7 +3047,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
     let title: String
     let videoAspectRatio: Double?
     let onRestore: () -> Void
-    let onFullScreenChange: (Bool) -> Void
+    let onFullScreenChange: (Bool, CGFloat) -> Void
     var onTransitionChange: (Bool) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
@@ -3314,6 +3121,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
         private var titlebarSeparatorStyle: NSTitlebarSeparatorStyle = .automatic
         private var windowTitle = ""
         private var contentAspectRatio = NSSize.zero
+        private var contentResizeIncrements = NSSize(width: 1, height: 1)
         private var closeButtonWasHidden = false
         private var miniaturizeButtonWasHidden = false
         private var zoomButtonWasHidden = false
@@ -3326,12 +3134,12 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
         private var windowWillCloseObserver: NSObjectProtocol?
         private var windowLifetime: WindowLifetime?
         var onRestore: () -> Void
-        var onFullScreenChange: (Bool) -> Void
+        var onFullScreenChange: (Bool, CGFloat) -> Void
         var onTransitionChange: (Bool) -> Void
 
         init(
             onRestore: @escaping () -> Void,
-            onFullScreenChange: @escaping (Bool) -> Void = { _ in },
+            onFullScreenChange: @escaping (Bool, CGFloat) -> Void = { _, _ in },
             onTransitionChange: @escaping (Bool) -> Void = { _ in }
         ) {
             self.onRestore = onRestore
@@ -3359,7 +3167,8 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                       let newWindow,
                       self.window === newWindow else { return }
                 self.onFullScreenChange(
-                    newWindow.styleMask.contains(.fullScreen)
+                    newWindow.styleMask.contains(.fullScreen),
+                    newWindow.styleMask.contains(.fullScreen) ? (newWindow.screen?.safeAreaInsets.top ?? 0) : 0
                 )
             }
             desiredConfiguration = nil
@@ -3376,6 +3185,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             titlebarSeparatorStyle = newWindow.titlebarSeparatorStyle
             windowTitle = newWindow.title
             contentAspectRatio = newWindow.contentAspectRatio
+            contentResizeIncrements = newWindow.contentResizeIncrements
             closeButtonWasHidden = newWindow.standardWindowButton(
                 .closeButton
             )?.isHidden ?? false
@@ -3484,6 +3294,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             let savedTitlebarSeparatorStyle = titlebarSeparatorStyle
             let savedWindowTitle = windowTitle
             let savedContentAspectRatio = contentAspectRatio
+            let savedContentResizeIncrements = contentResizeIncrements
             let savedCloseButtonWasHidden = closeButtonWasHidden
             let savedMiniaturizeButtonWasHidden = miniaturizeButtonWasHidden
             let savedZoomButtonWasHidden = zoomButtonWasHidden
@@ -3542,7 +3353,12 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                         window.titlebarSeparatorStyle =
                             savedTitlebarSeparatorStyle
                         window.title = savedWindowTitle
-                        window.contentAspectRatio = savedContentAspectRatio
+                        if savedContentAspectRatio.width > 0, savedContentAspectRatio.height > 0,
+                           savedContentAspectRatio.width.isFinite, savedContentAspectRatio.height.isFinite {
+                            window.contentAspectRatio = savedContentAspectRatio
+                        } else {
+                            window.contentResizeIncrements = savedContentResizeIncrements
+                        }
                         window.standardWindowButton(.closeButton)?.isHidden =
                             savedCloseButtonWasHidden
                         window.standardWindowButton(
@@ -3678,11 +3494,16 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                                   let window,
                                   self.window === window else { return }
                             let transitioning = note.name == NSWindow.willEnterFullScreenNotification || note.name == NSWindow.willExitFullScreenNotification
-                            self.onTransitionChange(transitioning)
+                            var transaction = Transaction(); transaction.disablesAnimations = true
+                            withTransaction(transaction) {
+                                if !transitioning {
+                                    let fullScreen = window.styleMask.contains(.fullScreen)
+                                    self.onFullScreenChange(fullScreen,
+                                        fullScreen ? (window.screen?.safeAreaInsets.top ?? 0) : 0)
+                                }
+                                self.onTransitionChange(transitioning)
+                            }
                             if transitioning { return }
-                            self.onFullScreenChange(
-                                window.styleMask.contains(.fullScreen)
-                            )
                             if let configuration = self.desiredConfiguration {
                                 self.scheduleWindowConfiguration(
                                     configuration,
@@ -4376,5 +4197,184 @@ enum PlayerEpisodeTitlePolicy {
     static func title(content: String, resource: String) -> String {
         let name = resource.trimmingCharacters(in: .whitespacesAndNewlines)
         return name.isEmpty || name == content ? content : content + " · " + name
+    }
+}
+
+/// A stable channel identity drives selection; query text never starts playback.
+enum PlayerChannelSearch {
+    static func normalized(_ value: String) -> String {
+        value.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .filter { !$0.isWhitespace && !"-‐‑‒–—_".contains($0) }
+    }
+
+    static func results(_ channels: [LiveChannel], query: String) -> [LiveChannel] {
+        let needle = normalized(query)
+        guard !needle.isEmpty else { return channels }
+        return channels.enumerated().compactMap { index, channel -> (Int, Int, LiveChannel)? in
+            let primary = [channel.name, channel.number ?? "", channel.tvgName ?? ""].map(normalized)
+            let group = normalized(channel.groupName)
+            guard primary.contains(where: { $0.contains(needle) }) || group.contains(needle) else { return nil }
+            let rank = primary.contains(needle) ? 0 : primary.contains(where: { $0.hasPrefix(needle) }) ? 1 : 2
+            return (rank, index, channel)
+        }.sorted { ($0.0, $0.1) < ($1.0, $1.1) }.map { $0.2 }
+    }
+}
+
+struct PlayerChannelPicker: View {
+    let channels: [LiveChannel]
+    let currentID: LiveChannel.ID?
+    let title: String
+    let select: (LiveChannel.ID) -> Void
+    let close: () -> Void
+    @State private var query = ""
+    @State private var highlightedID: LiveChannel.ID?
+
+    private var results: [LiveChannel] { PlayerChannelSearch.results(channels, query: query) }
+
+    var body: some View {
+        let matches = results
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(title).font(.system(size: 15, weight: .semibold))
+                Spacer()
+                Text("\(matches.count)").font(.caption).foregroundStyle(.secondary)
+            }
+            PlayerChannelSearchField(text: $query, move: { move($0, in: matches) },
+                submit: { if let id = highlightedID, matches.contains(where: { $0.id == id }) { select(id) } },
+                escape: { if query.isEmpty { close() } else { query = "" } })
+                .frame(height: 30)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(matches) { channel in
+                            Button { select(channel.id) } label: {
+                                HStack(spacing: 8) {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(channel.name).font(.callout).lineLimit(1)
+                                        Text([channel.number, channel.groupName].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
+                                            .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                    }
+                                    Spacer(minLength: 4)
+                                    if channel.id == currentID {
+                                        Label(L10n.string("player.channel.playing", fallback: "Playing"), systemImage: "checkmark")
+                                            .font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                }
+                                .padding(.horizontal, 10).padding(.vertical, 8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(RoundedRectangle(cornerRadius: 7).fill(.white.opacity(channel.id == highlightedID ? 0.13 : 0)))
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("player.channel.\(channel.id)")
+                            .id(channel.id)
+                        }
+                    }
+                }
+                .overlay {
+                    if matches.isEmpty {
+                        VStack(spacing: 12) {
+                            Text(L10n.string("player.channel.no-results", fallback: "No matching channels"))
+                                .foregroundStyle(.secondary)
+                            if !query.isEmpty {
+                                Button(L10n.string("player.channel.clear", fallback: "Clear Search")) { query = "" }
+                                    .buttonStyle(.plain)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+                .onAppear {
+                    highlightedID = matches.first(where: { $0.id == currentID })?.id ?? matches.first?.id
+                    if let highlightedID { proxy.scrollTo(highlightedID, anchor: .center) }
+                }
+                .onChange(of: query) { value in
+                    highlightedID = value.isEmpty ? matches.first(where: { $0.id == currentID })?.id ?? matches.first?.id : matches.first?.id
+                    if let highlightedID { proxy.scrollTo(highlightedID, anchor: .center) }
+                }
+                .onChange(of: matches.map(\.id)) { ids in
+                    if query.isEmpty {
+                        highlightedID = ids.first(where: { $0 == currentID }) ?? ids.first
+                    } else if !ids.contains(highlightedID ?? "") {
+                        highlightedID = ids.first
+                    }
+                }
+                .onChange(of: highlightedID) { id in
+                    if let id { proxy.scrollTo(id, anchor: .center) }
+                }
+            }
+        }
+        .accessibilityIdentifier("player.channel-picker")
+    }
+
+    private func move(_ offset: Int, in matches: [LiveChannel]) {
+        guard !matches.isEmpty else { return }
+        let index = matches.firstIndex { $0.id == highlightedID } ?? (offset > 0 ? -1 : matches.count)
+        highlightedID = matches[min(max(index + offset, 0), matches.count - 1)].id
+    }
+}
+
+/// The native field editor owns typing and IME composition. The application's
+/// playback key monitor already yields to an editable NSTextView.
+struct PlayerChannelSearchField: NSViewRepresentable {
+    @Binding var text: String
+    let move: (Int) -> Void
+    let submit: () -> Void
+    let escape: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeNSView(context: Context) -> Field {
+        let field = Field()
+        field.placeholderString = L10n.string("player.channel.search", fallback: "Search channel name or number")
+        field.setAccessibilityLabel(field.placeholderString)
+        field.setAccessibilityIdentifier("player.channel-search")
+        field.sendsSearchStringImmediately = true
+        field.sendsWholeSearchString = false
+        field.delegate = context.coordinator
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.changed(_:))
+        return field
+    }
+    func updateNSView(_ field: Field, context: Context) {
+        context.coordinator.parent = self
+        guard (field.currentEditor() as? NSTextView)?.hasMarkedText() != true else { return }
+        if field.stringValue != text { field.stringValue = text }
+    }
+    static func dismantleNSView(_ field: Field, coordinator: Coordinator) {
+        field.delegate = nil; field.target = nil
+    }
+    final class Field: NSSearchField {
+        private var requestedFocus = false
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window, !requestedFocus else { return }
+            requestedFocus = true
+            DispatchQueue.main.async { [weak self, weak window] in
+                guard let self, let window, self.window === window else { return }
+                window.makeFirstResponder(self)
+            }
+        }
+    }
+    final class Coordinator: NSObject, NSSearchFieldDelegate {
+        var parent: PlayerChannelSearchField
+        init(_ parent: PlayerChannelSearchField) { self.parent = parent }
+        @objc func changed(_ field: NSSearchField) {
+            guard (field.currentEditor() as? NSTextView)?.hasMarkedText() != true else { return }
+            parent.text = field.stringValue
+        }
+        func controlTextDidChange(_ notification: Notification) {
+            if let field = notification.object as? NSSearchField { changed(field) }
+        }
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy command: Selector) -> Bool {
+            guard !textView.hasMarkedText() else { return false }
+            switch command {
+            case #selector(NSResponder.moveDown(_:)): parent.move(1)
+            case #selector(NSResponder.moveUp(_:)): parent.move(-1)
+            case #selector(NSResponder.insertNewline(_:)): parent.submit()
+            case #selector(NSResponder.cancelOperation(_:)): parent.escape()
+            default: return false
+            }
+            return true
+        }
     }
 }

@@ -278,6 +278,9 @@ final class PlayerOverlayHostingView<Content: View>: NSHostingView<Content> {
 final class PlayerFullscreenOverlayView: NSView {
     private var presentationRevision = 0
     private var savedAlpha: CGFloat?
+    private let presentationKey = UUID()
+    private weak var observedWindow: NSWindow?
+    private var phaseObserver: NSObjectProtocol?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -286,22 +289,67 @@ final class PlayerFullscreenOverlayView: NSView {
     }
     required init?(coder: NSCoder) { super.init(coder: coder); wantsLayer = true }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard observedWindow !== window else { return }
+        if let phaseObserver { NotificationCenter.default.removeObserver(phaseObserver) }
+        phaseObserver = nil
+        if let observedWindow { WindowTransitionCoordinator.state(for: observedWindow).cancel(presentationKey) }
+        resetPresentation()
+        observedWindow = window
+        guard let window else { return }
+        phaseObserver = NotificationCenter.default.addObserver(
+            forName: WindowTransitionCoordinator.fullScreenPhaseDidChange,
+            object: window, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updatePresentationForWindowPhase() }
+        }
+        updatePresentationForWindowPhase()
+    }
+
+    deinit {
+        if let phaseObserver { NotificationCenter.default.removeObserver(phaseObserver) }
+    }
+
+    private func updatePresentationForWindowPhase() {
+        guard let window else { return }
+        let transition = WindowTransitionCoordinator.state(for: window)
+        if transition.isClosing { resetPresentation(); return }
+        switch transition.phase {
+        case .enteringFullScreen, .exitingFullScreen: suspendPresentation()
+        case .windowed, .fullScreen: resumePresentation()
+        }
+    }
+
+    private func resetPresentation() {
+        presentationRevision &+= 1
+        layer?.removeAnimation(forKey: "com.okvideomac.controls.reveal")
+        if let savedAlpha { alphaValue = savedAlpha }
+        savedAlpha = nil
+    }
+
     func suspendPresentation() {
         presentationRevision &+= 1
+        if let window { WindowTransitionCoordinator.state(for: window).cancel(presentationKey) }
         if savedAlpha == nil { savedAlpha = alphaValue }
         layer?.removeAnimation(forKey: "com.okvideomac.controls.reveal")
         alphaValue = 0
     }
 
     func resumePresentation() {
-        guard let alpha = savedAlpha else { return }
+        guard let alpha = savedAlpha, let window else { return }
         presentationRevision &+= 1
         let ticket = presentationRevision
         // Allow AppKit's final frame and the hosting view's finite layout to
         // settle outside the fullscreen completion notification stack.
-        DispatchQueue.main.async { [weak self] in
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.window != nil, self.presentationRevision == ticket else { return }
+        WindowTransitionCoordinator.state(for: window).whenStable(key: presentationKey) { [weak self] window in
+            DispatchQueue.main.async { [weak self, weak window] in
+                guard let self, let window, self.window === window,
+                      self.presentationRevision == ticket else { return }
+                guard WindowTransitionCoordinator.state(for: window).canApplyChrome else {
+                    self.resumePresentation()
+                    return
+                }
                 self.layoutSubtreeIfNeeded()
                 self.savedAlpha = nil
                 self.alphaValue = alpha
@@ -328,12 +376,10 @@ private final class PlayerFullscreenBackdrop {
     private let oldOpaque: Bool
     private let oldShadow: Bool
     private let mask = CAShapeLayer()
-    private let overlays: [PlayerFullscreenOverlayView]
 
     init?(window: NSWindow, entering: Bool, expectedFrame: NSRect, windowedFrame: NSRect) {
         guard let root = window.contentView, let rootLayer = root.layer else { return nil }
         self.window = window; self.root = root; self.rootLayer = rootLayer
-        overlays = root.subviews.compactMap { $0 as? PlayerFullscreenOverlayView }
         oldMask = rootLayer.mask; oldLayerColor = rootLayer.backgroundColor
         oldBackground = window.backgroundColor; oldOpaque = window.isOpaque; oldShadow = window.hasShadow
         let full = NSRect(origin: .zero, size: expectedFrame.size)
@@ -347,7 +393,6 @@ private final class PlayerFullscreenBackdrop {
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
-        overlays.forEach { $0.suspendPresentation() }
         CATransaction.commit()
     }
 
@@ -370,7 +415,6 @@ private final class PlayerFullscreenBackdrop {
     func restore() {
         guard let window else { return }
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        overlays.forEach { $0.resumePresentation() }
         if rootLayer.mask === mask { rootLayer.mask = oldMask }
         mask.removeAllAnimations()
         rootLayer.backgroundColor = oldLayerColor
@@ -484,12 +528,19 @@ final class MPVOpenGLView: NSOpenGLView {
     private var callbackBox: MPVRenderCallbackBox?
     private var didReportRenderError = false
     private var isSurfaceReady = false
+    var isReadyForPictureInPicture: Bool { isSurfaceReady && !isTornDown }
     private var hasPendingRenderFrame = false
     private var geometryRevision: UInt64 = 0
     private var synchronizedGeometryRevision: UInt64?
     private var presentedGeometryRevision: UInt64?
     private var lastBackingBounds: NSRect?
     private var isTornDown = false
+    private var isPictureInPicturePresentation = false
+    func setPictureInPicturePresentation(_ active: Bool) {
+        isPictureInPicturePresentation = active
+        synchronizeDrawableAfterWindowLayout()
+        consumeRenderUpdateAndRequestDisplay()
+    }
     private struct FullscreenRequest {
         let entering: Bool
         let deadline: TimeInterval
@@ -649,12 +700,15 @@ final class MPVOpenGLView: NSOpenGLView {
         // AppKit marks the source window occluded while its live surface is
         // being composited into the fullscreen animation in another Space.
         let isFullScreenAnimation = phase == .enteringFullScreen || phase == .exitingFullScreen
-        return MPVRenderVisibilityPolicy.shouldRequestDisplay(
+        // Native PiP hosts its video in a remote content window. That window's
+        // occlusion state does not describe the visible system PiP panel.
+        // Only an owned PiP presentation can bypass ordinary window visibility.
+        return (isPictureInPicturePresentation || MPVRenderVisibilityPolicy.shouldRequestDisplay(
             isAttachedToWindow: true,
             isWindowVisible: window.isVisible,
             isMiniaturized: window.isMiniaturized,
             isOcclusionVisible: window.occlusionState.contains(.visible) || isFullScreenAnimation
-        ) && MPVRenderSafetyPolicy.framebufferSize(
+        )) && MPVRenderSafetyPolicy.framebufferSize(
             backingBounds: convertToBacking(bounds),
             isInLiveResize: window.inLiveResize,
             isAttachedToWindow: true
@@ -969,27 +1023,58 @@ final class MPVOpenGLView: NSOpenGLView {
     }
 }
 
+/// SwiftUI owns this stable host while the same OpenGL view moves into PiP.
+final class MPVRenderHostView: NSView {
+    let surface: MPVOpenGLView
+    let ownerID: UUID
+    weak var pictureInPicture: PlayerPictureInPictureCoordinator?
+    init(player: MPVPlayerClient, pictureInPicture: PlayerPictureInPictureCoordinator?,
+         onError: @escaping (Error) -> Void, onSurfaceReady: @escaping (UUID) -> Void,
+         onSurfaceUnavailable: @escaping (UUID) -> Void) {
+        ownerID = player.renderOwnerID
+        self.pictureInPicture = pictureInPicture
+        surface = MPVOpenGLView(player: player, onError: onError, onSurfaceReady: { [weak pictureInPicture] owner in
+            onSurfaceReady(owner)
+            DispatchQueue.main.async { pictureInPicture?.refreshReadiness() }
+        }, onSurfaceUnavailable: onSurfaceUnavailable)
+        super.init(frame: .zero)
+        surface.autoresizingMask = [.width, .height]
+        addSubview(surface)
+        pictureInPicture?.attach(self)
+    }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:)") }
+    override func layout() {
+        super.layout()
+        if surface.superview === self { surface.frame = bounds }
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        DispatchQueue.main.async { [weak self] in self?.pictureInPicture?.refreshReadiness() }
+    }
+    func restoreSurface() {
+        if surface.superview !== self {
+            surface.removeFromSuperview(); surface.frame = bounds
+            surface.autoresizingMask = [.width, .height]; addSubview(surface)
+            surface.synchronizeDrawableAfterWindowLayout()
+        }
+    }
+    func tearDown() {
+        pictureInPicture?.detach(self)
+        surface.tearDown()
+    }
+}
+
 struct MPVRenderView: NSViewRepresentable {
     let player: MPVPlayerClient
     let onError: (Error) -> Void
     let onSurfaceReady: (UUID) -> Void
     let onSurfaceUnavailable: (UUID) -> Void
+    var pictureInPicture: PlayerPictureInPictureCoordinator? = nil
 
-    func makeNSView(context: Context) -> MPVOpenGLView {
-        MPVOpenGLView(
-            player: player,
-            onError: onError,
-            onSurfaceReady: onSurfaceReady,
-            onSurfaceUnavailable: onSurfaceUnavailable
-        )
+    func makeNSView(context: Context) -> MPVRenderHostView {
+        MPVRenderHostView(player: player, pictureInPicture: pictureInPicture,
+            onError: onError, onSurfaceReady: onSurfaceReady, onSurfaceUnavailable: onSurfaceUnavailable)
     }
-
-    func updateNSView(_ nsView: MPVOpenGLView, context: Context) {}
-
-    static func dismantleNSView(
-        _ nsView: MPVOpenGLView,
-        coordinator: ()
-    ) {
-        nsView.tearDown()
-    }
+    func updateNSView(_ nsView: MPVRenderHostView, context: Context) {}
+    static func dismantleNSView(_ nsView: MPVRenderHostView, coordinator: ()) { nsView.tearDown() }
 }

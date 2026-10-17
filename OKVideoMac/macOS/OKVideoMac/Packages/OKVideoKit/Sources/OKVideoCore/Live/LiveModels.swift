@@ -70,6 +70,7 @@ public struct LiveChannel: Codable, Equatable, Identifiable, Sendable {
     public var tvgID: String?
     public var tvgName: String?
     public var streams: [LiveStream]
+    public var epgAPI: TVBoxEPGConfiguration?
 
     public init(
         groupName: String,
@@ -79,6 +80,7 @@ public struct LiveChannel: Codable, Equatable, Identifiable, Sendable {
         tvgID: String? = nil,
         tvgName: String? = nil,
         streams: [LiveStream],
+        epgAPI: TVBoxEPGConfiguration? = nil,
         explicitID: String? = nil,
         explicitGroupID: String? = nil
     ) {
@@ -91,6 +93,7 @@ public struct LiveChannel: Codable, Equatable, Identifiable, Sendable {
         self.tvgID = tvgID
         self.tvgName = tvgName
         self.streams = streams
+        self.epgAPI = epgAPI
     }
 }
 
@@ -117,6 +120,7 @@ public struct LiveStream: Codable, Equatable, Identifiable, Sendable {
     public var format: String?
     public var needsParsing: Bool
     public var catchup: LiveCatchupConfiguration?
+    public var archive: XtreamArchiveCapability?
 
     public init(
         name: String,
@@ -124,7 +128,8 @@ public struct LiveStream: Codable, Equatable, Identifiable, Sendable {
         headers: [String: String] = [:],
         format: String? = nil,
         needsParsing: Bool = false,
-        catchup: LiveCatchupConfiguration? = nil
+        catchup: LiveCatchupConfiguration? = nil,
+        archive: XtreamArchiveCapability? = nil
     ) {
         self.name = name
         self.target = .direct(url)
@@ -132,6 +137,7 @@ public struct LiveStream: Codable, Equatable, Identifiable, Sendable {
         self.format = format
         self.needsParsing = needsParsing
         self.catchup = catchup
+        self.archive = archive
     }
 
     public init(
@@ -140,7 +146,8 @@ public struct LiveStream: Codable, Equatable, Identifiable, Sendable {
         headers: [String: String] = [:],
         format: String? = nil,
         needsParsing: Bool = false,
-        catchup: LiveCatchupConfiguration? = nil
+        catchup: LiveCatchupConfiguration? = nil,
+        archive: XtreamArchiveCapability? = nil
     ) throws {
         self.name = name
         self.target = target
@@ -148,6 +155,7 @@ public struct LiveStream: Codable, Equatable, Identifiable, Sendable {
         self.format = format
         self.needsParsing = needsParsing
         self.catchup = catchup
+        self.archive = archive
         try validateProviderTarget()
     }
 
@@ -166,8 +174,13 @@ public struct LiveStream: Codable, Equatable, Identifiable, Sendable {
             retentionDays: 7, timeZoneID: TimeZone.current.identifier, seekPolicy: .request)
     }
 
+    public var catchupSeekPolicy: LiveCatchupSeekPolicy? {
+        if case .provider = target, archive?.isValid == true { return .request }
+        return effectiveCatchup?.seekPolicy
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case name, url, headers, format, needsParsing, catchup
+        case name, url, headers, format, needsParsing, catchup, archive
         case targetVersion, providerResourceReference
     }
 
@@ -175,6 +188,7 @@ public struct LiveStream: Codable, Equatable, Identifiable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         name = try container.decode(String.self, forKey: .name)
         catchup = try container.decodeIfPresent(LiveCatchupConfiguration.self, forKey: .catchup)
+        archive = try container.decodeIfPresent(XtreamArchiveCapability.self, forKey: .archive)
         format = try container.decodeIfPresent(String.self, forKey: .format)
         if container.contains(.targetVersion) || container.contains(.providerResourceReference) {
             guard !container.contains(.url),
@@ -202,6 +216,7 @@ public struct LiveStream: Codable, Equatable, Identifiable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(name, forKey: .name)
         try container.encodeIfPresent(catchup, forKey: .catchup)
+        try container.encodeIfPresent(archive, forKey: .archive)
         try container.encodeIfPresent(format, forKey: .format)
         switch target {
         case .direct(let url):
@@ -218,7 +233,8 @@ public struct LiveStream: Codable, Equatable, Identifiable, Sendable {
         guard case .provider(let reference) = target else { return }
         guard let locator = reference.xtreamLiveLocator,
               headers.isEmpty, !needsParsing, catchup == nil,
-              format == nil || format == locator.outputFormat.rawValue else {
+              (format == nil || format == locator.outputFormat.rawValue),
+              archive?.isValid ?? true else {
             throw LiveModelError.invalidProviderTarget
         }
     }
@@ -242,12 +258,14 @@ public struct EPGProgramme: Codable, Equatable, Identifiable, Sendable {
     public var title: String
     public var start: Date
     public var end: Date
+    public var catchupAvailable: Bool?
 
-    public init(channelID: String, title: String, start: Date, end: Date) {
+    public init(channelID: String, title: String, start: Date, end: Date, catchupAvailable: Bool? = nil) {
         self.channelID = channelID
         self.title = title
         self.start = start
         self.end = end
+        self.catchupAvailable = catchupAvailable
     }
 }
 

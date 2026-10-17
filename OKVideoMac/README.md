@@ -11,10 +11,10 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
 ## 当前版本
 
-- 当前稳定版本：0.8.6（Build 139）
-- Tag：`v0.8.6` 固定 `590a065d93116d341f94b925b46d8fed0d719744`；既有 v0.8.5 资产保持不变。
-- source release index：`OKVideoMac-0.8.6-build139-SOURCE_RELEASE_INDEX.json`。
-- 官方 DMG 可在用户同意后上传过滤的崩溃报告；默认关闭，源码服务配置留空。见[发布说明](../Docs/RELEASE_NOTES_0.8.6.md)与[正式验证](../Docs/RELEASE_VALIDATION_0.8.6.md)。
+- 当前发布候选：0.8.7（Build 140）
+- 目标 tag：`v0.8.7`，仅在正式发布门禁通过后创建。
+- source release index：`OKVideoMac-0.8.7-build140-SOURCE_RELEASE_INDEX.json`。
+- 本轮包含直播回放、原生画中画、播放信息、启动／播放器界面和历史／详情修复。见[发布说明](../Docs/RELEASE_NOTES_0.8.7.md)与[发布就绪](../Docs/RELEASE_READINESS_0.8.7.md)。
 - 最低系统：macOS 12.0
 - 支持架构：Apple Silicon / arm64
 - 播放历史与收藏保留配置、站点和稳定媒体身份；旧记录经过迁移后仍可准确恢复，
@@ -28,18 +28,16 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 - 搜索框有文字时第一次 Esc 只清空并保持焦点，空框再次 Esc 才退出搜索
 - 0.6.0 历史另行执行的 4 项真实 Android 生命周期测试与 API 35 隔离矩阵通过；
   本轮正式收口不把这些历史实机结果冒充为重跑结果
-- 0.8.5 的回归结果、覆盖边界与更新行为见
-  [发布就绪记录](../Docs/RELEASE_READINESS_0.8.5.md)和
-  [自动更新流程](../Docs/AUTOMATIC_UPDATES.md)
-- 对外分发：0.8.5 Build 138 已完成 Developer ID、Apple notarization（`Accepted`）、
-  Staple、Gatekeeper 与安装 smoke；见
-  [GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.5)；
-  [正式验证记录](../Docs/RELEASE_VALIDATION_0.8.5.md)
+- 本轮完整测试与正式发布门禁见[发布就绪记录](../Docs/RELEASE_READINESS_0.8.7.md)；稳定更新保留既有 HTTPS feed 与用户确认流程，见[自动更新](../Docs/AUTOMATIC_UPDATES.md)。
 
-## 0.8.6 发布候选
+## 0.8.7 发布候选
 
-- 官方 DMG 打包时注入接收配置，用户同意后才上传过滤的崩溃报告；公开源码配置留空，后台管理令牌不进入 App。
-- 发布验证尚待完成，见[发布就绪](../Docs/RELEASE_READINESS_0.8.6.md)和[配置流程](../Docs/CRASH_REPORTING_RELEASE_CONFIGURATION.md)。
+- 版本由 0.8.6 / 139 递增为 0.8.7 / 140；Android Bridge 与固定依赖版本保持。
+- 回放、画中画及播放信息的具体边界见本轮发布说明。正式构建从干净 main 的固定提交生成；签名、公证、staple、Gatekeeper 和安装验证通过后才公开。
+
+## 0.8.6 历史正式发布
+
+- 官方 DMG 在用户同意后上传过滤的崩溃报告；源码配置留空。签名、公证及资产验证见[正式记录](../Docs/RELEASE_VALIDATION_0.8.6.md)。
 
 ## 0.8.5 历史正式发布
 

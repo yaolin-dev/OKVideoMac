@@ -21,6 +21,7 @@ public struct XtreamAccount: Equatable, Sendable {
     public let activeConnections: Int?
     public let maxConnections: Int?
     public let allowedOutputFormats: [String]
+    public let serverTimeZoneID: String?
 
     public init(
         status: String?,
@@ -28,7 +29,8 @@ public struct XtreamAccount: Equatable, Sendable {
         isTrial: Bool?,
         activeConnections: Int?,
         maxConnections: Int?,
-        allowedOutputFormats: [String]
+        allowedOutputFormats: [String],
+        serverTimeZoneID: String? = nil
     ) {
         self.status = status
         self.expirationDate = expirationDate
@@ -36,6 +38,7 @@ public struct XtreamAccount: Equatable, Sendable {
         self.activeConnections = activeConnections
         self.maxConnections = maxConnections
         self.allowedOutputFormats = allowedOutputFormats
+        self.serverTimeZoneID = serverTimeZoneID
     }
 }
 
@@ -140,8 +143,16 @@ public final class XtreamClient: @unchecked Sendable {
             isTrial: info.isTrial,
             activeConnections: info.activeConnections,
             maxConnections: info.maxConnections,
-            allowedOutputFormats: info.allowedOutputFormats
+            allowedOutputFormats: info.allowedOutputFormats,
+            serverTimeZoneID: response.serverInfo?.timezone.flatMap { TimeZone(identifier: $0)?.identifier }
         )
+    }
+
+    public func archiveRequest(streamID: String, outputFormat: String, programme: EPGProgramme,
+                               offset: TimeInterval, now: Date, serverTimeZoneID: String?) throws -> XtreamArchiveRequest {
+        try urlBuilder.archiveRequest(credentials: credentials,
+            streamID: validIdentifier(streamID), outputFormat: outputFormat, programme: programme,
+            offset: offset, now: now, serverTimeZoneID: serverTimeZoneID)
     }
 
     public func liveCategories() async throws -> [XtreamCategoryDTO] {
@@ -149,11 +160,16 @@ public final class XtreamClient: @unchecked Sendable {
     }
 
     public func shortEPG(streamID: String) async throws -> EPGPayload {
+        try await epg(streamID: streamID, archive: false)
+    }
+    public func archiveEPG(streamID: String) async throws -> EPGPayload {
+        try await epg(streamID: streamID, archive: true)
+    }
+    private func epg(streamID: String, archive: Bool) async throws -> EPGPayload {
         do {
-            let data = try await responseData(action: .shortEPG, parameters: [
-                URLQueryItem(name: "stream_id", value: try validIdentifier(streamID)),
-                URLQueryItem(name: "limit", value: "4")
-            ], isCatalog: false)
+            let data = try await responseData(action: archive ? .simpleDataTable : .shortEPG, parameters:
+                [URLQueryItem(name: "stream_id", value: try validIdentifier(streamID))]
+                + (archive ? [] : [URLQueryItem(name: "limit", value: "4")]), isCatalog: false)
             let response = try XtreamEPGResponse(data: data)
             var timezone: TimeZone?
             if response.requiresServerTimezone {
@@ -294,7 +310,7 @@ public final class XtreamClient: @unchecked Sendable {
             action: action,
             parameters: parameters
         )
-        let maximumBytes = action == .shortEPG ? 1024 * 1024 : isCatalog
+        let maximumBytes = [.shortEPG, .simpleDataTable].contains(action) ? 1024 * 1024 : isCatalog
             ? catalogResponsePolicy.maximumResponseBytes
             : Self.metadataMaximumResponseBytes
         let request = HTTPRequest(
@@ -305,7 +321,7 @@ public final class XtreamClient: @unchecked Sendable {
             ],
             timeout: 30,
             maximumResponseBytes: maximumBytes,
-            earlyResponseLimitBytes: isCatalog || action == .shortEPG ? maximumBytes : nil,
+            earlyResponseLimitBytes: isCatalog || [.shortEPG, .simpleDataTable].contains(action) ? maximumBytes : nil,
             maximumRedirects: 3,
             redirectPolicy: .sameOriginNoDowngrade,
             retryPolicy: HTTPRetryPolicy(

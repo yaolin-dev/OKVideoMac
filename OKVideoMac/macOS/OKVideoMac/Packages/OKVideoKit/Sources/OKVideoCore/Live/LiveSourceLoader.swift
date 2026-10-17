@@ -56,8 +56,12 @@ public struct LiveSourceLoader {
         self.now = now
     }
 
-    public func load(_ source: LiveSourceInput) async throws -> LoadedLiveSource {
-        let data: Data
+    public func load(_ source: LiveSourceInput, defaults: LiveSourceDefaults? = nil) async throws -> LoadedLiveSource {
+        try await load(source, defaults: defaults, depth: 0)
+    }
+
+    private func load(_ source: LiveSourceInput, defaults: LiveSourceDefaults?, depth: Int) async throws -> LoadedLiveSource {
+        var data: Data
         let baseURL: URL?
 
         switch source {
@@ -105,11 +109,34 @@ public struct LiveSourceLoader {
         guard data.count <= Self.maximumSourceSize else {
             throw AppError.live("直播源超过 32 MiB 限制")
         }
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let descriptor: LiveConfiguration?
+            if let lives = object["lives"] as? [Any] {
+                guard lives.count == 1 else { throw AppError.live("配置包含多个直播列表，请从点播配置中选择导入") }
+                descriptor = try JSONDecoder().decode([LiveConfiguration].self, from: JSONSerialization.data(withJSONObject: lives)).first
+            } else if object["groups"] != nil || object["url"] != nil {
+                descriptor = try JSONDecoder().decode(LiveConfiguration.self, from: data)
+            } else { descriptor = nil }
+            if let descriptor {
+                if descriptor.groups.isEmpty {
+                    guard depth == 0, let reference = descriptor.url ?? descriptor.api,
+                          let url = try? ResourceResolver.resolve(reference, relativeTo: baseURL),
+                          ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+                        throw AppError.live("外部直播列表无效或嵌套层数过多")
+                    }
+                    let child = try await load(.remote(url), defaults: LiveSourceDefaults(descriptor), depth: depth + 1)
+                    return LoadedLiveSource(source: source, baseURL: child.baseURL, rawData: child.rawData,
+                                            playlist: child.playlist, loadedAt: child.loadedAt)
+                }
+                data = try JSONEncoder().encode(descriptor)
+            }
+        }
+        let storedData = try defaults.map { try LiveSourceDocument.attaching($0, to: data) } ?? data
         return LoadedLiveSource(
             source: source,
             baseURL: baseURL,
-            rawData: data,
-            playlist: try parser.parse(data, baseURL: baseURL),
+            rawData: storedData,
+            playlist: try parser.parse(storedData, baseURL: baseURL),
             loadedAt: now()
         )
     }

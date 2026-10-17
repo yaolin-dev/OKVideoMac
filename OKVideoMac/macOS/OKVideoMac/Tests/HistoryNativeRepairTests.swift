@@ -577,3 +577,481 @@ final class DanmakuSmoothRenderingTests: XCTestCase {
         driver.stop()
     }
 }
+
+final class CatPawColdHistoryTests: XCTestCase {
+    private let configuration = "history-cold-fixture"
+    private func provider(_ client: HTTPClient) throws -> NodeHTTPSpiderSiteProvider {
+        try NodeHTTPSpiderSiteProvider(site: .init(key: "fixture", name: "CatPawOpen", type: 4,
+            api: "/spider/fixture/3", extra: ["okNodeRuntime": .bool(true)]),
+            baseURL: URL(string: "http://127.0.0.1:18988/")!, httpClient: client, configurationIdentity: configuration)
+    }
+    private func persistedReference() async throws -> PlaybackResourceReference {
+        let initial = try provider(ColdQuarkClient(tokenVersion: "yesterday"))
+        let detail = try await initial.detail(id: "video")
+        let reference = try XCTUnwrap(detail.playSources.first?.episodes.first?.providerResourceReference)
+        let data = try JSONEncoder().encode(reference)
+        let text = String(decoding: data, as: UTF8.self)
+        for forbidden in ["yesterday", "shareFidToken", "stoken", "cookie", "passcode"] { XCTAssertFalse(text.contains(forbidden)) }
+        return try JSONDecoder().decode(PlaybackResourceReference.self, from: data)
+    }
+    private func request(_ ref: PlaybackResourceReference, videoID: String = "video") -> PlaybackRefreshRequest {
+        .init(videoID: videoID, title: "历史影片", sourceIdentity: ref.sourceIdentity,
+            resourceIdentity: ref.episodeIdentity, sourceName: "夸克原画", episodeName: "第64集",
+            episodeReference: ref.stableResourceLocator, providerResourceReference: ref)
+    }
+    func testColdAndRestartedHistoryAlwaysUsesCompleteCurrentFileToken() async throws {
+        let persisted = try await persistedReference()
+        // Each attempt uses a new runtime/client with an empty play cache.
+        for version in ["current", "after-restart", "after-expiry"] {
+            let client = ColdQuarkClient(tokenVersion: version, omitsDetailID: true)
+            let fresh = try provider(client)
+            let replay = try await fresh.refreshPlayback(request(persisted))
+            XCTAssertEqual(replay.episode.url, try ColdQuarkClient.episode(version))
+            XCTAssertEqual(replay.detail.summary.videoID, "video", "Missing vod_id uses the navigation summary")
+            XCTAssertEqual(replay.playbackResult.resourceReference?.stableResourceLocator, persisted.stableResourceLocator)
+            let requests = await client.captured()
+            XCTAssertEqual(requests.filter { $0.url.path.hasSuffix("/detail") }.count, 1)
+            XCTAssertEqual(requests.filter { $0.url.path.hasSuffix("/play") }.count, 1)
+            XCTAssertFalse(requests.contains { $0.url == QuarkEpisodeReference.shareTokenURL || $0.url.path == "/website/api/status" })
+        }
+    }
+    func testExpiredNavigationSearchesAgainButKeepsOriginalFileIdentity() async throws {
+        let reference = try await persistedReference(), client = ColdQuarkClient()
+        let result = try await provider(client).refreshPlayback(request(reference, videoID: "expired"))
+        XCTAssertEqual(result.episode.url, try ColdQuarkClient.episode("current"))
+        let requests = await client.captured()
+        XCTAssertEqual(requests.filter { $0.url.path.hasSuffix("/search") }.count, 1)
+        XCTAssertEqual(requests.filter { $0.url.path.hasSuffix("/play") }.count, 1)
+    }
+    func testSameNameDifferentFileAndAmbiguousEpisodeNeverAutoPlay() async throws {
+        let ref = try await persistedReference()
+        for client in [ColdQuarkClient(fileID: "different-file"), ColdQuarkClient(duplicateEpisode: true)] {
+            do { _ = try await provider(client).refreshPlayback(request(ref)); XCTFail("An ambiguous or different file must require selection") }
+            catch { XCTAssertFalse(error is NodeWebAuthorizationRequired) }
+            let requests = await client.captured()
+            XCTAssertFalse(requests.contains { $0.url.path.hasSuffix("/play") })
+        }
+    }
+    func testMisreportedCookieFailureChecksQuarkStatusOnly() async throws {
+        for loggedIn in [true, false] {
+            let client = ColdQuarkClient(misreportsCookieFailure: true, loggedIn: loggedIn)
+            do { _ = try await provider(client).player(flag: "夸克原画", episodeURL: ColdQuarkClient.episode("current"), transferContext: .init(requestID: UUID(), requestGeneration: 1)); XCTFail("Fixture must fail") }
+            catch { XCTAssertEqual(error is NodeWebAuthorizationRequired, !loggedIn) }
+            let requests = await client.captured()
+            XCTAssertEqual(requests.filter { $0.url.path == "/website/api/status" }.count, 1)
+            XCTAssertEqual(requests.filter { $0.url.path.hasSuffix("/play") }.count, 1, "No blind repeat of cloud transfer")
+            XCTAssertFalse(requests.contains { $0.url.path.contains("credentials") })
+        }
+    }
+    @MainActor
+    func testHistorySelectionHonorsSavedFileIdentityAndOffersAmbiguousMatches() async throws {
+        let ref = try await persistedReference()
+        let record = HistoryRecord(siteKey: "fixture", videoID: "video", title: "历史影片",
+            sourceName: "夸克原画", episodeName: "第64集", episodeReference: ref.stableResourceLocator, position: 128)
+        for client in [ColdQuarkClient(fileID: "different-file"), ColdQuarkClient(duplicateEpisode: true)] {
+            let detail = try await provider(client).detail(id: "video")
+            XCTAssertNil(AppState.historyPlaybackSelection(in: detail, record: record))
+            let choices = AppState.historyPlaybackChoices(in: detail, record: record)
+            XCTAssertEqual(choices.count, client.duplicateEpisode ? 2 : 0)
+        }
+        let fresh = try await provider(ColdQuarkClient()).detail(id: "video")
+        let match = try XCTUnwrap(AppState.historyPlaybackSelection(in: fresh, record: record))
+        XCTAssertEqual(match.episode.url, try ColdQuarkClient.episode("current"))
+        XCTAssertEqual(record.position, 128)
+    }
+    func testUnavailableAccountStatusPreservesAuthorizationPrompt() async throws {
+        let client = ColdQuarkClient(misreportsCookieFailure: true, statusUnavailable: true)
+        do {
+            _ = try await provider(client).player(flag: "夸克原画", episodeURL: ColdQuarkClient.episode("current"),
+                transferContext: .init(requestID: UUID(), requestGeneration: 1))
+            XCTFail("Fixture must fail")
+        } catch { XCTAssertTrue(error is NodeWebAuthorizationRequired) }
+    }
+    func testExplicitFileTokenErrorDoesNotRequestLogin() async throws {
+        let client = ColdQuarkClient(explicitFileTokenFailure: true)
+        do { _ = try await provider(client).player(flag: "夸克原画", episodeURL: ColdQuarkClient.episode("current"), transferContext: .init(requestID: UUID(), requestGeneration: 1)); XCTFail("Fixture must fail") }
+        catch { XCTAssertFalse(error is NodeWebAuthorizationRequired); XCTAssertTrue(error.localizedDescription.contains("token")) }
+        let requests = await client.captured()
+        XCTAssertFalse(requests.contains { $0.url.path == "/website/api/status" })
+    }
+}
+
+private actor ColdQuarkClient: HTTPClient {
+    let tokenVersion: String, fileID: String
+    let omitsDetailID: Bool, duplicateEpisode: Bool, misreportsCookieFailure: Bool, loggedIn: Bool, explicitFileTokenFailure: Bool, statusUnavailable: Bool
+    private var requests: [HTTPRequest] = []
+    init(tokenVersion: String = "current", fileID: String = "file-64", omitsDetailID: Bool = false,
+         duplicateEpisode: Bool = false, misreportsCookieFailure: Bool = false, loggedIn: Bool = true, explicitFileTokenFailure: Bool = false, statusUnavailable: Bool = false) {
+        self.tokenVersion = tokenVersion; self.fileID = fileID; self.omitsDetailID = omitsDetailID
+        self.duplicateEpisode = duplicateEpisode; self.misreportsCookieFailure = misreportsCookieFailure
+        self.loggedIn = loggedIn; self.explicitFileTokenFailure = explicitFileTokenFailure; self.statusUnavailable = statusUnavailable
+    }
+    static func episode(_ version: String, fileID: String = "file-64") throws -> String {
+        let token = try JSONSerialization.data(withJSONObject: ["fid": fileID, "shareId": "share-fixture", "stoken": "stoken-\(version)", "shareFidToken": "file-token-\(version)", "fileName": "第64集"], options: [.sortedKeys])
+        return try JSONSerialization.data(withJSONObject: ["providerId": "quark", "shareId": "share-fixture", "fileId": fileID, "playToken": String(decoding: token, as: UTF8.self)], options: [.sortedKeys]).base64EncodedString()
+    }
+    func captured() -> [HTTPRequest] { requests }
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        requests.append(request)
+        func response(_ body: [String: Any], status: Int = 200) throws -> HTTPResponse {
+            .init(url: request.url, statusCode: status, headers: ["Content-Type": "application/json"], body: try JSONSerialization.data(withJSONObject: body))
+        }
+        if request.url.path.hasSuffix("/init") { return try response([:], status: 404) }
+        if request.url.path == "/website/api/status" {
+            if statusUnavailable { return try response([:], status: 404) }
+            return try response(["code": 0, "data": ["providers": ["quark": ["configured": true, "login": loggedIn], "baidu": ["configured": true, "login": false]]]])
+        }
+        if request.url.path.hasSuffix("/search") {
+            return try response(["list": [["vod_id": "video", "vod_name": "历史影片"]]])
+        }
+        if request.url.path.hasSuffix("/detail") {
+            let body = String(decoding: request.body ?? Data(), as: UTF8.self)
+            if body.contains("expired") { return try response(["error": "detail unavailable"], status: 404) }
+            let entry = "第64集$\(try Self.episode(tokenVersion, fileID: fileID))"
+            var detail = ["vod_name": "历史影片", "vod_play_from": "夸克原画", "vod_play_url": duplicateEpisode ? "\(entry)#\(entry)" : entry]
+            if !omitsDetailID { detail["vod_id"] = "video" }
+            return try response(["list": [detail]])
+        }
+        if request.url.path.hasSuffix("/play") {
+            if explicitFileTokenFailure { return try response(["error": "夸克转存文件token校验异常"], status: 500) }
+            let body = try JSONSerialization.jsonObject(with: request.body ?? Data()) as? [String: Any]
+            let id = body?["id"] as? String ?? ""
+            let token = Data(base64Encoded: id).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["playToken"] as? String ?? ""
+            // A partial stoken-only reconstruction fails even with a valid account.
+            if misreportsCookieFailure || !token.contains("file-token-\(tokenVersion)") {
+                return try response(["error": "夸克 Cookie 已失效，请重新登录"], status: 500)
+            }
+            return try response(["parse": 0, "url": "https://media.example.invalid/movie.m3u8"])
+        }
+        return try response([:], status: 404)
+    }
+}
+
+@MainActor
+final class HistorySelectionInteractionTests: XCTestCase {
+    @MainActor private final class Fixture {
+        var selection = Set<String>()
+        var rows = (0..<4).map { NativeLibraryRow(id: "\($0)", title: "History \($0)", subtitle: "Line", posterURL: nil, date: Date(), progress: 0.1) }
+        var opened: [String] = []
+        var deleted = Set<String>()
+        func view() -> NativeLibraryList {
+            NativeLibraryList(rows: rows, selection: Binding(get: { self.selection }, set: { self.selection = $0 }), repository: nil,
+                openTitle: "Play", onOpen: { self.opened.append($0) }, onDelete: { ids, _ in self.deleted = ids })
+        }
+    }
+    private func fixture() async throws -> (Fixture, NSHostingView<NativeLibraryList>, NSWindow, NativeLibraryTableView) {
+        let model = Fixture(), window = NSWindow(contentRect: .init(x: 100, y: 100, width: 900, height: 450),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        let host = NSHostingView(rootView: model.view())
+        window.isReleasedWhenClosed = false; window.contentView = host
+        NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil)
+        try await Task.sleep(nanoseconds: 100_000_000); host.layoutSubtreeIfNeeded()
+        let table = try XCTUnwrap(BrowserKeyboardView.descendants(of: host).compactMap { $0 as? NativeLibraryTableView }.first)
+        XCTAssertTrue(window.isKeyWindow)
+        return (model, host, window, table)
+    }
+    private func refresh(_ model: Fixture, _ host: NSHostingView<NativeLibraryList>) {
+        host.rootView = model.view(); host.layoutSubtreeIfNeeded()
+    }
+    private func click(_ table: NativeLibraryTableView, row: Int, count: Int = 1,
+                       modifiers: NSEvent.ModifierFlags = [], hold: Double = 0.12, during: (() -> Void)? = nil) throws {
+        let window = try XCTUnwrap(table.window)
+        let point = table.convert(NSPoint(x: 220, y: table.rect(ofRow: row).midY), to: nil)
+        let timestamp = ProcessInfo.processInfo.systemUptime
+        let down = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: modifiers,
+            timestamp: timestamp, windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: count, pressure: 1))
+        let up = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseUp, location: point, modifierFlags: modifiers,
+            timestamp: timestamp + hold, windowNumber: window.windowNumber, context: nil, eventNumber: 2, clickCount: count, pressure: 0))
+        var refreshed = false
+        let update = Timer(timeInterval: 0.02, repeats: false) { _ in
+            MainActor.assumeIsolated { refreshed = true; during?() }
+        }
+        let postRelease: @MainActor () -> Void = { NSApp.postEvent(up, atStart: true) }
+        let release = Timer(timeInterval: hold, repeats: false) { _ in
+            MainActor.assumeIsolated { postRelease() }
+        }
+        RunLoop.main.add(update, forMode: .eventTracking); RunLoop.main.add(release, forMode: .eventTracking)
+        defer { update.invalidate(); release.invalidate() }
+        table.mouseDown(with: down)
+        XCTAssertTrue(refreshed, "The update must run inside AppKit's native mouse tracking loop")
+    }
+    func testSingleClickSurvivesProgressRefreshBeforeMouseUp() async throws {
+        let (model, host, window, table) = try await fixture(); defer { window.close() }
+        for hold in [0.06, 0.12, 0.3] {
+            for initial: Set<String> in [[], ["0"]] {
+                model.selection = initial; refresh(model, host)
+                try click(table, row: 2, hold: hold) {
+                    XCTAssertEqual(table.selectedRow, 2)
+                    model.rows[0].progress = 0.8
+                    self.refresh(model, host)
+                    XCTAssertEqual(table.selectedRow, 2)
+                }
+                XCTAssertEqual(table.selectedRowIndexes, IndexSet(integer: 2))
+                XCTAssertEqual(model.selection, ["2"])
+                XCTAssertTrue(model.opened.isEmpty, "Single click only selects")
+            }
+        }
+    }
+    func testReorderingDuringClickPreservesTheClickedRecord() async throws {
+        let (model, host, window, table) = try await fixture(); defer { window.close() }
+        try click(table, row: 1) {
+            model.rows.swapAt(1, 3); self.refresh(model, host)
+            let displayed = table.view(atColumn: 0, row: 1, makeIfNecessary: true) as? NativeLibraryCell
+            XCTAssertEqual(displayed?.title.stringValue, "History 1", "Reordering waits for mouse-up")
+        }
+        XCTAssertEqual(table.selectedRow, 3)
+        XCTAssertEqual(model.selection, ["1"])
+        XCTAssertTrue(model.opened.isEmpty)
+    }
+    func testDeletionDuringClickCannotLeaveAnInvalidSelection() async throws {
+        let (model, host, window, table) = try await fixture(); defer { window.close() }
+        try click(table, row: 1) {
+            model.rows.remove(at: 1); self.refresh(model, host)
+            XCTAssertEqual(table.numberOfRows, 4)
+        }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(table.numberOfRows, 3)
+        XCTAssertTrue(table.selectedRowIndexes.isEmpty)
+        XCTAssertTrue(model.selection.isEmpty)
+    }
+    func testNativeMultipleSelectionDoubleClickAndButtonsRemainIndependent() async throws {
+        let (model, host, window, table) = try await fixture(); defer { window.close() }
+        try click(table, row: 0); refresh(model, host)
+        try click(table, row: 2, modifiers: .command) { model.rows[0].progress = 0.5; self.refresh(model, host) }
+        XCTAssertEqual(model.selection, ["0", "2"])
+        refresh(model, host)
+        try click(table, row: 1, modifiers: .shift) { self.refresh(model, host) }
+        XCTAssertTrue(model.selection.contains("1")); XCTAssertGreaterThan(model.selection.count, 1)
+        XCTAssertTrue(model.opened.isEmpty)
+        // Test an ordinary double-click separately from the modifier
+        // gesture. The existing open command requires one selected row.
+        model.selection = []; refresh(model, host)
+        try click(table, row: 1) { self.refresh(model, host) }
+        try click(table, row: 1, count: 2) { model.rows[0].progress = 0.6; self.refresh(model, host) }
+        XCTAssertEqual(model.selection, ["1"])
+        XCTAssertEqual(model.opened, ["1"])
+        let cell = try XCTUnwrap(table.view(atColumn: 0, row: 3, makeIfNecessary: true) as? NativeLibraryCell)
+        cell.open.performClick(nil); XCTAssertEqual(model.opened, ["1", "3"])
+        cell.remove.performClick(nil); XCTAssertEqual(model.deleted, ["3"])
+        XCTAssertEqual(model.opened, ["1", "3"])
+    }
+    func testExternalSelectAllAndKeyboardSelectionAreStillApplied() async throws {
+        let (model, host, window, table) = try await fixture(); defer { window.close() }
+        model.selection = Set(model.rows.map(\.id)); refresh(model, host)
+        XCTAssertEqual(table.selectedRowIndexes, IndexSet(0..<4))
+        model.selection = ["1"]; refresh(model, host)
+        window.makeFirstResponder(table)
+        let down = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, characters: "\u{f701}", charactersIgnoringModifiers: "\u{f701}", isARepeat: false, keyCode: 125))
+        table.keyDown(with: down); XCTAssertEqual(model.selection, ["2"])
+        refresh(model, host); XCTAssertEqual(table.selectedRow, 2)
+        model.selection = []; refresh(model, host); XCTAssertTrue(table.selectedRowIndexes.isEmpty)
+    }
+}
+
+@MainActor
+final class DetailPlaybackRetentionTests: XCTestCase {
+    private struct Provider: SiteProvider {
+        var mediaURL: URL? = nil
+        let site = SiteConfiguration(key: "detail-retention", name: "Fixture", type: 1, api: "https://example.invalid/api")
+        let capability = SiteCapability.standardJSON
+        func home() async throws -> SiteHome { SiteHome(categories: [], recommendations: []) }
+        func category(id: String, page: Int, filters: [String: String]) async throws -> VideoPage {
+            VideoPage(items: [], pagination: Pagination(page: page, pageCount: 1))
+        }
+        func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
+            VideoPage(items: [], pagination: Pagination(page: page, pageCount: 1))
+        }
+        func detail(id: String) async throws -> VideoDetail {
+            if id == "delayed" { try await Task.sleep(nanoseconds: 150_000_000) }
+            let episodes = (1...80).map { PlayEpisode(name: "Episode \($0)", url: "https://example.invalid/\(id)/\($0).mp4") }
+            return VideoDetail(summary: VideoSummary(siteKey: site.key, siteName: site.name, videoID: id, title: "Detail \(id)"),
+                playSources: [PlaySource(name: "Line A", episodes: episodes), PlaySource(name: "Line B", episodes: episodes)])
+        }
+        func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
+            if let mediaURL {
+                return SitePlaybackResult(url: mediaURL.absoluteString, needsParsing: false, flag: flag, validationPolicy: .playerAuthoritative)
+            }
+            throw AppError.playback("Intentional fixture resolution failure")
+        }
+    }
+    private func fixture() async throws -> (AppState, AppEnvironment, Provider, VideoDetail) {
+        let environment = try AppEnvironment.live(), provider = Provider()
+        let state = AppState(environment: environment)
+        state.seedCategoryHomeForTesting(record: .init(name: "Fixture", sourceKind: .pasted, rawData: Data("{}".utf8)),
+            provider: provider, home: try await provider.home())
+        let detail = try await provider.detail(id: "a")
+        await state.loadDetail(detail.summary)
+        return (state, environment, provider, detail)
+    }
+    func testPlaybackPreparationFailureAndCloseKeepMountedDetail() async throws {
+        let (state, environment, _, detail) = try await fixture()
+        let host = NSHostingController(rootView: RootView().environmentObject(state).environmentObject(state.navigation))
+        let window = NSWindow(contentRect: .init(x: 100, y: 100, width: 1100, height: 650),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentViewController = host
+        window.makeKeyAndOrderFront(nil); defer { window.close() }
+        try await Task.sleep(nanoseconds: 150_000_000); host.view.layoutSubtreeIfNeeded()
+        let scroll = try XCTUnwrap(BrowserKeyboardView.descendants(of: host.view).compactMap { $0 as? NSScrollView }
+            .first { $0.documentView?.bounds.height ?? 0 > $0.contentSize.height + 60 })
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 80)); scroll.reflectScrolledClipView(scroll.contentView)
+        let origin = scroll.contentView.bounds.origin
+        var prepared = false
+        environment.player.transitionSuspensionForTesting = { transition in
+            if transition == .prepare { prepared = true; XCTAssertEqual(state.selectedDetail, detail) }
+        }
+        await state.startPlayback(detail: detail, source: detail.playSources[0], episode: detail.playSources[0].episodes[1])
+        XCTAssertTrue(prepared)
+        XCTAssertTrue(state.isPlayerPresented)
+        XCTAssertEqual(state.selectedDetail, detail); XCTAssertTrue(state.isDetailPagePresented)
+        XCTAssertNotNil(state.playbackFailureSummary, "Exercise the actual provider resolution failure")
+        try await Task.sleep(nanoseconds: 80_000_000); host.view.layoutSubtreeIfNeeded()
+        XCTAssertTrue(scroll.isDescendant(of: host.view), "The detail scroll view must not be unmounted")
+        XCTAssertEqual(scroll.contentView.bounds.origin, origin)
+        await state.closePlayer()
+        XCTAssertTrue(state.isDetailPagePresented); XCTAssertEqual(state.selectedDetail, detail)
+        state.dismissDetail(); XCTAssertFalse(state.isDetailPagePresented)
+        await state.shutdown()
+    }
+    func testHistoryRequestPreservesDetailAndSidebarNavigationStillDismissesIt() async throws {
+        let (state, _, provider, detail) = try await fixture()
+        let item = HistoryRecord(configurationID: state.activeConfigurationRecord?.id, siteKey: provider.site.key,
+            videoID: "a", title: detail.summary.title, sourceName: "Line A", episodeName: "Episode 1")
+        state.requestHistoryPlayback(item)
+        XCTAssertTrue(state.isPlayerPresented); XCTAssertEqual(state.selectedDetail, detail)
+        await state.closePlayer()
+        XCTAssertEqual(state.selectedDetail, detail)
+        state.selectSection(.history)
+        XCTAssertFalse(state.isDetailPagePresented); XCTAssertEqual(state.selectedSection, .history)
+        await state.shutdown()
+    }
+    func testPlaybackDoesNotCancelAnotherDetailRequest() async throws {
+        let (state, _, provider, detail) = try await fixture()
+        let summary = VideoSummary(siteKey: provider.site.key, siteName: provider.site.name, videoID: "delayed", title: "Detail delayed")
+        let loading = Task { await state.loadDetail(summary) }
+        for _ in 0..<50 {
+            if state.pendingDetailSummary == summary { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertEqual(state.pendingDetailSummary, summary)
+        await state.startPlayback(detail: detail, source: detail.playSources[0], episode: detail.playSources[0].episodes[0])
+        await loading.value
+        XCTAssertEqual(state.selectedDetail?.summary, summary)
+        XCTAssertFalse(state.isRefreshingDetail)
+        await state.closePlayer(); await state.shutdown()
+    }
+    func testSuccessfulPlaybackAndEpisodeSwitchKeepDetailUntilExplicitBack() async throws {
+        let path = try XCTUnwrap(ProcessInfo.processInfo.environment["OKVIDEO_PIP_FIXTURE"])
+        let environment = try AppEnvironment.live(), provider = Provider(mediaURL: URL(fileURLWithPath: path))
+        let state = AppState(environment: environment)
+        await state.start()
+        state.seedCategoryHomeForTesting(record: .init(name: "Detail playback fixture", sourceKind: .pasted, rawData: Data("{}".utf8)),
+            provider: provider, home: try await provider.home())
+        let detail = try await provider.detail(id: "success")
+        await state.loadDetail(detail.summary)
+        let controller = PlayerPlaybackWindowController(appState: state)
+        let commands = state.$playerWindowCommand.compactMap { $0 }.sink { controller.execute($0) }
+        let presentation = state.$isPlayerPresented.removeDuplicates().sink { if !$0 { controller.dismiss() } }
+        controller.prewarm()
+        let window = try XCTUnwrap(controller.windowForTesting)
+        window.setContentSize(.init(width: 960, height: 540))
+        // XCTest's async wait does not guarantee an AppKit display cycle.
+        // Drive the real view's layout/display; readiness still requires a
+        // successful libmpv render probe in the production surface.
+        let display = Task { @MainActor in
+            while !Task.isCancelled {
+                window.contentView?.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+                if let content = window.contentView {
+                    for surface in BrowserKeyboardView.descendants(of: content).compactMap({ $0 as? MPVOpenGLView }) {
+                        // The first draw can be consumed before the window
+                        // becomes visible. Request a real draw while XCTest
+                        // owns the run loop, even if mpv has no video yet.
+                        surface.needsDisplay = true
+                        surface.displayIfNeeded()
+                    }
+                }
+                do { try await Task.sleep(nanoseconds: 20_000_000) } catch { return }
+            }
+        }
+        defer { display.cancel(); commands.cancel(); presentation.cancel(); controller.dismiss() }
+        for episode in detail.playSources[0].episodes.prefix(2) {
+            let timeout = Task { @MainActor in
+                do { try await Task.sleep(nanoseconds: 15_000_000_000) } catch { return }
+                let surfaces = window.contentView.map { BrowserKeyboardView.descendants(of: $0).compactMap { $0 as? MPVOpenGLView } } ?? []
+                XCTFail("Local fixture playback timed out: visible=\(window.isVisible) occlusion=\(window.occlusionState.rawValue) bounds=\(window.contentView?.bounds ?? .zero) surfaces=\(surfaces.map(\.readinessDiagnosticsForTesting))")
+                await state.closePlayer()
+            }
+            await state.startPlayback(detail: detail, source: detail.playSources[0], episode: episode)
+            timeout.cancel()
+            guard state.playbackResolutionState == .playing else {
+                XCTFail(state.playbackFailureSummary ?? "Playback did not start")
+                await state.shutdown()
+                return
+            }
+            XCTAssertEqual(state.currentPlaybackEpisode?.id, episode.id)
+            XCTAssertEqual(state.selectedDetail, detail)
+            XCTAssertTrue(state.isDetailPagePresented)
+        }
+        await state.closePlayer()
+        XCTAssertEqual(state.selectedDetail, detail)
+        XCTAssertTrue(state.isDetailPagePresented)
+        state.dismissDetail(); XCTAssertFalse(state.isDetailPagePresented)
+        await state.shutdown()
+    }
+
+}
+
+@MainActor
+final class HistorySelectionStateBindingTests: XCTestCase {
+    @MainActor private final class Rows: ObservableObject {
+        @Published var values = (0..<3).map { NativeLibraryRow(id: "\($0)", title: "Item \($0)", subtitle: "", posterURL: nil, date: Date(), progress: 0.1) }
+        var selected = Set<String>()
+    }
+    private struct Surface: View {
+        @ObservedObject var rows: Rows
+        @State private var selection = Set<String>()
+        var body: some View {
+            NativeLibraryList(rows: rows.values, selection: $selection, repository: nil, openTitle: "Play",
+                onOpen: { _ in XCTFail("Single click must not play") }, onDelete: { _, _ in })
+                .onChange(of: selection) { rows.selected = $0 }
+                .onChange(of: rows.values.map(\.id)) { selection.formIntersection($0) }
+        }
+    }
+    func testSwiftUIStateBindingKeepsNativeChoiceAcrossProgressAndRemoval() async throws {
+        let model = Rows(), host = NSHostingView(rootView: Surface(rows: Rows()))
+        host.rootView = Surface(rows: model)
+        let window = NSWindow(contentRect: .init(x: 100, y: 100, width: 900, height: 350), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host
+        NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        try await Task.sleep(nanoseconds: 100_000_000); host.layoutSubtreeIfNeeded()
+        let table = try XCTUnwrap(BrowserKeyboardView.descendants(of: host).compactMap { $0 as? NativeLibraryTableView }.first)
+        for removing in [false, true] {
+            let index = removing ? 2 : 1
+            let point = table.convert(NSPoint(x: 220, y: table.rect(ofRow: index).midY), to: nil)
+            let time = ProcessInfo.processInfo.systemUptime
+            let down = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [], timestamp: time,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
+            let up = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseUp, location: point, modifierFlags: [], timestamp: time + 0.15,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 2, clickCount: 1, pressure: 0))
+            var didUpdate = false
+            let update = Timer(timeInterval: 0.02, repeats: false) { _ in
+                MainActor.assumeIsolated {
+                    if removing { model.values.remove(at: 2) } else { model.values[0].progress = 0.8 }
+                    host.rootView = Surface(rows: model); host.layoutSubtreeIfNeeded(); didUpdate = true
+                    XCTAssertEqual(table.selectedRow, index)
+                }
+            }
+            let postRelease: @MainActor () -> Void = { NSApp.postEvent(up, atStart: true) }
+            let release = Timer(timeInterval: 0.15, repeats: false) { _ in MainActor.assumeIsolated { postRelease() } }
+            RunLoop.main.add(update, forMode: .eventTracking); RunLoop.main.add(release, forMode: .eventTracking)
+            table.mouseDown(with: down)
+            update.invalidate(); release.invalidate()
+            try await Task.sleep(nanoseconds: 60_000_000)
+            XCTAssertTrue(didUpdate)
+            XCTAssertEqual(model.selected, removing ? [] : ["1"])
+            XCTAssertEqual(table.selectedRowIndexes, removing ? [] : IndexSet(integer: 1))
+        }
+    }
+}

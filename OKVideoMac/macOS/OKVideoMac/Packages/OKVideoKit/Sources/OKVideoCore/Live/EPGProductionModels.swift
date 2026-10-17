@@ -128,7 +128,7 @@ public struct EPGXtreamWindowResult: Equatable, Sendable {
 }
 
 public struct EPGProgrammeRecordIdentity: Equatable, Hashable, Sendable {
-    public enum Kind: String, Sendable { case xmltv, xtream }
+    public enum Kind: String, Sendable { case xmltv, xtream, tvboxDay }
 
     public let kind: Kind
     public let resourceIdentity: String

@@ -30,9 +30,10 @@ public enum EPGGuideXtreamLoader {
         demand: EPGGuideDemand,
         context: EPGGuideXtreamContext,
         retainedSnapshotCost: Int = 0,
+        archive: Bool = false,
         fetch: @escaping Fetch
     ) async throws -> EPGGuideSnapshot {
-        guard demand.capability == .xtreamShort,
+        guard demand.capability == (archive ? .xtreamArchive : .xtreamShort),
               demand.source.kind == .xtream,
               !context.accountIdentity.isEmpty,
               !context.serverIdentity.isEmpty,
@@ -48,7 +49,7 @@ public enum EPGGuideXtreamLoader {
                     demand: demand,
                     context: context,
                     retainedSnapshotCost: retainedSnapshotCost,
-                    fetch: fetch
+                    archive: archive, fetch: fetch
                 )
             } catch AttemptError.rowSnapshotChanged {
                 guard restartCount == 0 else { throw EPGGuideFailure.snapshotChanged }
@@ -88,6 +89,7 @@ public enum EPGGuideXtreamLoader {
         demand: EPGGuideDemand,
         context: EPGGuideXtreamContext,
         retainedSnapshotCost: Int,
+        archive: Bool,
         fetch: @escaping Fetch
     ) async throws -> EPGGuideSnapshot {
         var coordinator = try EPGGuideWorkCoordinator(
@@ -125,7 +127,7 @@ public enum EPGGuideXtreamLoader {
                                 configurationRevision: context.configurationRevision,
                                 from: assignment.slice.start,
                                 to: assignment.slice.end,
-                                demandRevision: demand.demandRevision,
+                                demandRevision: demand.demandRevision, archive: archive,
                                 fetch: { try await fetch(streamID) }
                             )
                             try Task.checkCancellation()

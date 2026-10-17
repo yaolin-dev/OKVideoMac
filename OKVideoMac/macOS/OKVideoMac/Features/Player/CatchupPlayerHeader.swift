@@ -10,25 +10,12 @@ struct CatchupPlayerHeader: View {
         HStack(spacing: 12) {
             Color.clear.frame(width: 100, height: 1)
                 .accessibilityHidden(true)
-            VStack(spacing: 3) {
-                Text(title)
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.94))
-                    .lineLimit(1).truncationMode(.tail)
-                HStack(spacing: 5) {
-                    Text(L10n.string("live.catchup.mode", fallback: "Catch-up"))
-                    Text("·")
-                    Text(channel).lineLimit(1).truncationMode(.tail)
-                    Text("·")
-                    Text(start, format: .dateTime.month().day().hour().minute())
-                        .monospacedDigit().fixedSize()
-                }
-                .font(.system(size: 11))
-                .foregroundStyle(.white.opacity(0.66))
-                .lineLimit(1)
-            }
+            PlayerTitleView(title: title, episode: [
+                L10n.string("live.catchup.mode", fallback: "Catch-up"), channel,
+                start.formatted(.dateTime.month().day().hour().minute())
+            ].joined(separator: " · "))
             .frame(maxWidth: .infinity)
-            .shadow(color: .black.opacity(0.7), radius: 2, y: 1)
+            .help(title + " · " + channel + " · " + start.formatted())
             Button(action: returnToLive) {
                 Label(L10n.string("live.catchup.return-live", fallback: "Return to Live"), systemImage: "dot.radiowaves.left.and.right")
                     .font(.system(size: 11, weight: .medium))
@@ -40,6 +27,6 @@ struct CatchupPlayerHeader: View {
             .accessibilityIdentifier("player.catchup.return-live")
             .frame(width: 100)
         }
-        .frame(height: 48)
+        .frame(height: 36)
     }
 }

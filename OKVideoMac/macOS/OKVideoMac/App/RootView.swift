@@ -435,6 +435,10 @@ private struct BrowserRootSplitView: NSViewControllerRepresentable {
         return controller
     }
 
+    static func dismantleNSViewController(_ controller: BrowserRootSplitController, coordinator: ()) {
+        controller.detachWindowChrome()
+    }
+
     func updateNSViewController(_ controller: BrowserRootSplitController, context: Context) {
         controller.sidebarHost.rootView = AnyView(
             SidebarView(liveSession: liveSession)
@@ -450,7 +454,7 @@ private struct BrowserRootSplitView: NSViewControllerRepresentable {
         )
         controller.detailHost.rootView = AnyView(
             SectionContentView(liveSession: liveSession)
-                .background { BrowserDetailTitlebarMaterial().ignoresSafeArea() }
+                .modifier(BrowserToolbarBackgroundModifier())
                 // Forward app-specific values, not a snapshot of colorScheme
                 // or display traits. Each host must follow its NSWindow's
                 // live appearance in the same update as the native materials.
@@ -470,21 +474,6 @@ private struct BrowserRootSplitView: NSViewControllerRepresentable {
 final class BrowserRootSplitViewSurface: NSSplitView {
     override var dividerThickness: CGFloat { 0 }
     override func drawDivider(in rect: NSRect) {}
-}
-
-/// The right pane owns its titlebar material independently of AppKit's sidebar.
-/// Page backgrounds stop at the top safe area, leaving this semantic material
-/// behind the toolbar. It covers the entire right column, including its edge.
-private struct BrowserDetailTitlebarMaterial: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = .titlebar
-        view.blendingMode = .withinWindow
-        view.state = .followsWindowActiveState
-        return view
-    }
-
-    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
 }
 
 /// A window command belongs to the window, not to a page's changing toolbar.
@@ -572,6 +561,17 @@ final class BrowserRootSplitController: NSSplitViewController {
         // SwiftUI's toolbar/observer teardown. Empty home states declare their
         // real page title through HomeLiveToolbarModifier instead.
         scheduleTitlebarLayout()
+    }
+
+    func detachWindowChrome() {
+        guard let window = observedWindow else { return }
+        observedWindow = nil
+        let accessory = sidebarTitlebar
+        DispatchQueue.main.async { [weak window] in
+            guard let window, let index = window.titlebarAccessoryViewControllers
+                .firstIndex(where: { $0 === accessory }) else { return }
+            window.removeTitlebarAccessoryViewController(at: index)
+        }
     }
 
     private func scheduleTitlebarLayout() {
@@ -1502,7 +1502,7 @@ private struct NodeConfigurationWebView: NSViewRepresentable {
     }
 }
 
-private struct WindowCloseObserver: NSViewRepresentable {
+struct WindowCloseObserver: NSViewRepresentable {
     let onClose: () -> Void
     let onKeyChange: (Bool) -> Void
 
@@ -1522,7 +1522,7 @@ private struct WindowCloseObserver: NSViewRepresentable {
     }
 }
 
-private final class WindowCloseObserverView: NSView {
+final class WindowCloseObserverView: NSView {
     var onClose: (() -> Void)?
     var onKeyChange: ((Bool) -> Void)?
     private var observers: [NSObjectProtocol] = []
@@ -2349,6 +2349,7 @@ struct NativeSidebarSourceList: NSViewRepresentable {
     let onSubmit: () -> Void
     let onExitSearch: () -> Bool
     let onSelect: (AppSection) -> Void
+    var isNavigationEnabled = true
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -2548,7 +2549,8 @@ struct NativeSidebarSourceList: NSViewRepresentable {
         }
 
         private func activate(row: Int, in outlineView: NSOutlineView) {
-            guard let item = outlineView.item(atRow: row) as? ItemNode else { return }
+            guard parent.isNavigationEnabled,
+                  let item = outlineView.item(atRow: row) as? ItemNode else { return }
             parent.onSelect(item.section)
             let selection = parent.navigation.selection
             latestUserSelection = selection
@@ -2565,6 +2567,7 @@ struct NativeSidebarSourceList: NSViewRepresentable {
             // replay that value into either the selection or search control.
             guard parent.selection == parent.navigation.selection,
                   parent.selection.revision >= (latestUserSelection?.revision ?? 0) else { return }
+            view.outlineView.isEnabled = parent.isNavigationEnabled
             let field = view.searchField
             AppSidebarNativePolicy.setPlaceholder(parent.presentation.placeholder, on: field)
             field.setAccessibilityLabel(parent.presentation.accessibilityLabel)

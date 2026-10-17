@@ -9,6 +9,7 @@ final class WindowTransitionCoordinator {
     enum Phase { case windowed, enteringFullScreen, fullScreen, exitingFullScreen }
     private static var associationKey: UInt8 = 0
     static let didFailFullScreen = Notification.Name("com.okvideomac.window.fullscreen-failed")
+    static let fullScreenPhaseDidChange = Notification.Name("com.okvideomac.window.fullscreen-phase-changed")
 
     static func state(for window: NSWindow) -> WindowTransitionCoordinator {
         if let state = objc_getAssociatedObject(window, &associationKey) as? WindowTransitionCoordinator {
@@ -89,6 +90,7 @@ final class WindowTransitionCoordinator {
             pending.removeAll()
             pendingOrder.removeAll()
             actions.forEach { $0.action(nil) }
+            publishFullScreenPhase()
         default: break
         }
     }
@@ -101,6 +103,7 @@ final class WindowTransitionCoordinator {
         generation &+= 1
         fullscreenStartedAt = ProcessInfo.processInfo.systemUptime
         scheduleFullscreenRecovery()
+        publishFullScreenPhase()
     }
 
     func completeFullScreen(isFullScreen: Bool) {
@@ -110,6 +113,13 @@ final class WindowTransitionCoordinator {
         isLiveResizing = window?.inLiveResize == true
         if desiredFullScreen == isFullScreen { desiredFullScreen = nil }
         scheduleDrain()
+        publishFullScreenPhase()
+    }
+
+    private func publishFullScreenPhase() {
+        if let window {
+            NotificationCenter.default.post(name: Self.fullScreenPhaseDidChange, object: window)
+        }
     }
 
     /// Called by the app-owned player delegate for both public failure hooks.

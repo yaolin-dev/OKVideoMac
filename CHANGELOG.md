@@ -2,11 +2,18 @@
 
 ## [Unreleased]
 
-- Add local catch-up acceptance: programme-aware M3U archive requests, channel/date programme lists, bounded programme playback, seek policy and return to live. Retain previously observed XMLTV history within source and revision boundaries. Full TVBox JSON and Native Xtream archive integration remain pending. See [scope and validation](OKVideoMac/macOS/OKVideoMac/Docs/LIVE_CATCHUP.md).
-- Add a visible Playback Information button for on-demand and live playback, with source resolution, codecs, media frame rate, selected audio parameters and estimated bitrates. Expand playback statistics for decoder, output frame rate, network speed, buffered duration and dropped frames.
-- Copy known playback information without URL credentials, query strings or parent file paths. Missing values remain unavailable; bitrate and download speed use distinct bit/byte units.
-- Show last-played specifications on Detail only for the exact configuration revision, source and episode observed in the current session. No pre-play probing or title-based quality inference.
-- Phase 1 is a local acceptance change; catch-up playback and public release remain pending. See [feature scope and validation](OKVideoMac/macOS/OKVideoMac/Docs/PLAYBACK_INFORMATION.md).
+No additional changes beyond the 0.8.7 candidate.
+
+## [0.8.7] - 2026-10-17
+
+- Add programme-aware live catch-up for declared M3U and TVBox/FongMi rules, date-based EPG, observed XMLTV history and credential-isolated Native Xtream archives. Bound playback to the selected programme, preserve seek ownership and provide replay, the next available programme and return to live. Server support and EPG coverage still determine availability.
+- Add native Picture in Picture for video playback, retaining one mpv client/render context, subtitles, pause/return and playback when the main window closes. The dynamically checked private system interface is for Developer ID distribution; unavailable interfaces disable entry. Danmaku remains in the main player.
+- Add Playback Information under Settings, with source media parameters, selected audio metadata, separately labelled bitrate/network statistics and sanitized copying. Detail specifications are session-only and scoped to the exact configuration, resource, line and episode.
+- Unify responsive VOD/live/catch-up controls, channel and episode navigation, programme headers, narrow-window menus, seek feedback and fullscreen recovery. Refresh video dimensions when consecutive files have the same resolution.
+- Show the native browser shell during startup, restore local content/theme before optional Android checks, remove the light titlebar split-section stripe with a continuous native backdrop, and retain recovery and initialization gates.
+- Preserve single-click History/Favorites selection during progress refresh and defer row changes until native mouse tracking ends. Double-click and the Play button retain their existing playback behavior; Cmd/Shift and keyboard selection remain available.
+- Keep the browser detail route, its scroll position and independent detail loading through playback preparation, failure, success and episode changes. Refresh Quark history through fresh detail and retain verified file identity instead of persisting expiring play tokens.
+- Release candidate: **0.8.7 / Build 140**; Android Bridge remains **0.3.48 / 60** and dependency versions remain pinned. Formal test/signing/notarization/publication results are recorded in [release readiness](Docs/RELEASE_READINESS_0.8.7.md).
 
 ## [0.8.6] - 2026-10-14
 

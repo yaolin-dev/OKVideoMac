@@ -150,7 +150,7 @@ public actor EPGProductionRepository {
     public func loadXtreamWindow(key: EPGRequestKey, accountIdentity: String,
                                  serverIdentity: String, configurationRevision: String,
                                  from start: Date, to end: Date, demandRevision: UUID,
-                                 force: Bool = false,
+                                 force: Bool = false, archive: Bool = false,
                                  fetch: @escaping @Sendable () async throws -> EPGPayload) async throws -> EPGXtreamWindowResult {
         guard !closed else { throw EPGProductionServiceError.closed }
         guard !paused else { throw EPGProductionServiceError.paused }
@@ -159,9 +159,10 @@ public actor EPGProductionRepository {
         }
         let cacheKey = try xtreamKey(key: key, accountIdentity: accountIdentity,
                                      serverIdentity: serverIdentity,
-                                     configurationRevision: configurationRevision)
+                                     configurationRevision: configurationRevision, archive: archive)
         let entry = try await resolveXtreamEntry(cacheKey: cacheKey, requestKey: key,
-                                                 force: force, fetch: fetch)
+                                                 force: force, maximumProgrammes: archive ? 1000 : Self.maximumXtreamProgrammes,
+                                                 maximumEntryBytes: archive ? 256 * 1024 : Self.maximumXtreamEntryBytes, fetch: fetch)
         let token = xtreamToken(entry, demandRevision: demandRevision)
         let records: [EPGWindowProgramme] = entry.programmes.enumerated().compactMap { ordinal, programme in
             guard programme.start < end, programme.end > start else { return nil }
@@ -257,7 +258,7 @@ public actor EPGProductionRepository {
     }
 
     private func xtreamKey(key: EPGRequestKey, accountIdentity: String,
-                           serverIdentity: String, configurationRevision: String) throws -> XtreamKey {
+                           serverIdentity: String, configurationRevision: String, archive: Bool = false) throws -> XtreamKey {
         guard key.source.kind == .xtream, key.resource.utf8.count > 0,
               key.resource.utf8.count <= Self.maximumXtreamIdentifierBytes,
               accountIdentity.utf8.count <= 8_192, serverIdentity.utf8.count <= 8_192,
@@ -265,15 +266,15 @@ public actor EPGProductionRepository {
             throw EPGProductionServiceError.invalidRequest
         }
         return XtreamKey(source: key.source,
-            revision: Self.digest(key.revision + "\u{0}" + configurationRevision),
+            revision: Self.digest(key.revision + "\u{0}" + configurationRevision + (archive ? "\u{0}archive" : "\u{0}short")),
             account: Self.digest(accountIdentity), server: Self.digest(serverIdentity),
             streamID: key.resource)
     }
 
     private static func xtreamEntry(payload: EPGPayload, requestKey: EPGRequestKey,
-                                    streamID: String, now: Date) throws -> XtreamEntry {
+                                    streamID: String, now: Date, maximumProgrammes: Int = maximumXtreamProgrammes, maximumEntryBytes: Int = maximumXtreamEntryBytes, cacheTTL: TimeInterval? = nil) throws -> XtreamEntry {
         let programmes = payload.guide.programmes
-        guard programmes.count <= maximumXtreamProgrammes else {
+        guard programmes.count <= maximumProgrammes else {
             throw EPGProductionServiceError.resultTooLarge
         }
         var cost = streamID.utf8.count + 256
@@ -289,13 +290,13 @@ public actor EPGProductionRepository {
             }
             previous = value.start
             cost += titleBytes + value.channelID.utf8.count + 128
-            guard cost <= maximumXtreamEntryBytes else {
+            guard cost <= maximumEntryBytes else {
                 throw EPGProductionServiceError.resultTooLarge
             }
         }
         let availability: EPGAvailability = payload.unsupported ? .unsupported
             : (programmes.isEmpty ? .empty : .fresh)
-        let ttl = payload.unsupported ? unsupportedTTL : (programmes.isEmpty ? emptyTTL : xtreamTTL)
+        let ttl = cacheTTL ?? (payload.unsupported ? unsupportedTTL : (programmes.isEmpty ? emptyTTL : xtreamTTL))
         return XtreamEntry(key: requestKey, version: UUID().uuidString,
             publishedAt: now, expiresAt: now.addingTimeInterval(ttl),
             availability: availability, programmes: programmes,
@@ -312,7 +313,8 @@ public actor EPGProductionRepository {
     }
 
     private func resolveXtreamEntry(cacheKey: XtreamKey, requestKey: EPGRequestKey,
-                                    force: Bool,
+                                    force: Bool, maximumProgrammes: Int = maximumXtreamProgrammes,
+                                    maximumEntryBytes: Int = maximumXtreamEntryBytes, cacheTTL: TimeInterval? = nil,
                                     fetch: @escaping @Sendable () async throws -> EPGPayload) async throws -> XtreamEntry {
         if !force, var cached = xtreamEntries[cacheKey], cached.expiresAt > now() {
             cached.accessedAt = now()
@@ -331,7 +333,7 @@ public actor EPGProductionRepository {
             let payload = try await fetch()
             try Task.checkCancellation()
             return try Self.xtreamEntry(payload: payload, requestKey: requestKey,
-                                        streamID: cacheKey.streamID, now: clock())
+                                        streamID: cacheKey.streamID, now: clock(), maximumProgrammes: maximumProgrammes, maximumEntryBytes: maximumEntryBytes, cacheTTL: cacheTTL)
         }
         xtreamFlights[cacheKey] = XtreamFlight(id: id, task: task)
         do {
@@ -381,6 +383,27 @@ public actor EPGProductionRepository {
 
     private func xtreamAvailability(_ entry: XtreamEntry) -> EPGAvailability {
         entry.expiresAt <= now() && entry.availability == .fresh ? .stale : entry.availability
+    }
+
+    /// Daily API entries share the existing finite cache/flight/close budgets,
+    /// with source, channel, endpoint revision, timezone and day isolated.
+    public func loadTVBoxDay(key: EPGRequestKey, day: String, timeZoneID: String,
+                            demandRevision: UUID,
+                            fetch: @escaping @Sendable () async throws -> EPGPayload) async throws -> EPGChannelDayResult {
+        guard !closed, !paused, key.source.kind == .imported, !key.resource.isEmpty,
+              key.resource.utf8.count <= Self.maximumXtreamIdentifierBytes,
+              day.utf8.count <= 16, TimeZone(identifier: timeZoneID) != nil else {
+            throw EPGProductionServiceError.invalidRequest
+        }
+        let scope = Self.digest(key.revision + "\u{0}" + day + "\u{0}" + timeZoneID)
+        let cacheKey = XtreamKey(source: key.source, revision: scope,
+            account: "tvbox-day", server: scope, streamID: key.resource)
+        let entry = try await resolveXtreamEntry(cacheKey: cacheKey, requestKey: key,
+            force: false, maximumProgrammes: 512, cacheTTL: 300, fetch: fetch)
+        let token = EPGResultToken(serviceIncarnation: incarnation,
+            resourceIdentity: "tvbox:" + Self.digest(key.revision + "\u{0}" + key.resource + "\u{0}" + day),
+            sourceEpoch: key.revision, dataVersion: entry.version, demandRevision: demandRevision)
+        return EPGChannelDayResult(token: token, programmes: entry.programmes, availability: xtreamAvailability(entry))
     }
 
     private static func digest(_ value: String) -> String {

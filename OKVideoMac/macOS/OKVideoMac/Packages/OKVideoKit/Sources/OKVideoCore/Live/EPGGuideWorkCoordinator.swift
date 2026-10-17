@@ -90,8 +90,8 @@ public struct EPGGuideWorkCoordinator: Sendable {
         while reservations.count < EPGGuideLimits.maximumRunning, !runnable.isEmpty {
             let index = runnable.removeFirst()
             guard !rows[index].terminal, !rows[index].running else { continue }
-            let reservation = capability == .xmltv
-                ? EPGGuideLimits.xmltvReservationBytes : EPGGuideLimits.xtreamReservationBytes
+            let reservation = capability == .xmltv ? EPGGuideLimits.xmltvReservationBytes
+                : (capability == .xtreamShort ? EPGGuideLimits.xtreamReservationBytes : EPGGuideLimits.channelArchiveReservationBytes)
             if totalCommittedCost + reservations.values.reduce(0, +) + reservation
                     > EPGGuideLimits.maximumEstimatedBytes {
                 if retainedCost > 0 {

@@ -16,7 +16,7 @@ class UpdateBundleTests(unittest.TestCase):
         changed=set(paths); changed.remove('Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate')
         changed.add('Contents/Helpers/unknown')
         with self.assertRaises(SystemExit): require_approved(changed)
-        self.assertEqual(require_approved(paths),34)
+        self.assertEqual(require_approved(paths),36)
     def test_missing_or_extra_executable_fails(self):
         paths=expected_paths()
         with self.assertRaises(SystemExit): require_approved(paths|{'Contents/MacOS/unapproved'})

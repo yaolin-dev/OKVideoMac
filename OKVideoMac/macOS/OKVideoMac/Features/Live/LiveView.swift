@@ -483,6 +483,7 @@ private struct LiveGuideSelection: Equatable {
     let title: String
     let start: Date
     let end: Date
+    var catchupAvailable: Bool? = nil
 }
 
 struct LiveGuideChannelPager {
@@ -712,11 +713,11 @@ struct LiveGuideScreen: View {
                     onProgrammeSelected: { row, programme in
                         guard modelPresenter.acceptsCallback(scope: scope, revision: revision) else { return }
                         selection = LiveGuideSelection(rowID: row.id, title: programme.title,
-                            start: programme.start, end: programme.end)
+                            start: programme.start, end: programme.end, catchupAvailable: programme.catchupAvailable)
                     },
                     onProgrammeActivated: { row, programme in
                         guard modelPresenter.acceptsCallback(scope: scope, revision: revision) else { return }
-                        playProgramme(LiveGuideSelection(rowID: row.id, title: programme.title, start: programme.start, end: programme.end))
+                        playProgramme(LiveGuideSelection(rowID: row.id, title: programme.title, start: programme.start, end: programme.end, catchupAvailable: programme.catchupAvailable))
                     },
                     onChannelActivated: { row in
                         guard modelPresenter.acceptsCallback(scope: scope, revision: revision) else { return }
@@ -831,7 +832,7 @@ struct LiveGuideScreen: View {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(row.programmes) { programme in
                             let value = LiveGuideSelection(rowID: row.id, title: programme.title,
-                                start: programme.start, end: programme.end)
+                                start: programme.start, end: programme.end, catchupAvailable: programme.catchupAvailable)
                             HStack(spacing: 12) {
                                 VStack(alignment: .leading, spacing: 5) {
                                     Text(programme.title).font(.headline)
@@ -858,7 +859,7 @@ struct LiveGuideScreen: View {
     }
 
     private func programme(_ value: LiveGuideSelection) -> EPGProgramme {
-        EPGProgramme(channelID: value.rowID, title: value.title, start: value.start, end: value.end)
+        EPGProgramme(channelID: value.rowID, title: value.title, start: value.start, end: value.end, catchupAvailable: value.catchupAvailable)
     }
 
     private func availability(_ value: LiveGuideSelection) -> LiveCatchupAvailability {
@@ -868,8 +869,11 @@ struct LiveGuideScreen: View {
 
     private func programmeButton(_ value: LiveGuideSelection) -> some View {
         let availability = availability(value)
+        let message = availability == .unsupported && sourceID.isXtream && value.catchupAvailable == false
+            ? L10n.string("live.catchup.programme-unavailable", fallback: "Programme Not Available for Catch-up")
+            : LiveCatchupPresentation.label(availability)
         return Button { playProgramme(value) } label: {
-            Label(LiveCatchupPresentation.label(availability), systemImage: availability == .available ? "clock.arrow.circlepath" : "play.fill")
+            Label(message, systemImage: availability == .available ? "clock.arrow.circlepath" : "play.fill")
         }
         .disabled(availability != .available && availability != .current)
     }
@@ -877,9 +881,17 @@ struct LiveGuideScreen: View {
     private func playProgramme(_ value: LiveGuideSelection) {
         let availability = availability(value)
         if availability == .current { playChannel(value.rowID); return }
-        guard availability == .available, let channel = boundedChannels.first(where: { $0.id == value.rowID }),
-              let selection = importedCatalog?.selections(for: channel).first(where: {
-                  LiveCatchupPolicy.availability(configuration: $0.stream.effectiveCatchup,
+        guard availability == .available, let channel = boundedChannels.first(where: { $0.id == value.rowID }) else { return }
+        if sourceID.isXtream {
+            guard let stream = channel.streams.first(where: {
+                LiveCatchupPolicy.availability(stream: $0, programme: programme(value), now: Date()) == .available
+            }) else { return }
+            Task { await state.playNativeCatchup(channel: channel, stream: stream, sourceID: sourceID,
+                programme: programme(value), navigationChannels: boundedChannels) }
+            return
+        }
+        guard let selection = importedCatalog?.selections(for: channel).first(where: {
+                  LiveCatchupPolicy.availability(stream: $0.stream,
                       programme: programme(value), now: Date()) == .available
               }) else { return }
         Task { await state.playImportedCatchup(selection, programme: programme(value), navigationChannels: boundedChannels) }
@@ -1417,6 +1429,7 @@ struct LiveNowNextView: View {
     @ObservedObject var epg: LiveEPGState
     let channel: LiveChannel
     let source: LiveSourceID
+    var usesPlayerProgressColors = false
 
     var body: some View {
         let initial = epg.nowNext(channel: channel, source: source, at: Date())
@@ -1432,8 +1445,7 @@ struct LiveNowNextView: View {
                             .fixedSize(horizontal: true, vertical: false)
                             .layoutPriority(1)
                         if let progress = info.progress(at: context.date) {
-                            ProgressView(value: progress)
-                                .progressViewStyle(.linear)
+                            programmeProgress(progress)
                                 .frame(maxWidth: .infinity)
                                 .accessibilityLabel(L10n.string("live.epg.progress", fallback: "Programme progress"))
                         }
@@ -1470,12 +1482,40 @@ struct LiveNowNextView: View {
         }
     }
 
+    @ViewBuilder
+    private func programmeProgress(_ progress: Double) -> some View {
+        if usesPlayerProgressColors {
+            ProgressView(value: progress)
+                .progressViewStyle(LivePlayerProgrammeProgressStyle())
+        } else {
+            ProgressView(value: progress).progressViewStyle(.linear)
+        }
+    }
+
     private func emptyLabel(_ availability: EPGAvailability) -> String {
         switch availability {
         case .unsupported: return L10n.string("live.epg.unsupported", fallback: "Provider has no programme guide")
         case .failed: return L10n.string("live.epg.unavailable", fallback: "Programme guide unavailable")
         default: return L10n.string("live.epg.no-current", fallback: "No current programme")
         }
+    }
+}
+
+/// Explicit colors keep the player overlay readable independently of the
+/// system accent color; browser programme rows retain their native style.
+private struct LivePlayerProgrammeProgressStyle: ProgressViewStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        GeometryReader { geometry in
+            let progress = min(1, max(0, configuration.fractionCompleted ?? 0))
+            Capsule()
+                .fill(.white.opacity(0.20))
+                .overlay(alignment: .leading) {
+                    Capsule()
+                        .fill(.white.opacity(0.85))
+                        .frame(width: geometry.size.width * progress)
+                }
+        }
+        .frame(height: 6)
     }
 }
 

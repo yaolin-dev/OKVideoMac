@@ -9,6 +9,8 @@ public enum EPGGuideValidationError: Error, Equatable, Sendable {
 public enum EPGGuideCapability: String, Equatable, Sendable {
     case xmltv
     case xtreamShort
+    case xtreamArchive
+    case tvboxDay
 }
 
 public struct EPGGuideTimeSlice: Equatable, Hashable, Sendable {
@@ -84,6 +86,7 @@ public enum EPGGuideTruncationReason: String, Equatable, Sendable {
     case perRowLimit
     case globalItemLimit
     case byteBudget
+    case sourceCoverage
 }
 
 public enum EPGGuideFailure: String, Error, Equatable, Sendable {
@@ -248,6 +251,7 @@ public enum EPGGuideLimits {
     public static let maximumEstimatedBytes = 8 * 1_024 * 1_024
     public static let xmltvReservationBytes = 2 * 1_024 * 1_024 + 64 * 1_024
     public static let xtreamReservationBytes = 64 * 1_024 + 16 * 1_024
+    public static let channelArchiveReservationBytes = 256 * 1_024 + 16 * 1_024
 }
 
 public enum EPGGuideCost {

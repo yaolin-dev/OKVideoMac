@@ -4,15 +4,26 @@ import OKVideoCore
 enum LiveCatchupPresentation {
     static func canBrowse(_ channel: LiveChannel) -> Bool {
         channel.streams.contains { stream in
+            if case .provider = stream.target, stream.archive?.isValid == true { return true }
             guard let config = stream.effectiveCatchup else { return false }
             return ["default", "append"].contains(config.mode) && !config.template.isEmpty
         }
     }
     static func availability(channel: LiveChannel, programme: EPGProgramme, now: Date) -> LiveCatchupAvailability {
-        let results = channel.streams.map { LiveCatchupPolicy.availability(configuration: $0.effectiveCatchup, programme: programme, now: now) }
+        let results = channel.streams.map { LiveCatchupPolicy.availability(stream: $0, programme: programme, now: now) }
         if results.contains(.available) { return .available }
         if results.contains(.expired) { return .expired }
         return results.first ?? .unsupported
+    }
+    static func errorMessage(_ error: XtreamArchiveError) -> String {
+        switch error {
+        case .missingServerTimeZone:
+            return L10n.string("live.catchup.server-timezone-unavailable", fallback: "The server did not provide a usable archive time zone.")
+        case .ambiguousServerTime:
+            return L10n.string("live.catchup.ambiguous-server-time", fallback: "The server cannot distinguish this repeated local time. Choose another programme.")
+        default:
+            return L10n.string("live.catchup.failed", fallback: "Catch-up Unavailable")
+        }
     }
     static func label(_ availability: LiveCatchupAvailability) -> String {
         switch availability {

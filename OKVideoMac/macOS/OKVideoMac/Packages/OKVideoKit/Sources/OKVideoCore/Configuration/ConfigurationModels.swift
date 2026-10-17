@@ -263,6 +263,7 @@ public struct LiveConfiguration: Codable, Equatable, Identifiable, Sendable {
     public var click: String?
     public var logo: String?
     public var epg: String?
+    public var catchup: TVBoxCatchupConfiguration?
     public var userAgent: String?
     public var origin: String?
     public var referer: String?
@@ -283,6 +284,7 @@ public struct LiveConfiguration: Codable, Equatable, Identifiable, Sendable {
         click: String? = nil,
         logo: String? = nil,
         epg: String? = nil,
+        catchup: TVBoxCatchupConfiguration? = nil,
         userAgent: String? = nil,
         origin: String? = nil,
         referer: String? = nil,
@@ -302,6 +304,7 @@ public struct LiveConfiguration: Codable, Equatable, Identifiable, Sendable {
         self.click = click
         self.logo = logo
         self.epg = epg
+        self.catchup = catchup
         self.userAgent = userAgent
         self.origin = origin
         self.referer = referer
@@ -324,6 +327,7 @@ public struct LiveConfiguration: Codable, Equatable, Identifiable, Sendable {
         click = object.removeString("click")
         logo = object.removeString("logo")
         epg = object.removeString("epg")
+        catchup = try object.removeDecoded("catchup", default: Optional<TVBoxCatchupConfiguration>.none)
         userAgent = object.removeString("ua")
         origin = object.removeString("origin")
         referer = object.removeString("referer")
@@ -346,6 +350,7 @@ public struct LiveConfiguration: Codable, Equatable, Identifiable, Sendable {
         object.set("click", click)
         object.set("logo", logo)
         object.set("epg", epg)
+        try object.setEncoded("catchup", catchup)
         object.set("ua", userAgent)
         object.set("origin", origin)
         object.set("referer", referer)
@@ -383,6 +388,7 @@ public struct LiveChannelConfiguration: Codable, Equatable, Sendable {
     public var number: String?
     public var logo: String?
     public var epg: String?
+    public var catchup: TVBoxCatchupConfiguration?
     public var userAgent: String?
     public var click: String?
     public var format: String?
@@ -394,6 +400,7 @@ public struct LiveChannelConfiguration: Codable, Equatable, Sendable {
     public var parse: Int?
 
     enum CodingKeys: String, CodingKey {
+        case catchup
         case name, urls, number, logo, epg, click, format, origin, referer, header, parse
         case userAgent = "ua"
         case tvgID = "tvgId"
@@ -406,6 +413,7 @@ public struct LiveChannelConfiguration: Codable, Equatable, Sendable {
         number: String? = nil,
         logo: String? = nil,
         epg: String? = nil,
+        catchup: TVBoxCatchupConfiguration? = nil,
         userAgent: String? = nil,
         click: String? = nil,
         format: String? = nil,
@@ -421,6 +429,7 @@ public struct LiveChannelConfiguration: Codable, Equatable, Sendable {
         self.number = number
         self.logo = logo
         self.epg = epg
+        self.catchup = catchup
         self.userAgent = userAgent
         self.click = click
         self.format = format
@@ -439,6 +448,7 @@ public struct LiveChannelConfiguration: Codable, Equatable, Sendable {
         number = try container.decodeIfPresent(String.self, forKey: .number)
         logo = try container.decodeIfPresent(String.self, forKey: .logo)
         epg = try container.decodeIfPresent(String.self, forKey: .epg)
+        catchup = try container.decodeIfPresent(TVBoxCatchupConfiguration.self, forKey: .catchup)
         userAgent = try container.decodeIfPresent(String.self, forKey: .userAgent)
         click = try container.decodeIfPresent(String.self, forKey: .click)
         format = try container.decodeIfPresent(String.self, forKey: .format)

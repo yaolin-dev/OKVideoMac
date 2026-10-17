@@ -1,6 +1,6 @@
-# 直播回放：第二阶段本地验收
+# 直播回放
 
-状态：第二阶段实现、相关自动化回归和独立 Release 包验证完成，用户已确认播放、跳转、返回直播及顶部界面试用通过。尚未发布，不替换桌面 App。第一阶段播放信息已通过用户试用。完整 TVBox／FongMi JSON 配置、日期式节目表 API 和 Native Xtream 归档属于第三阶段。
+状态：0.8.7（Build 140）发布候选。包含通用 M3U 回放、TVBox／FongMi 配置与日期式节目表，以及 Native Xtream 节目归档。下述能力依赖来源声明、服务端行为与实际 EPG 覆盖；自动化和先前本机试用不代表所有服务端均已验收。
 
 ## 操作
 
@@ -20,8 +20,28 @@
 
 同一来源、同一节目表修订刷新时，将过去已经观察到的、已结束的节目保留最多七天。新节目表提供的内容和时间重叠区间优先；移除的频道、其他来源或修订不会复活。缓存遵循原有条数、字节、磁盘及取消预算，不挤占新的节目表数据。没有取到过的历史节目不会被补造；视频保留期限与节目表覆盖范围分别处理。
 
+## TVBox／FongMi 配置
+
+直播项及频道支持 catchup.type、days、regex、source、replace。频道规则优先；明确关闭时不启用标准 IPTV 自动兼容。支持 ${(b)timestamp}、${(e)timestamp}、utc／utcend 形式，以及 yyyy、MM、dd、HH、mm、ss 与常用分隔符组成的开始／结束时间格式。附加模式按规则改写直播路径，并处理已有查询参数。未知时间格式或无效规则不发起播放请求，正则工作有长度、次数和执行预算。
+
+独立列表支持 Group 数组、内嵌 groups 的 Live 对象，以及只含一个直播项的 lives 对象或外部列表引用。包含多个直播项的主配置沿用点播配置中的直播导入入口；外部引用只允许一层 HTTP／HTTPS，拒绝循环引用。列表原始字节与继承配置保存在同一个有版本、大小受限的本地快照中，刷新及重启走同一解析路径，不改变数据库结构。
+
+## 日期式节目表
+
+Live.epg 可声明包含 {id}、{name}、{epg}、{date} 的日期接口；频道 epg 可覆盖地址或提供替换标记。频道字段按 URL 参数编码，不作为额外查询语法执行。日期使用 yyyy-MM-dd。接口返回 date 和 epg_data，其中每个节目含 start、end、title。支持 HH:mm／HH:mm:ss、跨午夜及 24:00 结束边界；日期不符或全部无效的非空响应不会替换已有数据。
+
+节目表使用 Live.timeZone，缺省为设备时区；回放时间模板按上游语义使用设备时区，两者分别处理。查询按频道、日期、时区和配置修订隔离，保留既有缓存、并发、取消及字节预算。缺失日期保留其他已取得的节目，并显示部分覆盖；不会补造历史条目。未配置日期接口的频道可使用同一来源的 XMLTV。用户指定的自定义 XMLTV 及禁用设置优先。
+
+## Native Xtream 归档
+
+只有明确声明 tv_archive 与有效 tv_archive_duration 的频道提供回放。历史节目表读取 get_simple_data_table，与当前／下一节目的 get_short_epg 缓存隔离；不支持历史接口时保留短节目表展示，不能把短节目表的有限覆盖当成完整历史。节目明确声明 has_archive=0 时禁止回放。
+
+播放时从现有凭据隔离边界重新读取账号并校验请求归属，随后构造同一节目区间的 timeshift 地址。支持 REST／legacy 接口及 TS／HLS 格式，失败仅在该频道和节目内有限回退，鉴权失败停止。频道、节目表及历史身份不保存带账号的播放地址。
+
+归档时间使用服务端提供的有效时区，缺失时不给出设备时区猜测。分钟地址保留秒级起点差，由文件级 start／end 选项限定播放区间，并将播放器时间映射回节目进度；跳转、重播和返回直播分别生成新的请求归属。返回直播清除归档区间。服务端格式无法区分的夏令时重复本地时刻明确报不可用，避免播放错误时段。
+
 ## 验收范围
 
 自动化使用合成节目、地址和媒体，覆盖有效期、跨日、夏令时、模板、路由身份、旧请求失效、失败、跳转、节目结束和返回直播。最后仍需对照成熟播放器及用户试用，不能仅凭地址生成或连接成功宣布来源通过验收。
 
-协议参考：[Kodi IPTV Simple](https://github.com/kodi-pvr/pvr.iptvsimple/blob/Piers/README.md)、[FongMi 公开实现](https://github.com/FongMi/TV/blob/b49b7027639edd42c7209651f9f0dab7150ae7ba/app/src/main/java/com/fongmi/android/tv/bean/Catchup.java)。
+协议参考：[IPTVnator 原生归档实现](https://github.com/4gray/iptvnator/blob/2139ddd5c0ee31ad592c4611a294f36cde68865e/libs/portal/xtream/data-access/src/lib/services/xtream-url.service.ts)、[Kodi IPTV Simple](https://github.com/kodi-pvr/pvr.iptvsimple/blob/Piers/README.md)、[FongMi 公开实现](https://github.com/FongMi/TV/blob/b49b7027639edd42c7209651f9f0dab7150ae7ba/app/src/main/java/com/fongmi/android/tv/bean/Catchup.java)。

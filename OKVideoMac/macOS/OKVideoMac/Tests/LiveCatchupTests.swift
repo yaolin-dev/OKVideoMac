@@ -41,6 +41,24 @@ import OKVideoPersistence
         await state.closePlayer()
     }
 
+    func testPlayerChannelPickerKeepsPlayingCatalogAndRejectsStaleSource() async throws {
+        let (state, catalog, channels, programme) = fixture()
+        var urls: [URL] = []
+        state.importedRouteLoadForTesting = { _, media, _ in urls.append(media.url) }
+        await state.playImportedCatchup(catalog.selections(for: channels[0])[0], programme: programme, navigationChannels: channels)
+        XCTAssertEqual(state.playerLiveChannels.map(\.id), channels.map(\.id))
+        let source = try XCTUnwrap(state.livePlaybackSourceID)
+        await state.selectPlayerLiveChannel(channels[1].id, source: .imported(UUID()))
+        XCTAssertEqual(urls.count, 1)
+        XCTAssertEqual(state.liveCatchupProgramme, programme)
+        await state.selectPlayerLiveChannel(channels[1].id, source: source)
+        XCTAssertEqual(urls.count, 2)
+        XCTAssertEqual(state.livePlaybackChannel?.id, channels[1].id)
+        XCTAssertNil(state.liveCatchupProgramme)
+        XCTAssertTrue(state.isLivePlayback)
+        await state.closePlayer()
+    }
+
     func testArchiveFailureNeverFallsThroughToLiveOrAnotherChannel() async {
         let (state, catalog, channels, programme) = fixture()
         var urls: [URL] = []; state.importedRouteLoadForTesting = { _, media, _ in urls.append(media.url); throw AppError.playback("synthetic failure") }
@@ -172,7 +190,7 @@ import OKVideoPersistence
         await state.closePlayer()
     }
 
-    func testCatchupHeaderRendersTwoLinesWithinNarrowAndWideWindows() throws {
+    func testCatchupHeaderKeepsSingleLineWithinNarrowAndWideWindows() throws {
         let output = URL(fileURLWithPath: "/private/tmp/OKVideoMac-Catchup/HeaderRenders")
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         for width in [640, 1000] {
@@ -182,13 +200,224 @@ import OKVideoPersistence
                 .environment(\.colorScheme, .dark)
             let host = NSHostingView(rootView: header)
             if #available(macOS 13.0, *) { host.sizingOptions = [] }
-            host.frame = NSRect(x: 0, y: 0, width: width, height: 48)
+            host.frame = NSRect(x: 0, y: 0, width: width, height: 36)
             host.layoutSubtreeIfNeeded()
-            XCTAssertLessThanOrEqual(host.fittingSize.height, 60)
+            XCTAssertLessThanOrEqual(host.fittingSize.height, 36)
             let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
             host.cacheDisplay(in: host.bounds, to: bitmap)
             try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: output.appendingPathComponent("header-\(width).png"))
         }
     }
 
+}
+
+@MainActor final class TVBoxGuideWiringTests: XCTestCase {
+    func testInlineImportKeepsCatchupAndDailyEPGWhenReadAgain() throws {
+        let live = LiveConfiguration(name: "Synthetic",
+            epg: "https://guide.example.invalid/?id={id}&date={date}",
+            catchup: .init(source: "?start=${(b)timestamp}"), timeZone: "Asia/Shanghai",
+            groups: [.init(name: "Synthetic", channels: [.init(name: "One", urls: ["https://example.invalid/live.ts"], tvgID: "one")])])
+        let data = try EmbeddedLiveSourcePolicy.inlineData(for: live)
+        let channel = try XCTUnwrap(LiveSourceParser().parse(data).groups.first?.channels.first)
+        XCTAssertNotNil(channel.streams[0].catchup)
+        XCTAssertEqual(channel.epgAPI?.timeZoneID, "Asia/Shanghai")
+        XCTAssertEqual(channel.epgAPI?.template, "https://guide.example.invalid/?id=one&date={date}")
+        XCTAssertEqual(try LiveSourceDocument.defaults(in: data)?.catchup, live.catchup)
+    }
+
+    func testDailyGuideUsesPerRowTokensAndRejectsOldDelivery() throws {
+        let source = EPGSourceKey(.imported(UUID())), service = UUID(), first = UUID(), second = UUID()
+        let identity = LiveGuideDeliveryIdentity(source: source, revision: "fixture", demandRevision: first,
+                                                serviceIncarnation: service, capability: .tvboxDay)
+        let state = LiveGuideState()
+        let channel = LiveChannel(groupName: "Synthetic", name: "One", streams: [])
+        let start = Date(timeIntervalSince1970: 1704067200)
+        let token = EPGResultToken(serviceIncarnation: service, resourceIdentity: "synthetic", sourceEpoch: "fixture",
+                                  dataVersion: "day-1", demandRevision: first)
+        let programme = EPGProgramme(channelID: channel.id, title: "Synthetic programme", start: start, end: start.addingTimeInterval(3600))
+        let record = EPGWindowProgramme(id: .init(kind: .tvboxDay, resourceIdentity: token.resourceIdentity,
+            sourceEpoch: token.sourceEpoch, dataVersion: token.dataVersion, ordinal: 0), programme: programme)
+        let snapshot = try EPGGuideSnapshot(source: source, revision: identity.revision, demandRevision: first,
+            slices: [.init(start: start, end: start.addingTimeInterval(12 * 3600))], coherence: .perRowToken,
+            rows: [.init(channel: .init(channel), token: token, match: .init(kind: .exact, channelID: channel.id),
+                         availability: .fresh, programmes: [record], state: .ready)])
+        state.begin(identity, refreshing: true)
+        XCTAssertTrue(state.publish(snapshot, identity: identity))
+        let newer = LiveGuideDeliveryIdentity(source: source, revision: "fixture", demandRevision: second,
+                                             serviceIncarnation: service, capability: .tvboxDay)
+        state.begin(newer, refreshing: true)
+        XCTAssertFalse(state.publish(snapshot, identity: identity))
+    }
+}
+
+@MainActor final class NativeArchivePlaybackWiringTests: XCTestCase {
+    private func fixture() async throws -> (AppState, LiveChannel, EPGProgramme, LiveSourceID) {
+        let descriptor = try XtreamProviderConfiguration(providerID: UUID(), displayName: "Synthetic",
+            serverBaseURL: URL(string: "https://native.example.invalid")!)
+        let provider = try XtreamSiteProvider(configuration: descriptor,
+            credentials: .init(username: "synthetic-user", password: "fixture"),
+            httpClient: NativeArchiveMetadataClient(), userAgent: "Synthetic")
+        let record = StoredConfiguration(id: descriptor.providerID, name: "Synthetic", sourceKind: .xtream,
+            sourceValue: descriptor.serverBaseURL.absoluteString, baseURL: descriptor.serverBaseURL,
+            rawData: try descriptor.encoded(), isActive: true)
+        let state = AppState(environment: nil)
+        state.setLiveConfigurationForTesting(record, providers: [provider.site.key: provider])
+        let source = LiveSourceID.xtream(record.id)
+        await state.loadLiveSource(source)
+        let channel = try XCTUnwrap(state.liveCatalog(for: source)?.groups.first?.channels.first)
+        let programme = EPGProgramme(channelID: channel.id, title: "Synthetic history",
+            start: Date().addingTimeInterval(-7200), end: Date().addingTimeInterval(-3600), catchupAvailable: true)
+        state.nativeLiveMediaForTesting = { reference, programme, offset, now, legacy in
+            try Self.media(reference, programme: programme, offset: offset, now: now, legacy: legacy)
+        }
+        return (state, channel, programme, source)
+    }
+
+    private static func media(_ reference: PlaybackResourceReference, programme: EPGProgramme?,
+                              offset: TimeInterval, now: Date, legacy: Bool) throws -> ResolvedMedia {
+        let locator = try XCTUnwrap(reference.xtreamLiveLocator)
+        let builder = XtreamURLBuilder(endpoint: try .init(serverURL: URL(string: "https://native.example.invalid")!))
+        let credentials = XtreamCredentials(username: "synthetic", password: "fixture")
+        if let programme {
+            let request = try builder.archiveRequest(credentials: credentials, streamID: locator.streamID,
+                outputFormat: locator.outputFormat.rawValue, programme: programme, offset: offset, now: now, serverTimeZoneID: "UTC")
+            var media = ResolvedMedia(url: legacy ? request.legacyURL : request.url, headers: [:],
+                siteKey: "live-catchup", sourceName: "Synthetic", episodeName: programme.title,
+                compatibilityPolicy: .nativeXtreamLive)
+            media.playbackDurationLimit = request.remainingDuration + request.leadIn
+            media.playbackStartOffset = request.leadIn
+            return media
+        }
+        return ResolvedMedia(url: try builder.playbackURL(kind: .live, remoteID: locator.streamID,
+            containerExtension: locator.outputFormat.rawValue, credentials: credentials), headers: [:],
+            siteKey: "xtream-live", sourceName: "Synthetic", episodeName: "TS", compatibilityPolicy: .nativeXtreamLive)
+    }
+
+    func testNativeArchiveSeekAndReturnRetainProgrammeAndClearFileBounds() async throws {
+        let (state, channel, programme, source) = try await fixture()
+        var loads: [ResolvedMedia] = []
+        state.importedRouteLoadForTesting = { _, media, _ in loads.append(media) }
+        await state.playNativeCatchup(channel: channel, stream: channel.streams[0], sourceID: source,
+                                      programme: programme, navigationChannels: [channel])
+        XCTAssertEqual(loads.count, 1)
+        XCTAssertEqual(loads[0].siteKey, "live-catchup")
+        XCTAssertFalse(state.isLivePlayback)
+        XCTAssertTrue(state.canSeekPlayback)
+        let previous = state.importedRouteFlowForTesting
+        await state.seek(to: 600)
+        XCTAssertEqual(loads.count, 2)
+        XCTAssertNotEqual(state.importedRouteFlowForTesting, previous)
+        XCTAssertEqual(state.liveCatchupProgramme, programme)
+        XCTAssertEqual((loads[1].playbackDurationLimit ?? 0) - (loads[1].playbackStartOffset ?? 0),
+                       programme.end.timeIntervalSince(programme.start) - 600, accuracy: 0.001)
+        await state.returnToLive()
+        XCTAssertEqual(loads.count, 3)
+        XCTAssertEqual(loads[2].siteKey, "xtream-live")
+        XCTAssertNil(loads[2].playbackDurationLimit)
+        XCTAssertNil(loads[2].playbackStartOffset)
+        XCTAssertTrue(state.isLivePlayback)
+        XCTAssertNil(state.liveCatchupProgramme)
+        await state.closePlayer()
+    }
+
+    func testNativeArchiveFailureOnlyRetriesSameProgrammeViaLegacyEndpoint() async throws {
+        let (state, channel, programme, source) = try await fixture()
+        var loads: [ResolvedMedia] = []
+        state.importedRouteLoadForTesting = { _, media, _ in
+            loads.append(media)
+            if media.url.path.contains("/timeshift/") { throw AppError.playback("HTTP 404") }
+        }
+        await state.playNativeCatchup(channel: channel, stream: channel.streams[0], sourceID: source,
+                                      programme: programme, navigationChannels: [channel])
+        XCTAssertEqual(loads.count, 2)
+        XCTAssertTrue(loads[0].url.path.contains("/timeshift/"))
+        XCTAssertEqual(loads[1].url.path, "/streaming/timeshift.php")
+        XCTAssertTrue(loads.allSatisfy { $0.siteKey == "live-catchup" && $0.episodeName == programme.title })
+        XCTAssertFalse(state.hasExhaustedLivePlayback)
+        XCTAssertEqual(state.liveCatchupProgramme, programme)
+        state.failImportedRouteForTesting()
+        XCTAssertTrue(state.hasExhaustedLivePlayback)
+        XCTAssertNil(state.importedRouteRecoveryTaskForTesting)
+        XCTAssertEqual(loads.count, 2)
+        await state.closePlayer()
+    }
+
+    func testForeignOrUnavailableProgrammesCannotStartNativePlayback() async throws {
+        let (state, channel, original, source) = try await fixture()
+        var loads = 0
+        state.importedRouteLoadForTesting = { _, _, _ in loads += 1 }
+        var foreign = original; foreign.channelID = "foreign"
+        var denied = original; denied.catchupAvailable = false
+        for programme in [foreign, denied] {
+            await state.playNativeCatchup(channel: channel, stream: channel.streams[0], sourceID: source,
+                                          programme: programme, navigationChannels: [channel])
+        }
+        XCTAssertEqual(loads, 0)
+        XCTAssertNil(state.liveCatchupProgramme)
+        await state.closePlayer()
+    }
+
+    func testLateNativeArchiveResolutionCannotOverwriteReturnToLive() async throws {
+        let (state, channel, programme, source) = try await fixture()
+        let started = expectation(description: "archive resolver started")
+        var continuation: CheckedContinuation<Void, Error>?
+        state.nativeLiveMediaForTesting = { reference, programme, offset, now, legacy in
+            if programme != nil {
+                started.fulfill()
+                try await withCheckedThrowingContinuation { continuation = $0 }
+            }
+            return try Self.media(reference, programme: programme, offset: offset, now: now, legacy: legacy)
+        }
+        var loads: [ResolvedMedia] = []
+        state.importedRouteLoadForTesting = { _, media, _ in loads.append(media) }
+        let old = Task { await state.playNativeCatchup(channel: channel, stream: channel.streams[0],
+            sourceID: source, programme: programme, navigationChannels: [channel]) }
+        await fulfillment(of: [started], timeout: 2)
+        await state.returnToLive()
+        let current = state.importedRouteFlowForTesting
+        continuation?.resume(throwing: AppError.playback("late synthetic failure"))
+        await old.value
+        XCTAssertEqual(state.importedRouteFlowForTesting, current)
+        XCTAssertTrue(state.isLivePlayback)
+        XCTAssertEqual(loads.map(\.siteKey), ["xtream-live"])
+        XCTAssertFalse(state.hasExhaustedLivePlayback)
+        await state.closePlayer()
+    }
+
+    func testNativeFileOptionsKeepSubMinuteStartAndEndLocalToArchive() {
+        var media = ResolvedMedia(url: URL(string: "https://example.invalid/archive.ts")!, headers: [:],
+            siteKey: "live-catchup", sourceName: "Synthetic", episodeName: "Synthetic", compatibilityPolicy: .nativeXtreamLive)
+        media.playbackStartOffset = 2.5; media.playbackDurationLimit = 5.5
+        let archive = MPVTVBoxPlaybackPolicy.loadCommand(for: media)
+        XCTAssertTrue(archive.last?.contains("start=2.500") == true)
+        XCTAssertTrue(archive.last?.contains("end=5.500") == true)
+        XCTAssertTrue(archive.last?.contains("tls-verify=yes") == true)
+        media.playbackStartOffset = nil; media.playbackDurationLimit = nil
+        let live = MPVTVBoxPlaybackPolicy.loadCommand(for: media)
+        XCTAssertFalse(live.contains { $0.contains("start=") || $0.contains("end=") })
+    }
+}
+
+private struct NativeArchiveMetadataClient: HTTPClient {
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        let action = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "action" }?.value
+        let body: String
+        switch action {
+        case "get_live_categories": body = #"[{"category_id":"7","category_name":"Synthetic"}]"#
+        case "get_live_streams": body = #"[{"stream_id":42,"name":"Synthetic","category_id":"7","tv_archive":1,"tv_archive_duration":7}]"#
+        default: body = #"{"user_info":{"auth":1,"status":"Active","allowed_output_formats":["ts","m3u8"]},"server_info":{"timezone":"UTC"}}"#
+        }
+        return .init(url: request.url, statusCode: 200, headers: [:], body: Data(body.utf8))
+    }
+}
+
+@MainActor final class ArchiveGuideMetadataProjectionTests: XCTestCase {
+    func testProgrammeArchiveDenialSurvivesGridProjection() {
+        let start = Date(timeIntervalSince1970: 1704067200)
+        let record = EPGWindowProgramme(id: .init(kind: .xtream, resourceIdentity: "fixture",
+            sourceEpoch: "fixture", dataVersion: "fixture", ordinal: 0),
+            programme: .init(channelID: "fixture", title: "Synthetic", start: start,
+                             end: start.addingTimeInterval(3600), catchupAvailable: false))
+        XCTAssertEqual(LiveGuideGridProgramme(record).catchupAvailable, false)
+    }
 }

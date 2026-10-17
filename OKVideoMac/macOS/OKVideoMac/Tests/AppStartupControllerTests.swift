@@ -1,3 +1,5 @@
+import AppKit
+import SwiftUI
 import Foundation
 import OKVideoCore
 import OKCrashDiagnostics
@@ -99,5 +101,105 @@ final class AppStartupControllerTests: XCTestCase {
         controller.beginIfReady();controller.continueStartup()
         XCTAssertEqual(controller.phase,.failed);XCTAssertEqual(starts,0);XCTAssertNil(controller.business)
         XCTAssertFalse(controller.openFile(URL(fileURLWithPath:"/private/tmp/late.json")))
+    }
+}
+
+@MainActor
+final class StartupPresentationTests: XCTestCase {
+    func testLaunchThemeCacheSupportsEveryThemeAndRejectsInvalidValues() throws {
+        let name = "com.okvideomac.launch-theme-tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        XCTAssertEqual(AppAppearanceController.cachedTheme(defaults: defaults), .system)
+        for theme in AppTheme.allCases {
+            AppAppearanceController.cache(theme, defaults: defaults)
+            XCTAssertEqual(AppAppearanceController.cachedTheme(defaults: defaults), theme)
+        }
+        defaults.set("invalid", forKey: AppAppearanceController.launchThemeKey)
+        XCTAssertEqual(AppAppearanceController.cachedTheme(defaults: defaults), .system)
+    }
+
+    func testContentActivityWaitsForGracePeriodAndLeavesWithPlaceholder() async throws {
+        let controller = NSHostingController(rootView: AnyView(StartupContentPlaceholder().accentColor(.blue)))
+        let host = controller.view
+        let window = NSWindow(contentViewController: controller)
+        window.isReleasedWhenClosed = false
+        window.setContentSize(NSSize(width: 800, height: 600))
+        window.orderFront(nil)
+        defer { window.close() }
+        func render(_ name: String) throws -> Int {
+            host.layoutSubtreeIfNeeded()
+            let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            let image = XCTAttachment(data: try XCTUnwrap(bitmap.representation(using: .png, properties: [:])),
+                uniformTypeIdentifier: "public.png")
+            image.name = "startup-" + name
+            image.lifetime = .keepAlways
+            add(image)
+            // Poster placeholders are neutral gray. The blue activity ring is
+            // a visible output of the actual SwiftUI task, independent of the
+            // test host's incomplete virtual accessibility tree on macOS 14.
+            var bluePixels = 0
+            for y in stride(from: 0, to: bitmap.pixelsHigh, by: 3) {
+                for x in stride(from: 0, to: bitmap.pixelsWide, by: 3) {
+                    if let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
+                       color.blueComponent > color.redComponent + 0.18,
+                       color.blueComponent > color.greenComponent + 0.10 {
+                        bluePixels += 1
+                    }
+                }
+            }
+            return bluePixels
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let early = try render("fast-restore")
+        XCTAssertLessThan(early, 3, "Fast startup must not flash the activity ring")
+        try await Task.sleep(nanoseconds: 400_000_000)
+        let waiting = try render("slow-restore")
+        XCTAssertGreaterThan(waiting, 10, "Slow restore must render the activity ring")
+        controller.rootView = AnyView(EmptyView())
+        let removed = try render("restore-complete")
+        XCTAssertLessThan(removed, 3)
+        let metrics = XCTAttachment(data: try JSONSerialization.data(withJSONObject:
+            ["earlyBluePixels": early, "waitingBluePixels": waiting, "removedBluePixels": removed],
+            options: [.prettyPrinted]), uniformTypeIdentifier: "public.json")
+        metrics.name = "startup-delay-render-result"
+        metrics.lifetime = .keepAlways
+        add(metrics)
+    }
+
+    func testStartupToBrowserKeepsWindowGeometryAndOnlyOneSidebarAccessory() async throws {
+        let hosting = NSHostingController(rootView: AnyView(AppStartupBrowserShell().ignoresSafeArea()))
+        let window = NSWindow(contentViewController: hosting)
+        window.isReleasedWhenClosed = false
+        window.setContentSize(NSSize(width: 1000, height: 650))
+        window.orderFront(nil)
+        defer { window.close() }
+        for _ in 0..<30 {
+            window.contentView?.layoutSubtreeIfNeeded()
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        func descendants(_ view: NSView) -> [NSView] {
+            [view] + view.subviews.flatMap { descendants($0) }
+        }
+        let outline = try XCTUnwrap(descendants(hosting.view).compactMap { $0 as? NSOutlineView }.first)
+        let search = try XCTUnwrap(descendants(hosting.view).compactMap { $0 as? NSSearchField }.first)
+        XCTAssertEqual(outline.numberOfRows, AppSection.allCases.count)
+        XCTAssertFalse(outline.isEnabled)
+        XCTAssertFalse(search.isEnabled)
+        let before = window.frame
+        XCTAssertEqual(window.titlebarAccessoryViewControllers.filter { $0 is BrowserSidebarTitlebarController }.count, 1)
+        let state = AppState(environment: nil)
+        hosting.rootView = AnyView(RootView().environmentObject(state).environmentObject(state.navigation))
+        for _ in 0..<30 {
+            window.contentView?.layoutSubtreeIfNeeded()
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(window.frame, before)
+        XCTAssertEqual(window.titlebarAccessoryViewControllers.filter { $0 is BrowserSidebarTitlebarController }.count, 1)
+        let readyOutline = try XCTUnwrap(descendants(hosting.view).compactMap { $0 as? NSOutlineView }.first)
+        XCTAssertTrue(readyOutline.isEnabled)
+        hosting.rootView = AnyView(EmptyView())
+        for _ in 0..<10 { await Task.yield() }
     }
 }

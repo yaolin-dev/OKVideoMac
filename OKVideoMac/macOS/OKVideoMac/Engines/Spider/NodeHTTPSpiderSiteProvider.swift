@@ -1223,49 +1223,25 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
               !NodePlaybackReplayReference.isPersistedOpaqueIdentity(
                   locatorCandidate
               ),
-              !locatorCandidate.hasPrefix("runtime-v1.") else {
+              !locatorCandidate.hasPrefix("runtime-v1."),
+              !locatorCandidate.hasPrefix(QuarkEpisodeReference.durableReferencePrefix + ".") else {
             throw ProviderPlaybackError(
                 L10n.string("provider.history.internal-reference", fallback: "A CatPaw internal history reference cannot be used as a media URL. Refresh the current details first.")
             )
         }
-        var resolvedEpisodeURL = episodeURL
-        var refreshedShareToken = false
-        if QuarkEpisodeReference.requiresShareTokenRefresh(resolvedEpisodeURL) {
-            resolvedEpisodeURL = try await refreshQuarkShareToken(
-                in: resolvedEpisodeURL
-            )
-            refreshedShareToken = true
-        }
         do {
-            return try await resolvePlayer(
-                flag: flag,
-                episodeURL: resolvedEpisodeURL
-            )
+            // Provider-owned tokens must remain intact, including shareFidToken.
+            // AppState performs one same-resource detail refresh on failure.
+            return try await resolvePlayer(flag: flag, episodeURL: episodeURL)
         } catch let authorization as NodeWebAuthorizationRequired {
+            if (CatPawCloudProvider.resolve(flag: flag) == .quark
+                || QuarkEpisodeReference.identity(from: episodeURL) != nil),
+               await quarkLoginIsCurrentlyValid(authorization) {
+                try Task.checkCancellation()
+                throw ProviderPlaybackError(L10n.string("provider.quark.resource-refresh-required", fallback: "Quark login is valid, but the file could not be played. Refresh the resource details and retry."))
+            }
             throw authorization
         } catch {
-            if !refreshedShareToken,
-               Self.shouldRefreshQuarkShareToken(after: error),
-               QuarkEpisodeReference.identity(from: resolvedEpisodeURL) != nil {
-                let refreshedURL = try await refreshQuarkShareToken(
-                    in: resolvedEpisodeURL
-                )
-                do {
-                    return try await resolvePlayer(
-                        flag: flag,
-                        episodeURL: refreshedURL
-                    )
-                } catch {
-                    throw AppError.spider(
-                        L10n.string(
-                            "provider.quark.transfer-after-refresh.failed",
-                            fallback: "%1$@ playback failed: the Quark share token was refreshed, but transfer still failed: %2$@",
-                            site.name,
-                            error.localizedDescription
-                        )
-                    )
-                }
-            }
             // Some Node spiders put an already playable URL directly in the
             // episode field even though their optional play resolver is down.
             // Preserve that valid fallback instead of turning a resolver 500
@@ -1302,67 +1278,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
     func refreshPlayback(
         _ request: PlaybackRefreshRequest
     ) async throws -> RefreshedSitePlayback {
-        let requestedSourceName = request.sourceName?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if let reference = request.providerResourceReference,
-           acceptsPlaybackResourceReference(reference) {
-            guard let sourceName = requestedSourceName,
-                  !sourceName.isEmpty else {
-                throw ProviderPlaybackError(L10n.string("provider.history.source-id-missing", fallback: "The history item is missing its original playback source identifier."))
-            }
-            let directResult: SitePlaybackResult
-            do {
-                directResult = try await player(
-                    flag: sourceName,
-                    episodeURL: reference.stableResourceLocator
-                )
-            } catch let authorization as NodeWebAuthorizationRequired {
-                throw authorization
-            } catch {
-                // Password-protected shares intentionally do not persist the
-                // extraction code. Let current Spider detail reacquire its
-                // own share context before declaring the durable identity
-                // unusable.
-                return try await refreshPlaybackBySelection(request)
-            }
-            var result = directResult
-            result.resourceReference = reference
-            result.mediaSession?.resourceReference = reference
-            result.mediaSession?.refreshPerformed = true
-            let requestedEpisodeName = request.episodeName?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let episodeName: String
-            if let requestedEpisodeName, !requestedEpisodeName.isEmpty {
-                episodeName = requestedEpisodeName
-            } else {
-                episodeName = L10n.string("history.episode.fallback", fallback: "History Episode")
-            }
-            let episode = PlayEpisode(
-                name: episodeName,
-                url: reference.stableResourceLocator,
-                referenceIdentity: reference.episodeIdentity,
-                providerResourceReference: reference
-            )
-            let source = PlaySource(
-                name: sourceName,
-                episodes: [episode],
-                referenceIdentity: reference.sourceIdentity
-            )
-            return RefreshedSitePlayback(
-                detail: VideoDetail(
-                    summary: VideoSummary(
-                        siteKey: site.key,
-                        siteName: site.name,
-                        videoID: request.videoID,
-                        title: request.title
-                    ),
-                    playSources: [source]
-                ),
-                source: source,
-                episode: episode,
-                playbackResult: result
-            )
-        }
+        // Reconstruct credentials through current detail even when a stable
+        // Quark identity exists. A recent play-cache hit is not replay evidence.
         return try await refreshPlaybackBySelection(request)
     }
 
@@ -1380,7 +1297,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
     private func refreshPlaybackBySelection(
         _ request: PlaybackRefreshRequest
     ) async throws -> RefreshedSitePlayback {
-        let selected = try await resolvePlaybackRefreshSelection(request)
+        let selected = try await currentPlaybackSelection(request)
         var result = try await player(
             flag: selected.source.name,
             episodeURL: selected.episode.url
@@ -1392,6 +1309,74 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             episode: selected.episode,
             playbackResult: result
         )
+    }
+
+    /// Durable references identify a file, not its expiring transfer capability.
+    /// Always ask current detail for the complete provider-owned play token.
+    private func currentPlaybackSelection(_ request: PlaybackRefreshRequest) async throws ->
+        (detail: VideoDetail, source: PlaySource, episode: PlayEpisode) {
+        func match(_ detail: VideoDetail) -> (VideoDetail, PlaySource, PlayEpisode)? {
+            let identity = request.providerResourceReference.flatMap {
+                acceptsPlaybackResourceReference($0) ? QuarkEpisodeReference.identity(from: $0.stableResourceLocator) : nil
+            }
+            let matches = detail.playSources.flatMap { source in
+                source.episodes.compactMap { episode -> (VideoDetail, PlaySource, PlayEpisode)? in
+                    guard source.stableIdentity == request.sourceIdentity || source.name == request.sourceName else { return nil }
+                    if let identity {
+                        // Never fall back to a same-name file when the saved identity differs.
+                        return QuarkEpisodeReference.identity(from: episode.url) == identity ? (detail, source, episode) : nil
+                    }
+                    return episode.stableIdentity == request.resourceIdentity
+                        || episode.url == request.episodeReference
+                        || episode.name == request.episodeName ? (detail, source, episode) : nil
+                }
+            }
+            return matches.count == 1 ? matches[0] : nil
+        }
+        func load(_ summary: VideoSummary) async throws -> VideoDetail? {
+            guard case .detail(let detail) = try await select(summary: summary) else { return nil }
+            return detail
+        }
+        if !NodePlaybackReplayReference.isPersistedOpaqueIdentity(request.videoID),
+           let detail = try await loadRefreshDetail(load, summary: VideoSummary(siteKey: site.key,
+               siteName: site.name, videoID: request.videoID, title: request.title)),
+           let selected = match(detail) { return selected }
+
+        let page = try await search(keyword: request.title, page: 1, quick: false)
+        var matches: [(VideoDetail, PlaySource, PlayEpisode)] = []
+        for summary in page.items.filter({ $0.title.compare(request.title,
+            options: [.caseInsensitive, .widthInsensitive, .diacriticInsensitive]) == .orderedSame }).prefix(20) {
+            try Task.checkCancellation()
+            if let detail = try await loadRefreshDetail(load, summary: summary), let selected = match(detail) {
+                matches.append(selected)
+            }
+        }
+        guard matches.count == 1, let selected = matches.first else {
+            throw ProviderPlaybackError(L10n.string("provider.history.resource-not-unique", fallback: "Unable to uniquely locate the original stream and episode in current details. Choose the resource again."))
+        }
+        return selected
+    }
+
+    private func loadRefreshDetail(_ load: (VideoSummary) async throws -> VideoDetail?, summary: VideoSummary) async throws -> VideoDetail? {
+        do { return try await load(summary) }
+        catch is CancellationError { throw CancellationError() }
+        catch let authorization as NodeWebAuthorizationRequired { throw authorization }
+        catch { return nil }
+    }
+
+    /// New CatPawOpen versions can turn every upstream 403 into "Cookie expired",
+    /// including a missing share_fid_token. Consult only its fresh, credential-free
+    /// local account status before accepting this ambiguous authorization claim.
+    private func quarkLoginIsCurrentlyValid(_ authorization: NodeWebAuthorizationRequired) async -> Bool {
+        let website = authorization.websiteURL
+        guard website.scheme == "http", ["127.0.0.1", "localhost", "::1"].contains(website.host ?? ""),
+              let endpoint = URL(string: "/website/api/status", relativeTo: website)?.absoluteURL else { return false }
+        guard let response = try? await httpClient.send(HTTPRequest(url: endpoint,
+            timeout: 5, maximumResponseBytes: 1_024 * 1_024, maximumRedirects: 0,
+            retryPolicy: .none, allowsNonSuccessfulStatus: true)), response.statusCode == 200,
+              let value = try? JSONDecoder().decode(JSONValue.self, from: response.body),
+              let quark = value.objectValue?["data"]?.objectValue?["providers"]?.objectValue?["quark"]?.objectValue else { return false }
+        return quark["configured"] == .bool(true) && quark["login"] == .bool(true)
     }
 
     func acceptsPlaybackResourceReference(
@@ -1872,104 +1857,6 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         SHA256.hash(data: Data("\(flag)\u{0}\(episodeURL)".utf8))
             .map { String(format: "%02x", $0) }
             .joined()
-    }
-
-    private func refreshQuarkShareToken(
-        in episodeURL: String
-    ) async throws -> String {
-        guard let identity = QuarkEpisodeReference.identity(from: episodeURL) else {
-            throw AppError.playback(
-                L10n.string(
-                    "provider.quark.token.identifiers-missing",
-                    fallback: "The Quark episode token is missing a share or file identifier."
-                )
-            )
-        }
-        let body = try JSONSerialization.data(
-            withJSONObject: [
-                "pwd_id": identity.shareID,
-                "passcode": QuarkEpisodeReference.passcode(from: episodeURL)
-            ],
-            options: [.sortedKeys, .withoutEscapingSlashes]
-        )
-        let response = try await httpClient.send(
-            HTTPRequest(
-                url: QuarkEpisodeReference.shareTokenURL,
-                method: .post,
-                headers: [
-                    "Content-Type": "application/json; charset=utf-8",
-                    "Referer": "https://pan.quark.cn/",
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-                ],
-                body: body,
-                timeout: 20,
-                maximumResponseBytes: 1_024 * 1_024,
-                maximumRedirects: 2,
-                retryPolicy: .none,
-                allowsNonSuccessfulStatus: true
-            )
-        )
-        let value = try? JSONDecoder().decode(JSONValue.self, from: response.body)
-        let message = value.flatMap { Self.serverMessage(from: $0) }
-        guard (200...299).contains(response.statusCode) else {
-            let code = value.flatMap(Self.serverCode)
-            let detail = [
-                code.map {
-                    L10n.string(
-                        "common.error-code",
-                        fallback: "Error code %@",
-                        $0
-                    )
-                },
-                message
-            ]
-                .compactMap { $0 }
-                .joined(separator: L10n.string("common.detail-separator", fallback: ": "))
-            throw AppError.playback(
-                L10n.string(
-                    "provider.quark.token.refresh.failed-prefix",
-                    fallback: "Unable to refresh the Quark share token: %@",
-                    detail.isEmpty
-                        ? L10n.string(
-                            "common.http-status",
-                            fallback: "HTTP status %lld",
-                            response.statusCode
-                        )
-                        : detail
-                )
-            )
-        }
-        guard let stoken = value?.objectValue?["data"]?
-            .objectValue?["stoken"]?.stringValue?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !stoken.isEmpty else {
-            throw AppError.playback(
-                L10n.string(
-                    "provider.quark.token.refresh.failed-prefix",
-                    fallback: "Unable to refresh the Quark share token: %@",
-                    message ?? L10n.string(
-                        "provider.quark.token.missing-new",
-                        fallback: "The service did not return a new stoken; the share may have expired."
-                    )
-                )
-            )
-        }
-        return try QuarkEpisodeReference.replacingStoken(
-            in: episodeURL,
-            with: stoken
-        )
-    }
-
-    private static func shouldRefreshQuarkShareToken(after error: Error) -> Bool {
-        let message = error.localizedDescription.lowercased()
-        let missingTask = (message.contains("task_id")
-            || message.contains("task id"))
-            && (message.contains("没有返回")
-                || message.contains("未返回")
-                || message.contains("missing")
-                || message.contains("empty")
-                || message.contains("null"))
-        return missingTask || isExpiredQuarkShareTokenMessage(message)
     }
 
     private func playbackMediaSession(
@@ -3407,11 +3294,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
     private static func isExpiredQuarkShareTokenMessage(
         _ message: String
     ) -> Bool {
-        let normalized = message.lowercased()
-        return normalized.contains("41016")
-            || (normalized.contains("stoken")
-                && (normalized.contains("过期")
-                    || normalized.contains("expired")))
+        CatPawAuthorizationClassifier.isExpiredShareToken(message)
     }
 
     private static func isAuthorizationMessage(_ message: String) -> Bool {

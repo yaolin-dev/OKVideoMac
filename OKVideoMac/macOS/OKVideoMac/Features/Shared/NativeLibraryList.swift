@@ -94,6 +94,7 @@ struct NativeLibraryList: NSViewRepresentable {
         table.doubleAction = #selector(Coordinator.openSelection)
         table.onOpen = { [weak coordinator = context.coordinator] in coordinator?.openSelection() }
         table.onDelete = { [weak coordinator = context.coordinator] in coordinator?.deleteSelection() }
+        table.onMouseInteractionEnded = { [weak coordinator = context.coordinator] in coordinator?.finishMouseInteraction() }
         table.menu = NSMenu()
         table.menu?.delegate = context.coordinator
         scroll.documentView = table
@@ -101,33 +102,77 @@ struct NativeLibraryList: NSViewRepresentable {
         return scroll
     }
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        let coordinator = context.coordinator
-        let previousIDs = coordinator.parent.rows.map(\.id)
-        coordinator.parent = self
-        guard let table = coordinator.table else { return }
-        table.navigationSelection = navigationSelection
-        coordinator.updating = true
-        if previousIDs != rows.map(\.id) || table.numberOfRows != rows.count {
-            table.reloadData()
-        } else {
-            let visible = table.rows(in: table.visibleRect)
-            if visible.location != NSNotFound {
-                for index in visible.location..<min(NSMaxRange(visible), rows.count) {
-                    (table.view(atColumn: 0, row: index, makeIfNecessary: false) as? NativeLibraryCell)?.update(
-                        rows[index], repository: repository, openTitle: openTitle, openSymbol: openSymbol,
-                        onOpen: onOpen, onDelete: onDelete)
-                }
-            }
-        }
-        table.selectRowIndexes(IndexSet(rows.indices.filter { selection.contains(rows[$0].id) }), byExtendingSelection: false)
-        coordinator.updating = false
+        context.coordinator.update(self, navigationSelection: navigationSelection)
     }
 
+    @MainActor
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
         var parent: NativeLibraryList
         weak var table: NativeLibraryTableView?
         var updating = false
+        private var lastRequestedSelection: Set<String>?
+        private var pendingUpdate: (parent: NativeLibraryList, navigation: NavigationSelection?, selection: Set<String>?)?
         init(_ parent: NativeLibraryList) { self.parent = parent }
+
+        func update(_ value: NativeLibraryList, navigationSelection: NavigationSelection?) {
+            guard let table else { return }
+            // Only an actual binding change (for example Select All) is a
+            // selection command. Progress updates must not replay an old value
+            // over AppKit's selection before its mouse-up notification.
+            let requestedSelection = lastRequestedSelection != value.selection ? value.selection : nil
+            lastRequestedSelection = value.selection
+            if table.isTrackingMouse {
+                // Keep the displayed row identities and action targets stable
+                // through native tracking, including a double-click or drag.
+                pendingUpdate = (value, navigationSelection, requestedSelection ?? pendingUpdate?.selection)
+                return
+            }
+            apply(value, navigation: navigationSelection, selection: requestedSelection)
+        }
+
+        func finishMouseInteraction() {
+            guard let pending = pendingUpdate else { return }
+            pendingUpdate = nil
+            apply(pending.parent, navigation: pending.navigation, selection: pending.selection)
+        }
+
+        private func apply(_ value: NativeLibraryList, navigation: NavigationSelection?, selection: Set<String>?) {
+            guard let table else { return }
+            let previousIDs = parent.rows.map(\.id)
+            let selectedIDs = selection ?? Set(table.selectedRowIndexes.compactMap {
+                parent.rows.indices.contains($0) ? parent.rows[$0].id : nil
+            })
+            parent = value
+            table.navigationSelection = navigation
+            updating = true
+            defer { updating = false }
+            let rows = value.rows
+            if previousIDs != rows.map(\.id) || table.numberOfRows != rows.count {
+                table.reloadData()
+            } else {
+                let visible = table.rows(in: table.visibleRect)
+                if visible.location != NSNotFound {
+                    for index in visible.location..<min(NSMaxRange(visible), rows.count) {
+                        (table.view(atColumn: 0, row: index, makeIfNecessary: false) as? NativeLibraryCell)?.update(
+                            rows[index], repository: value.repository, openTitle: value.openTitle, openSymbol: value.openSymbol,
+                            onOpen: value.onOpen, onDelete: value.onDelete)
+                    }
+                }
+            }
+            let indexes = IndexSet(rows.indices.filter { selectedIDs.contains(rows[$0].id) })
+            if table.selectedRowIndexes != indexes {
+                table.selectRowIndexes(indexes, byExtendingSelection: false)
+            }
+            if !value.selection.isSubset(of: Set(rows.map(\.id))) {
+                // A row can disappear during the gesture. Reconcile on the
+                // next turn, outside SwiftUI's representable update transaction.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.table?.isTrackingMouse == false else { return }
+                    let valid = self.parent.selection.intersection(self.parent.rows.map(\.id))
+                    if valid != self.parent.selection { self.parent.selection = valid }
+                }
+            }
+        }
         func numberOfRows(in tableView: NSTableView) -> Int { parent.rows.count }
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             let id = NSUserInterfaceItemIdentifier("library-cell")
@@ -199,10 +244,17 @@ final class NativeLibraryTableView: NSTableView, BrowserContentKeyTarget {
     var onOpen: (() -> Void)?
     var onDelete: (() -> Void)?
     private(set) var showsKeyboardFocus = false
+    private(set) var isTrackingMouse = false
+    var onMouseInteractionEnded: (() -> Void)?
     private func refreshSelectionAppearance() {
         enumerateAvailableRowViews { row, _ in row.needsDisplay = true }
     }
     override func mouseDown(with event: NSEvent) {
+        isTrackingMouse = true
+        defer {
+            isTrackingMouse = false
+            onMouseInteractionEnded?()
+        }
         showsKeyboardFocus = false
         refreshSelectionAppearance()
         super.mouseDown(with: event)

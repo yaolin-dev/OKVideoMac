@@ -1,6 +1,6 @@
 # OKVideoMac
 
-The latest stable release is **0.8.6 (Build 139)**. Official DMGs can send filtered crash reports after user consent; public source defaults remain unconfigured. Signing, notarization, final-build symbolication and all 16 public assets passed verification. See [release notes](Docs/RELEASE_NOTES_0.8.6.md), [configuration](Docs/CRASH_REPORTING_RELEASE_CONFIGURATION.md) and [verification](Docs/RELEASE_VALIDATION_0.8.6.md).
+The current release candidate is **0.8.7 (Build 140)**, covering live catch-up, native Picture in Picture, playback information, startup/player controls and history/detail fixes. The current public stable download remains 0.8.6 until all release gates pass. See [release notes](Docs/RELEASE_NOTES_0.8.7.md) and [readiness](Docs/RELEASE_READINESS_0.8.7.md).
 
 **0.8.4 (Build 137)** fixes the SwiftUI/AppKit toolbar ownership path associated with the 0.8.3 startup crash. The user confirmed successful macOS 27.0.1 testing; see [release notes](Docs/RELEASE_NOTES_0.8.4.md) and [formal verification](Docs/RELEASE_VALIDATION_0.8.4.md).
 
@@ -33,7 +33,15 @@ Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to disab
 
 > OKVideoMac is a player and provider client. It does not include third-party video sources, accounts, cookies, parsing services or DRM keys.
 
-## New in 0.8.6
+## New in 0.8.7 (release candidate)
+
+- Programme-aware catch-up for supported M3U/TVBox/FongMi sources and Native Xtream archives, date EPG and return to live.
+- Native Picture in Picture, responsive player controls, playback information in Settings and a native startup shell.
+- Reliable History/Favorites single-click selection during playback, existing double-click playback, retained detail pages and refreshed Quark history identity.
+
+See [release notes](Docs/RELEASE_NOTES_0.8.7.md) and [readiness](Docs/RELEASE_READINESS_0.8.7.md). Catch-up depends on server capabilities and EPG coverage. PiP uses a dynamically checked private macOS interface; danmaku stays in the main window.
+
+## 0.8.6 history
 
 Consent-based remote crash uploads in official DMGs, private packaging configuration and clear unconfigured status for source builds. Reports stay local until the user opts in from Settings → Advanced. See [verification](Docs/RELEASE_VALIDATION_0.8.6.md).
 
@@ -240,7 +248,7 @@ validation limits are documented in [Android Bridge Setup](OKVideoMac/macOS/OKVi
 
 | Source / runtime | Level | Current scope |
 | --- | --- | --- |
-| Native Xtream | Supported | Authentication, Movies, Series, search, Basic Live and short EPG; no catch-up/timeshift or `direct_source` |
+| Native Xtream | Supported | Authentication, Movies, Series, search, live/EPG and declared programme archives; `direct_source` is unsupported |
 | Native CMS JSON | Supported | Main provider path |
 | CMS XML / native type 4 | Partial | Narrower coverage than CMS JSON |
 | TVBox/CatVod-style QuickJS | Selected | `home`, `category`, `detail`, `search`, `play`, and selected helpers |
@@ -321,7 +329,7 @@ Runtime are not shipped as an Intel or Universal Binary stack.
   Emulator E2E on macOS 12, 13, and 15 remains unverified.
 - QuickJS, Node, cloud, and web-sniffing paths cover selected interfaces and
   may need updates when upstream implementations change.
-- Top-level TVBox/FongMi `lives`, catchup/timeshift, parser types 2/3/4, and DRM
+- TVBox/FongMi `lives` and supported catch-up rules are described in the [live catch-up scope](OKVideoMac/macOS/OKVideoMac/Docs/LIVE_CATCHUP.md). Parser types 2/3/4 and DRM
   are not supported.
 - Playback ultimately depends on libmpv, codecs, headers/cookies, the media
   server, and the selected provider.

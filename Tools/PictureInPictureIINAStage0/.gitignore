@@ -1,0 +1,6 @@
+Build/
+Evidence/
+__pycache__/
+*.app/
+*.mov
+*.wav

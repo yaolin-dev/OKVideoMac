@@ -101,8 +101,12 @@ public struct XtreamLiveStreamDTO: Decodable, Equatable, Sendable {
     public let streamIcon: String?
     public let categoryID: String?
     public let containerExtension: String?
+    public let tvArchive: Bool?
+    public let tvArchiveDuration: Int?
 
     private enum CodingKeys: String, CodingKey {
+        case tvArchive = "tv_archive"
+        case tvArchiveDuration = "tv_archive_duration"
         case epgChannelID = "epg_channel_id"
         case streamID = "stream_id"
         case name
@@ -124,6 +128,8 @@ public struct XtreamLiveStreamDTO: Decodable, Equatable, Sendable {
         number = values.xtreamStringIfPresent(.number)
         streamIcon = values.xtreamStringIfPresent(.streamIcon)
         containerExtension = values.xtreamStringIfPresent(.containerExtension)
+        tvArchive = values.xtreamBoolIfPresent(.tvArchive)
+        tvArchiveDuration = values.xtreamIntIfPresent(.tvArchiveDuration)
     }
 }
 

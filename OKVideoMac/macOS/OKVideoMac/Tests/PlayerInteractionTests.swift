@@ -111,6 +111,27 @@ final class PlayerProgressInteractionTests: XCTestCase {
 
 @MainActor
 final class PlayerOverlayLayoutTests: XCTestCase {
+    func testConsecutiveFullscreenTransitionsFreezeTheLatestViewport() {
+        var viewport = PlayerOverlayViewportState()
+        let windowed = CGSize(width: 960, height: 540)
+        let full = CGSize(width: 1728, height: 1117)
+        viewport.update(windowed)
+        viewport.setTransitioning(true)
+        viewport.update(full)
+        XCTAssertEqual(viewport.frozenSize, windowed)
+        viewport.setTransitioning(false)
+        XCTAssertNil(viewport.frozenSize)
+        // No additional geometry notification arrives after completion.
+        viewport.setTransitioning(true)
+        XCTAssertEqual(viewport.frozenSize, full)
+        viewport.update(.zero)
+        XCTAssertEqual(viewport.latestSize, full)
+        viewport.update(windowed)
+        viewport.setTransitioning(false)
+        viewport.setTransitioning(true)
+        XCTAssertEqual(viewport.frozenSize, windowed)
+    }
+
     func testAdaptiveControlsAndPanelsFitLongDurationsAndSmallWindows() {
         var modes = Set<String>()
         for time in ["06:47 / 46:44", "1:26:59 / 3:12:08", "99:59:59 / 999:59:59"] {
@@ -119,7 +140,7 @@ final class PlayerOverlayLayoutTests: XCTestCase {
                                                  timeLabelWidth: PlayerOverlayLayout.timeWidth(time))
                 modes.insert(String(describing: layout.mode))
                 let leading = (layout.mode == .expanded ? 121.0 : 38.0) + 10 + layout.timeLabelWidth
-                let trailing = layout.showsAllTools ? 284.0 : 120.0
+                let trailing = layout.showsAllTools ? 213.0 : 120.0
                 if layout.mode == .stacked {
                     XCTAssertLessThanOrEqual(leading + trailing + 24, layout.innerWidth)
                 } else {
@@ -136,7 +157,7 @@ final class PlayerOverlayLayoutTests: XCTestCase {
         let long = PlayerOverlayLayout(viewportSize: .init(width: 640, height: 360), timeLabelWidth: 180)
         XCTAssertEqual(long.mode, .stacked)
         let middle = PlayerOverlayLayout(viewportSize: .init(width: 800, height: 450), timeLabelWidth: 190)
-        XCTAssertEqual(middle.mode, .compactTools)
+        XCTAssertEqual(middle.mode, .compactVolume)
         XCTAssertTrue(modes.contains("expanded")); XCTAssertTrue(modes.contains("compactTools"))
     }
 
@@ -169,8 +190,6 @@ final class PlayerOverlayLayoutTests: XCTestCase {
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = host
         defer { window.close() }
-        let directory = URL(fileURLWithPath: "/private/tmp/okvideo-player-layout-renders")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         for size in [CGSize(width: 640, height: 360), .init(width: 800, height: 450), .init(width: 1200, height: 675), .init(width: 2240, height: 1260)] {
             window.setContentSize(size)
             try await Task.sleep(nanoseconds: 120_000_000)
@@ -178,8 +197,11 @@ final class PlayerOverlayLayoutTests: XCTestCase {
             XCTAssertEqual(host.bounds.size, size)
             let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
             host.cacheDisplay(in: host.bounds, to: bitmap)
-            try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to:
-                directory.appendingPathComponent("player-\(Int(size.width)).png"))
+            let image = XCTAttachment(data: try XCTUnwrap(bitmap.representation(using: .png, properties: [:])),
+                uniformTypeIdentifier: "public.png")
+            image.name = "player-\(Int(size.width))"
+            image.lifetime = .keepAlways
+            add(image)
             let track = try XCTUnwrap(BrowserKeyboardView.descendants(of: host).compactMap { $0 as? ProgressHoverTrackingNSView }.first)
             let trackRect = host.convert(track.bounds, from: track)
             XCTAssertTrue(host.bounds.contains(trackRect), "Timeline must remain entirely within viewport")
@@ -217,7 +239,7 @@ final class PlayerOverlayLayoutTests: XCTestCase {
         guard let fixture = ProcessInfo.processInfo.environment["OKVIDEOMAC_SEEK_FIXTURE"] else {
             throw XCTSkip("Requires generated long-GOP fixture and a visible OpenGL surface")
         }
-        let player = try MPVPlayerClient(teardownMode: .fullDestroy)
+        let player = try MPVPlayerClient(teardownMode: .fullDestroy, audioPreference: .init(muted: true), mediaProxyResolver: { _ in .direct })
         let window = NSWindow(contentRect: .init(x: 100, y: 100, width: 320, height: 180), styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         var ready = false
@@ -231,10 +253,21 @@ final class PlayerOverlayLayoutTests: XCTestCase {
             }
         }
         let surface = MPVOpenGLView(player: player, onError: { XCTFail($0.localizedDescription) }, onSurfaceReady: { _ in ready = true }, onSurfaceUnavailable: { _ in })
-        window.contentView = surface; window.orderFront(nil)
+        surface.frame = NSRect(x: 0, y: 0, width: 320, height: 180)
+        window.contentView = surface
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
         do {
-            for _ in 0..<100 where !ready { try await Task.sleep(nanoseconds: 20_000_000) }
-            XCTAssertTrue(ready)
+            for _ in 0..<100 where !ready {
+                window.displayIfNeeded()
+                surface.needsDisplay = true
+                surface.displayIfNeeded()
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            XCTAssertTrue(ready, "visible=\(window.isVisible) occlusion=\(window.occlusionState.rawValue) bounds=\(surface.bounds) backing=\(surface.convertToBacking(surface.bounds)) mini=\(window.isMiniaturized) superview=\(surface.superview != nil) \(surface.readinessDiagnosticsForTesting)")
             try await player.setMuted(true)
             var media = ResolvedMedia(url: URL(fileURLWithPath: fixture), headers: [:], format: "mov", siteKey: "seek-fixture", sourceName: "Fixture", episodeName: "1")
             media.transportProfile = .tvBox
@@ -427,5 +460,100 @@ final class PlayerOverlayLayoutTests: XCTestCase {
                 XCTAssertEqual(rect.height, 28)
             }
         }
+    }
+}
+
+@MainActor final class PlayerChannelPickerTests: XCTestCase {
+    private func channel(_ name: String, group: String = "央视", number: String? = nil, alias: String? = nil) -> LiveChannel {
+        LiveChannel(groupName: group, name: name, number: number, tvgName: alias,
+            streams: [.init(name: "主线路", url: URL(string: "https://example.invalid/\(name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)!)")!)])
+    }
+    func testNormalizedSearchRanksExactAndPreservesPlusChannel() {
+        let plus = channel("CCTV-5+"), exact = channel("CCTV-5", number: "5"), other = channel("浙江卫视", group: "卫视", number: "101", alias: "ZJTV")
+        let channels = [plus, other, exact]
+        XCTAssertEqual(PlayerChannelSearch.results(channels, query: " ｃｃｔｖ－５ ").map(\.name), ["CCTV-5", "CCTV-5+"])
+        XCTAssertEqual(PlayerChannelSearch.results(channels, query: "cctv5+").map(\.id), [plus.id])
+        for query in ["101", "zjtv", "卫视"] { XCTAssertEqual(PlayerChannelSearch.results(channels, query: query).map(\.id), [other.id]) }
+        XCTAssertEqual(PlayerChannelSearch.results(channels, query: ""), channels)
+        XCTAssertTrue(PlayerChannelSearch.results(channels, query: "不存在").isEmpty)
+    }
+    func testPickerSearchesOtherGroupsAndUsesPlayingSnapshot() async throws {
+        let state = AppState(environment: nil)
+        let source = StoredLiveSource(name: "Fixture", sourceKind: .pasted, rawData: Data())
+        let a = channel("CCTV-5"), b = channel("浙江卫视", group: "卫视"), locked = channel("加密", group: "Protected")
+        let playlist = LivePlaylist(format: .m3u, groups: [.init(name: "央视", channels: [a]), .init(name: "卫视", channels: [b]), .init(name: "Protected", password: "fixture", channels: [locked])])
+        state.acceptImportedRoutesForTesting(source, playlist: playlist)
+        let catalog = try XCTUnwrap(state.acceptedImportedCatalogs[source.id])
+        var played: [URL] = []
+        state.importedRouteLoadForTesting = { _, media, _ in played.append(media.url) }
+        await state.playImportedLive(catalog.selections(for: a)[0], navigationChannels: [a])
+        XCTAssertEqual(state.playerLiveChannels.map(\.id), [a.id, b.id])
+        // A refresh must not change the routes offered by an already playing snapshot.
+        state.acceptImportedRoutesForTesting(source, playlist: .init(format: .m3u, groups: [.init(name: "New", channels: [channel("新频道")])]))
+        XCTAssertEqual(state.playerLiveChannels.map(\.id), [a.id, b.id])
+        await state.selectPlayerLiveChannel(locked.id, source: .imported(source.id))
+        await state.selectPlayerLiveChannel(b.id, source: .imported(UUID()))
+        XCTAssertEqual(played.count, 1)
+        await state.selectPlayerLiveChannel(b.id, source: .imported(source.id))
+        XCTAssertEqual(played.last, b.streams[0].url)
+        XCTAssertEqual(state.livePlaybackChannel?.id, b.id)
+        await state.switchLiveChannel(by: -1)
+        XCTAssertEqual(state.livePlaybackChannel?.id, a.id)
+        await state.closePlayer()
+    }
+    func testNativeSearchCommandsYieldToIMEAndOrdinaryTyping() {
+        var text = "", moves: [Int] = [], submissions = 0, escapes = 0
+        let view = PlayerChannelSearchField(text: .init(get: { text }, set: { text = $0 }),
+            move: { moves.append($0) }, submit: { submissions += 1 }, escape: { escapes += 1 })
+        let delegate = view.makeCoordinator(), field = NSSearchField(), editor = NSTextView()
+        editor.setMarkedText("zhong", selectedRange: .init(location: 5, length: 0), replacementRange: .init(location: NSNotFound, length: 0))
+        XCTAssertFalse(delegate.control(field, textView: editor, doCommandBy: #selector(NSResponder.insertNewline(_:))))
+        XCTAssertFalse(delegate.control(field, textView: editor, doCommandBy: #selector(NSResponder.moveDown(_:))))
+        XCTAssertFalse(delegate.control(field, textView: editor, doCommandBy: #selector(NSResponder.cancelOperation(_:))))
+        XCTAssertEqual(submissions, 0); XCTAssertTrue(moves.isEmpty); XCTAssertEqual(escapes, 0)
+        editor.unmarkText()
+        for command in [#selector(NSResponder.moveDown(_:)), #selector(NSResponder.moveUp(_:)), #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.cancelOperation(_:))] {
+            XCTAssertTrue(delegate.control(field, textView: editor, doCommandBy: command))
+        }
+        XCTAssertEqual(moves, [1, -1]); XCTAssertEqual(submissions, 1); XCTAssertEqual(escapes, 1)
+        XCTAssertFalse(delegate.control(field, textView: editor, doCommandBy: #selector(NSResponder.insertTab(_:))))
+    }
+    func testNativeEditingKeepsPanelSizeAndDoesNotStartPlayback() async throws {
+        let channels = (1...30).map { channel("CCTV-\($0)") }
+        var selections: [String] = [], closes = 0
+        let host = NSHostingView(rootView: PlayerChannelPicker(channels: channels, currentID: channels[15].id,
+            title: "频道", select: { selections.append($0) }, close: { closes += 1 })
+            .padding(14).frame(width: 370, height: 490).background(Color.black).environment(\.colorScheme, .dark))
+        let window = NSWindow(contentRect: .init(x: -2500, y: -2000, width: 370, height: 490), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host
+        defer { window.close() }
+        try await Task.sleep(nanoseconds: 180_000_000)
+        let field = try XCTUnwrap(BrowserKeyboardView.descendants(of: host).compactMap { $0 as? NSSearchField }.first)
+        let delegate = try XCTUnwrap(field.delegate as? PlayerChannelSearchField.Coordinator)
+        let original = host.bounds.size
+        for query in ["cctv5", "不存在", ""] {
+            field.stringValue = query; delegate.changed(field)
+            try await Task.sleep(nanoseconds: 100_000_000)
+            host.layoutSubtreeIfNeeded()
+            XCTAssertEqual(host.bounds.size, original)
+            XCTAssertTrue(selections.isEmpty)
+            let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            let image = XCTAttachment(data: try XCTUnwrap(bitmap.representation(using: .png, properties: [:])), uniformTypeIdentifier: "public.png")
+            image.name = "channel-search-\(query.isEmpty ? "all" : query)"; image.lifetime = .keepAlways; add(image)
+        }
+        let editor = NSTextView()
+        XCTAssertTrue(delegate.control(field, textView: editor, doCommandBy: #selector(NSResponder.insertNewline(_:))))
+        XCTAssertEqual(selections, [channels[15].id], "Clearing search must return keyboard selection to the playing channel")
+        selections.removeAll()
+        field.stringValue = "cctv5"; delegate.changed(field)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(delegate.control(field, textView: editor, doCommandBy: #selector(NSResponder.insertNewline(_:))))
+        XCTAssertEqual(selections, [channels[4].id])
+        XCTAssertTrue(delegate.control(field, textView: editor, doCommandBy: #selector(NSResponder.cancelOperation(_:))))
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(field.stringValue, ""); XCTAssertEqual(closes, 0)
+        XCTAssertTrue(delegate.control(field, textView: editor, doCommandBy: #selector(NSResponder.cancelOperation(_:))))
+        XCTAssertEqual(closes, 1)
     }
 }

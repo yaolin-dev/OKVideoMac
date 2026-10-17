@@ -47,7 +47,11 @@ struct XtreamEPGResponse {
             for secret in secrets where !secret.isEmpty { title = title.replacingOccurrences(of: secret, with: "<redacted>") }
             title = boundedUTF8(title.trimmingCharacters(in: .whitespacesAndNewlines), maximumBytes: 4096)
             guard !title.isEmpty, seen.insert(start).inserted else { continue }
-            programmes.append(EPGProgramme(channelID: streamID, title: title, start: start, end: end))
+            let archive: Bool?
+            if let value = row["has_archive"] as? NSNumber { archive = value.doubleValue == 1 ? true : (value.doubleValue == 0 ? false : nil) }
+            else if let value = row["has_archive"] as? String { archive = ["1", "true"].contains(value.lowercased()) ? true : (["0", "false"].contains(value.lowercased()) ? false : nil) }
+            else { archive = nil }
+            programmes.append(EPGProgramme(channelID: streamID, title: title, start: start, end: end, catchupAvailable: archive))
         }
         // Invalid nonempty data must not replace a previous valid schedule.
         if !rows.isEmpty && programmes.isEmpty { throw EPGFetchError.malformed }
@@ -82,7 +86,7 @@ struct XtreamEPGResponse {
 public enum XtreamEPGAdapter {
     public static func fetch(configuration: XtreamProviderConfiguration, streamID: String,
                              credentialStore: any XtreamCredentialStoring,
-                             httpClient: HTTPClient, userAgent: String) async throws -> EPGPayload {
+                             httpClient: HTTPClient, userAgent: String, archive: Bool = false) async throws -> EPGPayload {
         guard let credentials = try await credentialStore.credentials(for: configuration.providerID) else {
             throw EPGFetchError.unavailable
         }
@@ -90,6 +94,10 @@ public enum XtreamEPGAdapter {
         let client = XtreamClient(endpoint: try XtreamEndpoint(serverURL: configuration.serverBaseURL),
                                   credentials: credentials, httpClient: httpClient, userAgent: userAgent,
                                   maximumConcurrentRequests: 1)
+        if archive {
+            let value = try await client.archiveEPG(streamID: streamID)
+            if !value.unsupported { return value }
+        }
         return try await client.shortEPG(streamID: streamID)
     }
 }

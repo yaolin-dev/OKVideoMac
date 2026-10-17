@@ -73,6 +73,275 @@ import OKVideoPersistence
     }
 }
 
+@MainActor final class FullscreenOverlayLifecycleTests: XCTestCase {
+    private func makeWindow() -> (NSWindow, PlayerFullscreenOverlayView) {
+        let window = NSWindow(contentRect: .init(x: -2000, y: -2000, width: 960, height: 540),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let overlay = PlayerFullscreenOverlayView(frame: window.contentView!.bounds)
+        window.contentView!.addSubview(overlay)
+        return (window, overlay)
+    }
+    private func drain() async {
+        for _ in 0..<6 {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.main.async { continuation.resume() }
+            }
+        }
+    }
+    func testNativePhaseHidesBeforeResizeAndRestoresAfterCompletion() async {
+        let (window, overlay) = makeWindow(); defer { window.close() }
+        let transition = WindowTransitionCoordinator.state(for: window)
+        for entering in [true, false] {
+            transition.beginFullScreen(entering: entering)
+            XCTAssertEqual(overlay.alphaValue, 0)
+            window.setContentSize(entering ? .init(width: 1440, height: 900) : .init(width: 960, height: 540))
+            await drain()
+            XCTAssertEqual(overlay.alphaValue, 0)
+            XCTAssertTrue(CATransform3DIsIdentity(overlay.layer!.transform))
+            transition.completeFullScreen(isFullScreen: entering)
+            XCTAssertEqual(overlay.alphaValue, 0, "Completion must not expose a pending SwiftUI layout")
+            await drain()
+            XCTAssertEqual(overlay.alphaValue, 1)
+            XCTAssertEqual(overlay.frame, window.contentView!.bounds)
+        }
+    }
+    func testRapidToggleRejectsOldRevealAndFailureRecovers() async {
+        let (window, overlay) = makeWindow(); defer { window.close() }
+        let transition = WindowTransitionCoordinator.state(for: window)
+        transition.beginFullScreen(entering: true)
+        transition.completeFullScreen(isFullScreen: true)
+        transition.beginFullScreen(entering: false)
+        await drain()
+        XCTAssertEqual(overlay.alphaValue, 0)
+        transition.fullScreenDidFail()
+        await drain()
+        XCTAssertEqual(overlay.alphaValue, 1)
+        transition.beginFullScreen(entering: true)
+        XCTAssertTrue(transition.recoverStalledFullscreen(at: ProcessInfo.processInfo.systemUptime + 6))
+        await drain()
+        XCTAssertEqual(overlay.alphaValue, 1)
+    }
+    func testClosingOrMovingOverlayInvalidatesPendingReveal() async {
+        let (window, overlay) = makeWindow(); defer { window.close() }
+        let (other, _) = makeWindow(); defer { other.close() }
+        let transition = WindowTransitionCoordinator.state(for: window)
+        transition.beginFullScreen(entering: true)
+        transition.completeFullScreen(isFullScreen: true)
+        overlay.removeFromSuperview()
+        WindowTransitionCoordinator.state(for: other).beginFullScreen(entering: true)
+        other.contentView!.addSubview(overlay)
+        await drain()
+        XCTAssertEqual(overlay.alphaValue, 0, "The old window cannot reveal controls in the new transition")
+        NotificationCenter.default.post(name: NSWindow.willCloseNotification, object: other)
+        await drain()
+        XCTAssertEqual(overlay.alphaValue, 1)
+        XCTAssertNil(overlay.layer?.animation(forKey: "com.okvideomac.controls.reveal"))
+    }
+    func testAlreadyHiddenOverlayRemainsHiddenAfterTransition() async {
+        let (window, overlay) = makeWindow(); defer { window.close() }
+        overlay.alphaValue = 0
+        let transition = WindowTransitionCoordinator.state(for: window)
+        transition.beginFullScreen(entering: true)
+        transition.completeFullScreen(isFullScreen: true)
+        await drain()
+        XCTAssertEqual(overlay.alphaValue, 0)
+    }
+}
+
+@MainActor final class FullscreenPlaybackTests: XCTestCase {
+    private func renderHost(in view: NSView) -> MPVRenderHostView? {
+        if let host = view as? MPVRenderHostView { return host }
+        for child in view.subviews {
+            if let host = renderHost(in: child) { return host }
+        }
+        return nil
+    }
+
+    private func waitFor(_ condition: () -> Bool, line: UInt = #line) async throws {
+        let deadline = ProcessInfo.processInfo.systemUptime + 10
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            if condition() { return }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTFail("Fullscreen playback condition timed out", line: line)
+        throw NSError(domain: "FullscreenPlayback", code: 1)
+    }
+
+    /// The upper-right portion of the isolated overlay contains only the card.
+    /// A stray centered live title also expands these bounds and fails the check.
+    private func renderedProgrammeBounds(_ bitmap: NSBitmapImageRep, viewport: NSSize) throws -> NSRect {
+        var minX = bitmap.pixelsWide, minY = bitmap.pixelsHigh, maxX = -1, maxY = -1
+        for y in stride(from: 0, to: bitmap.pixelsHigh / 3, by: 2) {
+            for x in stride(from: bitmap.pixelsWide / 2, to: bitmap.pixelsWide, by: 2) {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                      max(color.redComponent, color.greenComponent, color.blueComponent) > 0.03 else { continue }
+                minX = min(minX, x); minY = min(minY, y); maxX = max(maxX, x); maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= minX, maxY >= minY else {
+            XCTFail("Programme card was not rendered")
+            throw NSError(domain: "FullscreenPlayback", code: 2)
+        }
+        let sx = CGFloat(bitmap.pixelsWide) / viewport.width, sy = CGFloat(bitmap.pixelsHigh) / viewport.height
+        return NSRect(x: CGFloat(minX) / sx, y: CGFloat(minY) / sy,
+            width: CGFloat(maxX + 1 - minX) / sx, height: CGFloat(maxY + 1 - minY) / sy)
+    }
+
+    func testLiveUsesNativeFullscreenWithContinuousPlayback() async throws { try await exercise(live: true) }
+    func testOnDemandKeepsCustomFullscreenWithContinuousPlayback() async throws { try await exercise(live: false) }
+
+    private func exercise(live: Bool) async throws {
+        guard let fixture = ProcessInfo.processInfo.environment["OKVIDEO_PIP_FIXTURE"] else {
+            throw XCTSkip("Requires the synthetic video fixture and an unlocked desktop")
+        }
+        let state = AppState(environment: nil)
+        state.playerWindowPreferences.setMode(.automaticAspect)
+        if live {
+            let source = StoredLiveSource(name: "Fullscreen fixture", sourceKind: .pasted, rawData: Data())
+            let channel = LiveChannel(groupName: "Fixture", name: "Live fullscreen", streams: [
+                LiveStream(name: "Fixture", url: URL(fileURLWithPath: fixture))])
+            state.acceptImportedRoutesForTesting(source, playlist: .init(format: .m3u,
+                groups: [.init(name: "Fixture", channels: [channel])]))
+            state.importedRouteLoadForTesting = { _, _, _ in }
+            await state.playImportedLive(state.acceptedImportedCatalogs[source.id]!.selections(for: channel)[0], navigationChannels: [channel])
+            let liveSource = LiveSourceID.imported(source.id), now = Date()
+            let generation = state.liveEPG.prepare(source: liveSource, revision: "fixture")
+            let incarnation = UUID(), demand = UUID()
+            XCTAssertTrue(state.liveEPG.publish(.init(token: .init(serviceIncarnation: incarnation,
+                resourceIdentity: "fixture", sourceEpoch: "fixture", dataVersion: "1", demandRevision: demand),
+                items: [.init(match: .init(kind: .exact, channelID: "fixture"),
+                    current: .init(channelID: "fixture", title: "当前节目 · 自然与旅行", start: now.addingTimeInterval(-900), end: now.addingTimeInterval(900)),
+                    next: .init(channelID: "fixture", title: "下一节目 · 晚间新闻", start: now.addingTimeInterval(900), end: now.addingTimeInterval(2700)))]),
+                channels: [channel], source: liveSource, revision: "fixture", generation: generation,
+                demandRevision: demand, serviceIncarnation: incarnation))
+        } else {
+            state.seedHistoryPlaybackForTesting(configuration: .init(name: "Fullscreen fixture", sourceKind: .pasted,
+                rawData: Data("{}".utf8)), position: 0, duration: 120)
+        }
+        XCTAssertEqual(state.isLivePlayback, live)
+        let player = try MPVPlayerClient(teardownMode: .fullDestroy, audioPreference: .init(muted: true), mediaProxyResolver: { _ in .direct })
+        var latest = PlayerSnapshot(), errors: [String] = []
+        let reader = Task { @MainActor in
+            for await event in player.events {
+                if case .snapshot(let snapshot, _) = event {
+                    latest = snapshot
+                    state.playerSnapshotState.update(snapshot)
+                }
+            }
+        }
+        let controller = PlayerPlaybackWindowController(appState: state)
+        controller.prewarm()
+        let window = try XCTUnwrap(controller.windowForTesting)
+        window.setContentSize(.init(width: 960, height: 540))
+        let content = try XCTUnwrap(window.contentView)
+        let composition = try XCTUnwrap(content.subviews.compactMap { $0 as? PlayerFullscreenContentView }.first)
+        let overlay = try XCTUnwrap(content.subviews.compactMap { $0 as? PlayerFullscreenOverlayView }.first)
+        // Match the production window's finite AppKit container and retained
+        // hosting controller, including the SwiftUI-owned render host.
+        let videoController = NSHostingController(rootView: ZStack {
+            Color.black
+            MPVRenderView(player: player, onError: { errors.append($0.localizedDescription) },
+                onSurfaceReady: { _ in }, onSurfaceUnavailable: { _ in })
+                .ignoresSafeArea().allowsHitTesting(false)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity).background(.black))
+        if #available(macOS 13.0, *) { videoController.sizingOptions = [] }
+        let videoView = videoController.view
+        videoView.translatesAutoresizingMaskIntoConstraints = true
+        videoView.frame = composition.bounds; videoView.autoresizingMask = [.width, .height]
+        composition.addSubview(videoView)
+        let host = PlayerOverlayHostingView(rootView: PlayerView(playerSnapshotState: state.playerSnapshotState,
+            onWindowChromeRestored: {}).environmentObject(state))
+        if #available(macOS 13.0, *) { host.sizingOptions = [] }
+        host.frame = overlay.bounds; host.autoresizingMask = [.width, .height]; overlay.addSubview(host)
+        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        let transition = WindowTransitionCoordinator.state(for: window)
+        try await waitFor { self.renderHost(in: composition) != nil }
+        let renderHost = try XCTUnwrap(renderHost(in: composition))
+        let surface = renderHost.surface
+        do {
+            try await waitFor { surface.canAnimateFullscreen }
+            let media = ResolvedMedia(url: URL(fileURLWithPath: fixture), headers: [:], siteKey: live ? "live" : "fullscreen-fixture",
+                sourceName: "Synthetic", episodeName: "Fullscreen")
+            try await player.load(media, startPosition: nil, requestID: UUID())
+            try await waitFor { latest.status == .playing && latest.position > 0.1 }
+            let context = surface.openGLContext
+            if live {
+                XCTAssertNil(controller.customWindowsToEnterFullScreen(for: window, on: try XCTUnwrap(window.screen)))
+            }
+            // Exercise the neutral prewarmed shell, fixed sizing, automatic
+            // aspect, and switching back to fixed sizing while paused.
+            for round in 0..<4 {
+                if round > 0 {
+                    let mode: PlayerWindowMode = round == 2 ? .automaticAspect : .fixedFrame
+                    state.playerWindowPreferences.setMode(mode)
+                    try await Task.sleep(nanoseconds: 300_000_000)
+                    try await waitFor {
+                        mode == .fixedFrame ? window.contentAspectRatio == .zero : window.contentAspectRatio.width > 0
+                    }
+                }
+                if round == 3 { try await player.pause(); try await waitFor { latest.status == .paused } }
+                let originalFrame = window.frame
+                let position = latest.position
+                for entering in [true, false] {
+                    NSLog("FullscreenPlayback live=%@ round=%d entering=%@ frame=%@ min=%@ max=%@ aspect=%@",
+                        String(live), round, String(entering), NSStringFromRect(window.frame),
+                        NSStringFromSize(window.contentMinSize), NSStringFromSize(window.contentMaxSize),
+                        NSStringFromSize(window.contentAspectRatio))
+                    transition.requestFullScreenToggle()
+                    try await waitFor { transition.phase == (entering ? .enteringFullScreen : .exitingFullScreen) }
+                    XCTAssertEqual(overlay.alphaValue, 0)
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                    if transition.isTransitioning { XCTAssertEqual(overlay.alphaValue, 0) }
+                    if live {
+                        XCTAssertNil(composition.layer?.animation(forKey: "com.okvideomac.video.fullscreen"))
+                        XCTAssertNil(content.layer?.mask, "Native live transition must not acquire the custom video mask")
+                    }
+                    try await waitFor { transition.phase == (entering ? .fullScreen : .windowed) && !transition.isTransitioning && overlay.alphaValue == 1 }
+                    XCTAssertEqual(window.styleMask.contains(.fullScreen), entering)
+                    XCTAssertTrue(surface.openGLContext === context)
+                    XCTAssertTrue(surface.superview === renderHost)
+                    XCTAssertTrue(renderHost.isDescendant(of: composition))
+                    XCTAssertTrue(host.superview === overlay)
+                    XCTAssertEqual(host.frame, overlay.bounds)
+                    XCTAssertTrue(CATransform3DIsIdentity(overlay.layer!.transform))
+                    try await Task.sleep(nanoseconds: 180_000_000)
+                    if live && round == 0 {
+                        host.layoutSubtreeIfNeeded()
+                        let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                        host.cacheDisplay(in: host.bounds, to: bitmap)
+                        // Measure the actual SwiftUI rendering: removing the live
+                        // header must not anchor this card to the control row.
+                        let card = try renderedProgrammeBounds(bitmap, viewport: host.bounds.size)
+                        let layout = PlayerOverlayLayout(viewportSize: host.bounds.size)
+                        XCTAssertEqual(host.bounds.width - card.maxX, layout.programmeTrailingInset, accuracy: 2,
+                            "Programme card must align with the inset control content")
+                        XCTAssertEqual(card.minY, layout.programmeTopInset + (entering ? (window.screen?.safeAreaInsets.top ?? 0) : 0), accuracy: 2)
+                        if !entering {
+                            XCTAssertEqual(host.bounds.width - card.maxX, 40, accuracy: 2)
+                            XCTAssertEqual(card.minY, 44, accuracy: 2)
+                        }
+                        XCTAssertEqual(card.width, 310, accuracy: 2, "Original programme card width must be retained")
+                        let image = XCTAttachment(data: try XCTUnwrap(bitmap.representation(using: .png, properties: [:])), uniformTypeIdentifier: "public.png")
+                        image.name = entering ? "live-programme-fullscreen" : "live-programme-windowed"
+                        image.lifetime = .keepAlways
+                        add(image)
+                    }
+                }
+                if round < 3 { XCTAssertGreaterThan(latest.position, position + 0.2) }
+                else { XCTAssertEqual(latest.position, position, accuracy: 0.1) }
+                XCTAssertEqual(window.frame.width, originalFrame.width, accuracy: 1)
+                XCTAssertEqual(window.frame.height, originalFrame.height, accuracy: 1)
+                XCTAssertTrue(errors.isEmpty, "Render errors: \(errors)")
+            }
+            withExtendedLifetime(videoController) {}
+            surface.tearDown(); controller.dismiss(); reader.cancel(); await player.shutdown(); await state.closePlayer()
+        } catch {
+            surface.tearDown(); controller.dismiss(); reader.cancel(); await player.shutdown(); await state.closePlayer(); throw error
+        }
+    }
+}
+
 @MainActor final class FullscreenCompositionTests: XCTestCase {
     // Direct lifecycle tests invoke the delegate without entering a Space.
     // Real fullscreen windows are not constrained to the desktop's Dock/menu
@@ -279,16 +548,17 @@ import OKVideoPersistence
 
 @MainActor
 final class BrowserSplitDividerTests: XCTestCase {
-    private func withBrowser(initialSection: AppSection = .settings, suppliedState: AppState? = nil, _ run: (AppState, NSWindow) async throws -> Void) async throws {
+    private func withBrowser(initialSection: AppSection = .settings, suppliedState: AppState? = nil, configureChromeImmediately: Bool = true, imageRepository: ImageRepository? = nil, _ run: (AppState, NSWindow) async throws -> Void) async throws {
         let state = suppliedState ?? AppState(environment: nil)
         state.selectSection(initialSection)
         let host = NSHostingController(rootView: RootView()
+            .environment(\.imageRepository, imageRepository)
             .environmentObject(state).environmentObject(state.navigation))
         let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 1370, height: 780),
             styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentViewController = host
-        BrowserWindowChromeController.configure(window)
+        if configureChromeImmediately { BrowserWindowChromeController.configure(window) }
         window.title = "OKVideoMac native sidebar verification"
         window.makeKeyAndOrderFront(nil)
         defer { window.close() }
@@ -299,6 +569,22 @@ final class BrowserSplitDividerTests: XCTestCase {
         try await Task.sleep(nanoseconds: 200_000_000)
         window.contentView?.layoutSubtreeIfNeeded()
         window.displayIfNeeded()
+    }
+
+    private func assertTitlebarMaterial(_ window: NSWindow, line: UInt = #line) throws {
+        XCTAssertTrue(window.titlebarAppearsTransparent, line: line)
+        let content = try XCTUnwrap(window.contentView)
+        let backdrop = try XCTUnwrap(BrowserKeyboardView.descendants(of: content)
+            .compactMap { $0 as? BrowserTitlebarMaterialView }.first)
+        let painted = backdrop.materialView.convert(backdrop.materialView.bounds, to: nil)
+        let contentTop = window.contentLayoutRect.maxY
+        XCTAssertEqual(painted.minY, contentTop, accuracy: 0.5, line: line)
+        XCTAssertEqual(painted.maxY, content.convert(content.bounds, to: nil).maxY, accuracy: 0.5, line: line)
+        XCTAssertGreaterThan(painted.height, 0, line: line)
+        XCTAssertEqual(backdrop.materialView.material, .titlebar, line: line)
+        XCTAssertEqual(backdrop.materialView.blendingMode, .behindWindow, line: line)
+        XCTAssertFalse(backdrop.materialView.isHiddenOrHasHiddenAncestor, line: line)
+        XCTAssertNil(backdrop.hitTest(.zero), "The background must never intercept content clicks", line: line)
     }
 
     private func primarySplit(in window: NSWindow) throws -> NSSplitView {
@@ -481,6 +767,77 @@ final class BrowserSplitDividerTests: XCTestCase {
         }
     }
 
+    func testFirstHomeScrollKeepsTitlebarMaterialBeforeAnyNavigation() async throws {
+        let pixels = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil,
+            pixelsWide: 80, pixelsHigh: 120, bitsPerSample: 8, samplesPerPixel: 4,
+            hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+            bytesPerRow: 0, bitsPerPixel: 0))
+        for y in 0..<120 {
+            for x in 0..<80 {
+                pixels.setColor((x / 10 + y / 10).isMultiple(of: 2) ? .systemRed : .systemBlue, atX: x, y: y)
+            }
+        }
+        let png = try XCTUnwrap(pixels.representation(using: .png, properties: [:]))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("toolbar-posters-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let repository = ImageRepository(dataRepository: try ImageDataRepository(cacheDirectory: directory,
+            httpClient: ToolbarPosterHTTPClient(body: png)))
+        let posterURL = try XCTUnwrap(URL(string: "https://toolbar.fixture.invalid/poster.png"))
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            // Let the production WindowCloseObserver schedule window setup.
+            // Synchronous configuration in the other helpers hid this race.
+            try await withBrowser(initialSection: .home, configureChromeImmediately: false, imageRepository: repository) { state, window in
+                window.appearance = NSAppearance(named: appearance)
+                let provider = ToolbarFixtureProvider()
+                let record = StoredConfiguration(name: "Scrolling toolbar fixture", sourceKind: .pasted,
+                    rawData: try JSONEncoder().encode(FongMiConfiguration(sites: [provider.site])))
+                let posters = (0..<120).map { index in
+                    VideoSummary(siteKey: provider.site.key, siteName: provider.site.name,
+                        videoID: "poster-\(index)", title: "Poster \(index)", posterURL: posterURL)
+                }
+                state.seedCategoryHomeForTesting(record: record, provider: provider,
+                    home: SiteHome(categories: [], recommendations: posters))
+                try await self.settle(window)
+                let split = try self.primarySplit(in: window)
+                XCTAssertFalse(HomeItemPresentationPolicy.prefersCompactCards(posters),
+                    "Exercise the recommendation poster wall, not compact entry cards")
+                let scroll = try XCTUnwrap(BrowserKeyboardView.descendants(of: split.arrangedSubviews[1])
+                    .compactMap { $0 as? NSScrollView }.first {
+                        ($0.documentView?.bounds.height ?? 0) > $0.contentView.bounds.height + 500
+                    })
+                XCTAssertTrue(WindowTransitionCoordinator.state(for: window).browserChromeConfigured)
+                // Let initial viewport measurement/anchor restoration finish,
+                // just as it does while startup artwork loads. Never navigate.
+                try await self.settle(window)
+                try await self.settle(window)
+                for offset: CGFloat in [180, 640, 1200, 0] {
+                    scroll.contentView.scroll(to: NSPoint(x: 0, y: offset))
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                    try await self.settle(window)
+                    XCTAssertEqual(scroll.contentView.bounds.minY, offset, accuracy: 1)
+                    try self.assertTitlebarMaterial(window)
+                    XCTAssertFalse(try XCTUnwrap(window.toolbar).items.isEmpty)
+                    if offset == 640 {
+                        let stats = await repository.posterPipelineStats()
+                        XCTAssertGreaterThan(stats.decoded, 0, "Render colored poster images without a network dependency")
+                        try self.attachWindowSnapshot(window, name: "first-home-scroll-\(appearance.rawValue)")
+                    }
+                }
+                for section: AppSection in [.live, .home, .favorites, .history, .settings, .home] {
+                    state.selectSection(section)
+                    try await self.settle(window)
+                    try self.assertTitlebarMaterial(window)
+                }
+                state.presentHomeSearch()
+                try await self.settle(window)
+                try self.assertTitlebarMaterial(window)
+                state.returnFromSearchToHome()
+                try await self.settle(window)
+                try self.assertTitlebarMaterial(window)
+            }
+        }
+    }
+
     func testConfigurationArrivalAndRemovalKeepHomeTitlebarStable() async throws {
         try await withBrowser(initialSection: .home) { state, window in
             try await self.settle(window)
@@ -623,9 +980,7 @@ final class BrowserSplitDividerTests: XCTestCase {
                     XCTAssertTrue(controller.splitViewItems[0].allowsFullHeightLayout)
                     let sidebarFrame = sidebar.convert(sidebar.bounds, to: window.contentView)
                     XCTAssertEqual(sidebarFrame.maxY, window.contentView!.bounds.maxY, accuracy: 0.5)
-                    let material = try XCTUnwrap(BrowserKeyboardView.descendants(of: panes[1])
-                        .compactMap { $0 as? NSVisualEffectView }.first { $0.material == .titlebar })
-                    XCTAssertEqual(material.blendingMode, .withinWindow)
+                    try self.assertTitlebarMaterial(window)
                     let items = try XCTUnwrap(window.toolbar?.items)
                     XCTAssertFalse(items.contains { $0.itemIdentifier == .sidebarTrackingSeparator })
                     XCTAssertEqual(window.titlebarAccessoryViewControllers.filter { $0 is BrowserSidebarTitlebarController }.count, 1)
@@ -784,9 +1139,15 @@ final class BrowserSplitDividerTests: XCTestCase {
             let container = try XCTUnwrap(BrowserKeyboardView.descendants(of: split.arrangedSubviews[0])
                 .compactMap { $0 as? NativeSidebarSourceList.ContainerView }.first)
             let frame = try XCTUnwrap(window.contentView?.superview)
+            AppAppearanceController.apply(.system)
+            try await self.settle(window)
+            let systemIsDark = window.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             for theme: AppTheme in [.dark, .light, .dark, .light, .system] {
+                // AppKit propagates application appearance on its next turn.
+                // Derive the expected theme from the requested value, rather
+                // than accidentally recording the previous frame's appearance.
+                let dark = theme == .system ? systemIsDark : theme == .dark
                 AppAppearanceController.apply(theme)
-                let dark = window.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
                 // Assert the first frames after the actual app-level theme
                 // change, without waiting for a settled 200 ms screenshot.
                 for sample in 0..<3 {
@@ -862,5 +1223,12 @@ private struct ToolbarFixtureProvider: SiteProvider {
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult { throw AppError.site("fixture") }
     func detail(id: String) async throws -> VideoDetail {
         .init(summary: .init(siteKey: site.key, siteName: site.name, videoID: id, title: "Fixture"), synopsis: "", playSources: [])
+    }
+}
+
+private struct ToolbarPosterHTTPClient: HTTPClient {
+    let body: Data
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        HTTPResponse(url: request.url, statusCode: 200, headers: ["Content-Type": "image/png"], body: body)
     }
 }

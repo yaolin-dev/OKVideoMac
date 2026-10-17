@@ -145,13 +145,17 @@ enum MPVTVBoxPlaybackPolicy {
             options.append("start=" + String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), position))
             options.append("pause=yes")
         }
+        if media.transportProfile != .tvBox, let start = media.playbackStartOffset, start.isFinite, start > 0 {
+            options.append("start=" + String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), start))
+            options.append("pause=yes")
+        }
         if let limit = media.playbackDurationLimit, limit.isFinite, limit > 0 {
             options.append("end=" + String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), limit))
         }
         if media.compatibilityPolicy == .nativeXtreamLive, media.hlsStartupSelection != nil {
             options.append("demuxer-lavf-format=hls")
         }
-        if media.siteKey == "xtream-live",
+        if (media.siteKey == "xtream-live" || media.compatibilityPolicy == .nativeXtreamLive),
            media.url.scheme?.lowercased() == "https" {
             options.append("tls-verify=yes")
         }
@@ -2001,6 +2005,11 @@ final class MPVPlayerClient: PlayerClient {
         }
     }
 
+    private func refreshDisplayDimensions(client: OpaquePointer) {
+        snapshot.videoWidth = max(0, propertyString("dwidth", client: client).flatMap(Int.init) ?? 0)
+        snapshot.videoHeight = max(0, propertyString("dheight", client: client).flatMap(Int.init) ?? 0)
+    }
+
     private func refreshMediaInfo(client: OpaquePointer) {
         guard !isReplacingMedia, didEmitFileLoadedForCurrentMedia,
               let owner = activeMediaRequestID, owner == currentRequestID,
@@ -2360,6 +2369,9 @@ final class MPVPlayerClient: PlayerClient {
                 )
             }
             activeMediaRequestID = currentRequestID
+            // Property observation reports changes, so replacing a video with
+            // the same display size can leave the per-media reset at zero.
+            refreshDisplayDimensions(client: client)
             snapshot.isSeekable = propertyString("seekable", client: client).map { $0 == "yes" }
             if let limit = currentMedia?.playbackDurationLimit { snapshot.duration = limit }
             pendingEOFSignal = nil
@@ -2598,6 +2610,7 @@ final class MPVPlayerClient: PlayerClient {
             } else { snapshot.isSeeking = true }
             emitSnapshot()
         case NativeEvent.playbackRestart:
+            if let client { refreshDisplayDimensions(client: client) }
             let activeSeekGeneration = postSeekEndGuard
                 .activeSeekGeneration(
                     requestGeneration: playbackRequestGeneration

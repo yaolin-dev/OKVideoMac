@@ -31,7 +31,7 @@ struct HomeView: View {
     @ViewBuilder
     private var homeContent: some View {
         if !state.hasCompletedStartup && state.activeConfiguration == nil {
-            AppActivityLabel(L10n.string("home.restoring-last-content", fallback: "Restoring your last content…"))
+            StartupContentPlaceholder()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if state.activeConfiguration == nil {
             VStack(spacing: 18) {

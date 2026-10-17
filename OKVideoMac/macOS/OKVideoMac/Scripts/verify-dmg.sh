@@ -98,7 +98,9 @@ else
   fi
 fi
 
-MOUNT_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/okvideomac-dmg-verify.XXXXXX")"
+# Keep the tiny mount directory independent of large external build staging.
+# Some external volumes reject mounting a disk image inside themselves.
+MOUNT_ROOT="$(mktemp -d "${OKVIDEOMAC_DMG_VERIFY_TMPDIR:-${TMPDIR:-/tmp}}/okvideomac-dmg-verify.XXXXXX")"
 MOUNT_POINT="$MOUNT_ROOT/mount"
 mkdir -p "$MOUNT_POINT"
 ATTACHED=0

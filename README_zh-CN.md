@@ -1,6 +1,6 @@
 # OKVideoMac
 
-最新稳定版本为 **0.8.6（Build 139）**。官方 DMG 在用户同意后可发送过滤后的崩溃报告，公开源码默认没有实际服务地址。签名、公证、最终符号后台解析与16项公开资产核验通过；见[发布说明](Docs/RELEASE_NOTES_0.8.6.md)、[配置流程](Docs/CRASH_REPORTING_RELEASE_CONFIGURATION.md)和[正式验证](Docs/RELEASE_VALIDATION_0.8.6.md)。
+当前发布候选为 **0.8.7（Build 140）**，包含直播回放、原生画中画、播放信息、启动／播放器界面以及历史与详情修复。现有公开稳定下载仍为 0.8.6，待全部发布门禁通过后更新。见[发布说明](Docs/RELEASE_NOTES_0.8.7.md)与[发布就绪](Docs/RELEASE_READINESS_0.8.7.md)。
 
 **0.8.4（Build 137）**修复与 0.8.3 启动崩溃相关的工具栏归属路径，用户已确认 macOS 27.0.1 实机测试正常。见[发布说明](Docs/RELEASE_NOTES_0.8.4.md)和[正式验证](Docs/RELEASE_VALIDATION_0.8.4.md)。
 
@@ -33,7 +33,15 @@
 
 > 本项目是播放器与源客户端，不内置第三方内容源、账号、Cookie、解析服务或 DRM 密钥。
 
-## 0.8.6 新增与修复
+## 0.8.7 新增与修复（发布候选）
+
+- 支持所声明 M3U／TVBox／FongMi 回放规则、日期式节目表与 Native Xtream 归档，提供节目进度、下一档可回放节目及返回直播。
+- 增加原生画中画、统一的自适应播放器控制栏、设置中的播放信息，以及原生启动占位界面。
+- 修复播放中历史／收藏单击选中被刷新覆盖，保留双击播放；播放与切集后保留详情页，并刷新夸克历史资源身份。
+
+见[发布说明](Docs/RELEASE_NOTES_0.8.7.md)和[发布就绪](Docs/RELEASE_READINESS_0.8.7.md)。回放取决于服务端能力与节目表覆盖；画中画使用动态校验的 macOS 私有接口，弹幕保留在主窗口。
+
+## 0.8.6 历史版本
 
 官方 DMG 可发送过滤后的崩溃报告；默认关闭，在“设置 → 高级”选择授权。源码实际服务地址留空，未配置构建明确显示不可上传。管理令牌不进入 App；见[正式验证](Docs/RELEASE_VALIDATION_0.8.6.md)。
 
@@ -215,7 +223,7 @@ Managed 安装事务与 Emulator Session 生命周期互相独立。存储、修
 
 | 源 / 运行时 | 级别 | 当前范围 |
 | --- | --- | --- |
-| Native Xtream | 支持 | 账号认证、Movies、Series、搜索、Basic Live 与短 EPG；不支持回看/时移或 `direct_source` |
+| Native Xtream | 支持 | 账号认证、Movies、Series、搜索、直播／EPG 与声明支持的节目归档；不支持 `direct_source` |
 | Native CMS JSON | 支持 | 主要 Provider 路径 |
 | CMS XML / Native type 4 | 部分支持 | 覆盖窄于 CMS JSON |
 | TVBox/CatVod 风格 QuickJS | 部分兼容 | `home`、`category`、`detail`、`search`、`play` 与部分辅助接口 |
@@ -285,7 +293,7 @@ Intel 或 Universal Binary 组合发布。
   M1 / macOS 14.8.8 上完成 Emulator/Bridge/Dex 实机 E2E；macOS 12、13、15 的
   Managed Emulator E2E 尚未验证。
 - QuickJS、Node、网盘和网页嗅探只覆盖已实现接口，上游变化可能需要后续适配。
-- TVBox/FongMi 顶层 `lives`、catchup/timeshift、parser type 2/3/4 与 DRM 不受支持。
+- TVBox/FongMi 顶层 `lives` 及选定回放规则见[支持范围](OKVideoMac/macOS/OKVideoMac/Docs/LIVE_CATCHUP.md)；parser type 2/3/4 与 DRM 不受支持。
 - 最终播放仍取决于 libmpv、codec、Header/Cookie、媒体服务器和所选 Provider。
 - 大型旧数据库可能造成一次性启动停顿。
 

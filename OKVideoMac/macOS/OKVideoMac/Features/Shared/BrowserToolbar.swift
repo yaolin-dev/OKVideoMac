@@ -389,6 +389,64 @@ extension View {
     }
 }
 
+/// Keep the background preference on the stable detail host, outside route
+/// conditionals. Every page, including native Favorites and History, shares it.
+struct BrowserToolbarBackgroundModifier: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        Group {
+            if #available(macOS 13.0, *) {
+                content.toolbarBackground(.visible, for: .windowToolbar)
+            } else {
+                content
+            }
+        }
+        .overlay {
+            BrowserTitlebarMaterial()
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+    }
+}
+
+private struct BrowserTitlebarMaterial: NSViewRepresentable {
+    func makeNSView(context: Context) -> BrowserTitlebarMaterialView {
+        BrowserTitlebarMaterialView()
+    }
+    func updateNSView(_ view: BrowserTitlebarMaterialView, context: Context) {
+        view.needsLayout = true
+    }
+}
+
+/// Owns only the right pane's titlebar background. The page can scroll beneath
+/// it without leaking through AppKit's native split-section separator slot.
+final class BrowserTitlebarMaterialView: NSView {
+    let materialView = NSVisualEffectView()
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        materialView.material = .titlebar
+        materialView.blendingMode = .behindWindow
+        materialView.state = .followsWindowActiveState
+        addSubview(materialView)
+        setAccessibilityElement(false)
+    }
+    required init?(coder: NSCoder) { nil }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        needsLayout = true
+    }
+    override func layout() {
+        super.layout()
+        guard let window else { materialView.frame = .zero; return }
+        let contentTop = convert(NSPoint(x: 0, y: window.contentLayoutRect.maxY), from: nil).y
+        let bottom = min(bounds.maxY, max(bounds.minY, contentTop))
+        materialView.frame = NSRect(x: bounds.minX, y: bottom, width: bounds.width,
+                                    height: bounds.maxY - bottom)
+    }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 struct BrowserToolbarChromeModifier: ViewModifier {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
@@ -408,9 +466,6 @@ struct BrowserToolbarChromeModifier: ViewModifier {
     func body(content: Content) -> some View {
         if usesSystemChrome {
             content
-        } else if #available(macOS 13.0, *) {
-            chrome(content)
-                .toolbarBackground(.visible, for: .windowToolbar)
         } else {
             chrome(content)
         }

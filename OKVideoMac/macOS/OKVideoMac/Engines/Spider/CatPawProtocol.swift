@@ -321,6 +321,10 @@ enum CatPawAuthorizationClassifier {
     static func isExpiredShareToken(_ message: String) -> Bool {
         let normalized = message.lowercased()
         return normalized.contains("41016")
+            || normalized.contains("转存文件token校验异常")
+            || normalized.contains("share_fid_token")
+            || normalized.contains("sharefidtoken")
+            || normalized.contains("fid_token")
             || (normalized.contains("stoken")
                 && (normalized.contains("过期")
                     || normalized.contains("expired")))

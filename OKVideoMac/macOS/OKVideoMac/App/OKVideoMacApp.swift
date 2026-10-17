@@ -12,6 +12,7 @@ struct OKVideoMacApp: App {
         CrashAcceptance.faultIfRequested("app-init")
 #endif
         localizer = AppLocalizer.shared
+        AppAppearanceController.apply(AppAppearanceController.cachedTheme())
         let session = AppLaunchSession.current ?? AppLaunchSession.prepare()
         let controller = AppStartupController(session: session)
         session.controller = controller
@@ -630,7 +631,9 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
             width: PlayerWindowPreferencePolicy.minimumContentWidth,
             height: PlayerWindowPreferencePolicy.minimumContentHeight
         )
-        window.contentAspectRatio = .zero
+        // Reset via increments. Assigning a zero aspect ratio can leave
+        // AppKit with an invalid constraint when native fullscreen exits.
+        window.contentResizeIncrements = NSSize(width: 1, height: 1)
         self.window = window
         if let content = window.contentView {
             content.wantsLayer = true
@@ -706,6 +709,13 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         window.close()
         clearWindowReferences()
         isDismissingFromState = false
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard sender === window, !isDismissingFromState,
+              appState?.pictureInPicture.isPresented == true else { return true }
+        sender.orderOut(nil)
+        return false
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -985,7 +995,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
 
         switch preference.mode {
         case .fixedFrame:
-            window.contentAspectRatio = .zero
+            window.contentResizeIncrements = NSSize(width: 1, height: 1)
             window.contentMinSize = NSSize(
                 width: CGFloat(
                     PlayerWindowPreferencePolicy.minimumContentWidth
@@ -1251,10 +1261,9 @@ enum BrowserWindowChromeController {
         guard !transition.browserChromeConfigured, transition.canChangeGeometry else { return }
         transition.browserChromeConfigured = true
         if !window.styleMask.contains(.fullSizeContentView) { window.styleMask.insert(.fullSizeContentView) }
-        // Each split pane supplies its own native material through the titlebar:
-        // AppKit's full-height sidebar on the left, .titlebar on the right.
-        // Page backgrounds respect the top safe area. A second system titlebar
-        // fill would reserve a 1 pt split seam and expose the page underneath.
+        // The stable detail host supplies one continuous native titlebar
+        // material. AppKit's split titlebar sections reserve a 1 pt gap even
+        // when the content divider is zero-width, exposing the page below.
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.toolbarStyle = .unified
@@ -1637,14 +1646,15 @@ struct PlayerPlaybackWindowRoot: View {
                         appState.playerRenderSurfaceDidBecomeUnavailable(
                             renderOwnerID
                         )
-                    }
+                    },
+                    pictureInPicture: appState.pictureInPicture
                 )
                 .id(player.renderOwnerID)
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
             }
 
-            if appState.isPlayerPresented, !appState.isLivePlayback {
+            if appState.isPlayerPresented, !appState.isLivePlayback, !appState.pictureInPicture.isPresented {
                 PlayerDanmakuLayer(coordinator: appState.danmaku, snapshotState: appState.playerSnapshotState)
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
@@ -1886,6 +1896,16 @@ final class MainMenuLocalizationController {
 }
 
 enum AppAppearanceController {
+    static let launchThemeKey = "OKVideoMac.LaunchTheme.v1"
+
+    static func cachedTheme(defaults: UserDefaults = .standard) -> AppTheme {
+        defaults.string(forKey: launchThemeKey).flatMap(AppTheme.init(persistedValue:)) ?? .system
+    }
+
+    static func cache(_ theme: AppTheme, defaults: UserDefaults = .standard) {
+        defaults.set(theme.rawValue, forKey: launchThemeKey)
+    }
+
     static func appearanceName(for theme: AppTheme) -> NSAppearance.Name? {
         switch theme {
         case .system: return nil
@@ -1987,6 +2007,7 @@ private struct PlaybackCommandItems: View {
     @ObservedObject var state: AppState
     var body: some View {
         Group {
+            PlayerPictureInPictureMenuItem(coordinator: state.pictureInPicture)
             Button(L10n.string("menu.playback.play-pause", fallback: "Play/Pause")) {
                 Task { await state.togglePlayPause() }
             }

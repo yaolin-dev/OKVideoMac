@@ -1,5 +1,9 @@
 # Automatic updates
 
+## 0.8.7 release candidate
+
+Build 140 is greater than the published Build 139. Keep the current stable HTTPS feed, pinned Sparkle and existing signing account. Generate and validate the appcast against the final notarized/stapled 0.8.7 DMG before publication; until then the public feed still offers 0.8.6. See [readiness](RELEASE_READINESS_0.8.7.md).
+
 ## Published 0.8.6
 
 The stable latest feed offers 0.8.6 (139), retaining the existing HTTPS feed and public key. Its XML/DMG signatures and all 16 anonymous asset hashes pass. This does not claim a new complete Sparkle update-installation cycle. See [verification](RELEASE_VALIDATION_0.8.6.md).
@@ -48,8 +52,7 @@ use the existing `Scripts/package-app.sh`. Packaging prepares the pinned runtime
 again and supplies its exact path to Xcode. The Release path signs all nested
 Sparkle executables, nested app/XPC bundles, and the framework inside out. SBOM,
 checksum, source binding, architecture, minimum OS, signature and entitlement
-checks still apply. The approved inventory is an exact set of 34 paths, replacing
-the previous numeric 29-object assertion. Extra, missing or substituted paths fail.
+checks still apply. The approved inventory is an exact set of 36 paths, including the two static diagnostics resource stubs. It replaces the previous numeric 29-object assertion. Extra, missing or substituted paths fail.
 
 Optional `OKVIDEOMAC_UPDATE_CONFIG` names a plist with `SUFeedURL`,
 `SUPublicEDKey` (base64 32-byte Ed25519 public key), and `OKUpdateChannel`.

@@ -144,11 +144,15 @@ public final class XtreamSiteProvider: SiteProvider, @unchecked Sendable {
                 .trimmingCharacters(in: CharacterSet(charactersIn: "."))
                 .lowercased()
             let locators = preferredExtension == "m3u8" ? [hls, ts] : [ts, hls]
+            let archive = stream.tvArchive == true ? stream.tvArchiveDuration.flatMap {
+                (1...365).contains($0) ? XtreamArchiveCapability(retentionDays: $0) : nil
+            } : nil
             let targets = try locators.map { locator in
                 try LiveStream(
                     name: locator.outputFormat == .ts ? "TS" : "HLS",
                     target: .provider(.xtreamLive(locator)),
-                    format: locator.outputFormat.rawValue
+                    format: locator.outputFormat.rawValue,
+                    archive: archive
                 )
             }
 
@@ -225,8 +229,17 @@ public final class XtreamSiteProvider: SiteProvider, @unchecked Sendable {
     /// Revalidates the account immediately before a Live playback URL is
     /// materialized. This is metadata authentication only; it never probes or
     /// pre-opens a media path.
-    public func validateLivePlaybackAccount() async throws {
-        _ = try await client.authenticate()
+    @discardableResult
+    public func validateLivePlaybackAccount() async throws -> XtreamAccount {
+        try await client.authenticate()
+    }
+
+    public func resolveLiveArchive(_ reference: PlaybackResourceReference, programme: EPGProgramme,
+                                   offset: TimeInterval, now: Date, serverTimeZoneID: String?) throws -> XtreamArchiveRequest {
+        _ = try resolveLivePlayback(reference)
+        guard let locator = reference.xtreamLiveLocator else { throw XtreamSiteProviderError.invalidPlaybackLocator }
+        return try client.archiveRequest(streamID: locator.streamID, outputFormat: locator.outputFormat.rawValue,
+            programme: programme, offset: offset, now: now, serverTimeZoneID: serverTimeZoneID)
     }
 
     public func home() async throws -> SiteHome {
