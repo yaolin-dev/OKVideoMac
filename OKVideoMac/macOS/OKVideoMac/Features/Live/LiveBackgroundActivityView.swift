@@ -9,6 +9,7 @@ struct LiveBackgroundActivityControl: View {
     @EnvironmentObject private var state: AppState
     @ObservedObject var epgState: LiveEPGState
     @ObservedObject var validationToolbar: LiveValidationToolbarModel
+    @ObservedObject var previewToolbar: LivePreviewActivityModel.Toolbar
     let source: LiveSourceDescriptor
     @State private var presented = false
 
@@ -22,8 +23,11 @@ struct LiveBackgroundActivityControl: View {
             guard case .imported(let id) = source.id else { return .idle }
             return validationToolbar.indicators[id] ?? .idle
         }()
-        let indicator: LiveBackgroundIndicator = [otherIndicator, validationIndicator].contains(.active)
-            ? .active : [otherIndicator, validationIndicator].contains(.warning) ? .warning : .idle
+        let previewKey = LivePreviewPolicy.digest([LiveBrowserPreferenceStore.encode(source.id)])
+        let previewIndicator = previewToolbar.state?.sourceKey == previewKey ? previewToolbar.state!.indicator : .idle
+        let indicators = [otherIndicator, validationIndicator, previewIndicator]
+        let indicator: LiveBackgroundIndicator = indicators.contains(.active)
+            ? .active : indicators.contains(.warning) ? .warning : .idle
         Button { presented.toggle() } label: {
             Group {
                 switch indicator {
@@ -43,6 +47,7 @@ struct LiveBackgroundActivityControl: View {
         .accessibilityIdentifier("live.background.activity")
         .popover(isPresented: $presented, arrowEdge: .bottom) {
             LiveBackgroundActivityPopover(activity: state.liveValidationActivity,
+                previews: state.livePreviews.activity,
                 source: source, programmeEnd: epg?.lastProgrammeEnd)
         }
         .onChange(of: source.id) { _ in presented = false }
@@ -55,10 +60,12 @@ struct LiveBackgroundActivityControl: View {
 private struct LiveBackgroundActivityPopover: View {
     @EnvironmentObject private var state: AppState
     @ObservedObject var activity: LiveValidationActivityModel
+    @ObservedObject var previews: LivePreviewActivityModel
     let source: LiveSourceDescriptor
     let programmeEnd: Date?
 
     var body: some View {
+        let key = LivePreviewPolicy.digest([LiveBrowserPreferenceStore.encode(source.id)])
         TimelineView(EPGTimelineSchedule(boundaries: [programmeEnd].compactMap { $0 })) { context in
             LiveBackgroundActivityDetails(
                 sourceName: LogRedactor.text(source.name),
@@ -68,6 +75,8 @@ private struct LiveBackgroundActivityPopover: View {
                 catalogFailed: state.liveCatalogError(for: source.id) != nil,
                 hasCatalog: state.presentedLiveCatalog(for: source.id) != nil,
                 nativeEPGEnabled: state.epgPreferences.automaticEPGEnabled,
+                preview: previews.presentation?.sourceKey == key ? previews.presentation : nil,
+                retryPreviews: { state.livePreviews.retryFailed(sourceKey: key) },
                 stop: { runID in state.stopLiveBackgroundValidation(sourceID: source.id, runID: runID) })
         }
         .labelStyle(.titleAndIcon)
@@ -85,6 +94,8 @@ struct LiveBackgroundActivityDetails: View {
     let catalogFailed: Bool
     let hasCatalog: Bool
     let nativeEPGEnabled: Bool
+    var preview: LivePreviewActivityPresentation? = nil
+    var retryPreviews: (() -> Void)? = nil
     let stop: (UUID) -> Void
 
     var body: some View {
@@ -111,7 +122,11 @@ struct LiveBackgroundActivityDetails: View {
                 Divider()
                 validationSection(validation)
             }
-            if epg == nil && validation == nil && !catalogLoading && !catalogFailed {
+            if let preview {
+                Divider()
+                previewSection(preview)
+            }
+            if epg == nil && validation == nil && preview == nil && !catalogLoading && !catalogFailed {
                 Text(nativeEPGEnabled
                     ? activityText("native", "Programme data is loaded on demand and shown on channel cards.")
                     : activityText("native-disabled", "Programme guide is disabled."))
@@ -123,6 +138,53 @@ struct LiveBackgroundActivityDetails: View {
         .fixedSize(horizontal: false, vertical: true)
         .labelStyle(.titleAndIcon)
         .accessibilityIdentifier("live.background.details")
+    }
+
+    private func previewSection(_ value: LivePreviewActivityPresentation) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(L10n.string("live.preview.frames", fallback: "Channel Pictures"))
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                if value.phase == .partial, let retryPreviews {
+                    Button(activityText("preview-retry", "Retry Failed"), action: retryPreviews)
+                        .controlSize(.small)
+                }
+            }
+            Text(previewTitle(value)).font(.caption)
+            Text(L10n.string("live.background.preview-visible", fallback: "Pictures on screen: %d / %d",
+                value.visibleReady, value.visibleTotal)).font(.caption)
+            if value.active > 0 || value.queued > 0 {
+                Text(L10n.string("live.background.preview-workers", fallback: "Capturing: %d · Queued: %d",
+                    value.active, value.queued)).font(.caption).foregroundColor(.secondary)
+            }
+            if value.total > 0 {
+                Text(L10n.string("live.background.preview-round", fallback: "This round: %d / %d",
+                    value.completed, value.total)).font(.caption)
+                if value.indicator == .active {
+                    ProgressView(value: Double(value.completed), total: Double(value.total))
+                        .progressViewStyle(.linear)
+                        .accessibilityLabel(activityText("preview-round-label", "Channel picture progress"))
+                        .accessibilityValue("\(value.completed) / \(value.total)")
+                }
+                Text(L10n.string("live.background.preview-results", fallback: "New: %d · Cached: %d · Failed: %d",
+                    value.captured, value.cached, value.failed)).font(.caption).foregroundColor(.secondary)
+            }
+            Text(activityText("preview-scope", "Automatic updates refresh visible channels every 10 minutes when enabled. Saved pictures remain available."))
+                .font(.caption).foregroundColor(.secondary)
+        }
+        .accessibilityIdentifier("live.background.previews")
+    }
+
+    private func previewTitle(_ value: LivePreviewActivityPresentation) -> String {
+        switch value.phase {
+        case .restoring: return activityText("preview-restoring", "Restoring saved pictures…")
+        case .capturing: return activityText("preview-capturing", "Loading channel pictures…")
+        case .waiting: return activityText("preview-waiting", "Waiting for an available source connection…")
+        case .paused: return activityText("preview-paused", "Paused while playing or browsing elsewhere")
+        case .completed: return activityText("preview-completed", "Pictures are up to date")
+        case .partial: return activityText("preview-partial", "Some pictures could not be updated; saved pictures are kept")
+        }
     }
 
     private func epgSection(_ value: LiveEPGPresentation) -> some View {

@@ -1650,7 +1650,10 @@ final class LiveBackgroundPopoverTests: XCTestCase {
                 for scheme in [ColorScheme.light, .dark] {
                     let root = LiveBackgroundActivityDetails(sourceName: "联通 / A long source name for layout verification",
                         epg: epg, validation: .init(status: status, runID: UUID()),
-                        catalogLoading: false, catalogFailed: true, hasCatalog: true, nativeEPGEnabled: true, stop: { _ in stops += 1 })
+                        catalogLoading: false, catalogFailed: true, hasCatalog: true, nativeEPGEnabled: true,
+                        preview: .init(sourceKey: "fixture", phase: .capturing, visibleReady: 8, visibleTotal: 12,
+                            active: 3, queued: 39, completed: 18, total: 60, captured: 10, cached: 8, failed: 0),
+                        retryPreviews: { stops += 1 }, stop: { _ in stops += 1 })
                         .environment(\.locale, Locale(identifier: locale)).environment(\.colorScheme, scheme)
                         .labelStyle(.iconOnly)
                     let host = NSHostingView(rootView: root)

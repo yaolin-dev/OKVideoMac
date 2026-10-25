@@ -23342,8 +23342,27 @@ extension AppState {
     func livePreviewDemand(source: LiveSourceID, channel: LiveChannel, streams: [LiveStream],
                            programmeStart: Date?) -> LivePreviewDemand? {
         guard let catalog = presentedLiveCatalog(for: source),
-              catalog.groups.filter({ $0.password == nil }).flatMap(\.channels).contains(channel),
-              !isLiveChannelDeleted(sourceID: source, channel: channel), !streams.isEmpty else { return nil }
+              catalog.groups.filter({ $0.password == nil }).flatMap(\.channels).contains(channel) else { return nil }
+        return makeLivePreviewDemand(source: source, channel: channel, streams: streams, programmeStart: programmeStart)
+    }
+
+    /// Validate the complete channel value against one catalog index, preserving
+    /// locked-group and identity checks without scanning the catalog per card.
+    func livePreviewDemands(source: LiveSourceID, channels: [LiveChannel],
+                            streams: (LiveChannel) -> [LiveStream],
+                            programmeStart: (LiveChannel) -> Date?) -> [LivePreviewDemand] {
+        guard let catalog = presentedLiveCatalog(for: source) else { return [] }
+        let allowed = Dictionary(grouping: catalog.groups.filter { $0.password == nil }.flatMap(\.channels), by: \.id)
+        return channels.compactMap { channel in
+            guard allowed[channel.id]?.contains(channel) == true else { return nil }
+            return makeLivePreviewDemand(source: source, channel: channel,
+                streams: streams(channel), programmeStart: programmeStart(channel))
+        }
+    }
+
+    private func makeLivePreviewDemand(source: LiveSourceID, channel: LiveChannel, streams: [LiveStream],
+                                      programmeStart: Date?) -> LivePreviewDemand? {
+        guard !isLiveChannelDeleted(sourceID: source, channel: channel), !streams.isEmpty else { return nil }
         let sourceKey = LivePreviewPolicy.digest([LiveBrowserPreferenceStore.encode(source)])
         let imported: AcceptedImportedCatalog?
         let revision: String

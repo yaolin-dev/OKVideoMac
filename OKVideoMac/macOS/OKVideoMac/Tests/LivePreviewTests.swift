@@ -7,6 +7,159 @@ import OKVideoPersistence
 @testable import OKVideoMac
 
 @MainActor final class LivePreviewTests: XCTestCase {
+    func testPartiallyOverlappingViewportReclaimsOffscreenSlotWithoutInterruptingVisibleChannel() async throws {
+        let data = try jpeg(), owner = UUID()
+        var cancelled = Set<String>(), active = 0, peak = 0
+        let began = expectation(description: "old viewport admitted"); began.expectedFulfillmentCount = 3
+        let old = (0..<3).map { demand("old-overlap-\($0)") }
+        var next = (0..<2).map { demand("new-overlap-\($0)") }
+        for i in next.indices { next[i].priority = 2 }
+        let service = LivePreviewCoordinator(cache: cache()) { input in
+            let name = URL(string: input.url)!.lastPathComponent
+            active += 1; peak = max(peak, active); defer { active -= 1 }
+            if name.hasPrefix("old-") {
+                began.fulfill()
+                do { try await Task.sleep(nanoseconds: 8_000_000_000) }
+                catch {
+                    cancelled.insert(name)
+                    await Task.detached { try? await Task.sleep(nanoseconds: 120_000_000) }.value
+                    throw CancellationError()
+                }
+            }
+            return data
+        }
+        defer { service.clear(owner: owner) }
+        service.update(owner: owner, demands: old + next, mayCapture: { true })
+        await fulfillment(of: [began], timeout: 3)
+        service.updateViewport(owner: owner, visible: Set([old[0].key] + next.map(\.key)), nearby: [])
+        try await settle(1.15)
+        XCTAssertTrue(next.allSatisfy { service.image(for: $0.key, programmeStart: nil) != nil })
+        XCTAssertFalse(cancelled.contains("old-overlap-0"), "Keep the overlapping visible capture")
+        XCTAssertFalse(cancelled.isEmpty, "An offscreen slot must yield even with another visible flight")
+        XCTAssertLessThanOrEqual(peak, 3)
+        await service.quiesce()
+    }
+
+    func testInitialProgressIncludesCacheAndFailuresAndKeepsRoundDenominatorAcrossScrolling() async throws {
+        let store = cache(), data = try jpeg(), owner = UUID()
+        let cached = demand("progress-cache"), fresh = demand("progress-new"), failed = demand("progress-bad")
+        await store.store(.init(data: data, captured: Date(), sourceKey: "fixture"), key: cached.key)
+        var allow = false, calls = 0
+        let service = LivePreviewCoordinator(cache: store) { input in
+            calls += 1
+            if input.url.contains("bad") { throw LivePreviewCaptureError.unavailable }
+            try await Task.sleep(nanoseconds: 200_000_000); return data
+        }
+        defer { service.clear(owner: owner) }
+        service.update(owner: owner, demands: [cached, fresh, failed], mayCapture: { allow })
+        try await settle(0.35)
+        XCTAssertEqual(service.activity.presentation?.phase, .paused)
+        XCTAssertEqual(service.activity.presentation?.cached, 1)
+        XCTAssertEqual(service.activity.presentation?.total, 3)
+        XCTAssertEqual(calls, 0)
+        allow = true
+        service.setSurfaceActive(owner: owner, isActive: true, autoRefresh: false)
+        try await settle(0.1)
+        XCTAssertEqual(service.activity.toolbar.state?.indicator, .active, "Initial loading needs a spinner, not just manual refresh")
+        service.updateViewport(owner: owner, visible: [fresh.key], nearby: [])
+        try await settle(0.4)
+        let result = try XCTUnwrap(service.activity.presentation)
+        XCTAssertEqual(result.phase, .partial)
+        XCTAssertEqual(result.total, 3); XCTAssertEqual(result.completed, 3)
+        XCTAssertEqual(result.cached, 1); XCTAssertEqual(result.captured, 1); XCTAssertEqual(result.failed, 1)
+        XCTAssertEqual(result.visibleTotal, 1); XCTAssertEqual(result.visibleReady, 1)
+        XCTAssertEqual(calls, 2)
+        service.retryFailed(sourceKey: "another-source")
+        try await settle(0.1)
+        XCTAssertEqual(calls, 2)
+        service.capture = { _ in calls += 1; return data }
+        service.retryFailed(sourceKey: "fixture")
+        try await settle(0.2)
+        XCTAssertEqual(calls, 3, "Only failed channels are retried")
+        XCTAssertEqual(service.activity.presentation?.phase, .completed)
+        XCTAssertEqual(service.activity.presentation?.total, 1)
+        service.clear(owner: owner)
+        XCTAssertNil(service.activity.presentation); XCTAssertNil(service.activity.toolbar.state)
+    }
+
+    func testProgressCountsDoNotPublishToolbarChanges() {
+        let model = LivePreviewActivityModel()
+        var toolbarChanges = 0, detailsChanges = 0
+        let toolbar = model.toolbar.objectWillChange.sink { toolbarChanges += 1 }
+        let details = model.objectWillChange.sink { detailsChanges += 1 }
+        for count in 0..<20 {
+            model.publish(.init(sourceKey: "fixture", phase: .capturing, visibleReady: count,
+                visibleTotal: 20, active: 3, queued: 20 - count, completed: count, total: 30,
+                captured: count, cached: 0, failed: 0))
+        }
+        XCTAssertEqual(detailsChanges, 20)
+        XCTAssertEqual(toolbarChanges, 1, "Numeric progress is confined to the open popover")
+        withExtendedLifetime((toolbar, details)) {}
+    }
+
+    func testAutomaticRoundIncludesUnfinishedInitialCaptures() async throws {
+        let store = cache(), data = try jpeg(), owner = UUID()
+        let cached = demand("auto-progress-cache")
+        var held = demand("auto-progress-held"); held.priority = 2
+        await store.store(.init(data: data, captured: Date(), sourceKey: "fixture"), key: cached.key)
+        let began = expectation(description: "initial background capture started")
+        var offset = 0.0
+        let service = LivePreviewCoordinator(cache: store, clock: { Date().addingTimeInterval(offset) }) { input in
+            if input.url.contains("held") { began.fulfill(); try await Task.sleep(nanoseconds: 8_000_000_000) }
+            return data
+        }
+        defer { service.clear(owner: owner) }
+        service.update(owner: owner, demands: [cached, held], mayCapture: { true }, autoRefresh: true)
+        await fulfillment(of: [began], timeout: 3)
+        XCTAssertTrue(service.ownsViewport(owner)); XCTAssertFalse(service.ownsViewport(UUID()))
+        offset = 601
+        service.update(owner: owner, demands: [cached, held], mayCapture: { true }, autoRefresh: true)
+        try await settle(0.2)
+        let progress = try XCTUnwrap(service.activity.presentation)
+        XCTAssertEqual(progress.total, 2)
+        XCTAssertEqual(progress.completed, 1)
+        XCTAssertEqual(progress.active, 1)
+        XCTAssertEqual(progress.phase, .capturing)
+        await service.quiesce()
+        service.clear(owner: owner)
+        XCTAssertFalse(service.ownsViewport(owner))
+    }
+
+    func testBackgroundPictureDetailsFitAndOpeningDoesNotRetry() async throws {
+        var retries = 0
+        for dark in [false, true] {
+            let presentation = LivePreviewActivityPresentation(sourceKey: "fixture", phase: .capturing,
+                visibleReady: 8, visibleTotal: 12, active: 3, queued: 39,
+                completed: 18, total: 60, captured: 10, cached: 8, failed: 0)
+            let root = LiveBackgroundActivityDetails(sourceName: "频道画面加载", epg: nil, validation: nil,
+                catalogLoading: false, catalogFailed: false, hasCatalog: true, nativeEPGEnabled: true,
+                preview: presentation, retryPreviews: { retries += 1 }, stop: { _ in })
+                .environment(\.colorScheme, dark ? .dark : .light)
+            let host = NSHostingView(rootView: root)
+            let size = host.fittingSize
+            XCTAssertEqual(size.width, 320, accuracy: 0.5)
+            XCTAssertLessThan(size.height, 440)
+            host.frame = NSRect(origin: .zero, size: size)
+            let window = NSWindow(contentRect: NSRect(x: -2500, y: -2000, width: size.width, height: size.height),
+                styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false; window.contentView = host
+            window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            window.backgroundColor = .windowBackgroundColor
+            host.layoutSubtreeIfNeeded()
+            try await Task.sleep(nanoseconds: 80_000_000)
+            if let directory = ProcessInfo.processInfo.environment["OKVIDEO_REPAIR_UI_DIR"] {
+                let url = URL(fileURLWithPath: directory, isDirectory: true)
+                try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+                let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                    .write(to: url.appendingPathComponent(dark ? "preview-progress-dark.png" : "preview-progress-light.png"))
+            }
+            window.close()
+        }
+        XCTAssertEqual(retries, 0)
+    }
+
     func testFastVisibleChannelsFinishWhileAnotherChannelWaitsForFirstFrame() async throws {
         let data = try jpeg(), owner = UUID()
         var finished: [String] = [], active = 0, peak = 0
@@ -81,7 +234,7 @@ import OKVideoPersistence
         }
         service.updateViewport(owner: owner, visible: Set((next + cached).map(\.key)), nearby: [])
         try await settle(1.0)
-        XCTAssertEqual(oldCancelled, 1, "Only one stranded offscreen job should be preempted")
+        XCTAssertTrue((1...2).contains(oldCancelled), "Reclaim at most the two visible-priority slots")
         XCTAssertEqual(peak, 3, "A cancelled native worker still consumes its slot while exiting")
         XCTAssertTrue(next.allSatisfy { service.image(for: $0.key, programmeStart: nil) != nil })
         XCTAssertTrue(cached.allSatisfy { service.image(for: $0.key, programmeStart: nil) != nil })
@@ -526,6 +679,22 @@ import OKVideoPersistence
         state.isPlayerPresented = true
         do { _ = try await request.resolve(); XCTFail("Player must take priority") } catch {}
         state.isPlayerPresented = false
+    }
+    func testBulkDemandValidationPreservesCompleteIdentityAndLockedGroupChecks() throws {
+        let state = AppState(environment: nil)
+        let source = StoredLiveSource(name: "Bulk fixture", sourceKind: .pasted, rawData: Data())
+        let stream = LiveStream(name: "A", url: URL(string: "https://example.invalid/allowed")!)
+        let allowed = LiveChannel(groupName: "G", name: "A", streams: [stream])
+        let locked = LiveChannel(groupName: "Locked", name: "B", streams: [stream])
+        state.acceptImportedRoutesForTesting(source, playlist: .init(format: .m3u, groups: [
+            .init(name: "G", channels: [allowed]), .init(name: "Locked", password: "fixture", channels: [locked])]))
+        var forged = allowed
+        forged.streams = [LiveStream(name: "Injected", url: URL(string: "https://example.invalid/foreign")!)]
+        let requests = state.livePreviewDemands(source: .imported(source.id), channels: [forged, allowed, locked],
+            streams: { $0.streams }, programmeStart: { _ in nil })
+        XCTAssertEqual(requests.map(\.channelID), [allowed.id])
+        XCTAssertTrue(try XCTUnwrap(requests.first).isValid())
+        XCTAssertFalse(state.isPlayerPresented)
     }
     func testViewportCancellationCannotResetCurrentFrameBudget() async throws {
         let data = try jpeg(); var attempts = 0

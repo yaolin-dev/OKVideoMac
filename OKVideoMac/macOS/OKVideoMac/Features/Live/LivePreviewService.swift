@@ -202,6 +202,47 @@ final class LivePreviewProcessJob: @unchecked Sendable {
     func release() { let action = onRelease; onRelease = nil; action?() }
 }
 
+struct LivePreviewActivityPresentation: Equatable {
+    enum Phase: Equatable { case restoring, capturing, waiting, paused, completed, partial }
+    let sourceKey: String
+    let phase: Phase
+    let visibleReady: Int
+    let visibleTotal: Int
+    let active: Int
+    let queued: Int
+    let completed: Int
+    let total: Int
+    let captured: Int
+    let cached: Int
+    let failed: Int
+    var indicator: LiveBackgroundIndicator {
+        switch phase {
+        case .restoring, .capturing, .waiting: return .active
+        case .partial: return .warning
+        case .paused, .completed: return .idle
+        }
+    }
+}
+
+/// Counts never invalidate the toolbar or the channel grid. Only the open
+/// background-activity popover subscribes to the detailed presentation.
+@MainActor final class LivePreviewActivityModel: ObservableObject {
+    struct ToolbarState: Equatable {
+        let sourceKey: String
+        let indicator: LiveBackgroundIndicator
+    }
+    @MainActor final class Toolbar: ObservableObject {
+        @Published fileprivate(set) var state: ToolbarState?
+    }
+    let toolbar = Toolbar()
+    @Published private(set) var presentation: LivePreviewActivityPresentation?
+    func publish(_ value: LivePreviewActivityPresentation?) {
+        if presentation != value { presentation = value }
+        let next = value.map { ToolbarState(sourceKey: $0.sourceKey, indicator: $0.indicator) }
+        if toolbar.state != next { toolbar.state = next }
+    }
+}
+
 @MainActor final class LivePreviewCoordinator: ObservableObject {
     final class ImageEntry {
         let image: NSImage
@@ -226,6 +267,7 @@ final class LivePreviewProcessJob: @unchecked Sendable {
     }
     let changes = PassthroughSubject<Set<String>, Never>()
     let connectionBudget = LivePreviewConnectionBudget()
+    let activity = LivePreviewActivityModel()
     @Published private(set) var refreshing = false
     private let cache: LivePreviewCache
     private let clock: () -> Date
@@ -253,6 +295,11 @@ final class LivePreviewProcessJob: @unchecked Sendable {
     private var viewportStableAt = Date.distantPast
     private var changeTask: Task<Void, Never>?
     private var pendingChanges = Set<String>()
+    private var activityTask: Task<Void, Never>?
+    private var roundKeys = Set<String>()
+    private var roundCaptured = Set<String>()
+    private var roundRequiresRefresh = false
+    private var demandKeys = Set<String>()
     private var mayCapture: @MainActor () -> Bool = { false }
     private var observers: [NSObjectProtocol] = []
     private var sleeping = false
@@ -286,7 +333,7 @@ final class LivePreviewProcessJob: @unchecked Sendable {
     }
     deinit {
         for flight in flights.values { flight.task?.cancel() }
-        cacheTask?.cancel(); viewportTask?.cancel(); changeTask?.cancel(); timer?.invalidate()
+        cacheTask?.cancel(); viewportTask?.cancel(); changeTask?.cancel(); activityTask?.cancel(); timer?.invalidate()
         for observer in observers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
     }
     func image(for key: String, programmeStart: Date?, now: Date = Date()) -> ImageEntry? {
@@ -304,6 +351,10 @@ final class LivePreviewProcessJob: @unchecked Sendable {
         self.demands = demands.filter { seen.insert($0.key).inserted }
         self.mayCapture = mayCapture; self.autoRefresh = autoRefresh; suspended = !isActive
         let keys = Set(self.demands.map(\.key))
+        if keys != demandKeys {
+            demandKeys = keys
+            beginRound(keys, requiresRefresh: false)
+        }
         refreshKeys.formIntersection(keys); refreshing = !refreshKeys.isEmpty
         for demand in self.demands { sources[demand.key] = demand.sourceKey }
         retainViewport()
@@ -328,6 +379,19 @@ final class LivePreviewProcessJob: @unchecked Sendable {
             lanes[demand.priority].append(demand)
         }
         demands = lanes.flatMap { $0 }; retainViewport(); loadCache(); pump()
+    }
+    func ownsViewport(_ owner: UUID) -> Bool { self.owner == owner }
+    func setSurfaceActive(owner: UUID, isActive: Bool, autoRefresh: Bool) {
+        guard self.owner == owner else { return }
+        suspended = !isActive; self.autoRefresh = autoRefresh
+        if suspended { interrupt(); timer?.invalidate(); timer = nil }
+        else if timer == nil, !demands.isEmpty {
+            let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.pump() }
+            }
+            RunLoop.main.add(timer, forMode: .common); self.timer = timer
+        }
+        pump()
     }
     private func retainViewport() {
         let next = Set(demands.filter { $0.priority == 0 && $0.isValid() }.map(\.key))
@@ -365,13 +429,14 @@ final class LivePreviewProcessJob: @unchecked Sendable {
     func requestRefresh() {
         guard owner != nil, refreshKeys.isEmpty else { return }
         refreshKeys = Set(demands.filter { $0.isValid() }.map(\.key))
+        beginRound(refreshKeys, requiresRefresh: true)
         for key in refreshKeys where flights[key] == nil { attempts[key] = 0 }
         capacityWaitUntil.removeAll(); deferredUntil.removeAll()
         refreshing = !refreshKeys.isEmpty; loadCache(); pump()
     }
     func suspend(owner: UUID) {
         guard self.owner == owner else { return }
-        suspended = true; interrupt(); timer?.invalidate(); timer = nil
+        suspended = true; interrupt(); timer?.invalidate(); timer = nil; scheduleActivity()
     }
     func clear(owner: UUID) { if self.owner == owner { clearCurrentOwner() } }
     private func clearCurrentOwner() {
@@ -380,6 +445,9 @@ final class LivePreviewProcessJob: @unchecked Sendable {
         interrupt(); cacheTask?.cancel(); cacheTask = nil
         viewportTask?.cancel(); viewportTask = nil
         changeTask?.cancel(); changeTask = nil; pendingChanges.removeAll()
+        activityTask?.cancel(); activityTask = nil
+        roundKeys.removeAll(); roundCaptured.removeAll(); demandKeys.removeAll()
+        activity.publish(nil)
         loaded.removeAll(); deferredUntil.removeAll(); capacityWaitUntil.removeAll()
         refreshKeys.removeAll(); refreshing = false
         timer?.invalidate(); timer = nil
@@ -407,6 +475,54 @@ final class LivePreviewProcessJob: @unchecked Sendable {
         capacityWaitUntil[sourceKey] = nil; refreshing = !refreshKeys.isEmpty
         Task { await cache.remove(sourceKey: sourceKey) }
         notify(keys)
+        roundKeys.subtract(keys); scheduleActivity()
+    }
+    private func beginRound(_ keys: Set<String>, requiresRefresh: Bool) {
+        roundKeys = keys; roundCaptured.removeAll(); roundRequiresRefresh = requiresRefresh
+    }
+    func retryFailed(sourceKey: String) {
+        guard demands.first?.sourceKey == sourceKey, !suspended, refreshKeys.isEmpty else { return }
+        let failed = Set(demands.filter {
+            $0.isValid() && (attempts[$0.key] ?? 0) >= 2 && outcomes[$0.key] != "success"
+        }.map(\.key))
+        guard !failed.isEmpty else { return }
+        beginRound(failed, requiresRefresh: true)
+        refreshKeys = failed
+        for key in failed { attempts[key] = 0; outcomes[key] = nil; deferredUntil[key] = nil }
+        capacityWaitUntil.removeAll(); refreshing = true; pump()
+    }
+    private func scheduleActivity() {
+        guard owner != nil, activityTask == nil else { return }
+        activityTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.activityTask = nil; self.publishActivity()
+        }
+    }
+    private func publishActivity() {
+        guard owner != nil, let sourceKey = demands.first?.sourceKey else { activity.publish(nil); return }
+        let failed = roundKeys.filter { (attempts[$0] ?? 0) >= 2 && outcomes[$0] != "success" }.count
+        let captured = roundCaptured.intersection(roundKeys).count
+        let cached = roundRequiresRefresh ? 0 : roundKeys.filter {
+            cachedDates[$0] != nil && !roundCaptured.contains($0)
+                && !((attempts[$0] ?? 0) >= 2 && outcomes[$0] != "success")
+        }.count
+        let completed = min(roundKeys.count, captured + cached + failed)
+        let currentFlights = flights.values.filter { $0.generation == generation && !$0.cancellationRequested }
+        let active = currentFlights.count
+        let queued = max(0, roundKeys.count - completed - currentFlights.filter { roundKeys.contains($0.demand.key) }.count)
+        let phase: LivePreviewActivityPresentation.Phase
+        if suspended || sleeping || draining > 0 { phase = .paused }
+        else if active > 0 { phase = .capturing }
+        else if cacheTask != nil { phase = .restoring }
+        else if completed == roundKeys.count { phase = failed > 0 ? .partial : .completed }
+        else if !mayCapture() && !demands.contains(where: { $0.mayReuseFrame() }) { phase = .paused }
+        else if (capacityWaitUntil[sourceKey] ?? .distantPast) > clock() { phase = .waiting }
+        else { phase = .capturing }
+        activity.publish(.init(sourceKey: sourceKey, phase: phase,
+            visibleReady: visibleKeys.filter { visibleImages[$0] != nil }.count, visibleTotal: visibleKeys.count,
+            active: active, queued: queued, completed: completed, total: roundKeys.count,
+            captured: captured, cached: cached, failed: failed))
     }
     private func loadCache() {
         guard cacheTask == nil else { return }
@@ -446,6 +562,7 @@ final class LivePreviewProcessJob: @unchecked Sendable {
         }
     }
     private func pump() {
+        defer { scheduleActivity() }
         guard draining == 0, !sleeping, !suspended, owner != nil else { interrupt(); return }
         for flight in flights.values {
             if !mayCapture(), !(flight.reuseFrame && flight.demand.mayReuseFrame()) { flight.cancel() }
@@ -454,11 +571,20 @@ final class LivePreviewProcessJob: @unchecked Sendable {
         guard now >= quietUntil else { return }
         if autoRefresh, cacheTask == nil, now.timeIntervalSince(lastAutomaticRound) >= LivePreviewPolicy.refresh {
             lastAutomaticRound = now
+            let hadRefresh = !refreshKeys.isEmpty
             for demand in demands where demand.priority == 0 && flights[demand.key] == nil
                 && cachedDates[demand.key].map({ now.timeIntervalSince($0) >= LivePreviewPolicy.refresh }) == true {
                 refreshKeys.insert(demand.key); attempts[demand.key] = 0
             }
             refreshing = !refreshKeys.isEmpty
+            if !hadRefresh, !refreshKeys.isEmpty {
+                // A fresh automatic round also owns any unfinished first loads;
+                // otherwise it could claim completion while those workers wait.
+                let missing = Set(demands.filter {
+                    $0.isValid() && cachedDates[$0.key] == nil && (attempts[$0.key] ?? 0) < 2
+                }.map(\.key))
+                beginRound(refreshKeys.union(missing), requiresRefresh: true)
+            }
         }
         // Local pictures are restored before network tasks are admitted.
         guard !demands.contains(where: { $0.priority == 0 && $0.isValid() && !loaded.contains($0.key) }) else { return }
@@ -476,12 +602,19 @@ final class LivePreviewProcessJob: @unchecked Sendable {
             let right = (b.element.priority, attempts[b.element.key] ?? 0, cachedDates[b.element.key] == nil ? 0 : 1, b.offset)
             return left < right
         }.map(\.element)
-        // Preserve valid in-flight results during ordinary scrolls. Only when
-        // all slots are stranded offscreen, reserve one for a stable new viewport.
+        // Keep up to two slots serving a stable visible region, even when one
+        // old visible channel remains. Reclaim one worker at a time and count
+        // it against the pool until the native process has actually exited.
+        let visibleRunning = flights.values.filter {
+            !$0.cancellationRequested && visibleKeys.contains($0.demand.key)
+        }.count
+        let visibleWaiting = ordered.filter { $0.priority == 0 }.count
+        let desiredVisible = min(2, maximumConcurrentCaptures, visibleRunning + visibleWaiting)
         if flights.count >= maximumConcurrentCaptures, now >= viewportStableAt,
-           ordered.contains(where: { $0.priority == 0 }),
-           !flights.values.contains(where: { $0.cancellationRequested || visibleKeys.contains($0.demand.key) }) {
-            if let victim = flights.values.sorted(by: { $0.demand.key < $1.demand.key }).first(where: { !$0.reuseFrame }) {
+           visibleRunning < desiredVisible,
+           !flights.values.contains(where: { $0.cancellationRequested }) {
+            if let victim = flights.values.filter({ !$0.reuseFrame && !visibleKeys.contains($0.demand.key) })
+                .sorted(by: { $0.startedAt == $1.startedAt ? $0.demand.key < $1.demand.key : $0.startedAt < $1.startedAt }).first {
                 // Let short captures finish instead of discarding nearly-ready frames.
                 let grace = victim.startedAt.addingTimeInterval(0.75).timeIntervalSince(now)
                 if grace <= 0 {
@@ -576,6 +709,7 @@ final class LivePreviewProcessJob: @unchecked Sendable {
                 }
                 self.attempts[demand.key] = 2; self.refreshKeys.remove(demand.key)
                 self.outcomes[demand.key] = "success"
+                if self.roundKeys.contains(demand.key) { self.roundCaptured.insert(demand.key) }
                 await self.cache.store(.init(data: data, captured: captured, sourceKey: demand.sourceKey), key: demand.key)
             } catch {
                 guard flight.generation == self.generation, demand.isValid() else { return }

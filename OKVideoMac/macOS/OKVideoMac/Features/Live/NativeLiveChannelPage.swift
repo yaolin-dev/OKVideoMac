@@ -69,6 +69,7 @@ struct NativeLiveChannelPage: NSViewRepresentable {
         private var previewObserver: AnyCancellable?
         private let previewOwner = UUID()
         private var previewDemands: [String: LivePreviewDemand] = [:]
+        private var previewNeedsRebuild = true
         private var previewVisibleIndices: [IndexPath] = []
         private var previewRefreshRequest = 0
         private var visibilityObservers: [NSObjectProtocol] = []
@@ -107,6 +108,9 @@ struct NativeLiveChannelPage: NSViewRepresentable {
         }
 
         func update(_ page: NativeLiveChannelPage, state: AppState, repository: ImageRepository?, report: @escaping (Bool) -> Void) {
+            // Catalog/account/route updates arrive here. Scroll and EPG ticks
+            // only reprioritize these validated demands; they never rebuild them.
+            previewNeedsRebuild = true
             let sourceChanged = self.page?.source != page.source
             let changed = channels != page.channels || sourceChanged
             if sourceChanged || !page.session.showsPreviewImages {
@@ -317,25 +321,27 @@ struct NativeLiveChannelPage: NSViewRepresentable {
                 .filter { channels.indices.contains($0) }
             let visibleIDs = Set(indices.map { channels[$0].id })
             let nearby = max(0, (indices.first ?? 0) - columns * 2)..<min(channels.count, (indices.last ?? 0) + columns * 3)
-            // Current filtered list defines this round; scrolling promotes its new
-            // viewport without restarting the jobs already admitted for this source.
-            let ordered = channels.enumerated().sorted {
-                let a = visibleIDs.contains($0.element.id) ? 0 : nearby.contains($0.offset) ? 1 : 2
-                let b = visibleIDs.contains($1.element.id) ? 0 : nearby.contains($1.offset) ? 1 : 2
-                return a == b ? $0.offset < $1.offset : a < b
+            if previewNeedsRebuild || previewDemands.isEmpty || !state.livePreviews.ownsViewport(previewOwner) {
+                let now = Date()
+                let validated = state.livePreviewDemands(source: page.source, channels: channels,
+                    streams: { page.session.previewStreams(channel: $0, source: page.source) },
+                    programmeStart: { state.liveEPG.nowNext(channel: $0, source: page.source, at: now).current?.start })
+                previewDemands = Dictionary(uniqueKeysWithValues: validated.map { ($0.channelID, $0) })
+                var lanes = [[LivePreviewDemand](), [LivePreviewDemand](), [LivePreviewDemand]()]
+                for (index, channel) in channels.enumerated() {
+                    guard var demand = previewDemands[channel.id] else { continue }
+                    demand.priority = visibleIDs.contains(channel.id) ? 0 : nearby.contains(index) ? 1 : 2
+                    lanes[demand.priority].append(demand)
+                }
+                state.livePreviews.update(owner: previewOwner, demands: lanes.flatMap { $0 }, mayCapture: { [weak self, weak state] in
+                    self?.previewCaptureIsActive == true && state?.permitsBackgroundLivePreview == true
+                }, autoRefresh: page.session.automaticallyRefreshPreviews, isActive: previewCaptureIsActive)
+                previewNeedsRebuild = false
+            } else {
+                state.livePreviews.setSurfaceActive(owner: previewOwner, isActive: previewCaptureIsActive,
+                    autoRefresh: page.session.automaticallyRefreshPreviews)
+                publishPreviewViewport(indices: indices)
             }
-            let demands = ordered.compactMap { item -> LivePreviewDemand? in
-                let channel = item.element
-                let programme = state.liveEPG.nowNext(channel: channel, source: page.source, at: Date()).current
-                var demand = state.livePreviewDemand(source: page.source, channel: channel,
-                    streams: page.session.previewStreams(channel: channel, source: page.source), programmeStart: programme?.start)
-                demand?.priority = visibleIDs.contains(channel.id) ? 0 : nearby.contains(item.offset) ? 1 : 2
-                return demand
-            }
-            previewDemands = Dictionary(uniqueKeysWithValues: demands.map { ($0.channelID, $0) })
-            state.livePreviews.update(owner: previewOwner, demands: demands, mayCapture: { [weak self, weak state] in
-                self?.previewCaptureIsActive == true && state?.permitsBackgroundLivePreview == true
-            }, autoRefresh: page.session.automaticallyRefreshPreviews, isActive: previewCaptureIsActive)
             if previewRefreshRequest != page.session.previewRefreshRequest {
                 previewRefreshRequest = page.session.previewRefreshRequest
                 state.livePreviews.requestRefresh()
@@ -531,7 +537,7 @@ final class LiveChannelNativeCard: NSView, BrowserHoverTarget {
     override var acceptsFirstResponder: Bool { true }
     init() {
         super.init(frame: .zero)
-        logo.imageScaling = .scaleProportionallyUpOrDown
+        logo.imageScaling = .scaleProportionallyDown
         previewImage.imageScaling = .scaleProportionallyUpOrDown
         previewImage.wantsLayer = true; previewImage.layer?.cornerRadius = 10
         previewImage.layer?.backgroundColor = NSColor.black.cgColor
@@ -579,7 +585,10 @@ final class LiveChannelNativeCard: NSView, BrowserHoverTarget {
         let artHeight = bounds.width * 9 / 16
         previewImage.frame = NSRect(x: 8, y: 8, width: max(0, bounds.width - 16), height: max(0, (bounds.width - 16) * 9 / 16))
         previewAge.frame = NSRect(x: max(8, bounds.width - 76), y: previewImage.frame.maxY - 23, width: 60, height: 17)
-        logo.frame = NSRect(x: 20, y: 16, width: max(0, bounds.width - 40), height: max(0, artHeight - 32))
+        let logoWidth = min(160, max(0, bounds.width * 0.55))
+        let logoHeight = min(72, max(0, artHeight * 0.48))
+        logo.frame = NSRect(x: (bounds.width - logoWidth) / 2, y: (artHeight - logoHeight) / 2,
+                            width: logoWidth, height: logoHeight)
         star.frame = NSRect(x: bounds.width - 38, y: 4, width: 26, height: 26)
         catchupButton.frame = NSRect(x: bounds.width - 70, y: 4, width: 26, height: 26)
         number.frame = NSRect(x: 17, y: 17, width: min(80, max(26, number.intrinsicContentSize.width + 10)), height: 18)

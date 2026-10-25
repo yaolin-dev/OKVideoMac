@@ -34051,13 +34051,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Refresh Visible Pictures Every 10 Minutes"
+            "value": "Auto-update (10 minutes)"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "每 10 分钟更新可见频道画面"
+            "value": "自动更新（10 分钟）"
           }
         }
       }
@@ -34228,6 +34228,227 @@
           "stringUnit": {
             "state": "translated",
             "value": "管理点播源…"
+          }
+        }
+      }
+    },
+    "live.background.preview-capturing": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading channel pictures…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在加载频道画面…"
+          }
+        }
+      }
+    },
+    "live.background.preview-completed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pictures are up to date"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "频道画面已加载"
+          }
+        }
+      }
+    },
+    "live.background.preview-partial": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Some pictures could not be updated; saved pictures are kept"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "部分画面加载失败，已保留已有画面"
+          }
+        }
+      }
+    },
+    "live.background.preview-paused": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused while playing or browsing elsewhere"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "播放中或离开当前页面时暂停取图"
+          }
+        }
+      }
+    },
+    "live.background.preview-restoring": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restoring saved pictures…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在恢复缓存画面…"
+          }
+        }
+      }
+    },
+    "live.background.preview-results": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New: %d · Cached: %d · Failed: %d"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新获取：%d · 已缓存：%d · 失败：%d"
+          }
+        }
+      }
+    },
+    "live.background.preview-retry": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retry Failed"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重试失败项"
+          }
+        }
+      }
+    },
+    "live.background.preview-round": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This round: %d / %d"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本轮处理：%d / %d"
+          }
+        }
+      }
+    },
+    "live.background.preview-round-label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Channel picture progress"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "频道画面加载进度"
+          }
+        }
+      }
+    },
+    "live.background.preview-scope": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Automatic updates refresh visible channels every 10 minutes when enabled. Saved pictures remain available."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开启自动更新后，每 10 分钟刷新可见频道；加载期间保留已有画面。"
+          }
+        }
+      }
+    },
+    "live.background.preview-visible": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pictures on screen: %d / %d"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前屏幕已有画面：%d / %d"
+          }
+        }
+      }
+    },
+    "live.background.preview-waiting": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for an available source connection…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在等待源的可用连接名额…"
+          }
+        }
+      }
+    },
+    "live.background.preview-workers": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Capturing: %d · Queued: %d"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在取图：%d 路 · 等待：%d 个"
           }
         }
       }

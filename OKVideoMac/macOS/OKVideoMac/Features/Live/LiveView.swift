@@ -1084,15 +1084,19 @@ struct LiveToolbarView: View {
 
             if !session.showsGuide {
                 Menu {
-                    Button { session.showsPreviewImages = true } label: {
-                        menuLabel(L10n.string("live.preview.frames", fallback: "Channel Pictures"), selected: session.showsPreviewImages)
+                    Group {
+                        Picker(L10n.string("live.preview.display", fallback: "Channel Appearance"), selection: $session.showsPreviewImages) {
+                            Text(L10n.string("live.preview.frames", fallback: "Channel Pictures")).tag(true)
+                            Text(L10n.string("live.preview.logos", fallback: "Channel Logos")).tag(false)
+                        }
+                        .pickerStyle(.inline)
+                        Divider()
+                        LivePreviewRefreshMenuItem(previews: state.livePreviews, session: session)
+                        Toggle(L10n.string("live.preview.automatic", fallback: "Auto-update (10 minutes)"), isOn: $session.automaticallyRefreshPreviews)
                     }
-                    Button { session.showsPreviewImages = false } label: {
-                        menuLabel(L10n.string("live.preview.logos", fallback: "Channel Logos"), selected: !session.showsPreviewImages)
-                    }
-                    Divider()
-                    LivePreviewRefreshMenuItem(previews: state.livePreviews, session: session)
-                    Toggle(L10n.string("live.preview.automatic", fallback: "Refresh Visible Pictures Every 10 Minutes"), isOn: $session.automaticallyRefreshPreviews)
+                    .labelStyle(.titleAndIcon)
+                    .font(.body)
+                    .foregroundColor(.primary)
                 } label: {
                     Label(L10n.string("live.preview.display", fallback: "Channel Appearance"), systemImage: "photo.on.rectangle")
                 }
@@ -1101,7 +1105,8 @@ struct LiveToolbarView: View {
             }
             PrimaryToolbarDivider()
             LiveBackgroundActivityControl(epgState: state.liveEPG,
-                validationToolbar: state.liveValidationActivity.toolbar, source: source)
+                validationToolbar: state.liveValidationActivity.toolbar,
+                previewToolbar: state.livePreviews.activity.toolbar, source: source)
             LiveRefreshToolbarControl(guide: state.liveGuide, session: session, source: source)
         }
     }
@@ -2201,6 +2206,7 @@ private struct LivePreviewRefreshMenuItem: View {
                 : L10n.string("live.preview.refresh", fallback: "Refresh Channel Pictures"),
                 systemImage: "arrow.clockwise")
         }
+        .labelStyle(.titleAndIcon)
         .disabled(previews.refreshing)
     }
 }
