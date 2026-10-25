@@ -5,12 +5,14 @@ public struct DanmakuLaneReservation: Equatable, Sendable {
     public var startTime: TimeInterval
     public var textWidth: Double
     public var velocity: Double
+    public var originX: Double
 
-    public init(lane: Int, startTime: TimeInterval, textWidth: Double, velocity: Double) {
+    public init(lane: Int, startTime: TimeInterval, textWidth: Double, velocity: Double, originX: Double = 0) {
         self.lane = lane
         self.startTime = startTime
         self.textWidth = textWidth
         self.velocity = velocity
+        self.originX = originX
     }
 }
 
@@ -18,16 +20,28 @@ public struct DanmakuLaneReservation: Equatable, Sendable {
 /// safe separation, the comment is dropped for that presentation frame.
 public struct DanmakuLaneScheduler: Sendable {
     private var reservations: [DanmakuLaneReservation?]
+    private var availableLaneCount: Int
 
     public init(laneCount: Int) {
         reservations = Array(repeating: nil, count: max(0, laneCount))
+        availableLaneCount = max(0, laneCount)
     }
 
     public mutating func reset(laneCount: Int? = nil) {
         if let laneCount {
-            reservations = Array(repeating: nil, count: max(0, laneCount))
+            availableLaneCount = max(0, laneCount)
+            reservations = Array(repeating: nil, count: availableLaneCount)
         } else {
             reservations = Array(repeating: nil, count: reservations.count)
+        }
+    }
+
+    /// Clipped lanes keep their occupancy so expanding the window cannot
+    /// admit a new comment on top of one that is still travelling offscreen.
+    public mutating func resize(laneCount: Int) {
+        availableLaneCount = max(0, laneCount)
+        if availableLaneCount > reservations.count {
+            reservations += Array(repeating: nil, count: availableLaneCount - reservations.count)
         }
     }
 
@@ -42,7 +56,7 @@ public struct DanmakuLaneScheduler: Sendable {
               viewportWidth.isFinite, viewportWidth > 0,
               lifetime.isFinite, lifetime > 0 else { return nil }
         let velocity = (viewportWidth + textWidth) / lifetime
-        for lane in reservations.indices {
+        for lane in 0..<availableLaneCount {
             if canUse(
                 reservations[lane],
                 at: mediaTime,
@@ -54,7 +68,8 @@ public struct DanmakuLaneScheduler: Sendable {
                     lane: lane,
                     startTime: mediaTime,
                     textWidth: textWidth,
-                    velocity: velocity
+                    velocity: velocity,
+                    originX: viewportWidth
                 )
                 reservations[lane] = reservation
                 return reservation
@@ -72,7 +87,7 @@ public struct DanmakuLaneScheduler: Sendable {
     ) -> Bool {
         guard let previous else { return true }
         let elapsed = max(0, time - previous.startTime)
-        let previousRightEdge = viewportWidth + previous.textWidth
+        let previousRightEdge = previous.originX + previous.textWidth
             - previous.velocity * elapsed
         // The previous comment must be fully inside the viewport before the
         // next one enters from the right.

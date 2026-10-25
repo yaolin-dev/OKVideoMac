@@ -619,7 +619,10 @@ final class DanmakuOverlayNSView: NSView {
         let lifetime: TimeInterval
         let mode: DanmakuMode
         let layer: CALayer
-        let bytes: Int
+        var bytes: Int
+        var rasterKey: DanmakuRasterCache.Key
+        let originX: CGFloat
+        let velocity: CGFloat
     }
     private var timeline = DanmakuTimeline(comments: [])
     private var timelineRevision: UInt64?
@@ -637,7 +640,6 @@ final class DanmakuOverlayNSView: NSView {
     private var commentOpacity: Double = 0.86
     private var displayArea: DanmakuDisplayArea = .upperHalf
     private var density: DanmakuDensity = .medium
-    private var lastBoundsSize: CGSize = .zero
     private let spriteRoot = CALayer()
     var rasterizationCount: Int { rasters.rasterizationCount }
     var preparedRasterBytes: Int { rasters.bytes }
@@ -690,7 +692,9 @@ final class DanmakuOverlayNSView: NSView {
     }
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
-        resetPresentation(at: clock.currentTime(at: ProcessInfo.processInfo.systemUptime))
+        // A backing-scale change changes glyph resolution, not media time or
+        // trajectories. Keep the old image until its replacement is ready.
+        prepareRasters(at: clock.currentTime(at: ProcessInfo.processInfo.systemUptime))
         refreshDriver()
     }
     private func refreshDriver() {
@@ -728,11 +732,9 @@ final class DanmakuOverlayNSView: NSView {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         spriteRoot.frame = bounds
         CATransaction.commit()
-        if bounds.size != lastBoundsSize {
-            lastBoundsSize = bounds.size
-            resetPresentation(at: clock.currentTime(at: ProcessInfo.processInfo.systemUptime))
-        }
+        scrollingScheduler.resize(laneCount: scrollingLaneCount)
         refreshDriver()
+        if !isDisplayDriverRunning { renderFrame(at: ProcessInfo.processInfo.systemUptime) }
     }
     /// Main-thread frame entry shared by the display link and deterministic rendering tests.
     func renderFrame(at uptime: TimeInterval) {
@@ -759,12 +761,23 @@ final class DanmakuOverlayNSView: NSView {
         }
         presentComments(through: mediaTime)
         prepareRasters(at: mediaTime)
-        for item in active {
+        for index in active.indices {
+            let replacementKey = currentRasterKey(active[index].rasterKey)
+            if replacementKey != active[index].rasterKey,
+               let raster = rasters.raster(for: replacementKey),
+               rasterBytes - active[index].bytes + raster.bytes <= Self.activeRasterBudget {
+                rasterBytes += raster.bytes - active[index].bytes
+                active[index].bytes = raster.bytes
+                active[index].rasterKey = replacementKey
+                active[index].layer.contents = raster.image
+                active[index].layer.contentsScale = CGFloat(replacementKey.scale)
+            }
+            let item = active[index]
             let y = item.mode == .bottom
                 ? max(0, bounds.height * displayArea.fraction - CGFloat(item.lane + 1) * item.laneHeight)
                 : CGFloat(item.lane) * item.laneHeight
-            let progress = min(max((mediaTime - item.startTime) / item.lifetime, 0), 1)
-            let x = item.mode == .scrolling ? bounds.width - CGFloat(progress) * (bounds.width + item.width)
+            let elapsed = CGFloat(max(0, mediaTime - item.startTime))
+            let x = item.mode == .scrolling ? item.originX - elapsed * item.velocity
                 : max(0, (bounds.width - item.width) / 2)
             item.layer.position = CGPoint(x: x, y: y)
             item.layer.opacity = Float(commentOpacity)
@@ -795,6 +808,14 @@ final class DanmakuOverlayNSView: NSView {
         .init(text: comment.text, size: min(max(comment.fontSize * fontScale, 13), 58),
               color: comment.color, scale: Double(window?.backingScaleFactor ?? 2))
     }
+    private func currentRasterKey(_ key: DanmakuRasterCache.Key) -> DanmakuRasterCache.Key {
+        .init(text: key.text, size: key.size, color: key.color, scale: Double(window?.backingScaleFactor ?? 2))
+    }
+    private var scrollingLaneCount: Int {
+        let height = CGFloat(28 * fontScale) + density.laneSpacing
+        return max(1, Int(max(1, bounds.height * displayArea.fraction) / max(1, height)))
+    }
+    private static let activeRasterBudget = maximumRasterBytes - DanmakuRasterCache.maximumBytes - 8 * 1_024 * 1_024
     private var mayPrepareRasters: Bool {
         guard clock.isAdvancing, let window else { return true }
         return window.occlusionState.contains(.visible) && !isHiddenOrHasHiddenAncestor
@@ -803,18 +824,26 @@ final class DanmakuOverlayNSView: NSView {
         guard mayPrepareRasters else { return }
         let upcoming = timeline.comments(from: mediaTime - offset - 0.15,
             through: mediaTime - offset + max(0.5, clock.rate))
-        rasters.prepare((waitingComments + upcoming.prefix(density.maximumActiveComments)).map(rasterKey))
+        let replacements = active.compactMap { item -> DanmakuRasterCache.Key? in
+            let key = currentRasterKey(item.rasterKey)
+            return key == item.rasterKey ? nil : key
+        }
+        rasters.prepare(replacements + (waitingComments + upcoming.prefix(density.maximumActiveComments)).map(rasterKey))
     }
     private func add(_ comment: DanmakuComment, raster: DanmakuRasterCache.Raster, at time: TimeInterval) {
         let width = raster.size.width, height = raster.size.height, bytes = raster.bytes
         guard active.count < density.maximumActiveComments,
-              bytes <= Self.maximumRasterBytes - DanmakuRasterCache.maximumBytes - 8 * 1_024 * 1_024 - rasterBytes else { return }
+              bytes <= Self.activeRasterBudget - rasterBytes else { return }
         let laneHeight = CGFloat(rasterKey(comment).size) + density.laneSpacing
         let laneCount = max(1, Int(max(laneHeight, bounds.height * displayArea.fraction) / laneHeight))
+        // Logical points per media second, calibrated to the comfortable small
+        // window speed. A larger viewport extends travel time, never velocity.
+        let velocity: CGFloat = 140
+        let lifetime = comment.mode == .scrolling ? Double((bounds.width + width) / velocity) : 4
         let lane: Int
         if comment.mode == .scrolling {
             guard let reservation = scrollingScheduler.reserve(at: time, textWidth: Double(width),
-                viewportWidth: Double(bounds.width), lifetime: 8) else { return }
+                viewportWidth: Double(bounds.width), lifetime: lifetime) else { return }
             lane = reservation.lane
         } else {
             let occupied = Set(active.filter { $0.mode == comment.mode }.map(\.lane))
@@ -828,7 +857,8 @@ final class DanmakuOverlayNSView: NSView {
         spriteRoot.addSublayer(sprite)
         rasterBytes += bytes
         active.append(ActiveComment(lane: lane, startTime: time, width: width, laneHeight: laneHeight,
-            lifetime: comment.mode == .scrolling ? 8 : 4, mode: comment.mode, layer: sprite, bytes: bytes))
+            lifetime: lifetime, mode: comment.mode, layer: sprite, bytes: bytes,
+            rasterKey: rasterKey(comment), originX: bounds.width, velocity: velocity))
     }
     private func resetPresentation(at mediaTime: TimeInterval) {
         CATransaction.begin(); CATransaction.setDisableActions(true)
@@ -836,8 +866,7 @@ final class DanmakuOverlayNSView: NSView {
         CATransaction.commit()
         active.removeAll(keepingCapacity: true); rasterBytes = 0
         waitingComments.removeAll(); lastFrameMediaTime = nil; rasters.reset()
-        let fontHeight = CGFloat(28 * fontScale) + density.laneSpacing
-        scrollingScheduler.reset(laneCount: max(1, Int(max(1, bounds.height * displayArea.fraction) / max(1, fontHeight))))
+        scrollingScheduler.reset(laneCount: scrollingLaneCount)
         lastPresentedMediaTime = max(0, mediaTime - 0.15)
     }
 }

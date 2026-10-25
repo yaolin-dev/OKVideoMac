@@ -227,6 +227,22 @@ final class DanmakuCoreTests: XCTestCase {
         XCTAssertNotNil(scheduler.reserve(at: 3, textWidth: 80, viewportWidth: 500, lifetime: 6))
     }
 
+    func testResizeUsesOriginalTrajectoryAndRetainsClippedLaneOccupancy() {
+        var shrinking = DanmakuLaneScheduler(laneCount: 1)
+        XCTAssertNotNil(shrinking.reserve(at: 0, textWidth: 100, viewportWidth: 1600, lifetime: 1700 / 140))
+        XCTAssertNil(shrinking.reserve(at: 1, textWidth: 100, viewportWidth: 800, lifetime: 900 / 140))
+        XCTAssertNotNil(shrinking.reserve(at: 7, textWidth: 100, viewportWidth: 800, lifetime: 900 / 140))
+        var expanding = DanmakuLaneScheduler(laneCount: 1)
+        XCTAssertNotNil(expanding.reserve(at: 0, textWidth: 100, viewportWidth: 800, lifetime: 900 / 140))
+        XCTAssertNotNil(expanding.reserve(at: 0.1, textWidth: 100, viewportWidth: 1600, lifetime: 1700 / 140))
+        var lanes = DanmakuLaneScheduler(laneCount: 2)
+        for _ in 0..<2 { XCTAssertNotNil(lanes.reserve(at: 0, textWidth: 100, viewportWidth: 800, lifetime: 900 / 140)) }
+        lanes.resize(laneCount: 1); lanes.resize(laneCount: 2)
+        XCTAssertNil(lanes.reserve(at: 0.1, textWidth: 100, viewportWidth: 800, lifetime: 900 / 140))
+        lanes.resize(laneCount: 3)
+        XCTAssertEqual(lanes.reserve(at: 0.1, textWidth: 100, viewportWidth: 800, lifetime: 900 / 140)?.lane, 2)
+    }
+
     private func source(_ id: String, generation: UInt64) -> DanmakuSourceDescriptor {
         DanmakuSourceDescriptor(
             stable: StableDanmakuLocator(

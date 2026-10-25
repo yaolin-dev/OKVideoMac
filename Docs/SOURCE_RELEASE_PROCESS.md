@@ -1,5 +1,9 @@
 # Immutable Corresponding-Source Release Process
 
+## Local Build 151 acceptance
+
+The danmaku resize candidate uses a captured local source tree and `OKVideoMac-0.8.7-build151-SOURCE_RELEASE_INDEX.json`. It remains a local acceptance build; prior sources and installed Build 150 are retained.
+
 ## Local Build 150 acceptance
 
 The Live TV preview candidate uses a captured local source tree and `OKVideoMac-0.8.7-build150-SOURCE_RELEASE_INDEX.json`. It is not a public release or a replacement for the notarized Build 140 assets. Its source SHA-256 and local validation evidence are retained with the candidate package.

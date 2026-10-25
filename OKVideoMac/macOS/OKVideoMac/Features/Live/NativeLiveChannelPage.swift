@@ -537,7 +537,7 @@ final class LiveChannelNativeCard: NSView, BrowserHoverTarget {
     override var acceptsFirstResponder: Bool { true }
     init() {
         super.init(frame: .zero)
-        logo.imageScaling = .scaleProportionallyDown
+        logo.imageScaling = .scaleProportionallyUpOrDown
         previewImage.imageScaling = .scaleProportionallyUpOrDown
         previewImage.wantsLayer = true; previewImage.layer?.cornerRadius = 10
         previewImage.layer?.backgroundColor = NSColor.black.cgColor
@@ -585,10 +585,7 @@ final class LiveChannelNativeCard: NSView, BrowserHoverTarget {
         let artHeight = bounds.width * 9 / 16
         previewImage.frame = NSRect(x: 8, y: 8, width: max(0, bounds.width - 16), height: max(0, (bounds.width - 16) * 9 / 16))
         previewAge.frame = NSRect(x: max(8, bounds.width - 76), y: previewImage.frame.maxY - 23, width: 60, height: 17)
-        let logoWidth = min(160, max(0, bounds.width * 0.55))
-        let logoHeight = min(72, max(0, artHeight * 0.48))
-        logo.frame = NSRect(x: (bounds.width - logoWidth) / 2, y: (artHeight - logoHeight) / 2,
-                            width: logoWidth, height: logoHeight)
+        logo.frame = NSRect(x: 20, y: 16, width: max(0, bounds.width - 40), height: max(0, artHeight - 32))
         star.frame = NSRect(x: bounds.width - 38, y: 4, width: 26, height: 26)
         catchupButton.frame = NSRect(x: bounds.width - 70, y: 4, width: 26, height: 26)
         number.frame = NSRect(x: 17, y: 17, width: min(80, max(26, number.intrinsicContentSize.width + 10)), height: 18)

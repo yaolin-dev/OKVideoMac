@@ -1,6 +1,6 @@
 # OKVideoMac
 
-当前发布候选为 **0.8.7（Build 150）**，用于直播画面缓存与按轮刷新的本地验收，保留 B 站播放修复、本地 DASH、重试和详情优化。Build 150 尚未公开发布或公证；下方正式 Build 140 发布记录保持原范围。
+当前发布候选为 **0.8.7（Build 151）**，用于弹幕跨窗口等速、连续缩放及台标尺寸恢复的本地验收。Build 151 尚未公开发布或公证；下方正式 Build 140 发布记录保持原范围。
 
 当前稳定版本为 **0.8.7（Build 140）**，包含直播回放、原生画中画、播放信息、启动／播放器界面以及历史与详情修复。Developer ID、Apple Accepted、staple、Gatekeeper、安装和全部16项公开资产核验通过。见[发布说明](Docs/RELEASE_NOTES_0.8.7.md)与[正式验证](Docs/RELEASE_VALIDATION_0.8.7.md)。
 

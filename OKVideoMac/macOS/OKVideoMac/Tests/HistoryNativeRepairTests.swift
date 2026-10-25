@@ -540,6 +540,51 @@ final class DanmakuSmoothRenderingTests: XCTestCase {
         update(view, timeline: .init(comments: []), snapshot: snapshot, revision: 3)
         XCTAssertEqual(view.rasterBytes, 0)
     }
+    func testResizeAndBackingNotificationKeepExistingSpritesAndRasters() async throws {
+        let (view, window) = makeView(); defer { window.close() }
+        update(view, timeline: timeline(), snapshot: .init(status: .paused, position: 1))
+        try await waitForComments(view, count: 60)
+        let layers = try XCTUnwrap(view.layer?.sublayers?.first?.sublayers)
+        let firstX = layers[0].position.x
+        let bytes = view.rasterBytes, rasterizations = view.rasterizationCount
+        for size in [NSSize(width: 800, height: 450), NSSize(width: 1600, height: 900),
+                     NSSize(width: 640, height: 360), NSSize(width: 2240, height: 1260)] {
+            window.setContentSize(size); view.layoutSubtreeIfNeeded()
+            XCTAssertEqual(view.activeCommentCount, 60)
+            XCTAssertTrue(layers.allSatisfy { $0.superlayer != nil })
+            XCTAssertEqual(layers[0].position.x, firstX, accuracy: 0.001)
+            XCTAssertEqual(view.rasterBytes, bytes)
+            XCTAssertEqual(view.rasterizationCount, rasterizations)
+        }
+        view.viewDidChangeBackingProperties()
+        XCTAssertEqual(view.activeCommentCount, 60)
+        XCTAssertEqual(layers[0].position.x, firstX, accuracy: 0.001)
+    }
+    func testScrollingSpeedIsEqualAcrossViewportWidthsAndDuringResize() async throws {
+        var speeds: [CGFloat] = []
+        for width in [800.0, 1600.0] {
+            let view = DanmakuOverlayNSView(frame: .init(x: 0, y: 0, width: width, height: 450))
+            view.layoutSubtreeIfNeeded()
+            let timeline = DanmakuTimeline(comments: [.init(id: "same", time: 1, mode: .scrolling,
+                fontSize: 25, color: 0xFFFFFF, text: "同一条弹幕在大窗口保持阅读速度")])
+            update(view, timeline: timeline, snapshot: .init(status: .paused, position: 1))
+            try await waitForComments(view, count: 1)
+            let layer = try XCTUnwrap(view.layer?.sublayers?.first?.sublayers?.first)
+            let now = ProcessInfo.processInfo.systemUptime
+            var playing = PlayerSnapshot(status: .playing, position: 1); playing.positionSampleUptime = now
+            update(view, timeline: timeline, snapshot: playing)
+            view.renderFrame(at: now + 0.1); let first = layer.position.x
+            view.renderFrame(at: now + 0.6); let second = layer.position.x
+            speeds.append((first - second) / 0.5)
+            view.frame.size = .init(width: width + 500, height: 800); view.layoutSubtreeIfNeeded()
+            view.renderFrame(at: now + 0.6)
+            XCTAssertEqual(layer.position.x, second, accuracy: 0.001, "Resize must not teleport the comment")
+            view.renderFrame(at: now + 1.1)
+            XCTAssertEqual(second - layer.position.x, 70, accuracy: 0.01)
+        }
+        XCTAssertEqual(speeds[0], speeds[1], accuracy: 0.001)
+        XCTAssertEqual(speeds[0], 140, accuracy: 0.001)
+    }
     func testRetinaRasterShowsLegibleTextAndColor() async throws {
         let (view, window) = makeView(); defer { window.close() }
         let timeline = DanmakuTimeline(comments: [.init(id: "top", time: 1, mode: .top, fontSize: 38,
