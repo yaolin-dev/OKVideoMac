@@ -7,6 +7,242 @@ import OKVideoPersistence
 @testable import OKVideoMac
 
 @MainActor final class LivePreviewTests: XCTestCase {
+    func testFastVisibleChannelsFinishWhileAnotherChannelWaitsForFirstFrame() async throws {
+        let data = try jpeg(), owner = UUID()
+        var finished: [String] = [], active = 0, peak = 0
+        let service = LivePreviewCoordinator(cache: cache(), maximumConcurrentCaptures: 3) { input in
+            let name = URL(string: input.url)!.lastPathComponent
+            active += 1; peak = max(peak, active)
+            defer { active -= 1 }
+            try await Task.sleep(nanoseconds: name == "slow-first" ? 2_000_000_000 : 50_000_000)
+            finished.append(name); return data
+        }
+        defer { service.clear(owner: owner) }
+        let requests = [demand("slow-first")] + (0..<8).map { demand("fast-\($0)") }
+        service.update(owner: owner, demands: requests, mayCapture: { true })
+        try await settle(1.2)
+        XCTAssertEqual(finished.count, 8); XCTAssertFalse(finished.contains("slow-first"))
+        XCTAssertEqual(peak, 3)
+        XCTAssertEqual(requests.dropFirst().filter { service.image(for: $0.key, programmeStart: nil) != nil }.count, 8)
+        await service.quiesce(); XCTAssertEqual(active, 0)
+    }
+    func testOnlyOneSlowRetryOccupiesThePoolAndAllFirstAttemptsHavePriority() async throws {
+        let data = try jpeg(), owner = UUID()
+        var first = Set<String>(), retries = 0, peakRetries = 0, firstCountAtFirstRetry: Int?
+        let service = LivePreviewCoordinator(cache: cache()) { input in
+            if input.timeoutSeconds == 12 { first.insert(input.url); throw LivePreviewCaptureError.deadline }
+            if firstCountAtFirstRetry == nil { firstCountAtFirstRetry = first.count }
+            retries += 1; peakRetries = max(peakRetries, retries)
+            defer { retries -= 1 }
+            try await Task.sleep(nanoseconds: 80_000_000); return data
+        }
+        defer { service.clear(owner: owner) }
+        let requests = (0..<6).map { demand("retry-\($0)") }
+        service.update(owner: owner, demands: requests, mayCapture: { true })
+        try await settle(1.8)
+        XCTAssertEqual(firstCountAtFirstRetry, 6); XCTAssertEqual(peakRetries, 1)
+        XCTAssertEqual(requests.filter { service.image(for: $0.key, programmeStart: nil) != nil }.count, 6)
+    }
+    func testNewViewportGetsASlotOnlyAfterCancelledNativeWorkExits() async throws {
+        let store = cache(), data = try jpeg(), owner = UUID()
+        var active = 0, peak = 0, oldCancelled = 0, allowed = true
+        let began = expectation(description: "three old viewport workers started"); began.expectedFulfillmentCount = 3
+        var held = (0..<3).map { demand("held-\($0)") }
+        var next = (0..<3).map { demand("next-\($0)") }
+        let cached = (0..<20).map { demand("cached-\($0)") }
+        for r in cached { await store.store(.init(data: data, captured: Date().addingTimeInterval(-3600), sourceKey: "fixture"), key: r.key) }
+        let service = LivePreviewCoordinator(cache: store) { input in
+            active += 1; peak = max(peak, active)
+            defer { active -= 1 }
+            if input.url.contains("held-") {
+                began.fulfill()
+                do { try await Task.sleep(nanoseconds: 8_000_000_000) }
+                catch {
+                    oldCancelled += 1
+                    // Cleanup keeps the native connection alive despite Swift cancellation.
+                    await Task.detached { try? await Task.sleep(nanoseconds: 180_000_000) }.value
+                    throw CancellationError()
+                }
+            } else { try await Task.sleep(nanoseconds: 35_000_000) }
+            return data
+        }
+        defer { service.clear(owner: owner) }
+        for i in next.indices { next[i].priority = 2 }
+        service.update(owner: owner, demands: held + cached + next, mayCapture: { allowed })
+        await fulfillment(of: [began], timeout: 3)
+        for i in held.indices { held[i].priority = 2 }
+        for i in next.indices { next[i].priority = 0 }
+        service.update(owner: owner, demands: next + cached + held, mayCapture: { allowed })
+        // Rapid intermediate positions must not repeatedly cancel the pool.
+        for step in 0..<12 {
+            service.updateViewport(owner: owner, visible: Set((step % 2 == 0 ? next + cached : cached).map(\.key)), nearby: [])
+            try await settle(0.01)
+            XCTAssertTrue(cached.allSatisfy { service.image(for: $0.key, programmeStart: nil) != nil })
+        }
+        service.updateViewport(owner: owner, visible: Set((next + cached).map(\.key)), nearby: [])
+        try await settle(1.0)
+        XCTAssertEqual(oldCancelled, 1, "Only one stranded offscreen job should be preempted")
+        XCTAssertEqual(peak, 3, "A cancelled native worker still consumes its slot while exiting")
+        XCTAssertTrue(next.allSatisfy { service.image(for: $0.key, programmeStart: nil) != nil })
+        XCTAssertTrue(cached.allSatisfy { service.image(for: $0.key, programmeStart: nil) != nil })
+        allowed = false; await service.quiesce(); XCTAssertEqual(active, 0)
+    }
+    func testOwnerSwitchRejectsEveryLateParallelResultAndPreservesPoolBound() async throws {
+        let store = cache(), data = try jpeg()
+        var active = 0, peak = 0, newCalls = 0, oldValid = true
+        let began = expectation(description: "old generation entered three decoders"); began.expectedFulfillmentCount = 3
+        let service = LivePreviewCoordinator(cache: store) { input in
+            active += 1; peak = max(peak, active); defer { active -= 1 }
+            if input.url.contains("old-owner") {
+                began.fulfill()
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                await Task.detached { try? await Task.sleep(nanoseconds: 120_000_000) }.value
+            } else { newCalls += 1 }
+            return data
+        }
+        let oldOwner = UUID(), newOwner = UUID()
+        let old = (0..<3).map { demand("old-owner-\($0)", valid: { oldValid }) }
+        let new = (0..<3).map { demand("new-owner-\($0)") }
+        service.update(owner: oldOwner, demands: old, mayCapture: { true })
+        await fulfillment(of: [began], timeout: 3)
+        oldValid = false
+        service.update(owner: newOwner, demands: new, mayCapture: { true })
+        try await settle(1)
+        XCTAssertEqual(newCalls, 3); XCTAssertLessThanOrEqual(peak, 3)
+        for r in old {
+            XCTAssertNil(service.image(for: r.key, programmeStart: nil))
+            let persisted = await store.read(r.key); XCTAssertNil(persisted)
+        }
+        XCTAssertTrue(new.allSatisfy { service.image(for: $0.key, programmeStart: nil) != nil })
+        service.clear(owner: oldOwner)
+        XCTAssertTrue(new.allSatisfy { service.image(for: $0.key, programmeStart: nil) != nil })
+        service.clear(owner: newOwner); await service.quiesce(); XCTAssertEqual(active, 0)
+    }
+    func testQuiesceWaitsForEveryConnectionLeaseAndCancelledDecoder() async throws {
+        let data = try jpeg(), owner = UUID(), pool = LivePreviewConnectionBudget()
+        var active = 0, allowed = true
+        let began = expectation(description: "three connections held"); began.expectedFulfillmentCount = 3
+        let service = LivePreviewCoordinator(cache: cache()) { _ in
+            active += 1; began.fulfill(); defer { active -= 1 }
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            await Task.detached { try? await Task.sleep(nanoseconds: 120_000_000) }.value
+            return data
+        }
+        let requests = (0..<3).map { index -> LivePreviewDemand in
+            var r = demand("drain-\(index)"); r.acquireConnection = { try pool.reserve(sourceKey: "account", reportedAvailable: 3) }; return r
+        }
+        service.update(owner: owner, demands: requests, mayCapture: { allowed })
+        await fulfillment(of: [began], timeout: 3)
+        XCTAssertEqual(pool.count(sourceKey: "account"), 3)
+        allowed = false; await service.quiesce()
+        XCTAssertEqual(active, 0); XCTAssertEqual(pool.count(sourceKey: "account"), 0)
+        XCTAssertTrue(requests.allSatisfy { service.image(for: $0.key, programmeStart: nil) == nil })
+        service.clear(owner: owner)
+    }
+    func testAccountReservationsCannotOversubscribeAndReleaseIsIdempotent() throws {
+        let pool = LivePreviewConnectionBudget()
+        let a = try pool.reserve(sourceKey: "account", reportedAvailable: 2)
+        let b = try pool.reserve(sourceKey: "account", reportedAvailable: 2)
+        XCTAssertThrowsError(try pool.reserve(sourceKey: "account", reportedAvailable: 2)) {
+            guard case LivePreviewCaptureError.connectionBusy = $0 else { return XCTFail("Expected local capacity wait") }
+        }
+        XCTAssertThrowsError(try pool.reserve(sourceKey: "account", reportedAvailable: 0)) {
+            guard case LivePreviewCaptureError.connectionBusy = $0 else { return XCTFail("Our own live connections may exhaust the reported free capacity") }
+        }
+        a.release(); a.release(); XCTAssertEqual(pool.count(sourceKey: "account"), 1)
+        let other = try pool.reserve(sourceKey: "other", reportedAvailable: 1)
+        b.release(); other.release(); XCTAssertEqual(pool.count(sourceKey: "account"), 0)
+        XCTAssertThrowsError(try pool.reserve(sourceKey: "account", reportedAvailable: 0))
+    }
+    func testTemporaryAccountCapacityWaitDoesNotConsumeCaptureAttempts() async throws {
+        let pool = LivePreviewConnectionBudget(), data = try jpeg(), owner = UUID()
+        let store = cache(), old = Date().addingTimeInterval(-3600)
+        var active = 0, peak = 0, calls = 0
+        let service = LivePreviewCoordinator(cache: store) { _ in
+            active += 1; peak = max(peak, active); calls += 1; defer { active -= 1 }
+            try await Task.sleep(nanoseconds: 150_000_000); return data
+        }
+        defer { service.clear(owner: owner) }
+        let requests = (0..<3).map { i -> LivePreviewDemand in
+            var r = demand("limited-\(i)")
+            r.acquireConnection = {
+                try await Task.sleep(nanoseconds: 20_000_000)
+                return try pool.reserve(sourceKey: "account", reportedAvailable: 1)
+            }
+            return r
+        }
+        for r in requests { await store.store(.init(data: data, captured: old, sourceKey: "fixture"), key: r.key) }
+        service.update(owner: owner, demands: requests, mayCapture: { true })
+        try await settle(1.2) // Let the cache-only page become idle before manual refresh.
+        XCTAssertEqual(calls, 0)
+        service.requestRefresh()
+        for _ in 0..<60 {
+            if requests.allSatisfy({ (service.image(for: $0.key, programmeStart: nil)?.captured ?? .distantPast) > old }) { break }
+            try await settle(0.1)
+        }
+        XCTAssertEqual(calls, 3); XCTAssertEqual(peak, 1); XCTAssertEqual(pool.count(sourceKey: "account"), 0)
+        XCTAssertTrue(requests.allSatisfy { (service.image(for: $0.key, programmeStart: nil)?.captured ?? .distantPast) > old })
+    }
+    func testParallelFailedRefreshNeverClearsAnyLastGoodPicture() async throws {
+        let store = cache(), data = try jpeg(), owner = UUID(), old = Date().addingTimeInterval(-7200)
+        let requests = (0..<12).map { demand("old-parallel-\($0)") }
+        for r in requests { await store.store(.init(data: data, captured: old, sourceKey: "fixture"), key: r.key) }
+        var calls = 0
+        let service = LivePreviewCoordinator(cache: store) { _ in
+            calls += 1; try await Task.sleep(nanoseconds: 30_000_000); throw LivePreviewCaptureError.helper("media-failed")
+        }
+        defer { service.clear(owner: owner) }
+        service.update(owner: owner, demands: requests, mayCapture: { true })
+        try await settle(0.3)
+        service.requestRefresh(); service.requestRefresh()
+        for step in 0..<30 {
+            let count = [2, 5, 12, 7][step % 4]
+            let visible = Set(requests.prefix(count).map(\.key))
+            service.updateViewport(owner: owner, visible: visible, nearby: [])
+            try await settle(0.03)
+            XCTAssertTrue(requests.prefix(count).allSatisfy { service.image(for: $0.key, programmeStart: nil)?.captured == old })
+        }
+        service.updateViewport(owner: owner, visible: Set(requests.map(\.key)), nearby: [])
+        try await settle(1.3)
+        XCTAssertEqual(calls, 24); XCTAssertFalse(service.refreshing)
+        XCTAssertTrue(requests.allSatisfy { service.image(for: $0.key, programmeStart: nil)?.captured == old })
+        for r in requests { let saved = await store.read(r.key); XCTAssertEqual(saved?.captured, old) }
+    }
+
+    func testIndependentVisibleCapturesOverlapWithoutDuplicateChannels() async throws {
+        let data = try jpeg(), owner = UUID()
+        var active = 0, peak = 0, calls: [String] = []
+        let began = expectation(description: "three visible captures overlap")
+        began.expectedFulfillmentCount = 3
+        let service = LivePreviewCoordinator(cache: cache()) { input in
+            active += 1; peak = max(peak, active); calls.append(input.url)
+            if calls.count <= 3 { began.fulfill() }
+            defer { active -= 1 }
+            try await Task.sleep(nanoseconds: 700_000_000)
+            return data
+        }
+        defer { service.clear(owner: owner) }
+        let requests = (0..<6).map { demand("concurrent-\($0)") }
+        service.update(owner: owner, demands: requests, mayCapture: { true })
+        await fulfillment(of: [began], timeout: 4)
+        XCTAssertEqual(peak, 3, "Independent visible requests should use all three bounded slots")
+        service.update(owner: owner, demands: requests, mayCapture: { true })
+        try await settle(3)
+        XCTAssertEqual(Set(calls).count, 6); XCTAssertEqual(calls.count, 6)
+        XCTAssertEqual(requests.filter { service.image(for: $0.key, programmeStart: nil) != nil }.count, 6)
+    }
+    func testDefinitiveHelperFailureReleasesSlotBeforeItsDeadline() async throws {
+        let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/OKVideoLivePreview")
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
+        let started = Date()
+        do {
+            _ = try await LivePreviewProcessJob().run(.init(url: missing.absoluteString, headers: [:]), executable: helper)
+            XCTFail("A missing stream must fail")
+        } catch {}
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2.5,
+            "A definite playback failure must not occupy the entire 12-second first-attempt budget")
+    }
+
     private func jpeg() throws -> Data {
         let image = NSImage(size: NSSize(width: 64, height: 36))
         image.lockFocus(); NSColor.red.setFill(); NSRect(x: 0, y: 0, width: 64, height: 36).fill(); image.unlockFocus()
@@ -177,10 +413,10 @@ import OKVideoPersistence
         let evicted = await tiny.read(a); XCTAssertNil(evicted)
         let traversal = await store.read("../outside"); XCTAssertNil(traversal)
     }
-    func testQueueUsesOneDecoderAndReusesFreshCache() async throws {
+    func testConfiguredSingleDecoderReusesFreshCache() async throws {
         let data = try jpeg(), store = cache()
         var active = 0, peak = 0, calls = 0
-        let service = LivePreviewCoordinator(cache: store) { _ in
+        let service = LivePreviewCoordinator(cache: store, maximumConcurrentCaptures: 1) { _ in
             active += 1; peak = max(peak, active); calls += 1
             defer { active -= 1 }
             try await Task.sleep(nanoseconds: 30_000_000)
@@ -192,7 +428,7 @@ import OKVideoPersistence
         XCTAssertEqual(calls, 4); XCTAssertEqual(peak, 1)
         for request in demands { XCTAssertNotNil(service.image(for: request.key, programmeStart: nil)) }
         service.clear(owner: owner)
-        let reopened = LivePreviewCoordinator(cache: store) { _ in XCTFail("Fresh cache must avoid another connection"); return data }
+        let reopened = LivePreviewCoordinator(cache: store, maximumConcurrentCaptures: 1) { _ in XCTFail("Fresh cache must avoid another connection"); return data }
         reopened.update(owner: owner, demands: demands, mayCapture: { true })
         try await settle()
         for request in demands { XCTAssertNotNil(reopened.image(for: request.key, programmeStart: nil)) }
@@ -200,16 +436,17 @@ import OKVideoPersistence
     }
     func testChangingSourceCancelsAndRejectsLateOldResults() async throws {
         let data = try jpeg(); var valid = true
+        let began = expectation(description: "old source capture started")
         let old = demand("old", valid: { valid }), new = demand("new")
         var calls: [String] = []
         let service = LivePreviewCoordinator(cache: cache()) { input in
             calls.append(input.url)
-            if input.url.hasSuffix("old") { try? await Task.sleep(nanoseconds: 800_000_000) }
+            if input.url.hasSuffix("old") { began.fulfill(); try? await Task.sleep(nanoseconds: 800_000_000) }
             return data
         }
         let owner = UUID()
         service.update(owner: owner, demands: [old], mayCapture: { true })
-        try await settle(1.1)
+        await fulfillment(of: [began], timeout: 3)
         valid = false
         service.update(owner: owner, demands: [new], mayCapture: { true })
         try await settle(1.2)
@@ -408,7 +645,7 @@ import OKVideoPersistence
     func testScrollingReprioritizesWithoutDiscardingInFlightPicture() async throws {
         let data = try jpeg(), owner = UUID(), began = expectation(description: "first capture")
         var calls: [String] = []
-        let service = LivePreviewCoordinator(cache: cache()) { input in
+        let service = LivePreviewCoordinator(cache: cache(), maximumConcurrentCaptures: 1) { input in
             calls.append(input.url)
             if calls.count == 1 { began.fulfill(); try await Task.sleep(nanoseconds: 350_000_000) }
             return data
@@ -432,7 +669,7 @@ import OKVideoPersistence
         var background = demand("background"); background.priority = 2
         await store.store(.init(data: data, captured: Date().addingTimeInterval(-3600), sourceKey: "fixture"), key: old.key)
         var calls: [String] = []
-        let service = LivePreviewCoordinator(cache: store) { input in calls.append(URL(string: input.url)!.lastPathComponent); return data }
+        let service = LivePreviewCoordinator(cache: store, maximumConcurrentCaptures: 1) { input in calls.append(URL(string: input.url)!.lastPathComponent); return data }
         service.update(owner: owner, demands: [old,missing,background], mayCapture: { false })
         try await settle(0.2)
         service.requestRefresh()
@@ -449,7 +686,7 @@ import OKVideoPersistence
         let fast = demand("fast")
         var background = demand("background"); background.priority = 2
         var calls: [String] = [], budgets: [Double] = []
-        let service = LivePreviewCoordinator(cache: cache()) { input in
+        let service = LivePreviewCoordinator(cache: cache(), maximumConcurrentCaptures: 1) { input in
             calls.append(URL(string: input.url)!.lastPathComponent); budgets.append(input.timeoutSeconds ?? 0)
             if input.url.hasSuffix("slow") { throw LivePreviewCaptureError.deadline }
             return data

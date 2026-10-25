@@ -23392,11 +23392,6 @@ extension AppState {
                 guard valid(), self.permitsBackgroundLivePreview else { throw CancellationError() }
                 let provider = try XtreamSiteProvider(configuration: XtreamProviderConfiguration(data: record.rawData),
                     credentials: credentials, httpClient: environment.xtreamHTTPClient, userAgent: Self.xtreamUserAgent)
-                let account = try await provider.validateLivePlaybackAccount()
-                try Task.checkCancellation()
-                guard valid(), self.permitsBackgroundLivePreview,
-                      let maximum = account.maxConnections, maximum > 0,
-                      let active = account.activeConnections, active >= 0, active < maximum else { return [] }
                 return try streams.prefix(2).compactMap { stream in
                     guard channel.streams.contains(stream), case .provider(let reference) = stream.target else { return nil }
                     let media = try provider.resolveLivePlayback(reference)
@@ -23407,6 +23402,27 @@ extension AppState {
                     return input
                 }
             }, isValid: valid)
+        if case .xtream(let id) = source {
+            demand.acquireConnection = { [weak self] in
+                guard let self, valid(), self.permitsBackgroundLivePreview,
+                      !self.nativeLiveAccountMutationIDs.contains(id),
+                      let record = self.activeConfigurationRecord, record.id == id, record.sourceKind == .xtream,
+                      let environment = self.environment,
+                      let credentials = try await self.liveCredentialStore?.previewCredentials(for: id) else {
+                    throw LivePreviewCaptureError.unavailable
+                }
+                try Task.checkCancellation()
+                let provider = try XtreamSiteProvider(configuration: XtreamProviderConfiguration(data: record.rawData),
+                    credentials: credentials, httpClient: environment.xtreamHTTPClient, userAgent: Self.xtreamUserAgent)
+                let account = try await provider.validateLivePlaybackAccount()
+                try Task.checkCancellation()
+                guard valid(), self.permitsBackgroundLivePreview else { throw CancellationError() }
+                guard let maximum = account.maxConnections, maximum > 0,
+                      let active = account.activeConnections, active >= 0 else { throw LivePreviewCaptureError.unavailable }
+                return try self.livePreviews.connectionBudget.reserve(sourceKey: sourceKey,
+                    reportedAvailable: max(0, maximum - active))
+            }
+        }
         demand.legacyKey = legacyKey
         demand.mayReuseFrame = { [weak self] in
             guard let self else { return false }

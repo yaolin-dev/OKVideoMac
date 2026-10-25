@@ -124,7 +124,7 @@ struct NativeLiveChannelPage: NSViewRepresentable {
             if !page.session.showsPreviewImages { refreshPreviewImages() }
             currentKey = page.browseKey; favorites = nextFavorites
             if previewObserver == nil {
-                previewObserver = state.livePreviews.changes.sink { [weak self] in self?.refreshPreviewImages() }
+                previewObserver = state.livePreviews.changes.sink { [weak self] keys in self?.refreshPreviewImages(keys: keys) }
             }
             if epgObserver == nil {
                 epgObserver = state.liveEPG.objectWillChange.sink { [weak self] in
@@ -348,9 +348,10 @@ struct NativeLiveChannelPage: NSViewRepresentable {
             }
             card.updatePreview(key: demand.key, entry: state.livePreviews.image(for: demand.key, programmeStart: demand.programmeStart))
         }
-        private func refreshPreviewImages() {
+        private func refreshPreviewImages(keys: Set<String>? = nil) {
             guard let scroll else { return }
             for path in scroll.viewportIndexPaths where channels.indices.contains(path.item) {
+                if let keys, let key = previewDemands[channels[path.item].id]?.key, !keys.contains(key) { continue }
                 guard let item = scroll.collection.item(at: path) as? LiveChannelNativeItem else { continue }
                 updatePreview(item.card, channel: channels[path.item])
             }
