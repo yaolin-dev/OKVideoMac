@@ -92,8 +92,8 @@ final class DanmakuTextRasterizationTests: XCTestCase {
             for size: CGFloat in [13, 18, 28, 42, 58] {
                 for scale: CGFloat in [1, 2] {
                     let font = NSFont.systemFont(ofSize: size, weight: .semibold)
-                    let plain = try rasterize(text, attributes: [.font: font, .foregroundColor: NSColor.white], scale: scale)
-                    let decorated = try rasterize(text, attributes: DanmakuTextStyle.attributes(font: font, color: .white, scale: scale), scale: scale)
+                    let plain = try rasterize(text, font: font, color: .white, scale: scale, decorate: false)
+                    let decorated = try rasterize(text, font: font, color: .white, scale: scale)
                     var foregroundPixels = 0
                     var damagedPixels = 0
                     var shadowPixels = 0
@@ -125,8 +125,8 @@ final class DanmakuTextRasterizationTests: XCTestCase {
     func testDecorationPreservesColoredCommentFill() throws {
         let font = NSFont.systemFont(ofSize: 28, weight: .semibold)
         let color = NSColor(calibratedRed: 0.2, green: 0.8, blue: 0.4, alpha: 1)
-        let plain = try rasterize("中文 Color", attributes: [.font: font, .foregroundColor: color], scale: 2)
-        let decorated = try rasterize("中文 Color", attributes: DanmakuTextStyle.attributes(font: font, color: color, scale: 2), scale: 2)
+        let plain = try rasterize("中文 Color", font: font, color: color, scale: 2, decorate: false)
+        let decorated = try rasterize("中文 Color", font: font, color: color, scale: 2)
         var compared = 0
         for y in 0..<plain.pixelsHigh {
             for x in 0..<plain.pixelsWide {
@@ -146,9 +146,9 @@ final class DanmakuTextRasterizationTests: XCTestCase {
     func testShadowHasConsistentLogicalExtentAtRetinaScale() throws {
         let font = NSFont.systemFont(ofSize: 58, weight: .semibold)
         let extents = try [CGFloat(1), 2].map { scale -> CGFloat in
-            let plain = try rasterize("H", attributes: [.font: font, .foregroundColor: NSColor.white], scale: scale)
+            let plain = try rasterize("H", font: font, color: .white, scale: scale, decorate: false)
             let decorated = try rasterize("H",
-                attributes: DanmakuTextStyle.attributes(font: font, color: .white, scale: scale), scale: scale)
+                font: font, color: .white, scale: scale)
             let y = plain.pixelsHigh / 2
             let fillEdge = try XCTUnwrap((0..<plain.pixelsWide).last {
                 (plain.colorAt(x: $0, y: y)?.alphaComponent ?? 0) > 0.01
@@ -166,9 +166,8 @@ final class DanmakuTextRasterizationTests: XCTestCase {
         for size: CGFloat in [13, 58] {
             for scale: CGFloat in [1, 2] {
                 let font = NSFont.systemFont(ofSize: size, weight: .semibold)
-                let attributes = DanmakuTextStyle.attributes(font: font, color: .white, scale: scale)
-                let sprite = try rasterize("中文彈幕 Agjy", attributes: attributes, scale: scale)
-                let roomy = try rasterize("中文彈幕 Agjy", attributes: attributes, scale: scale, padding: 12)
+                let sprite = try rasterize("中文彈幕 Agjy", font: font, color: .white, scale: scale)
+                let roomy = try rasterize("中文彈幕 Agjy", font: font, color: .white, scale: scale, padding: 12)
                 let inset = Int(8 * scale)
                 var maximumClippedAlpha: CGFloat = 0
                 for y in 0..<roomy.pixelsHigh {
@@ -185,21 +184,16 @@ final class DanmakuTextRasterizationTests: XCTestCase {
         }
     }
 
-    private func rasterize(_ text: String, attributes: [NSAttributedString.Key: Any], scale: CGFloat, padding: CGFloat = 4) throws -> NSBitmapImageRep {
-        let size = (text as NSString).size(withAttributes: attributes)
-        let width = Int(ceil((ceil(size.width) + 2 * padding) * scale))
-        let height = Int(ceil((ceil(size.height) + 2 * padding) * scale))
-        let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
-            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-            colorSpaceName: .deviceRGB, bytesPerRow: width * 4, bitsPerPixel: 32))
-        let graphics = try XCTUnwrap(NSGraphicsContext(bitmapImageRep: bitmap))
-        NSGraphicsContext.saveGraphicsState()
-        defer { NSGraphicsContext.restoreGraphicsState() }
-        NSGraphicsContext.current = graphics
-        graphics.cgContext.clear(CGRect(x: 0, y: 0, width: width, height: height))
-        graphics.cgContext.scaleBy(x: scale, y: scale)
-        (text as NSString).draw(at: CGPoint(x: padding, y: padding), withAttributes: attributes)
-        return bitmap
+    private func rasterize(_ text: String, font: NSFont, color: NSColor, scale: CGFloat,
+                           decorate: Bool = true, padding: CGFloat = 4) throws -> NSBitmapImageRep {
+        let rgb = try XCTUnwrap(color.usingColorSpace(.deviceRGB))
+        let value = UInt32((rgb.redComponent * 255).rounded()) << 16
+            | UInt32((rgb.greenComponent * 255).rounded()) << 8
+            | UInt32((rgb.blueComponent * 255).rounded())
+        let raster = try XCTUnwrap(DanmakuRasterCache.draw(
+            .init(text: text, size: Double(font.pointSize), color: value, scale: Double(scale)),
+            shadow: decorate, padding: padding))
+        return NSBitmapImageRep(cgImage: raster.image)
     }
 }
 

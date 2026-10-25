@@ -8,8 +8,11 @@ public struct DanmakuClock: Equatable, Sendable {
     public private(set) var monotonicTime: TimeInterval
     public private(set) var rate: Double
     public private(set) var isAdvancing: Bool
-    private var correction: TimeInterval = 0
-    private var correctionDuration: TimeInterval = 0.5
+    // Corrections affect presentation only. Filter transport noise and limit the
+    // remaining slew to 2% of playback speed; never restart a fast linear ramp.
+    private var correctionVelocity: Double = 0
+    private var filteredError: TimeInterval = 0
+    private let correctionDecay: TimeInterval = 1.5
     private var observation: Observation?
     private struct Observation: Equatable, Sendable {
         var position: TimeInterval
@@ -27,7 +30,8 @@ public struct DanmakuClock: Equatable, Sendable {
         rate: Double = 1,
         isAdvancing: Bool = false
     ) {
-        correction = 0
+        correctionVelocity = 0
+        filteredError = 0
         observation = nil
         self.generation = generation
         self.mediaTime = Self.validMediaTime(mediaTime)
@@ -45,7 +49,8 @@ public struct DanmakuClock: Equatable, Sendable {
         isSeeking: Bool,
         generation: UInt64
     ) {
-        correction = 0
+        correctionVelocity = 0
+        filteredError = 0
         observation = nil
         self.generation = generation
         self.mediaTime = Self.validMediaTime(mediaTime)
@@ -59,7 +64,8 @@ public struct DanmakuClock: Equatable, Sendable {
             return mediaTime
         }
         let elapsed = max(0, monotonicTime - self.monotonicTime)
-        return max(0, mediaTime + elapsed * rate + correction * min(elapsed / correctionDuration, 1))
+        return max(0, mediaTime + elapsed * rate
+            + correctionVelocity * correctionDecay * (1 - exp(-elapsed / correctionDecay)))
     }
 
     /// Returns true only when the timeline should discard its old presentation.
@@ -85,14 +91,26 @@ public struct DanmakuClock: Equatable, Sendable {
         let reset = self.generation != generation || abs(target - expected) > 0.8
             || (isSeeking && observation?.seeking != true)
         let smoothly = !reset && advancing && isAdvancing
+        let elapsed = max(0, now - self.monotonicTime)
+        let previousVelocity = correctionVelocity * exp(-elapsed / correctionDecay)
+        if smoothly && self.rate == rate {
+            // A 20 ms wall-time dead band suppresses frame-quantized progress.
+            // Persistent drift still accumulates against expected media time.
+            let alpha = 1 - exp(-min(elapsed, 1) / 0.5)
+            filteredError += alpha * (target - expected - filteredError)
+            let deadBand = 0.020 * rate
+            let error = max(0, abs(filteredError) - deadBand) * (filteredError < 0 ? -1 : 1)
+            let desiredVelocity = min(max(error / 2, -rate * 0.02), rate * 0.02)
+            correctionVelocity = previousVelocity + alpha * (desiredVelocity - previousVelocity)
+        } else {
+            correctionVelocity = 0
+            filteredError = 0
+        }
         self.mediaTime = smoothly ? expected : target
         self.monotonicTime = now
         self.generation = generation
         self.rate = rate
         self.isAdvancing = advancing
-        correction = smoothly ? target - expected : 0
-        // Limit correction velocity to 25% of playback speed, including slow motion.
-        correctionDuration = max(0.5, abs(correction) / (rate * 0.25))
         observation = next
         return reset
     }

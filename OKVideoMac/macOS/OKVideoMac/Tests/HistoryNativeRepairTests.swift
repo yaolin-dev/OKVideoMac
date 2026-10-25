@@ -464,6 +464,13 @@ final class DanmakuSmoothRenderingTests: XCTestCase {
             fontSize: 22, color: i % 2 == 0 ? 0xFFFFFF : 0xE0AAFF,
             text: "弹幕缓存与同步测试 \(i) · 流畅移动 ♡") })
     }
+    private func waitForComments(_ view: DanmakuOverlayNSView, count: Int) async throws {
+        let deadline = ProcessInfo.processInfo.systemUptime + 2
+        while view.activeCommentCount < count && ProcessInfo.processInfo.systemUptime < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertEqual(view.activeCommentCount, count)
+    }
     private func makeView() -> (DanmakuOverlayNSView, NSWindow) {
         let view = DanmakuOverlayNSView(frame: .init(x: 0, y: 0, width: 2240, height: 1260))
         let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -476,14 +483,17 @@ final class DanmakuSmoothRenderingTests: XCTestCase {
         view.update(timeline: timeline, timelineRevision: revision, snapshot: snapshot, offset: 0,
                     fontScale: 1, opacity: opacity, displayArea: .full, density: .high)
     }
-    func testFramesOnlyMoveCachedSpritesAndRemainMemoryBounded() throws {
+    func testFramesOnlyMoveCachedSpritesAndRemainMemoryBounded() async throws {
         let (view, window) = makeView(); defer { window.close() }
         let timeline = timeline()
         let now = ProcessInfo.processInfo.systemUptime
-        var snapshot = PlayerSnapshot(status: .playing, position: 1)
+        var snapshot = PlayerSnapshot(status: .paused, position: 1)
         snapshot.positionSampleUptime = now
         update(view, timeline: timeline, snapshot: snapshot)
+        try await waitForComments(view, count: 60)
         XCTAssertEqual(view.activeCommentCount, 60)
+        snapshot.status = .playing; snapshot.positionSampleUptime = ProcessInfo.processInfo.systemUptime
+        update(view, timeline: timeline, snapshot: snapshot)
         let rasterizations = view.rasterizationCount, bytes = view.rasterBytes
         let layers = try XCTUnwrap(view.layer?.sublayers?.first?.sublayers)
         let original = layers[0].position
@@ -505,12 +515,13 @@ final class DanmakuSmoothRenderingTests: XCTestCase {
         XCTAssertEqual(view.activeCommentCount, 0)
         XCTAssertEqual(view.rasterBytes, 0)
     }
-    func testPausedSpritesFreezeAndSeekOrNewTimelineClearsOldContents() throws {
+    func testPausedSpritesFreezeAndSeekOrNewTimelineClearsOldContents() async throws {
         let (view, window) = makeView(); defer { window.close() }
         let timeline = timeline()
         let now = ProcessInfo.processInfo.systemUptime
         var snapshot = PlayerSnapshot(status: .paused, position: 1)
         update(view, timeline: timeline, snapshot: snapshot)
+        try await waitForComments(view, count: 60)
         XCTAssertEqual(view.activeCommentCount, 60)
         let layers = try XCTUnwrap(view.layer?.sublayers?.first?.sublayers)
         let positions = layers.map(\.position)
@@ -523,16 +534,18 @@ final class DanmakuSmoothRenderingTests: XCTestCase {
         XCTAssertEqual(view.rasterBytes, 0)
         snapshot = .init(status: .paused, position: 1)
         update(view, timeline: timeline, snapshot: snapshot, revision: 2)
+        try await waitForComments(view, count: 60)
         XCTAssertEqual(view.activeCommentCount, 60)
         XCTAssertTrue(layers.allSatisfy { $0.superlayer == nil })
         update(view, timeline: .init(comments: []), snapshot: snapshot, revision: 3)
         XCTAssertEqual(view.rasterBytes, 0)
     }
-    func testRetinaRasterShowsLegibleTextAndColor() throws {
+    func testRetinaRasterShowsLegibleTextAndColor() async throws {
         let (view, window) = makeView(); defer { window.close() }
         let timeline = DanmakuTimeline(comments: [.init(id: "top", time: 1, mode: .top, fontSize: 38,
             color: 0xE0AAFF, text: "兰香如故 · 弹幕流畅度测试 128 ♡")])
         update(view, timeline: timeline, snapshot: .init(status: .paused, position: 1))
+        try await waitForComments(view, count: 1)
         let sprite = try XCTUnwrap(view.layer?.sublayers?.first?.sublayers?.first)
         let contents = try XCTUnwrap(sprite.contents)
         let image = contents as! CGImage
@@ -563,7 +576,7 @@ final class DanmakuSmoothRenderingTests: XCTestCase {
     }
     func testDisplayDriverStopsWithoutDeliveringQueuedFrames() async throws {
         var count = 0
-        let driver = DanmakuDisplayDriver { count += 1 }
+        let driver = DanmakuDisplayDriver { _ in count += 1 }
         driver.start(displayID: CGMainDisplayID())
         XCTAssertTrue(driver.isRunning)
         try await Task.sleep(nanoseconds: 120_000_000)
@@ -1213,5 +1226,141 @@ final class HistoryRelinkTests: XCTestCase {
         try await Task.sleep(nanoseconds: 100_000_000)
         host.layoutSubtreeIfNeeded()
         XCTAssertEqual(table.numberOfRows, 0)
+    }
+}
+
+@MainActor
+final class DanmakuMotionRenderingTests: XCTestCase {
+    func testHiddenPlayingWindowDoesNotKeepPreparingFutureGlyphs() async throws {
+        let view = DanmakuOverlayNSView(frame: .init(x: 0, y: 0, width: 1280, height: 720))
+        let window = NSWindow(contentRect: view.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = view
+        defer { window.close() }
+        view.layoutSubtreeIfNeeded()
+        let timeline = DanmakuTimeline(comments: (0..<100).map {
+            .init(id: "hidden-\($0)", time: 1 + Double($0) * 0.01, mode: .scrolling,
+                  fontSize: 25, color: 0xFFFFFF, text: "不可见窗口不持续生成文字 \($0)")
+        })
+        view.update(timeline: timeline, timelineRevision: 1, snapshot: .init(status: .playing, position: 1),
+            offset: 0, fontScale: 1, opacity: 1, displayArea: .full, density: .high)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertFalse(view.isDisplayDriverRunning)
+        XCTAssertEqual(view.rasterizationCount, 0)
+        view.update(timeline: timeline, timelineRevision: 1, snapshot: .init(status: .paused, position: 1),
+            offset: 0, fontScale: 1, opacity: 1, displayArea: .full, density: .high)
+        let deadline = ProcessInfo.processInfo.systemUptime + 2
+        while view.rasterizationCount == 0 && ProcessInfo.processInfo.systemUptime < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertGreaterThan(view.rasterizationCount, 0, "A paused snapshot remains renderable")
+    }
+    func testPreparationIsAsynchronousAndOldGenerationCannotReappear() async throws {
+        let view = DanmakuOverlayNSView(frame: .init(x: 0, y: 0, width: 1920, height: 1080))
+        view.layoutSubtreeIfNeeded()
+        let old = DanmakuTimeline(comments: (0..<100).map {
+            .init(id: "old-\($0)", time: 1, mode: .top, fontSize: 30, color: 0xFFFFFF,
+                  text: "旧时间线永远不可重新出现 \($0)")
+        })
+        view.update(timeline: old, timelineRevision: 1, snapshot: .init(status: .paused, position: 1),
+                    offset: 0, fontScale: 1, opacity: 1, displayArea: .full, density: .high)
+        XCTAssertEqual(view.rasterizationCount, 0, "No rasterization in the presentation/update call")
+        view.update(timeline: .init(comments: []), timelineRevision: 2,
+                    snapshot: .init(status: .paused, position: 50),
+                    offset: 0, fontScale: 1, opacity: 1, displayArea: .full, density: .high)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(view.activeCommentCount, 0)
+        XCTAssertEqual(view.preparedRasterBytes, 0)
+    }
+    func testWarmCommentsEnterWithoutNewRasterizationAndMemoryIsBounded() async throws {
+        let view = DanmakuOverlayNSView(frame: .init(x: 0, y: 0, width: 1920, height: 1080))
+        view.layoutSubtreeIfNeeded()
+        let timeline = DanmakuTimeline(comments: (0..<20).map {
+            .init(id: "warm-\($0)", time: 1.5, mode: .scrolling, fontSize: 25, color: 0xFFFFFF,
+                  text: "提前准备的弹幕 \($0)")
+        })
+        view.update(timeline: timeline, timelineRevision: 1, snapshot: .init(status: .paused, position: 1),
+                    offset: 0, fontScale: 1, opacity: 1, displayArea: .full, density: .high)
+        let deadline = ProcessInfo.processInfo.systemUptime + 2
+        while view.rasterizationCount < 20 && ProcessInfo.processInfo.systemUptime < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertEqual(view.rasterizationCount, 20)
+        XCTAssertEqual(view.activeCommentCount, 0)
+        let now = ProcessInfo.processInfo.systemUptime
+        var snapshot = PlayerSnapshot(status: .playing, position: 1.5)
+        snapshot.positionSampleUptime = now
+        view.update(timeline: timeline, timelineRevision: 1, snapshot: snapshot,
+                    offset: 0, fontScale: 1, opacity: 1, displayArea: .full, density: .high)
+        XCTAssertEqual(view.activeCommentCount, 20)
+        XCTAssertEqual(view.rasterizationCount, 20)
+        XCTAssertLessThanOrEqual(view.rasterBytes + view.preparedRasterBytes, DanmakuOverlayNSView.maximumRasterBytes)
+    }
+}
+
+@MainActor
+final class DanmakuDisplayCadenceTests: XCTestCase {
+    func testVisibleOverlayKeepsUniformMotionDuringSnapshotChurn() async throws {
+        let view = DanmakuOverlayNSView(frame: .init(x: 0, y: 0, width: 1280, height: 720))
+        let window = NSWindow(contentRect: view.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = view
+        window.title = "弹幕流畅度验证"; window.center(); window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        defer { view.frameObserver = nil; window.close() }
+        view.layoutSubtreeIfNeeded()
+        let timeline = DanmakuTimeline(comments: (0..<240).map {
+            .init(id: "flow-\($0)", time: 1 + Double($0) * 0.02, mode: .scrolling,
+                  fontSize: 25, color: $0 % 2 == 0 ? 0xFFFFFF : 0xE0AAFF,
+                  text: "弹幕平稳移动 · 高密度与进度校准测试 \($0)")
+        })
+        var times: [Double] = [], velocities: [Double] = [], renderCosts: [Double] = [], leadTimes: [Double] = []
+        var previous: (CALayer, Double, CGFloat)?
+        view.frameObserver = { target, delivered, renderDuration in
+            times.append(target)
+            renderCosts.append(renderDuration * 1000)
+            leadTimes.append((target - delivered) * 1000)
+            if let layer = view.layer?.sublayers?.first?.sublayers?.first {
+                if let last = previous, last.0 === layer, target > last.1 {
+                    velocities.append(Double(last.2 - layer.position.x) / (target - last.1))
+                }
+                previous = (layer, target, layer.position.x)
+            }
+        }
+        let start = ProcessInfo.processInfo.systemUptime
+        for tick in 0..<50 {
+            let now = ProcessInfo.processInfo.systemUptime
+            var snapshot = PlayerSnapshot(status: .playing, position: 1 + now - start + (tick % 2 == 0 ? 0.05 : -0.05))
+            snapshot.positionSampleUptime = now
+            view.update(timeline: timeline, timelineRevision: 1, snapshot: snapshot,
+                        offset: 0, fontScale: 1, opacity: 0.86, displayArea: .full, density: .high)
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        XCTAssertTrue(view.isDisplayDriverRunning)
+        XCTAssertGreaterThan(times.count, 60)
+        XCTAssertGreaterThan(velocities.count, 60)
+        guard times.count > 60, velocities.count > 60 else { return }
+        let sorted = velocities.sorted(), median = sorted[sorted.count / 2]
+        XCTAssertGreaterThan(median, 0)
+        XCTAssertLessThan((sorted.last! - sorted.first!) / median, 0.025)
+        let intervals = zip(times.dropFirst(), times).map { ($0 - $1) * 1000 }.sorted()
+        let medianInterval = intervals[intervals.count / 2]
+        let costs = renderCosts.sorted()
+        let p99Cost = costs[Int(Double(costs.count - 1) * 0.99)]
+        let missedRefreshes = intervals.filter { $0 > medianInterval * 1.8 }.count
+        XCTAssertLessThan(p99Cost, medianInterval * 0.5, "Presentation work must leave time for video and compositing")
+        XCTAssertLessThan(Double(missedRefreshes) / Double(intervals.count), 0.02)
+        let report: [String: Any] = ["callbacks": times.count, "seconds": ProcessInfo.processInfo.systemUptime - start,
+            "targetIntervalMedianMs": medianInterval,
+            "targetIntervalP99Ms": intervals[Int(Double(intervals.count - 1) * 0.99)],
+            "renderCostP99Ms": p99Cost, "renderCostMaxMs": costs.last!,
+            "deliveryLeadMinMs": leadTimes.min()!, "missedRefreshIntervals": missedRefreshes,
+            "velocityMin": sorted.first!, "velocityMax": sorted.last!, "velocityMedian": median,
+            "activeRasterBytes": view.rasterBytes, "preparedRasterBytes": view.preparedRasterBytes,
+            "note": "Display callback delivery and layer positions; not a measurement of physical scanout"]
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+            .write(to: URL(fileURLWithPath: "/private/tmp/ok-danmaku-display-cadence.json"))
+        let canvas = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+        view.cacheDisplay(in: view.bounds, to: canvas)
+        try XCTUnwrap(canvas.representation(using: .png, properties: [:]))
+            .write(to: URL(fileURLWithPath: "/private/tmp/ok-danmaku-visible-overlay.png"))
     }
 }

@@ -284,7 +284,8 @@ final class DanmakuSmoothClockTests: XCTestCase {
                 XCTAssertGreaterThan(value, previous)
                 previous = value
             }
-            XCTAssertEqual(previous, 100 + 2.1 * rate - 0.05, accuracy: 0.000001)
+            // An isolated 50 ms observation must not force visible acceleration.
+            XCTAssertEqual(previous, 100 + 2.1 * rate, accuracy: 0.02 * rate)
         }
     }
     func testPauseBufferResumeSpeedAndSeekRemainAuthoritative() {
@@ -302,5 +303,46 @@ final class DanmakuSmoothClockTests: XCTestCase {
         XCTAssertEqual(clock.currentTime(at: 51), 301, accuracy: 0.000001)
         XCTAssertTrue(observe(&clock, position: 0, sample: 51, now: 51, generation: 2))
         XCTAssertEqual(clock.currentTime(at: 51), 0)
+    }
+}
+
+final class DanmakuMotionRegressionTests: XCTestCase {
+    private func sync(_ clock: inout DanmakuClock, _ position: Double, _ now: Double, rate: Double) {
+        clock.synchronize(mediaTime: position, sampleUptime: now, monotonicTime: now, rate: rate,
+                          isPlaying: true, isBuffering: false, isSeeking: false, generation: 1)
+    }
+    func testTransportJitterDoesNotModulateVisibleVelocity() {
+        for rate in [0.25, 1, 2] {
+            for hz in [60, 120] {
+                var clock = DanmakuClock()
+                sync(&clock, 100, 10, rate: rate)
+                var previous = clock.currentTime(at: 10)
+                for frame in 1...(hz * 20) {
+                    let now = 10 + Double(frame) / Double(hz)
+                    if frame % (hz / 10) == 0 {
+                        let error = (frame / (hz / 10)) % 2 == 0 ? 0.05 : -0.05
+                        sync(&clock, 100 + (now - 10 + error) * rate, now, rate: rate)
+                    }
+                    let current = clock.currentTime(at: now)
+                    XCTAssertEqual((current - previous) * Double(hz) / rate, 1, accuracy: 0.002)
+                    previous = current
+                }
+            }
+        }
+    }
+    func testPersistentOffsetConvergesWithoutExceedingTwoPercentSlew() {
+        for sign in [-1.0, 1.0] {
+            var clock = DanmakuClock()
+            sync(&clock, 100, 10, rate: 1)
+            var previous = clock.currentTime(at: 10)
+            for frame in 1...7200 {
+                let now = 10 + Double(frame) / 120
+                if frame % 12 == 0 { sync(&clock, 100 + now - 10 + sign * 0.20, now, rate: 1) }
+                let current = clock.currentTime(at: now)
+                XCTAssertEqual((current - previous) * 120, 1, accuracy: 0.020001)
+                previous = current
+            }
+            XCTAssertEqual(previous, 160 + sign * 0.20, accuracy: 0.025)
+        }
     }
 }
