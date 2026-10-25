@@ -8,9 +8,12 @@ enum FavoriteScope: Hashable {
 
 struct FavoritesView: View {
     @EnvironmentObject private var state: AppState
+    @ObservedObject var search: SidebarSearchState
     @State private var isDeleting = false
     private var visible: [FavoriteRecord] {
-        state.favorites.filter { item in
+        let query = LibrarySearchQuery(search.favorites)
+        return state.favorites.filter { item in
+            guard query.matches(item.title, state.favoriteSourceDescription(item)) else { return false }
             switch state.favoritesScope {
             case .all: return true
             case .current: return item.configurationID != nil && item.configurationID == state.activeConfigurationRecord?.id
@@ -34,8 +37,13 @@ struct FavoritesView: View {
         .overlay {
             if rows.isEmpty {
                 VStack(spacing: 8) {
-                    Text(L10n.string("favorites.empty.title", fallback: "No Favorites")).font(.headline)
-                    Text(L10n.string("favorites.empty.message", fallback: "Add a title to Favorites from its details page.")).foregroundColor(.secondary)
+                    Text(LibrarySearchQuery(search.favorites).isEmpty
+                        ? L10n.string("favorites.empty.title", fallback: "No Favorites")
+                        : L10n.string("sidebar.search.no-results", fallback: "No Matching Results")).font(.headline)
+                    Text(LibrarySearchQuery(search.favorites).isEmpty
+                        ? L10n.string("favorites.empty.message", fallback: "Add a title to Favorites from its details page.")
+                        : L10n.string("sidebar.search.no-results.help", fallback: "Try another keyword or clear the search field."))
+                        .foregroundColor(.secondary)
                 }.padding()
             }
         }
@@ -61,7 +69,7 @@ struct FavoritesView: View {
                     Button(L10n.string("favorites.source.choose", fallback: "Confirm Favorite Source")) {
                         if let id = state.favoriteSelection.first { state.requestOpenFavorite(id, repairSource: true) }
                     }.disabled(state.favoriteSelection.count != 1)
-                    Button(L10n.string("favorites.clear-scope", fallback: "Remove All in This Scope")) { requestDeletion(Set(visible.map(\.id)), nil) }
+                    Button(LibrarySearchQuery(search.favorites).isEmpty ? L10n.string("favorites.clear-scope", fallback: "Remove All in This Scope") : L10n.string("sidebar.search.remove-results", fallback: "Remove Filtered Results")) { requestDeletion(Set(visible.map(\.id)), nil) }
                 } label: { Label(L10n.string("favorites.manage", fallback: "Manage Favorites"), systemImage: "ellipsis.circle") }
                 .primaryToolbarMenuControl()
                 .frame(height: PrimaryToolbarMetrics.itemHeight)

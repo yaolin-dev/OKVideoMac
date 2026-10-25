@@ -345,11 +345,8 @@ struct RootView: View {
         // Each content page supplies its own canvas inside the detail pane.
         browsingContent
         .alert(item: $state.presentedError) { error in
-            Alert(
-                title: Text(error.title),
-                message: Text(error.message),
-                dismissButton: .default(Text(L10n.string(.commonOK)))
-            )
+            Alert(title: Text(error.title), message: Text(error.message),
+                dismissButton: .default(Text(L10n.string(.commonOK))))
         }
         .sheet(isPresented: $state.isAndroidRuntimeInstallSheetPresented) {
             AndroidRuntimeInstallView()
@@ -441,7 +438,7 @@ private struct BrowserRootSplitView: NSViewControllerRepresentable {
 
     func updateNSViewController(_ controller: BrowserRootSplitController, context: Context) {
         controller.sidebarHost.rootView = AnyView(
-            SidebarView(liveSession: liveSession)
+            SidebarView(search: state.sidebarSearch, liveSession: liveSession)
                 // Forward app-specific values, not a snapshot of colorScheme
                 // or display traits. Each host must follow its NSWindow's
                 // live appearance in the same update as the native materials.
@@ -516,7 +513,27 @@ final class BrowserRootSplitController: NSSplitViewController {
     let detailHost = NSHostingController(rootView: AnyView(EmptyView()))
     private(set) lazy var sidebarTitlebar = BrowserSidebarTitlebarController(target: self)
     private weak var observedWindow: NSWindow?
-    private var accessoryLayoutScheduled = false
+    private var toolbarObservation: NSKeyValueObservation?
+    private var toolbarNotificationTokens: [NSObjectProtocol] = []
+    private var toolbarTrackingScheduled = false
+    private weak var trackingToolbar: NSToolbar?
+    private weak var trackingItem: NSTrackingSeparatorToolbarItem?
+    private static let controllers = NSMapTable<NSWindow, BrowserRootSplitController>.weakToWeakObjects()
+
+    static func toggleSidebar(in window: NSWindow?) {
+        guard let window, !WindowModalRegistry.isPresented(in: window) else { return }
+        controllers.object(forKey: window)?.toggleSidebar(nil)
+    }
+
+    static func revealSidebar(in window: NSWindow?) {
+        guard let window, let controller = controllers.object(forKey: window),
+              !WindowModalRegistry.isPresented(in: window) else { return }
+        if controller.splitViewItems[0].isCollapsed {
+            // Search must become focusable before the focus request is sent.
+            controller.splitViewItems[0].isCollapsed = false
+            controller.view.layoutSubtreeIfNeeded()
+        }
+    }
 
     init() {
         super.init(nibName: nil, bundle: nil)
@@ -545,7 +562,7 @@ final class BrowserRootSplitController: NSSplitViewController {
     override func viewDidLayout() {
         super.viewDidLayout()
         attachWindowChrome()
-        updateTitlebarWidth()
+        scheduleToolbarTracking()
     }
 
     private func attachWindowChrome() {
@@ -554,48 +571,77 @@ final class BrowserRootSplitController: NSSplitViewController {
            let index = oldWindow.titlebarAccessoryViewControllers.firstIndex(where: { $0 === sidebarTitlebar }) {
             oldWindow.removeTitlebarAccessoryViewController(at: index)
         }
+        if observedWindow != nil { detachWindowChrome() }
         observedWindow = window
+        Self.controllers.setObject(self, forKey: window)
         window.addTitlebarAccessoryViewController(sidebarTitlebar)
-        // SwiftUI owns the window toolbar, including temporary removal during
-        // a route update. Never write it back from a KVO callback: that reenters
-        // SwiftUI's toolbar/observer teardown. Empty home states declare their
-        // real page title through HomeLiveToolbarModifier instead.
-        scheduleTitlebarLayout()
+        // SwiftUI retains ownership of the toolbar and its delegate. Observe
+        // replacement only to attach AppKit's standard tracking item after the
+        // owner finishes its update; never restore or replace window.toolbar.
+        toolbarObservation = window.observe(\.toolbar, options: [.initial, .new]) { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.scheduleToolbarTracking() }
+        }
+        toolbarNotificationTokens.forEach(NotificationCenter.default.removeObserver)
+        toolbarNotificationTokens = [NSToolbar.willAddItemNotification, NSToolbar.didRemoveItemNotification].map { name in
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let self, let toolbar = note.object as? NSToolbar,
+                          self.observedWindow?.toolbar === toolbar else { return }
+                    self.scheduleToolbarTracking()
+                }
+            }
+        }
     }
 
     func detachWindowChrome() {
         guard let window = observedWindow else { return }
+        Self.controllers.removeObject(forKey: window)
+        toolbarObservation = nil
+        toolbarNotificationTokens.forEach(NotificationCenter.default.removeObserver)
+        toolbarNotificationTokens.removeAll()
         observedWindow = nil
         let accessory = sidebarTitlebar
-        DispatchQueue.main.async { [weak window] in
-            guard let window, let index = window.titlebarAccessoryViewControllers
-                .firstIndex(where: { $0 === accessory }) else { return }
-            window.removeTitlebarAccessoryViewController(at: index)
+        let toolbar = trackingToolbar
+        let item = trackingItem
+        trackingToolbar = nil
+        trackingItem = nil
+        DispatchQueue.main.async { [weak self, weak window, weak toolbar] in
+            // A representable may reattach before deferred cleanup executes.
+            guard self?.observedWindow !== window else { return }
+            if let window, let index = window.titlebarAccessoryViewControllers
+                .firstIndex(where: { $0 === accessory }) {
+                window.removeTitlebarAccessoryViewController(at: index)
+            }
+            if let toolbar, let item, let index = toolbar.items.firstIndex(where: { $0 === item }) {
+                toolbar.removeItem(at: index)
+            }
         }
     }
 
-    private func scheduleTitlebarLayout() {
-        guard !accessoryLayoutScheduled else { return }
-        accessoryLayoutScheduled = true
+    private func scheduleToolbarTracking() {
+        guard !toolbarTrackingScheduled else { return }
+        toolbarTrackingScheduled = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.accessoryLayoutScheduled = false
-            self.updateTitlebarWidth()
+            self.toolbarTrackingScheduled = false
+            guard let window = self.observedWindow, self.view.window === window,
+                  let toolbar = window.toolbar else { return }
+            if !toolbar.items.contains(where: { $0.itemIdentifier == .sidebarTrackingSeparator }) {
+                toolbar.insertItem(withItemIdentifier: .sidebarTrackingSeparator, at: 0)
+            }
+            guard let item = toolbar.items.first(where: { $0.itemIdentifier == .sidebarTrackingSeparator })
+                as? NSTrackingSeparatorToolbarItem else { return }
+            // Bind explicitly: the split is nested inside SwiftUI's root host.
+            // AppKit then aligns in the same native layout pass, including the
+            // fullscreen reveal animation. The accessory stays a fixed 44 pt.
+            if item.splitView !== self.splitView { item.splitView = self.splitView }
+            if item.dividerIndex != 0 { item.dividerIndex = 0 }
+            self.trackingToolbar = toolbar
+            self.trackingItem = item
         }
     }
 
-    private func updateTitlebarWidth() {
-        let accessory = sidebarTitlebar.view
-        guard accessory.window != nil else { return }
-        let origin = accessory.convert(.zero, to: nil).x
-        let boundary = detailHost.view.convert(.zero, to: nil).x
-        // Reserve only the sidebar's header. No tracking separator or slot is
-        // needed: the two native materials already meet at the split boundary.
-        let width = splitViewItems[0].isCollapsed ? 44 : max(44, boundary - origin)
-        if abs(accessory.frame.width - width) > 0.01 {
-            accessory.setFrameSize(NSSize(width: width, height: accessory.frame.height))
-        }
-    }
+    deinit { toolbarNotificationTokens.forEach(NotificationCenter.default.removeObserver) }
 }
 
 private struct QuickSwitcherView: View {
@@ -1539,8 +1585,9 @@ final class WindowCloseObserverView: NSView {
             key: configurationKey, windowedOnly: true
         ) { [weak self] stableWindow in
             guard let self, let stableWindow, self.window === stableWindow else { return }
-            AppWindowLayoutPolicy.configure(stableWindow, target: .mainWindow)
+            // Finalize titlebar/content geometry before restoring the saved frame.
             BrowserWindowChromeController.configure(stableWindow)
+            AppWindowLayoutPolicy.configure(stableWindow, target: .mainWindow)
         }
         onKeyChange?(window.isKeyWindow)
         observers = [
@@ -1581,6 +1628,21 @@ final class WindowCloseObserverView: NSView {
     }
 }
 
+/// Native overlays do not create an attached sheet. Register them explicitly
+/// so background keyboard handlers yield regardless of monitor registration order.
+@MainActor
+enum WindowModalRegistry {
+    private static let overlays = NSMapTable<NSWindow, NSView>.weakToWeakObjects()
+    static func register(_ overlay: NSView, in window: NSWindow) { overlays.setObject(overlay, forKey: window) }
+    static func unregister(_ overlay: NSView, in window: NSWindow) {
+        if overlays.object(forKey: window) === overlay { overlays.removeObject(forKey: window) }
+    }
+    static func isPresented(in window: NSWindow?) -> Bool {
+        guard let window, let overlay = overlays.object(forKey: window) else { return false }
+        return overlay.window === window && overlay.superview != nil
+    }
+}
+
 struct AppKeyCommandMonitor: NSViewRepresentable {
     let handler: (NSEvent) -> Bool
 
@@ -1606,18 +1668,25 @@ final class AppKeyCommandMonitorView: NSView {
         super.viewDidMoveToWindow()
         removeMonitor()
         guard window != nil else { return }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
-            [weak self] event in
-            guard let self,
-                  let window = self.window,
-                  window.isKeyWindow,
-                  event.window === window,
-                  !Self.isEditingText(in: window),
-                  self.handler?(event) == true else {
-                return event
-            }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            return self.handleKeyEvent(event)
+        }
+    }
+
+    func handleKeyEvent(_ event: NSEvent) -> NSEvent? {
+        guard let window, window.isKeyWindow, event.window === window,
+              !WindowModalRegistry.isPresented(in: window) else { return event }
+        // SwiftUI/AppKit can defer creating the native View menu command until
+        // its first opening. Route the standard chord to this key window's
+        // native action even before that menu exists, including in search fields.
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if modifiers == [.command, .control], event.charactersIgnoringModifiers?.lowercased() == "f" {
+            if !event.isARepeat { window.toggleFullScreen(nil) }
             return nil
         }
+        guard !Self.isEditingText(in: window), handler?(event) == true else { return event }
+        return nil
     }
 
     deinit {
@@ -2265,6 +2334,7 @@ private struct AndroidActionSurfaceView: View {
 }
 
 private struct SidebarView: View {
+    @ObservedObject var search: SidebarSearchState
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var navigation: AppNavigationState
     @ObservedObject var liveSession: LiveBrowserSession
@@ -2291,12 +2361,7 @@ private struct SidebarView: View {
     }
 
     private var searchText: Binding<String> {
-        switch searchPresentation.kind {
-        case .video:
-            return $state.searchDraftKeyword
-        case .liveChannels:
-            return $liveSession.searchText
-        }
+        SidebarSearchBinding.text(for: navigation.selectedSection, state: state, live: liveSession)
     }
 
     private var searchIsEnabled: Bool {
@@ -2305,13 +2370,12 @@ private struct SidebarView: View {
             return !state.visibleSites.isEmpty
         case .liveChannels:
             return !state.liveSourceDescriptors.isEmpty
+        case .favorites, .history, .settings: return true
         }
     }
 
     private func handleSearchTextChange(_ value: String) {
-        guard searchPresentation.kind == .video,
-              value.isEmpty else { return }
-        state.clearGlobalVideoSearch()
+        state.sidebarSearchDidChange(value)
     }
 
     private func submitSearch() {
@@ -2701,7 +2765,8 @@ struct NativeSidebarSourceList: NSViewRepresentable {
         }
 
         func controlTextDidChange(_ notification: Notification) {
-            guard let field = notification.object as? NSSearchField else {
+            guard parent.selection == parent.navigation.selection,
+                  let field = notification.object as? NSSearchField else {
                 return
             }
             parent.text = field.stringValue
@@ -2713,7 +2778,8 @@ struct NativeSidebarSourceList: NSViewRepresentable {
             textView: NSTextView,
             doCommandBy commandSelector: Selector
         ) -> Bool {
-            guard commandSelector == #selector(NSResponder.cancelOperation(_:)),
+            guard parent.selection == parent.navigation.selection,
+                  commandSelector == #selector(NSResponder.cancelOperation(_:)),
                   let field = control as? NSSearchField else {
                 return false
             }
@@ -2737,6 +2803,7 @@ struct NativeSidebarSourceList: NSViewRepresentable {
         }
 
         @objc func submit(_ sender: NSSearchField) {
+            guard parent.selection == parent.navigation.selection else { return }
             parent.text = sender.stringValue
             parent.onTextChange(sender.stringValue)
             parent.onSubmit()
@@ -2745,6 +2812,7 @@ struct NativeSidebarSourceList: NSViewRepresentable {
 }
 
 private struct CollapsedSidebarSearchButton: View {
+    @ObservedObject var search: SidebarSearchState
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var navigation: AppNavigationState
     @ObservedObject var liveSession: LiveBrowserSession
@@ -2794,12 +2862,7 @@ private struct CollapsedSidebarSearchButton: View {
     }
 
     private var searchText: Binding<String> {
-        switch searchPresentation.kind {
-        case .video:
-            return $state.searchDraftKeyword
-        case .liveChannels:
-            return $liveSession.searchText
-        }
+        SidebarSearchBinding.text(for: navigation.selectedSection, state: state, live: liveSession)
     }
 
     private var searchIsEnabled: Bool {
@@ -2808,13 +2871,12 @@ private struct CollapsedSidebarSearchButton: View {
             return !state.visibleSites.isEmpty
         case .liveChannels:
             return !state.liveSourceDescriptors.isEmpty
+        case .favorites, .history, .settings: return true
         }
     }
 
     private func handleSearchTextChange(_ value: String) {
-        guard searchPresentation.kind == .video,
-              value.isEmpty else { return }
-        state.clearGlobalVideoSearch()
+        state.sidebarSearchDidChange(value)
     }
 
     private func submitSearch() {
@@ -2927,15 +2989,17 @@ private struct SectionContentView: View {
                 HomeLiveSectionContainer(liveSession: liveSession)
             case .favorites:
                 StandardBrowserSectionContainer(nativeChrome: true) {
-                    FavoritesView()
+                    FavoritesView(search: state.sidebarSearch)
                 }
             case .history:
                 StandardBrowserSectionContainer(nativeChrome: true) {
-                    HistoryView()
+                    HistoryView(history: state.watchHistory, search: state.sidebarSearch)
                 }
             case .settings:
                 StandardBrowserSectionContainer {
-                    SettingsView(navigation: state.settingsNavigation)
+                    SettingsView(navigation: state.settingsNavigation, search: state.sidebarSearch)
+                        .navigationTitle("")
+                        .toolbar { PrimaryPageToolbarLeadingContent(title: L10n.string(.sectionSettings)) }
                 }
             }
         }
@@ -2987,64 +3051,48 @@ private struct StandardBrowserSectionContainer<Content: View>: View {
 private struct BrowserDetailRouteContainer: View {
     @EnvironmentObject private var state: AppState
     @State private var isContentScrolled = false
-
+    @StateObject private var related = TMDBRelatedBrowser()
     var body: some View {
-        VStack(spacing: 0) {
-            if state.selectedDetail != nil, state.detailLoadState.message != nil {
-                DetailRequestStatusView()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(20)
-            }
-            if let detail = state.selectedDetail {
-                DetailView(detail: detail)
-                    .id(detail.summary.id)
-            } else if let summary = state.detailRouteSummary ?? state.pendingDetailSummary {
-                DetailLoadingView(summary: summary)
-            }
-        }
-        // A concrete container owns both navigation preferences and toolbar
-        // items. Attaching the back item to a Group while its children own
-        // their titles/toolbars drops it during loading -> detail on macOS.
-        .navigationTitle("")
-        .toolbar {
-            ToolbarItem(id: "detail.back", placement: .navigation) {
-                BrowserToolbarBackButton(
-                    help: L10n.string(
-                        "common.back-previous",
-                        fallback: "Back to the previous page"
-                    ),
-                    identifier: "detail.back",
-                    action: { state.dismissDetail() }
-                )
-                .frame(
-                    width: PrimaryToolbarMetrics.iconControlSize,
-                    height: PrimaryToolbarMetrics.iconControlSize
-                )
-            }
-            ToolbarItem(id: "detail.space", placement: .principal) {
-                Spacer(minLength: 0).frame(maxWidth: .infinity)
-            }
-            ToolbarItem(id: "detail.refresh", placement: .primaryAction) {
-                DetailRefreshButton(isLoading: state.isRefreshingDetail) {
-                    Task { await state.refreshDetail() }
+        GeometryReader { geometry in
+            ZStack {
+                TMDBDetailRouteContent(model: state.tmdbDetailModel)
+                    .opacity(related.pages.isEmpty ? 1 : 0).allowsHitTesting(related.pages.isEmpty).accessibilityHidden(!related.pages.isEmpty)
+                ForEach(related.pages) { page in
+                    let active = related.pages.last?.id == page.id
+                    TMDBRelatedPageView(browser: related, page: page, active: active)
+                        .opacity(active ? 1 : 0).allowsHitTesting(active).accessibilityHidden(!active)
                 }
-                .frame(width: PrimaryToolbarMetrics.iconControlSize, height: PrimaryToolbarMetrics.iconControlSize)
             }
-
-        }
-        .environment(\.browserToolbarScrollReporter) { isScrolled in
-            if isContentScrolled != isScrolled {
-                isContentScrolled = isScrolled
+            .navigationTitle("")
+            .toolbar {
+                ToolbarItem(id: "detail.navigation", placement: .navigation) {
+                    HStack(spacing: 8) {
+                        BrowserToolbarBackButton(help: L10n.string("common.back-previous", fallback: "Back to the previous page"), identifier: "detail.back") {
+                            if related.pages.isEmpty { state.dismissDetail() } else { related.pop() }
+                        }.frame(width: PrimaryToolbarMetrics.iconControlSize, height: PrimaryToolbarMetrics.iconControlSize)
+                        Text(related.pages.last?.title ?? state.selectedDetail?.summary.title ?? state.detailRouteSummary?.title ?? "")
+                            .font(.headline).lineLimit(1).truncationMode(.tail)
+                            .frame(maxWidth: min(420, max(100, geometry.size.width - 140)), alignment: .leading)
+                    }
+                }
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Spacer()
+                    if let page = related.pages.last {
+                        TMDBRelatedRefreshButton(browser: related, page: page)
+                    } else {
+                        DetailRefreshButton(isLoading: state.isRefreshingDetail && state.selectedDetail?.playSources.isEmpty == false) { Task { await state.refreshDetail() } }
+                            .allowsHitTesting(!state.isRefreshingDetail)
+                    }
+                }
             }
         }
-        .modifier(
-            BrowserToolbarChromeModifier(
-                isScrolled: isContentScrolled,
-                isWindowActive: state.isBrowserWindowKey
-            )
-        )
+        .environment(\.tmdbOpenPerson) { person, source in related.open(person: person, source: source, state: state) }
+        .environment(\.browserToolbarScrollReporter) { isScrolled in if isContentScrolled != isScrolled { isContentScrolled = isScrolled } }
+        .modifier(BrowserToolbarChromeModifier(isScrolled: isContentScrolled, isWindowActive: state.isBrowserWindowKey))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppSurfacePalette.background, ignoresSafeAreaEdges: [.horizontal, .bottom])
+        .onChange(of: state.activeConfigurationRecord?.id) { _ in related.clear() }
+        .onDisappear { related.clear() }
     }
 }
 
@@ -3197,6 +3245,18 @@ private struct LiveBrowserToolbarContent: ToolbarContent {
             LiveToolbarView(session: session)
                 .frame(height: PrimaryToolbarMetrics.itemHeight)
                 .disabled(isInteractionBlocked)
+        }
+    }
+}
+
+
+private struct TMDBDetailRouteContent: View {
+    @EnvironmentObject private var state: AppState
+    @ObservedObject var model: TMDBDetailModel
+    var body: some View {
+        if let detail = state.selectedDetail
+            ?? (state.detailRouteSummary ?? state.pendingDetailSummary).map({ VideoDetail(summary: $0) }) {
+            DetailView(detail: detail, metadata: model).id(model.navigationID)
         }
     }
 }

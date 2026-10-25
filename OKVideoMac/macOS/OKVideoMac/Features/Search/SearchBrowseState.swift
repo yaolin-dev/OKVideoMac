@@ -1,6 +1,37 @@
 import Foundation
 import OKVideoCore
 
+/// Opt-in timings contain only opaque IDs, counts and durations.
+enum SearchLatencyTrace {
+    static let enabled = ProcessInfo.processInfo.environment["OKVIDEOMAC_SEARCH_DIAGNOSTICS"] == "1"
+    static func record(_ phase: String, id: String, started: TimeInterval, count: Int = 0) {
+        guard enabled else { return }
+        let ms = Int((ProcessInfo.processInfo.systemUptime - started) * 1_000)
+        let line = "search_timing phase=\(phase) id=\(id) ms=\(ms) count=\(count)\n"
+        FileHandle.standardError.write(Data(line.utf8))
+    }
+}
+
+/// Lives with one Dex provider, so changing its configuration/JAR/account
+/// cannot carry a stale ranking into a replacement provider. No results cached.
+final class TVBoxSearchPerformance: @unchecked Sendable {
+    private let lock = NSLock()
+    private let now: @Sendable () -> TimeInterval
+    private var sample: (rank: Int, elapsed: TimeInterval, recorded: TimeInterval)?
+    init(now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.now = now
+    }
+    func record(elapsed: TimeInterval, resultCount: Int, succeeded: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        sample = (succeeded ? (resultCount > 0 ? 0 : 2) : 3, max(0, elapsed), now())
+    }
+    var priority: TimeInterval {
+        lock.lock(); defer { lock.unlock() }
+        guard let sample, now() - sample.recorded < 1_800 else { return 100 }
+        return Double(sample.rank) * 100 + min(sample.elapsed, 99)
+    }
+}
+
 /// Publish the first result immediately and the trailing batch on a timer,
 /// even when no further providers return. Cancel when the search owner leaves.
 @MainActor final class SearchSnapshotPublisher<Value> {

@@ -3,6 +3,69 @@ import CryptoKit
 import Darwin
 import Foundation
 
+/// Coalesces preparation, without making a cancelled search wait for another
+/// caller's SDK/ADB work. Only runtime teardown cancels the shared operation.
+actor AndroidRuntimePreparationFlight {
+    private var task: Task<Void, Never>?
+    private var waiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+
+    func run(_ operation: @escaping @Sendable () async throws -> Void) async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { continuation in
+                waiters[id] = continuation
+                if task == nil {
+                    task = Task {
+                        let result: Result<Void, Error>
+                        do {
+                            try await operation()
+                            try Task.checkCancellation()
+                            result = .success(())
+                        } catch { result = .failure(error) }
+                        finish(result)
+                    }
+                }
+            }
+            try Task.checkCancellation()
+        } onCancel: {
+            Task { await self.cancelWaiter(id) }
+        }
+    }
+
+    func cancelAndWait() async {
+        guard let task else { return }
+        task.cancel()
+        await task.value
+    }
+
+    private func cancelWaiter(_ id: UUID) {
+        waiters.removeValue(forKey: id)?.resume(throwing: CancellationError())
+    }
+
+    private func finish(_ result: Result<Void, Error>) {
+        task = nil
+        let pending = Array(waiters.values)
+        waiters.removeAll()
+        for continuation in pending { continuation.resume(with: result) }
+    }
+}
+
+/// A cheap filesystem identity, including replacement, permissions and
+/// nanosecond timestamps. Never runs a tool or reads SDK/VM image contents.
+enum AndroidRuntimeFileIdentity {
+    static func stamp(_ url: URL) -> String {
+        let path = url.standardizedFileURL.resolvingSymlinksInPath().path
+        var info = stat()
+        guard path.withCString({ lstat($0, &info) }) == 0 else {
+            return path + ":missing"
+        }
+        return "\(path):\(info.st_dev):\(info.st_ino):\(info.st_mode):\(info.st_size):"
+            + "\(info.st_mtimespec.tv_sec):\(info.st_mtimespec.tv_nsec):"
+            + "\(info.st_ctimespec.tv_sec):\(info.st_ctimespec.tv_nsec)"
+    }
+}
+
 enum AndroidRuntimeMode: String, Codable, CaseIterable, Sendable {
     case managed
     case external
@@ -496,9 +559,11 @@ struct ExternalAndroidRuntimeValidation: Equatable, Sendable {
     }
 }
 
-struct ExternalAndroidRuntimeValidator {
-    typealias ArchitectureInspector = (URL) throws -> Bool
-    typealias JavaResolver = () -> AndroidJavaRuntime?
+/// Immutable configuration. FileManager is used only for thread-safe queries;
+/// injected inspectors/resolvers must also be safe to call off the actor.
+struct ExternalAndroidRuntimeValidator: @unchecked Sendable {
+    typealias ArchitectureInspector = @Sendable (URL) throws -> Bool
+    typealias JavaResolver = @Sendable () -> AndroidJavaRuntime?
 
     let applicationSupportDirectory: URL
     let homeDirectory: URL
@@ -521,11 +586,11 @@ struct ExternalAndroidRuntimeValidator {
         self.fileManager = fileManager
         self.architectureInspector = architectureInspector
             ?? { try Self.hostCanExecute($0) }
-        self.javaResolver = javaResolver ?? {
+        self.javaResolver = javaResolver ?? { [homeDirectory, environment] in
             AndroidJavaRuntimeResolver(
                 homeDirectory: homeDirectory,
                 environment: environment,
-                fileManager: fileManager
+                fileManager: .default
             ).resolve()
         }
     }
@@ -1119,6 +1184,9 @@ actor AndroidRuntimeModeCoordinator {
     private var maintenanceEpoch = 0
     private var record: AndroidRuntimeModeRecord
     private var lastExternalValidation: ExternalAndroidRuntimeValidation?
+    private let preparationFlight = AndroidRuntimePreparationFlight()
+    private var preparedIdentity: [String]?
+    private var preparedAt: TimeInterval?
 
     init(
         store: AndroidRuntimeModeStore,
@@ -1155,6 +1223,7 @@ actor AndroidRuntimeModeCoordinator {
         let token = UUID()
         maintenanceToken = token
         maintenanceEpoch += 1
+        preparedIdentity = nil
         return token
     }
 
@@ -1172,11 +1241,51 @@ actor AndroidRuntimeModeCoordinator {
     func prepareRuntime() async throws {
         let epoch = maintenanceEpoch
         try requireMaintenanceIdle(epoch: epoch)
+        try await preparationFlight.run { [self] in
+            try await prepareRuntimeShared()
+        }
+        try requireMaintenanceIdle(epoch: epoch)
+    }
+
+    private func preparationIdentity() -> [String] {
+        var files = [
+            layout.currentRuntimePointer,
+            layout.avdDirectory.appendingPathComponent("config.ini"),
+            AndroidRuntimeAVDFingerprintStore(layout: layout, fileManager: .default).url
+        ]
+        if record.mode == .external, let root = record.externalSDKRoot {
+            let sdk = URL(fileURLWithPath: root)
+            files += ["platform-tools/adb", "emulator/emulator",
+                      "emulator/source.properties", "system-images"].map {
+                sdk.appendingPathComponent($0)
+            }
+            if let image = lastExternalValidation?.systemImage {
+                files.append(sdk.appendingPathComponent(image.actualRelativeDirectory)
+                    .appendingPathComponent("source.properties"))
+            }
+        }
+        return ["\(record.revision)", "\(maintenanceEpoch)", record.mode.rawValue]
+            + files.map(AndroidRuntimeFileIdentity.stamp)
+    }
+
+    private func rememberPreparation() {
+        preparedIdentity = preparationIdentity()
+        preparedAt = ProcessInfo.processInfo.systemUptime
+    }
+
+    private func prepareRuntimeShared() async throws {
+        let epoch = maintenanceEpoch
+        try requireMaintenanceIdle(epoch: epoch)
         if PrivateAVDRebuildStore(layout: layout).hasPendingTransaction {
             try await recoverPrivateAVD?()
             try requireMaintenanceIdle(epoch: epoch)
             try PrivateAVDRebuildStore(layout: layout).requireNoPendingTransaction()
         }
+        if preparedIdentity == preparationIdentity(), let preparedAt,
+           ProcessInfo.processInfo.systemUptime - preparedAt < 30 {
+            return
+        }
+        preparedIdentity = nil
         while true {
             try requireMaintenanceIdle(epoch: epoch)
             let admitted = record
@@ -1202,6 +1311,7 @@ actor AndroidRuntimeModeCoordinator {
                     try validateAndAdoptManagedAVD()
                 }
                 try requireMaintenanceIdle(epoch: epoch)
+                rememberPreparation()
                 return
 
             case .external:
@@ -1211,7 +1321,12 @@ actor AndroidRuntimeModeCoordinator {
                     throw AndroidRuntimeModeCoordinatorError
                         .externalNotConfigured
                 }
-                let validation = externalValidator.validate(sdkRoot: root)
+                let validation = await Task.detached(priority: .userInitiated) {
+                    [externalValidator] in externalValidator.validate(sdkRoot: root)
+                }.value
+                try Task.checkCancellation()
+                try requireMaintenanceIdle(epoch: epoch)
+                guard record.revision == admitted.revision else { continue }
                 lastExternalValidation = validation
                 guard validation.canPrepareRuntime else {
                     throw AndroidRuntimeModeCoordinatorError
@@ -1237,6 +1352,7 @@ actor AndroidRuntimeModeCoordinator {
                     continue
                 }
                 try requireMaintenanceIdle(epoch: epoch)
+                rememberPreparation()
                 return
             }
         }
@@ -1246,6 +1362,7 @@ actor AndroidRuntimeModeCoordinator {
     /// launch compatibility is the problem, but only if the selected
     /// environment has every create/repair dependency.
     func prepareRuntimeRepair() async throws {
+        preparedIdentity = nil
         let epoch = maintenanceEpoch
         try requireMaintenanceIdle(epoch: epoch)
         switch record.mode {

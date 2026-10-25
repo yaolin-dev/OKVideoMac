@@ -2,7 +2,6 @@
 """Create the stable signed appcast from the final notarized DMG only."""
 import argparse
 import hashlib
-import html
 import json
 import os
 from pathlib import Path
@@ -11,6 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
+from update_release_notes import render_release_notes
 
 REPO = Path(__file__).resolve().parents[2]
 NS = '{http://www.andymatuschak.org/xml-namespaces/sparkle}'
@@ -66,7 +66,7 @@ def create(dmg, app, notary_result, archive, output, notes, account):
         inputs = root/'inputs'; inputs.mkdir()
         shutil.copyfile(dmg, inputs/dmg.name)
         (inputs/dmg.with_suffix('.html').name).write_text(
-            '<!doctype html><meta charset="utf-8"><pre>'+html.escape(notes.read_text())+'</pre>\n')
+            render_release_notes(notes.read_text(encoding='utf-8')), encoding='utf-8')
         feed = root/'appcast.xml'
         run([tools/'bin/generate_appcast','--account',account,'--maximum-deltas','0',
              '--versions',build,'--download-url-prefix',

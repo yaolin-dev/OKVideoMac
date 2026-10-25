@@ -175,6 +175,7 @@ QUICKJS_ROOT="$OKVIDEOMAC_BUILD_ROOT/QuickJS"
 NODE_RUNTIME="$APP_DESTINATION/Contents/Resources/NodeRuntime/node"
 EXECUTABLE="$APP_DESTINATION/Contents/MacOS/OKVideoMac"
 RELAUNCHER="$APP_DESTINATION/Contents/Helpers/OKVideoMacRelauncher"
+LIVE_PREVIEW="$APP_DESTINATION/Contents/Helpers/OKVideoLivePreview"
 MPV_BRIDGE="$LIBMPV_ROOT/lib/libOKMPVBridge.dylib"
 LEGAL_SOURCE_DIR="$SOURCE_ROOT/THIRD_PARTY_LICENSES"
 LEGAL_ROOT="$APP_DESTINATION/Contents/Resources/Legal"
@@ -330,6 +331,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/crash-symbols.py" archive \
 # paths cannot leak into either project-owned executable; runtime symbols remain.
 /usr/bin/strip -S "$EXECUTABLE"
 /usr/bin/strip -S "$RELAUNCHER"
+/usr/bin/strip -S "$LIVE_PREVIEW"
 APP_VERSION="$(
   /usr/libexec/PlistBuddy \
     -c 'Print :CFBundleShortVersionString' \
@@ -407,6 +409,8 @@ cp "$SOURCE_ROOT/Helpers/AndroidDexBridge/FONGMI_CATVOD_CHANGES.md" \
 cp "$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-without-cocoa.patch" \
   "$LEGAL_ROOT/ModifiedSources/"
 cp "$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-without-cocoa.NOTICE.md" \
+  "$LEGAL_ROOT/ModifiedSources/"
+cp "$PROJECT_DIR/Patches/"ffmpeg-7.1.4-dash-*.patch \
   "$LEGAL_ROOT/ModifiedSources/"
 cp "$REPOSITORY_ROOT/Docs/THIRD_PARTY_LICENSE_AUDIT.md" \
   "$LEGAL_ROOT/Compliance/"
@@ -526,6 +530,7 @@ fi
 pending=(
   "$EXECUTABLE"
   "$RELAUNCHER"
+  "$LIVE_PREVIEW"
   "$NODE_RUNTIME"
   "$FRAMEWORKS/libmpv.dylib"
   "$FRAMEWORKS/libOKMPVBridge.dylib"
@@ -551,7 +556,7 @@ while [[ "${#pending[@]}" -gt 0 ]]; do
 
   while IFS= read -r dependency; do
     case "$dependency" in
-      /opt/homebrew/*|/opt/local/*|/usr/local/*)
+      /opt/homebrew/*|/opt/local/*|/usr/local/*|"$OKVIDEOMAC_BUILD_ROOT"/*|"${OKVIDEOMAC_REPRO_ROOT:-$OKVIDEOMAC_BUILD_ROOT/ReproNative}"/*)
         base="$(basename "$dependency")"
         destination="$FRAMEWORKS/$base"
         if [[ ! -f "$destination" ]]; then
@@ -566,7 +571,7 @@ while [[ "${#pending[@]}" -gt 0 ]]; do
   done < <(otool -L "$binary" | tail -n +2 | awk '{print $1}')
   while IFS= read -r search_path; do
     case "$search_path" in
-      /opt/homebrew/*|/opt/local/*|/usr/local/*|/Users/*)
+      /opt/homebrew/*|/opt/local/*|/usr/local/*|/Users/*|"$OKVIDEOMAC_BUILD_ROOT"/*|"${OKVIDEOMAC_REPRO_ROOT:-$OKVIDEOMAC_BUILD_ROOT/ReproNative}"/*)
         install_name_tool -delete_rpath "$search_path" "$binary"
         ;;
     esac
@@ -611,7 +616,8 @@ for ((index=${#processed[@]} - 1; index >= 0; index--)); do
   binary="${processed[$index]}"
   if [[ "$binary" == "$EXECUTABLE" ||
         "$binary" == "$NODE_RUNTIME" ||
-        "$binary" == "$RELAUNCHER" ]]; then
+        "$binary" == "$RELAUNCHER" ||
+        "$binary" == "$LIVE_PREVIEW" ]]; then
     continue
   fi
   sign_code "$binary"
@@ -633,6 +639,9 @@ sign_code "$SPARKLE_FRAMEWORK/Versions/B/XPCServices/Installer.xpc"
 sign_code "$SPARKLE_FRAMEWORK"
 sign_code "$NODE_RUNTIME" "$NODE_ENTITLEMENTS"
 sign_code "$RELAUNCHER"
+# The helper loads the same bundled dylibs as the main app. Match its local
+# ad-hoc Library Validation exception; distribution uses neither exception.
+sign_code "$LIVE_PREVIEW" "$APP_ENTITLEMENTS"
 sign_code "$EXECUTABLE" "$APP_ENTITLEMENTS"
 
 # Include libraries added during dependency normalization in crash image metadata.

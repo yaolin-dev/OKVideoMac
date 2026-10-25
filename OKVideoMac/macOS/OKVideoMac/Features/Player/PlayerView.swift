@@ -47,7 +47,8 @@ struct PlayerView: View {
         GeometryReader { geometry in
             let layout = PlayerOverlayLayout(
                 viewportSize: viewportState.frozenSize ?? geometry.size,
-                timeLabelWidth: playbackTimeWidth
+                timeLabelWidth: playbackTimeWidth,
+                showsQuality: state.hasPlaybackQualityChoices
             )
         ZStack {
             // fullDestroy intentionally leaves no embedded client between
@@ -455,6 +456,12 @@ struct PlayerView: View {
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
                                             .lineLimit(2)
+                                        if let action = state.historyPlaybackChoiceAction(choice) {
+                                            Text(action)
+                                                .font(.callout.weight(.semibold))
+                                                .foregroundStyle(Color.accentColor)
+                                                .padding(.top, 4)
+                                        }
                                     }
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(.horizontal, 12)
@@ -468,6 +475,13 @@ struct PlayerView: View {
 
                     Button(L10n.string("player.history.cancel-recovery", fallback: "Cancel Restore")) {
                         state.cancelHistoryPlaybackChoices()
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                if isFailed, state.canRestartHistoryRelinkFromBeginning {
+                    Button(L10n.string("history.relink.from-beginning", fallback: "Link and Play from Beginning")) {
+                        Task { await state.restartHistoryRelinkFromBeginning() }
                     }
                     .buttonStyle(.bordered)
                 }
@@ -606,6 +620,9 @@ struct PlayerView: View {
 
     private var compactUtilityMenu: some View {
         Menu {
+            if state.hasPlaybackQualityChoices {
+                Menu(L10n.string("player.quality", fallback: "Quality")) { qualityMenuItems }
+            }
             compactPanelAction(.episodes, title: resourceControlTitle)
             compactPanelAction(.subtitles, title: L10n.string("player.subtitles", fallback: "Subtitles"))
             compactPanelAction(.settings, title: L10n.string("player.settings", fallback: "Playback Settings"))
@@ -828,6 +845,7 @@ struct PlayerView: View {
 
     private var utilityControls: some View {
         HStack(spacing: 14) {
+            if state.hasPlaybackQualityChoices { qualityControl }
             HStack(spacing: 3) {
                 utilityPanelButton(systemImage: "list.bullet", panel: .episodes, help: resourceControlTitle)
                 utilityPanelButton(systemImage: "captions.bubble", panel: .subtitles,
@@ -839,6 +857,43 @@ struct PlayerView: View {
                 PlayerPictureInPictureButton(coordinator: state.pictureInPicture)
                 fullScreenButton
             }
+        }
+    }
+
+    private var qualityControl: some View {
+        Menu { qualityMenuItems } label: {
+            HStack(spacing: 4) {
+                Text(state.selectedPlaybackQualityName ?? L10n.string("player.quality", fallback: "Quality"))
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .frame(width: 90, height: utilityButtonSize)
+            .contentShape(Rectangle())
+            .modifier(PlayerControlHoverEffect())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(state.isSwitchingPlaybackQuality)
+        .accessibilityLabel(L10n.string("player.quality", fallback: "Quality"))
+        .accessibilityValue(state.selectedPlaybackQualityName ?? "")
+        .accessibilityIdentifier("player.quality-selector")
+        .playerControlHelp(L10n.string("player.quality", fallback: "Quality"))
+    }
+
+    @ViewBuilder private var qualityMenuItems: some View {
+        ForEach(state.selectablePlaybackQualities) { quality in
+            Button {
+                keepControlsVisible()
+                Task { await state.switchPlaybackQuality(quality) }
+            } label: {
+                if quality.name == state.selectedPlaybackQualityName {
+                    Label(quality.name, systemImage: "checkmark")
+                } else { Text(quality.name) }
+            }
+            .disabled(state.isSwitchingPlaybackQuality)
         }
     }
 
@@ -1266,6 +1321,19 @@ struct PlayerView: View {
             Group {
                 VStack(alignment: .leading, spacing: 12) {
                     panelHeader(title: L10n.string("player.settings", fallback: "Playback Settings"), detail: nil)
+                    if state.hasPlaybackQualityChoices {
+                        panelOptionGrid(
+                            title: L10n.string("player.quality", fallback: "Quality"),
+                            values: state.selectablePlaybackQualities.map { $0.name },
+                            selected: state.selectedPlaybackQualityName
+                        ) { selectedName in
+                            guard let quality = state.selectablePlaybackQualities.first(
+                                where: { $0.name == selectedName }
+                            ) else { return }
+                            Task { await state.switchPlaybackQuality(quality) }
+                        }
+                    }
+
                     settingsDestination(.audio, symbol: "waveform", title: L10n.string("player.audio-tracks", fallback: "Audio Tracks"))
                     settingsDestination(.danmaku, symbol: "text.bubble", title: L10n.string("player.danmaku", fallback: "Danmaku"))
                     settingsDestination(.information, symbol: "info.circle", title: L10n.string("player.info.title", fallback: "Playback Information"))
@@ -1391,20 +1459,6 @@ struct PlayerView: View {
                         }
                         .buttonStyle(.link)
                         .font(.caption)
-                    }
-
-                    if state.playbackQualities.count > 1 {
-                        panelDivider
-                        panelOptionGrid(
-                            title: L10n.string("player.quality", fallback: "Quality"),
-                            values: state.playbackQualities.map { $0.name },
-                            selected: state.selectedPlaybackQualityName
-                        ) { selectedName in
-                            guard let quality = state.playbackQualities.first(
-                                where: { $0.name == selectedName }
-                            ) else { return }
-                            Task { await state.switchPlaybackQuality(quality) }
-                        }
                     }
 
                     panelDivider
@@ -2165,7 +2219,7 @@ struct PlayerView: View {
 
             Divider()
 
-            if state.playbackQualities.count > 1 {
+            if state.hasPlaybackQualityChoices {
                 Menu(
                     L10n.string("player.quality", fallback: "Quality") + " · "
                         + (state.isSwitchingPlaybackQuality
@@ -2173,7 +2227,7 @@ struct PlayerView: View {
                             : state.selectedPlaybackQualityName
                                 ?? L10n.string("common.automatic", fallback: "Automatic"))
                 ) {
-                    ForEach(state.playbackQualities) { quality in
+                    ForEach(state.selectablePlaybackQualities) { quality in
                         Button {
                             Task { await state.switchPlaybackQuality(quality) }
                         } label: {
@@ -2783,6 +2837,8 @@ struct PlayerOverlayLayout {
     enum Mode { case expanded, compactVolume, compactTools, stacked }
     let viewportSize: CGSize
     var timeLabelWidth: CGFloat = 106
+    var showsQuality = false
+    var expandedToolsWidth: CGFloat { 213 + (showsQuality ? 104 : 0) }
     static let transportWidth: CGFloat = 216
     var horizontalInset: CGFloat { 18 + max(0, viewportSize.width - 800) * 0.05 }
     var controlWidth: CGFloat { max(1, viewportSize.width - horizontalInset * 2) }
@@ -2794,8 +2850,8 @@ struct PlayerOverlayLayout {
     var innerWidth: CGFloat { max(1, controlWidth - 24) }
     var sideWidth: CGFloat { max(0, (innerWidth - Self.transportWidth - 24) / 2) }
     var mode: Mode {
-        if sideWidth >= max(213, 121 + 10 + timeLabelWidth) { return .expanded }
-        if sideWidth >= max(213, 38 + 10 + timeLabelWidth) { return .compactVolume }
+        if sideWidth >= max(expandedToolsWidth, 121 + 10 + timeLabelWidth) { return .expanded }
+        if sideWidth >= max(expandedToolsWidth, 38 + 10 + timeLabelWidth) { return .compactVolume }
         if sideWidth >= max(120, 38 + 10 + timeLabelWidth) { return .compactTools }
         return .stacked
     }

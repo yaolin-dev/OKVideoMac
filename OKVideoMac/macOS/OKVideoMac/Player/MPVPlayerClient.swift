@@ -204,27 +204,13 @@ enum MPVTVBoxPlaybackPolicy {
         for media: ResolvedMedia,
         omitFormatHint: Bool
     ) -> [String] {
-        var options: [String]
-        if isBridgeSession(media.url) {
-            // The bridge already owns the remote connection and byte ranges.
-            // A smaller forward/back window avoids retaining tens or hundreds
-            // of megabytes from an abandoned seek while keeping enough data
-            // for short backward jumps.
-            options = [
-                "cache=yes",
-                "cache-secs=24",
-                "demuxer-max-bytes=48MiB",
-                "demuxer-max-back-bytes=12MiB",
-                "demuxer-hysteresis-secs=3"
-            ]
-        } else {
-            options = [
-                "cache=auto",
-                "cache-secs=36",
-                "demuxer-max-bytes=64MiB",
-                "demuxer-max-back-bytes=16MiB",
-                "demuxer-hysteresis-secs=4"
-            ]
+        // Match the standard/CatPaw buffering budget and refill threshold.
+        // Keep caching explicit for bridge-owned loopback media; only its
+        // cache activation differs from the standard network heuristic.
+        let bridgeSession = isBridgeSession(media.url)
+        var options = MPVPlaybackPerformanceProfile.balanced.mpvOptions.map { option in
+            let value = bridgeSession && option.name == "cache" ? "yes" : option.value
+            return "\(option.name)=\(value)"
         }
         if !omitFormatHint, let hint = formatHint(for: media) {
             options.append("demuxer-lavf-format=\(hint)")
@@ -1449,7 +1435,7 @@ final class MPVPlayerClient: PlayerClient {
             do {
                 self.beginSeekReadDiagnostics(request: requestGeneration, seek: seekGeneration)
                 self.logSeekReadState(phase: "seek_read_before")
-                try self.command(Self.seekCommand(to: target, duration: self.snapshot.duration), client: client)
+                try self.command(Self.seekCommand(to: target, duration: self.snapshot.duration, demuxerFormat: self.propertyString("file-format", client: client)), client: client)
                 if let tvBoxGeneration {
                     self.queue.asyncAfter(deadline: .now() + .seconds(15)) {
                         guard self.currentMediaTransportProfile == .tvBox,
@@ -1485,14 +1471,17 @@ final class MPVPlayerClient: PlayerClient {
         }
     }
 
-    static func seekCommand(to position: TimeInterval, duration: TimeInterval? = nil) -> [String] {
+    static func seekCommand(to position: TimeInterval, duration: TimeInterval? = nil, demuxerFormat: String? = nil) -> [String] {
         let targetValue = String(
             format: "%.3f",
             locale: Locale(identifier: "en_US_POSIX"),
             position
         )
         let isEnd = duration.map { $0.isFinite && $0 > 0 && position >= $0 } ?? false
-        return ["seek", targetValue, isEnd ? "absolute+exact" : "absolute+keyframes"]
+        // Separate DASH audio/video streams can land at different keyframes.
+        // Decode to the common target before restarting either presentation.
+        let exact = isEnd || demuxerFormat?.lowercased() == "dash"
+        return ["seek", targetValue, exact ? "absolute+exact" : "absolute+keyframes"]
     }
 
     func setVolume(_ volume: Double) async throws {
@@ -2386,16 +2375,23 @@ final class MPVPlayerClient: PlayerClient {
             snapshot.status = currentMediaTransportProfile == .tvBox
                 ? (snapshot.isPausedForCache ? .buffering : .loading) : .playing
             if currentMediaTransportProfile != .tvBox, let position = pendingStartPosition {
-                // History restore and quality switching are timeline seeks too.
-                // Keep them on the remote-friendly keyframe path instead of
-                // silently reintroducing an exact `time-pos` property seek.
+                // Resume and quality switching use the same demuxer-aware
+                // seek policy as the timeline, including synchronized DASH
+                // audio/video landing at the requested position.
                 let requestGeneration = playbackRequestGeneration
                 let seekGeneration = postSeekEndGuard.begin(
                     requestGeneration: requestGeneration,
                     target: position
                 )
                 do {
-                    try command(Self.seekCommand(to: position), client: client)
+                    try command(
+                        Self.seekCommand(
+                            to: position,
+                            duration: snapshot.duration,
+                            demuxerFormat: propertyString("file-format", client: client)
+                        ),
+                        client: client
+                    )
                 } catch {
                     postSeekEndGuard.cancel(
                         requestGeneration: requestGeneration,

@@ -24,6 +24,9 @@ struct HomeView: View {
                 SearchView()
             } else {
                 homeContent
+                    .overlay(alignment: .bottom) {
+                        HomeRuntimeActivityOverlay(activity: state.homeRuntimeActivity)
+                    }
             }
         }
     }
@@ -306,8 +309,18 @@ struct HomeView: View {
                 }
             }
         } else if state.isHomeLoading || !state.hasCompletedStartup {
-            AppActivityLabel(L10n.string("home.loading-provider", fallback: "Loading provider…"))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if state.selectedHomeUsesAndroidRuntime {
+                GeometryReader { geometry in
+                    ScrollView {
+                        PosterInitialSkeleton(width: geometry.size.width, height: geometry.size.height)
+                            .padding(20)
+                    }
+                }
+                .accessibilityIdentifier("home.runtime.skeleton")
+            } else {
+                AppActivityLabel(L10n.string("home.loading-provider", fallback: "Loading provider…"))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         } else if let message = state.homeLoadErrorMessage {
             EmptyStateView(
                 systemImage: state.homeLoadErrorIsLocalPluginCache
@@ -1037,13 +1050,16 @@ private struct AdaptiveFilterRow: View, Equatable {
     }
 
     private func optionButton(_ option: VideoFilterOption) -> some View {
-        Button(option.name) {
+        Button {
             onSelect(option.value)
+        } label: {
+            TruncationAwareText(text: option.name,
+                font: .system(size: 13, weight: option.value == selectedValue ? .semibold : .medium),
+                minimumScaleFactor: 0.9)
         }
         .buttonStyle(
             FilterChipButtonStyle(isSelected: option.value == selectedValue)
         )
-        .help(L10n.string("home.filter.option", fallback: "%@: %@", filter.name, option.name))
         .accessibilityLabel(L10n.string("home.filter.option-accessibility", fallback: "%@, %@", filter.name, option.name))
         .accessibilityAddTraits(
             option.value == selectedValue ? .isSelected : []
@@ -1694,5 +1710,188 @@ enum HomeSitePresentation {
         capability == .unsupportedSpider
             ? L10n.string("home.provider.unavailable-name", fallback: "%@ (Unavailable)", siteName)
             : siteName
+    }
+}
+
+// The browser observes only this compact presentation. Runtime events never
+// publish AppState.objectWillChange and never trigger a health check.
+enum HomeRuntimeActivityPhase: Equatable {
+    case preparing, starting, connecting, fetching
+
+    static func phase(for status: AndroidRuntimeStatus) -> Self {
+        if status.phase == .running { return .fetching }
+        switch status.stage {
+        case .launchingEmulator, .waitingForADB, .waitingForAndroidBoot:
+            return .starting
+        case .configuringPortForward, .checkingEmulatorNetwork, .installingBridge,
+             .launchingBridge, .probingBridge:
+            return .connecting
+        case .ready: return .fetching
+        default: return .preparing
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .preparing: return L10n.string("home.runtime.preparing", fallback: "Preparing video providers…")
+        case .starting: return L10n.string("home.runtime.starting", fallback: "Starting the compatibility environment…")
+        case .connecting: return L10n.string("home.runtime.connecting", fallback: "Connecting to the compatibility environment…")
+        case .fetching: return L10n.string("home.runtime.fetching", fallback: "Loading the video list…")
+        }
+    }
+}
+
+struct HomeRuntimeActivityPresentation: Equatable {
+    var phase: HomeRuntimeActivityPhase
+    var failure: String? = nil
+}
+
+@MainActor final class HomeRuntimeActivity: ObservableObject {
+    @Published private(set) var presentation: HomeRuntimeActivityPresentation?
+    private var requestID: UUID?
+    private var pending = HomeRuntimeActivityPresentation(phase: .preparing)
+    private var visible = false
+    private var revealTask: Task<Void, Never>?
+    private var observationTask: Task<Void, Never>?
+
+    @discardableResult
+    func begin(revealDelay: UInt64 = 300_000_000,
+               updates: @escaping () async -> AsyncStream<AndroidRuntimeStatus>) -> UUID {
+        cancel()
+        let id = UUID()
+        requestID = id
+        pending = .init(phase: .preparing)
+        revealTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: revealDelay) }
+            catch { return }
+            guard let self, self.requestID == id, !Task.isCancelled else { return }
+            self.visible = true
+            self.publishIfChanged()
+        }
+        observationTask = Task { @MainActor [weak self] in
+            let stream = await updates()
+            for await status in stream {
+                guard let self, self.requestID == id, !Task.isCancelled else { return }
+                self.pending.phase = .phase(for: status)
+                self.publishIfChanged()
+            }
+        }
+        return id
+    }
+
+    func finish(_ id: UUID) {
+        guard requestID == id else { return }
+        revealTask?.cancel(); revealTask = nil
+        observationTask?.cancel(); observationTask = nil
+        if pending.failure == nil { cancel() }
+    }
+
+    func fail(_ id: UUID, message: String) {
+        guard requestID == id else { return }
+        revealTask?.cancel(); revealTask = nil
+        observationTask?.cancel(); observationTask = nil
+        pending.failure = message
+        visible = true
+        publishIfChanged()
+    }
+
+    func cancel() {
+        requestID = nil
+        revealTask?.cancel(); revealTask = nil
+        observationTask?.cancel(); observationTask = nil
+        visible = false
+        if presentation != nil { presentation = nil }
+    }
+
+    private func publishIfChanged() {
+        guard visible, presentation != pending else { return }
+        presentation = pending
+    }
+
+    deinit { revealTask?.cancel(); observationTask?.cancel() }
+}
+
+struct HomeRuntimeActivityOverlay: View {
+    @EnvironmentObject private var state: AppState
+    @ObservedObject var activity: HomeRuntimeActivity
+
+    var body: some View {
+        if let presentation = activity.presentation {
+            HomeRuntimeActivityCard(presentation: presentation, hasCachedContent: state.siteHome != nil) {
+                Task {
+                    await state.loadSelectedSiteHome(refreshConfigurationIfNeeded: false,
+                        reportErrors: false, forceHomeRefresh: true)
+                }
+            } switchProvider: {
+                Menu {
+                    ForEach(state.visibleSites, id: \.key) { site in
+                        Button(site.name) { Task { await state.selectSite(site.key) } }
+                    }
+                    Divider()
+                    Button(L10n.string("home.runtime.manage", fallback: "Manage Video Providers…")) {
+                        state.selectedSettingsPane = .configurations
+                        state.selectSection(.settings)
+                    }
+                } label: {
+                    Text(L10n.string("home.runtime.switch", fallback: "Switch Provider"))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .accessibilityIdentifier("home.runtime.switch")
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 20)
+        }
+    }
+}
+
+struct HomeRuntimeActivityCard<SwitchProvider: View>: View {
+    let presentation: HomeRuntimeActivityPresentation
+    let hasCachedContent: Bool
+    let retry: () -> Void
+    @ViewBuilder var switchProvider: () -> SwitchProvider
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 12) {
+                if presentation.failure != nil {
+                    Image(systemName: "exclamationmark.circle")
+                        .foregroundColor(.orange)
+                        .font(.system(size: 20))
+                        .accessibilityHidden(true)
+                } else {
+                    AppActivityIndicator(size: .small)
+                        .frame(width: 20, height: 20)
+                        .accessibilityHidden(true)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(presentation.failure == nil ? presentation.phase.title
+                        : L10n.string("home.runtime.failed", fallback: "Unable to load this provider"))
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(presentation.failure ?? (hasCachedContent
+                        ? L10n.string("home.runtime.available", fallback: "You can continue browsing saved content.")
+                        : L10n.string("home.runtime.empty", fallback: "Content will appear here when it is ready.")))
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityElement(children: .combine)
+            }
+            if presentation.failure != nil {
+                HStack(spacing: 16) {
+                    Button(L10n.string("common.retry", fallback: "Try Again"), action: retry)
+                        .accessibilityIdentifier("home.runtime.retry")
+                    switchProvider()
+                }
+                .padding(.leading, 32)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: 560, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.09)))
+        .shadow(color: .black.opacity(0.10), radius: 8, y: 3)
+        .accessibilityIdentifier("home.runtime.activity")
     }
 }

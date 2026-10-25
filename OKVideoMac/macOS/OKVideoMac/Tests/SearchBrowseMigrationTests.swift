@@ -2,9 +2,68 @@ import AppKit
 import SwiftUI
 import XCTest
 import OKVideoCore
+import OKVideoPersistence
 @testable import OKVideoMac
 
 @MainActor final class SearchBrowseMigrationTests: XCTestCase {
+    func testTVBoxPrioritizesPositiveResultsAndOmitsOnlyUnsupportedDexSites() throws {
+        let bridge = AndroidDexBridgeClient(runtimePrerequisite: { XCTFail("ordering must not start Android") })
+        func dex(_ key: String, searchable: Int = 1) throws -> AndroidDexSpiderSiteProvider {
+            try AndroidDexSpiderSiteProvider(
+                site: SiteConfiguration(key: key, name: key, type: 3, api: "csp_Fixture", searchable: searchable),
+                configurationID: UUID(), configurationHosts: [], jarReference: "https://fixture.invalid/spider.jar",
+                baseURL: nil, bridge: bridge)
+        }
+        let slow = try dex("slow"), unknown = try dex("unknown"), fast = try dex("fast")
+        let empty = try dex("empty"), disabled = try dex("disabled", searchable: 0)
+        let failed = try dex("failed")
+        slow.searchPerformance.record(elapsed: 5, resultCount: 20, succeeded: true)
+        fast.searchPerformance.record(elapsed: 1, resultCount: 20, succeeded: true)
+        empty.searchPerformance.record(elapsed: 0.1, resultCount: 0, succeeded: true)
+        failed.searchPerformance.record(elapsed: 0.1, resultCount: 0, succeeded: false)
+        let all = [failed, empty, slow, unknown, disabled, fast]
+        let ordered = AppState.orderedSearchProviders(catalog: all.map(\.site),
+            providers: Dictionary(uniqueKeysWithValues: all.map { ($0.site.key, $0 as SiteProvider) }))
+        XCTAssertEqual(ordered.map { $0.site.key }, ["fast", "slow", "unknown", "empty", "failed"])
+        XCTAssertTrue(AppState.orderedSearchProviders(catalog: [disabled.site],
+            providers: ["disabled": disabled], selectedKeys: ["disabled"]).isEmpty)
+        // A fresh provider with the same key cannot inherit old account/JAR performance.
+        XCTAssertEqual(try dex("fast").aggregateSearchPriority, unknown.aggregateSearchPriority)
+    }
+
+    func testRepeatedTVBoxStyleSearchPreservesSessionAndNewKeywordRejectsOldResults() async throws {
+        let recorder = SearchAppRequestRecorder()
+        let provider = SearchAppFixture(recorder: recorder)
+        let state = AppState(environment: nil, initialProviders: [provider.site.key: provider])
+        state.seedCategoryHomeForTesting(
+            record: StoredConfiguration(name: "Fixture", sourceKind: .pasted, rawData: Data()),
+            provider: provider, home: SiteHome(categories: [], recommendations: []))
+        state.search("first")
+        let session = state.searchBrowseSessionID
+        state.search(" first ")
+        XCTAssertEqual(state.searchBrowseSessionID, session)
+        try await Task.sleep(nanoseconds: 10_000_000)
+        state.search("second")
+        XCTAssertNotEqual(state.searchBrowseSessionID, session)
+        for _ in 0..<100 where state.isSearching {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertFalse(state.searchResults.isEmpty)
+        XCTAssertTrue(state.searchResults.allSatisfy { $0.title.hasPrefix("second") })
+        state.cancelSearch()
+    }
+
+    func testFirstResultPublishesBeforeSlowTrailingBatch() async throws {
+        var displayed: [Int] = []
+        let publisher = SearchSnapshotPublisher<Int> { displayed.append($0) }
+        publisher.submit(1)
+        XCTAssertEqual(displayed, [1])
+        publisher.submit(2)
+        XCTAssertEqual(displayed, [1])
+        try await Task.sleep(nanoseconds: 160_000_000)
+        XCTAssertEqual(displayed, [1, 2])
+        publisher.cancel()
+    }
     func summary(_ id: String, site: String = "source", title: String? = nil) -> VideoSummary {
         VideoSummary(siteKey: site, siteName: "来源 \(site)", videoID: id, title: title ?? id, year: "2026")
     }

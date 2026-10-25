@@ -66,6 +66,12 @@ struct NativeLiveChannelPage: NSViewRepresentable {
         private var itemSize = NSSize(width: 260, height: 250)
         private var boundsObserver: NSObjectProtocol?
         private var epgObserver: AnyCancellable?
+        private var previewObserver: AnyCancellable?
+        private let previewOwner = UUID()
+        private var previewDemands: [String: LivePreviewDemand] = [:]
+        private var previewVisibleIndices: [IndexPath] = []
+        private var previewRefreshRequest = 0
+        private var visibilityObservers: [NSObjectProtocol] = []
         private var timer: Timer?
         private var demandTask: Task<Void, Never>?
         private var pendingViewport = false
@@ -86,6 +92,13 @@ struct NativeLiveChannelPage: NSViewRepresentable {
                 self.play(self.channels[index])
             }
             scroll.didLayout = { [weak self] in self?.layout() }
+            for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.didMiniaturizeNotification,
+                         NSWindow.didDeminiaturizeNotification, NSApplication.didResignActiveNotification,
+                         NSApplication.didBecomeActiveNotification] {
+                visibilityObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.publishPreviewDemand() }
+                })
+            }
             scroll.contentView.postsBoundsChangedNotifications = true
             boundsObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification,
                 object: scroll.contentView, queue: .main) { [weak self] _ in
@@ -94,7 +107,13 @@ struct NativeLiveChannelPage: NSViewRepresentable {
         }
 
         func update(_ page: NativeLiveChannelPage, state: AppState, repository: ImageRepository?, report: @escaping (Bool) -> Void) {
-            let changed = channels != page.channels || self.page?.source != page.source
+            let sourceChanged = self.page?.source != page.source
+            let changed = channels != page.channels || sourceChanged
+            if sourceChanged || !page.session.showsPreviewImages {
+                state.livePreviews.clear(owner: previewOwner)
+                previewRefreshRequest = page.session.previewRefreshRequest
+                previewDemands.removeAll(); previewVisibleIndices.removeAll()
+            }
             let nextFavorites = Set(page.channels.filter { state.isLiveFavorite(sourceID: page.source, channel: $0) }.map(\.id))
             let favoritesChanged = nextFavorites != favorites
             let keyChanged = currentKey != page.browseKey
@@ -102,20 +121,25 @@ struct NativeLiveChannelPage: NSViewRepresentable {
             let anchor = keyChanged ? page.session.channelAnchors[page.browseKey] : captureAnchor()
             let oldIDs = channels.map(\.id)
             self.page = page; self.state = state; self.repository = repository; self.report = report
+            if !page.session.showsPreviewImages { refreshPreviewImages() }
             currentKey = page.browseKey; favorites = nextFavorites
+            if previewObserver == nil {
+                previewObserver = state.livePreviews.changes.sink { [weak self] in self?.refreshPreviewImages() }
+            }
             if epgObserver == nil {
                 epgObserver = state.liveEPG.objectWillChange.sink { [weak self] in
-                    DispatchQueue.main.async { self?.refreshVisible() }
+                    DispatchQueue.main.async { self?.refreshVisible(); self?.publishPreviewDemand() }
                 }
             }
             if page.session.isActive, timer == nil {
                 let timer = Timer(timeInterval: 15, repeats: true) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.refreshVisible() }
+                    MainActor.assumeIsolated { self?.refreshVisible(); self?.publishPreviewDemand() }
                 }
                 RunLoop.main.add(timer, forMode: .common); self.timer = timer
             } else if !page.session.isActive {
                 timer?.invalidate(); timer = nil
                 demandTask?.cancel(); demandTask = nil; preheater.cancel()
+                state.livePreviews.clear(owner: previewOwner)
             }
             if changed {
                 channels = page.channels
@@ -199,6 +223,7 @@ struct NativeLiveChannelPage: NSViewRepresentable {
             item.card.catchupAction = { [weak self] in self?.showCatchup(channel) }
             item.card.menuProvider = { [weak self] in self?.menu(channel) ?? NSMenu() }
             updateProgramme(item.card, channel: channel)
+            updatePreview(item.card, channel: channel)
         }
         private func updateProgramme(_ card: LiveChannelNativeCard, channel: LiveChannel) {
             guard let page, let state else { return }
@@ -208,7 +233,7 @@ struct NativeLiveChannelPage: NSViewRepresentable {
         }
         private func refreshVisible(rebind: Bool = false) {
             guard let scroll, !scroll.isHiddenOrHasHiddenAncestor, page?.session.isActive == true else { return }
-            for path in scroll.collection.indexPathsForVisibleItems() where channels.indices.contains(path.item) {
+            for path in scroll.viewportIndexPaths where channels.indices.contains(path.item) {
                 guard let item = scroll.collection.item(at: path) as? LiveChannelNativeItem else { continue }
                 if rebind { bind(item, index: path.item) }
                 else { updateProgramme(item.card, channel: channels[path.item]) }
@@ -225,6 +250,11 @@ struct NativeLiveChannelPage: NSViewRepresentable {
         }
         private func viewportChanged() {
             guard let scroll, let page, page.session.isActive else { return }
+            let visibleIndices = scroll.viewportIndexPaths.sorted()
+            if visibleIndices != previewVisibleIndices {
+                previewVisibleIndices = visibleIndices
+                publishPreviewViewport(indices: visibleIndices.map(\.item))
+            }
             let offset = max(0, scroll.contentView.bounds.minY)
             if !restoring, let anchor = captureAnchor() {
                 if page.session.channelAnchors.count > 64 { page.session.channelAnchors.removeAll() }
@@ -254,9 +284,76 @@ struct NativeLiveChannelPage: NSViewRepresentable {
         }
         private func publishDemand() {
             guard let page, page.session.isActive, let scroll, let state else { return }
-            let indices = scroll.collection.indexPathsForVisibleItems().map(\.item).sorted()
+            let indices = scroll.viewportIndexPaths.map(\.item).sorted()
             let visible = indices.filter { channels.indices.contains($0) }.prefix(100).map { channels[$0] }
             state.setEPGBrowserDemand(source: page.source, channels: visible)
+            publishPreviewDemand()
+        }
+        private var previewSurfaceIsVisible: Bool {
+            guard let scroll, let window = scroll.window else { return false }
+            return page?.session.isActive == true && page?.session.showsPreviewImages == true
+                && !scroll.isHiddenOrHasHiddenAncestor && window.isVisible && !window.isMiniaturized
+        }
+        private var previewCaptureIsActive: Bool {
+            previewSurfaceIsVisible && NSApp.isActive && scroll?.window?.occlusionState.contains(.visible) == true
+        }
+        private func publishPreviewViewport(indices: [Int]) {
+            guard let state, previewSurfaceIsVisible else { return }
+            let indices = indices.filter { channels.indices.contains($0) }
+            let visible = Set(indices.compactMap { previewDemands[channels[$0].id]?.key })
+            let nearby = max(0, (indices.first ?? 0) - columns * 2)..<min(channels.count, (indices.last ?? 0) + columns * 3)
+            let nearKeys = Set(nearby.compactMap { previewDemands[channels[$0].id]?.key })
+            state.livePreviews.updateViewport(owner: previewOwner, visible: visible, nearby: nearKeys)
+            refreshVisible(rebind: true)
+        }
+        private func publishPreviewDemand() {
+            guard let state else { return }
+            guard previewSurfaceIsVisible, let scroll, let page else {
+                state.livePreviews.suspend(owner: previewOwner)
+                if self.page?.session.showsPreviewImages != true { previewDemands.removeAll(); refreshPreviewImages() }
+                return
+            }
+            let indices = scroll.viewportIndexPaths.map(\.item).sorted()
+                .filter { channels.indices.contains($0) }
+            let visibleIDs = Set(indices.map { channels[$0].id })
+            let nearby = max(0, (indices.first ?? 0) - columns * 2)..<min(channels.count, (indices.last ?? 0) + columns * 3)
+            // Current filtered list defines this round; scrolling promotes its new
+            // viewport without restarting the jobs already admitted for this source.
+            let ordered = channels.enumerated().sorted {
+                let a = visibleIDs.contains($0.element.id) ? 0 : nearby.contains($0.offset) ? 1 : 2
+                let b = visibleIDs.contains($1.element.id) ? 0 : nearby.contains($1.offset) ? 1 : 2
+                return a == b ? $0.offset < $1.offset : a < b
+            }
+            let demands = ordered.compactMap { item -> LivePreviewDemand? in
+                let channel = item.element
+                let programme = state.liveEPG.nowNext(channel: channel, source: page.source, at: Date()).current
+                var demand = state.livePreviewDemand(source: page.source, channel: channel,
+                    streams: page.session.previewStreams(channel: channel, source: page.source), programmeStart: programme?.start)
+                demand?.priority = visibleIDs.contains(channel.id) ? 0 : nearby.contains(item.offset) ? 1 : 2
+                return demand
+            }
+            previewDemands = Dictionary(uniqueKeysWithValues: demands.map { ($0.channelID, $0) })
+            state.livePreviews.update(owner: previewOwner, demands: demands, mayCapture: { [weak self, weak state] in
+                self?.previewCaptureIsActive == true && state?.permitsBackgroundLivePreview == true
+            }, autoRefresh: page.session.automaticallyRefreshPreviews, isActive: previewCaptureIsActive)
+            if previewRefreshRequest != page.session.previewRefreshRequest {
+                previewRefreshRequest = page.session.previewRefreshRequest
+                state.livePreviews.requestRefresh()
+            }
+            refreshPreviewImages()
+        }
+        private func updatePreview(_ card: LiveChannelNativeCard, channel: LiveChannel) {
+            guard page?.session.showsPreviewImages == true, let demand = previewDemands[channel.id], demand.isValid(), let state else {
+                card.clearPreview(); return
+            }
+            card.updatePreview(key: demand.key, entry: state.livePreviews.image(for: demand.key, programmeStart: demand.programmeStart))
+        }
+        private func refreshPreviewImages() {
+            guard let scroll else { return }
+            for path in scroll.viewportIndexPaths where channels.indices.contains(path.item) {
+                guard let item = scroll.collection.item(at: path) as? LiveChannelNativeItem else { continue }
+                updatePreview(item.card, channel: channels[path.item])
+            }
         }
         private func captureAnchor() -> LiveChannelBrowseAnchor? {
             guard let scroll, !channels.isEmpty else { return nil }
@@ -331,6 +428,10 @@ struct NativeLiveChannelPage: NSViewRepresentable {
             return menu
         }
         func stop() {
+            state?.livePreviews.clear(owner: previewOwner)
+            previewObserver = nil
+            visibilityObservers.forEach { NotificationCenter.default.removeObserver($0) }
+            visibilityObservers.removeAll()
             scroll?.resetBrowserHover()
             if let boundsObserver { NotificationCenter.default.removeObserver(boundsObserver) }
             boundsObserver = nil; epgObserver = nil; timer?.invalidate(); timer = nil
@@ -354,6 +455,15 @@ final class LiveChannelScrollView: BrowserHoverScrollView {
     }
     required init?(coder: NSCoder) { nil }
     override func layout() { super.layout(); didLayout?() }
+    /// AppKit's "visible items" includes prepared cards outside the clip after
+    /// fast scrolling. Only intersecting layout frames define preview priority.
+    var viewportIndexPaths: [IndexPath] {
+        let viewport = collection.convert(contentView.bounds, from: contentView)
+        guard !viewport.isEmpty, let layout = collection.collectionViewLayout else { return [] }
+        return layout.layoutAttributesForElements(in: viewport)
+            .filter { $0.representedElementCategory == .item && $0.frame.intersects(viewport) }
+            .compactMap(\.indexPath).sorted()
+    }
 }
 final class LiveChannelCollectionView: NSCollectionView, BrowserContentKeyTarget {
     var navigationSelection: NavigationSelection?
@@ -368,7 +478,7 @@ private final class LiveChannelNativeItem: NSCollectionViewItem {
     var card: LiveChannelNativeCard { view as! LiveChannelNativeCard }
     override func loadView() { view = LiveChannelNativeCard() }
     override var isSelected: Bool { didSet { card.selected = isSelected } }
-    override func prepareForReuse() { super.prepareForReuse(); card.setBrowserHovered(false); card.cancelImage() }
+    override func prepareForReuse() { super.prepareForReuse(); card.setBrowserHovered(false); card.cancelImage(); card.clearPreview() }
 }
 private final class LiveChannelMenuItem: NSMenuItem {
     private var invoke: () -> Void
@@ -385,9 +495,15 @@ final class LiveChannelNativeCard: NSView, BrowserHoverTarget {
         hovered = value; needsDisplay = true
     }
     private let logo = NSImageView()
+    private let previewImage = NSImageView()
+    private let previewAge = NSTextField(labelWithString: "")
+    private var previewCaptured: Date?
+    private var previewKey: String?
+    private var channelID: String?
+    private var favoriteSelected = false
     private let number = NSTextField(labelWithString: "")
     private let name = NSTextField(labelWithString: "")
-    private let current = NSTextField(labelWithString: "")
+    private let current = NativeOverflowTooltipField(labelWithString: "")
     private let next = NSTextField(labelWithString: "")
     private let time = NSTextField(labelWithString: "")
     private let progress = NativeNeutralProgressView()
@@ -398,7 +514,14 @@ final class LiveChannelNativeCard: NSView, BrowserHoverTarget {
     private var programmePopover: NSPopover?
     private var imageTask: Task<Void, Never>?
     private var imageKey = ""
-    var selected = false { didSet { if oldValue != selected { needsDisplay = true } } }
+    var selected = false {
+        didSet {
+            if oldValue != selected {
+                needsDisplay = true
+                previewImage.layer?.borderWidth = selected ? 2 : 0
+            }
+        }
+    }
     var activate: (() -> Void)?
     var favoriteAction: (() -> Void)?
     var catchupAction: (() -> Void)?
@@ -408,6 +531,18 @@ final class LiveChannelNativeCard: NSView, BrowserHoverTarget {
     init() {
         super.init(frame: .zero)
         logo.imageScaling = .scaleProportionallyUpOrDown
+        previewImage.imageScaling = .scaleProportionallyUpOrDown
+        previewImage.wantsLayer = true; previewImage.layer?.cornerRadius = 10
+        previewImage.layer?.backgroundColor = NSColor.black.cgColor
+        previewImage.layer?.borderColor = NSColor.controlAccentColor.cgColor
+        previewImage.layer?.masksToBounds = true; previewImage.isHidden = true
+        addSubview(previewImage)
+        previewAge.font = .systemFont(ofSize: 10)
+        previewAge.textColor = .white; previewAge.isHidden = true
+        previewAge.wantsLayer = true; previewAge.layer?.cornerRadius = 4
+        previewAge.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.45).cgColor
+        previewAge.alignment = .center
+        addSubview(previewAge)
         name.font = .systemFont(ofSize: 13, weight: .semibold)
         for field in [name, current, next, time] {
             field.lineBreakMode = .byTruncatingTail; field.maximumNumberOfLines = 1
@@ -430,6 +565,7 @@ final class LiveChannelNativeCard: NSView, BrowserHoverTarget {
         programmeInfo.toolTip = L10n.string("live.programme-details", fallback: "Programme Details")
         programmeInfo.setAccessibilityLabel(programmeInfo.toolTip)
         number.font = .systemFont(ofSize: 11, weight: .semibold)
+        number.wantsLayer = true; number.layer?.cornerRadius = 4
         number.alignment = .center; number.textColor = .labelColor
         number.isHidden = true
         star.isBordered = false; star.target = self; star.action = #selector(favorite)
@@ -440,6 +576,8 @@ final class LiveChannelNativeCard: NSView, BrowserHoverTarget {
     override func layout() {
         super.layout()
         let artHeight = bounds.width * 9 / 16
+        previewImage.frame = NSRect(x: 8, y: 8, width: max(0, bounds.width - 16), height: max(0, (bounds.width - 16) * 9 / 16))
+        previewAge.frame = NSRect(x: max(8, bounds.width - 76), y: previewImage.frame.maxY - 23, width: 60, height: 17)
         logo.frame = NSRect(x: 20, y: 16, width: max(0, bounds.width - 40), height: max(0, artHeight - 32))
         star.frame = NSRect(x: bounds.width - 38, y: 4, width: 26, height: 26)
         catchupButton.frame = NSRect(x: bounds.width - 70, y: 4, width: 26, height: 26)
@@ -478,6 +616,7 @@ final class LiveChannelNativeCard: NSView, BrowserHoverTarget {
     }
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
+        previewImage.layer?.borderColor = NSColor.controlAccentColor.cgColor
         needsDisplay = true
     }
     override func mouseDown(with event: NSEvent) { activate?() }
@@ -502,6 +641,7 @@ final class LiveChannelNativeCard: NSView, BrowserHoverTarget {
         programmePopover = popover
     }
     func bind(channel: LiveChannel, favorite: Bool, urls: [URL], pixels: Int, repository: ImageRepository?) {
+        if channelID != channel.id { clearPreview(); channelID = channel.id }
         if name.stringValue != channel.name { programmePopover?.close() }
         name.stringValue = channel.name
         catchupButton.isHidden = !LiveCatchupPresentation.canBrowse(channel)
@@ -509,6 +649,7 @@ final class LiveChannelNativeCard: NSView, BrowserHoverTarget {
         number.isHidden = number.stringValue.isEmpty
         needsLayout = true
         setAccessibilityLabel(channel.name)
+        favoriteSelected = favorite
         star.image = NSImage(systemSymbolName: favorite ? "star.fill" : "star", accessibilityDescription: nil)
         star.contentTintColor = favorite ? .controlAccentColor : .secondaryLabelColor
         star.toolTip = L10n.string(favorite ? "live.unfavorite" : "live.favorite", fallback: favorite ? "Remove from Favorites" : "Favorite Channel")
@@ -550,12 +691,49 @@ final class LiveChannelNativeCard: NSView, BrowserHoverTarget {
         if time.stringValue != displayedTimes { time.stringValue = displayedTimes }
         progress.isHidden = info.progress(at: date) == nil
         programmeInfo.isHidden = info.current == nil && info.next == nil
-        current.toolTip = [title, displayedTimes, nextTitle].filter { !$0.isEmpty }.joined(separator: "\n")
+        let supplemental = [time.isHidden ? displayedTimes : "", next.isHidden ? nextTitle : ""]
+            .filter { !$0.isEmpty }.joined(separator: "\n")
+        current.supplementalToolTip = supplemental.isEmpty ? nil : supplemental
+        current.refreshOverflowToolTip()
         progress.doubleValue = info.progress(at: date) ?? 0
         let progressTitle = L10n.string("live.programme-progress", fallback: "Programme Progress")
         progress.setAccessibilityLabel(progressTitle)
         progress.toolTip = progress.isHidden ? nil : "\(progressTitle) · \(displayedTimes) · \(Int(progress.doubleValue * 100))%"
         setAccessibilityValue(title + "; " + nextTitle)
+    }
+    func updatePreview(key: String, entry: LivePreviewCoordinator.ImageEntry?) {
+        // Missing memory is a loading state, not an instruction to erase the
+        // last good frame. Source/channel identity prevents reuse leaking it.
+        if previewKey != key { clearPreview(); previewKey = key }
+        if let entry { showPreview(entry) }
+    }
+    func clearPreview() { previewKey = nil; showPreview(nil) }
+    func showPreview(_ entry: LivePreviewCoordinator.ImageEntry?) {
+        let changed = previewCaptured != entry?.captured || previewImage.image !== entry?.image
+        previewCaptured = entry?.captured
+        if changed {
+            if entry != nil && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                let fade = CATransition(); fade.type = .fade; fade.duration = 0.15
+                previewImage.layer?.add(fade, forKey: "live-preview")
+            }
+            previewImage.image = entry?.image
+        }
+        previewImage.isHidden = entry == nil; logo.isHidden = entry != nil
+        previewImage.layer?.borderWidth = selected ? 2 : 0
+        number.textColor = entry == nil ? .labelColor : .white
+        number.layer?.backgroundColor = entry == nil ? NSColor.clear.cgColor : NSColor.black.withAlphaComponent(0.55).cgColor
+        previewAge.isHidden = entry == nil || Date().timeIntervalSince(entry!.captured) < 120
+        previewAge.stringValue = L10n.string("live.preview.cached", fallback: "Cached")
+        if let entry {
+            previewImage.toolTip = L10n.string("live.preview.updated", fallback: "Picture captured at %@",
+                DateFormatter.localizedString(from: entry.captured, dateStyle: .short, timeStyle: .short))
+        } else { previewImage.toolTip = nil }
+        for button in [star, catchupButton] {
+            button.wantsLayer = true; button.layer?.cornerRadius = 6
+            button.layer?.backgroundColor = entry == nil ? NSColor.clear.cgColor : NSColor.black.withAlphaComponent(0.4).cgColor
+            button.contentTintColor = entry == nil ? .secondaryLabelColor : .white
+        }
+        if favoriteSelected { star.contentTintColor = .controlAccentColor }
     }
     func cancelImage() { imageTask?.cancel(); imageTask = nil; imageKey = "" }
     deinit { imageTask?.cancel() }

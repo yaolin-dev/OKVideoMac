@@ -118,6 +118,12 @@ if [[ ! -x "$RELAUNCHER" ]]; then
   echo "Bundled app relaunch helper is missing: $RELAUNCHER" >&2
   exit 1
 fi
+LIVE_PREVIEW="$APP/Contents/Helpers/OKVideoLivePreview"
+if [[ ! -x "$LIVE_PREVIEW" ]] || ! lipo -info "$LIVE_PREVIEW" | grep -q 'arm64'; then
+  echo "Bundled Live TV preview helper is missing or not arm64." >&2
+  exit 1
+fi
+codesign --verify --strict "$LIVE_PREVIEW"
 if ! lipo -info "$RELAUNCHER" | grep -q 'arm64'; then
   echo "Bundled app relaunch helper is not arm64." >&2
   exit 1
@@ -484,9 +490,9 @@ while IFS= read -r binary; do
   # The first line printed by otool is the inspected binary's own path. Skip
   # it so an app installed below /Users is not mistaken for an external dylib.
   if otool -L "$binary" | tail -n +2 |
-       grep -E '/opt/homebrew|/opt/local|/usr/local|/Users/' >/dev/null ||
+       grep -E '/opt/homebrew|/opt/local|/usr/local|/Users/|/Volumes/|/private/tmp/' >/dev/null ||
      otool -l "$binary" | tail -n +2 |
-       grep -E '/opt/homebrew|/opt/local|/usr/local|/Users/' >/dev/null; then
+       grep -E '/opt/homebrew|/opt/local|/usr/local|/Users/|/Volumes/|/private/tmp/' >/dev/null; then
     echo "Forbidden absolute dependency in $binary" >&2
     otool -L "$binary" >&2
     failure=1
@@ -527,4 +533,8 @@ if [[ "$failure" -ne 0 ]]; then
   exit 1
 fi
 
+# Gate the actual signed bundle on decoding and seeking DASH with both tracks.
+# An installed/system FFmpeg cannot satisfy this check.
+PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/verify-dash-playback.py" \
+  --library "$FRAMEWORKS/libmpv.dylib" --ffmpeg "$FRAMEWORKS/libavformat.61.dylib"
 echo "Bundle verification passed: $APP"

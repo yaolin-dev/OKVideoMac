@@ -1,3 +1,4 @@
+import Combine
 import AppKit
 import SwiftUI
 import XCTest
@@ -677,18 +678,18 @@ final class CatPawColdHistoryTests: XCTestCase {
 }
 
 private actor ColdQuarkClient: HTTPClient {
-    let tokenVersion: String, fileID: String
+    let tokenVersion: String, fileID: String, shareID: String
     let omitsDetailID: Bool, duplicateEpisode: Bool, misreportsCookieFailure: Bool, loggedIn: Bool, explicitFileTokenFailure: Bool, statusUnavailable: Bool
     private var requests: [HTTPRequest] = []
-    init(tokenVersion: String = "current", fileID: String = "file-64", omitsDetailID: Bool = false,
+    init(tokenVersion: String = "current", fileID: String = "file-64", shareID: String = "share-fixture", omitsDetailID: Bool = false,
          duplicateEpisode: Bool = false, misreportsCookieFailure: Bool = false, loggedIn: Bool = true, explicitFileTokenFailure: Bool = false, statusUnavailable: Bool = false) {
-        self.tokenVersion = tokenVersion; self.fileID = fileID; self.omitsDetailID = omitsDetailID
+        self.tokenVersion = tokenVersion; self.fileID = fileID; self.shareID = shareID; self.omitsDetailID = omitsDetailID
         self.duplicateEpisode = duplicateEpisode; self.misreportsCookieFailure = misreportsCookieFailure
         self.loggedIn = loggedIn; self.explicitFileTokenFailure = explicitFileTokenFailure; self.statusUnavailable = statusUnavailable
     }
-    static func episode(_ version: String, fileID: String = "file-64") throws -> String {
-        let token = try JSONSerialization.data(withJSONObject: ["fid": fileID, "shareId": "share-fixture", "stoken": "stoken-\(version)", "shareFidToken": "file-token-\(version)", "fileName": "第64集"], options: [.sortedKeys])
-        return try JSONSerialization.data(withJSONObject: ["providerId": "quark", "shareId": "share-fixture", "fileId": fileID, "playToken": String(decoding: token, as: UTF8.self)], options: [.sortedKeys]).base64EncodedString()
+    static func episode(_ version: String, fileID: String = "file-64", shareID: String = "share-fixture") throws -> String {
+        let token = try JSONSerialization.data(withJSONObject: ["fid": fileID, "shareId": shareID, "stoken": "stoken-\(version)", "shareFidToken": "file-token-\(version)", "fileName": "第64集"], options: [.sortedKeys])
+        return try JSONSerialization.data(withJSONObject: ["providerId": "quark", "shareId": shareID, "fileId": fileID, "playToken": String(decoding: token, as: UTF8.self)], options: [.sortedKeys]).base64EncodedString()
     }
     func captured() -> [HTTPRequest] { requests }
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
@@ -707,7 +708,7 @@ private actor ColdQuarkClient: HTTPClient {
         if request.url.path.hasSuffix("/detail") {
             let body = String(decoding: request.body ?? Data(), as: UTF8.self)
             if body.contains("expired") { return try response(["error": "detail unavailable"], status: 404) }
-            let entry = "第64集$\(try Self.episode(tokenVersion, fileID: fileID))"
+            let entry = "第64集$\(try Self.episode(tokenVersion, fileID: fileID, shareID: shareID))"
             var detail = ["vod_name": "历史影片", "vod_play_from": "夸克原画", "vod_play_url": duplicateEpisode ? "\(entry)#\(entry)" : entry]
             if !omitsDetailID { detail["vod_id"] = "video" }
             return try response(["list": [detail]])
@@ -886,7 +887,13 @@ final class DetailPlaybackRetentionTests: XCTestCase {
     }
     func testPlaybackPreparationFailureAndCloseKeepMountedDetail() async throws {
         let (state, environment, _, detail) = try await fixture()
-        let host = NSHostingController(rootView: RootView().environmentObject(state).environmentObject(state.navigation))
+        // This regression intentionally exercises the original, vertically
+        // scrolling episode grid; TMDB's horizontal shelf can fit the viewport.
+        let suite = "DetailPlaybackRetentionTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.set(false, forKey: "detail.tmdb.enabled")
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let host = NSHostingController(rootView: RootView().environmentObject(state).environmentObject(state.navigation).defaultAppStorage(defaults))
         let window = NSWindow(contentRect: .init(x: 100, y: 100, width: 1100, height: 650),
             styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentViewController = host
@@ -1053,5 +1060,158 @@ final class HistorySelectionStateBindingTests: XCTestCase {
             XCTAssertEqual(model.selected, removing ? [] : ["1"])
             XCTAssertEqual(table.selectedRowIndexes, removing ? [] : IndexSet(integer: 1))
         }
+    }
+}
+
+
+@MainActor
+final class HistoryRelinkTests: XCTestCase {
+    private let filename = "知否知否应是绿肥红瘦.The.Story.of.Ming.Lan.2018.S01E72.1080p.WEB-DL.AAC.H265-OurTV.mkv"
+    private func episode(_ file: String, share: String = "new-share", name: String? = nil) throws -> PlayEpisode {
+        PlayEpisode(name: name ?? self.filename, url: try ColdQuarkClient.episode("current", fileID: file, shareID: share))
+    }
+    private func record() throws -> HistoryRecord {
+        HistoryRecord(siteKey: "fixture", videoID: "old-video", title: "知否知否应是绿肥红瘦", sourceName: "夸克原画",
+            episodeName: "[980.9MB]" + filename + "【旧文件夹】",
+            episodeReference: QuarkEpisodeReference.durableHistoryReference(try episode("old-file", share: "old-share").url),
+            position: 2108.2, duration: 2637.461)
+    }
+    private func detail(_ episodes: [PlayEpisode], source: String = "夸克原画") -> VideoDetail {
+        VideoDetail(summary: VideoSummary(siteKey: "fixture", siteName: "Fixture", videoID: "new-video", title: "知否知否应是绿肥红瘦"),
+            playSources: [PlaySource(name: source, episodes: episodes)])
+    }
+    func testChangedShareAndFileOffersOneExplicitRelinkWithOriginalProgress() throws {
+        let original = try record(), fresh = detail([try episode("new-file", name: "[981.0MB]" + filename + "【新目录】")])
+        let resolution = AppState.historyPlaybackResolution(in: fresh, record: original)
+        XCTAssertNil(resolution.automaticChoice)
+        let choice = try XCTUnwrap(resolution.choices.first)
+        XCTAssertEqual(resolution.choices.count, 1)
+        XCTAssertTrue(choice.requiresRelink); XCTAssertTrue(choice.sameFilename)
+        XCTAssertEqual(AppState.historyResumePosition(from: original), 2108.2)
+        XCTAssertNil(AppState.historyPlaybackSelection(in: fresh, record: original), "Background playlist restoration must remain strict")
+        XCTAssertTrue(AppState.historyPlaybackChoices(in: fresh, record: original).isEmpty)
+    }
+    func testSameFileWithNewTokenStillAutomaticallyRestoresAfterReorder() throws {
+        let old = try record()
+        let selected = try episode("old-file", share: "old-share")
+        let fresh = detail([try episode("unrelated", name: filename.replacingOccurrences(of: "E72", with: "E71")), selected], source: "重命名线路")
+        let resolution = AppState.historyPlaybackResolution(in: fresh, record: old)
+        XCTAssertEqual(resolution.automaticChoice?.episode.url, selected.url)
+        XCTAssertFalse(try XCTUnwrap(resolution.automaticChoice).requiresRelink)
+    }
+    func testVariantsRemainExplicitAndDoNotMergeResolutionOrEditionMarkers() throws {
+        let newVersion = filename.replacingOccurrences(of: "1080p", with: "2160p").replacingOccurrences(of: "OurTV", with: "OtherGroup")
+        let resolution = AppState.historyPlaybackResolution(in: detail([try episode("a"), try episode("b", name: newVersion)]), record: try record())
+        XCTAssertNil(resolution.automaticChoice); XCTAssertEqual(resolution.choices.count, 2)
+        XCTAssertTrue(resolution.choices[0].sameFilename); XCTAssertFalse(resolution.choices[1].sameFilename)
+        XCTAssertNotEqual(AppState.historyRelinkFilename("[1080p]" + filename), AppState.historyRelinkFilename("[2160p]" + filename))
+        XCTAssertNotEqual(AppState.historyRelinkFilename(filename + "Part2"), AppState.historyRelinkFilename(filename))
+    }
+    func testDifferentSeasonEpisodePartBonusAndBarePositionNeverBecomeCandidates() throws {
+        for bad in ["72", "第72集", filename.replacingOccurrences(of: "S01", with: "S02"),
+                    filename.replacingOccurrences(of: "E72", with: "E71"), filename.replacingOccurrences(of: ".mkv", with: ".Part1.mkv"),
+                    filename.replacingOccurrences(of: ".mkv", with: ".花絮.mkv")] {
+            let resolution = AppState.historyPlaybackResolution(in: detail([try episode("new-file", name: bad)]), record: try record())
+            XCTAssertTrue(resolution.choices.isEmpty, bad)
+        }
+        var wrong = detail([try episode("new-file")]); wrong.summary.title = "另一部剧"
+        XCTAssertTrue(AppState.historyPlaybackResolution(in: wrong, record: try record()).choices.isEmpty)
+    }
+    func testOneFileOnDifferentRoutesRemainsAChoiceAndSearchCopiesDeduplicate() throws {
+        var fresh = detail([try episode("new-file")])
+        fresh.playSources += [PlaySource(name: "夸克流畅", episodes: [try episode("new-file")])]
+        let resolution = AppState.historyPlaybackResolution(in: fresh, record: try record())
+        XCTAssertNil(resolution.automaticChoice); XCTAssertEqual(resolution.choices.count, 2)
+        XCTAssertEqual(AppState.uniqueHistoryPlaybackChoices(resolution.choices + resolution.choices).count, 2)
+    }
+    func testRelinkRefreshUsesConfirmedNewIdentityAcrossColdRestart() async throws {
+        let old = try record()
+        for version in ["current", "after-restart"] {
+            let client = ColdQuarkClient(tokenVersion: version, fileID: "new-file", shareID: "new-share")
+            let provider = try NodeHTTPSpiderSiteProvider(site: .init(key: "fixture", name: "Fixture", type: 4,
+                api: "/spider/fixture/3", extra: ["okNodeRuntime": .bool(true)]),
+                baseURL: URL(string: "http://127.0.0.1:18988/")!, httpClient: client, configurationIdentity: "history-cold-fixture")
+            let fresh = try await provider.detail(id: "video"), source = try XCTUnwrap(fresh.playSources.first)
+            let item = try XCTUnwrap(source.episodes.first)
+            for ref in [item.providerResourceReference, nil] {
+                let request = AppState.historyPlaybackRefreshRequest(detail: fresh, source: source, episode: item,
+                    providerReference: ref, origin: .historyRelink(old, fromBeginning: false))
+                XCTAssertEqual(QuarkEpisodeReference.identity(from: request.episodeReference ?? "")?.fileID, "new-file")
+                XCTAssertEqual(QuarkEpisodeReference.identity(from: request.episodeReference ?? "")?.shareID, "new-share")
+                let refreshed = try await provider.refreshPlayback(request)
+                XCTAssertEqual(refreshed.episode.url, try ColdQuarkClient.episode(version, fileID: "new-file", shareID: "new-share"))
+            }
+        }
+    }
+    func testNativeResumeRequiresRealSeekAndComparableDuration() throws {
+        let old = try record()
+        var snapshot = PlayerSnapshot(status: .playing, position: 0, duration: old.duration)
+        func evaluate() -> HistoryRelinkResumePolicy.Result {
+            HistoryRelinkResumePolicy.evaluate(record: old, snapshot: snapshot, target: old.position, canSeek: true)
+        }
+        XCTAssertEqual(evaluate(), .waiting)
+        snapshot.position = old.position; snapshot.isSeeking = true; XCTAssertEqual(evaluate(), .waiting)
+        snapshot.isSeeking = false; snapshot.historyProgressIsReliable = false; XCTAssertEqual(evaluate(), .waiting)
+        snapshot.historyProgressIsReliable = true; XCTAssertEqual(evaluate(), .ready)
+        snapshot.duration = 1800
+        guard case .rejected = evaluate() else { return XCTFail("Reject a different cut") }
+        snapshot.duration = old.duration; snapshot.isSeekable = false
+        guard case .rejected = evaluate() else { return XCTFail("Reject unseekable resource") }
+        snapshot.isSeekable = true; snapshot.position = .nan; XCTAssertEqual(evaluate(), .waiting)
+        snapshot.position = old.position; snapshot.status = .failed("seek failed"); XCTAssertEqual(evaluate(), .waiting)
+    }
+    func testReplacementCommitRemovesOldRowAndRestartsWithNewStableIdentity() async throws {
+        let environment = try AppEnvironment.live(), old = try record()
+        try await environment.database.saveHistory(old, incognito: false)
+        let fresh = detail([try episode("new-file")])
+        _ = AppState.historyPlaybackResolution(in: fresh, record: old)
+        let unchanged = try await environment.database.history()
+        XCTAssertEqual(unchanged.count, 1); XCTAssertEqual(unchanged[0].position, old.position)
+        XCTAssertEqual(unchanged[0].episodeReference, old.episodeReference, "Discovery/cancel must not rewrite history")
+        var replacement = old
+        replacement.videoID = "new-video"
+        replacement.episodeReference = QuarkEpisodeReference.durableHistoryReference(fresh.playSources[0].episodes[0].url)
+        replacement.watchedAt = old.watchedAt.addingTimeInterval(1)
+        let saved = try await environment.database.saveWatchedHistory(replacement, replacing: old, sessionID: UUID())
+        XCTAssertTrue(saved)
+        let rows = try await environment.database.history()
+        XCTAssertEqual(rows.count, 1); XCTAssertEqual(rows[0].position, 2108.2)
+        let restarted = try JSONDecoder().decode(HistoryRecord.self, from: JSONEncoder().encode(rows[0]))
+        XCTAssertNotNil(AppState.historyPlaybackResolution(in: fresh, record: restarted).automaticChoice)
+    }
+}
+
+@MainActor final class HistoryObservationIsolationTests: XCTestCase {
+    func testProgressUpdatesReachHistoryWithoutPublishingBrowserChanges() {
+        let state = AppState(environment: nil)
+        var browserChanges = 0, historyChanges = 0
+        let browser = state.objectWillChange.sink { browserChanges += 1 }
+        let history = state.watchHistory.objectWillChange.sink { historyChanges += 1 }
+        var record = HistoryRecord(configurationID: UUID(), siteKey: "fixture", videoID: "v", title: "Fixture")
+        for second in 1...20 {
+            record.position = Double(second)
+            state.watchHistory.replace([record])
+        }
+        XCTAssertEqual(state.history.first?.position, 20)
+        XCTAssertEqual(historyChanges, 20)
+        XCTAssertEqual(browserChanges, 0, "History ticks must not invalidate the mounted detail tree")
+        withExtendedLifetime((browser, history)) {}
+    }
+
+    func testMountedHistoryListStillUpdatesAfterIsolatingPublications() async throws {
+        let state = AppState(environment: nil)
+        let host = NSHostingView(rootView: HistoryView(history: state.watchHistory, search: state.sidebarSearch).environmentObject(state))
+        let window = NSWindow(contentRect: .init(x: -2500, y: -2200, width: 700, height: 500), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host
+        defer { window.close() }
+        state.watchHistory.replace([HistoryRecord(configurationID: UUID(), siteKey: "fixture", videoID: "v", title: "Fixture")])
+        try await Task.sleep(nanoseconds: 100_000_000)
+        host.layoutSubtreeIfNeeded()
+        let table = try XCTUnwrap(BrowserKeyboardView.descendants(of: host).compactMap { $0 as? NativeLibraryTableView }.first)
+        XCTAssertEqual(table.numberOfRows, 1)
+        state.watchHistory.replace([])
+        try await Task.sleep(nanoseconds: 100_000_000)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(table.numberOfRows, 0)
     }
 }

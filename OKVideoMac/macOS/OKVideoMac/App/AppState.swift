@@ -292,6 +292,7 @@ enum AppSection: String, CaseIterable, Identifiable {
 enum SidebarSearchKind: Equatable {
     case video
     case liveChannels
+    case favorites, history, settings
 }
 
 struct SidebarSearchPresentation: Equatable {
@@ -320,7 +321,22 @@ enum SidebarSearchPresentationPolicy {
                     fallback: "Filter channels in the current live TV source"
                 )
             )
-        case .home, .favorites, .history, .settings:
+        case .favorites:
+            return SidebarSearchPresentation(kind: .favorites,
+                placeholder: L10n.string("sidebar.search.favorites.placeholder", fallback: "Search favorites…"),
+                accessibilityLabel: L10n.string("sidebar.search.favorites.accessibility", fallback: "Search favorites"),
+                help: L10n.string("sidebar.search.favorites.help", fallback: "Filter favorite titles and sources in the selected scope"))
+        case .history:
+            return SidebarSearchPresentation(kind: .history,
+                placeholder: L10n.string("sidebar.search.history.placeholder", fallback: "Search history…"),
+                accessibilityLabel: L10n.string("sidebar.search.history.accessibility", fallback: "Search history"),
+                help: L10n.string("sidebar.search.history.help", fallback: "Filter history titles, sources, and episodes in the current configuration"))
+        case .settings:
+            return SidebarSearchPresentation(kind: .settings,
+                placeholder: L10n.string("sidebar.search.settings.placeholder", fallback: "Search settings…"),
+                accessibilityLabel: L10n.string("sidebar.search.settings.accessibility", fallback: "Search settings"),
+                help: L10n.string("sidebar.search.settings.help", fallback: "Find settings by name or keyword"))
+        case .home:
             return SidebarSearchPresentation(
                 kind: .video,
                 placeholder: L10n.string(
@@ -435,32 +451,6 @@ final class AppNavigationState: ObservableObject {
         selection = NavigationSelection(section: section, revision: selection.revision + 1)
         return selection
     }
-}
-
-/// Settings navigation is presentation state. Keeping it out of AppState's
-/// publisher prevents a pane click from rebuilding browser grids and live
-/// channel cards that are about to leave the hierarchy.
-@MainActor
-final class SettingsNavigationState: ObservableObject {
-    @Published private(set) var selectedPane: SettingsPane = .general
-
-    func select(_ pane: SettingsPane) {
-        guard selectedPane != pane else { return }
-        selectedPane = pane
-    }
-}
-
-enum SettingsPane: String, CaseIterable, Identifiable {
-    case general
-    case configurations
-    case search
-    case liveSources
-    case playback
-    case cache
-    case backup
-    case advanced
-
-    var id: String { rawValue }
 }
 
 enum AppTheme: String, CaseIterable, Identifiable {
@@ -3958,17 +3948,23 @@ struct HistoryPlaybackChoice: Identifiable, Equatable {
     let detail: VideoDetail
     let source: PlaySource
     let episode: PlayEpisode
+    let requiresRelink: Bool
+    let sameFilename: Bool
 
     init(
         id: UUID = UUID(),
         detail: VideoDetail,
         source: PlaySource,
-        episode: PlayEpisode
+        episode: PlayEpisode,
+        requiresRelink: Bool = false,
+        sameFilename: Bool = false
     ) {
         self.id = id
         self.detail = detail
         self.source = source
         self.episode = episode
+        self.requiresRelink = requiresRelink
+        self.sameFilename = sameFilename
     }
 
     var title: String {
@@ -4118,9 +4114,42 @@ struct NodePlaybackRecoveryCheckpoint: Equatable, Sendable {
     let position: TimeInterval
     let paused: Bool
 
-    init(position: TimeInterval, paused: Bool) {
+    let qualityName: String?
+
+    init(position: TimeInterval, paused: Bool, qualityName: String? = nil) {
         self.position = position.isFinite ? max(0, position) : 0
         self.paused = paused
+        self.qualityName = qualityName
+    }
+}
+
+enum BilibiliPlaybackPolicy {
+    static func isMediaURL(_ url: URL) -> Bool {
+        guard url.scheme == "http", ["127.0.0.1", "localhost", "::1"].contains(url.host ?? "") else { return false }
+        let parts = url.path.split(separator: "/")
+        return parts.count >= 8 && parts[0] == "spider" && parts[2] == "3"
+            && parts[3] == "proxy" && parts[4] == "mpd"
+            && parts[5...7].allSatisfy { !$0.isEmpty && $0.allSatisfy(\.isNumber) }
+    }
+
+    static func selectableQualities(_ qualities: [PlaybackQuality]) -> [PlaybackQuality] {
+        var urls = Set<String>()
+        return qualities.filter {
+            let url = $0.url.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !url.isEmpty && urls.insert(url).inserted
+        }
+    }
+}
+
+struct BilibiliPlaybackRecoveryBudget {
+    private var sessionID: UUID?
+    private var attempts = 0
+    mutating func reset() { sessionID = nil; attempts = 0 }
+    mutating func claim(_ session: UUID) -> Int? {
+        if sessionID != session { sessionID = session; attempts = 0 }
+        guard attempts < 2 else { return nil }
+        attempts += 1
+        return attempts
     }
 }
 
@@ -4254,14 +4283,70 @@ private struct CloudAuthorizationContext {
 enum PlaybackRequestOrigin: Equatable, Sendable {
     case direct
     case history(HistoryRecord)
+    // The user explicitly approved replacing the original cloud file.
+    // Keep the old row authoritative until native playback validates the seek.
+    case historyRelink(HistoryRecord, fromBeginning: Bool)
 
     var historyRecord: HistoryRecord? {
-        guard case .history(let record) = self else { return nil }
-        return record
+        switch self {
+        case .direct: return nil
+        case .history(let record), .historyRelink(let record, _): return record
+        }
+    }
+
+    var isRelink: Bool {
+        if case .historyRelink = self { return true }
+        return false
+    }
+
+    var startsFromBeginning: Bool {
+        if case .historyRelink(_, let fromBeginning) = self { return fromBeginning }
+        return false
     }
 
     var isHistory: Bool {
         historyRecord != nil
+    }
+}
+
+/// Stable-file matches may resume automatically. Replacement candidates never do.
+enum HistoryPlaybackResolution {
+    case original([HistoryPlaybackChoice])
+    case requiresRelink([HistoryPlaybackChoice])
+    case unavailable
+
+    var choices: [HistoryPlaybackChoice] {
+        switch self {
+        case .original(let choices), .requiresRelink(let choices): return choices
+        case .unavailable: return []
+        }
+    }
+    var automaticChoice: HistoryPlaybackChoice? {
+        guard case .original(let choices) = self, choices.count == 1 else { return nil }
+        return choices.first
+    }
+}
+
+enum HistoryRelinkResumePolicy {
+    enum Result: Equatable { case waiting, ready, rejected(String) }
+
+    static func evaluate(record: HistoryRecord, snapshot: PlayerSnapshot,
+                         target: TimeInterval, canSeek: Bool) -> Result {
+        if !canSeek || snapshot.isSeekable == false {
+            return .rejected(L10n.string("history.relink.unseekable", fallback: "This resource cannot seek. Your saved progress is unchanged; you can choose to play from the beginning."))
+        }
+        guard PlayerHistoryProgressCheckpoint.isReliable(snapshot),
+              snapshot.duration.isFinite, snapshot.duration > 0,
+              snapshot.position.isFinite else { return .waiting }
+        // A different cut must not inherit a timestamp merely because its
+        // filename says S01E72. Require a comparable native media duration.
+        if record.duration.isFinite, record.duration > 0,
+           abs(snapshot.duration - record.duration) > max(60, record.duration * 0.03) {
+            return .rejected(L10n.string("history.relink.duration-mismatch", fallback: "The new resource has a different duration and may be another cut. Your saved progress is unchanged; you can choose to play from the beginning."))
+        }
+        guard target.isFinite, target >= 0, target < snapshot.duration,
+              snapshot.position >= max(0, target - 5), snapshot.position <= target + 20 else { return .waiting }
+        return .ready
     }
 }
 
@@ -5150,6 +5235,15 @@ struct SearchSessionGate: Equatable {
     }
 }
 
+/// History progress has its own observation channel. A write must not trigger
+/// browser/detail layout while the separate player window renders video.
+@MainActor
+final class WatchHistoryState: ObservableObject {
+    @Published private(set) var records: [HistoryRecord] = []
+
+    func replace(_ records: [HistoryRecord]) { self.records = records }
+}
+
 /// Publishes the high-frequency mpv timeline independently from `AppState`.
 /// Browser views observe `AppState`, so keeping the snapshot there as an
 /// `@Published` value caused every progress tick to rebuild unrelated grids.
@@ -5200,6 +5294,7 @@ private struct HomeCategoryPublication: Equatable {
 final class AppState: ObservableObject {
     let navigation = AppNavigationState()
     let settingsNavigation = SettingsNavigationState()
+    let sidebarSearch = SidebarSearchState()
     var selectedSection: AppSection {
         get { navigation.selectedSection }
         set { navigation.selectedSection = newValue }
@@ -5215,7 +5310,10 @@ final class AppState: ObservableObject {
         ShortcutLiveSourceSelection?
     var selectedSettingsPane: SettingsPane {
         get { settingsNavigation.selectedPane }
-        set { settingsNavigation.select(newValue) }
+        set {
+            sidebarSearch.settings = ""
+            settingsNavigation.select(newValue)
+        }
     }
     @Published private(set) var configurations: [StoredConfiguration] = []
     @Published private(set) var activeConfigurationRecord: StoredConfiguration?
@@ -5273,7 +5371,29 @@ final class AppState: ObservableObject {
     @Published private(set) var activeSearchKeyword = ""
     @Published private(set) var globalSearchFocusRequest: UInt64 = 0
     @Published private(set) var homeSearchReturnSection: AppSection?
-    @Published private(set) var searchResults: [VideoSummary] = []
+    @Published private(set) var searchResults: [VideoSummary] = [] {
+        didSet { scheduleTMDBPrefetch() }
+    }
+    private var tmdbPrefetchTask: Task<Void, Never>?
+    private func scheduleTMDBPrefetch() {
+        tmdbPrefetchTask?.cancel()
+        guard UserDefaults.standard.object(forKey: "detail.tmdb.enabled") as? Bool != false,
+              let repository = tmdbRepository else { return }
+        let items = searchResults.filter {
+            !$0.isFolder && $0.resolvedContentKind != .action &&
+            (selectedSearchSiteKey == nil || $0.siteKey == selectedSearchSiteKey)
+        }.prefix(2)
+        guard !items.isEmpty else { return }
+        tmdbPrefetchTask = Task {
+            do { try await Task.sleep(nanoseconds: 350_000_000) } catch { return }
+            guard !Task.isCancelled else { return }
+            await withTaskGroup(of: Void.self) { group in
+                for item in items {
+                    group.addTask { await repository.prefetch(input: .init(detail: .init(summary: item))) }
+                }
+            }
+        }
+    }
     var searchClusters: [SearchResultCluster] { SearchResultAggregator.cluster(searchResults) }
     @Published private(set) var searchFailures: [SearchFailure] = []
     @Published private(set) var searchSiteOutcomes: [String: SearchSiteOutcome] = [:]
@@ -5294,7 +5414,11 @@ final class AppState: ObservableObject {
     @Published private(set) var searchFolderPath: [SearchFolderPage] = []
     @Published private(set) var searchFolderOrigin: SearchFolderOrigin?
     @Published private(set) var favorites: [FavoriteRecord] = []
-    @Published private(set) var history: [HistoryRecord] = []
+    let watchHistory = WatchHistoryState()
+    private(set) var history: [HistoryRecord] {
+        get { watchHistory.records }
+        set { watchHistory.replace(newValue) }
+    }
     @Published private(set) var historyPlaybackLoadingID: HistoryRecord.ID?
     @Published private(set) var historyPlaybackChoices: [HistoryPlaybackChoice] = []
     @Published private(set) var liveSources: [StoredLiveSource] = []
@@ -5336,7 +5460,11 @@ final class AppState: ObservableObject {
     @Published private(set) var livePlaybackNotice: String?
     let liveValidationActivity = LiveValidationActivityModel()
     var liveSourceValidationStatuses: [UUID: LiveSourceValidationStatus] { liveValidationActivity.statuses }
-    @Published private(set) var selectedDetail: VideoDetail?
+    @Published private(set) var selectedDetail: VideoDetail? {
+        didSet {
+            if let detail = selectedDetail { tmdbDetailModel.receive(detail: detail, key: tmdbSourceKey(for: detail)) }
+        }
+    }
     @Published private(set) var pendingDetailSummary: VideoSummary?
     @Published private(set) var detailRouteSummary: VideoSummary?
     @Published private(set) var detailLoadState: DetailPageLoadState = .loading
@@ -5354,6 +5482,7 @@ final class AppState: ObservableObject {
     let playbackMediaInfoCache = PlaybackMediaInfoCache()
     private var playerMediaInfoRequestID: UUID?
     let playerSnapshotState = PlayerSnapshotState()
+    let livePreviews = LivePreviewCoordinator()
     private var pictureInPictureObservation: AnyCancellable?
     lazy var pictureInPicture: PlayerPictureInPictureCoordinator = {
         let coordinator = PlayerPictureInPictureCoordinator { [weak self] playing, owner in
@@ -5412,6 +5541,7 @@ final class AppState: ObservableObject {
     @Published private(set) var isSwitchingPlaybackQuality = false
     @Published var isPlayerPresented = false {
         didSet {
+            if isPlayerPresented { livePreviews.interrupt() }
             if !isPlayerPresented {
                 pictureInPicture.end()
                 pictureInPicture.clearError()
@@ -5560,6 +5690,146 @@ final class AppState: ObservableObject {
     private(set) var searchBrowseSessionID = UUID()
 
     private let detailResponseCache = DetailResponseCache()
+    let tmdbDetailModel = TMDBDetailModel()
+    private(set) lazy var tmdbRepository: TMDBRepository? = environment.map { environment in
+        let runtime = TMDBNetworkRuntime.shared
+        let repository = TMDBRepository(client: runtime.service,
+            directory: environment.directories.applicationSupport.appendingPathComponent("TMDB", isDirectory: true),
+            prefetchArtwork: { [images = environment.imageRepository] work in
+                guard let url = TMDBClient.imageURL(path: work.artworkPath(.backdrop), size: "w1280") else { return }
+                _ = try? await images.posterImage(for: .init(url: url, pixels: 1280), priority: .forward)
+            })
+        runtime.register(repository)
+        return repository
+    }
+
+    func tmdbSourceKey(for detail: VideoDetail) -> String? {
+        guard let source = detailFavoriteSource, source.siteKey == detail.summary.siteKey,
+              detail.summary.resolvedContentKind == .media else { return nil }
+        return TMDBRepository.sourceKey(namespace: "\(source.configurationID):\(source.fingerprint)",
+            siteKey: detail.summary.siteKey, videoID: detail.summary.videoID)
+    }
+    func relatedTMDBKey(for detail: VideoDetail) -> String? {
+        guard let configuration = activeConfigurationRecord, let provider = providers[detail.summary.siteKey] else { return nil }
+        let context = FavoriteSourceContext(configuration: configuration, site: provider.site)
+        return TMDBRepository.sourceKey(namespace: "\(context.configurationID):\(context.fingerprint)", siteKey: detail.summary.siteKey, videoID: detail.summary.videoID)
+    }
+    /// Same catalog, scheduling and retention as home search, owned by the
+    /// related page so navigating back does not overwrite the home session.
+    func searchRelatedWork(_ page: TMDBRelatedPage, refresh: Bool) async throws {
+        guard activeConfigurationRecord?.id == page.configurationID else { throw CancellationError() }
+        let generation = page.searchGeneration
+        let choices = Self.orderedSearchProviders(catalog: searchCatalogSites, providers: providers)
+        if refresh || page.searchPaging.order.isEmpty {
+            page.searchPaging = SearchPagingState()
+            page.searchPaging.order = choices.map { $0.site.key }
+            page.totalSites = choices.count; page.completedSites = 0
+            for provider in choices {
+                page.searchPaging.cursors[provider.site.key] = SearchPageCursor(keyword: page.title)
+                if provider is NodeHTTPSpiderSiteProvider { page.searchPaging.restricted.insert(provider.site.key) }
+            }
+            let publisher = SearchSnapshotPublisher<MultiSiteSearchSnapshot> { [weak self, weak page] snapshot in
+                guard let self, let page, self.activeConfigurationRecord?.id == page.configurationID, page.searchGeneration == generation else { return }
+                page.results = snapshot.items.filter { $0.resolvedContentKind == .media }
+                page.maximumRetained = snapshot.maximumRetainedCandidates
+                page.maximumPerSite = snapshot.maximumResultsPerSite
+            }
+            defer { publisher.cancel() }
+            let stream = MultiSiteSearch(maximumConcurrency: 20).search(providers: choices, keyword: page.title,
+                providerPolicies: Self.aggregateSearchPolicies(choices), onPage: { [weak self, weak page] progress in
+                    await MainActor.run {
+                        guard let self, let page, self.activeConfigurationRecord?.id == page.configurationID, page.searchGeneration == generation else { return }
+                        var cursor = page.searchPaging.cursors[progress.siteKey] ?? SearchPageCursor(keyword: progress.keyword)
+                        cursor.keyword = progress.keyword
+                        cursor.accept(progress.page, requestedPage: progress.requestedPage)
+                        page.searchPaging.cursors[progress.siteKey] = cursor
+                        if progress.page.pagination.continuation == .more || progress.page.pagination.pageCount.map({ $0 > progress.requestedPage }) == true {
+                            page.searchPaging.restricted.remove(progress.siteKey)
+                        }
+                    }
+                })
+            for await event in stream {
+                try Task.checkCancellation()
+                guard activeConfigurationRecord?.id == page.configurationID else { throw CancellationError() }
+                switch event {
+                case .snapshot(let snapshot): publisher.submit(snapshot)
+                case .failure(let failure): page.searchPaging.cursors[failure.siteKey]?.fail(failure.message, uncertain: failure.isPaginationUncertain)
+                case .siteFirstPageCompleted: page.completedSites += 1
+                case .finished: publisher.flush()
+                default: break
+                }
+            }
+            try Task.checkCancellation(); publisher.flush()
+        } else {
+            for key in page.searchPaging.eligible(selected: nil, retry: false).prefix(4) {
+                try Task.checkCancellation()
+                guard let provider = providers[key], var cursor = page.searchPaging.cursors[key] else { continue }
+                let number = cursor.nextPage
+                let result = await MultiSiteSearch().nextPage(provider: provider, cursor: cursor)
+                try Task.checkCancellation()
+                guard activeConfigurationRecord?.id == page.configurationID else { throw CancellationError() }
+                page.searchPaging.lastServed = key
+                switch result {
+                case .success(let value, let keyword):
+                    cursor.keyword = keyword
+                    if cursor.accept(value, requestedPage: number) {
+                        let existing = page.results, title = page.title, maximum = page.maximumRetained, perSite = page.maximumPerSite
+                        let snapshot = await Task.detached(priority: .userInitiated) {
+                            MultiSiteSearch.merging(existing: existing, incoming: value.items, keyword: title,
+                                maximumRetainedCandidates: maximum, maximumResultsPerSite: perSite)
+                        }.value
+                        try Task.checkCancellation()
+                        page.results = snapshot.items.filter { $0.resolvedContentKind == .media }
+                    }
+                case .failure(let message, let uncertain): cursor.fail(message, uncertain: uncertain)
+                case .cancelled: throw CancellationError()
+                }
+                page.searchPaging.cursors[key] = cursor
+            }
+        }
+        page.hasMore = !page.searchPaging.eligible(selected: nil, retry: false).isEmpty
+        page.nextPage += 1
+    }
+
+    static func orderedSearchProviders(catalog: [SiteConfiguration], providers: [String: SiteProvider], selectedKeys: Set<String>? = nil) -> [SiteProvider] {
+        let choices = catalog.compactMap { site -> SiteProvider? in
+            guard selectedKeys == nil || selectedKeys!.contains(site.key) else { return nil }
+            // Dex implements searchable == 0 as an immediate empty return.
+            // Keep Node's route-based capability rules independent.
+            if providers[site.key] is AndroidDexSpiderSiteProvider, site.searchable == 0 { return nil }
+            return providers[site.key]
+        }
+        var nodeOrder = choices.enumerated().compactMap { index, provider -> (Int, NodeHTTPSpiderSiteProvider)? in
+            (provider as? NodeHTTPSpiderSiteProvider).map { (index, $0) }
+        }.sorted {
+            let a = $0.1.aggregateSearchPriority, b = $1.1.aggregateSearchPriority
+            return a == b ? $0.0 < $1.0 : a < b
+        }.map(\.1).makeIterator()
+        var dexOrder = choices.enumerated().compactMap { index, provider -> (Int, AndroidDexSpiderSiteProvider)? in
+            (provider as? AndroidDexSpiderSiteProvider).map { (index, $0) }
+        }.sorted {
+            let a = $0.1.aggregateSearchPriority, b = $1.1.aggregateSearchPriority
+            return a == b ? $0.0 < $1.0 : a < b
+        }.map(\.1).makeIterator()
+        return choices.map {
+            if $0 is NodeHTTPSpiderSiteProvider { return nodeOrder.next()! as SiteProvider }
+            if $0 is AndroidDexSpiderSiteProvider { return dexOrder.next()! as SiteProvider }
+            return $0
+        }
+    }
+    static func aggregateSearchPolicies(_ providers: [SiteProvider]) -> [String: MultiSiteSearchProviderPolicy] {
+        Dictionary(uniqueKeysWithValues: providers.compactMap { provider in
+            guard provider is NodeHTTPSpiderSiteProvider else { return nil }
+            return (provider.site.key, MultiSiteSearchProviderPolicy(concurrencyGroup: "node-http-runtime", maximumGroupConcurrency: 20, maximumPagesPerSite: 1))
+        })
+    }
+    func loadRelatedWork(_ summary: VideoSummary, configurationID: UUID) async throws -> VideoDetail {
+        guard activeConfigurationRecord?.id == configurationID, let provider = providers[summary.siteKey] else { throw CancellationError() }
+        let detail = try await Self.historyPlaybackDetail(provider: provider, summary: summary)
+        guard activeConfigurationRecord?.id == configurationID else { throw CancellationError() }
+        return detail
+    }
+
     private var detailRequestTask: Task<Void, Never>?
     private var detailTimeoutTask: Task<Void, Never>?
     private let detailRequestTimeout: TimeInterval
@@ -5574,6 +5844,12 @@ final class AppState: ObservableObject {
     private var discoverySearchReturnSnapshot:
         DetailHomeSearchReturnSnapshot?
     private var homeLoadSessionID = UUID()
+    // Independent observation keeps startup phases out of the large browser tree.
+    let homeRuntimeActivity = HomeRuntimeActivity()
+    var selectedHomeUsesAndroidRuntime: Bool {
+        guard let key = selectedSiteKey else { return false }
+        return providers[key] is AndroidDexSpiderSiteProvider
+    }
     private var androidHomeLoadTask: Task<SiteHome, Error>?
     private var androidHomeLoadTaskID: UUID?
     private var homeContentIdentity: HomeContentIdentity?
@@ -5660,6 +5936,9 @@ final class AppState: ObservableObject {
     private var pendingNodePlaybackConfigurationFallback:
         PendingNodePlaybackConfigurationFallback?
     private var nodePlaybackRecoveryGate = NodePlaybackRecoveryGate()
+    private var biliPlaybackRecoveryBudget = BilibiliPlaybackRecoveryBudget()
+    private var biliPlaybackRecoveryTask: Task<Void, Never>?
+    private var biliPlaybackRecoveryID: UUID?
     private var nodePlaybackRecoveryTask: Task<Void, Never>?
     private var nodePlaybackLastCheckpoint: (UUID, NodePlaybackRecoveryCheckpoint)?
     private var playbackSessionID = UUID()
@@ -5714,13 +5993,14 @@ final class AppState: ObservableObject {
     private var lastHistorySaveAt = Date.distantPast
     private var historyProgressCheckpoint = PlayerHistoryProgressCheckpoint()
     private var historyPlaybackPreparationID = UUID()
+    private var historyRelinkResumeIssue: (requestID: UUID, message: String)?
     private var historyPlaybackTask: Task<Void, Never>?
     private var historyPlaybackRequestedItem: HistoryRecord?
     private var historyPlaybackSessionCache = HistoryPlaybackSessionCache()
     private var pendingHistoryWrite: PlaybackHistoryWrite?
     private var historyPersistenceTask: Task<Void, Never>?
     private var shutdownTask: Task<Void, Never>?
-    private var isShutdownRequested = false
+    private var isShutdownRequested = false { didSet { if isShutdownRequested { livePreviews.interrupt() } } }
     private var hasCompletedShutdown = false
     private var shouldResumeAfterWake = false
     private var isClosingPlayer = false
@@ -7964,9 +8244,18 @@ final class AppState: ObservableObject {
         cancelAndroidHomeLoad()
         homeLoadSessionID = UUID()
         let sessionID = homeLoadSessionID
+        let activityID: UUID?
+        if provider is AndroidDexSpiderSiteProvider, let bridge = environment?.androidDexBridge {
+            activityID = homeRuntimeActivity.begin {
+                await bridge.startupStatusUpdates()
+            }
+        } else {
+            activityID = nil
+        }
         isHomeLoading = true
         homeLoadErrorIsLocalPluginCache = false
         defer {
+            if let activityID { homeRuntimeActivity.finish(activityID) }
             if homeLoadSessionID == sessionID {
                 isHomeLoading = false
             }
@@ -8049,7 +8338,9 @@ final class AppState: ObservableObject {
                 : nil
             homeLoadErrorIsLocalPluginCache = shouldPresent
                 && error is AndroidDexJarCacheFailure
-            if reportErrors && shouldPresent {
+            if let activityID, shouldPresent {
+                homeRuntimeActivity.fail(activityID, message: localizedRuntimeErrorMessage(error))
+            } else if reportErrors && shouldPresent {
                 show(error, title: L10n.string("provider.load.failed", fallback: "Provider Failed to Load"))
             }
             return false
@@ -8107,6 +8398,7 @@ final class AppState: ObservableObject {
         forceRefresh: Bool = false,
         favorite: FavoriteRecord? = nil
     ) async {
+        let tmdbEnteredAt = ProcessInfo.processInfo.systemUptime
         guard !Task.isCancelled else { return }
         if summary.resolvedContentKind == .action {
             await performHomeAction(SiteActionItem(summary: summary))
@@ -8135,6 +8427,8 @@ final class AppState: ObservableObject {
                     folderPath: searchFolderPath, folderOrigin: searchFolderOrigin)
             }
             cancelDetailRequest()
+            tmdbDetailModel.beginEntry(repository: nil, key: nil, summary: summary,
+                availability: TMDBNetworkRuntime.shared.availability, enabled: false)
             selectedDetail = nil
             pendingDetailSummary = nil
             detailRequestSummary = summary
@@ -8156,6 +8450,8 @@ final class AppState: ObservableObject {
            recovery.source.configurationID == activeConfigurationRecord?.id {
             detailFavoriteExpectation = recovery.expected
             guard detailFavoriteSource == recovery.source else {
+                tmdbDetailModel.beginEntry(repository: nil, key: nil, summary: summary,
+                    availability: TMDBNetworkRuntime.shared.availability, enabled: false)
                 detailRouteSummary = summary; selectedDetail = nil
                 detailLoadState = .failed(L10n.string("favorites.source.changed", fallback: "This source's server or account has changed. Use Confirm Source to verify this favorite again."))
                 return
@@ -8184,6 +8480,12 @@ final class AppState: ObservableObject {
         detailRequestSummary = summary
         // Media navigates immediately. Configuration entries are dispatched
         // above by their item/provider contract, never by engine type alone.
+        let metadataEnabled = UserDefaults.standard.object(forKey: "detail.tmdb.enabled") as? Bool != false
+        if !retainingDetail {
+            tmdbDetailModel.beginEntry(repository: tmdbRepository, key: tmdbSourceKey(for: VideoDetail(summary: summary)),
+                summary: summary, availability: TMDBNetworkRuntime.shared.availability,
+                startedAt: tmdbEnteredAt, enabled: metadataEnabled, policy: TMDBMatchingPreferences.policy())
+        }
         detailRouteSummary = summary
         detailLoadState = .loading
         detailSuggestedSearch = nil
@@ -8260,6 +8562,7 @@ final class AppState: ObservableObject {
     /// Provider replacement covers configuration revisions and account edits.
     /// Authorization entry points also invalidate snapshots before retrying.
     private func invalidateDetailContext(preservingRoute: Bool = false) {
+        tmdbDetailModel.cancel()
         catPawSearchMemory.invalidate(clearPerformance: true)
         let retainedSummary = preservingRoute && isDetailPagePresented
             ? (detailRouteSummary ?? detailRequestSummary) : nil
@@ -8272,6 +8575,8 @@ final class AppState: ObservableObject {
         detailRouteSummary = nil
         selectedDetail = nil
         if let retainedSummary {
+            tmdbDetailModel.beginEntry(repository: nil, key: nil, summary: retainedSummary,
+                availability: TMDBNetworkRuntime.shared.availability, enabled: false)
             detailRequestSummary = retainedSummary
             detailRouteSummary = retainedSummary
             detailSuggestedSearch = nil
@@ -11387,6 +11692,7 @@ final class AppState: ObservableObject {
               isPlayerPresented else { return }
         let preparationID = historyPlaybackPreparationID
         historyPlaybackChoices = []
+        nodePlaybackRecoveryGate.reset()
         historyPlaybackLoadingID = item.id
         playbackFailureSummary = nil
         playbackResolutionState = .restoringHistory
@@ -11398,11 +11704,37 @@ final class AppState: ObservableObject {
                 detail: choice.detail,
                 source: choice.source,
                 episode: choice.episode,
-                origin: .history(item),
+                origin: choice.requiresRelink ? .historyRelink(item, fromBeginning: false) : .history(item),
                 continuingRequestID: preparationID,
                 windowActivation: .preserveFocus
             )
         }
+    }
+
+    func historyPlaybackChoiceAction(_ choice: HistoryPlaybackChoice) -> String? {
+        guard choice.requiresRelink, let record = historyPlaybackRequestedItem else { return nil }
+        guard let position = Self.historyResumePosition(from: record) else {
+            return L10n.string("history.relink.play", fallback: "Link and Play")
+        }
+        let seconds = Int(position)
+        let time = String(format: "%02d:%02d", seconds / 60, seconds % 60)
+        return L10n.string("history.relink.resume", fallback: "Link and Resume from %@", time)
+    }
+
+    var canRestartHistoryRelinkFromBeginning: Bool {
+        guard let pendingPlayback else { return false }
+        return pendingPlayback.origin.isRelink && !pendingPlayback.origin.startsFromBeginning
+            && historyRelinkResumeIssue?.requestID == activePlayerRequestID
+            && pendingPlayback.requestID == activePlayerRequestID
+    }
+
+    func restartHistoryRelinkFromBeginning() async {
+        guard canRestartHistoryRelinkFromBeginning, let pending = pendingPlayback,
+              let record = pending.origin.historyRecord else { return }
+        nodePlaybackRecoveryGate.reset()
+        await startPlayback(detail: pending.detail, source: pending.source, episode: pending.episode,
+            origin: .historyRelink(record, fromBeginning: true),
+            continuingRequestID: pending.requestID, windowActivation: .preserveFocus)
     }
 
     func cancelHistoryPlaybackChoices() {
@@ -11532,6 +11864,7 @@ final class AppState: ObservableObject {
             return
         }
 
+        var relinkCandidates: [HistoryPlaybackChoice] = []
         let recipeDetailID = item.playbackReference?.navigationRecipe.flatMap {
             recipe in
             recipe.configurationID == owningConfigurationID
@@ -11563,11 +11896,9 @@ final class AppState: ObservableObject {
                 )
                 guard isCurrentHistoryPreparation(preparationID) else { return }
 
-                let selections = Self.historyPlaybackChoices(
-                    in: detail,
-                    record: item
-                )
-                if selections.count == 1, let selection = selections.first {
+                let resolution = Self.historyPlaybackResolution(in: detail, record: item)
+                let selections = resolution.choices
+                if let selection = resolution.automaticChoice {
                     await startPlayback(
                         detail: detail,
                         source: selection.source,
@@ -11578,19 +11909,11 @@ final class AppState: ObservableObject {
                     )
                     return
                 }
-                if selections.count > 1 {
-                    presentHistoryPlaybackChoices(
-                        selections.map {
-                            HistoryPlaybackChoice(
-                                detail: detail,
-                                source: $0.source,
-                                episode: $0.episode
-                            )
-                        },
-                        preparationID: preparationID
-                    )
+                if case .original = resolution, !selections.isEmpty {
+                    presentHistoryPlaybackChoices(selections, preparationID: preparationID)
                     return
                 }
+                if case .requiresRelink = resolution { relinkCandidates += selections }
 
                 // A provider may refresh the same episode with a shortened
                 // display name or a renamed route. Do not claim that the
@@ -11652,6 +11975,7 @@ final class AppState: ObservableObject {
                 record: item
             )
             var resolved: [HistoryPlaybackChoice] = []
+            var ambiguousOriginal = false
             for summary in candidates.prefix(12) {
                 guard let detail = try? await Self.historyPlaybackDetail(
                     provider: provider,
@@ -11659,20 +11983,18 @@ final class AppState: ObservableObject {
                 ) else {
                     continue
                 }
-                let selections = Self.historyPlaybackChoices(
-                    in: detail,
-                    record: item
-                )
-                resolved.append(contentsOf: selections.map {
-                    HistoryPlaybackChoice(
-                        detail: detail,
-                        source: $0.source,
-                        episode: $0.episode
-                    )
-                })
+                let resolution = Self.historyPlaybackResolution(in: detail, record: item)
+                switch resolution {
+                case .original(let choices):
+                    resolved += choices
+                    ambiguousOriginal = ambiguousOriginal || choices.count > 1
+                case .requiresRelink(let choices): relinkCandidates += choices
+                case .unavailable: break
+                }
             }
             guard isCurrentHistoryPreparation(preparationID) else { return }
-            if resolved.count == 1, let match = resolved.first {
+            resolved = Self.uniqueHistoryPlaybackChoices(resolved)
+            if !ambiguousOriginal, resolved.count == 1, let match = resolved.first {
                 await startPlayback(
                     detail: match.detail,
                     source: match.source,
@@ -11683,7 +12005,7 @@ final class AppState: ObservableObject {
                 )
                 return
             }
-            if resolved.count > 1 {
+            if !resolved.isEmpty {
                 presentHistoryPlaybackChoices(
                     Array(resolved.prefix(12)),
                     preparationID: preparationID
@@ -11704,6 +12026,10 @@ final class AppState: ObservableObject {
         }
 
         guard isCurrentHistoryPreparation(preparationID) else { return }
+        if !relinkCandidates.isEmpty {
+            presentHistoryPlaybackChoices(relinkCandidates, preparationID: preparationID)
+            return
+        }
         failHistoryPlayback(
             L10n.string("history.restore.reselect", fallback: "%@. Choose again.", recoveryFailure),
             preparationID: preparationID
@@ -11752,19 +12078,15 @@ final class AppState: ObservableObject {
         guard isCurrentHistoryPreparation(preparationID),
               activePlayerRequestID == preparationID,
               !choices.isEmpty else { return }
-        var seen = Set<String>()
-        historyPlaybackChoices = choices.filter { choice in
-            seen.insert(
-                [
-                    choice.detail.summary.siteKey,
-                    choice.detail.summary.videoID,
-                    choice.source.stableIdentity,
-                    choice.episode.stableIdentity
-                ].joined(separator: "|")
-            ).inserted
-        }
+        historyPlaybackChoices = Self.uniqueHistoryPlaybackChoices(choices)
         playbackResolutionState = .restoringHistory
-        playbackFailureSummary = L10n.string("history.restore.choose-candidate", fallback: "Multiple possible original streams or episodes were found. Choose one; this history item will be repaired automatically after playback succeeds.")
+        if choices.contains(where: \.requiresRelink) {
+            playbackFailureSummary = choices.allSatisfy(\.sameFilename)
+                ? L10n.string("history.relink.same-file", fallback: "The original resource was updated. A matching episode with the same filename and version was found. Confirm to link it; your history is updated only after playback and resume succeed.")
+                : L10n.string("history.relink.choose-version", fallback: "The original resource was updated. These resources match the season and episode; check the filename, version and stream before linking. Your saved progress is preserved until playback succeeds.")
+        } else {
+            playbackFailureSummary = L10n.string("history.restore.choose-candidate", fallback: "Multiple possible original streams or episodes were found. Choose one; this history item will be repaired automatically after playback succeeds.")
+        }
         playerSnapshot.status = .loading
         playerPresentedError = nil
     }
@@ -11962,6 +12284,7 @@ final class AppState: ObservableObject {
     }
 
     func dismissDetail(restoringSearch: Bool = true) {
+        tmdbDetailModel.cancel()
         favoriteOpenGeneration = UUID(); favoriteOpenTask?.cancel(); favoriteLoadingID = nil
         detailFavoriteExpectation = nil
         detailFavoriteSource = nil
@@ -12000,7 +12323,7 @@ final class AppState: ObservableObject {
         context: SearchLaunchContext
     ) {
         let normalized = keyword.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
-        if activeConfigurationUsesNodeRuntime, isSearching,
+        if isSearching,
            activeSearchKeyword == normalized, activeSearchContext == context,
            activeSearchScope == searchSiteScope { return }
         activeSearchContext = context
@@ -12086,19 +12409,7 @@ final class AppState: ObservableObject {
         // and older bundles may report `searchable == 0` even though their
         // route accepts a normal search request. Schedule every selected,
         // runnable provider and let the request's exact outcome decide.
-        var searchableProviders: [SiteProvider] = searchCatalogSites.compactMap { site in
-            guard selectedKeys.contains(site.key) else { return nil }
-            return providers[site.key]
-        }
-        // Reorder only CatPaw slots. Every selected site still gets a first-page
-        // attempt, including unknown and previously slow providers.
-        var nodeOrder = searchableProviders.enumerated().compactMap { index, provider -> (Int, NodeHTTPSpiderSiteProvider)? in
-            (provider as? NodeHTTPSpiderSiteProvider).map { (index, $0) }
-        }.sorted {
-            let a = $0.1.aggregateSearchPriority, b = $1.1.aggregateSearchPriority
-            return a == b ? $0.0 < $1.0 : a < b
-        }.map(\.1).makeIterator()
-        searchableProviders = searchableProviders.map { $0 is NodeHTTPSpiderSiteProvider ? (nodeOrder.next()! as SiteProvider) : $0 }
+        let searchableProviders = Self.orderedSearchProviders(catalog: searchCatalogSites, providers: providers, selectedKeys: selectedKeys)
         if refreshKeys == nil { searchPaging.order = searchableProviders.map { $0.site.key } }
         for provider in searchableProviders {
             let key = provider.site.key
@@ -12115,20 +12426,9 @@ final class AppState: ObservableObject {
             searchTask = nil
             return
         }
-        let aggregatePolicies: [String: MultiSiteSearchProviderPolicy] = Dictionary(
-            uniqueKeysWithValues: searchableProviders.compactMap {
-                provider -> (String, MultiSiteSearchProviderPolicy)? in
-                guard provider is NodeHTTPSpiderSiteProvider else { return nil }
-                return (
-                    provider.site.key,
-                    MultiSiteSearchProviderPolicy(
-                        concurrencyGroup: "node-http-runtime",
-                        maximumGroupConcurrency: 20,
-                        maximumPagesPerSite: 1
-                    )
-                )
-            }
-        )
+        let aggregatePolicies = Self.aggregateSearchPolicies(searchableProviders)
+        let searchStarted = ProcessInfo.processInfo.systemUptime
+        var publishedFirstResult = false
         let stream = MultiSiteSearch(maximumConcurrency: 20).search(
             providers: searchableProviders,
             keyword: keyword,
@@ -12145,6 +12445,11 @@ final class AppState: ObservableObject {
         let applySnapshot: (MultiSiteSearchSnapshot) -> Void = { [weak self] snapshot in
             guard let self,
                   self.searchSessionGate.accepts(sessionID) else { return }
+            if !publishedFirstResult, !snapshot.items.isEmpty {
+                publishedFirstResult = true
+                SearchLatencyTrace.record("first-published", id: sessionID.uuidString,
+                                          started: searchStarted, count: snapshot.items.count)
+            }
             // MultiSiteSearch is the semantic owner of relevance, retention,
             // eviction and per-site diversity. AppState only publishes its
             // authoritative retained snapshot.
@@ -12212,7 +12517,21 @@ final class AppState: ObservableObject {
         isHomeSearchPresented = true
     }
 
+    func sidebarSearchDidChange(_ value: String) {
+        switch SidebarSearchPresentationPolicy.presentation(for: selectedSection).kind {
+        case .video:
+            if value.isEmpty { clearGlobalVideoSearch() }
+        case .favorites, .history:
+            if isDetailPagePresented, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                dismissDetail(restoringSearch: false)
+            }
+        case .liveChannels, .settings: break
+        }
+    }
+
     func focusGlobalSearch() {
+        guard !WindowModalRegistry.isPresented(in: NSApp.keyWindow) else { return }
+        BrowserRootSplitController.revealSidebar(in: NSApp.keyWindow)
         globalSearchFocusRequest &+= 1
     }
 
@@ -12254,13 +12573,13 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func dismissHomeSearch(returningTo section: AppSection) {
+    private func dismissHomeSearch(returningTo section: AppSection, preservingDraft: Bool = false) {
         if isDetailPagePresented {
             dismissDetail(restoringSearch: false)
         }
         discoverySearchReturnSnapshot = nil
         cancelSearch()
-        searchDraftKeyword = ""
+        if !preservingDraft { searchDraftKeyword = "" }
         activeSearchKeyword = ""
         searchFolderPath = []
         searchFolderOrigin = nil
@@ -12279,7 +12598,7 @@ final class AppState: ObservableObject {
             dismissDetail(restoringSearch: false)
         }
         if isHomeSearchPresented {
-            dismissHomeSearch(returningTo: section)
+            dismissHomeSearch(returningTo: section, preservingDraft: true)
             return
         }
         if selectedSection == .home, section != .home {
@@ -12299,7 +12618,8 @@ final class AppState: ObservableObject {
     }
 
     var allowsBrowserShortcuts: Bool {
-        ShortcutRoutePolicy.allowsBrowserCommands(
+        !WindowModalRegistry.isPresented(in: NSApp.keyWindow)
+        && ShortcutRoutePolicy.allowsBrowserCommands(
             browserWindowIsKey: isBrowserWindowKey,
             playerWindowIsKey: isPlayerWindowKey
         )
@@ -12923,7 +13243,8 @@ final class AppState: ObservableObject {
         windowActivation: PlayerWindowActivationPolicy = .userInitiated,
         automaticAdvanceRequestID: UUID? = nil,
         recoveryCheckpoint: NodePlaybackRecoveryCheckpoint? = nil,
-        isAutomaticRecovery: Bool = false
+        isAutomaticRecovery: Bool = false,
+        recoveryRequestID: UUID? = nil
     ) async {
         if let automaticAdvanceRequestID {
             guard automaticEpisodeAdvanceController.owns(
@@ -12956,6 +13277,10 @@ final class AppState: ObservableObject {
             return
         }
         if continuingRequestID == nil {
+            biliPlaybackRecoveryTask?.cancel()
+            biliPlaybackRecoveryTask = nil
+            biliPlaybackRecoveryID = nil
+            biliPlaybackRecoveryBudget.reset()
             playbackAuthorizationResumeGate.resetForNewPlayback()
             nodePlaybackRecoveryGate.reset()
             nodePlaybackRecoveryTask?.cancel()
@@ -12972,7 +13297,7 @@ final class AppState: ObservableObject {
         }
         if let continuingRequestID {
             if authorizationRetry || isAutomaticRecovery {
-                guard activePlayerRequestID == continuingRequestID,
+                guard activePlayerRequestID == (recoveryRequestID ?? continuingRequestID),
                       playbackSessionID == continuingRequestID,
                       isPlayerPresented else { return }
             } else {
@@ -13026,6 +13351,7 @@ final class AppState: ObservableObject {
         // requests and result clustering compete with the player's cold-start
         // proxy traffic. Keep the accumulated results for a fast return.
         let sessionID = continuingRequestID ?? UUID()
+        historyRelinkResumeIssue = nil
         let nodeTransferContext = transferPlaybackContext(for: sessionID)
         playbackRequestsResolving.insert(sessionID)
         defer {
@@ -13145,10 +13471,10 @@ final class AppState: ObservableObject {
             var currentProviderReference = Self.acceptedProviderResourceReference(
                 episode.providerResourceReference,
                 provider: provider
-            ) ?? Self.acceptedHistoryProviderReference(
+            ) ?? (origin.isRelink ? nil : Self.acceptedHistoryProviderReference(
                 from: origin.historyRecord,
                 provider: provider
-            )
+            ))
             // User line selection is authoritative. Automatic attempts may use
             // configured parsers for that resource, but never silently move to
             // another provider line by array order. One same-resource refresh
@@ -13204,39 +13530,13 @@ final class AppState: ObservableObject {
                     // rebuilt. Repeating player() with the old episode value
                     // is not a refresh.
                     do {
-                        let historyRecord = origin.historyRecord
-                        let reference = historyRecord?.playbackReference
-                        let providerReference = currentProviderReference
-                        let refreshRequest = PlaybackRefreshRequest(
-                            // The verified fresh detail ID is usable by the provider;
-                            // a persisted cloud row ID may be only a deduplication hash.
-                            videoID: detail.summary.videoID,
-                            title: historyRecord?.title
-                                ?? detail.summary.title,
-                            sourceIdentity: providerReference?.sourceIdentity
-                                ?? reference?.sourceIdentity
-                                ?? source.stableIdentity,
-                            resourceIdentity: providerReference?.episodeIdentity
-                                ?? reference?.resourceIdentity
-                                ?? episode.stableIdentity,
-                            sourceName: historyRecord?.sourceName
-                                ?? source.name,
-                            episodeName: historyRecord?.episodeName
-                                ?? episode.name,
-                            episodeReference: providerReference?
-                                .stableResourceLocator
-                                ?? historyRecord?.episodeReference
-                                ?? episode.url,
-                            providerResourceReference: providerReference
-                        )
+                        let refreshRequest = Self.historyPlaybackRefreshRequest(detail: detail,
+                            source: source, episode: episode, providerReference: currentProviderReference, origin: origin)
                         let refreshed: RefreshedSitePlayback
                         if let androidProvider = provider
                             as? AndroidDexSpiderSiteProvider {
                             refreshed = try await androidProvider
-                                .refreshPlayback(
-                                    refreshRequest,
-                                    interactionID: sessionID
-                                )
+                                .refreshPlayback(refreshRequest)
                         } else if let nodeProvider = provider
                             as? NodeHTTPSpiderSiteProvider {
                             refreshed = try await nodeProvider.refreshPlayback(
@@ -13248,7 +13548,7 @@ final class AppState: ObservableObject {
                                 refreshRequest
                             )
                         }
-                        if let historyRecord,
+                        if let historyRecord = origin.historyRecord,
                            !Self.historyContentMatches(refreshed.detail, record: historyRecord) {
                             throw AppError.playback("刷新后的影片与历史记录不一致，请重新选择播放内容")
                         }
@@ -13334,7 +13634,7 @@ final class AppState: ObservableObject {
                     ? .resolving
                     : .retrying
 
-                let result: SitePlaybackResult
+                var result: SitePlaybackResult
                 do {
                     if let refreshedPlaybackResult {
                         result = refreshedPlaybackResult
@@ -13344,8 +13644,15 @@ final class AppState: ObservableObject {
                             flag: candidateSource.name,
                             episodeURL: candidateEpisode.url,
                             sessionID: sessionID,
+                            refreshPlayback: isRefreshAttempt,
                             transferContext: nodeTransferContext
                         )
+                    }
+                    if let qualityName = recoveryCheckpoint?.qualityName {
+                        guard let quality = result.qualities.first(where: { $0.name == qualityName }) else {
+                            throw AppError.playback(L10n.string("player.quality.unavailable-after-refresh", fallback: "The selected quality is no longer available. Choose another quality."))
+                        }
+                        result.url = quality.url
                     }
                     if let receipt = result.transferReceipt {
                         unresolvedTransferReceipts[receipt.receiptID] = receipt
@@ -13575,7 +13882,8 @@ final class AppState: ObservableObject {
                         attemptsInCandidate = max(attemptsInCandidate, attempt.number)
                         attempt.number += completedAttempts
                         currentPlaybackAttempt = attempt
-                        if !checkedLateNodeAuthorization,
+                        if historyRelinkResumeIssue?.requestID != sessionID,
+                           !checkedLateNodeAuthorization,
                            result.validationPolicy == .playerAuthoritative {
                             checkedLateNodeAuthorization = true
                             let pending = PendingCloudPlayback(
@@ -13625,7 +13933,8 @@ final class AppState: ObservableObject {
                         pendingPlayback = nil
                         return
                     case .failed(let message):
-                        if !checkedLateNodeAuthorization,
+                        if historyRelinkResumeIssue?.requestID != sessionID,
+                           !checkedLateNodeAuthorization,
                            result.validationPolicy == .playerAuthoritative {
                             checkedLateNodeAuthorization = true
                             let pending = PendingCloudPlayback(
@@ -13683,12 +13992,14 @@ final class AppState: ObservableObject {
                     failures.append(candidateFailure)
                     playbackFailureSummary = candidateFailure
                 }
-                if candidateMediaFailure?.allowsAutomaticRecovery == false || completedAttempts >= 8 {
+                if historyRelinkResumeIssue?.requestID == sessionID
+                    || candidateMediaFailure?.allowsAutomaticRecovery == false || completedAttempts >= 8 {
                     break
                 }
             }
 
-            let message = Self.consolidatedPlaybackFailureMessage(failures)
+            let message = historyRelinkResumeIssue.flatMap { $0.requestID == sessionID ? $0.message : nil }
+                ?? Self.consolidatedPlaybackFailureMessage(failures)
             prepareNodePlaybackFailureRecovery(provider: provider, message: message)
             playbackResolutionState = .exhausted
             playbackFailureSummary = message
@@ -13738,6 +14049,7 @@ final class AppState: ObservableObject {
         flag: String,
         episodeURL: String,
         sessionID: UUID,
+        refreshPlayback: Bool,
         transferContext: NodeTransferPlaybackContext
     ) async throws -> SitePlaybackResult {
         try Task.checkCancellation()
@@ -13748,7 +14060,7 @@ final class AppState: ObservableObject {
             return try await androidProvider.player(
                 flag: flag,
                 episodeURL: episodeURL,
-                interactionID: sessionID
+                refreshPlayback: refreshPlayback
             )
         }
         if let nodeProvider = provider as? NodeHTTPSpiderSiteProvider {
@@ -14461,6 +14773,7 @@ final class AppState: ObservableObject {
     }
 
     func deleteLiveSource(_ id: UUID) async {
+        livePreviews.invalidate(sourceKey: LivePreviewPolicy.digest([LiveBrowserPreferenceStore.encode(.imported(id))]))
         if importedIdentityEnabled {
             await retireImportedLiveSource(id)
             return
@@ -14596,6 +14909,7 @@ final class AppState: ObservableObject {
     }
 
     private func startInitialLiveSourceValidation(sourceID: UUID, playlist: LivePlaylist) {
+        livePreviews.interrupt()
         cancelLiveSourceValidation(sourceID)
         guard !epgSleeping, !isShutdownRequested, !deletingImportedSourceIDs.contains(sourceID),
               let source = liveSources.first(where: { $0.id == sourceID }) else { return }
@@ -14630,6 +14944,7 @@ final class AppState: ObservableObject {
                     self.liveValidationProgressRelays[sourceID] = nil
                 }
             }
+            await self.livePreviews.quiesce()
             let result = await service.run(channels: channels, permit: permit) { done, total in
                 relay.submit(completed: done, total: total)
             }
@@ -15012,6 +15327,7 @@ final class AppState: ObservableObject {
         initialRequestID: UUID? = nil,
         context: LivePlaybackNavigationContext
     ) async {
+        await livePreviews.quiesce()
         guard hasLivePlaybackLoader, liveFlowMayLoad(context), context.sourceID == sourceID else {
             return
         }
@@ -16369,12 +16685,15 @@ final class AppState: ObservableObject {
         )
     }
 
-    func clearPosterCache() async {
-        guard let repository = environment?.imageRepository else { return }
+    @discardableResult
+    func clearPosterCache() async -> Bool {
+        guard let repository = environment?.imageRepository else { return false }
         do {
             try await repository.clear()
+            return true
         } catch {
             show(error, title: L10n.string("settings.poster-cache.clear.failed", fallback: "Unable to Clear Poster Cache"))
+            return false
         }
     }
 
@@ -17130,6 +17449,12 @@ final class AppState: ObservableObject {
         await selectPlayerTrack(tracks[nextIndex])
     }
 
+    var selectablePlaybackQualities: [PlaybackQuality] {
+        BilibiliPlaybackPolicy.selectableQualities(playbackQualities)
+    }
+
+    var hasPlaybackQualityChoices: Bool { selectablePlaybackQualities.count > 1 }
+
     var selectedPlaybackQualityName: String? {
         playbackQualities.first { $0.id == selectedPlaybackQualityID }?.name
     }
@@ -17145,6 +17470,9 @@ final class AppState: ObservableObject {
             return
         }
 
+        biliPlaybackRecoveryTask?.cancel()
+        biliPlaybackRecoveryTask = nil
+        biliPlaybackRecoveryID = nil
         let switchSessionID = UUID()
         playbackQualitySwitchSessionID = switchSessionID
         let owningPlaybackSessionID = playbackSessionID
@@ -18759,6 +19087,82 @@ final class AppState: ObservableObject {
         return nil
     }
 
+    static func historyPlaybackRefreshRequest(detail: VideoDetail, source: PlaySource, episode: PlayEpisode,
+                                              providerReference: PlaybackResourceReference?, origin: PlaybackRequestOrigin) -> PlaybackRefreshRequest {
+        let history = origin.isRelink ? nil : origin.historyRecord
+        let reference = history?.playbackReference
+        return PlaybackRefreshRequest(videoID: detail.summary.videoID, title: history?.title ?? detail.summary.title,
+            sourceIdentity: providerReference?.sourceIdentity ?? reference?.sourceIdentity ?? source.stableIdentity,
+            resourceIdentity: providerReference?.episodeIdentity ?? reference?.resourceIdentity ?? episode.stableIdentity,
+            sourceName: history?.sourceName ?? source.name, episodeName: history?.episodeName ?? episode.name,
+            episodeReference: providerReference?.stableResourceLocator ?? history?.episodeReference ?? episode.url,
+            providerResourceReference: providerReference)
+    }
+
+    static func uniqueHistoryPlaybackChoices(_ choices: [HistoryPlaybackChoice]) -> [HistoryPlaybackChoice] {
+        var seen = Set<String>()
+        return choices.filter { choice in
+            let locator = choice.episode.providerResourceReference?.stableResourceLocator ?? choice.episode.url
+            let identity = QuarkEpisodeReference.identity(from: locator)
+            let resource = identity.map { "\($0.providerID)|\($0.shareID)|\($0.fileID)" } ?? choice.episode.stableIdentity
+            return seen.insert([choice.detail.summary.siteKey, choice.source.name, resource].joined(separator: "|")).inserted
+        }
+    }
+
+    /// Keeps version/edition/part markers and release-group text intact. Only
+    /// transport decoration (size prefix, folder suffix) is discarded.
+    static func historyRelinkFilename(_ raw: String) -> String {
+        let name = raw.replacingOccurrences(of: #"(?i)^\s*\[\s*[0-9.]+\s*(?:KB|MB|GB|TB)\s*\]\s*"#,
+            with: "", options: .regularExpression)
+        return PlaybackResourceAnalyzer.compactName(name, preserveTechnicalPrefix: true)
+            .folding(options: [.caseInsensitive, .widthInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func historyPlaybackResolution(in detail: VideoDetail, record: HistoryRecord) -> HistoryPlaybackResolution {
+        guard historyContentMatches(detail, record: record) else { return .unavailable }
+        let original = historyPlaybackChoices(in: detail, record: record).map {
+            HistoryPlaybackChoice(detail: detail, source: $0.source, episode: $0.episode)
+        }
+        if !original.isEmpty { return .original(original) }
+        let locator = record.playbackReference?.providerResourceReference?.stableResourceLocator ?? record.episodeReference
+        guard let locator, let oldIdentity = QuarkEpisodeReference.identity(from: locator),
+              let name = record.episodeName?.nonEmpty else { return .unavailable }
+        let recipe = record.playbackReference?.navigationRecipe
+        let old = PlaybackResourceAnalyzer.analyze(PlayEpisode(name: name, url: "history-relink", metadata: recipe?.episode.metadata),
+            categoryName: recipe?.episode.categoryName ?? detail.summary.categoryName)
+        let filename = historyRelinkFilename(name)
+        guard !filename.isEmpty else { return .unavailable }
+        var candidates: [HistoryPlaybackChoice] = []
+        for source in detail.playSources {
+            for episode in source.episodes {
+                let locator = episode.providerResourceReference?.stableResourceLocator ?? episode.url
+                guard let identity = QuarkEpisodeReference.identity(from: locator), identity != oldIdentity else { continue }
+                let candidate = PlaybackResourceAnalyzer.analyze(episode, categoryName: detail.summary.categoryName)
+                guard old.role == .main, candidate.role == .main,
+                      old.evidence != .conflict, candidate.evidence != .conflict else { continue }
+                let sameFilename = filename == historyRelinkFilename(episode.name)
+                    && old.versionLabels == candidate.versionLabels
+                let sameEpisode = old.hasReliableEpisode && candidate.hasReliableEpisode
+                    && old.season != nil && old.season == candidate.season && old.episode == candidate.episode
+                // Bare numeric labels, row positions, and an inferred season
+                // cannot establish a replacement candidate by themselves.
+                let fullFilename = sameFilename && filename.count > 12 && old.hasReliableEpisode
+                    && old.season == candidate.season && old.episode == candidate.episode
+                guard sameEpisode || fullFilename else { continue }
+                candidates.append(HistoryPlaybackChoice(detail: detail, source: source, episode: episode,
+                    requiresRelink: true, sameFilename: sameFilename))
+            }
+        }
+        candidates.sort {
+            let left = ($0.sameFilename ? 2 : 0) + ($0.source.name == record.sourceName ? 1 : 0)
+            let right = ($1.sameFilename ? 2 : 0) + ($1.source.name == record.sourceName ? 1 : 0)
+            return left > right
+        }
+        let unique = uniqueHistoryPlaybackChoices(candidates)
+        return unique.isEmpty ? .unavailable : .requiresRelink(unique)
+    }
+
     static func historyPlaybackChoices(
         in detail: VideoDetail,
         record: HistoryRecord
@@ -19665,6 +20069,7 @@ final class AppState: ObservableObject {
     }
 
     private func cancelAndroidHomeLoad() {
+        homeRuntimeActivity.cancel()
         androidHomeLoadTask?.cancel()
         androidHomeLoadTask = nil
         androidHomeLoadTaskID = nil
@@ -20835,6 +21240,16 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Settings may inspect inheritance without loading a playlist or starting EPG networking.
+    func settingsEPGOrigin(for id: UUID) -> String {
+        guard epgPreferences.automaticEPGEnabled else { return "off" }
+        let preference = epgPreferences.source(id)
+        if preference.mode == .disabled { return "off" }
+        if preference.mode == .custom { return "custom" }
+        guard let playlist = loadedLivePlaylists[id] else { return "automatic" }
+        return epgPreferences.resolvedXMLTV(for: .imported(id), embedded: playlist.epgURL)?.origin.rawValue ?? "none"
+    }
+
     private func resolvedEPGSource(for source: LiveSourceID) -> ResolvedXMLTVSource? {
         guard case .imported(let id) = source,
               liveSources.contains(where: { $0.id == id }), loadedLivePlaylists[id] != nil else { return nil }
@@ -21720,6 +22135,7 @@ final class AppState: ObservableObject {
             playbackFailureSummary = message
             return
         }
+        if let requestID, recoverBilibiliPlayback(requestID: requestID) { return }
         if let requestID, requestID == activePlayerRequestID,
            let playback = activePlayback,
            let provider = providers[playback.detail.summary.siteKey] as? NodeHTTPSpiderSiteProvider,
@@ -21763,6 +22179,46 @@ final class AppState: ObservableObject {
         } else {
             presentPlaybackErrorOnce(message, requestID: activePlayerRequestID)
         }
+    }
+
+    private func recoverBilibiliPlayback(requestID: UUID) -> Bool {
+        guard requestID == activePlayerRequestID, isPlayerPresented, !isClosingPlayer,
+              !isShutdownRequested, !isSwitchingPlaybackQuality, hasCurrentPlaybackStarted,
+              let playback = activePlayback,
+              providers[playback.detail.summary.siteKey] is NodeHTTPSpiderSiteProvider,
+              BilibiliPlaybackPolicy.isMediaURL(playback.media.url) else { return false }
+        if biliPlaybackRecoveryTask != nil { return true }
+        let owner = playbackSessionID
+        guard let attempt = biliPlaybackRecoveryBudget.claim(owner) else { return false }
+        let previous = nodePlaybackLastCheckpoint.flatMap { $0.0 == requestID ? $0.1 : nil }
+        let checkpoint = NodePlaybackRecoveryCheckpoint(
+            position: previous?.position ?? playerSnapshot.position,
+            paused: previous?.paused ?? false, qualityName: selectedPlaybackQualityName)
+        let ticket = UUID()
+        biliPlaybackRecoveryID = ticket
+        playbackFailureSummary = nil
+        playbackResolutionState = .retrying
+        playerSnapshot.status = .loading
+        biliPlaybackRecoveryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.biliPlaybackRecoveryID == ticket {
+                    self.biliPlaybackRecoveryTask = nil
+                    self.biliPlaybackRecoveryID = nil
+                }
+            }
+            do { try await Task.sleep(nanoseconds: UInt64(attempt) * 500_000_000) }
+            catch { return }
+            guard !Task.isCancelled, self.biliPlaybackRecoveryID == ticket,
+                  self.playbackSessionID == owner, self.activePlayerRequestID == requestID,
+                  self.isPlayerPresented, !self.isClosingPlayer, !self.isShutdownRequested else { return }
+            await self.startPlayback(detail: playback.detail, source: playback.source,
+                episode: playback.episode, configurationID: playback.configurationID,
+                continuingRequestID: owner, windowActivation: .preserveFocus,
+                recoveryCheckpoint: checkpoint, isAutomaticRecovery: true,
+                recoveryRequestID: requestID)
+        }
+        return true
     }
 
     private func scheduleAdvanceAfterCompletedEnd(endedSessionID: UUID) {
@@ -21997,8 +22453,37 @@ final class AppState: ObservableObject {
                   let episode = activePlayback?.episode ?? pendingPlayback?.episode {
             let configurationID = activePlayback?.configurationID ?? pendingPlayback?.configurationID
             await startPlayback(detail: detail, source: source, episode: episode,
-                configurationID: configurationID, windowActivation: .preserveFocus)
+                origin: pendingPlayback?.origin ?? .direct,
+                configurationID: configurationID, windowActivation: .preserveFocus,
+                recoveryCheckpoint: activePlayback.flatMap { playback in
+                    guard BilibiliPlaybackPolicy.isMediaURL(playback.media.url) else { return nil }
+                    return NodePlaybackRecoveryCheckpoint(position: playerSnapshot.position,
+                        paused: nodePlaybackLastCheckpoint?.1.paused ?? false,
+                        qualityName: selectedPlaybackQualityName)
+                })
         }
+    }
+
+    private func validateHistoryRelinkResume(record: HistoryRecord, target: TimeInterval,
+                                            canSeek: Bool, requestID: UUID) async throws {
+        // Observe native progress, never the requested startPosition. Active
+        // playback/history remain uncommitted throughout this bounded wait.
+        for _ in 0..<100 {
+            try Task.checkCancellation()
+            guard playbackSessionID == requestID, activePlayerRequestID == requestID else { throw CancellationError() }
+            switch HistoryRelinkResumePolicy.evaluate(record: record, snapshot: playerSnapshot,
+                target: target, canSeek: canSeek) {
+            case .ready: return
+            case .waiting: break
+            case .rejected(let message):
+                historyRelinkResumeIssue = (requestID, message)
+                throw AppError.playback(message)
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let message = L10n.string("history.relink.seek-unconfirmed", fallback: "The player could not confirm the saved playback position. Your history is unchanged. Retry or choose to play from the beginning.")
+        historyRelinkResumeIssue = (requestID, message)
+        throw AppError.playback(message)
     }
 
     private func loadResolvedPlayback(
@@ -22027,8 +22512,8 @@ final class AppState: ObservableObject {
         if isTVBoxPlayback {
             scopedMedia.transportProfile = .tvBox
         }
-        let authoritativeHistoryRecord = pendingPlayback?.requestID == sessionID
-            ? pendingPlayback?.origin.historyRecord : nil
+        let historyOrigin = pendingPlayback?.requestID == sessionID ? pendingPlayback?.origin : nil
+        let authoritativeHistoryRecord = historyOrigin?.historyRecord
         let replacementVideoID = persistentHistoryVideoID(
             detail: detail,
             providerResourceReference: providerResourceReference
@@ -22077,7 +22562,7 @@ final class AppState: ObservableObject {
         }
         let recoveryCheckpoint = pendingPlayback?.requestID == sessionID
             ? pendingPlayback?.recoveryCheckpoint : nil
-        let startPosition = recoveryCheckpoint.map { mediaCanSeek ? $0.position : 0 }
+        let startPosition = historyOrigin?.startsFromBeginning == true ? 0 : recoveryCheckpoint.map { mediaCanSeek ? $0.position : 0 }
             ?? PlaybackSkipPolicy.startPosition(
             resumePosition: wasCompletedByEndingSkip
                 ? nil
@@ -22187,6 +22672,12 @@ final class AppState: ObservableObject {
                         throw CancellationError()
                     }
                 }
+            }
+            if historyOrigin?.isRelink == true, historyOrigin?.startsFromBeginning == false,
+               let record = authoritativeHistoryRecord,
+               let target = Self.historyResumePosition(from: record) {
+                try await validateHistoryRelinkResume(record: record, target: target,
+                    canSeek: mediaCanSeek, requestID: sessionID)
             }
         } catch {
             if didReachFileLoaded {
@@ -22530,6 +23021,7 @@ final class AppState: ObservableObject {
         requestID: UUID,
         liveFlow: LivePlaybackNavigationContext? = nil
     ) async throws {
+        await livePreviews.quiesce()
         guard let environment else {
             throw AppError.playback(
                 L10n.string("app.environment.uninitialized", fallback: "The application environment has not been initialized.")
@@ -22838,3 +23330,104 @@ extension AppState {
 }
 
 #endif
+
+
+extension AppState {
+    var permitsBackgroundLivePreview: Bool {
+        !isShutdownRequested && !isClosingPlayer && !isPlayerPresented
+            && requestedConfigurationID == nil && configurationImportOperationID == nil
+            && xtreamProviderOperationID == nil && liveValidationPermits.isEmpty
+    }
+
+    func livePreviewDemand(source: LiveSourceID, channel: LiveChannel, streams: [LiveStream],
+                           programmeStart: Date?) -> LivePreviewDemand? {
+        guard let catalog = presentedLiveCatalog(for: source),
+              catalog.groups.filter({ $0.password == nil }).flatMap(\.channels).contains(channel),
+              !isLiveChannelDeleted(sourceID: source, channel: channel), !streams.isEmpty else { return nil }
+        let sourceKey = LivePreviewPolicy.digest([LiveBrowserPreferenceStore.encode(source)])
+        let imported: AcceptedImportedCatalog?
+        let revision: String
+        switch source {
+        case .imported(let id):
+            guard let accepted = acceptedImportedCatalogs[id], let record = liveSources.first(where: { $0.id == id }) else { return nil }
+            imported = accepted
+            revision = String(record.updatedAt.timeIntervalSince1970)
+        case .xtream:
+            imported = nil
+            revision = nativeLiveGeneration.uuidString
+        }
+        let identities = streams.prefix(2).flatMap { stream in
+            [stream.id, stream.name] + stream.headers.sorted { $0.key < $1.key }.flatMap { [$0.key, $0.value] }
+        }
+        let legacyKey = LivePreviewPolicy.digest([sourceKey, channel.id, revision,
+            programmeStart.map { String($0.timeIntervalSince1970) } ?? ""] + identities)
+        // A catalog reload, signed URL rotation or EPG boundary does not turn a
+        // last-good channel image into a different picture. Account edits do.
+        let accountIdentity = source.isXtream ? (activeConfigurationRecord.map { LivePreviewPolicy.digest([$0.rawData.base64EncodedString()]) } ?? "") : ""
+        let key = LivePreviewPolicy.digest(["channel-picture-v2", sourceKey, channel.id, accountIdentity])
+        let valid: @MainActor () -> Bool = { [weak self] in
+            guard let self, !self.isShutdownRequested, !self.isLiveChannelDeleted(sourceID: source, channel: channel) else { return false }
+            if case .imported(let id) = source {
+                return self.importedPlaybackSourceIsActive(id) && self.acceptedImportedCatalogs[id] === imported
+            }
+            return self.nativeLiveGeneration.uuidString == revision && self.nativeLiveCatalog?.sourceID == source
+                && self.requestedConfigurationID == nil && self.configurationImportOperationID == nil
+                && self.xtreamProviderOperationID == nil
+        }
+        var demand = LivePreviewDemand(key: key, sourceKey: sourceKey, channelID: channel.id,
+            programmeStart: programmeStart, resolve: { [weak self] in
+                guard let self, valid(), self.permitsBackgroundLivePreview else { throw CancellationError() }
+                if case .imported = source {
+                    return streams.prefix(2).compactMap { stream in
+                        guard imported?.contains(channel) == true, channel.streams.contains(stream),
+                              !stream.needsParsing, case .direct(let url) = stream.target else { return nil }
+                        return LivePreviewInput(url: url.absoluteString, headers: stream.headers)
+                    }
+                }
+                guard case .xtream(let id) = source, !self.nativeLiveAccountMutationIDs.contains(id),
+                      let record = self.activeConfigurationRecord, record.id == id, record.sourceKind == .xtream,
+                      let environment = self.environment,
+                      let credentials = try await self.liveCredentialStore?.previewCredentials(for: id) else { return [] }
+                try Task.checkCancellation()
+                guard valid(), self.permitsBackgroundLivePreview else { throw CancellationError() }
+                let provider = try XtreamSiteProvider(configuration: XtreamProviderConfiguration(data: record.rawData),
+                    credentials: credentials, httpClient: environment.xtreamHTTPClient, userAgent: Self.xtreamUserAgent)
+                let account = try await provider.validateLivePlaybackAccount()
+                try Task.checkCancellation()
+                guard valid(), self.permitsBackgroundLivePreview,
+                      let maximum = account.maxConnections, maximum > 0,
+                      let active = account.activeConnections, active >= 0, active < maximum else { return [] }
+                return try streams.prefix(2).compactMap { stream in
+                    guard channel.streams.contains(stream), case .provider(let reference) = stream.target else { return nil }
+                    let media = try provider.resolveLivePlayback(reference)
+                    var input = LivePreviewInput(url: media.url, headers: media.headers.dictionary)
+                    if let url = URL(string: media.url) {
+                        input.networkOptions = Dictionary(uniqueKeysWithValues: SystemMediaProxyResolver.resolve(for: url).mpvOptions)
+                    }
+                    return input
+                }
+            }, isValid: valid)
+        demand.legacyKey = legacyKey
+        demand.mayReuseFrame = { [weak self] in
+            guard let self else { return false }
+            return valid() && self.isPlayerPresented && !self.isClosingPlayer && self.livePlaybackSourceID == source
+                && self.livePlaybackChannel?.id == channel.id && self.livePlaybackStream == streams.first && self.liveCatchupProgramme == nil
+                && self.playerSnapshot.status == .playing && !self.playerSnapshot.isSeeking
+                && !self.playerSnapshot.isPausedForCache && !self.isRecoveringLivePlayback
+        }
+        let mayReuse = demand.mayReuseFrame
+        demand.currentFrame = { [weak self] in
+            guard let self, mayReuse(), let player = self.environment?.player else { return nil }
+            let requestID = self.activePlayerRequestID
+            let file = FileManager.default.temporaryDirectory.appendingPathComponent("OKLivePreview-" + UUID().uuidString + ".png")
+            defer { try? FileManager.default.removeItem(at: file) }
+            try await player.screenshot(to: file)
+            try Task.checkCancellation()
+            guard mayReuse(), requestID == self.activePlayerRequestID else { return nil }
+            return try await Task.detached(priority: .utility) {
+                LivePreviewImageCodec.thumbnail(from: try Data(contentsOf: file))
+            }.value
+        }
+        return demand
+    }
+}

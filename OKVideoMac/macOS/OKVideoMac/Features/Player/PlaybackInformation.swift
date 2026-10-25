@@ -192,3 +192,20 @@ struct DetailPlaybackSpecifications: View {
         }
     }
 }
+
+/// Display only the selected resource's original name below the cast.
+struct DetailResourceFooter: View {
+    let originalName: String?
+    var body: some View {
+        if let name = PlaybackMediaInfo.safeFileName(originalName) {
+            Text(name).font(.system(size: 12)).foregroundStyle(.secondary)
+                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 28).padding(.top, 6).padding(.bottom, 12)
+                .accessibilityIdentifier("detail.original-resource.name")
+                .contextMenu {
+                    Button(L10n.string("detail.resource.copy-name", fallback: "Copy Original Name")) { PlaybackInfoPresentation.copy(name) }
+                }
+        }
+    }
+}

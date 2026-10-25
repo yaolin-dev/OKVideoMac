@@ -83,6 +83,8 @@ public struct VideoSummary: Codable, Equatable, Hashable, Identifiable, Sendable
     public var tag: String?
     public var action: String?
     public var contentKind: VideoContentKind?
+    public var identityDirector: String?
+    public var identityActors: String?
 
     public init(
         siteKey: String,

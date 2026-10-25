@@ -47,7 +47,16 @@ clang -arch arm64 -mmacosx-version-min=12.0 \
   > "$REPORT_DIR/candidate-ffmpeg-capabilities.txt"
 diff -u "$REPORT_DIR/stable-ffmpeg-capabilities.txt" \
   "$REPORT_DIR/candidate-ffmpeg-capabilities.txt" \
-  > "$REPORT_DIR/ffmpeg-capabilities.diff"
+  > "$REPORT_DIR/ffmpeg-capabilities.diff" || [[ "$?" == 1 ]]
+python3 - "$REPORT_DIR" <<'PY'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+stable = set((root / 'stable-ffmpeg-capabilities.txt').read_text().splitlines())
+candidate = set((root / 'candidate-ffmpeg-capabilities.txt').read_text().splitlines())
+assert not stable - candidate, f'Capabilities removed: {sorted(stable - candidate)}'
+assert candidate - stable <= {'demuxer|dash'}, f'Unexpected additions: {sorted(candidate - stable)}'
+assert 'demuxer|dash' in candidate, 'DASH demuxer is required'
+PY
 
 stable_paths=(
   "$STABLE_FRAMEWORKS/libavcodec.61.dylib"
@@ -129,7 +138,7 @@ done
 for required in \
   'decoder|h264|' 'decoder|hevc|' 'decoder|av1|' 'decoder|aac|' \
   'decoder|ac3|' 'decoder|eac3|' 'demuxer|mov' 'demuxer|matroska' \
-  'demuxer|mpegts' 'demuxer|hls' 'protocol-in|http' \
+  'demuxer|mpegts' 'demuxer|hls' 'demuxer|dash' 'protocol-in|http' \
   'protocol-in|https' 'protocol-in|tcp' 'decoder|ass|' \
   'hwdevice|videotoolbox'; do
   if ! grep -Fq "$required" "$REPORT_DIR/candidate-ffmpeg-capabilities.txt"; then
@@ -140,7 +149,7 @@ done
 
 stable_capability_sha="$(shasum -a 256 "$REPORT_DIR/stable-ffmpeg-capabilities.txt" | awk '{print $1}')"
 candidate_capability_sha="$(shasum -a 256 "$REPORT_DIR/candidate-ffmpeg-capabilities.txt" | awk '{print $1}')"
-printf 'ffmpeg_capabilities\tstable=%s\tcandidate=%s\tequal=yes\n' \
+printf 'ffmpeg_capabilities\tstable=%s\tcandidate=%s\tno_removals=yes\tdash=yes\n' \
   "$stable_capability_sha" "$candidate_capability_sha" >> "$summary"
 
 echo "Native candidate ABI/capability comparison passed: $REPORT_DIR"

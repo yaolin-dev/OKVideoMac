@@ -4,6 +4,8 @@ import SwiftUI
 
 struct HistoryView: View {
     @EnvironmentObject private var state: AppState
+    @ObservedObject var history: WatchHistoryState
+    @ObservedObject var search: SidebarSearchState
     @State private var selectedIDs = Set<String>()
     @State private var isDeleting = false
 
@@ -11,13 +13,18 @@ struct HistoryView: View {
         NativeLibraryList(rows: rows, selection: $selectedIDs, repository: state.imageRepository,
             openTitle: L10n.string("history.continue", fallback: "Continue Watching"),
             onOpen: { id in
-                if let record = state.history.first(where: { $0.id == id }) { state.requestHistoryPlayback(record) }
+                if let record = history.records.first(where: { $0.id == id }) { state.requestHistoryPlayback(record) }
             }, onDelete: requestDeletion)
         .overlay {
             if rows.isEmpty {
                 VStack(spacing: 8) {
-                    Text(L10n.string("history.empty.title", fallback: "No Watch History")).font(.headline)
-                    Text(L10n.string("history.empty.message", fallback: "Playback progress appears here after a video starts. History is kept for 60 days by default.")).foregroundColor(.secondary)
+                    Text(LibrarySearchQuery(search.history).isEmpty
+                        ? L10n.string("history.empty.title", fallback: "No Watch History")
+                        : L10n.string("sidebar.search.no-results", fallback: "No Matching Results")).font(.headline)
+                    Text(LibrarySearchQuery(search.history).isEmpty
+                        ? L10n.string("history.empty.message", fallback: "Playback progress appears here after a video starts. History is kept for 60 days by default.")
+                        : L10n.string("sidebar.search.no-results.help", fallback: "Try another keyword or clear the search field."))
+                        .foregroundColor(.secondary)
                 }.padding()
             }
         }
@@ -41,7 +48,7 @@ struct HistoryView: View {
                 .disabled(selectedIDs.isEmpty || isDeleting)
                 PrimaryToolbarDivider()
                     .frame(height: PrimaryToolbarMetrics.itemHeight)
-                Button(L10n.string("history.clear", fallback: "Clear History")) {
+                Button(LibrarySearchQuery(search.history).isEmpty ? L10n.string("history.clear", fallback: "Clear History") : L10n.string("sidebar.search.remove-results", fallback: "Remove Filtered Results")) {
                     requestDeletion(Set(rows.map(\.id)), nil)
                 }
                 .primaryToolbarTextControl()
@@ -54,18 +61,19 @@ struct HistoryView: View {
         .onChange(of: state.isBrowserWindowKey) { key in
             if key { Task { await state.refreshHistoryPresentation() } }
         }
-        .onChange(of: state.history.map(\.id)) { selectedIDs.formIntersection($0) }
+        .onChange(of: rows.map(\.id)) { selectedIDs.formIntersection($0) }
     }
 
     private var rows: [NativeLibraryRow] {
-        state.history.map { item in
+        let query = LibrarySearchQuery(search.history)
+        return history.records.map { item in
             NativeLibraryRow(id: item.id, title: item.title,
                 subtitle: [state.historySiteName(for: item), item.sourceName, AppState.historyEpisodeDisplayName(item)].compactMap { $0 }.joined(separator: " · "),
                 posterURL: item.posterURL, date: item.watchedAt,
                 progress: Self.displayedProgress(position: item.position, duration: item.duration),
                 progressText: Self.progressText(position: item.position, duration: item.duration),
                 isLoading: state.historyPlaybackLoadingID == item.id)
-        }
+        }.filter { query.matches($0.title, $0.subtitle) }
     }
 
     static func displayedProgress(position: TimeInterval, duration: TimeInterval) -> Double? {
@@ -83,7 +91,8 @@ struct HistoryView: View {
     }
     private func requestDeletion(_ ids: Set<String>, _ window: NSWindow?) {
         guard !isDeleting else { return }
-        let records = state.history.filter { ids.contains($0.id) }
+        let visibleIDs = Set(rows.map(\.id))
+        let records = history.records.filter { ids.contains($0.id) && visibleIDs.contains($0.id) }
         guard !records.isEmpty else { return }
         NativeLibraryConfirmation.present(
             title: L10n.string("history.delete.title", fallback: "Delete History?"),
@@ -96,4 +105,13 @@ struct HistoryView: View {
                 }
             }
     }
+}
+
+/// Only these consumers redraw for progress updates; the browser/detail tree
+/// continues observing AppState without receiving the history timer.
+struct WatchHistoryObserver<Content: View>: View {
+    @ObservedObject var history: WatchHistoryState
+    @ViewBuilder let content: ([HistoryRecord]) -> Content
+
+    var body: some View { content(history.records) }
 }

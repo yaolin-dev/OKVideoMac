@@ -14,6 +14,12 @@ public struct XtreamCredentials: Equatable, Sendable {
 
 public protocol XtreamCredentialStoring: Sendable {
     func credentials(for providerID: UUID) async throws -> XtreamCredentials?
+    func previewCredentials(for providerID: UUID) async throws -> XtreamCredentials?
     func save(_ credentials: XtreamCredentials, for providerID: UUID) async throws
     func deleteCredentials(for providerID: UUID) async throws
+}
+
+public extension XtreamCredentialStoring {
+    /// Background artwork must never trigger a credential authorization dialog.
+    func previewCredentials(for providerID: UUID) async throws -> XtreamCredentials? { nil }
 }

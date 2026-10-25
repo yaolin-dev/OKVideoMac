@@ -13,6 +13,79 @@ import OKVideoCore
 import OKVideoPersistence
 @testable import OKVideoMac
 
+final class BilibiliPlaybackFixTests: XCTestCase {
+    func testDASHSeekAlignsBothStreamsWithoutChangingOtherDemuxers() {
+        for format in ["dash", "DASH"] {
+            XCTAssertEqual(MPVPlayerClient.seekCommand(to: 1887.429, duration: 6558, demuxerFormat: format),
+                ["seek", "1887.429", "absolute+exact"])
+        }
+        for format in ["hls", "mov,mp4,m4a,3gp,3g2,mj2", "matroska,webm"] {
+            XCTAssertEqual(MPVPlayerClient.seekCommand(to: 1887.429, demuxerFormat: format),
+                ["seek", "1887.429", "absolute+keyframes"])
+        }
+        XCTAssertEqual(MPVPlayerClient.seekCommand(to: 6558, duration: 6558), ["seek", "6558.000", "absolute+exact"])
+    }
+
+    func testQualityControlRequiresTwoDifferentPlayableChoices() {
+        let first = PlaybackQuality(name: "清晰 480P", url: "http://127.0.0.1/480")
+        let second = PlaybackQuality(name: "流畅 360P", url: "http://127.0.0.1/360")
+        XCTAssertEqual(BilibiliPlaybackPolicy.selectableQualities([]).count, 0)
+        XCTAssertEqual(BilibiliPlaybackPolicy.selectableQualities([first]).count, 1)
+        XCTAssertEqual(BilibiliPlaybackPolicy.selectableQualities([first, .init(name: "默认", url: first.url)]).count, 1)
+        XCTAssertEqual(BilibiliPlaybackPolicy.selectableQualities([first, .init(name: "空", url: " ")]).count, 1)
+        XCTAssertEqual(BilibiliPlaybackPolicy.selectableQualities([first, second]), [first, second])
+    }
+
+    func testRecoveryOnlyMatchesTheLocalBilibiliManifestRoute() throws {
+        for host in ["127.0.0.1", "localhost"] {
+            XCTAssertTrue(BilibiliPlaybackPolicy.isMediaURL(try XCTUnwrap(URL(string:
+                "http://\(host):12345/spider/bilixiqu/3/proxy/mpd/117461785575857/42847766229/32/.bin"))))
+        }
+        for value in ["https://example.com/spider/bilixiqu/3/proxy/mpd/1/2/32/.bin",
+                      "http://127.0.0.1/spider/quark/3/proxy/file/token", "http://127.0.0.1/video.mp4",
+                      "http://127.0.0.1/spider/bilixiqu/3/proxy/mpd/not-a-video/2/32/.bin"] {
+            XCTAssertFalse(BilibiliPlaybackPolicy.isMediaURL(try XCTUnwrap(URL(string: value))))
+        }
+    }
+
+    func testRecoveryBudgetIsBoundedAcrossAttemptsAndResetsForNewPlayback() {
+        var budget = BilibiliPlaybackRecoveryBudget(); let session = UUID()
+        XCTAssertEqual(budget.claim(session), 1)
+        XCTAssertEqual(budget.claim(session), 2)
+        XCTAssertNil(budget.claim(session))
+        XCTAssertNil(budget.claim(session))
+        XCTAssertEqual(budget.claim(UUID()), 1)
+        budget.reset()
+        XCTAssertEqual(budget.claim(session), 1)
+    }
+
+    func testRecoveryCheckpointPreservesQualityAndPause() {
+        let checkpoint = NodePlaybackRecoveryCheckpoint(position: 4618.9, paused: true, qualityName: "流畅 360P")
+        XCTAssertEqual(checkpoint.position, 4618.9)
+        XCTAssertTrue(checkpoint.paused)
+        XCTAssertEqual(checkpoint.qualityName, "流畅 360P")
+    }
+
+    func testResponsiveControlsReserveSpaceOnlyWhenQualityIsVisible() {
+        let ordinary = PlayerOverlayLayout(viewportSize: CGSize(width: 900, height: 600))
+        let choices = PlayerOverlayLayout(viewportSize: CGSize(width: 900, height: 600), showsQuality: true)
+        XCTAssertGreaterThan(choices.expandedToolsWidth, ordinary.expandedToolsWidth)
+        XCTAssertTrue(ordinary.showsAllTools)
+        XCTAssertFalse(choices.showsAllTools)
+        XCTAssertTrue(PlayerOverlayLayout(viewportSize: CGSize(width: 1400, height: 900), showsQuality: true).showsAllTools)
+    }
+
+    func testBilibiliAdapterResourcesMatchTheSealedRuntimePolicy() throws {
+        for (name, digest) in [("bilibili-streaming", BilibiliRuntimeCompatibility.moduleSHA256),
+                               ("bilibili-streaming.patch", BilibiliRuntimeCompatibility.patchSHA256)] {
+            let url = try XCTUnwrap(Bundle.main.url(forResource: name, withExtension: "js", subdirectory: "NodePatches")
+                ?? Bundle.main.url(forResource: name, withExtension: "js"))
+            let actual = SHA256.hash(data: try Data(contentsOf: url)).map { String(format: "%02x", $0) }.joined()
+            XCTAssertEqual(actual, digest)
+        }
+    }
+}
+
 final class DanmakuTextRasterizationTests: XCTestCase {
     func testChineseAndLatinForegroundSurvivesContrastDecoration() throws {
         for text in ["中文弹幕测试，清晰显示每一个字", "彈幕測試，繁體中文", "Danmaku x2♡5"] {
@@ -6401,9 +6474,11 @@ final class OKVideoMacTests: XCTestCase {
             "loadfile", bridgeURL.absoluteString, "replace", "-1"
         ])
         let options = try XCTUnwrap(command.last)
-        XCTAssertTrue(options.contains("cache-secs=24"))
-        XCTAssertTrue(options.contains("demuxer-max-bytes=48MiB"))
-        XCTAssertTrue(options.contains("demuxer-max-back-bytes=12MiB"))
+        XCTAssertTrue(options.contains("cache=yes"))
+        XCTAssertTrue(options.contains("cache-secs=60"))
+        XCTAssertTrue(options.contains("demuxer-max-bytes=128MiB"))
+        XCTAssertTrue(options.contains("demuxer-max-back-bytes=32MiB"))
+        XCTAssertTrue(options.contains("demuxer-hysteresis-secs=10"))
         XCTAssertTrue(options.contains("demuxer-lavf-format=hls"))
 
         let fallback = MPVTVBoxPlaybackPolicy.loadCommand(
@@ -8189,7 +8264,7 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testLeavingSearchClearsToolbarKeyword() async {
+    func testLeavingSearchClearsActiveKeywordButPreservesVideoDraft() async {
         await MainActor.run {
             let state = AppState(environment: nil)
             state.searchDraftKeyword = "寒战 1994"
@@ -8198,7 +8273,7 @@ final class OKVideoMacTests: XCTestCase {
             state.selectSection(.history)
 
             XCTAssertFalse(state.isHomeSearchPresented)
-            XCTAssertEqual(state.searchDraftKeyword, "")
+            XCTAssertEqual(state.searchDraftKeyword, "寒战 1994")
             XCTAssertEqual(state.activeSearchKeyword, "")
             XCTAssertEqual(state.selectedSection, .history)
         }
@@ -8239,12 +8314,9 @@ final class OKVideoMacTests: XCTestCase {
             )
         )
 
-        for section in [AppSection.favorites, .history, .settings] {
-            XCTAssertEqual(
-                SidebarSearchPresentationPolicy.presentation(for: section).kind,
-                .video
-            )
-        }
+        XCTAssertEqual(SidebarSearchPresentationPolicy.presentation(for: .favorites).kind, .favorites)
+        XCTAssertEqual(SidebarSearchPresentationPolicy.presentation(for: .history).kind, .history)
+        XCTAssertEqual(SidebarSearchPresentationPolicy.presentation(for: .settings).kind, .settings)
     }
 
     func testSidebarVideoSearchReturnsToItsOriginSection() async {
@@ -8476,6 +8548,26 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertFalse(state.isDetailPagePresented)
         XCTAssertFalse(state.isLoading)
         assertSearchDetailReturnContext(state, results: results)
+    }
+
+    @MainActor
+    func testLocalSidebarSearchLeavesDetailWithoutStartingVideoSearch() async throws {
+        for origin: AppSection in [.favorites, .history] {
+            let (state, requests, results) = searchDetailFixture()
+            state.returnFromSearchToHome()
+            state.selectSection(origin)
+            let load = Task { await state.loadDetail(results[0]) }
+            try await requests.waitUntilStarted(results[0].videoID)
+            await requests.finish(results[0])
+            await load.value
+            XCTAssertTrue(state.isDetailPagePresented)
+            SidebarSearchBinding.text(for: origin, state: state, live: LiveBrowserSession()).wrappedValue = "小城"
+            state.sidebarSearchDidChange("小城")
+            XCTAssertFalse(state.isDetailPagePresented)
+            XCTAssertFalse(state.isHomeSearchPresented)
+            XCTAssertEqual(state.selectedSection, origin)
+            XCTAssertEqual(state.activeSearchKeyword, "")
+        }
     }
 
     @MainActor
@@ -14111,6 +14203,52 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(terminal.outcome, .succeeded)
         XCTAssertEqual(terminal.providerResult, .string("provider-final-result"))
         XCTAssertEqual(terminal.refreshPerformed, true)
+    }
+
+    func testAndroidBridgeRejectedCompletedInteractionNeverBecomesPending() throws {
+        let requestID = UUID()
+        // This is the flat response returned when a completed interaction ID
+        // is reused. Polling it would find the OLD completion without a result.
+        for status in [200, 202, 409, 500] {
+            let response = try XCTUnwrap(HTTPURLResponse(
+                url: URL(string: "http://127.0.0.1:19978/v1/invoke")!,
+                statusCode: status, httpVersion: nil, headerFields: nil))
+            let terminal = AndroidDexBridgeClient.decodeTerminalResponse(
+                requestID: requestID,
+                data: Data("""
+                {"ok":false,"error":"Interaction is no longer current","phase":"completed","outcome":"completed","interactionID":"\(requestID.uuidString)","terminal":true}
+                """.utf8),
+                response: response, requiresScopedIdentity: true)
+            XCTAssertEqual(terminal.outcome, .failed, "HTTP \(status)")
+            XCTAssertEqual(terminal.error, "Interaction is no longer current")
+            XCTAssertNil(terminal.providerResult)
+        }
+    }
+
+    func testAndroidBridgeHTTPFailureOverridesSuccessfulPayload() throws {
+        let requestID = UUID()
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: URL(string: "http://127.0.0.1:19978/v1/invoke")!,
+            statusCode: 503, httpVersion: nil, headerFields: nil))
+        let terminal = AndroidDexBridgeClient.decodeTerminalResponse(
+            requestID: requestID,
+            data: Data("""
+            {"ok":true,"interactionID":"\(requestID.uuidString)"}
+            """.utf8), response: response, requiresScopedIdentity: true)
+        XCTAssertEqual(terminal.outcome, .failed)
+    }
+
+    func testAndroidBridgeCompletedPlaybackRequiresActualResult() throws {
+        let emptyResults: [JSONValue?] = [nil, .null]
+        for result in emptyResults {
+            XCTAssertThrowsError(try AndroidDexBridgeClient.validatedProviderResult(result, method: "play")) { error in
+                XCTAssertTrue(error.localizedDescription.contains("没有返回播放结果"))
+                XCTAssertFalse(error.localizedDescription.contains("响应顶层"))
+            }
+            XCTAssertEqual(try AndroidDexBridgeClient.validatedProviderResult(result, method: "destroy"), .null)
+        }
+        let media: JSONValue = .object(["url": .string("https://media.example/test.mpd")])
+        XCTAssertEqual(try AndroidDexBridgeClient.validatedProviderResult(media, method: "play"), media)
     }
 
     func testAndroidBridgeLegacyTerminalResponseDoesNotInventRefreshState()
@@ -29355,6 +29493,81 @@ final class SDKExecutableInspectionTests: XCTestCase {
     }
 }
 
+final class AndroidRuntimeSearchPreparationTests: XCTestCase {
+    func testTwentyRequestsShareOnePreparationAndCancelledWaiterExitsEarly() async throws {
+        let flight = AndroidRuntimePreparationFlight()
+        let boundary = AndroidRuntimeConfigurationBoundary()
+        let count = AndroidRuntimeSynchronousCounter()
+        let first = Task {
+            try await flight.run {
+                count.increment()
+                await boundary.configure(mode: .external)
+            }
+        }
+        await boundary.waitUntilExternalConfigurationStarts()
+        let callers = (0..<19).map { _ in
+            Task {
+                try await flight.run {
+                    count.increment()
+                    await boundary.configure(mode: .external)
+                }
+            }
+        }
+        // Cancellation must complete while the shared preparation is blocked.
+        first.cancel()
+        let cancelled = expectation(description: "cancelled waiter returned")
+        let observer = Task {
+            do { try await first.value; XCTFail("cancelled waiter succeeded") }
+            catch is CancellationError {} catch { XCTFail("\(error)") }
+            cancelled.fulfill()
+        }
+        await fulfillment(of: [cancelled], timeout: 1)
+        // Let all independently scheduled callers reach the flight.
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await boundary.releaseExternalConfiguration()
+        for caller in callers { try await caller.value }
+        await observer.value
+        XCTAssertEqual(count.value, 1)
+    }
+
+    func testFailureCanRetryAndTeardownCancelsSharedPreparation() async throws {
+        enum Failure: Error { case offline }
+        let flight = AndroidRuntimePreparationFlight()
+        do { try await flight.run { throw Failure.offline }; XCTFail("failure swallowed") }
+        catch is Failure {} catch { XCTFail("\(error)") }
+        try await flight.run {}
+        let started = expectation(description: "preparation started")
+        let caller = Task {
+            try await flight.run {
+                started.fulfill()
+                try await Task.sleep(nanoseconds: 30_000_000_000)
+            }
+        }
+        await fulfillment(of: [started], timeout: 1)
+        await flight.cancelAndWait()
+        do { try await caller.value; XCTFail("teardown did not cancel preparation") }
+        catch is CancellationError {} catch { XCTFail("\(error)") }
+        try await flight.run {}
+    }
+
+    func testFileIdentityDetectsReplacementPermissionsAndRemoval() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let binary = root.appendingPathComponent("adb")
+        try Data("first".utf8).write(to: binary)
+        let original = AndroidRuntimeFileIdentity.stamp(binary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: binary.path)
+        let executable = AndroidRuntimeFileIdentity.stamp(binary)
+        XCTAssertNotEqual(original, executable)
+        try Data("other".utf8).write(to: binary, options: .atomic)
+        let replaced = AndroidRuntimeFileIdentity.stamp(binary)
+        XCTAssertNotEqual(executable, replaced)
+        try FileManager.default.removeItem(at: binary)
+        XCTAssertNotEqual(replaced, AndroidRuntimeFileIdentity.stamp(binary))
+    }
+}
+
 final class AndroidRuntimeModeCompatibilityTests: XCTestCase {
     func testTimedOutInspectionPreservesExternalSelectionAndRetrySucceeds() async throws {
         let fixture = try makeFixture()
@@ -29748,15 +29961,26 @@ final class AndroidRuntimeModeCompatibilityTests: XCTestCase {
             probe: probe
         )
 
-        let callers = (0..<10).map { _ in
+        let callers = (0..<20).map { _ in
             Task { try await coordinator.prepareRuntime() }
         }
         for caller in callers { try await caller.value }
 
+        try await coordinator.prepareRuntime()
         let managedCalls = await probe.managedAdmissionCount
         let configurations = await probe.configurations
         XCTAssertEqual(managedCalls, 0)
-        XCTAssertEqual(configurations.count, 10)
+        XCTAssertEqual(configurations.count, 1)
+        let token = try await coordinator.beginMaintenance()
+        do { try await coordinator.prepareRuntime(); XCTFail("maintenance must reject cached admission") }
+        catch { XCTAssertEqual(error as? RuntimeMaintenanceError, .busy) }
+        await coordinator.endMaintenance(token)
+        try await coordinator.prepareRuntime()
+        let afterMaintenance = await probe.configurations.count
+        XCTAssertEqual(afterMaintenance, 2)
+        try FileManager.default.removeItem(at: sdk.appendingPathComponent("emulator/emulator"))
+        do { try await coordinator.prepareRuntime(); XCTFail("removed SDK binary must invalidate cache") }
+        catch is AndroidRuntimeModeCoordinatorError {} catch { XCTFail("unexpected error: \(error)") }
         XCTAssertTrue(configurations.allSatisfy {
             $0.mode == .external
                 && $0.sdkRoot == sdk.standardizedFileURL
@@ -33983,6 +34207,326 @@ final class AndroidAVDRebuildRegressionTests: XCTestCase {
         } catch {
             await runtime.stop()
             throw error
+        }
+    }
+}
+
+@MainActor final class HomeRuntimeActivityTests: XCTestCase {
+    private func stream() -> (AsyncStream<AndroidRuntimeStatus>, AsyncStream<AndroidRuntimeStatus>.Continuation) {
+        var continuation: AsyncStream<AndroidRuntimeStatus>.Continuation!
+        let stream = AsyncStream<AndroidRuntimeStatus>(bufferingPolicy: .bufferingNewest(1)) { continuation = $0 }
+        return (stream, continuation)
+    }
+
+    func testQuickCompletionNeverFlashesActivity() async throws {
+        let activity = HomeRuntimeActivity()
+        let (events, _) = stream()
+        var shown = 0
+        let observer = activity.$presentation.compactMap { $0 }.sink { _ in shown += 1 }
+        let id = activity.begin { events }
+        try await Task.sleep(nanoseconds: 40_000_000)
+        activity.finish(id)
+        try await Task.sleep(nanoseconds: 340_000_000)
+        XCTAssertNil(activity.presentation)
+        XCTAssertEqual(shown, 0)
+        withExtendedLifetime(observer) {}
+    }
+
+    func testColdBootStagesBecomeVisibleOnlyAfterDelayThenDisappearOnSuccess() async throws {
+        let activity = HomeRuntimeActivity()
+        let (events, sender) = stream()
+        let id = activity.begin { events }
+        sender.yield(.starting(stage: .waitingForAndroidBoot))
+        try await Task.sleep(nanoseconds: 80_000_000)
+        XCTAssertNil(activity.presentation)
+        try await Task.sleep(nanoseconds: 270_000_000)
+        XCTAssertEqual(activity.presentation?.phase, .starting)
+        sender.yield(.starting(stage: .probingBridge))
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(activity.presentation?.phase, .connecting)
+        sender.yield(.running)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(activity.presentation?.phase, .fetching)
+        activity.finish(id)
+        XCTAssertNil(activity.presentation)
+    }
+
+    func testWarmRuntimeShowsFetchingWithoutInventedBootOrPercentage() async throws {
+        let activity = HomeRuntimeActivity()
+        let (events, sender) = stream()
+        let id = activity.begin(revealDelay: 10_000_000) { events }
+        sender.yield(.running)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(activity.presentation, .init(phase: .fetching))
+        XCTAssertFalse(activity.presentation!.phase.title.contains("%"))
+        activity.finish(id)
+    }
+
+    func testRepeatedRuntimeEventsDoNotRepublishTheView() async throws {
+        let activity = HomeRuntimeActivity()
+        let (events, sender) = stream()
+        let id = activity.begin(revealDelay: 1_000_000) { events }
+        sender.yield(.starting(stage: .launchingEmulator))
+        try await Task.sleep(nanoseconds: 30_000_000)
+        var publications = 0
+        let observer = activity.objectWillChange.sink { publications += 1 }
+        for stage: AndroidRuntimeStartupStage in [.waitingForADB, .waitingForAndroidBoot, .waitingForADB] {
+            for _ in 0..<100 { sender.yield(.starting(stage: stage)) }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(publications, 0, "Unchanged user-visible stages must not redraw the browser")
+        activity.finish(id)
+        withExtendedLifetime(observer) {}
+    }
+
+    func testFailureSurvivesRequestCleanupAndRetryReplacesIt() async throws {
+        let activity = HomeRuntimeActivity()
+        let (events, _) = stream()
+        let old = activity.begin { events }
+        activity.fail(old, message: "连接超时，请重试")
+        activity.finish(old)
+        XCTAssertEqual(activity.presentation?.failure, "连接超时，请重试")
+        let (fresh, sender) = stream()
+        let current = activity.begin(revealDelay: 1_000_000) { fresh }
+        activity.fail(old, message: "旧请求错误")
+        activity.finish(old)
+        sender.yield(.running)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(activity.presentation, .init(phase: .fetching))
+        activity.finish(current)
+    }
+
+    func testSwitchingAwayCancelsObservationAndDelayedReveal() async throws {
+        let activity = HomeRuntimeActivity()
+        let (events, sender) = stream()
+        let ended = expectation(description: "observation released")
+        sender.onTermination = { _ in ended.fulfill() }
+        let id = activity.begin { events }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        activity.cancel()
+        sender.yield(.starting(stage: .waitingForAndroidBoot))
+        activity.fail(id, message: "late failure")
+        await fulfillment(of: [ended], timeout: 1)
+        try await Task.sleep(nanoseconds: 330_000_000)
+        XCTAssertNil(activity.presentation)
+    }
+
+    func testRuntimeObservationDoesNotStartOrProbeAnEnvironment() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("RuntimeObservation-\(UUID())")
+        let runtime = AndroidDexBridgeRuntime(applicationSupportDirectory: directory, environment: [:])
+        let events = await runtime.startupStatusUpdates()
+        var iterator = events.makeAsyncIterator()
+        let value = await iterator.next()
+        XCTAssertEqual(value, .stopped)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path), "Observing must not install, start, or create runtime state")
+    }
+
+    func testRuntimeStatusPublicationDoesNotPublishAppState() async throws {
+        let state = AppState.bootstrap()
+        var changes = 0
+        let observer = state.objectWillChange.sink { changes += 1 }
+        let (events, sender) = stream()
+        let id = state.homeRuntimeActivity.begin(revealDelay: 1_000_000) { events }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        sender.yield(.starting(stage: .waitingForAndroidBoot))
+        try await Task.sleep(nanoseconds: 20_000_000)
+        sender.yield(.running)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(changes, 0)
+        state.homeRuntimeActivity.finish(id)
+        withExtendedLifetime(observer) {}
+    }
+
+    func testNativeCardRendersInBothAppearancesAndNarrowWindow() throws {
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent("ok-startup-feedback-preview")
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        for dark in [false, true] {
+            for failure in [false, true] {
+                for width: CGFloat in [340, 650] {
+                    let card = HomeRuntimeActivityCard(
+                        presentation: .init(phase: .starting, failure: failure ? "兼容环境连接超时。已有内容已保留，请重试或切换点播源。" : nil),
+                        hasCachedContent: true, retry: {}, switchProvider: { Text("切换源 ⌄") })
+                    let host = NSHostingView(rootView: card.padding(20).frame(width: width, height: 240, alignment: .bottom))
+                    host.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                    host.frame = NSRect(x: 0, y: 0, width: width, height: 240)
+                    let window = NSWindow(contentRect: host.frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
+                    window.isReleasedWhenClosed = false
+                    window.contentView = host
+                    host.layoutSubtreeIfNeeded()
+                    let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                    host.cacheDisplay(in: host.bounds, to: bitmap)
+                    let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                    try data.write(to: output.appendingPathComponent("\(dark ? "dark" : "light")-\(failure ? "failed" : "starting")-\(Int(width)).png"))
+                    XCTAssertGreaterThan(bitmap.pixelsWide, 300)
+                    window.close()
+                }
+            }
+        }
+    }
+}
+
+@MainActor final class TooltipPresentationTests: XCTestCase {
+    private let longTitle = "这是一部需要完整显示的很长很长的影片名称 👨‍👩‍👧‍👦 · Extended Edition"
+
+    private func label(_ text: String, width: CGFloat = 160) -> NativeOverflowTooltipField {
+        let field = NativeOverflowTooltipField(labelWithString: text)
+        field.font = .systemFont(ofSize: 13, weight: .semibold)
+        field.lineBreakMode = .byTruncatingTail
+        field.maximumNumberOfLines = 1
+        field.frame = NSRect(x: 0, y: 0, width: width, height: 20)
+        field.refreshOverflowToolTip()
+        return field
+    }
+    private func poster(_ text: String, action: @escaping () -> Void = {}) -> PosterNativeCardView {
+        let card = PosterNativeCardView(frame: NSRect(x: 0, y: 0, width: 160, height: 280))
+        card.bind(summary: .init(siteKey: "fixture", siteName: "测试源", videoID: "1", title: text), repository: nil, pixels: 256, onSelect: action)
+        card.setBrowserHovered(true)
+        card.layout()
+        return card
+    }
+    private func tooltipViews(_ view: NSView) -> [OverflowToolTipView] {
+        (view as? OverflowToolTipView).map { [$0] } ?? view.subviews.flatMap { tooltipViews($0) }
+    }
+    private func settle(_ host: NSView) async throws {
+        for _ in 0..<4 { host.layoutSubtreeIfNeeded(); try await Task.sleep(nanoseconds: 25_000_000) }
+    }
+    private func window(_ host: NSView, width: CGFloat) -> NSWindow {
+        let window = NSWindow(contentRect: NSRect(x: -2000, y: -2000, width: width, height: 100), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        return window
+    }
+
+    func testShortNativeTitleHasNoTooltipAndKeepsAccessibilityText() {
+        let field = label("短片名")
+        XCTAssertNil(field.toolTip)
+        XCTAssertEqual(field.stringValue, "短片名")
+        XCTAssertFalse(field.allowsExpansionToolTips, "Do not stack a second native expansion hint")
+    }
+    func testNativeTooltipFollowsWindowWidth() {
+        let field = label(longTitle)
+        XCTAssertEqual(field.toolTip, longTitle)
+        field.setFrameSize(NSSize(width: 1000, height: 20)); field.layout()
+        XCTAssertNil(field.toolTip)
+        field.setFrameSize(NSSize(width: 90, height: 20)); field.layout()
+        XCTAssertEqual(field.toolTip, longTitle)
+    }
+    func testNativeTooltipFollowsFontChanges() {
+        let field = label("Long Title", width: 100)
+        XCTAssertNil(field.toolTip)
+        field.font = .systemFont(ofSize: 30); field.layout()
+        XCTAssertEqual(field.toolTip, "Long Title")
+    }
+    func testNativeReuseClearsOldTextEvenWhenReboundBeforeLayout() {
+        let field = label(longTitle)
+        field.stringValue = "短片"; XCTAssertNil(field.toolTip)
+        field.stringValue = longTitle; field.layout()
+        XCTAssertEqual(field.toolTip, longTitle)
+        field.stringValue = "短片"; field.layout(); XCTAssertNil(field.toolTip)
+    }
+    func testAlreadyVisibleNextProgrammeIsNotRepeated() {
+        let field = label("19:30 新闻", width: 180)
+        field.supplementalToolTip = field.stringValue
+        XCTAssertNil(field.toolTip)
+        field.setFrameSize(NSSize(width: 30, height: 20)); field.layout()
+        XCTAssertEqual(field.toolTip, field.stringValue)
+    }
+    func testProgrammeHintOnlyAddsUnshownInformation() {
+        let field = label("正在播放：新闻", width: 180)
+        field.supplementalToolTip = "19:00 – 19:30\n下一节目：天气"
+        XCTAssertEqual(field.toolTip, "19:00 – 19:30\n下一节目：天气")
+        field.setFrameSize(NSSize(width: 30, height: 20)); field.layout()
+        XCTAssertEqual(field.toolTip, "正在播放：新闻\n19:00 – 19:30\n下一节目：天气")
+        field.supplementalToolTip = nil
+        XCTAssertEqual(field.toolTip, field.stringValue)
+    }
+    func testPosterHintIsConfinedToTruncatedTitleAndClickStillWorks() {
+        var selected = 0
+        let card = poster(longTitle) { selected += 1 }
+        XCTAssertNil(card.toolTip, "The complete poster must not own a tooltip")
+        XCTAssertEqual(card.titleTipText?.description, longTitle)
+        XCTAssertGreaterThan(card.titleTipRect?.minY ?? 0, 200)
+        XCTAssertLessThanOrEqual(card.titleTipRect?.height ?? 100, PosterGridMetrics.titleHeight)
+        XCTAssertTrue(card.hitTest(NSPoint(x: 40, y: 40)) === card)
+        XCTAssertTrue(card.accessibilityPerformPress()); XCTAssertEqual(selected, 1)
+        XCTAssertTrue(card.accessibilityLabel()?.contains(longTitle) == true)
+    }
+    func testFullPosterTitleDoesNotRegisterAnyHint() {
+        let card = poster("短片")
+        XCTAssertNil(card.titleTipText); XCTAssertNil(card.titleTipRect); XCTAssertNil(card.toolTip)
+    }
+    func testPosterScrollingAndReuseRemoveHintImmediately() {
+        let card = poster(longTitle)
+        XCTAssertNotNil(card.titleTipText)
+        card.setBrowserHovered(false)
+        XCTAssertNil(card.titleTipText)
+        card.layout(); XCTAssertNil(card.titleTipText)
+        card.setBrowserHovered(true); XCTAssertNotNil(card.titleTipText)
+        card.reset(); card.layout()
+        XCTAssertNil(card.titleTipText); XCTAssertNil(card.titleTipRect)
+    }
+    func testPosterResizeStopsHintWhenFullTitleFits() {
+        let card = poster("长度刚好超过小卡片的影片名称")
+        XCTAssertNotNil(card.titleTipText)
+        card.setFrameSize(NSSize(width: 700, height: 1100)); card.layout()
+        XCTAssertNil(card.titleTipText)
+    }
+    func testSwiftUITextOnlyHintsWhenTruncatedAndClearsOnReuse() async throws {
+        let host = NSHostingView(rootView: TruncationAwareText(text: "短片", font: .system(size: 13)).frame(width: 100))
+        let panel = window(host, width: 140); defer { panel.close() }
+        try await settle(host)
+        XCTAssertEqual(tooltipViews(host).count, 1)
+        XCTAssertGreaterThan(tooltipViews(host).first?.bounds.width ?? 0, 0)
+        XCTAssertNil(tooltipViews(host).first?.toolTip)
+        host.rootView = TruncationAwareText(text: longTitle, font: .system(size: 13)).frame(width: 100)
+        try await settle(host)
+        XCTAssertEqual(tooltipViews(host).first?.toolTip, longTitle)
+        host.rootView = TruncationAwareText(text: "短片", font: .system(size: 13)).frame(width: 100)
+        try await settle(host)
+        XCTAssertNil(tooltipViews(host).first?.toolTip)
+    }
+    func testSwiftUITwoLineTitleUsesActualHeight() async throws {
+        let title = "第一行\n第二行"
+        let host = NSHostingView(rootView: TruncationAwareText(text: title, font: .system(size: 20), lineLimit: 2).frame(width: 140))
+        let panel = window(host, width: 180); defer { panel.close() }
+        try await settle(host); XCTAssertNil(tooltipViews(host).first?.toolTip)
+        host.rootView = TruncationAwareText(text: title+"\n第三行", font: .system(size: 20), lineLimit: 2).frame(width: 140)
+        try await settle(host); XCTAssertEqual(tooltipViews(host).first?.toolTip, title+"\n第三行")
+    }
+    func testTooltipRegionNeverInterceptsClicks() {
+        let view = OverflowToolTipView(frame: NSRect(x: 0, y: 0, width: 100, height: 30))
+        view.toolTip = longTitle
+        XCTAssertNil(view.hitTest(NSPoint(x: 30, y: 15)))
+    }
+    func testLibraryIconsKeepHelpfulHintsAndAccessibleNames() {
+        let cell = NativeLibraryCell(frame: NSRect(x: 0, y: 0, width: 700, height: 100))
+        cell.update(.init(id: "1", title: "短片", subtitle: "来源", posterURL: nil, date: Date()), repository: nil,
+                    openTitle: "继续播放", onOpen: { _ in }, onDelete: { _, _ in })
+        cell.layoutSubtreeIfNeeded()
+        XCTAssertEqual(cell.open.toolTip, "继续播放")
+        XCTAssertEqual(cell.open.accessibilityLabel(), "继续播放")
+        XCTAssertNotNil(cell.remove.toolTip)
+        XCTAssertEqual(cell.remove.accessibilityLabel(), cell.remove.toolTip)
+    }
+    func testNativeAndSwiftUILabelRenderWithoutChangingPosterGeometry() async throws {
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent("ok-tooltip-preview")
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        for dark in [false, true] {
+            let content = VStack(alignment: .leading, spacing: 14) {
+                TruncationAwareText(text: "短标题", font: .system(size: 13, weight: .semibold))
+                TruncationAwareText(text: longTitle, font: .system(size: 13, weight: .semibold))
+                TruncationAwareText(text: longTitle, font: .system(size: 28, weight: .bold), lineLimit: 2)
+            }.padding(20).frame(width: 340, height: 220)
+                .background(Color(nsColor: .windowBackgroundColor))
+            let host = NSHostingView(rootView: content)
+            host.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            let panel = window(host, width: 340); panel.setContentSize(NSSize(width: 340, height: 220))
+            defer { panel.close() }
+            try await settle(host)
+            let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: output.appendingPathComponent(dark ? "dark.png" : "light.png"))
+            XCTAssertEqual(tooltipViews(host).compactMap(\.toolTip).count, 2)
         }
     }
 }

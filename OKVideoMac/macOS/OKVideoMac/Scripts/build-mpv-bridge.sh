@@ -5,6 +5,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/build-environment.sh"
 
+# Keep the bridge on the same pinned DASH-enabled FFmpeg as libmpv. Mixing
+# this with the host's older libavformat can silently remove DASH at runtime.
+REPRO_ROOT="${OKVIDEOMAC_REPRO_ROOT:-$OKVIDEOMAC_BUILD_ROOT/ReproNative}"
+export PKG_CONFIG_LIBDIR="$REPRO_ROOT/prefix/lib/pkgconfig:$REPRO_ROOT/xml-prefix/lib/pkgconfig:$PKG_CONFIG_LIBDIR"
+if [[ "$("$PKG_CONFIG" --variable=pcfiledir libavformat)" != "$REPRO_ROOT/prefix/lib/pkgconfig" ]]; then
+  echo "Build pinned DASH dependencies with build-dash-native.sh first." >&2
+  exit 1
+fi
+
 LIBMPV_ROOT="$OKVIDEOMAC_BUILD_ROOT/libmpv"
 LIBMPV_PATH="$(find "$LIBMPV_ROOT" -name 'libmpv*.dylib' -type f | head -n 1)"
 BRIDGE_SOURCE="$PROJECT_DIR/Native/MPVBridge/OKMPVBridge.c"

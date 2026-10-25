@@ -105,6 +105,13 @@ final class LiveBrowserSession: ObservableObject {
             preferences.setGroup(selectedGroupID, for: selectedSourceID)
         }
     }
+    @Published var showsPreviewImages = UserDefaults.standard.object(forKey: "OKVideoMac.LivePreviewImages.v1") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(showsPreviewImages, forKey: "OKVideoMac.LivePreviewImages.v1") }
+    }
+    @Published var previewRefreshRequest = 0
+    @Published var automaticallyRefreshPreviews = UserDefaults.standard.bool(forKey: "OKVideoMac.LivePreviewAutomatic.v2") {
+        didSet { UserDefaults.standard.set(automaticallyRefreshPreviews, forKey: "OKVideoMac.LivePreviewAutomatic.v2") }
+    }
     @Published var showsFavoritesOnly = false
     @Published var showsCatchupList = false
     @Published var catchupChannelID: String?
@@ -171,6 +178,15 @@ final class LiveBrowserSession: ObservableObject {
             Task { await state.playLive(channel: channel, stream: stream, sourceID: source,
                                        navigationChannels: channels) }
         }
+    }
+
+    func previewStreams(channel: LiveChannel, source: LiveSourceID) -> [LiveStream] {
+        let remembered = rememberedRoute(for: source, channel: channel)
+        let preferred = channel.streams.first {
+            (source.isXtream ? nativeRouteIdentity(for: $0) : importedRouteIdentity(for: $0, in: channel)) == remembered
+        } ?? channel.streams.first
+        guard let preferred else { return [] }
+        return [preferred] + channel.streams.filter { $0 != preferred }.prefix(1)
     }
 
     static func roundedGuideStart(_ date: Date) -> Date {
@@ -1066,6 +1082,23 @@ struct LiveToolbarView: View {
                 .primaryToolbarMenuControl()
             }
 
+            if !session.showsGuide {
+                Menu {
+                    Button { session.showsPreviewImages = true } label: {
+                        menuLabel(L10n.string("live.preview.frames", fallback: "Channel Pictures"), selected: session.showsPreviewImages)
+                    }
+                    Button { session.showsPreviewImages = false } label: {
+                        menuLabel(L10n.string("live.preview.logos", fallback: "Channel Logos"), selected: !session.showsPreviewImages)
+                    }
+                    Divider()
+                    LivePreviewRefreshMenuItem(previews: state.livePreviews, session: session)
+                    Toggle(L10n.string("live.preview.automatic", fallback: "Refresh Visible Pictures Every 10 Minutes"), isOn: $session.automaticallyRefreshPreviews)
+                } label: {
+                    Label(L10n.string("live.preview.display", fallback: "Channel Appearance"), systemImage: "photo.on.rectangle")
+                }
+                .primaryToolbarMenuControl()
+                .help(L10n.string("live.preview.display", fallback: "Channel Appearance"))
+            }
             PrimaryToolbarDivider()
             LiveBackgroundActivityControl(epgState: state.liveEPG,
                 validationToolbar: state.liveValidationActivity.toolbar, source: source)
@@ -2152,5 +2185,22 @@ private struct LiveRefreshToolbarControl: View {
             }
         }
         return state.liveCatalogError(for: source.id)
+    }
+}
+
+private struct LivePreviewRefreshMenuItem: View {
+    @ObservedObject var previews: LivePreviewCoordinator
+    @ObservedObject var session: LiveBrowserSession
+    var body: some View {
+        Button {
+            session.showsPreviewImages = true
+            session.previewRefreshRequest &+= 1
+        } label: {
+            Label(previews.refreshing
+                ? L10n.string("live.preview.refreshing", fallback: "Refreshing Channel Pictures…")
+                : L10n.string("live.preview.refresh", fallback: "Refresh Channel Pictures"),
+                systemImage: "arrow.clockwise")
+        }
+        .disabled(previews.refreshing)
     }
 }

@@ -17,6 +17,7 @@ struct DetailLoadingView: View {
     var body: some View {
         GeometryReader { viewport in
             ScrollView {
+              VStack(alignment: .leading, spacing: 0) {
                 BrowserToolbarScrollMarker(
                     coordinateSpaceName: DetailPageLayout.coordinateSpaceName
                 )
@@ -30,6 +31,7 @@ struct DetailLoadingView: View {
                 })
                 .frame(maxWidth: DetailPageLayout.maximumContentWidth)
                 .frame(maxWidth: .infinity, alignment: .top)
+              }
             }
             .browserToolbarScrollSurface(named: DetailPageLayout.coordinateSpaceName)
         }
@@ -38,14 +40,17 @@ struct DetailLoadingView: View {
 }
 
 struct DetailRequestStatusView: View {
+    var streamsOnly = false
     @EnvironmentObject private var state: AppState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if state.detailLoadState == .loading {
                 HStack(spacing: 12) {
-                    AppActivityIndicator(size: .regular)
-                    Text(L10n.string("detail.loading", fallback: "Loading details and streams…"))
+                    ProgressView().progressViewStyle(.circular).controlSize(.small).frame(width: 16, height: 16)
+                    Text(streamsOnly
+                        ? L10n.string("detail.streams.loading", fallback: "Loading streams…")
+                        : L10n.string("detail.loading", fallback: "Loading details and streams…"))
                 }
             } else if let message = state.detailLoadState.message {
                 Text(message).textSelection(.enabled)
@@ -178,6 +183,7 @@ final class DetailRefreshControl: NSView {
 }
 
 struct DetailView: View {
+    @StateObject private var sourceIdentities = TMDBSourceIdentityCache()
     @EnvironmentObject private var state: AppState
     let detail: VideoDetail
     @AppStorage("detail.lastPlaySourceName") private var lastPlaySourceName = ""
@@ -190,24 +196,60 @@ struct DetailView: View {
     @State private var isPreparingEpisodes = false
     @State private var showsAllActors = false
     @State private var showsFullSynopsis = false
+    @AppStorage("detail.tmdb.enabled") private var tmdbEnabled = true
+    @AppStorage(TMDBMatchingPreferences.key) private var relaxedMatching = false
+    @StateObject private var tmdb: TMDBDetailModel
+    @State private var showsMatchSheet = false
+    @State private var selectedTMDBEpisodes: [String: String] = [:]
+    @State private var synopsis: TMDBSynopsis?
+    @State private var didChooseInitialEpisode = false
+    @State private var lastTMDBPlayTime: TimeInterval = -.infinity
+    private let injectedMetadata: Bool
+
+    init(detail: VideoDetail, metadata: TMDBDetailModel? = nil) {
+        self.detail = detail
+        injectedMetadata = metadata != nil
+        _tmdb = StateObject(wrappedValue: metadata ?? TMDBDetailModel())
+    }
+
+    private var usesTMDBLayout: Bool { tmdbEnabled && tmdb.usesUnifiedLayout }
 
     var body: some View {
         GeometryReader { viewport in
             ScrollView {
+              VStack(alignment: .leading, spacing: 0) {
                 BrowserToolbarScrollMarker(
                     coordinateSpaceName: DetailPageLayout.coordinateSpaceName
                 )
                 VStack(alignment: .leading, spacing: 0) {
-                    detailHero(availableWidth: min(viewport.size.width, DetailPageLayout.maximumContentWidth))
+                    if usesTMDBLayout {
+                        TMDBHeroView(metadata: tmdb, detail: detail, information: currentEpisodeInformation,
+                            width: viewport.size.width, viewportHeight: viewport.size.height,
+                            onSynopsis: { synopsis = $0 }) { tmdbActions }
+                    } else {
+                        detailHero(availableWidth: min(viewport.size.width, DetailPageLayout.maximumContentWidth))
+                    }
 
-                    if !detailFacts.isEmpty {
+                    if !detail.playSources.isEmpty, state.detailLoadState.message != nil {
+                        DetailRequestStatusView(streamsOnly: usesTMDBLayout).padding(.horizontal, 28).padding(.vertical, 12)
+                    }
+                    if !usesTMDBLayout && !detailFacts.isEmpty {
                         Divider().padding(.horizontal, DetailPageLayout.horizontalPadding)
                         detailFactStrip(availableWidth: min(viewport.size.width, DetailPageLayout.maximumContentWidth))
                     }
 
-                    Divider().padding(.horizontal, DetailPageLayout.horizontalPadding)
+                    if !usesTMDBLayout { Divider().padding(.horizontal, DetailPageLayout.horizontalPadding) }
 
-                    if detail.playSources.isEmpty {
+                    if detail.playSources.isEmpty, state.detailLoadState == .loading || state.detailLoadState.message != nil {
+                        if usesTMDBLayout {
+                            VStack(alignment: .leading, spacing: 18) {
+                                DetailRequestStatusView(streamsOnly: true).frame(height: viewport.size.width < 650 ? 112 : 72, alignment: .topLeading)
+                                if state.detailLoadState == .loading { TMDBEpisodeSkeleton() }
+                            }.padding(.horizontal, 28).padding(.top, 7).padding(.bottom, 18)
+                        } else {
+                            DetailRequestStatusView().padding(.horizontal, 28).frame(minHeight: 160)
+                        }
+                    } else if detail.playSources.isEmpty {
                         EmptyStateView(
                             systemImage: "play.slash",
                             title: L10n.string("detail.no-streams.title", fallback: "No Streams"),
@@ -215,17 +257,48 @@ struct DetailView: View {
                         )
                         .frame(minHeight: 260)
                     } else {
-                        playbackBrowser
+                        if usesTMDBLayout { tmdbPlaybackBrowser(width: viewport.size.width) } else { playbackBrowser }
+                    }
+                    if usesTMDBLayout {
+                        TMDBCastView(metadata: tmdb, source: detail.summary)
+                        DetailResourceFooter(originalName: primaryEpisode?.name)
                     }
                 }
-                .frame(maxWidth: DetailPageLayout.maximumContentWidth)
+                .frame(maxWidth: !usesTMDBLayout ? DetailPageLayout.maximumContentWidth : .infinity)
                 .frame(maxWidth: .infinity, alignment: .top)
                 .padding(.bottom, 30)
+              }
             }
             .browserToolbarScrollSurface(named: DetailPageLayout.coordinateSpaceName)
         }
         .background(AppSurfacePalette.background, ignoresSafeAreaEdges: [.horizontal, .bottom])
+        .background(TMDBSynopsisPresenter(synopsis: $synopsis))
+        .onReceive(NotificationCenter.default.publisher(for: .tmdbSessionWillChange)) { _ in tmdb.cancel() }
+        .onReceive(NotificationCenter.default.publisher(for: .tmdbSessionDidChange)) { _ in
+            if tmdbEnabled { tmdb.retryEnhanced(detail: detail) }
+        }
+        .onChange(of: relaxedMatching) { enabled in
+            tmdb.setMatchPolicy(enabled ? .relaxed : .strict, detail: detail)
+        }
+        .onChange(of: tmdbEnabled) { enabled in
+            tmdb.setPresentationEnabled(enabled, detail: detail)
+        }
+        .task(id: "\(tmdb.selection?.id ?? ""):\(selectedSourceIndex):\(state.detailRevision):\(tmdb.binding?.seasons.description ?? "")") {
+            await tmdb.loadSeason(source: selectedSource, category: detail.summary.categoryName)
+        }
+        .task(id: tmdb.selection?.id) { await tmdb.loadImageConfiguration() }
+        .task(id: "\(tmdb.episodeMappingInputRevision):\(state.detailRevision):\(selectedSourceIndex)") {
+            await tmdb.prepareEpisodeMapping(source: selectedSource, category: detail.summary.categoryName)
+        }
+
+        .sheet(isPresented: $showsMatchSheet) {
+            TMDBMatchSheet(metadata: tmdb, originalTitle: detail.summary.title)
+        }
         .onAppear {
+            tmdb.setMatchPolicy(relaxedMatching ? .relaxed : .strict, detail: detail)
+            if !tmdbEnabled || !tmdb.usesUnifiedLayout && !tmdb.originalRequested {
+                tmdb.setPresentationEnabled(tmdbEnabled, detail: detail)
+            }
             performInitialSelection()
             // Report after SwiftUI has mounted the real detail tree and the
             // main run loop gets its next display opportunity.
@@ -257,19 +330,18 @@ struct DetailView: View {
     private func detailHero(availableWidth: CGFloat) -> some View {
         DetailHeroHeader(summary: detail.summary, availableWidth: availableWidth, description: {
             detailDescription
-            if let configuration = state.activeConfigurationRecord, let source = selectedSource, let episode = primaryEpisode {
-                DetailPlaybackSpecifications(cache: state.playbackMediaInfoCache,
-                    key: .init(configurationID: configuration.id, configurationUpdatedAt: configuration.updatedAt,
-                        videoID: detail.summary.id, sourceID: source.id, episodeID: episode.id),
-                    episodeName: EpisodeNameParser.presentation(for: episode).displayName)
-                    .padding(.top, 6)
-            }
-        }, actions: {
+        }, actions: { detailActions(immersive: false) })
+    }
+
+
+    private func detailActions(immersive: Bool) -> some View {
             HStack(spacing: 10) {
                 Button(action: playPrimaryEpisode) {
                     Label(L10n.string("common.play", fallback: "Play"), systemImage: "play.fill")
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(immersive ? Color.white : Color.accentColor)
+                .foregroundColor(immersive ? .black : .white)
                 .controlSize(.large)
                 .disabled(primaryEpisode == nil)
                 .help(
@@ -280,9 +352,134 @@ struct DetailView: View {
                 DetailFavoriteButton(detail: detail)
                     .buttonStyle(.bordered)
                     .controlSize(.large)
+                detailMoreMenu
             }
             .accessibilityIdentifier("detail.primary-actions")
-        })
+    }
+
+    private var detailMoreItems: [TMDBDetailMenuItem] {
+        var items = [TMDBDetailMenuItem]()
+        if state.pendingFavoriteRepairID != nil {
+            items.append(.action(L10n.string("favorites.repair.link", fallback: "Associate with Saved Favorite")) { state.confirmFavoriteRepair(detail) })
+            items.append(.action(L10n.string(.commonCancel)) { state.cancelFavoriteRepair() })
+            items.append(.separator)
+        }
+        if !tmdbEnabled {
+            items.append(.action(L10n.string("tmdb.enable", fallback: "Enable TMDB Details")) { tmdbEnabled = true })
+        } else {
+            if tmdb.binding?.isRelaxed == true {
+                items.append(.status(L10n.string("tmdb.match.relaxed.status", fallback: "Matched using the unique title")))
+            }
+            items.append(.action(tmdb.needsMatchConfirmation ? L10n.string("tmdb.match.confirm", fallback: "Review TMDB Match…") : L10n.string("tmdb.match.title", fallback: "Match Movie or Series"),
+                enabled: state.tmdbRepository != nil || injectedMetadata) { showsMatchSheet = true })
+            items.append(.action("重新检测 TMDB 网络") { Task { await TMDBNetworkRuntime.shared.checkConnections() } })
+            items.append(.action("刷新影片资料") { tmdb.retryEnhanced(detail: detail) })
+            if tmdb.selection != nil || !tmdb.candidates.isEmpty {
+                items.append(.action(L10n.string("tmdb.original", fallback: "Use Original Details")) { Task { await tmdb.useOriginal() } })
+            }
+        }
+        return items
+    }
+
+    @ViewBuilder private var detailMoreActions: some View {
+        ForEach(Array(detailMoreItems.enumerated()), id: \.offset) { _, item in
+            switch item {
+            case let .action(title, enabled, action): Button(title, action: action).disabled(!enabled)
+            case let .status(title): Text(title)
+            case .separator: Divider()
+            }
+        }
+    }
+    private var detailMoreMenu: some View {
+        Menu { detailMoreActions } label: { Image(systemName: "ellipsis.circle") }
+            .menuStyle(.borderlessButton).fixedSize()
+            .accessibilityIdentifier("tmdb.match-menu")
+    }
+
+    private var currentEpisodeInformation: TMDBEpisodeInformation {
+        .make(detail: detail, work: tmdb.selection?.work, season: tmdb.season, source: selectedSource, episode: primaryEpisode,
+              mappedEpisode: primaryEpisode.flatMap { item in selectedSource?.episodes.firstIndex(where: { $0.id == item.id }) }.flatMap { tmdb.episodeMapping(source: selectedSource, category: detail.summary.categoryName)[$0] })
+    }
+
+    private func showWorkSynopsis() {
+        let work = tmdb.selection?.work
+        let overview = work?.chineseOverview ?? detail.synopsis ?? work?.overview ?? ""
+        let facts = [detail.summary.year, detail.summary.categoryName].compactMap { $0 }.joined(separator: " · ")
+        synopsis = TMDBSynopsis(title: work?.displayTitle ?? detail.summary.title, facts: facts, overview: overview)
+    }
+
+    private var tmdbActions: some View {
+        VStack(spacing: 6) {
+            tmdbPlayButton
+            tmdbSecondaryActions
+        }.accessibilityIdentifier("detail.primary-actions")
+    }
+
+    private var tmdbPlayButton: some View {
+        TMDBNativeActionButton(title: L10n.string("common.play", fallback: "Play"),
+            identifier: "tmdb.play-selected", prominent: true, action: playPrimaryEpisode)
+            .frame(maxWidth: .infinity).frame(height: 44)
+            .disabled(primaryEpisode == nil)
+    }
+
+    private var tmdbSecondaryActions: some View {
+        HStack(spacing: 8) {
+            TMDBNativeActionButton(title: state.isFavorite(detail) ? L10n.string("tmdb.favorite.saved", fallback: "Saved") : L10n.string("tmdb.favorite", fallback: "Favorite"),
+                symbol: state.isFavorite(detail) ? "star.fill" : "star", identifier: "tmdb.favorite") {
+                    Task { await state.setFavorite(detail, isFavorite: !state.isFavorite(detail)) }
+                }
+                .frame(maxWidth: .infinity).frame(height: 42).disabled(!state.canChangeFavorite(detail))
+            TMDBNativeActionButton(title: L10n.string("tmdb.details", fallback: "Details"),
+                symbol: "info.circle", identifier: "tmdb.work-synopsis", action: showWorkSynopsis)
+                .frame(maxWidth: .infinity).frame(height: 42)
+            TMDBNativeActionButton(title: tmdb.needsMatchConfirmation ? L10n.string("tmdb.match.pending", fallback: "Review") : L10n.string("tmdb.actions.more", fallback: "More"),
+                symbol: tmdb.needsMatchConfirmation ? "questionmark.circle" : "ellipsis", identifier: "tmdb.match-menu",
+                help: tmdb.needsMatchConfirmation ? L10n.string("tmdb.match.pending-help", fallback: "Candidates found. Review the title, year and director to confirm the correct work.") : nil,
+                menuItems: detailMoreItems)
+                .frame(maxWidth: .infinity).frame(height: 42)
+        }.frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    @ViewBuilder private var tmdbSourceControls: some View {
+        Picker(L10n.string("detail.streams", fallback: "Streams"), selection: $selectedSourceIndex) {
+            ForEach(detail.playSources.indices, id: \.self) { index in Text(detail.playSources[index].name).tag(index) }
+        }.labelsHidden().frame(maxWidth: 170).accessibilityIdentifier("tmdb.source-picker")
+        if tmdb.selection?.reference.type == .tv { tmdbSeasonPicker.labelsHidden().frame(maxWidth: 180) }
+    }
+    private var tmdbSearchControls: some View {
+        HStack(spacing: 8) {
+            TextField(L10n.string("tmdb.episode.search", fallback: "Search this stream’s episodes"), text: $episodeSearchKeyword)
+                .textFieldStyle(.roundedBorder).frame(minWidth: 140, idealWidth: 190, maxWidth: 220)
+                .accessibilityIdentifier("tmdb.episode.search")
+            Menu {
+                Picker(L10n.string("common.sort", fallback: "Sort"), selection: $episodeSortOrder) {
+                    ForEach(EpisodeSortOrder.allCases) { option in Text(option.title).tag(option) }
+                }
+            } label: { Image(systemName: "arrow.up.arrow.down") }
+                .menuStyle(.borderlessButton).fixedSize().disabled(!canSortEpisodes)
+        }
+    }
+
+    @ViewBuilder private func tmdbPlaybackBrowser(width: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if width < 650 {
+                HStack(spacing: 8) { tmdbSourceControls; Spacer(minLength: 0) }.frame(minHeight: 32)
+                HStack(spacing: 8) { tmdbSearchControls; Spacer(minLength: 0) }.frame(minHeight: 32)
+            } else {
+                HStack(spacing: 8) { tmdbSourceControls; Spacer(minLength: 0); tmdbSearchControls }.frame(minHeight: 32)
+            }
+
+            if rangeOptions.count > 1 {
+                EpisodeRangePicker(options: rangeOptions, selectedID: $selectedRangeID).frame(height: 32)
+            }
+            if let error = tmdb.seasonError {
+                HStack { Text(error).font(.caption).foregroundStyle(.secondary)
+                    Button(L10n.string("common.retry", fallback: "Retry")) { Task { await tmdb.loadSeason(source: selectedSource, category: detail.summary.categoryName) } }
+                }
+            }
+            if let error = tmdb.actionError { Text(error).font(.caption).foregroundStyle(.secondary) }
+        }.frame(minHeight: width < 650 ? 72 : 32, alignment: .topLeading).padding(.horizontal, 28).padding(.top, 7).padding(.bottom, 10)
+        episodeContent
     }
 
     private var detailDescription: some View {
@@ -339,7 +536,9 @@ struct DetailView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Spacer()
+                    if usesTMDBLayout, tmdb.selection?.reference.type == .tv { tmdbSeasonPicker }
                 }
+                if let error = tmdb.actionError { Text(error).font(.caption).foregroundStyle(.secondary) }
 
                 ScrollViewReader { sourceProxy in
                     ScrollView(.horizontal, showsIndicators: true) {
@@ -404,6 +603,24 @@ struct DetailView: View {
     }
 
     @ViewBuilder
+    private var tmdbSeasonPicker: some View {
+        if let source = selectedSource {
+            Picker(L10n.string("tmdb.season", fallback: "Season"), selection: Binding(
+                get: { tmdb.binding?.seasons[sourceIdentities.identity(source)] ?? -1 },
+                set: { number in Task { await tmdb.selectSeason(number < 0 ? nil : number, source: source) } }
+            )) {
+                Text(tmdb.season.map { L10n.string("tmdb.season.auto-number", fallback: "Automatic · Season %d", $0.seasonNumber) }
+                    ?? L10n.string("tmdb.season.auto", fallback: "Choose Season…")).tag(-1)
+                ForEach(tmdb.selection?.work.seasons ?? [], id: \.seasonNumber) { season in
+                    Text(season.seasonNumber == 0 ? L10n.string("tmdb.specials", fallback: "Specials")
+                        : L10n.string("tmdb.season.number", fallback: "Season %d", season.seasonNumber)).tag(season.seasonNumber)
+                }
+            }.frame(maxWidth: 240)
+            .accessibilityIdentifier("tmdb.season-picker")
+        }
+    }
+
+    @ViewBuilder
     private var episodeControls: some View {
         if let source = selectedSource, source.episodes.count > 1 {
             HStack(spacing: 10) {
@@ -446,7 +663,9 @@ struct DetailView: View {
         let visible = filteredPresentations
         let regular = visible.filter { $0.episodeNumber != nil }
         let other = visible.filter { $0.episodeNumber == nil }
-        if isPreparingEpisodes {
+        if isPreparingEpisodes && usesTMDBLayout {
+            TMDBEpisodeSkeleton().padding(.horizontal, 28).padding(.vertical, 18)
+        } else if isPreparingEpisodes {
             VStack(spacing: 10) {
                 ProgressView().progressViewStyle(.circular).controlSize(.small)
                 Text(L10n.string("detail.organizing-episodes", fallback: "Organizing %d episodes…", selectedSource?.episodes.count ?? 0))
@@ -461,6 +680,12 @@ struct DetailView: View {
                 message: L10n.string("detail.no-matching-episodes.message", fallback: "Try another search term or episode range.")
             )
         } else {
+            if usesTMDBLayout {
+                TMDBEpisodeCards(metadata: tmdb, episodes: visible, sourceIdentity: selectedSource.map { sourceIdentities.identity($0) } ?? "", sourceEpisodes: selectedSource?.episodes ?? [], sourceName: selectedSource?.name ?? "", sourceReferenceIdentity: selectedSource?.referenceIdentity, category: detail.summary.categoryName,
+                    selectedID: primaryEpisode?.id, fallbackURL: detail.summary.posterURL,
+                    onSelect: { selectedTMDBEpisodeID = $0.episode.id }, onPlay: playSelectedEpisode)
+                    .padding(.horizontal, DetailPageLayout.horizontalPadding).padding(.vertical, 18)
+            } else {
             VStack(alignment: .leading, spacing: 18) {
                 if !regular.isEmpty {
                     EpisodeSection(
@@ -485,6 +710,7 @@ struct DetailView: View {
             .padding(.horizontal, DetailPageLayout.horizontalPadding)
             .padding(.top, 18)
             .padding(.bottom, 24)
+            }
         }
     }
 
@@ -572,12 +798,33 @@ struct DetailView: View {
         allPresentations.lazy.filter { $0.episodeNumber != nil }.prefix(2).count == 2
     }
 
+    private var selectedTMDBEpisodeID: String? {
+        get { selectedSource.flatMap { selectedTMDBEpisodes[sourceIdentities.identity($0)] } }
+        nonmutating set { if let source = selectedSource { selectedTMDBEpisodes[sourceIdentities.identity(source)] = newValue } }
+    }
+
     private var primaryEpisode: PlayEpisode? {
-        selectedSource?.episodes.first
+        guard usesTMDBLayout else { return selectedSource?.episodes.first }
+        guard let source = selectedSource else { return nil }
+        // Read once, before scanning. The source identity normalizes every URL;
+        // evaluating it inside first(where:) previously made this quadratic.
+        guard let selectedID = selectedTMDBEpisodeID else { return source.episodes.first }
+        return source.episodes.first(where: { $0.id == selectedID }) ?? source.episodes.first
     }
 
     private func performInitialSelection() {
         guard !detail.playSources.isEmpty else { return }
+        if usesTMDBLayout, !didChooseInitialEpisode {
+            didChooseInitialEpisode = true
+            for record in state.history where record.configurationID == state.activeConfigurationRecord?.id {
+                if let match = AppState.historyPlaybackSelection(in: detail, record: record),
+                   let index = detail.playSources.firstIndex(where: { $0.id == match.source.id }) {
+                    selectedSourceIndex = index
+                    selectedTMDBEpisodes[sourceIdentities.identity(match.source)] = match.episode.id
+                    return
+                }
+            }
+        }
         if let index = detail.playSources.firstIndex(where: {
             $0.name == lastPlaySourceName
         }) {
@@ -621,16 +868,22 @@ struct DetailView: View {
 
     private func playSelectedEpisode(_ presentation: EpisodePresentation) {
         guard let source = selectedSource else { return }
+        selectedTMDBEpisodeID = presentation.episode.id
         play(source: source, episode: presentation.episode)
     }
 
     private func playPrimaryEpisode() {
         guard let source = selectedSource,
-              let episode = source.episodes.first else { return }
+              let episode = primaryEpisode else { return }
         play(source: source, episode: episode)
     }
 
     private func play(source: PlaySource, episode: PlayEpisode) {
+        if usesTMDBLayout {
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now - lastTMDBPlayTime > 0.55 else { return }
+            lastTMDBPlayTime = now
+        }
         Task {
             await state.startPlayback(
                 detail: detail,
@@ -668,13 +921,10 @@ private struct DetailFactCell: View {
             Label(fact.title, systemImage: fact.systemImage)
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Text(fact.value)
-                .font(.headline)
-                .lineLimit(1)
+            TruncationAwareText(text: fact.value, font: .headline)
         }
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, minHeight: 54)
-        .help(fact.value)
     }
 }
 
@@ -1463,10 +1713,7 @@ private struct DetailHeroHeader<Description: View, Actions: View>: View {
 
     private var information: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(summary.title)
-                .font(.system(size: 28, weight: .bold))
-                .lineLimit(2)
-                .help(summary.title)
+            TruncationAwareText(text: summary.title, font: .system(size: 28, weight: .bold), lineLimit: 2)
                 .frame(height: 68, alignment: .topLeading)
             description()
                 .frame(maxHeight: .infinity, alignment: .topLeading)

@@ -141,10 +141,10 @@ class LocalAcceptanceTests(unittest.TestCase):
 
     def testTrackedAndNewBuildInputsSelectedWithoutPersonalReports(self):
         outputs = [b"App.swift\0AGENTS.md\0Gone.swift\0Docs/DemoSource/README.md\0", b"Gone.swift\0",
-                   b"Docs/private-report.md\0Docs/RELEASE_NOTES_0.7.0.md\0Docs/RELEASE_READINESS_0.7.3.md\0OKVideoMac/macOS/OKVideoMac/New.swift\0Tools/SourceAudit/new.py\0"]
+                   b"Docs/private-report.md\0Docs/LIVE_CHANNEL_PREVIEW.md\0Docs/LIVE_CHANNEL_PREVIEW-private.md\0Docs/RELEASE_NOTES_0.7.0.md\0Docs/RELEASE_READINESS_0.7.3.md\0OKVideoMac/macOS/OKVideoMac/New.swift\0Tools/SourceAudit/new.py\0"]
         with patch.object(acceptance.subprocess, "check_output", side_effect=outputs):
             self.assertEqual(acceptance.selected_files(self.repo),
-                             ["App.swift", "Docs/RELEASE_NOTES_0.7.0.md",
+                             ["App.swift", "Docs/LIVE_CHANNEL_PREVIEW.md", "Docs/RELEASE_NOTES_0.7.0.md",
                               "Docs/RELEASE_READINESS_0.7.3.md",
                               "OKVideoMac/macOS/OKVideoMac/New.swift", "Tools/SourceAudit/new.py"])
 

@@ -1,0 +1,65 @@
+--- a/libavformat/dashdec.c
++++ b/libavformat/dashdec.c
+@@ -2029,6 +2029,26 @@
+     }
+ }
+ 
++/* A static MPD may contain an unavailable alternate encoding/CDN. Keep the
++ * remaining representations usable, but never hide cancellation, allocation
++ * failure, partial stream creation, or failure of the final representation.
++ * Dynamic MPDs keep the upstream index-based refresh behavior unchanged. */
++static int discard_unavailable_representation(AVFormatContext *s,
++        struct representation **list, int *count, int index,
++        unsigned int previous_streams, int error)
++{
++    DASHContext *c = s->priv_data;
++    if (c->is_live || *count <= 1 || error == AVERROR(ENOMEM) ||
++        error == AVERROR_EXIT || ff_check_interrupt(&s->interrupt_callback) ||
++        s->nb_streams != previous_streams)
++        return 0;
++    av_log(s, AV_LOG_WARNING, "Skipping unavailable alternate DASH representation\n");
++    free_representation(list[index]);
++    memmove(&list[index], &list[index + 1], (*count - index - 1) * sizeof(*list));
++    --*count;
++    return 1;
++}
++
+ static int dash_read_header(AVFormatContext *s)
+ {
+     DASHContext *c = s->priv_data;
+@@ -2065,10 +2085,16 @@
+             if (ret < 0)
+                 return ret;
+         }
++        unsigned int previous_streams = s->nb_streams;
+         ret = open_demux_for_component(s, rep);
+ 
+-        if (ret)
++        if (ret) {
++            if (discard_unavailable_representation(s, c->videos, &c->n_videos, i, previous_streams, ret)) {
++                --i;
++                continue;
++            }
+             return ret;
++        }
+         rep->stream_index = stream_index;
+         ++stream_index;
+     }
+@@ -2083,10 +2109,16 @@
+             if (ret < 0)
+                 return ret;
+         }
++        unsigned int previous_streams = s->nb_streams;
+         ret = open_demux_for_component(s, rep);
+ 
+-        if (ret)
++        if (ret) {
++            if (discard_unavailable_representation(s, c->audios, &c->n_audios, i, previous_streams, ret)) {
++                --i;
++                continue;
++            }
+             return ret;
++        }
+         rep->stream_index = stream_index;
+         ++stream_index;
+     }

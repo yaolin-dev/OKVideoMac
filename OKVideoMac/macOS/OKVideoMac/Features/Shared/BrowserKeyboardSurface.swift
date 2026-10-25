@@ -663,3 +663,112 @@ struct BrowserItemSelection: Equatable {
         if let hoveredID, !ids.contains(hoveredID) { self.hoveredID = nil }
     }
 }
+
+/// Measure plain, single-line AppKit labels only when their text/font/width changes.
+/// Tooltip tracking is owned by AppKit; no mouse-move measurement or polling.
+enum BrowserTextOverflow {
+    static func tooltip(for field: NSTextField) -> String? {
+        guard !field.stringValue.isEmpty, field.bounds.width > 0, field.bounds.height > 0 else { return nil }
+        let drawingWidth = field.cell?.drawingRect(forBounds: field.bounds).width ?? field.bounds.width
+        let naturalWidth = field.attributedStringValue.size().width
+        return naturalWidth > drawingWidth + 0.5 || field.stringValue.contains("\n") ? field.stringValue : nil
+    }
+}
+
+final class NativeOverflowTooltipField: NSTextField {
+    var supplementalToolTip: String? {
+        didSet { if supplementalToolTip != oldValue { refreshOverflowToolTip() } }
+    }
+    private var previousText: NSAttributedString?
+    private var previousSize: NSSize?
+    private var previousSupplement: String?
+
+    override var stringValue: String {
+        didSet {
+            if stringValue != oldValue { previousText = nil; toolTip = nil; needsLayout = true }
+        }
+    }
+    override func layout() {
+        super.layout()
+        refreshOverflowToolTip()
+    }
+    func refreshOverflowToolTip() {
+        let text = attributedStringValue
+        guard previousText != text || previousSize != bounds.size || previousSupplement != supplementalToolTip else { return }
+        previousText = text.copy() as? NSAttributedString
+        previousSize = bounds.size
+        previousSupplement = supplementalToolTip
+        let pieces = [BrowserTextOverflow.tooltip(for: self), supplementalToolTip == stringValue ? nil : supplementalToolTip]
+            .compactMap { $0 }.filter { !$0.isEmpty }
+        let value = pieces.isEmpty ? nil : pieces.joined(separator: "\n")
+        if toolTip != value { toolTip = value }
+    }
+}
+
+private struct TextOverflowMeasurement: Equatable {
+    let text: String
+    let truncated: Bool
+}
+private struct TextOverflowPreference: PreferenceKey {
+    static let defaultValue: TextOverflowMeasurement? = nil
+    static func reduce(value: inout TextOverflowMeasurement?, nextValue: () -> TextOverflowMeasurement?) {
+        if let next = nextValue() { value = next }
+    }
+}
+
+/// Uses the same SwiftUI font/layout for visible and full text, including CJK,
+/// multiline titles and accessibility text sizes. Only this label keeps state.
+struct TruncationAwareText: View {
+    let text: String
+    let font: Font
+    var lineLimit: Int = 1
+    var minimumScaleFactor: CGFloat = 1
+    @State private var measurement: TextOverflowMeasurement?
+
+    var body: some View {
+        Text(text)
+            .font(font)
+            .lineLimit(lineLimit)
+            .minimumScaleFactor(minimumScaleFactor)
+            .background {
+                GeometryReader { visible in
+                    Text(text)
+                        .font(font)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: lineLimit == 1, vertical: true)
+                        .background {
+                            GeometryReader { full in
+                                Color.clear.preference(key: TextOverflowPreference.self, value:
+                                    TextOverflowMeasurement(text: text, truncated: lineLimit == 1
+                                        ? full.size.width * minimumScaleFactor > visible.size.width + 0.5
+                                        : full.size.height > visible.size.height + 0.5))
+                            }
+                        }
+                        .hidden()
+                        .accessibilityHidden(true)
+                }
+            }
+            .onPreferenceChange(TextOverflowPreference.self) { value in
+                if measurement != value { measurement = value }
+            }
+            .background {
+                OverflowToolTipRegion(text: measurement?.text == text && measurement?.truncated == true ? text : nil)
+                    .accessibilityHidden(true)
+            }
+    }
+}
+
+struct OverflowToolTipRegion: NSViewRepresentable {
+    let text: String?
+    func makeNSView(context: Context) -> OverflowToolTipView { OverflowToolTipView() }
+    func updateNSView(_ view: OverflowToolTipView, context: Context) {
+        if view.toolTip != text { view.toolTip = text }
+    }
+    static func dismantleNSView(_ view: OverflowToolTipView, coordinator: ()) { view.toolTip = nil }
+}
+
+/// A tooltip region participates in native tracking, but never takes a click
+/// from its enclosing poster, filter, or person button.
+final class OverflowToolTipView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}

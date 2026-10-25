@@ -448,7 +448,12 @@ struct PosterNativePage: NSViewRepresentable {
     static func dismantleNSView(_ view: PosterNativePageScrollView,
                                 coordinator: Coordinator) {
         view.onLayout = nil
+        // SwiftUI may retain an outgoing representable through its render
+        // transaction. Remove its native document immediately so old search
+        // cards cannot remain above the incoming detail/loading surface.
+        view.isHidden = true
         coordinator.detach()
+        view.documentView = nil
     }
 
     @MainActor final class Coordinator: NSObject, NSCollectionViewDataSource, NSCollectionViewDelegate {
@@ -1413,7 +1418,7 @@ final class PosterNativeCardView: NSView, BrowserHoverTarget {
     private var onSelect: (() -> Void)?
     private var sources: [VideoSummary] = []
     private var onSelectSource: ((VideoSummary) -> Void)?
-    private var isHovered = false { didSet { updateHighlight() } }
+    private var isHovered = false { didSet { updateHighlight(); updateTitleToolTip() } }
     private var isKeyboardHighlighted = false { didSet { updateHighlight() } }
 
     override var isFlipped: Bool { true }
@@ -1460,7 +1465,7 @@ final class PosterNativeCardView: NSView, BrowserHoverTarget {
               pixels: Int, onSelect: @escaping () -> Void) {
         self.onSelect = onSelect
         title.stringValue = summary.title
-        toolTip = [summary.title, summary.remarks].compactMap { $0 }.joined(separator: " · ")
+        clearTitleToolTip()
         subtitle.stringValue = VideoCardMetadata.secondaryText(
             from: summary.remarks) ?? ""
         rating.stringValue = VideoCardMetadata.ratingText(
@@ -1476,6 +1481,26 @@ final class PosterNativeCardView: NSView, BrowserHoverTarget {
             imageCoordinator.cancel()
         }
         needsLayout = true
+    }
+
+    private var titleTipTag: NSView.ToolTipTag?
+    private(set) var titleTipText: NSString?
+    private(set) var titleTipRect: NSRect?
+
+    private func clearTitleToolTip() {
+        if let titleTipTag { removeToolTip(titleTipTag) }
+        titleTipTag = nil; titleTipText = nil; titleTipRect = nil
+        toolTip = nil
+    }
+    private func updateTitleToolTip() {
+        let text = isHovered ? BrowserTextOverflow.tooltip(for: title) : nil
+        guard titleTipText?.description != text || titleTipRect != (text == nil ? nil : title.frame) else { return }
+        clearTitleToolTip()
+        if let text {
+            let owner = text as NSString
+            titleTipText = owner; titleTipRect = title.frame
+            titleTipTag = addToolTip(title.frame, owner: owner, userData: nil)
+        }
     }
 
     private var showsSubtitle = false
@@ -1507,6 +1532,9 @@ final class PosterNativeCardView: NSView, BrowserHoverTarget {
     }
 
     func reset() {
+        clearTitleToolTip()
+        title.stringValue = ""
+        setAccessibilityLabel(nil)
         imageCoordinator.cancel()
         onSelect = nil
         onSelectSource = nil
@@ -1526,6 +1554,7 @@ final class PosterNativeCardView: NSView, BrowserHoverTarget {
         title.frame = NSRect(x: inset,
             y: poster.frame.maxY + PosterGridMetrics.textSpacing,
             width: posterWidth, height: PosterGridMetrics.titleHeight)
+        updateTitleToolTip()
         subtitle.frame = NSRect(x: inset,
             y: title.frame.maxY + PosterGridMetrics.textSpacing,
             width: posterWidth, height: PosterGridMetrics.subtitleHeight)
@@ -1959,9 +1988,7 @@ struct VideoCard: View {
             VStack(alignment: .leading, spacing: PosterGridMetrics.textSpacing) {
                 VideoPosterView(item: item)
 
-                Text(item.title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .lineLimit(1)
+                TruncationAwareText(text: item.title, font: .system(size: 13, weight: .semibold))
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                     .frame(height: PosterGridMetrics.titleHeight, alignment: .topLeading)
@@ -1990,7 +2017,6 @@ struct VideoCard: View {
         }
         .buttonStyle(.plain)
         .background { BrowserHoverBackground() }
-        .help(item.title)
         .accessibilityLabel(L10n.string("video.provider-accessibility", fallback: "%@, from %@", item.title, item.siteName))
     }
 

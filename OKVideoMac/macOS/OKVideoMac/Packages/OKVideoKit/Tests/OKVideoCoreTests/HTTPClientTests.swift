@@ -1,10 +1,65 @@
 import XCTest
+import Network
 @testable import OKVideoCore
 
 final class HTTPClientTests: XCTestCase {
     override func tearDown() {
         MockURLProtocol.handler = nil
         super.tearDown()
+    }
+
+    func testPooledBoundedRequestsReuseTCPConnectionAndKeepBodiesSeparate() async throws {
+        let server = try BoundedKeepAliveServer()
+        defer { server.stop() }
+        let port = try await server.port()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = ["HTTPEnable": 0, "HTTPSEnable": 0, "SOCKSEnable": 0] // Loopback fixture must not use a machine-wide upstream proxy.
+        let client = URLSessionHTTPClient(isolatedConfiguration: configuration, reusesBoundedConnections: true)
+        for path in ["first", "second", "third"] {
+            let response = try await client.send(server.request(port: port, path: path))
+            XCTAssertEqual(try response.text(), path)
+        }
+        XCTAssertEqual(server.connectionCount, 1, "The bounded path must keep the TCP connection alive")
+    }
+
+    func testPooledCancellationDoesNotCancelConcurrentOrSubsequentRequests() async throws {
+        let server = try BoundedKeepAliveServer()
+        defer { server.stop() }
+        let port = try await server.port()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = ["HTTPEnable": 0, "HTTPSEnable": 0, "SOCKSEnable": 0] // Loopback fixture must not use a machine-wide upstream proxy.
+        let client = URLSessionHTTPClient(isolatedConfiguration: configuration, reusesBoundedConnections: true)
+        let cancelled = Task { try await client.send(server.request(port: port, path: "slow-cancel")) }
+        try await server.waitForRequests(1)
+        let retained = Task { try await client.send(server.request(port: port, path: "slow-retained")) }
+        try await server.waitForRequests(2)
+        cancelled.cancel()
+        do { _ = try await cancelled.value; XCTFail("Cancelled response escaped") }
+        catch { XCTAssertEqual(error as? HTTPClientError, .cancelled) }
+        let response = try await retained.value
+        XCTAssertEqual(try response.text(), "slow-retained")
+        let next = try await client.send(server.request(port: port, path: "after-cancel"))
+        XCTAssertEqual(try next.text(), "after-cancel")
+    }
+
+    func testPooledBoundedLimitsAndRedirectRejectionDoNotPoisonSession() async throws {
+        let server = try BoundedKeepAliveServer()
+        defer { server.stop() }
+        let port = try await server.port()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = ["HTTPEnable": 0, "HTTPSEnable": 0, "SOCKSEnable": 0] // Loopback fixture must not use a machine-wide upstream proxy.
+        let client = URLSessionHTTPClient(isolatedConfiguration: configuration, reusesBoundedConnections: true)
+        for path in ["oversize", "chunked-oversize", "redirect"] {
+            do { _ = try await client.send(server.request(port: port, path: path, limit: 10)); XCTFail("Accepted " + path) }
+            catch {
+                guard let error = error as? HTTPClientError else { return XCTFail("Unexpected error: \(error)") }
+                if path == "redirect" { XCTAssertEqual(error, .tooManyRedirects(0)) }
+                else if case .responseTooLarge(let limit, let actual) = error { XCTAssertEqual(limit, 10); XCTAssertGreaterThan(actual, 10) }
+                else { XCTFail("Unexpected error: \(error)") }
+            }
+            let healthy = try await client.send(server.request(port: port, path: "healthy"))
+            XCTAssertEqual(try healthy.text(), "healthy")
+        }
     }
 
     func testGETPassesHeadersAndReturnsBody() async throws {
@@ -220,7 +275,8 @@ final class HTTPClientTests: XCTestCase {
         configuration.protocolClasses = [MockURLProtocol.self]
         let firstAccount = URLSessionHTTPClient(isolatedConfiguration: configuration)
         let secondAccount = URLSessionHTTPClient(isolatedConfiguration: configuration)
-        for client in [firstAccount, secondAccount] {
+        let pooledAccount = URLSessionHTTPClient(isolatedConfiguration: configuration, reusesBoundedConnections: true)
+        for client in [firstAccount, secondAccount, pooledAccount] {
             // The second request in each path also proves a Set-Cookie
             // response does not become account/session state.
             for limit: Int? in [nil, nil, 1_024, 1_024] {
@@ -232,7 +288,7 @@ final class HTTPClientTests: XCTestCase {
                 XCTAssertEqual(try response.text(), "ok")
             }
         }
-        XCTAssertEqual(requests.value, 8)
+        XCTAssertEqual(requests.value, 12)
         let remaining = HTTPCookieStorage.shared.cookies(for: url) ?? []
         XCTAssertTrue(remaining.contains { $0.name == sharedCookie.name })
         XCTAssertFalse(remaining.contains { $0.name == "xtream_response_session" })
@@ -463,5 +519,69 @@ private final class LockedCounter {
         defer { lock.unlock() }
         storage += 1
         return storage
+    }
+}
+
+/// Loopback HTTP/1.1 fixture verifies real connection reuse and cancellation;
+/// URLProtocol alone cannot exercise the connection pool.
+private final class BoundedKeepAliveServer: @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "bounded-http-fixture")
+    private let lock = NSLock()
+    private var connections: [NWConnection] = []
+    private var requests = 0
+    var connectionCount: Int { lock.lock(); defer { lock.unlock() }; return connections.count }
+    var requestCount: Int { lock.lock(); defer { lock.unlock() }; return requests }
+    init() throws {
+        listener = try NWListener(using: .tcp, on: .any)
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else { connection.cancel(); return }
+            self.lock.lock(); self.connections.append(connection); self.lock.unlock()
+            connection.start(queue: self.queue)
+            self.receive(connection, buffered: Data())
+        }
+        listener.start(queue: queue)
+    }
+    func port() async throws -> UInt16 {
+        for _ in 0..<500 {
+            if let port = listener.port?.rawValue, port != 0 { return port }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        throw URLError(.cannotConnectToHost)
+    }
+    func waitForRequests(_ count: Int) async throws {
+        for _ in 0..<1000 {
+            if requestCount >= count { return }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        throw URLError(.timedOut)
+    }
+    func request(port: UInt16, path: String, limit: Int = 1024) -> HTTPRequest {
+        HTTPRequest(url: URL(string: "http://127.0.0.1:\(port)/\(path)")!, timeout: 3,
+                    maximumResponseBytes: limit, earlyResponseLimitBytes: limit, maximumRedirects: 0, retryPolicy: .none)
+    }
+    private func receive(_ connection: NWConnection, buffered: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, complete, error in
+            guard let self, error == nil, !complete else { return }
+            var buffer = buffered; buffer.append(data ?? Data())
+            guard let end = buffer.range(of: Data("\r\n\r\n".utf8)) else { self.receive(connection, buffered: buffer); return }
+            let header = String(decoding: buffer[..<end.upperBound], as: UTF8.self)
+            let path = header.components(separatedBy: " ").dropFirst().first?.dropFirst().description ?? ""
+            self.lock.lock(); self.requests += 1; self.lock.unlock()
+            let response: String
+            if path == "redirect" { response = "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/forbidden\r\nContent-Length: 0\r\n\r\n" }
+            else if path == "oversize" { response = "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n12345678901" }
+            else if path == "chunked-oversize" { response = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nB\r\n12345678901\r\n0\r\n\r\n" }
+            else { response = "HTTP/1.1 200 OK\r\nContent-Length: \(path.utf8.count)\r\n\r\n\(path)" }
+            self.queue.asyncAfter(deadline: .now() + (path.hasPrefix("slow") ? 0.2 : 0)) {
+                connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in })
+            }
+            self.receive(connection, buffered: Data(buffer[end.upperBound...]))
+        }
+    }
+    func stop() {
+        listener.cancel()
+        lock.lock(); let copy = connections; lock.unlock()
+        copy.forEach { $0.cancel() }
     }
 }

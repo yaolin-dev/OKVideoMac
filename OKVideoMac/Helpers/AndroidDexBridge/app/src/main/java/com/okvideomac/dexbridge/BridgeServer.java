@@ -65,6 +65,7 @@ final class BridgeServer {
             Executors.newFixedThreadPool(MEDIA_THREAD_COUNT);
     private static final Map<String, Future<?>> INTERACTION_WORKERS =
             new ConcurrentHashMap<>();
+    private static final SearchRequestRegistry SEARCH_REQUESTS = new SearchRequestRegistry();
     private static final Map<String, InteractionWorkerExit> INTERACTION_EXITS =
             new ConcurrentHashMap<>();
     /**
@@ -351,6 +352,7 @@ final class BridgeServer {
                                 output,
                                 path.substring("/proxy/media/".length()),
                                 headers,
+                                parseQuery(target),
                                 "HEAD".equals(method)
                     ));
                     return;
@@ -362,6 +364,7 @@ final class BridgeServer {
                                 output,
                                 path.substring("/v1/media-sessions/".length()),
                                 headers,
+                                parseQuery(target),
                                 "HEAD".equals(method)
                     ));
                     return;
@@ -594,6 +597,15 @@ final class BridgeServer {
                     writeProxy(output, response, "HEAD".equals(method));
                     return;
                 }
+                if ("POST".equals(method) && path.startsWith("/v1/search/")
+                        && path.endsWith("/cancel")) {
+                    String searchID = path.substring("/v1/search/".length(), path.length() - "/cancel".length());
+                    JSONObject result = new JSONObject();
+                    result.put("ok", true);
+                    result.put("interrupted", SEARCH_REQUESTS.cancel(searchID));
+                    writeJSON(output, 200, result);
+                    return;
+                }
                 if (!"POST".equals(method) || !"/v1/invoke".equals(target)) {
                     writeJSON(output, 404, failure("Not found"));
                     return;
@@ -606,6 +618,8 @@ final class BridgeServer {
                 byte[] body = readExactly(input, length);
                 JSONObject payload = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 String interactionID = payload.optString("interactionID", "").trim();
+                String searchRequestID = "search".equals(payload.optString("method"))
+                        ? payload.optString("searchRequestID", "").trim() : "";
                 boolean interactive = payload.optBoolean(
                         "monitorsAuthorization",
                         false
@@ -648,6 +662,19 @@ final class BridgeServer {
                             );
                             return;
                         }
+                    } else if (!searchRequestID.isEmpty()) {
+                        final long queuedAt = System.nanoTime();
+                        invocation = SEARCH_REQUESTS.submit(searchRequestID, PROVIDER_WORKERS, () -> {
+                            long startedAt = System.nanoTime();
+                            try { return DexSpiderRegistry.get(context).invoke(invokePayload); }
+                            finally {
+                                if (invokePayload.optBoolean("searchDiagnostics", false)) {
+                                    Log.i(TAG, "search_timing id=" + searchRequestID
+                                            + " queue_ms=" + (startedAt - queuedAt) / 1_000_000
+                                            + " execute_ms=" + (System.nanoTime() - startedAt) / 1_000_000);
+                                }
+                            }
+                        });
                     } else {
                         invocation = PROVIDER_WORKERS.submit(
                                 () -> DexSpiderRegistry.get(context).invoke(
@@ -1238,14 +1265,25 @@ final class BridgeServer {
             BufferedOutputStream output,
             String sessionID,
             Map<String, String> clientHeaders,
+            Map<String, String> query,
             boolean headersOnly
     ) throws IOException {
+        String[] resourcePath = sessionID.split("/dash/", 2);
+        boolean dashChild = resourcePath.length == 2;
         BridgeMediaSessionRegistry.Session session =
-                BridgeMediaSessionRegistry.get(sessionID);
+                BridgeMediaSessionRegistry.get(resourcePath[0]);
         if (session == null) {
             writeJSON(output, 410, failure("Media session expired or missing"));
             return;
         }
+        java.util.List<String> upstreamURLs;
+        try {
+            upstreamURLs = dashChild ? session.resolveDashResource(resourcePath[1], query) : java.util.Collections.singletonList(session.upstreamURL);
+        } catch (IOException error) {
+            writeJSON(output, 410, failure("DASH media context expired or invalid"));
+            return;
+        }
+        String upstreamURL = upstreamURLs.get(0);
         String requestID = UUID.randomUUID().toString().substring(0, 8);
         LinkedHashMap<String, String> forwarded = new LinkedHashMap<>();
 
@@ -1275,7 +1313,7 @@ final class BridgeServer {
         if (range != null && !range.trim().isEmpty()) {
             putHeaderIgnoreCase(forwarded, "Range", range);
         }
-        URI providerProxy = providerProxyURI(session.upstreamURL);
+        URI providerProxy = providerProxyURI(upstreamURL);
         if (BuildConfig.MEDIA_RANGE_AUDIT && "1".equals(clientHeaders.get("x-okvideomac-range-audit"))) {
             writeJSON(output, 200, MediaRangeAudit.run(session, forwarded, providerProxy == null));
             return;
@@ -1328,23 +1366,50 @@ final class BridgeServer {
             }
             response = response.clone();
             response[2] = session.guardStream((InputStream) response[2]);
+            if ((Integer) response[0] == 200 && DashManifest.isDASH((String) response[1])) {
+                byte[] manifest = DashManifest.rewrite((InputStream) response[2], upstreamURL,
+                        url -> session.registerDashResource(url, sessionFingerprint));
+                // Rewritten bytes have new framing; upstream byte ranges and
+                // Content-Length no longer describe the downstream manifest.
+                response = new Object[]{200, "application/dash+xml", session.guardStream(new java.io.ByteArrayInputStream(manifest))};
+            }
             writeProxy(output, response, headersOnly);
             return;
         }
         synchronized (session) {
             if (!sessionFingerprint.equals(session.upstreamFingerprint)) throw new IOException("Media context changed");
-            if (session.virtualRange != null && range != null) {
+            if (!dashChild && session.virtualRange != null && range != null) {
                 putHeaderIgnoreCase(forwarded, "Range", session.virtualRange.upstreamRange(range));
             }
         }
         final SessionMediaResponse mediaResponse;
         try {
-            URI upstream = requireSessionMediaURI(session.upstreamURL);
-            mediaResponse = executeSessionMedia(
-                    upstream,
-                    forwarded,
-                    headersOnly
-            );
+            SessionMediaResponse selected = null;
+            IOException lastFailure = null;
+            for (String candidate : upstreamURLs) {
+                try {
+                    selected = executeSessionMedia(requireSessionMediaURI(candidate), forwarded, headersOnly);
+                    int status = selected.response.code();
+                    if (dashChild && status == 403) {
+                        Map<String, String> compatibility = DashManifest.forbiddenCDNHeaders(candidate, forwarded, sessionHeaders);
+                        if (compatibility != null) {
+                            selected.response.close();
+                            selected = null;
+                            selected = executeSessionMedia(requireSessionMediaURI(candidate), compatibility, headersOnly);
+                            status = selected.response.code();
+                        }
+                    }
+                    if (status >= 200 && status < 300) {
+                        if (dashChild) session.preferDashResource(resourcePath[1], candidate, query);
+                        break;
+                    }
+                    if (candidate.equals(upstreamURLs.get(upstreamURLs.size() - 1))) break;
+                    selected.response.close();
+                    selected = null;
+                } catch (IOException error) { lastFailure = error; }
+            }
+            if (selected == null) throw lastFailure == null ? new IOException("No DASH media mirror available") : lastFailure;
+            mediaResponse = selected;
         } catch (IOException | IllegalArgumentException error) {
             Log.w(
                     TAG,
@@ -1360,11 +1425,17 @@ final class BridgeServer {
             return;
         }
         try (Response response = mediaResponse.response) {
+            if (!headersOnly && response.code() == 200 && DashManifest.isDASH(response.header("Content-Type")) && response.body() != null) {
+                byte[] manifest = DashManifest.rewrite(session.guardStream(response.body().byteStream()),
+                        mediaResponse.upstream.toString(), url -> session.registerDashResource(url, sessionFingerprint));
+                writeProxy(output, new Object[]{200, "application/dash+xml", session.guardStream(new java.io.ByteArrayInputStream(manifest))}, false);
+                return;
+            }
             String normalizedRange = null;
             synchronized (session) {
                 if (!sessionFingerprint.equals(session.upstreamFingerprint)
                         || BridgeMediaSessionRegistry.get(session.id) != session) throw new IOException("Media context changed");
-                if (!headersOnly && !session.virtualRangeProbeAttempted
+                if (!dashChild && !headersOnly && !session.virtualRangeProbeAttempted
                         && VirtualMediaRange.candidate(response, range)) {
                     session.virtualRangeProbeAttempted = true;
                     session.virtualRange = VirtualMediaRange.probe(response, mediaResponse.headers);
@@ -1372,7 +1443,7 @@ final class BridgeServer {
                     Log.i(TAG, "MediaRangeProof session=" + shortHash(session.id)
                             + " outcome=" + (session.virtualRange == null ? "unproven" : "verified"));
                 }
-                if (session.virtualRange != null && range != null && response.code() == 206) {
+                if (!dashChild && session.virtualRange != null && range != null && response.code() == 206) {
                     normalizedRange = session.virtualRange.downstreamRange(range, response.header("Content-Range"));
                 } else if (response.code() == 206) {
                     long[] requested = VirtualMediaRange.requestedRange(range);

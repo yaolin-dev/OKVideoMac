@@ -20,6 +20,10 @@ int main(void) {
     failure |= require_decoder(AV_CODEC_ID_H264, "h264");
     failure |= require_decoder(AV_CODEC_ID_HEVC, "hevc");
     failure |= require_decoder(AV_CODEC_ID_AAC, "aac");
+    if (av_find_input_format("dash") == NULL) {
+        fprintf(stderr, "missing demuxer: dash\n");
+        failure = 1;
+    }
     if (strstr(configuration, "--enable-gpl") != NULL ||
         strstr(configuration, "--enable-nonfree") != NULL ||
         strstr(configuration, "--enable-version3") != NULL) {

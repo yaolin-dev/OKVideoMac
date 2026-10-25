@@ -1,5 +1,9 @@
 # Immutable Corresponding-Source Release Process
 
+## Local Build 149 acceptance
+
+The Live TV preview candidate uses a captured local source tree and `OKVideoMac-0.8.7-build149-SOURCE_RELEASE_INDEX.json`. It is not a public release or a replacement for the notarized Build 140 assets. Its source SHA-256 and local validation evidence are retained with the candidate package.
+
 ## Published 0.8.7 identity
 
 Release `v0.8.7` pins clean main commit `8208c1ea6db514cb35bbd32bbed8a15ade06cb03`. The notarized/stapled public download is `OKVideoMac-0.8.7.dmg`; `OKVideoMac-0.8.7-macOS-arm64.zip` remains internal. Source index `OKVideoMac-0.8.7-build140-SOURCE_RELEASE_INDEX.json`, source/licence archives, APK, SBOMs, notices, notes and signed feed bind the final release. All 16 public assets passed local/GitHub/anonymous SHA-256 checks. See [formal verification](RELEASE_VALIDATION_0.8.7.md); earlier tags/assets remain immutable.

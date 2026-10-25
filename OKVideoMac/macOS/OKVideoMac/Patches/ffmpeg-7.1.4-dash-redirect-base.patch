@@ -1,0 +1,11 @@
+--- a/libavformat/dashdec.c
++++ b/libavformat/dashdec.c
+@@ -1372,7 +1372,7 @@
+             } else if (!av_strcasecmp(adaptionset_node->name, "SegmentList")) {
+                 period_segmentlist_node = adaptionset_node;
+             } else if (!av_strcasecmp(adaptionset_node->name, "AdaptationSet")) {
+-                parse_manifest_adaptationset(s, url, adaptionset_node, mpd_baseurl_node, period_baseurl_node, period_segmenttemplate_node, period_segmentlist_node);
++                parse_manifest_adaptationset(s, c->base_url, adaptionset_node, mpd_baseurl_node, period_baseurl_node, period_segmenttemplate_node, period_segmentlist_node);
+             }
+             adaptionset_node = xmlNextElementSibling(adaptionset_node);
+         }

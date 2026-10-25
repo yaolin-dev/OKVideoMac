@@ -22,7 +22,7 @@ settings:
     SWIFT_VERSION: "5.7"
     CLANG_ENABLE_MODULES: true
     MARKETING_VERSION: 0.8.7
-    CURRENT_PROJECT_VERSION: 140
+    CURRENT_PROJECT_VERSION: 149
     OKVIDEOMAC_SPARKLE_ROOT: $(SRCROOT)/Vendor/Build/Sparkle
     OKVIDEOMAC_CRASH_REPORT_DSN: ""
     OKVIDEOMAC_UPDATE_FEED_URL: ""
@@ -30,6 +30,19 @@ settings:
     OKVIDEOMAC_UPDATE_CHANNEL: unconfigured
 
 targets:
+  OKVideoLivePreview:
+    type: tool
+    platform: macOS
+    deploymentTarget: "12.0"
+    sources:
+      - path: LivePreviewHelper
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.okvideomac.OKVideoMac.LivePreview
+        PRODUCT_NAME: OKVideoLivePreview
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+        SKIP_INSTALL: true
+
   OKVideoMacRelauncher:
     type: tool
     platform: macOS
@@ -112,6 +125,14 @@ targets:
               public.mime-type:
                 - application/vnd.okvideomac.backup+json
     postBuildScripts:
+      - name: Embed live preview helper
+        script: |
+          PREVIEW_SOURCE="${BUILT_PRODUCTS_DIR}/OKVideoLivePreview"
+          HELPERS_DIR="${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers"
+          test -x "${PREVIEW_SOURCE}" || exit 1
+          mkdir -p "${HELPERS_DIR}"
+          cp "${PREVIEW_SOURCE}" "${HELPERS_DIR}/OKVideoLivePreview"
+          chmod 755 "${HELPERS_DIR}/OKVideoLivePreview"
       - name: Embed app relaunch helper
         script: |
           RELAUNCHER_SOURCE="${BUILT_PRODUCTS_DIR}/OKVideoMacRelauncher"
@@ -224,6 +245,9 @@ targets:
       - framework: $(OKVIDEOMAC_SPARKLE_ROOT)/Sparkle.framework
         embed: true
         codeSign: false
+      - target: OKVideoLivePreview
+        link: false
+        embed: false
       - target: OKVideoMacRelauncher
         link: false
         embed: false

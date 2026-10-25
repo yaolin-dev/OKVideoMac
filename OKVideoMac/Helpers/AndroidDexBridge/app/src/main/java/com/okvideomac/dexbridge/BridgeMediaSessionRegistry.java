@@ -441,6 +441,8 @@ final class BridgeMediaSessionRegistry {
         final BridgeProviderOwnerRegistry.Binding owner;
         final long providerEpoch;
         final Map<String, String> headers;
+        final Map<String, DashManifest.Resource> dashResources = new LinkedHashMap<>();
+        final Map<List<String>, String> dashResourceIDs = new LinkedHashMap<>();
         volatile String upstreamFingerprint;
         // Runtime-only representation proof, owned by this exact session and
         // header revision. It is neither a URL cache nor a permanent identity.
@@ -488,6 +490,8 @@ final class BridgeMediaSessionRegistry {
                     owner
             );
             if (previousFingerprint != null && !previousFingerprint.equals(upstreamFingerprint)) {
+                dashResources.clear();
+                dashResourceIDs.clear();
                 virtualRange = null;
                 virtualRangeProbeAttempted = false;
             }
@@ -495,6 +499,29 @@ final class BridgeMediaSessionRegistry {
 
         synchronized Map<String, String> headerSnapshot() {
             return new LinkedHashMap<>(headers);
+        }
+
+        synchronized String registerDashResource(List<String> upstreams, String fingerprint) throws java.io.IOException {
+            if (!isCurrent() || !upstreamFingerprint.equals(fingerprint)) throw new java.io.IOException("Media context changed");
+            String child = dashResourceIDs.get(upstreams);
+            if (child == null) {
+                if (dashResources.size() >= 16384) throw new java.io.IOException("Too many DASH references");
+                child = UUID.randomUUID().toString();
+                dashResources.put(child, new DashManifest.Resource(upstreams));
+                dashResourceIDs.put(new ArrayList<>(upstreams), child);
+            }
+            return dashResources.get(child).downstream("/proxy/media/" + id + "/dash/" + child);
+        }
+
+        synchronized void preferDashResource(String child, String url, Map<String, String> query) throws java.io.IOException {
+            DashManifest.Resource resource = dashResources.get(child);
+            if (resource != null) resource.prefer(url, query);
+        }
+
+        synchronized List<String> resolveDashResource(String child, Map<String, String> query) throws java.io.IOException {
+            DashManifest.Resource resource = dashResources.get(child);
+            if (!isCurrent() || resource == null) throw new java.io.IOException("DASH media context expired");
+            return resource.resolveAll(query);
         }
     }
 

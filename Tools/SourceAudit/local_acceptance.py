@@ -19,7 +19,9 @@ MANIFEST = "LOCAL_ACCEPTANCE_SNAPSHOT.json"
 # personal files into an artifact; new implementation files use these roots.
 UNTRACKED_ROOTS = ("OKVideoMac/macOS/OKVideoMac/", "OKVideoMac/Helpers/", "Tools/SourceAudit/")
 UPDATE_INPUTS = {"ThirdParty/sparkle-lock.json", "ThirdParty/approved-macho-paths.json",
-                 "OKVideoMac/THIRD_PARTY_LICENSES/Sparkle-LICENSE.txt", "Docs/AUTOMATIC_UPDATES.md"}
+                 "OKVideoMac/THIRD_PARTY_LICENSES/Sparkle-LICENSE.txt",
+                 "OKVideoMac/THIRD_PARTY_LICENSES/libxml2-MIT.txt", "Docs/AUTOMATIC_UPDATES.md",
+                 "Docs/LIVE_CHANNEL_PREVIEW.md"}
 RELEASE_DOCUMENT_PATTERN = re.compile(
     r"Docs/RELEASE_(?:NOTES|READINESS)_\d+\.\d+\.\d+\.md\Z"
 )

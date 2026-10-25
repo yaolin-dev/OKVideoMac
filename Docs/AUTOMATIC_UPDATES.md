@@ -35,6 +35,19 @@ old preferences. Scheduled update windows are suppressed during playback; the
 application menu and General settings expose an available-version reminder.
 Manual checks use the standard Sparkle UI.
 
+Update release notes are generated as self-contained HTML by
+`Tools/SourceAudit/update_release_notes.py`. The publishing format supports
+headings, paragraphs, lists, fenced/inline code, bold text and HTTPS links;
+unsupported syntax and raw HTML are escaped rather than executed. The template
+wraps paragraphs, long words, links and code to Sparkle's existing viewport and
+provides a visible vertical scrollbar with reserved width. Only the notes scroll;
+Sparkle still owns the window, version header, action buttons and download status.
+No JavaScript, external fonts, images or stylesheets are needed. New embedded
+notes work in the already-shipped Sparkle 2.10.0 clients without a client upgrade.
+This is a publishing-template change: replacing a local App alone does not
+reformat an already-published feed. Generate and sign a new feed through the
+normal release process; do not edit previously signed assets in place.
+
 Downloading and installing require user choices. Deferring a staged install is
 mapped to Sparkle's cancellation choice; it does not leave an install-on-quit
 task. While downloading/preparing an accepted update, ordinary quit focuses the

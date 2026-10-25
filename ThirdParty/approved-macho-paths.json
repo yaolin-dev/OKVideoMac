@@ -31,7 +31,9 @@
   "Contents/Frameworks/libsqlite3.dylib",
   "Contents/Frameworks/libswresample.5.dylib",
   "Contents/Frameworks/libswscale.8.dylib",
+  "Contents/Frameworks/libxml2.16.dylib",
   "Contents/Frameworks/libz.1.dylib",
+  "Contents/Helpers/OKVideoLivePreview",
   "Contents/Helpers/OKVideoMacRelauncher",
   "Contents/MacOS/OKVideoMac",
   "Contents/Resources/NodeRuntime/node"

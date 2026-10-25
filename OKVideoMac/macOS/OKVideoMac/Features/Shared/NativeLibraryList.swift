@@ -366,7 +366,7 @@ final class NativeLibraryActionButton: NSButton {
 
 final class NativeLibraryCell: NSTableCellView {
     let poster = NSImageView()
-    let title = NSTextField(labelWithString: "")
+    let title = NativeOverflowTooltipField(labelWithString: "")
     let subtitle = NSTextField(labelWithString: "")
     let summary = NSTextField(wrappingLabelWithString: "")
     let time = NSTextField(labelWithString: "")
@@ -454,7 +454,6 @@ final class NativeLibraryCell: NSTableCellView {
         progress.setAccessibilityLabel(L10n.string("history.playback-progress", fallback: "Watch Progress"))
         date.stringValue = row.date.formatted(date: .abbreviated, time: .shortened)
         open.toolTip = openTitle; open.setAccessibilityLabel(openTitle)
-        title.toolTip = row.title
         open.image = NSImage(systemSymbolName: openSymbol, accessibilityDescription: nil)
         open.isEnabled = !row.isLoading
         loading.isHidden = !row.isLoading

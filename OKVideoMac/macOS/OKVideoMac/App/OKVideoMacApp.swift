@@ -112,6 +112,12 @@ private struct StartupCommands: Commands {
         CommandGroup(after: .appInfo) {
             if startup.canRunBusinessEvents { UpdateCommandItems() }
         }
+        CommandGroup(after: .toolbar) {
+            if let state = startup.business {
+                BrowserWindowCommandItems(state: state)
+                    .disabled(!startup.canRunBusinessEvents)
+            }
+        }
         CommandMenu(L10n.string("menu.navigation", fallback: "Navigate")) {
             if let state = startup.business { NavigationCommandItems(state: state).disabled(!startup.canRunBusinessEvents) }
         }
@@ -134,27 +140,19 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
     private let mainMenuLocalizer = MainMenuLocalizationController()
     private let newWindowGate = StartupNewWindowGate()
     private weak var appState: AppState?
-    private var settingsWindow: NSWindow?
     private var startupController: AppStartupController? { AppLaunchSession.current?.controller }
 
     @objc func showSettingsWindow(_ sender: Any?) {
         guard let startupController, startupController.canRunBusinessEvents,
               let state = startupController.business else { return }
-        if settingsWindow == nil {
-            let view = SettingsView(navigation: state.settingsNavigation)
-                .environmentObject(state)
-                .environmentObject(state.navigation)
-                .environment(\.locale, AppLocalizer.shared.locale)
-                .frame(width: 980, height: 650)
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 650),
-                styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-            window.title = L10n.string("settings.pane.settings.title", fallback: "Settings")
-            window.contentViewController = NSHostingController(rootView: view)
-            window.isReleasedWhenClosed = false
-            window.center()
-            settingsWindow = window
+        guard !WindowModalRegistry.isPresented(in: NSApp.keyWindow) else { return }
+        state.selectSection(.settings)
+        if let window = AppWindowLayoutPolicy.window(for: .mainWindow) {
+            window.deminiaturize(nil)
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            NSApp.sendAction(#selector(NSDocumentController.newDocument(_:)), to: nil, from: nil)
         }
-        settingsWindow?.makeKeyAndOrderFront(nil)
     }
     private var playerWindowController: PlayerPlaybackWindowController?
     private var playerPresentationCancellable: AnyCancellable?
@@ -1286,10 +1284,15 @@ final class MainWindowGeometryStore {
     private let defaults: UserDefaults
     private var observers: [NSObjectProtocol] = []
     private var saveTask: Task<Void, Never>?
+    private var lastWindowedFrame: NSRect?
 
-    static func attach(to window: NSWindow) {
+    static func isAttached(to window: NSWindow) -> Bool {
+        objc_getAssociatedObject(window, &associationKey) != nil
+    }
+
+    static func attach(to window: NSWindow, defaults: UserDefaults = .standard) {
         guard objc_getAssociatedObject(window, &associationKey) == nil else { return }
-        let store = MainWindowGeometryStore(window: window)
+        let store = MainWindowGeometryStore(window: window, defaults: defaults)
         objc_setAssociatedObject(window, &associationKey, store, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
@@ -1308,7 +1311,12 @@ final class MainWindowGeometryStore {
         for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification,
                      NSWindow.didEndLiveResizeNotification, NSWindow.didExitFullScreenNotification] {
             observers.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.scheduleSave() }
+                MainActor.assumeIsolated {
+                    // Capture moves immediately. A close or fullscreen transition
+                    // can follow before a debounced task gets a run-loop turn.
+                    self?.save()
+                    self?.scheduleSave()
+                }
             })
         }
         for (name, object) in [(NSWindow.willCloseNotification, window as AnyObject),
@@ -1329,9 +1337,18 @@ final class MainWindowGeometryStore {
     }
 
     func save() {
-        guard let window, WindowTransitionCoordinator.state(for: window).canChangeGeometry,
-              !window.isMiniaturized, window.frame.width >= 300, window.frame.height >= 200,
-              let data = try? JSONEncoder().encode(window.frame) else { return }
+        guard let window else { return }
+        let transition = WindowTransitionCoordinator.state(for: window)
+        // Reading the final frame while closing is safe; canChangeGeometry is
+        // a mutation guard and deliberately becomes false before willClose.
+        if transition.phase == .windowed, !transition.isTransitioning,
+           !window.styleMask.contains(.fullScreen), !window.isMiniaturized,
+           window.frame.width >= 300, window.frame.height >= 200,
+           [window.frame.minX, window.frame.minY, window.frame.width, window.frame.height].allSatisfy({ $0.isFinite }) {
+            lastWindowedFrame = window.frame
+        }
+        guard let frame = lastWindowedFrame,
+              let data = try? JSONEncoder().encode(frame) else { return }
         defaults.set(data, forKey: Self.storageKey)
     }
 
@@ -1433,23 +1450,30 @@ enum AppWindowLayoutPolicy {
     @MainActor
     static func configure(
         _ window: NSWindow,
-        target: AppWindowLayoutTarget
+        target: AppWindowLayoutTarget,
+        defaults: UserDefaults = .standard
     ) {
         let descriptor = descriptor(for: target)
-        let isAlreadyConfigured = window.identifier == descriptor.identifier
+        // AppKit can restore a window identifier before our observer attaches.
+        // It is not proof that geometry restoration/persistence ran this launch.
+        let isAlreadyConfigured = target == .mainWindow
+            ? MainWindowGeometryStore.isAttached(to: window)
+            : window.identifier == descriptor.identifier
         guard !isAlreadyConfigured,
               WindowTransitionCoordinator.state(for: window).canChangeGeometry else { return }
         window.identifier = descriptor.identifier
         window.contentMinSize = descriptor.minimumContentSize
 
-        if target == .mainWindow, let frame = MainWindowGeometryStore.savedFrame() {
+        // setFrameAutosaveName may itself restore the legacy AppKit frame.
+        // Register it first, then apply our authoritative saved geometry.
+        window.setFrameAutosaveName(descriptor.frameAutosaveName)
+        if target == .mainWindow, let frame = MainWindowGeometryStore.savedFrame(defaults: defaults) {
             window.setFrame(frame, display: false)
         } else if !window.setFrameUsingName(descriptor.frameAutosaveName) {
             applyDefaultFrame(window, target: target, animate: false)
         }
-        window.setFrameAutosaveName(descriptor.frameAutosaveName)
         restoreVisibleFrameIfNeeded(window)
-        if target == .mainWindow { MainWindowGeometryStore.attach(to: window) }
+        if target == .mainWindow { MainWindowGeometryStore.attach(to: window, defaults: defaults) }
     }
 
     @MainActor
@@ -1835,6 +1859,7 @@ final class MainMenuLocalizationController {
         let notifications: [Notification.Name] = [
             NSMenu.didBeginTrackingNotification,
             NSMenu.didAddItemNotification,
+            NSMenu.didRemoveItemNotification,
             NSMenu.didChangeItemNotification
         ]
         observers = notifications.map { name in
@@ -1849,6 +1874,12 @@ final class MainMenuLocalizationController {
                 }
             }
         }
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didEnterFullScreenNotification,
+                     NSWindow.didExitFullScreenNotification] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.localizeMainMenu() }
+            })
+        }
         DispatchQueue.main.async { [weak self] in
             self?.localizeMainMenu()
         }
@@ -1856,11 +1887,43 @@ final class MainMenuLocalizationController {
 
     func localizeMainMenu() {
         guard let mainMenu = NSApp.mainMenu else { return }
+        Self.ensureFullscreenCommand(in: mainMenu, window: NSApp.keyWindow)
         localize(mainMenu)
+    }
+
+    static func ensureFullscreenCommand(in mainMenu: NSMenu, window: NSWindow?) {
+        guard let viewMenu = mainMenu.items.first(where: { ["View", "显示"].contains($0.title) })?.submenu else { return }
+        let action = #selector(NSWindow.toggleFullScreen(_:))
+        let existing = viewMenu.items.filter { $0.action == action }
+        let item: NSMenuItem
+        if let first = existing.first {
+            item = first
+            for duplicate in existing.dropFirst() { viewMenu.removeItem(duplicate) }
+        } else {
+            // SwiftUI can rebuild View without AppKit's native fullscreen item.
+            // Keep exactly one responder-chain command across those rebuilds.
+            item = NSMenuItem(title: "", action: action, keyEquivalent: "f")
+            item.target = nil
+            viewMenu.addItem(item)
+        }
+        let title = MainMenuLocalization.title(for: window?.styleMask.contains(.fullScreen) == true
+                                               ? "Exit Full Screen" : "Enter Full Screen")
+        if item.title != title { item.title = title }
+        configureNativeFullscreenShortcut(item)
+    }
+
+    static func configureNativeFullscreenShortcut(_ item: NSMenuItem) {
+        guard item.action == #selector(NSWindow.toggleFullScreen(_:)) else { return }
+        // Preserve AppKit's nil target and dynamic Enter/Exit title. Only
+        // establish the standard keyboard equivalent on the native command.
+        if item.keyEquivalent != "f" { item.keyEquivalent = "f" }
+        let modifiers: NSEvent.ModifierFlags = [.command, .control]
+        if item.keyEquivalentModifierMask != modifiers { item.keyEquivalentModifierMask = modifiers }
     }
 
     private func localize(_ menu: NSMenu) {
         for item in menu.items {
+            Self.configureNativeFullscreenShortcut(item)
             let translatedTitle = MainMenuLocalization.title(
                 for: item.title
             )
@@ -1888,6 +1951,7 @@ final class MainMenuLocalizationController {
             let menus = Array(self.pendingMenus.values)
             self.pendingMenus.removeAll()
             self.localizationScheduled = false
+            if let mainMenu = NSApp.mainMenu { Self.ensureFullscreenCommand(in: mainMenu, window: NSApp.keyWindow) }
             for menu in menus {
                 self.localize(menu)
             }
@@ -1932,6 +1996,17 @@ private struct UpdateCommandItems: View {
                 Button(L10n.string("updates.available", fallback: "Update Available") + " \(version)") { updates.checkForUpdates() }
             }
                 }
+    }
+}
+
+private struct BrowserWindowCommandItems: View {
+    @ObservedObject var state: AppState
+    var body: some View {
+        Button(L10n.string("sidebar.toggle", fallback: "Toggle Sidebar")) {
+            BrowserRootSplitController.toggleSidebar(in: NSApp.keyWindow)
+        }
+        .keyboardShortcut("s", modifiers: [.command, .control])
+        .disabled(!state.allowsBrowserShortcuts)
     }
 }
 
@@ -2130,11 +2205,9 @@ private struct PlaybackCommandItems: View {
             }
                 .keyboardShortcut("f", modifiers: [])
                 .disabled(!state.allowsPlayerShortcuts)
-            Button(L10n.string("menu.playback.toggle-full-screen", fallback: "Enter/Exit Full Screen")) {
-                state.togglePlayerFullScreen()
-            }
-                .keyboardShortcut("f", modifiers: [.command, .control])
-                .disabled(!state.allowsPlayerShortcuts)
+            // Control-Command-F belongs to AppKit's native View > Full Screen
+            // command and therefore always targets the active window. Keep F
+            // as the player-only shortcut above; do not shadow the system key.
 
             Button(L10n.string("menu.playback.close-panel-or-full-screen", fallback: "Close Panel or Exit Full Screen")) {
                 state.requestPlayerEscapeHandling()

@@ -11,7 +11,8 @@ class SigningVerifierTests(unittest.TestCase):
     def run_verifier(self, **settings):
         with tempfile.TemporaryDirectory(prefix='OKVideoMac-Signing-Test-', dir='/private/tmp') as tmp:
             root = Path(tmp); app = root / 'OKVideoMac.app'; bins = root / 'bin'; bins.mkdir()
-            for name in ['Contents/MacOS/OKVideoMac', 'Contents/Resources/NodeRuntime/node', 'Contents/Helpers/OKVideoMacRelauncher']:
+            for name in ['Contents/MacOS/OKVideoMac', 'Contents/Resources/NodeRuntime/node', 'Contents/Helpers/OKVideoMacRelauncher', 'Contents/Helpers/OKVideoLivePreview']:
+                if settings.get('MISSING_PREVIEW') and name.endswith('/OKVideoLivePreview'): continue
                 target = app / name; target.parent.mkdir(parents=True, exist_ok=True); target.write_text('fixture'); target.chmod(0o755)
             commands = {
                 'file': '#!/bin/sh\nprintf "%s: Mach-O 64-bit executable arm64\\n" "$1"\n',
@@ -42,7 +43,12 @@ else:
     def test_long_diagnostics_do_not_trigger_sigpipe(self):
         result=self.run_verifier()
         self.assertEqual(result.returncode,0,result.stdout[-3000:])
-        self.assertIn('Signing verification passed (3 Mach-O objects',result.stdout)
+        self.assertIn('Signing verification passed (4 Mach-O objects',result.stdout)
+
+    def test_missing_preview_helper_is_rejected(self):
+        result=self.run_verifier(MISSING_PREVIEW='1')
+        self.assertEqual(result.returncode,1,result.stdout[-1000:])
+        self.assertIn('preview helper',result.stdout.lower())
 
     def test_invalid_nested_signature_is_still_rejected(self):
         result=self.run_verifier(BAD_SIGNATURE='1')

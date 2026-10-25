@@ -42,11 +42,19 @@ fi
 mkdir -p "$REPRO_ROOT/src" "$REPRO_ROOT/build" "$PREFIX" "$REPORT_DIR"
 rm -rf "$SOURCE_DIR" "$BUILD_DIR"
 tar -xJf "$ARCHIVE" -C "$REPRO_ROOT/src"
+patch -d "$SOURCE_DIR" -p1 -i "$PROJECT_DIR/Patches/ffmpeg-7.1.4-dash-redirect-base.patch"
+patch -d "$SOURCE_DIR" -p1 -i "$PROJECT_DIR/Patches/ffmpeg-7.1.4-dash-unavailable-representation.patch"
+patch -d "$SOURCE_DIR" -p1 -i "$PROJECT_DIR/Patches/ffmpeg-7.1.4-dash-single-file-seek.patch"
 mkdir -p "$BUILD_DIR"
 
 export MACOSX_DEPLOYMENT_TARGET=12.0
 export PKG_CONFIG=/opt/local/bin/pkg-config
-export PKG_CONFIG_LIBDIR=/opt/local/lib/pkgconfig:/opt/local/share/pkgconfig
+XML_PREFIX="$REPRO_ROOT/xml-prefix"
+export PKG_CONFIG_LIBDIR="$XML_PREFIX/lib/pkgconfig:/opt/local/lib/pkgconfig:/opt/local/share/pkgconfig"
+if [[ "$("$PKG_CONFIG" --variable=pcfiledir libxml-2.0)" != "$XML_PREFIX/lib/pkgconfig" ]]; then
+  echo "Run build-libxml2.sh first; a pinned libxml2 is required for DASH." >&2
+  exit 1
+fi
 configure_flags=(
   "--prefix=$PREFIX"
   "--libdir=$PREFIX/lib"
@@ -65,6 +73,9 @@ configure_flags=(
   --disable-debug
   --disable-avdevice
   --disable-autodetect
+  --enable-libxml2
+  --enable-demuxer=dash
+  --disable-demuxer=imf
   --enable-network
   --enable-securetransport
   --enable-videotoolbox

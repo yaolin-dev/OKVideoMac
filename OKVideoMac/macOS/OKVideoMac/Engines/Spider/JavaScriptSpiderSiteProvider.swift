@@ -1025,6 +1025,8 @@ enum AndroidHomeNetworkLoadPolicy {
 final class AndroidDexSpiderSiteProvider: SiteProvider {
     let site: SiteConfiguration
     let capability: SiteCapability = .javaDexSpider
+    let searchPerformance = TVBoxSearchPerformance()
+    var aggregateSearchPriority: TimeInterval { searchPerformance.priority }
 
     private let configurationIdentity: String
     private let configurationHosts: [String]
@@ -1437,36 +1439,46 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         // Empty search results are valid. In particular, a background search
         // must never destroy the provider used by an active detail or player.
         try Task.checkCancellation()
-        let value = try await invoke(method: "search", arguments: arguments)
-        try Task.checkCancellation()
-        return try SpiderResponseMapper.searchPage(
-            value, site: site, baseURL: baseURL, page: page
-        )
+        let started = ProcessInfo.processInfo.systemUptime
+        do {
+            let value = try await invoke(method: "search", arguments: arguments)
+            try Task.checkCancellation()
+            let result = try SpiderResponseMapper.searchPage(
+                value, site: site, baseURL: baseURL, page: page)
+            if page == 1 {
+                searchPerformance.record(elapsed: ProcessInfo.processInfo.systemUptime - started,
+                                         resultCount: result.items.count, succeeded: true)
+            }
+            return result
+        } catch {
+            if page == 1, !Task.isCancelled, !(error is CancellationError) {
+                searchPerformance.record(elapsed: ProcessInfo.processInfo.systemUptime - started,
+                                         resultCount: 0, succeeded: false)
+            }
+            throw error
+        }
     }
 
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
         try await requestPlayer(
             flag: flag,
             episodeURL: episodeURL,
-            refreshPlayback: false,
-            interactionID: nil
+            refreshPlayback: false
         )
     }
 
-    /// Keeps playerContent and any authorization UI inside the playback
-    /// request already owned by AppState. The eventual provider result is
-    /// cached by the same InteractionHandle and can resume that player without
-    /// issuing a second, unrelated playerContent call.
+    /// Each playerContent invocation owns a fresh Bridge interaction. AppState
+    /// separately owns the longer-lived playback session, including retries.
+    /// Authorization still resumes the result from that exact invocation.
     func player(
         flag: String,
         episodeURL: String,
-        interactionID: UUID
+        refreshPlayback: Bool
     ) async throws -> SitePlaybackResult {
         try await requestPlayer(
             flag: flag,
             episodeURL: episodeURL,
-            refreshPlayback: false,
-            interactionID: interactionID
+            refreshPlayback: refreshPlayback
         )
     }
 
@@ -1478,36 +1490,20 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         // playerContent, even when an older record incorrectly marked a locator
         // as provider-stable.
         try await AndroidProviderContextRecoveryPolicy.recover {
-            try await resolveFreshPlayback(request, interactionID: nil)
-        } reset: {
-            try await resetSpiderForPlaybackRecovery()
-        }
-    }
-
-    func refreshPlayback(
-        _ request: PlaybackRefreshRequest,
-        interactionID: UUID
-    ) async throws -> RefreshedSitePlayback {
-        try await AndroidProviderContextRecoveryPolicy.recover {
-            try await resolveFreshPlayback(
-                request,
-                interactionID: interactionID
-            )
+            try await resolveFreshPlayback(request)
         } reset: {
             try await resetSpiderForPlaybackRecovery()
         }
     }
 
     private func resolveFreshPlayback(
-        _ request: PlaybackRefreshRequest,
-        interactionID: UUID?
+        _ request: PlaybackRefreshRequest
     ) async throws -> RefreshedSitePlayback {
         let selected = try await resolvePlaybackRefreshSelection(request)
         let result = try await requestPlayer(
             flag: selected.source.name,
             episodeURL: selected.episode.url,
-            refreshPlayback: true,
-            interactionID: interactionID
+            refreshPlayback: true
         )
         return RefreshedSitePlayback(
             detail: selected.detail,
@@ -1530,8 +1526,7 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
     private func requestPlayer(
         flag: String,
         episodeURL: String,
-        refreshPlayback: Bool,
-        interactionID: UUID?
+        refreshPlayback: Bool
     ) async throws -> SitePlaybackResult {
         do {
             let providerValue = try await invoke(
@@ -1540,7 +1535,7 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
                 monitorsAuthorization: true,
                 interactionKind: .playback,
                 refreshPlayback: refreshPlayback,
-                interactionID: interactionID
+                interactionID: UUID()
             )
             return try playbackResult(
                 from: providerValue,
@@ -1566,7 +1561,7 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         episodeURL: String
     ) throws -> SitePlaybackResult {
         var result = try SpiderResponseMapper.player(
-            providerValue,
+            AndroidDexBridgeClient.validatedProviderResult(providerValue, method: "play"),
             site: site
         )
         result = Self.applyingPlaybackRequestContract(
@@ -2381,6 +2376,8 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         /// builds bypass their short playback handoff cache when this is true;
         /// old builds safely ignore the additional JSON field.
         let refreshPlayback: Bool?
+        let searchRequestID: String?
+        let searchDiagnostics: Bool?
     }
 
     private struct Response: Decodable {
@@ -2426,6 +2423,7 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     private let runtimePrerequisite: @Sendable () async throws -> Void
     private let session: URLSession
     private let interactionSession: URLSession
+    private let searchControlSession: URLSession
     private let invokeURL = URL(string: "http://127.0.0.1:19978/v1/invoke")!
     private let uiStateURL = URL(string: "http://127.0.0.1:19978/v1/ui/state")!
     private let uiDismissURL = URL(string: "http://127.0.0.1:19978/v1/ui/dismiss")!
@@ -2450,6 +2448,20 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         interactionConfiguration.httpMaximumConnectionsPerHost = 8
         interactionConfiguration.connectionProxyDictionary = [:]
         interactionSession = URLSession(configuration: interactionConfiguration)
+        let controlConfiguration = URLSessionConfiguration.ephemeral
+        controlConfiguration.timeoutIntervalForRequest = 2
+        controlConfiguration.timeoutIntervalForResource = 3
+        controlConfiguration.httpMaximumConnectionsPerHost = 4
+        controlConfiguration.connectionProxyDictionary = [:]
+        searchControlSession = URLSession(configuration: controlConfiguration)
+    }
+
+    private func cancelSearchRequest(_ id: String) async {
+        guard let url = URL(string: "http://127.0.0.1:19978/v1/search/\(id)/cancel") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = Data()
+        _ = try? await searchControlSession.data(for: request)
     }
 
     func verifyHomeNetwork(allowRecovery: Bool = false) async throws {
@@ -2466,6 +2478,12 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
 
     func runtimeStatus() async -> AndroidRuntimeStatus {
         await runtime.status()
+    }
+
+    /// Observation only: unlike runtimeStatus(), this never probes ADB,
+    /// resolves tools, performs network I/O or starts the runtime.
+    func startupStatusUpdates() async -> AsyncStream<AndroidRuntimeStatus> {
+        await runtime.startupStatusUpdates()
     }
 
     func diagnosticSnapshot() async -> AndroidRuntimeDiagnosticSnapshot {
@@ -2772,9 +2790,14 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         configurationSelectionText: String? = nil
     ) async throws -> JSONValue {
         try Task.checkCancellation()
+        let timingID = UUID().uuidString
+        var stageStarted = ProcessInfo.processInfo.systemUptime
         try await runtimePrerequisite()
+        if method == "search" { SearchLatencyTrace.record("android.prepare", id: timingID, started: stageStarted) }
         try Task.checkCancellation()
+        stageStarted = ProcessInfo.processInfo.systemUptime
         try await runtime.ensureReady()
+        if method == "search" { SearchLatencyTrace.record("android.ready", id: timingID, started: stageStarted) }
         try Task.checkCancellation()
         let monitorsAuthorization = Self.shouldMonitorAuthorization(
             for: method,
@@ -2848,7 +2871,9 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                     ? nil
                     : actionKind.rawValue,
                 providerOwnerID: providerOwnerID,
-                refreshPlayback: refreshPlayback ? true : nil
+                refreshPlayback: refreshPlayback ? true : nil,
+                searchRequestID: method == "search" ? timingID : nil,
+                searchDiagnostics: method == "search" && SearchLatencyTrace.enabled ? true : nil
             )
         )
         let terminalResponse: ConfigurationInteractionTerminalResponse
@@ -2872,7 +2897,25 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
             }
         } else {
             let requestID = UUID()
-            let (data, response) = try await session.data(for: request)
+            stageStarted = ProcessInfo.processInfo.systemUptime
+            let (data, response): (Data, URLResponse)
+            if method == "search" {
+                do {
+                    (data, response) = try await withTaskCancellationHandler {
+                        try await session.data(for: request)
+                    } onCancel: { [self] in
+                        Task.detached { await cancelSearchRequest(timingID) }
+                    }
+                } catch {
+                    if !Task.isCancelled {
+                        Task.detached { [self] in await cancelSearchRequest(timingID) }
+                    }
+                    throw error
+                }
+            } else {
+                (data, response) = try await session.data(for: request)
+            }
+            if method == "search" { SearchLatencyTrace.record("android.rpc", id: timingID, started: stageStarted) }
             terminalResponse = Self.decodeTerminalResponse(
                 requestID: requestID,
                 data: data,
@@ -2938,7 +2981,14 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                 interactionID: interactionID
             )
         }
-        return terminalResponse.providerResult ?? .null
+        return try Self.validatedProviderResult(terminalResponse.providerResult, method: method)
+    }
+
+    static func validatedProviderResult(_ result: JSONValue?, method: String) throws -> JSONValue {
+        if method == "play", result == nil || result == .null {
+            throw AppError.spider("Java/Dex 播放请求已结束，但没有返回播放结果，请重试")
+        }
+        return result ?? .null
     }
 
     static func requestScopedPlaybackHeaders(
@@ -3013,7 +3063,11 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
             )
         }
         let outcome: ConfigurationInteraction.Outcome
-        if bridgeResponse.interaction == nil,
+        if !transportSucceeded {
+            // A rejected/failed invocation must never poll a previous completed
+            // interaction and turn its empty acknowledgement into success.
+            outcome = .failed
+        } else if bridgeResponse.interaction == nil,
            (httpResponse.statusCode == 202 || requiresScopedIdentity),
            !(allowsImmediateAuthoritativeResult
              && bridgeResponse.result != nil
@@ -6130,8 +6184,8 @@ actor AndroidRuntimeStartupSingleFlight {
 }
 
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.48"
-    static let bridgeVersionCode = 60
+    static let bridgeVersion = "0.3.50"
+    static let bridgeVersionCode = 62
     static let bridgeApplicationID = "com.okvideomac.dexbridge"
     static let bridgeCertificateSHA256 =
         "33e95ef23b662f2629a23df892aaff52ae6216f7492cfb559a63d37247a059e0"
@@ -6183,16 +6237,55 @@ actor AndroidDexBridgeRuntime {
     private var gpuFallbackAttempted = false
     private var gpuFallbackResult: String?
     private var lastPrivateAVDRecoveryBackup: String?
-    private var ready = false
+    private var ready = false {
+        didSet {
+            if !ready { readyLeaseIdentity = nil }
+            if ready != oldValue { publishStartupStatus() }
+        }
+    }
     private var acceptsNewerBridge = false
     private var managedDisplayConfigured = false
-    private var lastNetworkCheck: Date?
+    private var lastNetworkCheck: Date? {
+        didSet { if lastNetworkCheck == nil { readyLeaseIdentity = nil } }
+    }
+    private let readinessFlight = AndroidRuntimePreparationFlight()
+    private var readyLeaseIdentity: [String]?
+    private var readyLeaseExpires: TimeInterval = 0
     /// Process-wide because more than one provider/runtime object can be
     /// constructed, while every instance targets the same managed AVD name.
     private static let startupSingleFlight =
         AndroidRuntimeStartupSingleFlight()
     private static let privateADBKeyLifecycleLock = NSLock()
-    private var operationStatus: AndroidRuntimeStatus?
+    private var startupObservers: [UUID: AsyncStream<AndroidRuntimeStatus>.Continuation] = [:]
+    private var operationStatus: AndroidRuntimeStatus? {
+        didSet {
+            if operationStatus != oldValue { publishStartupStatus() }
+        }
+    }
+
+    func startupStatusUpdates() -> AsyncStream<AndroidRuntimeStatus> {
+        let id = UUID()
+        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            startupObservers[id] = continuation
+            continuation.yield(observedStartupStatus)
+            continuation.onTermination = { [weak self] _ in
+                Task { await self?.removeStartupObserver(id) }
+            }
+        }
+    }
+
+    private var observedStartupStatus: AndroidRuntimeStatus {
+        operationStatus ?? (ready ? .running : .stopped)
+    }
+
+    private func publishStartupStatus() {
+        let status = observedStartupStatus
+        for continuation in startupObservers.values { continuation.yield(status) }
+    }
+
+    private func removeStartupObserver(_ id: UUID) {
+        startupObservers[id] = nil
+    }
     private var currentStage: AndroidRuntimeStartupStage = .idle
     private var stageStartedAt: Date?
     private var lastAttemptAt: Date?
@@ -7633,6 +7726,7 @@ actor AndroidDexBridgeRuntime {
         acceptsNewerBridge = false
         lastNetworkCheck = nil
         await Self.startupSingleFlight.cancelAndWait()
+        await readinessFlight.cancelAndWait()
         try await ensureRuntimeStartup(
             forceInstall: true,
             retryKnownFailedNetworkCommand: retryKnownFailedNetworkCommand
@@ -7649,6 +7743,7 @@ actor AndroidDexBridgeRuntime {
         maintenanceStopToken = UUID()
         let token = await Self.startupSingleFlight.beginStopping(permanent: false)
         maintenanceStopToken = token
+        await readinessFlight.cancelAndWait()
         do {
             let lease = try RuntimeMaintenanceLease(layout: layout, exclusive: true)
             defer { withExtendedLifetime(lease) {} }
@@ -7684,6 +7779,7 @@ actor AndroidDexBridgeRuntime {
         maintenanceStopToken = UUID()
         let stopToken = await Self.startupSingleFlight.beginStopping(permanent: false)
         maintenanceStopToken = stopToken
+        await readinessFlight.cancelAndWait()
         let layout = AndroidRuntimeLayout(runtimeRoot: runtimeDirectory)
         let store = PrivateAVDRebuildStore(layout: layout, fileManager: fileManager)
         do {
@@ -7761,6 +7857,7 @@ actor AndroidDexBridgeRuntime {
         // Reserve before the actor yields to cancellation/cleanup.
         maintenanceStopToken = UUID()
         maintenanceStopToken = await Self.startupSingleFlight.beginStopping(permanent: false)
+        await readinessFlight.cancelAndWait()
     }
 
     func stopForManagedMaintenance() async throws {
@@ -7831,6 +7928,7 @@ actor AndroidDexBridgeRuntime {
         let stopToken = await Self.startupSingleFlight.beginStopping(
             permanent: false
         )
+        await readinessFlight.cancelAndWait()
         let toolchain = loadIdentity().flatMap {
             resolver().toolchain(at: $0.sdkRoot)
         } ?? resolver().resolve() ?? lastObservedToolchain
@@ -7865,6 +7963,7 @@ actor AndroidDexBridgeRuntime {
 
     func beginApplicationTermination() async {
         await Self.startupSingleFlight.beginApplicationTermination()
+        await readinessFlight.cancelAndWait()
     }
 
     private func performStop(reason: String) async {
@@ -8139,9 +8238,65 @@ actor AndroidDexBridgeRuntime {
     func ensureReady(forceNetworkCheck: Bool = false) async throws {
         try await recoverInterruptedPrivateAVDRebuild()
         try RuntimeMaintenanceService.requireNoPendingTransaction(layout: AndroidRuntimeLayout(applicationSupportDirectory: applicationSupportDirectory))
-        guard !(await Self.startupSingleFlight.isRejectingStartup()) else {
+        guard maintenanceStopToken == nil,
+              !(await Self.startupSingleFlight.isRejectingStartup()) else {
             throw AndroidRuntimeAdmissionError.terminating
         }
+        try Task.checkCancellation()
+        if !forceNetworkCheck, hasFreshReadyLease() { return }
+        try await readinessFlight.run { [self] in
+            try await refreshReadiness()
+        }
+        try Task.checkCancellation()
+    }
+
+    /// Reuse a completed full verification only for the same live processes,
+    /// SDK binaries, manifest and AVD configuration. Kernel queries and stat
+    /// calls keep the ordinary RPC path free of ps/lsof/ADB subprocesses.
+    private func readinessIdentity() -> [String]? {
+        guard ready, let identity = loadIdentity(),
+              identity.systemBootIdentifier == currentBootIdentifier,
+              let emulatorBirth = processBirthIdentity(pid: identity.pid)?.value,
+              emulatorBirth == identity.pidBirthIdentity,
+              let emulatorPath = processExecutablePath(pid: identity.pid),
+              let adbPID = persistedADBServerPID,
+              let adbBirth = processBirthIdentity(pid: adbPID)?.value,
+              adbBirth == persistedADBServerBirthIdentity,
+              let adbPath = processExecutablePath(pid: adbPID) else { return nil }
+        let files = [manifestURL, avdDirectory.appendingPathComponent("config.ini"),
+                     identity.emulatorExecutable, URL(fileURLWithPath: emulatorPath),
+                     identity.sdkRoot.appendingPathComponent("platform-tools/adb"),
+                     URL(fileURLWithPath: adbPath)]
+        return [identity.generation, emulatorBirth, adbBirth,
+                runtimeSelectionMode?.rawValue ?? "", userSelectedSDKRoot ?? ""]
+            + files.map(AndroidRuntimeFileIdentity.stamp)
+    }
+
+    private func hasFreshReadyLease() -> Bool {
+        guard ready, lastNetworkCheck != nil, readyLeaseIdentity != nil,
+              ProcessInfo.processInfo.systemUptime < readyLeaseExpires else { return false }
+        return readinessIdentity() == readyLeaseIdentity
+    }
+
+    private func refreshReadiness() async throws {
+        readyLeaseIdentity = nil
+        guard maintenanceStopToken == nil,
+              !(await Self.startupSingleFlight.isRejectingStartup()) else {
+            throw AndroidRuntimeAdmissionError.terminating
+        }
+        try RuntimeMaintenanceService.requireNoPendingTransaction(
+            layout: AndroidRuntimeLayout(applicationSupportDirectory: applicationSupportDirectory))
+        try await ensureReadyUncached()
+        try Task.checkCancellation()
+        guard maintenanceStopToken == nil,
+              !(await Self.startupSingleFlight.isRejectingStartup()) else {
+            throw AndroidRuntimeAdmissionError.terminating
+        }
+        readyLeaseIdentity = readinessIdentity()
+        readyLeaseExpires = ProcessInfo.processInfo.systemUptime + Self.networkCheckInterval
+    }
+
+    private func ensureReadyUncached() async throws {
         if ready {
             guard let identity = loadIdentity(),
                   let toolchain = resolver().toolchain(at: identity.sdkRoot)
@@ -8175,18 +8330,16 @@ actor AndroidDexBridgeRuntime {
                             toolchain: toolchain
                         )
                     }
-                    if !forceNetworkCheck, let lastNetworkCheck,
-                       Date().timeIntervalSince(lastNetworkCheck)
-                            < Self.networkCheckInterval {
-                        return
-                    }
                     if try await isHealthy(
                         identity,
                         toolchain: toolchain,
                         acceptVersionMismatch: acceptsNewerBridge
-                    ), observeNetwork(identity, toolchain: toolchain) {
-                        lastNetworkCheck = Date()
-                        return
+                    ) {
+                        try Task.checkCancellation()
+                        if observeNetwork(identity, toolchain: toolchain) {
+                            lastNetworkCheck = Date()
+                            return
+                        }
                     }
                 }
                 lastNetworkCheck = nil

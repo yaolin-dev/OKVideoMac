@@ -1,6 +1,6 @@
 # OKVideoMac Third-Party Notices
 
-This is the authoritative third-party index for OKVideoMac 0.8.7 (Build 140). It
+This is the authoritative third-party index for OKVideoMac 0.8.7 (Build 149). It
 covers executable material actually shipped in the macOS App and its embedded
 Android APK. Third-party software remains under its original terms; the
 project's `GPL-3.0-only` license does not relicense it.
@@ -15,7 +15,8 @@ is in `Docs/BINARY_SOURCE_MAPPING.md`. License paths below are relative to
 | Component | Version | Upstream / copyright | License | Use and linkage | Modified? / source and binary mapping | License file |
 | --- | --- | --- | --- | --- | --- | --- |
 | mpv / libmpv | v0.41.0 | [mpv-player/mpv v0.41.0](https://github.com/mpv-player/mpv/tree/v0.41.0); mpv authors | `GPL-2.0-or-later` build | Dynamic `Frameworks/libmpv.dylib` through the project bridge | Yes. Official archive plus `macOS/OKVideoMac/Patches/mpv-0.41.0-coreaudio-without-cocoa.patch`; see adjacent change notice | `mpv-GPL-2.0-or-later.txt`, `mpv-Copyright.txt` |
-| FFmpeg family | 7.1.4 | [FFmpeg 7.1.4](https://ffmpeg.org/releases/ffmpeg-7.1.4.tar.xz); FFmpeg developers | `LGPL-2.1-or-later` build | Six dynamic `libav*`, `libswresample`, and `libswscale` dylibs | No local source patch found; exact retained source archive exists, but reproducible build recipe remains Phase 2 | `FFmpeg-LGPL-2.1-or-later.txt`, `FFmpeg-LICENSE.md` |
+| FFmpeg family | 7.1.4 | [FFmpeg 7.1.4](https://ffmpeg.org/releases/ffmpeg-7.1.4.tar.xz); FFmpeg developers | `LGPL-2.1-or-later` build | Six dynamic `libav*`, `libswresample`, and `libswscale` dylibs | DASH redirect-base, static alternate-representation and single-file seek patches; pinned source and build recipe in `ThirdParty/native-lock.json` | `FFmpeg-LGPL-2.1-or-later.txt`, `FFmpeg-LICENSE.md` |
+| libxml2 | 2.15.4 | [GNOME libxml2](https://download.gnome.org/sources/libxml2/2.15/libxml2-2.15.4.tar.xz) | `MIT` | Dynamic `libxml2.16.dylib`, FFmpeg DASH manifest parsing | Unmodified; pinned source and recipe in `ThirdParty/native-lock.json` | `libxml2-MIT.txt` |
 | libass | 0.17.5 | [libass 0.17.5](https://github.com/libass/libass/releases/tag/0.17.5); libass authors | `ISC` | Dynamic `libass.9.dylib` | No local patch found; retained source, build reconstruction partial | `libass-ISC.txt` |
 | libplacebo | 7.360.1, MacPorts `+opengl` | [haasn/libplacebo v7.360.1](https://github.com/haasn/libplacebo/archive/refs/tags/v7.360.1.tar.gz); libplacebo authors | `LGPL-2.1-or-later` | Dynamic `libplacebo.360.dylib` | No project patch; MacPorts receipt/Portfile provenance is partial | `libplacebo-LGPL-2.1-or-later.txt` |
 | FreeType | 2.14.3 | [FreeType 2.14.3](https://download.savannah.gnu.org/releases/freetype/freetype-2.14.3.tar.xz); FreeType Project | `FTL` selected | Dynamic `libfreetype.6.dylib` | No project patch; MacPorts provenance is partial | `FreeType-FTL.txt` |
@@ -38,7 +39,7 @@ is in `Docs/BINARY_SOURCE_MAPPING.md`. License paths below are relative to
 | OKMPVBridge / OKQuickJS bridge | 0.7.0 project source | OKVideoMac contributors | `GPL-3.0-only` | Project-built dynamic bridges | Project code; maps to the captured local acceptance source | Project `LICENSE` |
 
 The FFmpeg 7.1.4 binaries report an LGPL configuration with
-`--enable-zlib --enable-bzlib --enable-iconv --enable-lzma` and without
+`--enable-zlib --enable-bzlib --enable-iconv --enable-lzma --enable-libxml2 --enable-demuxer=dash` and without
 `--enable-gpl`, `--enable-version3`, `--enable-nonfree`, x264, x265,
 libfdk-aac, OpenSSL, or GnuTLS. FFmpeg's retained `LICENSE.md` includes its
 copyright/source guidance. Per FFmpeg's attribution guidance, this product

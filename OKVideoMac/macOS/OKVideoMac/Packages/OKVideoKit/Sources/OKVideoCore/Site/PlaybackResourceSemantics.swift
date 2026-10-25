@@ -54,6 +54,16 @@ public enum PlaybackResourceAnalyzer {
     public static let rulesVersion = 4
     private static let number = "[0-9零〇一二两三四五六七八九十百千万]+"
 
+    /// Explicit season markers only; sequel numbers and bare episode numbers
+    /// never establish a season. Shared by metadata matching and presentation.
+    public static func explicitSeasons(in raw: String) -> Set<Int> {
+        let name = raw.precomposedStringWithCompatibilityMapping
+        let named = captures("第(\(number))季", name).compactMap { integer($0[0]) }
+        let numeric = captures(#"(?:^|\s)([0-9]{1,4})季(?=\s|$)"#, name).compactMap { Int($0[0]) }
+        let coded = captures(#"(?i)(?:^|[^A-Z0-9])S([0-9]{1,4})(?=E[0-9]|[^A-Z0-9]|$)"#, name).compactMap { Int($0[0]) }
+        return Set((named + numeric + coded).filter { (0...10_000).contains($0) })
+    }
+
     public static func compactName(_ raw: String, preserveTechnicalPrefix: Bool = false) -> String {
         var value = raw.removingPercentEncoding ?? raw
         if let url = URL(string: value), ["http", "https", "file"].contains(url.scheme?.lowercased() ?? "") {

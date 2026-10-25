@@ -11,6 +11,11 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
 ## 当前版本
 
+- 当前发布候选：0.8.7（Build 149），仅本地直播画面滚动与窗口缩放验收，未公开发布或公证。
+- 本地 source release index：`OKVideoMac-0.8.7-build149-SOURCE_RELEASE_INDEX.json`。
+- 设置保留使用偏好、内容来源、应用管理三组分类，采用原生列表和紧凑分组展示；主侧栏搜索随点播、直播、收藏、历史、设置切换范围。
+- 以下为既有公开 Build 140 的发布身份与历史结果。
+
 - 当前稳定版本：0.8.7（Build 140）
 - Tag：`v0.8.7`，固定 release commit `8208c1ea6db514cb35bbd32bbed8a15ade06cb03`。
 - source release index：`OKVideoMac-0.8.7-build140-SOURCE_RELEASE_INDEX.json`。

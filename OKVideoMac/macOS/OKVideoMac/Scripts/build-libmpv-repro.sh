@@ -39,7 +39,7 @@ if [[ "$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')" != "$EXPECTED_SHA256" ]];
 fi
 
 export PKG_CONFIG=/opt/local/bin/pkg-config
-export PKG_CONFIG_LIBDIR="$FFMPEG_PREFIX/lib/pkgconfig:/opt/local/lib/pkgconfig:/opt/local/share/pkgconfig"
+export PKG_CONFIG_LIBDIR="$FFMPEG_PREFIX/lib/pkgconfig:$REPRO_ROOT/xml-prefix/lib/pkgconfig:/opt/local/lib/pkgconfig:/opt/local/share/pkgconfig"
 for package in libavcodec libavfilter libavformat libavutil libswresample libswscale; do
   pc_dir="$($PKG_CONFIG --variable=pcfiledir "$package")"
   if [[ "$pc_dir" != "$FFMPEG_PREFIX/lib/pkgconfig" ]]; then

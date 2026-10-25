@@ -174,7 +174,7 @@ enum UpstreamResponseDecoder {
         baseURL: URL?,
         inheritedContentKind: VideoContentKind? = nil
     ) -> [VideoSummary] {
-        videos.compactMap { video in
+        videos.compactMap { video -> VideoSummary? in
             guard video.id != "-1001", !video.name.isEmpty else {
                 return nil
             }
@@ -194,7 +194,7 @@ enum UpstreamResponseDecoder {
             let contentKind = video.contentKind == .media
                 ? (inheritedContentKind ?? .media)
                 : video.contentKind
-            return VideoSummary(
+            var summary = VideoSummary(
                 siteKey: site.key,
                 siteName: site.name,
                 videoID: identifier,
@@ -208,6 +208,9 @@ enum UpstreamResponseDecoder {
                 action: video.action,
                 contentKind: contentKind == .media ? nil : contentKind
             )
+            summary.identityDirector = video.director
+            summary.identityActors = video.actors
+            return summary
         }
     }
 

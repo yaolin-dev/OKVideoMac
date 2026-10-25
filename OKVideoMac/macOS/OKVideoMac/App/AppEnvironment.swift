@@ -52,6 +52,7 @@ struct AppEnvironment {
         let imageHTTPClient = URLSessionHTTPClient(
             configuration: imageConfiguration
         )
+        TMDBNetworkRuntime.shared.configure(images: imageHTTPClient)
         let databaseURL = directories.database.appendingPathComponent("OKVideoMac.sqlite3")
         let databaseResult: SQLiteStore.OpenResult
         if let acceptance {
@@ -152,7 +153,7 @@ struct AppEnvironment {
                         "Posters",
                         isDirectory: true
                     ),
-                    httpClient: imageHTTPClient
+                    httpClient: TMDBObservedImageClient(base: imageHTTPClient, availability: TMDBNetworkRuntime.shared.availability)
                 )
             ),
             xtreamCredentialStore: KeychainXtreamCredentialStore(service: acceptance == nil
@@ -223,13 +224,22 @@ struct KeychainXtreamCredentialStore: XtreamCredentialStoring {
     }
 
     func credentials(for providerID: UUID) async throws -> XtreamCredentials? {
+        try readCredentials(for: providerID, interactive: true)
+    }
+
+    func previewCredentials(for providerID: UUID) async throws -> XtreamCredentials? {
+        try readCredentials(for: providerID, interactive: false)
+    }
+
+    private func readCredentials(for providerID: UUID, interactive: Bool) throws -> XtreamCredentials? {
         var result: CFTypeRef?
         let status = SecItemCopyMatching(
             itemQuery(
                 providerID: providerID,
                 additional: [
                     kSecReturnData as String: true,
-                    kSecMatchLimit as String: kSecMatchLimitOne
+                    kSecMatchLimit as String: kSecMatchLimitOne,
+                    kSecUseAuthenticationUI as String: interactive ? kSecUseAuthenticationUIAllow : kSecUseAuthenticationUIFail
                 ]
             ) as CFDictionary,
             &result

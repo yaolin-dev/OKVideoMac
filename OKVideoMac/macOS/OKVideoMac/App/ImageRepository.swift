@@ -169,15 +169,25 @@ enum DecodedImageCacheCost {
     }
 }
 
+@MainActor
 private final class ImageMemoryCache {
     private let storage = NSCache<NSString, NSImage>()
     private let posterSourceIdentities = NSCache<NSString, NSString>()
+    private var memoryPressure: DispatchSourceMemoryPressure?
 
     init() {
         storage.countLimit = 300
         storage.totalCostLimit = 128 * 1_024 * 1_024
         posterSourceIdentities.countLimit = 1_024
+        let pressure = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        pressure.setEventHandler { [weak self] in
+            Task { @MainActor [weak self] in self?.removeAll() }
+        }
+        pressure.resume()
+        memoryPressure = pressure
     }
+
+    deinit { memoryPressure?.cancel() }
 
     @MainActor
     func image(for identity: ImageCacheIdentity) -> NSImage? {
@@ -451,15 +461,18 @@ struct PosterImageRequest: Hashable, Sendable {
     }
 }
 
-enum PosterImagePriority: Int, Sendable { case visible, forward, reverse }
+enum PosterImagePriority: Int, Sendable {
+    case hero = -2, selected = -1, visible = 0, forward, reverse
+    var isImmediate: Bool { rawValue <= 0 }
+}
 
 struct PosterImageDemand: Equatable, Sendable, Comparable {
     let priority: PosterImagePriority
     let distance: Int
 
     static func < (lhs: Self, rhs: Self) -> Bool {
-        if lhs.priority == .visible || rhs.priority == .visible {
-            if lhs.priority != rhs.priority { return lhs.priority == .visible }
+        if lhs.priority.isImmediate || rhs.priority.isImmediate {
+            if lhs.priority != rhs.priority { return lhs.priority.rawValue < rhs.priority.rawValue }
         }
         if lhs.distance != rhs.distance { return lhs.distance < rhs.distance }
         return lhs.priority.rawValue < rhs.priority.rawValue
@@ -640,21 +653,21 @@ actor PosterImagePipeline {
         // A request that was visible may become speculative while its network
         // task is still active. Reclaim only the excess slots, preserving all
         // consumer continuations so the request can resume if it is needed.
-        let speculative = running.filter { !$0.value.stopping && $0.value.demand.priority != .visible }
+        let speculative = running.filter { !$0.value.stopping && !$0.value.demand.priority.isImmediate }
         for (id, _) in speculative.sorted(by: { $0.value.demand > $1.value.demand }).prefix(max(0, speculative.count - 2)) {
             preempt(id)
         }
-        let visibleWaiting = entries.values.filter { $0.task == nil && $0.demand.priority == .visible }.count
+        let visibleWaiting = entries.values.filter { $0.task == nil && $0.demand.priority.isImmediate }.count
         let stopping = running.values.filter(\.stopping).count
         let freeWhenStopped = max(0, 6 - (running.count - stopping))
         for _ in 0..<max(0, visibleWaiting - freeWhenStopped) {
-            guard let victim = running.filter({ !$0.value.stopping && $0.value.demand.priority != .visible })
+            guard let victim = running.filter({ !$0.value.stopping && !$0.value.demand.priority.isImmediate })
                 .max(by: { $0.value.demand < $1.value.demand })?.key else { break }
             preempt(victim)
         }
         while running.count < 6 {
-            let speculativeActive = running.values.filter { $0.demand.priority != .visible }.count
-            guard let pair = entries.filter({ $0.value.task == nil && ($0.value.demand.priority == .visible || speculativeActive < 2) })
+            let speculativeActive = running.values.filter { !$0.demand.priority.isImmediate }.count
+            guard let pair = entries.filter({ $0.value.task == nil && ($0.value.demand.priority.isImmediate || speculativeActive < 2) })
                 .min(by: { lhs, rhs in
                     lhs.value.demand == rhs.value.demand ? lhs.value.order < rhs.value.order : lhs.value.demand < rhs.value.demand
                 }) else { return }
@@ -785,6 +798,9 @@ final class ImageRepository: Sendable {
         try await task.value
         return try cachedImageAfterLoad(for: url)
     }
+
+    @MainActor
+    func trimDecodedMemoryCache() { memoryCache.removeAll() }
 
     @MainActor
     func clear() async throws {

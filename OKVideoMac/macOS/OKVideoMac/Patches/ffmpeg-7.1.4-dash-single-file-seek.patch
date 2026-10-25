@@ -1,0 +1,18 @@
+--- a/libavformat/dashdec.c
++++ b/libavformat/dashdec.c
+@@ -1916,6 +1916,15 @@
+         goto fail;
+     }
+ 
++    /* A static single-file representation has ordinary byte offsets. Expose
++     * its proven HTTP seekability so MOV can use sidx/mfra instead of reading
++     * every fragment from the beginning on a distant seek. Never do this for
++     * concatenated initialization data, byte-range segments, or live MPDs. */
++    if (!c->is_live && pls->n_fragments == 1 && !pls->init_sec_data_len &&
++        pls->input && pls->cur_seg && pls->cur_seg->url_offset == 0 &&
++        pls->cur_seg->size < 0)
++        pls->pb.pub.seekable = pls->input->seekable & AVIO_SEEKABLE_NORMAL;
++
+     pls->ctx->pb = &pls->pb.pub;
+     pls->ctx->io_open  = nested_io_open;
+ 

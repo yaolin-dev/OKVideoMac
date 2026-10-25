@@ -44,6 +44,7 @@ APP="$1"
 MAIN_EXECUTABLE="$APP/Contents/MacOS/OKVideoMac"
 NODE_EXECUTABLE="$APP/Contents/Resources/NodeRuntime/node"
 RELAUNCHER_EXECUTABLE="$APP/Contents/Helpers/OKVideoMacRelauncher"
+PREVIEW_EXECUTABLE="$APP/Contents/Helpers/OKVideoLivePreview"
 if [[ ! -d "$APP" || ! -x "$MAIN_EXECUTABLE" || ! -x "$NODE_EXECUTABLE" || ! -x "$RELAUNCHER_EXECUTABLE" ]]; then
   echo "Incomplete OKVideoMac bundle: $APP" >&2
   exit 1
@@ -125,6 +126,17 @@ else
     echo "FAIL: local ad-hoc package lacks its development-only Library Validation exception." >&2
     failure=1
   fi
+fi
+
+if [[ ! -x "$PREVIEW_EXECUTABLE" ]]; then
+  echo "FAIL: Live preview helper is missing." >&2
+  failure=1
+elif [[ "$MODE" == "local" ]] && ! has_entitlement "$PREVIEW_EXECUTABLE" com.apple.security.cs.disable-library-validation; then
+  echo "FAIL: local preview helper lacks its Library Validation exception." >&2
+  failure=1
+elif [[ "$MODE" == "distribution" ]] && has_entitlement "$PREVIEW_EXECUTABLE" com.apple.security.cs.disable-library-validation; then
+  echo "FAIL: distribution preview helper disables Library Validation." >&2
+  failure=1
 fi
 
 if ! has_entitlement "$NODE_EXECUTABLE" com.apple.security.cs.allow-jit; then

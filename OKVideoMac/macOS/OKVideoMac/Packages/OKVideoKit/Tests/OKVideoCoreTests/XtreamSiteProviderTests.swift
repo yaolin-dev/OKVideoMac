@@ -142,6 +142,7 @@ final class XtreamSiteProviderTests: XCTestCase {
         XCTAssertEqual(detail.summary.title, "Fixture Movie One")
         XCTAssertEqual(detail.summary.year, "2024")
         XCTAssertEqual(detail.summary.categoryName, "Drama")
+        XCTAssertEqual(TMDBMatchInput(detail: detail).type, .movie)
         XCTAssertEqual(detail.director, "Director One")
         XCTAssertEqual(detail.actors, "Actor One, Actor Two")
         XCTAssertEqual(detail.synopsis, "Fixture plot")
@@ -300,6 +301,7 @@ final class XtreamSiteProviderTests: XCTestCase {
             id: try XCTUnwrap(page.items.first?.videoID)
         )
         XCTAssertEqual(detail.summary.title, "Fixture Series")
+        XCTAssertEqual(TMDBMatchInput(detail: detail).type, .tv)
         XCTAssertEqual(detail.playSources.map(\.name), ["Season 1", "Season 2"])
         XCTAssertEqual(
             detail.playSources.map { $0.episodes.map(\.name) },

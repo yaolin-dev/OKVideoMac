@@ -3,6 +3,7 @@ import Foundation
 public final class URLSessionHTTPClient: HTTPClient {
     private let session: URLSession
     private let configuration: URLSessionConfiguration
+    private let boundedSession: BoundedResponseSession?
 
     public init(
         configuration: URLSessionConfiguration = .default,
@@ -13,20 +14,21 @@ public final class URLSessionHTTPClient: HTTPClient {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         self.configuration = configuration.copy() as! URLSessionConfiguration
         session = URLSession(configuration: configuration)
+        boundedSession = nil
     }
 
     /// A separate, stateless transport for credential-bearing provider APIs.
     /// The existing initializer deliberately retains its shared-cookie behavior
     /// for providers that rely on it. Passing `.ephemeral` to that initializer
     /// is not equivalent to using this factory.
-    public static func isolatedEphemeral() -> URLSessionHTTPClient {
-        URLSessionHTTPClient(isolatedConfiguration: .ephemeral)
+    public static func isolatedEphemeral(reusesBoundedConnections: Bool = false) -> URLSessionHTTPClient {
+        URLSessionHTTPClient(isolatedConfiguration: .ephemeral, reusesBoundedConnections: reusesBoundedConnections)
     }
 
     // Keep protocol-class injection internal so tests can exercise both the
     // buffered and bounded paths without adding a production configuration
     // escape hatch to the isolated factory.
-    init(isolatedConfiguration: URLSessionConfiguration) {
+    init(isolatedConfiguration: URLSessionConfiguration, reusesBoundedConnections: Bool = false) {
         let configuration = isolatedConfiguration.copy()
             as! URLSessionConfiguration
         configuration.httpShouldSetCookies = false
@@ -37,7 +39,10 @@ public final class URLSessionHTTPClient: HTTPClient {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         self.configuration = configuration.copy() as! URLSessionConfiguration
         session = URLSession(configuration: configuration)
+        boundedSession = reusesBoundedConnections ? BoundedResponseSession(configuration: configuration) : nil
     }
+
+    deinit { boundedSession?.invalidate() }
 
     /// A defensive copy for transport-policy regression tests. The actual
     /// session and the configuration used by bounded loads remain immutable.
@@ -102,7 +107,9 @@ public final class URLSessionHTTPClient: HTTPClient {
                     maximumRedirects: request.maximumRedirects,
                     redirectedHeaders: redirectedHeaders,
                     redirectPolicy: request.redirectPolicy,
-                    originalURL: request.url
+                    originalURL: request.url,
+                    pooledSession: boundedSession,
+                    timingObserver: HTTPTaskTimingContext.observer
                 ).load(urlRequest)
                 data = result.data
                 response = result.response
@@ -367,6 +374,62 @@ private struct BoundedResponseResult {
     let redirects: [HTTPRedirectHop]
 }
 
+/// One connection pool per opted-in client. Response buffers, redirect policy,
+/// cancellation and metrics remain owned by each individual request.
+private final class BoundedResponseSession: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var loaders: [Int: BoundedResponseLoader] = [:]
+    private var session: URLSession!
+
+    init(configuration: URLSessionConfiguration) {
+        super.init()
+        session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+    }
+
+    func makeTask(_ request: URLRequest, loader: BoundedResponseLoader) -> URLSessionDataTask {
+        let task = session.dataTask(with: request)
+        lock.lock(); loaders[task.taskIdentifier] = loader; lock.unlock()
+        return task
+    }
+
+    private func loader(for task: URLSessionTask) -> BoundedResponseLoader? {
+        lock.lock(); defer { lock.unlock() }
+        return loaders[task.taskIdentifier]
+    }
+
+    func remove(_ task: URLSessionTask) {
+        lock.lock(); loaders[task.taskIdentifier] = nil; lock.unlock()
+    }
+
+    func invalidate() { session.invalidateAndCancel() }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard let loader = loader(for: dataTask) else { completionHandler(.cancel); return }
+        loader.urlSession(session, dataTask: dataTask, didReceive: response, completionHandler: completionHandler)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        loader(for: dataTask)?.urlSession(session, dataTask: dataTask, didReceive: data)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        guard let loader = loader(for: task) else { completionHandler(nil); return }
+        loader.urlSession(session, task: task, willPerformHTTPRedirection: response,
+                          newRequest: request, completionHandler: completionHandler)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+        loader(for: task)?.urlSession(session, task: task, didFinishCollecting: metrics)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        loader(for: task)?.urlSession(session, task: task, didCompleteWithError: error)
+        remove(task)
+    }
+}
+
 private final class BoundedResponseLoader: NSObject, URLSessionDataDelegate,
     @unchecked Sendable {
     private let configuration: URLSessionConfiguration
@@ -375,6 +438,8 @@ private final class BoundedResponseLoader: NSObject, URLSessionDataDelegate,
     private let redirectedHeaders: HTTPHeaders
     private let redirectPolicy: HTTPRedirectPolicy
     private let originalURL: URL
+    private let pooledSession: BoundedResponseSession?
+    private let timingObserver: (@Sendable (HTTPTaskTiming) -> Void)?
     private let lock = NSLock()
 
     private var continuation: CheckedContinuation<BoundedResponseResult, Error>?
@@ -393,7 +458,9 @@ private final class BoundedResponseLoader: NSObject, URLSessionDataDelegate,
         maximumRedirects: Int,
         redirectedHeaders: HTTPHeaders,
         redirectPolicy: HTTPRedirectPolicy,
-        originalURL: URL
+        originalURL: URL,
+        pooledSession: BoundedResponseSession? = nil,
+        timingObserver: (@Sendable (HTTPTaskTiming) -> Void)? = nil
     ) {
         self.configuration = configuration.copy() as! URLSessionConfiguration
         self.maximumBytes = max(1, maximumBytes)
@@ -401,6 +468,8 @@ private final class BoundedResponseLoader: NSObject, URLSessionDataDelegate,
         self.redirectedHeaders = redirectedHeaders
         self.redirectPolicy = redirectPolicy
         self.originalURL = originalURL
+        self.pooledSession = pooledSession
+        self.timingObserver = timingObserver
     }
 
     func load(_ request: URLRequest) async throws -> BoundedResponseResult {
@@ -408,13 +477,14 @@ private final class BoundedResponseLoader: NSObject, URLSessionDataDelegate,
             try await withCheckedThrowingContinuation { continuation in
                 lock.lock()
                 self.continuation = continuation
-                let session = URLSession(
-                    configuration: configuration,
-                    delegate: self,
-                    delegateQueue: nil
-                )
-                self.session = session
-                let task = session.dataTask(with: request)
+                let task: URLSessionDataTask
+                if let pooledSession {
+                    task = pooledSession.makeTask(request, loader: self)
+                } else {
+                    let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+                    self.session = session
+                    task = session.dataTask(with: request)
+                }
                 self.task = task
                 let cancelled = cancellationRequested || Task.isCancelled
                 lock.unlock()
@@ -428,6 +498,10 @@ private final class BoundedResponseLoader: NSObject, URLSessionDataDelegate,
         } onCancel: {
             self.cancel()
         }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+        timingObserver?(HTTPTaskTiming(metrics))
     }
 
     func urlSession(
@@ -574,6 +648,7 @@ private final class BoundedResponseLoader: NSObject, URLSessionDataDelegate,
         lock.unlock()
 
         if cancelTask { task?.cancel() }
+        if let task { pooledSession?.remove(task) }
         session?.invalidateAndCancel()
         continuation?.resume(with: result)
     }

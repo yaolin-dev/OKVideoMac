@@ -700,6 +700,13 @@ enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
     }
 }
 
+enum BilibiliRuntimeCompatibility {
+    static let inputSHA256 = "57f810b4bf35be00ca2e23d4847419e6a184d7243e9063c5b2752fe812297d6a"
+    static let patchSHA256 = "bfba08175b759f98373728f348862f733c108f6c5dc3a98402bf2ecf44f83602"
+    static let moduleSHA256 = "5d2f0c88764360f5a81410a9c7ad0654e8029f8eb31f5dcf0c18aff429532c57"
+    static let outputSHA256 = "092fad99411d427608703f203371c9457b2a3c3a0a586f35e40d67a187a1f989"
+}
+
 struct NodeBundleDeterministicPatch: Equatable, Sendable {
     static let quarkLifecycleV3 = NodeBundleDeterministicPatch(
         identifier: "catpaw-quark-lifecycle-v3",
@@ -2105,6 +2112,7 @@ actor NodeBundleRuntimeService {
             "OKVIDEO_CONTRACT_B_STATE_PATH",
             "OKVIDEO_CONTRACT_B_PROFILE_PATH",
             "OKVIDEO_TRANSFER_PATCH_MODULE",
+            "OKVIDEO_BILIBILI_STREAM_MODULE",
             "OKVIDEO_TRANSFER_LEDGER_PATH",
             "OKVIDEO_INSTALLATION_UUID",
             "OKVIDEO_INSTALLATION_HMAC_KEY",
@@ -3702,12 +3710,31 @@ actor NodeBundleRuntimeService {
             )
         }
         activeProfileURL = profileURL
+        var playbackEnvironment = try transferEnvironment(for: bundle)
+        var executableBundleURL = bundle.scriptURL
+        if contract == .hostIntegrated,
+           Self.sha256Hex(validatedBundleData) == BilibiliRuntimeCompatibility.inputSHA256 {
+            let patchURL = try Self.validatedNodePatchResourceURL(named: "bilibili-streaming.patch",
+                expectedSHA256: BilibiliRuntimeCompatibility.patchSHA256)
+            let moduleURL = try Self.validatedNodePatchResourceURL(named: "bilibili-streaming",
+                expectedSHA256: BilibiliRuntimeCompatibility.moduleSHA256)
+            var adapted = validatedBundleData
+            if adapted.last != 0x0A { adapted.append(0x0A) }
+            adapted.append(try Data(contentsOf: patchURL))
+            guard Self.sha256Hex(adapted) == BilibiliRuntimeCompatibility.outputSHA256 else {
+                throw NodeBundleRuntimeError.integrityRejected("Bilibili playback adapter integrity mismatch")
+            }
+            executableBundleURL = bundle.runtimeDirectory.appendingPathComponent("bilibili-compatible-v1.cjs")
+            try adapted.write(to: executableBundleURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: executableBundleURL.path)
+            playbackEnvironment["OKVIDEO_BILIBILI_STREAM_MODULE"] = moduleURL.path
+        }
         let launchPlan = try NodeRuntimeContractFactory.makePlan(
             contract: contract,
             runtimeDirectory: bundle.runtimeDirectory,
             profileURL: profileURL,
             configurationData: bundle.configurationData,
-            transferEnvironment: try transferEnvironment(for: bundle)
+            transferEnvironment: playbackEnvironment
         )
         activeContractCleanupURLs = launchPlan.cleanupURLs
         writer.write(
@@ -3786,7 +3813,7 @@ actor NodeBundleRuntimeService {
         process.arguments = [launcherURL.path]
         process.currentDirectoryURL = bundle.runtimeDirectory
         process.environment = try Self.sanitizedNodeEnvironment(
-            bundlePath: bundle.scriptURL,
+            bundlePath: executableBundleURL,
             runtimeDirectory: bundle.runtimeDirectory,
             temporaryDirectory: temporaryDirectory,
             contractAdditions: launchPlan.environmentAdditions

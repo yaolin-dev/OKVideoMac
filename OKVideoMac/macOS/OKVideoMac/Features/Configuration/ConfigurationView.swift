@@ -104,10 +104,11 @@ private enum ConfigurationSheet: Identifiable {
 struct ConfigurationView: View {
     @EnvironmentObject private var state: AppState
     let embedded: Bool
+    var editSearchScope: (() -> Void)?
     @State private var sheet: ConfigurationSheet?
     @State private var pendingDelete: StoredConfiguration?
 
-    init(embedded: Bool = false) { self.embedded = embedded }
+    init(embedded: Bool = false, editSearchScope: (() -> Void)? = nil) { self.embedded = embedded; self.editSearchScope = editSearchScope }
 
     var body: some View {
         Group {
@@ -176,22 +177,42 @@ struct ConfigurationView: View {
                         .disabled(state.isLoading)
                     }
                     Button(L10n.string("providers.details", fallback: "Details")) { sheet = .details(active) }
+                    Menu {
+                        Button(L10n.string("common.export", fallback: "Export")) { exportConfiguration(active, state: state) }
+                        Button(role: .destructive) { pendingDelete = active } label: { Text(L10n.string("common.delete", fallback: "Delete")) }
+                            .disabled(state.isLoading)
+                    } label: { Image(systemName: "ellipsis") }
+                    .menuStyle(.borderlessButton).fixedSize()
+                    .accessibilityLabel(L10n.string("providers.more", fallback: "More Actions"))
                 }
             }
         }
 
-        SettingsSectionTitle(L10n.string("configuration.imported.section", fallback: "My Providers"))
+        if let editSearchScope {
+            SettingsCard {
+                SettingsControlRow(icon: "magnifyingglass", color: .secondary,
+                    title: SettingsL10n.string("settings.search.default-scope.section", "Default Search Scope"),
+                    subtitle: state.activeConfigurationRecord == nil
+                        ? SettingsL10n.string("settings.providers.import-first", "Import and enable a video provider configuration first")
+                        : state.searchScopeSummary + " · " + SettingsL10n.string("settings.organized.sources.scope.next", "This configuration · next search")) {
+                    Button(SettingsL10n.string("settings.organized.common.edit", "Edit…"), action: editSearchScope)
+                        .disabled(state.activeConfigurationRecord == nil)
+                }
+            }.settingsAnchor("search-scope")
+        }
+
+        SettingsSectionTitle(state.activeConfigurationRecord == nil ? SettingsL10n.string("settings.organized.sources.configurations", "Video Configurations") : SettingsL10n.string("settings.organized.sources.other", "Other Configurations"))
         SettingsCard {
-            if state.configurations.isEmpty {
-                Text(L10n.string("providers.empty", fallback: "Add a provider above to start watching."))
+            if state.configurations.filter({ !$0.isActive }).isEmpty {
+                Text(state.configurations.isEmpty ? L10n.string("providers.empty", fallback: "Add a provider above to start watching.") : SettingsL10n.string("settings.organized.sources.no-other", "No other configurations have been added."))
                     .foregroundColor(.secondary).padding(18)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                ForEach(Array(state.configurations.enumerated()), id: \.element.id) { index, record in
+                ForEach(Array(state.configurations.filter { !$0.isActive }.enumerated()), id: \.element.id) { index, record in
                     HStack(spacing: 12) {
                         SettingsRowIcon(systemImage: record.isActive ? "checkmark.circle.fill" : "doc.text.fill", color: record.isActive ? .green : .indigo)
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(record.name).font(.headline).lineLimit(2)
+                            Text(record.name).font(.system(size: 13)).lineLimit(2)
                             Text(ConfigurationPresentationKind.resolve(record).rawValue)
                                 .font(.caption).foregroundColor(.secondary)
                         }
@@ -217,8 +238,8 @@ struct ConfigurationView: View {
                         .fixedSize()
                         .accessibilityLabel(L10n.string("providers.more", fallback: "More Actions"))
                     }
-                    .padding(16)
-                    if index < state.configurations.count - 1 { SettingsDivider() }
+                    .padding(12)
+                    if index < state.configurations.filter { !$0.isActive }.count - 1 { SettingsDivider() }
                 }
             }
         }

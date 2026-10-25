@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "release": "OKVideoMac 0.8.7 (140)",
+  "release": "OKVideoMac 0.8.7 (149)",
   "target": {
     "architecture": "arm64",
     "deployment_target": "12.0",
@@ -18,16 +18,73 @@
     "status": "receipt-exact; full historical compiler/build logs not retained"
   },
   "expected_dependency_graph": {
-    "libmpv.dylib": ["libass.9.dylib", "libavcodec.61.dylib", "libavfilter.10.dylib", "libavformat.61.dylib", "libavutil.59.dylib", "libplacebo.360.dylib", "libswresample.5.dylib", "libswscale.8.dylib", "liblcms2.2.dylib", "libz.1.dylib", "libjpeg.8.dylib"],
-    "libass.9.dylib": ["libiconv.2.dylib", "libfreetype.6.dylib", "libfribidi.0.dylib", "libharfbuzz.0.dylib"],
-    "libavcodec.61.dylib": ["libswresample.5.dylib", "libavutil.59.dylib", "liblzma.5.dylib", "libz.1.dylib", "libiconv.2.dylib"],
-    "libavfilter.10.dylib": ["libswscale.8.dylib", "libavformat.61.dylib", "libavcodec.61.dylib", "libswresample.5.dylib", "libavutil.59.dylib", "libbz2.1.0.dylib", "libz.1.dylib", "liblzma.5.dylib", "libiconv.2.dylib"],
-    "libavformat.61.dylib": ["libavcodec.61.dylib", "libswresample.5.dylib", "libavutil.59.dylib", "libbz2.1.0.dylib", "libz.1.dylib", "liblzma.5.dylib", "libiconv.2.dylib"],
-    "libfreetype.6.dylib": ["libz.1.dylib", "libbz2.1.0.dylib", "libpng16.16.dylib", "libbrotlidec.1.dylib"],
-    "libharfbuzz.0.dylib": ["libfreetype.6.dylib"],
-    "libplacebo.360.dylib": ["liblcms2.2.dylib", "libc++.1.0.dylib"],
-    "libpng16.16.dylib": ["libz.1.dylib"],
-    "libc++.1.0.dylib": ["libc++abi.1.dylib"]
+    "libmpv.dylib": [
+      "libass.9.dylib",
+      "libavcodec.61.dylib",
+      "libavfilter.10.dylib",
+      "libavformat.61.dylib",
+      "libavutil.59.dylib",
+      "libplacebo.360.dylib",
+      "libswresample.5.dylib",
+      "libswscale.8.dylib",
+      "liblcms2.2.dylib",
+      "libz.1.dylib",
+      "libjpeg.8.dylib"
+    ],
+    "libass.9.dylib": [
+      "libiconv.2.dylib",
+      "libfreetype.6.dylib",
+      "libfribidi.0.dylib",
+      "libharfbuzz.0.dylib"
+    ],
+    "libavcodec.61.dylib": [
+      "libswresample.5.dylib",
+      "libavutil.59.dylib",
+      "liblzma.5.dylib",
+      "libz.1.dylib",
+      "libiconv.2.dylib"
+    ],
+    "libavfilter.10.dylib": [
+      "libswscale.8.dylib",
+      "libavformat.61.dylib",
+      "libavcodec.61.dylib",
+      "libswresample.5.dylib",
+      "libavutil.59.dylib",
+      "libbz2.1.0.dylib",
+      "libz.1.dylib",
+      "liblzma.5.dylib",
+      "libiconv.2.dylib"
+    ],
+    "libavformat.61.dylib": [
+      "libavcodec.61.dylib",
+      "libswresample.5.dylib",
+      "libavutil.59.dylib",
+      "libbz2.1.0.dylib",
+      "libz.1.dylib",
+      "liblzma.5.dylib",
+      "libiconv.2.dylib",
+      "libxml2.16.dylib"
+    ],
+    "libfreetype.6.dylib": [
+      "libz.1.dylib",
+      "libbz2.1.0.dylib",
+      "libpng16.16.dylib",
+      "libbrotlidec.1.dylib"
+    ],
+    "libharfbuzz.0.dylib": [
+      "libfreetype.6.dylib"
+    ],
+    "libplacebo.360.dylib": [
+      "liblcms2.2.dylib",
+      "libc++.1.0.dylib"
+    ],
+    "libpng16.16.dylib": [
+      "libz.1.dylib"
+    ],
+    "libc++.1.0.dylib": [
+      "libc++abi.1.dylib"
+    ],
+    "libxml2.16.dylib": []
   },
   "components": [
     {
@@ -37,10 +94,36 @@
       "source_sha256": "71f4aac3573ed9060489cb62526a6c7dda815ae10993789611acd7be9fa9fbf4",
       "license": "LGPL-2.1-or-later build",
       "build_system": "configure/make",
-      "build_flags": "--arch=arm64 --target-os=darwin --enable-shared --disable-static --enable-pic --disable-programs --disable-doc --disable-debug --disable-avdevice --disable-autodetect --enable-network --enable-securetransport --enable-videotoolbox --enable-audiotoolbox --enable-zlib --enable-bzlib --enable-iconv --enable-lzma --enable-pthreads --disable-sdl2",
-      "patches": [],
+      "build_flags": "--arch=arm64 --target-os=darwin --enable-shared --disable-static --enable-pic --disable-programs --disable-doc --disable-debug --disable-avdevice --disable-autodetect --enable-libxml2 --enable-demuxer=dash --disable-demuxer=imf --enable-network --enable-securetransport --enable-videotoolbox --enable-audiotoolbox --enable-zlib --enable-bzlib --enable-iconv --enable-lzma --enable-pthreads --disable-sdl2",
+      "patches": [
+        "OKVideoMac/macOS/OKVideoMac/Patches/ffmpeg-7.1.4-dash-redirect-base.patch",
+        "OKVideoMac/macOS/OKVideoMac/Patches/ffmpeg-7.1.4-dash-unavailable-representation.patch",
+        "OKVideoMac/macOS/OKVideoMac/Patches/ffmpeg-7.1.4-dash-single-file-seek.patch"
+      ],
       "recipe": "OKVideoMac/macOS/OKVideoMac/Scripts/build-third-party-native.sh",
-      "outputs": ["libavcodec.61.dylib", "libavfilter.10.dylib", "libavformat.61.dylib", "libavutil.59.dylib", "libswresample.5.dylib", "libswscale.8.dylib"],
+      "outputs": [
+        "libavcodec.61.dylib",
+        "libavfilter.10.dylib",
+        "libavformat.61.dylib",
+        "libavutil.59.dylib",
+        "libswresample.5.dylib",
+        "libswscale.8.dylib"
+      ],
+      "status": "RECIPE_LOCKED"
+    },
+    {
+      "component": "libxml2",
+      "version": "2.15.4",
+      "upstream": "https://download.gnome.org/sources/libxml2/2.15/libxml2-2.15.4.tar.xz",
+      "source_sha256": "98087fd181d9070724f3fbc65c7377db03038eb92bd882374daff44940138821",
+      "license": "MIT",
+      "build_system": "Autotools",
+      "build_flags": "--enable-shared --disable-static --without-python --without-programs --without-iconv --without-icu --without-zlib --without-lzma",
+      "patches": [],
+      "recipe": "OKVideoMac/macOS/OKVideoMac/Scripts/build-libxml2.sh",
+      "outputs": [
+        "libxml2.16.dylib"
+      ],
       "status": "RECIPE_LOCKED"
     },
     {
@@ -50,7 +133,9 @@
       "source_sha256": "fa286fc9ee1ba3b932703a3df7b8474d01dc8abe29ec69b6fa68781dc4bf7acc",
       "license": "ISC",
       "build_system": "Autotools",
-      "outputs": ["libass.9.dylib"],
+      "outputs": [
+        "libass.9.dylib"
+      ],
       "status": "SOURCE_LOCKED_RECIPE_PENDING"
     },
     {
@@ -60,7 +145,9 @@
       "source_sha256": "a54a5d8e9380a41fbb762ce367bcbf7704792dfca0d93f1bbca86c5a57902e0e",
       "license": "MIT",
       "build_system": "Meson",
-      "outputs": ["libharfbuzz.0.dylib"],
+      "outputs": [
+        "libharfbuzz.0.dylib"
+      ],
       "status": "SOURCE_LOCKED_RECIPE_PENDING"
     },
     {
@@ -71,9 +158,13 @@
       "license": "LGPL-2.1-or-later",
       "build_system": "Meson via MacPorts",
       "macports_revision": 0,
-      "variants": ["opengl"],
+      "variants": [
+        "opengl"
+      ],
       "portfile_sha256": "a46b49d81c688963040bad23f9d87dcde402981aa5182cd1af04d605d7ed480b",
-      "outputs": ["libplacebo.360.dylib"],
+      "outputs": [
+        "libplacebo.360.dylib"
+      ],
       "status": "RECEIPT_EXACT"
     },
     {
@@ -86,7 +177,9 @@
       "macports_revision": 0,
       "variants": [],
       "portfile_sha256": "559a858fbf3b9519dde4be9fe371f0c15274c59716682b9e2ed9f889ea5669e5",
-      "outputs": ["libfreetype.6.dylib"],
+      "outputs": [
+        "libfreetype.6.dylib"
+      ],
       "status": "RECEIPT_EXACT"
     },
     {
@@ -99,7 +192,9 @@
       "macports_revision": 0,
       "variants": [],
       "portfile_sha256": "2faaf0766a2e0cdcc0b3a4ac0a33d43776f08f8023c2a3417495b78371eff32b",
-      "outputs": ["libfribidi.0.dylib"],
+      "outputs": [
+        "libfribidi.0.dylib"
+      ],
       "status": "RECEIPT_EXACT"
     },
     {
@@ -112,7 +207,10 @@
       "macports_revision": 0,
       "variants": [],
       "portfile_sha256": "60b53abf5204a319726e9b5445f57efd89335c4e628086f12fff44e4ae43c361",
-      "outputs": ["libbrotlicommon.1.dylib", "libbrotlidec.1.dylib"],
+      "outputs": [
+        "libbrotlicommon.1.dylib",
+        "libbrotlidec.1.dylib"
+      ],
       "status": "RECEIPT_EXACT"
     },
     {
@@ -125,7 +223,9 @@
       "macports_revision": 0,
       "variants": [],
       "portfile_sha256": "1fc4712df87a90f64c335aeb04841e530d31098f5a278b69cf67962c6444207c",
-      "outputs": ["liblcms2.2.dylib"],
+      "outputs": [
+        "liblcms2.2.dylib"
+      ],
       "status": "RECEIPT_EXACT"
     },
     {
@@ -138,7 +238,9 @@
       "macports_revision": 0,
       "variants": [],
       "portfile_sha256": "916b6f0ade87120f3586dd281f130ae8c9ac965a7544ea3299e5d07b56c63ea4",
-      "outputs": ["libpng16.16.dylib"],
+      "outputs": [
+        "libpng16.16.dylib"
+      ],
       "status": "RECEIPT_EXACT"
     },
     {
@@ -151,7 +253,9 @@
       "macports_revision": 0,
       "variants": [],
       "portfile_sha256": "dd68601ad60fe9bf72243ea8dc853dac171817a181cd2abccc0648cd6825d930",
-      "outputs": ["libjpeg.8.dylib"],
+      "outputs": [
+        "libjpeg.8.dylib"
+      ],
       "status": "RECEIPT_EXACT"
     },
     {
@@ -164,7 +268,9 @@
       "macports_revision": 0,
       "variants": [],
       "portfile_sha256": "bcdc9a7152da237f151693172dd7693f113f22a7e36248bb2112375fafb3e77d",
-      "outputs": ["liblzma.5.dylib"],
+      "outputs": [
+        "liblzma.5.dylib"
+      ],
       "status": "RECEIPT_EXACT"
     },
     {
@@ -177,7 +283,9 @@
       "macports_revision": 0,
       "variants": [],
       "portfile_sha256": "1254f2bbec73639240d30770d07ff0d39babcbd13b71b3a8e1a58ce4fa49a48b",
-      "outputs": ["libiconv.2.dylib"],
+      "outputs": [
+        "libiconv.2.dylib"
+      ],
       "status": "RECEIPT_EXACT"
     },
     {
@@ -190,7 +298,9 @@
       "macports_revision": 0,
       "variants": [],
       "portfile_sha256": "91606e09bc412974e8d906ef366b2eb50dd5aa0d15f68d7af2ca13ab7d983188",
-      "outputs": ["libbz2.1.0.dylib"],
+      "outputs": [
+        "libbz2.1.0.dylib"
+      ],
       "status": "RECEIPT_EXACT"
     },
     {
@@ -203,7 +313,9 @@
       "macports_revision": 0,
       "variants": [],
       "portfile_sha256": "2a9737714f695baaf2df48239a2804412d52cb393f028c4fffc8c9b930349203",
-      "outputs": ["libz.1.dylib"],
+      "outputs": [
+        "libz.1.dylib"
+      ],
       "status": "RECEIPT_EXACT_ARCHIVE_UNAVAILABLE"
     },
     {
@@ -216,7 +328,9 @@
       "macports_revision": 0,
       "variants": [],
       "portfile_sha256": "bd6285ee54d8b0bd76227fa1a2350d72ef6b25285a7f83209d8e13d5c3ea7ee8",
-      "outputs": ["libsqlite3.dylib"],
+      "outputs": [
+        "libsqlite3.dylib"
+      ],
       "status": "RECEIPT_EXACT"
     },
     {
@@ -229,7 +343,10 @@
       "macports_revision": 0,
       "variants": [],
       "portfile_sha256": "7d2f5341995654651895f55fe6c88add12427fb1ca22f579988d271a1b1a00de",
-      "outputs": ["libc++.1.0.dylib", "libc++abi.1.dylib"],
+      "outputs": [
+        "libc++.1.0.dylib",
+        "libc++abi.1.dylib"
+      ],
       "status": "UNRESOLVED_SOURCE_INPUT"
     }
   ]

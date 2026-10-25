@@ -548,6 +548,10 @@ import OKVideoPersistence
 
 @MainActor
 final class BrowserSplitDividerTests: XCTestCase {
+    private func pageToolbarItems(in window: NSWindow) -> [NSToolbarItem] {
+        (window.toolbar?.items ?? []).filter { $0.itemIdentifier != .sidebarTrackingSeparator }
+    }
+
     private func withBrowser(initialSection: AppSection = .settings, suppliedState: AppState? = nil, configureChromeImmediately: Bool = true, imageRepository: ImageRepository? = nil, _ run: (AppState, NSWindow) async throws -> Void) async throws {
         let state = suppliedState ?? AppState(environment: nil)
         state.selectSection(initialSection)
@@ -685,7 +689,7 @@ final class BrowserSplitDividerTests: XCTestCase {
             try await withBrowser(initialSection: .home, suppliedState: state) { state, window in
                 try await self.settle(window)
                 let height = window.frame.height - window.contentLayoutRect.height
-                XCTAssertEqual(window.toolbar?.items.count, 2)
+                XCTAssertEqual(self.pageToolbarItems(in: window).count, 2)
                 await state.start()
                 try await self.settle(window)
                 XCTAssertTrue(state.hasCompletedStartup)
@@ -726,7 +730,7 @@ final class BrowserSplitDividerTests: XCTestCase {
             let button = controller.sidebarTitlebar.toggleButton
             let position = button.convert(button.bounds, to: nil)
             let height = window.frame.height - window.contentLayoutRect.height
-            let homeItems = try XCTUnwrap(window.toolbar).items
+            let homeItems = self.pageToolbarItems(in: window)
             // Actual production title + principal spacer; no provider group.
             XCTAssertEqual(homeItems.count, 2)
             try self.attachWindowSnapshot(window, name: "home-loading-toolbar")
@@ -734,7 +738,7 @@ final class BrowserSplitDividerTests: XCTestCase {
                 state.presentHomeSearch()
                 try await self.settle(window)
                 XCTAssertTrue(state.isHomeSearchPresented)
-                let searchItems = try XCTUnwrap(window.toolbar).items
+                let searchItems = self.pageToolbarItems(in: window)
                 XCTAssertGreaterThan(searchItems.count, homeItems.count)
                 // System flexible-space identifiers are shared, unlike the
                 // actual home title. Do not treat spacing as a leaked page item.
@@ -758,7 +762,7 @@ final class BrowserSplitDividerTests: XCTestCase {
                 if iteration == 0 { try self.attachWindowSnapshot(window, name: "search-owned-toolbar") }
                 state.returnFromSearchToHome()
                 try await self.settle(window)
-                XCTAssertEqual(window.toolbar?.items.count, homeItems.count)
+                XCTAssertEqual(self.pageToolbarItems(in: window).count, homeItems.count)
                 XCTAssertEqual(window.frame.height - window.contentLayoutRect.height, height, accuracy: 0.5)
                 let current = button.convert(button.bounds, to: nil)
                 XCTAssertEqual(current.minX, position.minX, accuracy: 0.5)
@@ -842,7 +846,7 @@ final class BrowserSplitDividerTests: XCTestCase {
         try await withBrowser(initialSection: .home) { state, window in
             try await self.settle(window)
             let height = window.frame.height - window.contentLayoutRect.height
-            let count = try XCTUnwrap(window.toolbar).items.count
+            let count = self.pageToolbarItems(in: window).count
             XCTAssertEqual(count, 2)
             let provider = ToolbarFixtureProvider()
             let record = StoredConfiguration(name: "Toolbar fixture", sourceKind: .pasted,
@@ -851,14 +855,55 @@ final class BrowserSplitDividerTests: XCTestCase {
             state.seedCategoryHomeForTesting(record: record, provider: provider, home: try await provider.home())
             try await self.settle(window)
             XCTAssertNotNil(state.activeConfiguration)
-            XCTAssertGreaterThan(try XCTUnwrap(window.toolbar).items.count, count)
+            XCTAssertGreaterThan(self.pageToolbarItems(in: window).count, count)
             XCTAssertEqual(window.frame.height - window.contentLayoutRect.height, height, accuracy: 0.5)
             state.setLiveConfigurationForTesting(nil, providers: [:])
             try await self.settle(window)
             XCTAssertNil(state.activeConfiguration)
             XCTAssertTrue(state.hasCompletedStartup, "Exercise settled empty state, not only loading")
-            XCTAssertEqual(window.toolbar?.items.count, count)
+            XCTAssertEqual(self.pageToolbarItems(in: window).count, count)
             XCTAssertEqual(window.frame.height - window.contentLayoutRect.height, height, accuracy: 0.5)
+        }
+    }
+
+    func testNativeTrackingRetainsToolbarOwnerAndAlignsPageTitles() async throws {
+        try await withBrowser(initialSection: .home) { state, window in
+            try await self.settle(window)
+            let split = try self.primarySplit(in: window)
+            let controller = try XCTUnwrap(split.delegate as? BrowserRootSplitController)
+            for section: AppSection in [.home, .live, .favorites, .history, .settings, .home] {
+                state.selectSection(section)
+                try await self.settle(window)
+                let toolbar = try XCTUnwrap(window.toolbar)
+                let owner = toolbar.delegate
+                let item = try XCTUnwrap(toolbar.items.first as? NSTrackingSeparatorToolbarItem)
+                XCTAssertEqual(item.itemIdentifier, .sidebarTrackingSeparator)
+                XCTAssertTrue(item.splitView === split)
+                XCTAssertEqual(item.dividerIndex, 0)
+                XCTAssertEqual(controller.sidebarTitlebar.view.frame.width, 44)
+                // Changing unrelated native geometry must not resize the
+                // accessory, replace the owner's toolbar, or duplicate items.
+                window.setFrameOrigin(NSPoint(x: window.frame.minX + 20, y: window.frame.minY))
+                try await self.settle(window)
+                XCTAssertTrue(window.toolbar === toolbar)
+                XCTAssertTrue(toolbar.delegate === owner)
+                XCTAssertEqual(toolbar.items.filter { $0.itemIdentifier == .sidebarTrackingSeparator }.count, 1)
+                XCTAssertEqual(controller.sidebarTitlebar.view.frame.width, 44)
+            }
+            state.presentHomeSearch()
+            for width: CGFloat in [1120, 1370, 1537] {
+                window.setContentSize(NSSize(width: width, height: 780))
+                try await self.settle(window)
+                // Inspect the actual visible navigation control. Simple page
+                // titles may be native toolbar labels with no item.view.
+                let back = try XCTUnwrap(BrowserKeyboardView.descendants(of: window.contentView?.superview)
+                    .first { $0.accessibilityIdentifier() == "search.back" })
+                let boundary = split.arrangedSubviews[1].convert(.zero, to: nil).x
+                let offset = back.convert(.zero, to: nil).x - boundary
+                XCTAssertGreaterThanOrEqual(offset, 0)
+                XCTAssertLessThan(offset, 32, "Search navigation must start at the detail pane")
+                XCTAssertEqual(controller.sidebarTitlebar.view.frame.width, 44)
+            }
         }
     }
 
@@ -982,7 +1027,9 @@ final class BrowserSplitDividerTests: XCTestCase {
                     XCTAssertEqual(sidebarFrame.maxY, window.contentView!.bounds.maxY, accuracy: 0.5)
                     try self.assertTitlebarMaterial(window)
                     let items = try XCTUnwrap(window.toolbar?.items)
-                    XCTAssertFalse(items.contains { $0.itemIdentifier == .sidebarTrackingSeparator })
+                    let tracking = try XCTUnwrap(items.first as? NSTrackingSeparatorToolbarItem)
+                    XCTAssertTrue(tracking.splitView === split)
+                    XCTAssertEqual(items.filter { $0.itemIdentifier == .sidebarTrackingSeparator }.count, 1)
                     XCTAssertEqual(window.titlebarAccessoryViewControllers.filter { $0 is BrowserSidebarTitlebarController }.count, 1)
                 }
             }
