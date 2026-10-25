@@ -1,8 +1,8 @@
 # Immutable Corresponding-Source Release Process
 
-## Local Build 149 acceptance
+## Local Build 150 acceptance
 
-The Live TV preview candidate uses a captured local source tree and `OKVideoMac-0.8.7-build149-SOURCE_RELEASE_INDEX.json`. It is not a public release or a replacement for the notarized Build 140 assets. Its source SHA-256 and local validation evidence are retained with the candidate package.
+The Live TV preview candidate uses a captured local source tree and `OKVideoMac-0.8.7-build150-SOURCE_RELEASE_INDEX.json`. It is not a public release or a replacement for the notarized Build 140 assets. Its source SHA-256 and local validation evidence are retained with the candidate package.
 
 ## Published 0.8.7 identity
 
