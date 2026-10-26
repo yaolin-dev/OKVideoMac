@@ -8,6 +8,7 @@ English | [简体中文](README_zh-CN.md)
 selected TVBox/CatVod/CatPaw-style providers, and libmpv playback.**
 
 [![Latest release](https://img.shields.io/github/v/release/yaolin-dev/OKVideoMac?display_name=tag&sort=semver)](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
+[![CI](https://github.com/yaolin-dev/OKVideoMac/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/yaolin-dev/OKVideoMac/actions/workflows/ci.yml)
 ![macOS 12+](https://img.shields.io/badge/macOS-12%2B-000000?logo=apple&logoColor=white)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-000000?logo=apple&logoColor=white)
 [![GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
@@ -344,6 +345,12 @@ Runtime are not shipped as an Intel or Universal Binary stack.
 - A large legacy database may cause a one-time startup pause.
 
 ## Development and architecture
+
+Credential-free CI runs Core/Persistence tests in both Debug and Release, all Node tests,
+offline audits and static checks, Android Release JVM tests, and an unsigned main App
+Release compile. The `CI required` check succeeds only when every job succeeds.
+See [CI coverage, local commands and limitations](Docs/CI.md). CI does not replace
+playback/UI testing or the signed, notarized release process.
 
 The repository separates core models/networking, SQLite persistence, macOS UI,
 native playback bridges, provider runtimes, Managed Runtime installation, and

@@ -8,6 +8,7 @@
 部分 TVBox/CatVod/CatPaw 风格 Provider，以及 libmpv 播放。**
 
 [![最新版本](https://img.shields.io/github/v/release/yaolin-dev/OKVideoMac?display_name=tag&sort=semver)](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
+[![CI](https://github.com/yaolin-dev/OKVideoMac/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/yaolin-dev/OKVideoMac/actions/workflows/ci.yml)
 ![macOS 12+](https://img.shields.io/badge/macOS-12%2B-000000?logo=apple&logoColor=white)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-000000?logo=apple&logoColor=white)
 [![GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
@@ -306,6 +307,11 @@ Intel 或 Universal Binary 组合发布。
 - 大型旧数据库可能造成一次性启动停顿。
 
 ## 开发与架构
+
+无需证书和真实账号的 CI 已覆盖 Core/Persistence 的 Debug 与 Release 测试、
+全部 Node 测试、离线审计与静态检查、Android Release JVM 测试，以及主 App 的
+无签名 Release 编译。只有全部任务成功，`CI required` 汇总检查才会通过。
+范围、本地命令和限制见 [CI 指南](Docs/CI.md)；CI 不替代播放／界面实测及签名、公证发布流程。
 
 仓库将核心模型/网络、SQLite 持久化、macOS UI、原生播放桥、Provider Runtime、
 Managed Runtime 安装与 Android Emulator Session 分开；安装和 Session 生命周期是

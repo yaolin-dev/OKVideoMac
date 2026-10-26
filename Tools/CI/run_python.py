@@ -16,6 +16,7 @@ class RecordedResult(unittest.TextTestResult):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.cases = []
+        self.current = None
 
     def startTest(self, test):
         super().startTest(test)
@@ -25,27 +26,36 @@ class RecordedResult(unittest.TextTestResult):
     def stopTest(self, test):
         self.current['seconds'] = round(time.monotonic() - self.started, 6)
         self.cases.append(self.current)
+        self.current = None
         super().stopTest(test)
 
+    def record_problem(self, test, status, reason):
+        # Class/module fixtures can report errors or skips without startTest.
+        if self.current is None:
+            self.cases.append(dict(id=test.id(), status=status, reason=reason, seconds=0))
+        else:
+            self.current.update(status=status, reason=reason)
+
     def addSuccess(self, test):
-        self.current['status'] = 'passed'
+        if self.current['status'] == 'incomplete':
+            self.current['status'] = 'passed'
         super().addSuccess(test)
 
     def addFailure(self, test, err):
-        self.current.update(status='failed', reason=self._exc_info_to_string(err, test))
+        self.record_problem(test, 'failed', self._exc_info_to_string(err, test))
         super().addFailure(test, err)
 
     def addError(self, test, err):
-        self.current.update(status='error', reason=self._exc_info_to_string(err, test))
+        self.record_problem(test, 'error', self._exc_info_to_string(err, test))
         super().addError(test, err)
 
     def addSkip(self, test, reason):
-        self.current.update(status='skipped', reason=reason)
+        self.record_problem(test, 'skipped', reason)
         super().addSkip(test, reason)
 
     def addSubTest(self, test, subtest, err):
         if err:
-            self.current.update(status='failed', reason=self._exc_info_to_string(err, test))
+            self.record_problem(test, 'failed', self._exc_info_to_string(err, test))
         super().addSubTest(test, subtest, err)
 
 
@@ -95,8 +105,10 @@ def main():
             result = unittest.TextTestRunner(stream=log, verbosity=2, resultclass=RecordedResult).run(suite)
         report.update(total=result.testsRun, passed=sum(case['status'] == 'passed' for case in result.cases),
                       failed=len(result.failures), errors=len(result.errors), skipped=len(result.skipped), cases=result.cases)
-        xml = ET.Element('testsuite', name=args.suite, tests=str(result.testsRun),
-                         failures=str(len(result.failures)), errors=str(len(result.errors)), skipped=str(len(result.skipped)))
+        xml = ET.Element('testsuite', name=args.suite, tests=str(len(result.cases)),
+                         failures=str(sum(case['status'] == 'failed' for case in result.cases)),
+                         errors=str(sum(case['status'] not in {'passed', 'failed', 'skipped'} for case in result.cases)),
+                         skipped=str(sum(case['status'] == 'skipped' for case in result.cases)))
         for case in result.cases:
             node = ET.SubElement(xml, 'testcase', name=case['id'], time=str(case['seconds']))
             if case['status'] != 'passed':

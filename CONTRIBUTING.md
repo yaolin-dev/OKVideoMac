@@ -14,6 +14,15 @@ PR 保持单一、清晰的范围。说明变更目的、验证方式以及已�
 - 影响许可、对应源码、SBOM 或 provenance 的变更必须同步更新相应记录；
 - 不要把未经验证的第三方 artifact 作为可发布二进制提交。
 
-仓库没有在本文件中承诺特定 CI 必过项；maintainer 会根据变更风险要求补充验证。
-发布包仍必须遵循 `Docs/SOURCE_RELEASE_PROCESS.md` 和仓库 release scripts 的
-fail-closed 检查。
+提交到 `main` 的 PR 和 `main` 推送会运行 [CI](.github/workflows/ci.yml)。合入前应确认
+`CI required` 及其依赖的 Core Debug/Release、Node、离线审计与静态检查、Android JVM
+测试、主 App 无签名 Release 编译全部通过。失败、取消、跳过任务或缺失结果都不能
+视为通过。该汇总检查不等于已启用 GitHub 分支保护；本轮没有修改仓库保护规则。
+
+运行方法、工具版本、报告和明确不覆盖的范围见 [CI 指南](Docs/CI.md)。Core 中既有的
+条件测试跳过项由测试名和原因白名单约束，不得通过扩大跳过范围掩盖失败。新增测试
+会自动发现；更改白名单需解释对应的环境要求，并保留相关的人工验收路径。
+
+维护者仍会按变更风险要求补充实机、播放、兼容性或真实服务验证。CI 的未签名编译
+产物仅用于检查，不能安装或发布。发布包必须遵循
+[正式发布流程](Docs/SOURCE_RELEASE_PROCESS.md)和仓库 release scripts 的 fail-closed 检查。
