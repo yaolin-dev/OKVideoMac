@@ -23,5 +23,5 @@
 ## 本轮代码验证结果
 
 - 完整 Release App 用例共 1602 项，最终 1582 通过、20 条件跳过；焦点夹具修正后相关 26 项复验通过，未保留失败项。
-- Core／Persistence：1204 通过、29 条件跳过；Node 55、Android Release 单测 45、SourceAudit／原生启动器 51、崩溃发布配置 15 项通过。
+- Core／Persistence 原发布轮次为 Debug：1204 通过、29 条件跳过；2026-10-26 对同一核心源码补跑显式 Release，仍为 1204 通过、29 条件跳过、0 失败。原正式验证表的 Release 标注错误已更正，原始轮次与发布后补验分开记录。Node 55、Android Release 单测 45、SourceAudit／原生启动器 51、崩溃发布配置 15 项通过。
 - 实际播放验证启用本地及 HTTP Range、H.264／HEVC／PCM、画中画、节目边界、媒体替换、长 GOP 和连续定位；外部来源、真实 Android 生命周期及长时资源门禁的条件跳过保持独立列明。

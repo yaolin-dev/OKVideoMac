@@ -14,7 +14,8 @@
 | 项目 | 结果 |
 | --- | --- |
 | Release App XCTest | 1602 个唯一用例：1582 通过、20 条件跳过、0 未解决失败；完整套件加最终受影响窗口 26 项复验，未冒充单轮全绿 |
-| Release Core／Persistence | 1204 通过、29 条件跳过、0 失败 |
+| Core／Persistence：原发布轮次（Debug） | 1204 通过、29 条件跳过、0 失败；原文误标为 Release，已按原始日志纠正 |
+| Core／Persistence：发布后补验（Release） | 2026-10-26 对与 v0.9.0 完全相同的核心源码显式执行 `swift test --configuration release`；1233 项中 1204 通过、29 条件跳过、0 失败 |
 | Node／Android Release 单测 | Node 55、Android 45 通过，0 失败 |
 | SourceAudit／原生验收启动器 | 51 通过、0 跳过、0 失败 |
 | 崩溃发布配置／符号归档 | 配置 15 项通过；符号归档 7 项检查通过 |
@@ -29,6 +30,8 @@
 | 稳定更新与最终下载 DMG | latest feed 字节、155／0.9.0／不可变下载 URL、XML 签名和最终下载 DMG EdDSA 签名通过；下载 DMG 再次通过 codesign、staple、Gatekeeper 与磁盘完整性检查 |
 
 主窗口观察采用 clock 工具返回的 30.0093 秒实际等待及前后 UI／同一 PID 证据，不是启动耗时基准。桌面入口指向本地 `Applications/OKVideoMac-0.9.0-build155.app`，旧 Build 154 和桌面入口备份保留。未重新配置用户 SDK／AVD 或启用自动更新。
+
+2026-10-26 测试记录更正：原 Core／Persistence 日志首行是 `Building for debugging...`，因此原发布时只能证明 Debug 测试通过。上表分别保留原始证据与发布后的 Release 补验，不将补验倒记为发布前完成。补验使用 Xcode 16.2／Swift 6.0.3，日志明确显示 `Building for production...` 与 `release` 构建路径；逐项 XCTest 结果和最终汇总一致，日志 SHA-256 为 `d56bc3f23fd9a1fb264453065143ff08ffc41e03bd1bf222e772958c52da69f2`。正式 App 的 Release 构建、签名和公证由其他独立验证记录证明；tag 与已发布资产保持不变。
 
 ## 失败处理与不变性
 
