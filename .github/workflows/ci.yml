@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'codex/core-ci-checks', 'codex/ci-failure-probe']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  core:
+    name: Core (${{ matrix.configuration }})
+    runs-on: macos-14
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [debug, release]
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13.15'
+      - name: Verify selected toolchain and result-validator failure paths
+        run: |
+          test "$(uname -m)" = arm64
+          xcodebuild -version
+          swift --version
+          python3 -m unittest discover -s Tools/CI -p '*_test.py' -v
+      - name: Restore configuration-specific build cache
+        id: core-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/okvideo-core-${{ matrix.configuration }}
+          key: core-v1-${{ runner.os }}-${{ runner.arch }}-xcode16.2-${{ matrix.configuration }}-${{ hashFiles('OKVideoMac/macOS/OKVideoMac/Packages/OKVideoKit/**') }}
+      - name: Build, discover and run complete suite
+        run: >-
+          python3 Tools/CI/run_core.py
+          --configuration '${{ matrix.configuration }}'
+          --scratch-path '${{ runner.temp }}/okvideo-core-${{ matrix.configuration }}'
+          --output '${{ runner.temp }}/okvideo-reports/core-${{ matrix.configuration }}'
+          --jobs 2
+      - name: Retain test evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: core-${{ matrix.configuration }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/okvideo-reports/core-${{ matrix.configuration }}/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Save successful main build cache
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.core-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/okvideo-core-${{ matrix.configuration }}
+          key: ${{ steps.core-cache.outputs.cache-primary-key }}
