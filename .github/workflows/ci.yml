@@ -18,6 +18,41 @@ env:
   PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
+  offline:
+    name: Offline audits and static checks
+    runs-on: macos-14
+    timeout-minutes: 15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13.15'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.23.0'
+      - name: Prepare SHA-256 verified actionlint
+        run: |
+          mkdir -p '${{ runner.temp }}/okvideo-reports/offline'
+          python3 Tools/CI/fetch_tool.py actionlint --output '${{ runner.temp }}/okvideo-ci-tools' > '${{ runner.temp }}/okvideo-reports/offline/tool-download.log' 2>&1
+      - name: Run all offline audits and static checks
+        run: >-
+          python3 Tools/CI/run_offline.py
+          --output '${{ runner.temp }}/okvideo-reports/offline'
+          --work-dir '${{ runner.temp }}/okvideo-offline-fixtures'
+          --actionlint '${{ runner.temp }}/okvideo-ci-tools/actionlint'
+      - name: Retain offline evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: offline-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/okvideo-reports/offline/
+          if-no-files-found: error
+          retention-days: 7
+
   node:
     name: Node
     runs-on: ubuntu-24.04
