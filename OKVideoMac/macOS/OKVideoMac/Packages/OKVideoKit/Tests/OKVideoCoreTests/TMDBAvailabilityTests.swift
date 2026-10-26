@@ -56,20 +56,41 @@ final class TMDBAvailabilityTests: XCTestCase {
         }
     }
     func testProbeCoalescingPreservesUnexpiredSuccess() async throws {
-        let health = TMDBAvailability(), count = ProbeCounter()
+        let health = TMDBAvailability(), count = ProbeCounter(), gate = ProbeGate()
+        let started = expectation(description: "Probe operation started")
+        let checking = expectation(description: "Checking state published")
+        let completed = expectation(description: "Probe completion published")
         await health.finish(health.ticket(.metadata), outcome: .success)
+        let updates = await health.updates()
+        let observer = Task {
+            var sawChecking = false
+            for await state in updates {
+                if state.metadata.checking && !sawChecking {
+                    sawChecking = true
+                    checking.fulfill()
+                } else if sawChecking && !state.metadata.checking {
+                    completed.fulfill()
+                    return
+                }
+            }
+        }
+        defer { observer.cancel() }
         for _ in 0..<20 {
             await health.probe(.metadata, force: true) {
                 await count.increment()
-                try? await Task.sleep(nanoseconds: 50_000_000)
+                started.fulfill()
+                await gate.wait()
                 return .success
             }
         }
+        await fulfillment(of: [started, checking], timeout: 5)
         let during = await health.snapshot()
         XCTAssertTrue(during.metadata.checking); XCTAssertEqual(during.metadata.state, .available)
-        try await Task.sleep(nanoseconds: 80_000_000)
+        await gate.open()
+        await fulfillment(of: [completed], timeout: 5)
         let calls = await count.value, after = await health.snapshot()
         XCTAssertEqual(calls, 1); XCTAssertFalse(after.metadata.checking)
+        XCTAssertEqual(after.metadata.state, .available)
     }
     func testRateLimitCannotBeBypassedByRetryNetworkChangeOrInFlightSuccess() async throws {
         let clock = TMDBTestClock(), health = TMDBAvailability(now: { clock.now }), count = ProbeCounter()
@@ -123,6 +144,20 @@ final class TMDBAvailabilityTests: XCTestCase {
     }
 }
 private actor ProbeCounter { var value = 0; func increment() { value += 1 } }
+private actor ProbeGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    func open() {
+        isOpen = true
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending { waiter.resume() }
+    }
+}
 private final class TMDBTestClock: @unchecked Sendable {
     private let lock = NSLock()
     private var value: TimeInterval = 1000

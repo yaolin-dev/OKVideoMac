@@ -371,6 +371,8 @@ source index 和 binary-bound manifest 一致。
 构建环境、依赖和故障排查见
 [`macOS/OKVideoMac/Docs/BUILDING.md`](macOS/OKVideoMac/Docs/BUILDING.md)。
 贡献规则见 [`CONTRIBUTING.md`](../CONTRIBUTING.md)。
+无需证书和真实账号的自动测试、静态检查、无签名 Release 编译及其限制见
+[CI 指南](../Docs/CI.md)。CI 检查产物不能作为安装包；正式发布继续使用下面的受控流程。
 
 本地验证包：
 

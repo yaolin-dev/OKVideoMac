@@ -2,7 +2,10 @@
 
 ## [Unreleased]
 
-No additional changes beyond 0.9.0.
+- Add credential-free CI for Core/Persistence Debug and Release, all Node tests, offline audits/static checks, Android Release JVM tests and unsigned main App Release compilation; retain reports and require every job to succeed.
+- Pin CI Actions and tool downloads, isolate build inputs, validate discovered/completed test results and allowed skips, and reject empty, incomplete or failed results. Verify the aggregate gate with an intentional failure in an isolated branch.
+- Make crash-worker tests respect the selected Xcode, replace TMDB test timing sleeps with explicit coordination, publish the loopback fixture port atomically, and preserve Python class-fixture errors in reports.
+- Document CI coverage, local reproduction and remaining limits. App version/build and existing v0.9.0 release assets remain unchanged.
 
 ## [0.9.0] - 2026-10-26
 

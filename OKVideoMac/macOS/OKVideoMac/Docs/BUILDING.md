@@ -186,12 +186,17 @@ Homebrew ADB 或 SDK 不能代替 Managed Purity 门禁。
 
 ## 工程和测试
 
+自动检查的精确工具版本、Debug/Release 区分、严格结果验证及本地复现命令见
+[CI 指南](../../../../Docs/CI.md)。CI 只执行无签名主 App Release 编译，不生成可分发
+安装包，也不替代本页的完整依赖构建、实机测试和正式发布流程。
+
 ```bash
 cd OKVideoMac/macOS/OKVideoMac
 export OKVIDEOMAC_BUILD_ROOT="${OKVIDEOMAC_BUILD_ROOT:-$PWD/Vendor/Build}"
 ./Scripts/bootstrap.sh
 swift test \
   --package-path Packages/OKVideoKit \
+  --configuration debug \
   --scratch-path "$OKVIDEOMAC_BUILD_ROOT/SwiftPM"
 xcodebuild \
   -project OKVideoMac.xcodeproj \

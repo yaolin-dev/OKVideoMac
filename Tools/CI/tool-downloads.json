@@ -1,0 +1,28 @@
+{
+  "actionlint": {
+    "version": "1.7.12",
+    "platforms": {
+      "Darwin-arm64": {
+        "url": "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_darwin_arm64.tar.gz",
+        "sha256": "aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f",
+        "member": "actionlint"
+      },
+      "Linux-x86_64": {
+        "url": "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz",
+        "sha256": "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
+        "member": "actionlint"
+      }
+    }
+  },
+  "xcodegen": {
+    "version": "2.46.0",
+    "platforms": {
+      "Darwin-arm64": {
+        "url": "https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip",
+        "sha256": "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806",
+        "member": "xcodegen/bin/xcodegen",
+        "format": "zip"
+      }
+    }
+  }
+}

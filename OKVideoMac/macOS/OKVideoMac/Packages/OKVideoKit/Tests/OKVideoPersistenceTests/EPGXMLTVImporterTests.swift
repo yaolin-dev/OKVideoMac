@@ -298,9 +298,8 @@ final class EPGXMLTVImporterTests: XCTestCase {
         for boundary in ["programmeBatchCommitted", "parsedComplete", "validateBeforeCommit", "activateBeforeCommit", "activateAfterCommit"] {
             let old = try await run(Data(fixture().utf8)); store.close()
             let child = Process()
-            let developer = "/Volumes/XcodeDev/Xcode.app/Contents/Developer"
-            child.executableURL = URL(fileURLWithPath: developer + "/usr/bin/xctest")
-            child.arguments = ["-XCTest", "OKVideoPersistenceTests.EPGImportCrashWorkerTests/testWorker", Bundle(for: Self.self).bundleURL.path]
+            child.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            child.arguments = ["xctest", "-XCTest", "OKVideoPersistenceTests.EPGImportCrashWorkerTests/testWorker", Bundle(for: Self.self).bundleURL.path]
             var env = ProcessInfo.processInfo.environment
             env["EPG9C3_CRASH_DB"] = directory.path; env["EPG9C3_CRASH_ROOT"] = root
             env["EPG9C3_CRASH_SOURCE"] = key.source.id.uuidString; env["EPG9C3_CRASH_AT"] = boundary
