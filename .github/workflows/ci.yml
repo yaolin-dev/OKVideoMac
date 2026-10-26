@@ -18,6 +18,24 @@ env:
   PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
+  ci:
+    name: CI required
+    if: always()
+    needs: [core, node, offline, android, app]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13.15'
+      - name: Require every job to succeed
+        env:
+          CI_JOB_RESULTS: ${{ toJSON(needs) }}
+        run: python3 Tools/CI/check_jobs.py
+
   app:
     name: Main App Release compile (unsigned)
     needs: android
@@ -185,7 +203,7 @@ jobs:
         with:
           node-version: '22.23.0'
       - name: Verify report failure paths
-        run: python3 -m unittest discover -s Tools/CI -p '*_test.py' -v
+        run: python3 Tools/CI/run_python.py --suite ci --output '${{ runner.temp }}/okvideo-reports/node/validator'
       - name: Run every Node test file
         run: python3 Tools/CI/run_node.py --output '${{ runner.temp }}/okvideo-reports/node'
       - name: Retain Node evidence
@@ -219,7 +237,7 @@ jobs:
           test "$(uname -m)" = arm64
           xcodebuild -version
           swift --version
-          python3 -m unittest discover -s Tools/CI -p '*_test.py' -v
+          python3 Tools/CI/run_python.py --suite ci --output '${{ runner.temp }}/okvideo-reports/core-${{ matrix.configuration }}/validator'
       - name: Restore configuration-specific build cache
         id: core-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
