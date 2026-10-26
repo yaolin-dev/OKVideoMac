@@ -18,6 +18,67 @@ env:
   PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
+  app:
+    name: Main App Release compile (unsigned)
+    needs: android
+    runs-on: macos-14
+    timeout-minutes: 35
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13.15'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.23.0'
+      - name: Prepare SHA-256 verified XcodeGen
+        run: |
+          mkdir -p '${{ runner.temp }}/okvideo-reports/app'
+          python3 Tools/CI/fetch_tool.py xcodegen --output '${{ runner.temp }}/okvideo-ci-tools' > '${{ runner.temp }}/okvideo-reports/app/tool-download.log' 2>&1
+      - name: Receive tested compile-only bridge
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: android-compile-input
+          path: ${{ runner.temp }}/okvideo-android-compile-input
+      - name: Restore pinned App dependency inputs
+        id: app-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/okvideo-app-dependencies/CrashReporter/Source
+            ${{ runner.temp }}/okvideo-app-dependencies/Downloads
+            ${{ runner.temp }}/okvideo-app-dependencies/SourcePackages
+          key: app-deps-v1-${{ runner.os }}-${{ runner.arch }}-xcode16.2-${{ hashFiles('OKVideoMac/macOS/OKVideoMac/Packages/OKCrashDiagnostics/Package.swift', 'OKVideoMac/macOS/OKVideoMac/Scripts/prepare-crash-reporter.sh', 'OKVideoMac/macOS/OKVideoMac/Scripts/prepare-sparkle.py', 'ThirdParty/sparkle-lock.json') }}
+      - name: Compile and verify Release App structure without signing
+        run: >-
+          python3 Tools/CI/run_app.py
+          --work-dir '${{ runner.temp }}/okvideo-app-compile'
+          --dependencies '${{ runner.temp }}/okvideo-app-dependencies'
+          --output '${{ runner.temp }}/okvideo-reports/app'
+          --bridge-input '${{ runner.temp }}/okvideo-android-compile-input'
+          --xcodegen '${{ runner.temp }}/okvideo-ci-tools/xcodegen'
+      - name: Retain App compilation evidence only
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: app-compile-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/okvideo-reports/app/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Save successful main App dependency cache
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.app-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/okvideo-app-dependencies/CrashReporter/Source
+            ${{ runner.temp }}/okvideo-app-dependencies/Downloads
+            ${{ runner.temp }}/okvideo-app-dependencies/SourcePackages
+          key: ${{ steps.app-cache.outputs.cache-primary-key }}
+
   android:
     name: Android Release JVM and unsigned bridge
     runs-on: ubuntu-24.04
@@ -60,10 +121,11 @@ jobs:
       - name: Transfer compile-only unsigned APK to the App job
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: android-compile-input-${{ github.run_attempt }}
+          name: android-compile-input
           path: ${{ runner.temp }}/okvideo-android-compile-input/
           if-no-files-found: error
           retention-days: 1
+          overwrite: true
       - name: Save successful main Gradle cache
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
