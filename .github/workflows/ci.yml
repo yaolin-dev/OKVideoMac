@@ -18,6 +18,61 @@ env:
   PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
+  android:
+    name: Android Release JVM and unsigned bridge
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      GRADLE_USER_HOME: ${{ github.workspace }}/../okvideo-gradle
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13.15'
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: '17.0.19+10'
+      - name: Restore locked Gradle dependencies
+        id: gradle-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.GRADLE_USER_HOME }}/caches
+            ${{ env.GRADLE_USER_HOME }}/wrapper
+          key: gradle-v1-${{ runner.os }}-${{ runner.arch }}-java17.0.19-${{ hashFiles('OKVideoMac/Helpers/AndroidDexBridge/**/*.gradle', 'OKVideoMac/Helpers/AndroidDexBridge/**/*.lockfile', 'OKVideoMac/Helpers/AndroidDexBridge/gradle/wrapper/gradle-wrapper.properties') }}
+      - name: Build unsigned bridge and run Release JVM tests
+        run: >-
+          python3 Tools/CI/run_android.py
+          --work-dir '${{ runner.temp }}/okvideo-android'
+          --output '${{ runner.temp }}/okvideo-reports/android'
+          --artifact-dir '${{ runner.temp }}/okvideo-android-compile-input'
+      - name: Retain Android evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-tests-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/okvideo-reports/android/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Transfer compile-only unsigned APK to the App job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-compile-input-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/okvideo-android-compile-input/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Save successful main Gradle cache
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.GRADLE_USER_HOME }}/caches
+            ${{ env.GRADLE_USER_HOME }}/wrapper
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
+
   offline:
     name: Offline audits and static checks
     runs-on: macos-14
