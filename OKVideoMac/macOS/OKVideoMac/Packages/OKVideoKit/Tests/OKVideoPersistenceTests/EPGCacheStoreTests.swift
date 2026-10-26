@@ -321,9 +321,8 @@ final class EPGCacheStoreTests: XCTestCase {
             let childDirectory = URL(fileURLWithPath: "/private/tmp/EPGCache-crash-" + UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: childDirectory) }
             let process = Process()
-            let developer = ProcessInfo.processInfo.environment["DEVELOPER_DIR"] ?? "/Volumes/XcodeDev/Xcode.app/Contents/Developer"
-            process.executableURL = URL(fileURLWithPath: developer + "/usr/bin/xctest")
-            process.arguments = ["-XCTest", "OKVideoPersistenceTests.EPGCacheCrashWorkerTests/testWorker", Bundle(for: Self.self).bundleURL.path]
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            process.arguments = ["xctest", "-XCTest", "OKVideoPersistenceTests.EPGCacheCrashWorkerTests/testWorker", Bundle(for: Self.self).bundleURL.path]
             var env = ProcessInfo.processInfo.environment
             env["OKVIDEO_EPG_CACHE_CRASH_DIRECTORY"] = childDirectory.path
             env["OKVIDEO_EPG_CACHE_CRASH_BOUNDARY"] = boundary
