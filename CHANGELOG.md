@@ -2,7 +2,17 @@
 
 ## [Unreleased]
 
-No additional changes beyond 0.8.7.
+No additional changes beyond 0.9.0.
+
+## [0.9.0] - 2026-10-26
+
+- Reorganize Settings and search, with bounded, cancellable configuration/live refresh, cache, backup, diagnostics and compatibility operations; preserve saved data and reject stale completions.
+- Add TMDB matching, review and season/person details. Keep original source details by default; automatic TMDB presentation requires a saved credential and working API/image connections. Freeze layout at entry and retain explicit Original choices.
+- Add DASH support with pinned FFmpeg/libxml2 provenance and restricted Android session routing; repair Bilibili streaming range, retry and resume ownership.
+- Preserve visible live preview frames through scrolling, resizing and cache eviction; prioritize visible work with at most three independent captures, source quotas and scoped progress.
+- Keep danmaku motion stable across window sizes, bound glyph preparation and preserve tracks during resize. Add real Android startup stages and truncated-text tooltips.
+- Reject duplicate/empty provider category identities before native navigation; clear stale empty controls and preserve original request IDs.
+- Preserve original crash release/build/UUID metadata during delayed uploads. Android Bridge is 0.3.50 / 62. User reports successful macOS 27.0.1 testing; formal test/signing/notarization/publication results are recorded separately.
 
 ## [0.8.7] - 2026-10-17
 

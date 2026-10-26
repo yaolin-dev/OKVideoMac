@@ -91,7 +91,8 @@ struct AndroidRuntimeInstallView: View {
                             fallback: "Export Diagnostics…"
                         )) {
                             exportDiagnostics()
-                        }
+                        }.disabled(state.isExportingDiagnostics)
+                        if state.isExportingDiagnostics { ProgressView().controlSize(.small) }
                     }
 
                     if !state.managedRuntimeInstallationState.isBusy,
@@ -110,6 +111,9 @@ struct AndroidRuntimeInstallView: View {
                     Spacer()
 
                     primaryAction
+                }
+                if let message = state.diagnosticsExportMessage {
+                    Text(message).font(.caption).foregroundStyle(.secondary)
                 }
             }
             .padding(24)
@@ -393,6 +397,7 @@ struct AndroidRuntimeInstallView: View {
     }
 
     private func exportDiagnostics() {
+        guard !state.isExportingDiagnostics else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
         panel.canCreateDirectories = true

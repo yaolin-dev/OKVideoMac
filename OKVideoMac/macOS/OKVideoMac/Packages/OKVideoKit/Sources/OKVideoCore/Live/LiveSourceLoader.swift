@@ -57,10 +57,11 @@ public struct LiveSourceLoader {
     }
 
     public func load(_ source: LiveSourceInput, defaults: LiveSourceDefaults? = nil) async throws -> LoadedLiveSource {
-        try await load(source, defaults: defaults, depth: 0)
+        try await load(source, defaults: defaults, depth: 0, deadline: ProcessInfo.processInfo.systemUptime + 30)
     }
 
-    private func load(_ source: LiveSourceInput, defaults: LiveSourceDefaults?, depth: Int) async throws -> LoadedLiveSource {
+    private func load(_ source: LiveSourceInput, defaults: LiveSourceDefaults?, depth: Int, deadline: TimeInterval) async throws -> LoadedLiveSource {
+        try Task.checkCancellation()
         var data: Data
         let baseURL: URL?
 
@@ -69,15 +70,20 @@ public struct LiveSourceLoader {
             guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
                 throw AppError.live("远程直播源仅允许 HTTP/HTTPS")
             }
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { throw HTTPClientError.timeout }
             let response = try await httpClient.send(
                 HTTPRequest(
                     url: url,
-                    timeout: 30,
+                    timeout: remaining,
+                    totalTimeout: remaining,
                     maximumResponseBytes: Self.maximumSourceSize,
+                    earlyResponseLimitBytes: Self.maximumSourceSize,
                     maximumRedirects: 10,
                     retryPolicy: .standard
                 )
             )
+            try Task.checkCancellation()
             data = response.body
             baseURL = response.url.deletingLastPathComponent()
 
@@ -124,13 +130,15 @@ public struct LiveSourceLoader {
                           ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
                         throw AppError.live("外部直播列表无效或嵌套层数过多")
                     }
-                    let child = try await load(.remote(url), defaults: LiveSourceDefaults(descriptor), depth: depth + 1)
+                    let child = try await load(.remote(url), defaults: LiveSourceDefaults(descriptor), depth: depth + 1, deadline: deadline)
                     return LoadedLiveSource(source: source, baseURL: child.baseURL, rawData: child.rawData,
                                             playlist: child.playlist, loadedAt: child.loadedAt)
                 }
                 data = try JSONEncoder().encode(descriptor)
             }
         }
+        try Task.checkCancellation()
+        guard ProcessInfo.processInfo.systemUptime < deadline else { throw HTTPClientError.timeout }
         let storedData = try defaults.map { try LiveSourceDocument.attaching($0, to: data) } ?? data
         return LoadedLiveSource(
             source: source,

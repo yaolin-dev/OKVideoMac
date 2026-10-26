@@ -3,6 +3,53 @@ import Network
 @testable import OKVideoCore
 
 final class HTTPClientTests: XCTestCase {
+    func testTotalDeadlineCancelsActiveNetworkAndLeavesSessionUsable() async throws {
+        let server = try BoundedKeepAliveServer()
+        defer { server.stop() }
+        let port = try await server.port()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = ["HTTPEnable": 0, "HTTPSEnable": 0, "SOCKSEnable": 0]
+        let client = URLSessionHTTPClient(isolatedConfiguration: configuration, reusesBoundedConnections: true)
+        var request = server.request(port: port, path: "slow-deadline")
+        request.totalTimeout = 0.03
+        do { _ = try await client.send(request); XCTFail("Deadline was ignored") }
+        catch { XCTAssertEqual(error as? HTTPClientError, .timeout) }
+        let response = try await client.send(server.request(port: port, path: "after-deadline"))
+        XCTAssertEqual(try response.text(), "after-deadline")
+    }
+
+    func testTotalDeadlineIncludesRetryBackoff() async throws {
+        let attempts = LockedCounter()
+        MockURLProtocol.handler = { request in
+            _ = attempts.increment()
+            return (HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!, Data())
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let client = URLSessionHTTPClient(configuration: configuration)
+        let request = HTTPRequest(url: URL(string: "https://fixture.invalid/retry")!, timeout: 3, totalTimeout: 0.03,
+            retryPolicy: .init(maximumRetries: 2, initialDelay: 1))
+        do { _ = try await client.send(request); XCTFail("Retry delay escaped the deadline") }
+        catch { XCTAssertEqual(error as? HTTPClientError, .timeout) }
+        XCTAssertEqual(attempts.value, 1)
+    }
+
+    func testExplicitCancellationWithDeadlineStillReportsCancellation() async throws {
+        let server = try BoundedKeepAliveServer()
+        defer { server.stop() }
+        let port = try await server.port()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = ["HTTPEnable": 0, "HTTPSEnable": 0, "SOCKSEnable": 0]
+        let client = URLSessionHTTPClient(isolatedConfiguration: configuration, reusesBoundedConnections: true)
+        var request = server.request(port: port, path: "slow-user-cancel")
+        request.totalTimeout = 5
+        let task = Task { try await client.send(request) }
+        try await server.waitForRequests(1)
+        task.cancel()
+        do { _ = try await task.value; XCTFail("Cancelled request escaped") }
+        catch { XCTAssertEqual(error as? HTTPClientError, .cancelled) }
+    }
+
     override func tearDown() {
         MockURLProtocol.handler = nil
         super.tearDown()

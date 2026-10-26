@@ -53,6 +53,24 @@ public final class URLSessionHTTPClient: HTTPClient {
     public func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         try Self.validateScheme(request.url)
 
+        guard let budget = request.totalTimeout else { return try await sendWithRetries(request) }
+        do {
+            return try await withThrowingTaskGroup(of: HTTPResponse.self) { group in
+                group.addTask { try await self.sendWithRetries(request) }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: UInt64(budget * 1_000_000_000))
+                    throw HTTPClientError.timeout
+                }
+                defer { group.cancelAll() }
+                return try await group.next()!
+            }
+        } catch {
+            if Task.isCancelled { throw HTTPClientError.cancelled }
+            throw Self.map(error)
+        }
+    }
+
+    private func sendWithRetries(_ request: HTTPRequest) async throws -> HTTPResponse {
         var attempt = 0
         var delay = request.retryPolicy.initialDelay
         while true {

@@ -41,3 +41,26 @@ private struct LiveLoaderStubHTTPClient: HTTPClient {
         response
     }
 }
+
+
+private actor SettingsBudgetCaptureHTTP: HTTPClient {
+    private(set) var requests: [HTTPRequest] = []
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        requests.append(request)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let body = requests.count == 1 ? #"{"url":"https://fixture.invalid/list.m3u"}"# : "#EXTM3U\n#EXTINF:-1,Channel\nhttps://fixture.invalid/media\n"
+        return HTTPResponse(url: request.url, statusCode: 200, headers: [:], body: Data(body.utf8))
+    }
+}
+
+final class SettingsSourceBudgetTests: XCTestCase {
+    func testNestedLiveSourceSharesOneBudgetAndBoundsBothDownloads() async throws {
+        let transport = SettingsBudgetCaptureHTTP()
+        _ = try await LiveSourceLoader(httpClient: transport).load(.remote(URL(string: "https://fixture.invalid/root")!))
+        let requests = await transport.requests
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertLessThan(try XCTUnwrap(requests[1].totalTimeout), try XCTUnwrap(requests[0].totalTimeout))
+        XCTAssertLessThanOrEqual(requests[0].totalTimeout!, 30)
+        XCTAssertTrue(requests.allSatisfy { $0.earlyResponseLimitBytes == LiveSourceLoader.maximumSourceSize })
+    }
+}

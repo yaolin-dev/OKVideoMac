@@ -5315,6 +5315,12 @@ final class AppState: ObservableObject {
             settingsNavigation.select(newValue)
         }
     }
+    @Published private(set) var isClearingPosterCache = false
+    @Published private(set) var posterCacheOperationMessage: String?
+    @Published private(set) var isBackupBusy = false
+    @Published var backupOperationMessage: String?
+    @Published var pendingBackupImport: PortableBackupPreview?
+
     @Published private(set) var configurations: [StoredConfiguration] = []
     @Published private(set) var activeConfigurationRecord: StoredConfiguration?
     @Published private(set) var activeConfiguration: FongMiConfiguration?
@@ -5375,10 +5381,11 @@ final class AppState: ObservableObject {
         didSet { scheduleTMDBPrefetch() }
     }
     private var tmdbPrefetchTask: Task<Void, Never>?
+    let tmdbRuntime: TMDBNetworkRuntime
+    private var tmdbSessionObservation: AnyCancellable?
     private func scheduleTMDBPrefetch() {
         tmdbPrefetchTask?.cancel()
-        guard UserDefaults.standard.object(forKey: "detail.tmdb.enabled") as? Bool != false,
-              let repository = tmdbRepository else { return }
+        guard tmdbRuntime.decisionForEntry().usesTMDB, let repository = tmdbRepository else { return }
         let items = searchResults.filter {
             !$0.isFolder && $0.resolvedContentKind != .action &&
             (selectedSearchSiteKey == nil || $0.siteKey == selectedSearchSiteKey)
@@ -5386,7 +5393,7 @@ final class AppState: ObservableObject {
         guard !items.isEmpty else { return }
         tmdbPrefetchTask = Task {
             do { try await Task.sleep(nanoseconds: 350_000_000) } catch { return }
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, tmdbRuntime.presentationDecision.usesTMDB else { return }
             await withTaskGroup(of: Void.self) { group in
                 for item in items {
                     group.addTask { await repository.prefetch(input: .init(detail: .init(summary: item))) }
@@ -5422,6 +5429,13 @@ final class AppState: ObservableObject {
     @Published private(set) var historyPlaybackLoadingID: HistoryRecord.ID?
     @Published private(set) var historyPlaybackChoices: [HistoryPlaybackChoice] = []
     @Published private(set) var liveSources: [StoredLiveSource] = []
+    @Published private(set) var refreshingLiveSourceIDs = Set<UUID>()
+    @Published private(set) var committingLiveSourceRefreshIDs = Set<UUID>()
+    @Published private(set) var liveSourceRefreshMessages: [UUID: String] = [:]
+    private var liveSourceRefreshTasks: [UUID: Task<Void, Never>] = [:]
+    private var liveSourceRefreshOperations: [UUID: UUID] = [:]
+    private let settingsLiveSourceLoader: LiveSourceLoader?
+
     @Published private(set) var acceptedImportedCatalogs: [UUID: AcceptedImportedCatalog] = [:]
     // Compatibility projection for existing EPG/identity readers; publication
     // has only one authority, and never allocates contexts on a read.
@@ -5584,8 +5598,22 @@ final class AppState: ObservableObject {
     @Published private(set) var nodeWebPresentation: NodeWebPresentation?
     @Published private(set) var configurationCategoryPresentation:
         ConfigurationCategoryPresentation?
-    @Published private(set) var androidRuntimeStatus: AndroidRuntimeStatus = .checking
-    @Published private(set) var isAndroidRuntimeBusy = false
+    @Published private(set) var androidRuntimeStatus: AndroidRuntimeStatus = .checking {
+        didSet { androidRuntimeStatusRevision &+= 1 }
+    }
+    private var androidRuntimeStatusRevision: UInt64 = 0
+    @Published private(set) var isAndroidRuntimeBusy = false {
+        didSet { if isAndroidRuntimeBusy { invalidateAndroidRuntimeCheck() } }
+    }
+    @Published private(set) var isCheckingAndroidRuntime = false
+    @Published private(set) var androidRuntimeCheckMessage: String?
+    private var androidRuntimeCheckTask: Task<Void, Never>?
+    private var androidRuntimeCheckID = UUID()
+    private var androidRuntimeCheckReportsResult = false
+    private let settingsRuntimeStatusLoader: (@Sendable () async -> (AndroidRuntimeModeSnapshot, AndroidRuntimeStatus))?
+    @Published private(set) var isExportingDiagnostics = false
+    @Published private(set) var diagnosticsExportMessage: String?
+    @Published private(set) var diagnosticsExportURL: URL?
     @Published private(set) var androidRuntimeStorage: ManagedRuntimeStorage?
     @Published private(set) var androidMaintenanceMessage: String?
     @Published private(set) var managedRuntimeInstallationState:
@@ -5661,6 +5689,8 @@ final class AppState: ObservableObject {
     private let liveCredentialStore: (any XtreamCredentialStoring)?
     private let playerRenderSurfaceGate = PlayerRenderSurfaceReadinessGate()
     private var configurationImportOperationID: UUID?
+    @Published private(set) var isCommittingXtreamProvider = false
+    private let settingsXtreamHTTPClient: (any HTTPClient)?
     private var xtreamProviderOperationID: UUID?
     private var configurationActivationTracker =
         ConfigurationActivationRequestTracker()
@@ -5692,7 +5722,7 @@ final class AppState: ObservableObject {
     private let detailResponseCache = DetailResponseCache()
     let tmdbDetailModel = TMDBDetailModel()
     private(set) lazy var tmdbRepository: TMDBRepository? = environment.map { environment in
-        let runtime = TMDBNetworkRuntime.shared
+        let runtime = tmdbRuntime
         let repository = TMDBRepository(client: runtime.service,
             directory: environment.directories.applicationSupport.appendingPathComponent("TMDB", isDirectory: true),
             prefetchArtwork: { [images = environment.imageRepository] work in
@@ -6008,6 +6038,13 @@ final class AppState: ObservableObject {
     private var prefersPlayerSubtitlesEnabled = false
     private var preferredPlayerSubtitleTrack: PlayerSubtitleTrackPreference?
     private var lastAutomaticConfigurationRefreshAttemptAt: Date?
+    @Published private(set) var refreshingConfigurationID: UUID?
+    @Published private(set) var isCommittingConfigurationRefresh = false
+    @Published private(set) var configurationRefreshMessage: String?
+    private var configurationRefreshReportsErrors = false
+    private let settingsConfigurationLoader: ConfigurationLoader?
+    private var configurationRefreshDeadlineTask: Task<Void, Never>?
+    private let configurationRefreshTimeout: TimeInterval
     private var configurationRefreshTask: Task<Bool, Never>?
     private var configurationRefreshSessionID = UUID()
     private var nodeRuntimeStatusTask: Task<Void, Never>?
@@ -6132,6 +6169,12 @@ final class AppState: ObservableObject {
     var importedRoutePlaybackCatalogForTesting: AcceptedImportedCatalog? { livePlaybackNavigationContext?.importedCatalog }
     var importedRouteRecoveryTaskForTesting: Task<Void, Never>? { livePlaybackRecoveryTask }
     var importedRouteAttemptCountForTesting: Int { livePlaybackNavigationContext?.attemptedTransports.count ?? 0 }
+    func setSettingsConfigurationsForTesting(_ records: [StoredConfiguration]) throws {
+        invalidateConfigurationRefresh()
+        configurations = records
+        activeConfigurationRecord = records.first(where: \.isActive)
+        activeConfiguration = try activeConfigurationRecord.map { try ConfigurationParser().parse($0.rawData) }
+    }
     func setImportedIdentityCatalogForTesting(_ source: StoredLiveSource) throws {
         liveSources.removeAll { $0.id == source.id }; liveSources.append(source)
         publishImportedCatalog(try LiveSourceParser().parse(source.rawData, baseURL: source.baseURL), sourceID: source.id)
@@ -6143,13 +6186,26 @@ final class AppState: ObservableObject {
         startupError: UserFacingError? = nil,
         initialProviders: [String: SiteProvider] = [:],
         liveReferenceStore: SQLiteStore? = nil,
+        liveSourceLoader: LiveSourceLoader? = nil,
+        configurationLoader: ConfigurationLoader? = nil,
+        xtreamHTTPClient: (any HTTPClient)? = nil,
+        runtimeStatusLoader: (@Sendable () async -> (AndroidRuntimeModeSnapshot, AndroidRuntimeStatus))? = nil,
         liveCredentialStore: (any XtreamCredentialStoring)? = nil,
         playbackDisplaySleep: PlaybackDisplaySleepController? = nil,
+        tmdbRuntime: TMDBNetworkRuntime? = nil,
         detailRequestTimeout: TimeInterval = 90,
+        configurationRefreshTimeout: TimeInterval = 30,
         configurationActionTimeout: TimeInterval = 90
     ) {
         self.environment = environment
+        self.tmdbRuntime = tmdbRuntime ?? .shared
+        self.settingsRuntimeStatusLoader = runtimeStatusLoader
+        self.settingsXtreamHTTPClient = xtreamHTTPClient ?? environment?.xtreamHTTPClient
+        self.settingsConfigurationLoader = configurationLoader
+        self.settingsLiveSourceLoader = liveSourceLoader ?? environment?.liveSourceLoader
         self.playerAudioPreference = environment?.player.audioPreference ?? .init()
+        self.playerHardwareDecoding = environment?.player.rememberedHardwareDecoding ?? true
+        self.configurationRefreshTimeout = configurationRefreshTimeout.isFinite ? min(120, max(0.001, configurationRefreshTimeout)) : 30
         self.configurationActionTimeout = configurationActionTimeout.isFinite ? min(600, max(0.001, configurationActionTimeout)) : 90
         self.detailRequestTimeout = detailRequestTimeout.isFinite ? min(600, max(0.001, detailRequestTimeout)) : 90
         self.playbackDisplaySleep = playbackDisplaySleep ?? PlaybackDisplaySleepController()
@@ -6162,6 +6218,14 @@ final class AppState: ObservableObject {
         presentedError = startupError
         self.playerSnapshot.volume = environment?.player.audioPreference.volume ?? 100
         self.playerSnapshot.isMuted = environment?.player.audioPreference.muted ?? false
+        tmdbSessionObservation = NotificationCenter.default.publisher(for: .tmdbSessionWillChange, object: self.tmdbRuntime)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.tmdbPrefetchTask?.cancel()
+                if self.tmdbRuntime.preference == .original {
+                    self.tmdbDetailModel.setPresentationEnabled(false, detail: nil)
+                } else { self.tmdbDetailModel.suspendNetworkRequests() }
+            }
         environment?.player.onRenderClientChanged = { [weak self] player in
             self?.pictureInPicture.playerWillChange(to: player?.renderOwnerID)
             self?.playerRenderClient = player
@@ -6275,7 +6339,7 @@ final class AppState: ObservableObject {
         username: String,
         password: String
     ) async throws -> XtreamAccount {
-        guard let environment else {
+        guard let httpClient = settingsXtreamHTTPClient else {
             throw AppError.configuration(
                 L10n.string(
                     "app.environment.not-initialized",
@@ -6291,7 +6355,7 @@ final class AppState: ObservableObject {
         return try await XtreamClient(
             endpoint: endpoint,
             credentials: credentials,
-            httpClient: environment.xtreamHTTPClient,
+            httpClient: httpClient,
             userAgent: Self.xtreamUserAgent
         ).authenticate()
     }
@@ -6304,7 +6368,8 @@ final class AppState: ObservableObject {
         username: String,
         password: String
     ) async -> Bool {
-        guard let environment else { return false }
+        guard let database = environment?.database ?? liveReferenceStore,
+              let credentialStore = liveCredentialStore, let httpClient = settingsXtreamHTTPClient else { return false }
         guard xtreamProviderOperationID == nil,
               configurationImportOperationID == nil,
               requestedConfigurationID == nil else {
@@ -6328,6 +6393,7 @@ final class AppState: ObservableObject {
         defer {
             if xtreamProviderOperationID == operationID {
                 xtreamProviderOperationID = nil
+                isCommittingXtreamProvider = false
                 isLoading = false
             }
         }
@@ -6370,14 +6436,14 @@ final class AppState: ObservableObject {
             _ = try await XtreamClient(
                 endpoint: endpoint,
                 credentials: credentials,
-                httpClient: environment.xtreamHTTPClient,
+                httpClient: httpClient,
                 userAgent: Self.xtreamUserAgent
             ).authenticate()
             try Task.checkCancellation()
 
             nativeLiveAccountMutationIDs.insert(providerID)
             liveEPG.remove(.xtream(providerID))
-            await environment.productionEPGRepository.invalidate(EPGSourceKey(.xtream(providerID)))
+            await environment?.productionEPGRepository.invalidate(EPGSourceKey(.xtream(providerID)))
             if existing == nil || activeConfigurationRecord?.id == providerID {
                 invalidateXtreamLiveCatalog()
             }
@@ -6388,9 +6454,10 @@ final class AppState: ObservableObject {
             guard xtreamProviderOperationID == operationID else {
                 throw CancellationError()
             }
-            previousCredentials = try await environment.xtreamCredentialStore
-                .credentials(for: providerID)
-            try await environment.xtreamCredentialStore.save(
+            previousCredentials = try await credentialStore.credentials(for: providerID)
+            try Task.checkCancellation()
+            isCommittingXtreamProvider = true
+            try await credentialStore.save(
                 credentials,
                 for: providerID
             )
@@ -6409,11 +6476,11 @@ final class AppState: ObservableObject {
             )
             let shouldPublish = existing == nil || record.isActive
             if existing == nil {
-                configurations = try await environment.database
+                configurations = try await database
                     .commitImportedConfiguration(record)
                 didCommitDatabase = true
             } else {
-                try await environment.database.saveConfiguration(record)
+                try await database.saveConfiguration(record)
                 didCommitDatabase = true
                 configurations = configurations.map {
                     $0.id == record.id ? record : $0
@@ -6451,12 +6518,12 @@ final class AppState: ObservableObject {
         } catch {
             if didWriteCredentials && !didCommitDatabase {
                 if let previousCredentials, let targetProviderID {
-                    try? await environment.xtreamCredentialStore.save(
+                    try? await credentialStore.save(
                         previousCredentials,
                         for: targetProviderID
                     )
                 } else if let targetProviderID {
-                    try? await environment.xtreamCredentialStore
+                    try? await credentialStore
                         .deleteCredentials(for: targetProviderID)
                 }
             }
@@ -6602,9 +6669,7 @@ final class AppState: ObservableObject {
             invalidateCatPawHomeLoads()
             categoryLoadSessionID = UUID()
             configurations = committedConfigurations
-            configurationRefreshSessionID = UUID()
-            configurationRefreshTask?.cancel()
-            configurationRefreshTask = nil
+            invalidateConfigurationRefresh()
             lastAutomaticConfigurationRefreshAttemptAt = payload.loaded.loadedAt
             activeConfigurationRecord = record
             activeConfiguration = payload.loaded.configuration
@@ -6660,6 +6725,28 @@ final class AppState: ObservableObject {
         guard configurationImportOperationID == operationID else {
             throw CancellationError()
         }
+    }
+
+    private func invalidateConfigurationRefresh() {
+        configurationRefreshDeadlineTask?.cancel()
+        configurationRefreshDeadlineTask = nil
+        configurationRefreshSessionID = UUID()
+        configurationRefreshTask?.cancel()
+        configurationRefreshTask = nil
+        refreshingConfigurationID = nil
+        isCommittingConfigurationRefresh = false
+        configurationRefreshMessage = nil
+    }
+
+    func cancelConfigurationRefresh() {
+        guard !isCommittingConfigurationRefresh else { return }
+        invalidateConfigurationRefresh()
+        configurationRefreshMessage = L10n.string("settings.operation.cancelled", fallback: "Cancelled; previous data kept")
+    }
+
+    private func isCurrentConfigurationRefresh(_ session: UUID, recordID: UUID) -> Bool {
+        !Task.isCancelled && !isShutdownRequested && configurationRefreshSessionID == session
+            && activeConfigurationRecord?.id == recordID
     }
 
     func refreshActiveConfiguration() async {
@@ -6737,7 +6824,7 @@ final class AppState: ObservableObject {
     }
 
     @discardableResult
-    private func refreshActiveConfigurationIfNeeded(
+    func refreshActiveConfigurationIfNeeded(
         force: Bool = false,
         reportErrors: Bool = false,
         now: Date = Date()
@@ -6756,21 +6843,32 @@ final class AppState: ObservableObject {
             return false
         }
         if let configurationRefreshTask {
+            configurationRefreshReportsErrors = configurationRefreshReportsErrors || reportErrors
             return await configurationRefreshTask.value
         }
 
+        guard !isShutdownRequested else { return false }
+        refreshingConfigurationID = record.id
+        configurationRefreshMessage = nil
+        configurationRefreshReportsErrors = reportErrors
         lastAutomaticConfigurationRefreshAttemptAt = now
         configurationRefreshSessionID = UUID()
         let refreshSessionID = configurationRefreshSessionID
         let task = Task { [weak self] in
-            guard let self, let environment = self.environment else { return false }
+            guard let self else { return false }
+            defer {
+                if self.configurationRefreshSessionID == refreshSessionID {
+                    self.configurationRefreshDeadlineTask?.cancel()
+                    self.configurationRefreshDeadlineTask = nil
+                    self.configurationRefreshTask = nil
+                    self.refreshingConfigurationID = nil
+                    self.isCommittingConfigurationRefresh = false
+                }
+            }
+            guard let database = self.environment?.database ?? self.liveReferenceStore else { return false }
             do {
                 let loaded = try await self.loadConfiguration(.remote(url))
-                guard !Task.isCancelled,
-                      self.configurationRefreshSessionID == refreshSessionID,
-                      self.activeConfigurationRecord?.id == record.id else {
-                    return false
-                }
+                guard self.isCurrentConfigurationRefresh(refreshSessionID, recordID: record.id) else { return false }
                 let change = ConfigurationPublicationChangePolicy.classify(
                     previous: record,
                     incomingRawData: loaded.rawData,
@@ -6787,10 +6885,19 @@ final class AppState: ObservableObject {
                     updatedAt: loaded.loadedAt,
                     isActive: true
                 )
-                try await environment.database.saveConfiguration(updated)
-                self.configurations = try await environment.database.configurations()
+                self.isCommittingConfigurationRefresh = true
+                guard try await database.refreshActiveConfiguration(updated, expectedUpdatedAt: record.updatedAt),
+                      self.isCurrentConfigurationRefresh(refreshSessionID, recordID: record.id) else { return false }
+                self.configurations = self.configurations.map { $0.id == record.id ? updated : $0 }
                 self.activeConfigurationRecord = updated
                 self.activeConfiguration = loaded.configuration
+                if NodeBundleRuntimeService.supports(url) {
+                    self.activeNodeRuntimeEndpoint = loaded.baseURL
+                    self.nodeRuntimeUnavailableReason = ""
+                }
+                self.configurationRefreshMessage = change == .semantic
+                    ? L10n.string("settings.operation.updated", fallback: "Updated successfully")
+                    : L10n.string("settings.operation.unchanged", fallback: "Checked; no content changes")
 
                 if change == .transportOnly, let endpoint = loaded.baseURL {
                     self.rebindCatPawHomeTransport(to: endpoint)
@@ -6805,9 +6912,6 @@ final class AppState: ObservableObject {
                 }) {
                     self.selectedSiteKey = self.supportedSites.first?.key
                 }
-                if self.selectedSiteKey != previousSiteKey {
-                    try? await self.reloadHistory()
-                }
                 self.discardHomeContentIfNeeded(
                     for: self.currentHomeContentIdentity
                 )
@@ -6817,10 +6921,13 @@ final class AppState: ObservableObject {
                 self.categoryPage = nil
                 self.homePresentationSelection = .empty
                 self.categoryPaginationError = nil
-                return true
+                if self.selectedSiteKey != previousSiteKey { try? await self.reloadHistory() }
+                return self.isCurrentConfigurationRefresh(refreshSessionID, recordID: record.id)
             } catch {
-                if reportErrors {
-                    self.show(error, title: L10n.string("configuration.refresh.failed", fallback: "Configuration Refresh Failed"))
+                guard self.isCurrentConfigurationRefresh(refreshSessionID, recordID: record.id),
+                      !AsyncCancellationPolicy.isCancellation(error) else { return false }
+                if self.configurationRefreshReportsErrors {
+                    self.configurationRefreshMessage = self.localizedRuntimeErrorMessage(error)
                 }
                 // Automatic refresh is best-effort. Keep the last valid cached
                 // configuration so an offline launch remains usable.
@@ -6828,11 +6935,17 @@ final class AppState: ObservableObject {
             }
         }
         configurationRefreshTask = task
-        let changed = await task.value
-        if configurationRefreshSessionID == refreshSessionID {
-            configurationRefreshTask = nil
+        configurationRefreshDeadlineTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do { try await Task.sleep(nanoseconds: UInt64(self.configurationRefreshTimeout * 1_000_000_000)) }
+            catch { return }
+            guard self.isCurrentConfigurationRefresh(refreshSessionID, recordID: record.id),
+                  !self.isCommittingConfigurationRefresh else { return }
+            let report = self.configurationRefreshReportsErrors
+            self.invalidateConfigurationRefresh()
+            if report { self.configurationRefreshMessage = self.localizedRuntimeErrorMessage(HTTPClientError.timeout) }
         }
-        return changed
+        return await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
     }
 
     var configurationMenuSelectionID: UUID? {
@@ -7076,9 +7189,7 @@ final class AppState: ObservableObject {
     ) {
         cancelActiveCloudAuthorizationInteraction(nextIdentity: nil)
         resetSearchForConfigurationChange()
-        configurationRefreshSessionID = UUID()
-        configurationRefreshTask?.cancel()
-        configurationRefreshTask = nil
+        invalidateConfigurationRefresh()
         invalidateCatPawHomeLoads()
         categoryLoadSessionID = UUID()
         cancelDetailRequest()
@@ -7352,6 +7463,7 @@ final class AppState: ObservableObject {
 
     func deleteConfiguration(_ id: UUID) async {
         guard let environment else { return }
+        if refreshingConfigurationID == id { invalidateConfigurationRefresh() }
         clearConfigurationSwitchFeedback()
         let deletingActiveConfiguration = activeConfigurationRecord?.id == id
         let deletingXtream = configurations.first(where: { $0.id == id })?
@@ -8428,7 +8540,7 @@ final class AppState: ObservableObject {
             }
             cancelDetailRequest()
             tmdbDetailModel.beginEntry(repository: nil, key: nil, summary: summary,
-                availability: TMDBNetworkRuntime.shared.availability, enabled: false)
+                availability: tmdbRuntime.availability, enabled: false)
             selectedDetail = nil
             pendingDetailSummary = nil
             detailRequestSummary = summary
@@ -8451,7 +8563,7 @@ final class AppState: ObservableObject {
             detailFavoriteExpectation = recovery.expected
             guard detailFavoriteSource == recovery.source else {
                 tmdbDetailModel.beginEntry(repository: nil, key: nil, summary: summary,
-                    availability: TMDBNetworkRuntime.shared.availability, enabled: false)
+                    availability: tmdbRuntime.availability, enabled: false)
                 detailRouteSummary = summary; selectedDetail = nil
                 detailLoadState = .failed(L10n.string("favorites.source.changed", fallback: "This source's server or account has changed. Use Confirm Source to verify this favorite again."))
                 return
@@ -8480,10 +8592,10 @@ final class AppState: ObservableObject {
         detailRequestSummary = summary
         // Media navigates immediately. Configuration entries are dispatched
         // above by their item/provider contract, never by engine type alone.
-        let metadataEnabled = UserDefaults.standard.object(forKey: "detail.tmdb.enabled") as? Bool != false
+        let metadataEnabled = tmdbRuntime.decisionForEntry().usesTMDB
         if !retainingDetail {
             tmdbDetailModel.beginEntry(repository: tmdbRepository, key: tmdbSourceKey(for: VideoDetail(summary: summary)),
-                summary: summary, availability: TMDBNetworkRuntime.shared.availability,
+                summary: summary, availability: tmdbRuntime.availability,
                 startedAt: tmdbEnteredAt, enabled: metadataEnabled, policy: TMDBMatchingPreferences.policy())
         }
         detailRouteSummary = summary
@@ -8576,7 +8688,7 @@ final class AppState: ObservableObject {
         selectedDetail = nil
         if let retainedSummary {
             tmdbDetailModel.beginEntry(repository: nil, key: nil, summary: retainedSummary,
-                availability: TMDBNetworkRuntime.shared.availability, enabled: false)
+                availability: tmdbRuntime.availability, enabled: false)
             detailRequestSummary = retainedSummary
             detailRouteSummary = retainedSummary
             detailSuggestedSearch = nil
@@ -14691,10 +14803,52 @@ final class AppState: ObservableObject {
     }
 
     func refreshLiveSource(_ id: UUID) async {
+        guard !deletingImportedSourceIDs.contains(id), !isShutdownRequested else { return }
+        if let task = liveSourceRefreshTasks[id] { await task.value; return }
+        let operation = UUID()
+        liveSourceRefreshOperations[id] = operation
+        refreshingLiveSourceIDs.insert(id)
+        liveSourceRefreshMessages[id] = nil
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.liveSourceRefreshOperations[id] == operation {
+                    self.liveSourceRefreshOperations[id] = nil
+                    self.liveSourceRefreshTasks[id] = nil
+                    self.refreshingLiveSourceIDs.remove(id)
+                    self.committingLiveSourceRefreshIDs.remove(id)
+                }
+            }
+            await self.performLiveSourceRefresh(id, operation: operation)
+        }
+        liveSourceRefreshTasks[id] = task
+        await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
+    }
+
+    func cancelLiveSourceRefresh(_ id: UUID) {
+        guard !committingLiveSourceRefreshIDs.contains(id) else { return }
+        invalidateLiveSourceRefresh(id)
+        liveSourceRefreshMessages[id] = L10n.string("settings.operation.cancelled", fallback: "Cancelled; previous data kept")
+    }
+
+    private func invalidateLiveSourceRefresh(_ id: UUID) {
+        liveSourceRefreshOperations[id] = nil
+        liveSourceRefreshTasks.removeValue(forKey: id)?.cancel()
+        refreshingLiveSourceIDs.remove(id)
+        committingLiveSourceRefreshIDs.remove(id)
+        liveCatalogLoadingSourceIDs.remove(.imported(id))
+    }
+
+    private func isCurrentLiveSourceRefresh(_ id: UUID, operation: UUID) -> Bool {
+        !Task.isCancelled && !isShutdownRequested && liveSourceRefreshOperations[id] == operation
+            && !deletingImportedSourceIDs.contains(id) && liveSources.contains { $0.id == id }
+    }
+
+    private func performLiveSourceRefresh(_ id: UUID, operation: UUID) async {
         guard !deletingImportedSourceIDs.contains(id) else { return }
         // Even a refresh that cannot start must terminate the previous check.
         cancelLiveSourceValidation(id)
-        guard let environment,
+        guard let database = liveReferenceStore, let loader = settingsLiveSourceLoader,
               let existing = liveSources.first(where: { $0.id == id }) else {
             return
         }
@@ -14719,10 +14873,9 @@ final class AppState: ObservableObject {
             importedIdentityMappingFailed = false
         }
         liveCatalogLoadingSourceIDs.insert(.imported(id))
-        isLoading = true
         defer {
-            if identityGeneration == nil || importedIdentityGeneration === identityGeneration {
-                isLoading = false
+            if liveSourceRefreshOperations[id] == operation,
+               identityGeneration == nil || importedIdentityGeneration === identityGeneration {
                 liveCatalogLoadingSourceIDs.remove(.imported(id))
                 importedRefreshDownloads[id] = nil
             }
@@ -14731,12 +14884,13 @@ final class AppState: ObservableObject {
             let defaults = try LiveSourceDocument.defaults(in: existing.rawData)
             let loaded: LoadedLiveSource
             if identityGeneration != nil {
-                let download = Task { try await environment.liveSourceLoader.load(.remote(url), defaults: defaults) }
+                let download = Task { try await loader.load(.remote(url), defaults: defaults) }
                 importedRefreshDownloads[id] = download
                 loaded = try await withTaskCancellationHandler(operation: { try await download.value }, onCancel: { download.cancel() })
             } else {
-                loaded = try await environment.liveSourceLoader.load(.remote(url), defaults: defaults)
+                loaded = try await loader.load(.remote(url), defaults: defaults)
             }
+            guard isCurrentLiveSourceRefresh(id, operation: operation) else { return }
             if let identityGeneration, !identityGeneration.isCurrent { return }
             let updated = StoredLiveSource(
                 id: existing.id,
@@ -14747,38 +14901,47 @@ final class AppState: ObservableObject {
                 rawData: loaded.rawData,
                 updatedAt: loaded.loadedAt
             )
+            committingLiveSourceRefreshIDs.insert(id)
             if let identityGeneration {
-                try await environment.database.acceptImportedRefresh(updated, generation: identityGeneration)
+                try await database.acceptImportedRefresh(updated, generation: identityGeneration)
                 guard identityGeneration.isCurrent else { return }
             } else {
-                try await environment.database.saveLiveSource(updated)
+                guard try await database.refreshExistingLiveSource(updated) else { return }
             }
-            liveSources = try await environment.database.liveSources()
+            guard isCurrentLiveSourceRefresh(id, operation: operation) else { return }
             if let identityGeneration, !identityGeneration.isCurrent { return }
-            await environment.productionEPGRepository.invalidate(EPGSourceKey(.imported(id)), removePersistentCache: false)
+            await environment?.productionEPGRepository.invalidate(EPGSourceKey(.imported(id)), removePersistentCache: false)
+            guard isCurrentLiveSourceRefresh(id, operation: operation) else { return }
+            liveSources = liveSources.map { $0.id == id ? updated : $0 }
+                .sorted { $0.updatedAt > $1.updatedAt }
             publishImportedCatalog(loaded.playlist, sourceID: id)
             if let identityGeneration {
                 await refreshImportedIdentityMapping(id, generation: identityGeneration)
                 guard identityGeneration.isCurrent else { return }
             }
+            guard isCurrentLiveSourceRefresh(id, operation: operation) else { return }
             epgFailures[id] = nil
             startLiveSourceBackgroundWork(for: updated, playlist: loaded.playlist)
+            liveSourceRefreshMessages[id] = L10n.string("settings.operation.updated", fallback: "Updated successfully")
         } catch {
+            guard isCurrentLiveSourceRefresh(id, operation: operation) else { return }
             if let identityGeneration, !identityGeneration.isCurrent { return }
             // Failed refresh is not an empty catalog. Recompute authority from
             // the unchanged stored catalog under the new live generation.
             if let identityGeneration { await refreshImportedIdentityMapping(id, generation: identityGeneration) }
-            show(error, title: L10n.string("live.refresh.failed", fallback: "Live TV Source Refresh Failed"))
+            liveSourceRefreshMessages[id] = RuntimeUserFacingMessageMapper.message(for: error)
         }
     }
 
     func deleteLiveSource(_ id: UUID) async {
+        invalidateLiveSourceRefresh(id)
+        liveSourceRefreshMessages[id] = nil
         livePreviews.invalidate(sourceKey: LivePreviewPolicy.digest([LiveBrowserPreferenceStore.encode(.imported(id))]))
         if importedIdentityEnabled {
             await retireImportedLiveSource(id)
             return
         }
-        guard let environment, deletingImportedSourceIDs.insert(id).inserted else { return }
+        guard let database = liveReferenceStore, deletingImportedSourceIDs.insert(id).inserted else { return }
         revokeImportedPlaybackFlow(id)
         defer { deletingImportedSourceIDs.remove(id) }
         cancelLiveSourceValidation(id)
@@ -14786,11 +14949,11 @@ final class AppState: ObservableObject {
         liveValidationFreshness.remove(id)
         liveSourceEPGStatuses[id] = nil
         do {
-            try await environment.database.deleteLiveSource(id: id)
-            liveSources = try await environment.database.liveSources()
+            try await database.deleteLiveSource(id: id)
+            liveSources.removeAll { $0.id == id }
             publishImportedCatalog(nil, sourceID: id)
             liveEPG.remove(.imported(id))
-            await environment.productionEPGRepository.invalidate(EPGSourceKey(.imported(id)))
+            await environment?.productionEPGRepository.invalidate(EPGSourceKey(.imported(id)))
             scheduleEPGRefresh()
             epgFailures[id] = nil
             let previousDeletedIDs = deletedLiveChannelIDs
@@ -16012,20 +16175,24 @@ final class AppState: ObservableObject {
     func exportPortableBackup(
         to url: URL
     ) async throws -> PortableBackupPreview {
-        guard let environment, let configuration = activeConfigurationRecord else {
+        guard !isBackupBusy else { throw AppError.configuration(L10n.string("settings.operation.busy", fallback: "Another operation is in progress. Wait for it to finish.")) }
+        isBackupBusy = true
+        backupOperationMessage = nil
+        defer { isBackupBusy = false }
+        guard let database = environment?.database ?? liveReferenceStore, let configuration = activeConfigurationRecord else {
             throw AppError.configuration(L10n.string("configuration.import-enable-first", fallback: "Import and enable a video provider configuration first."))
         }
-        let allHistory = try await environment.database.history()
+        let allHistory = try await database.history()
         let history = allHistory.filter {
             $0.configurationID == configuration.id
         }
-        let playbackSkipRules = try await environment.database
+        let playbackSkipRules = try await database
             .playbackSkipRules(configurationID: configuration.id)
-        let playbackCompletionMarkers = try await environment.database
+        let playbackCompletionMarkers = try await database
             .playbackCompletionMarkers(configurationID: configuration.id)
-        let danmakuBindings = try await environment.database
+        let danmakuBindings = try await database
             .danmakuBindings(configurationID: configuration.id)
-        let scopedFavorites = try await environment.database.favorites().filter { $0.configurationID == configuration.id }
+        let scopedFavorites = try await database.favorites().filter { $0.configurationID == configuration.id }
         let appVersion = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
         ) as? String ?? L10n.string("common.unknown", fallback: "Unknown")
@@ -16033,8 +16200,8 @@ final class AppState: ObservableObject {
             forInfoDictionaryKey: "CFBundleVersion"
         ) as? String ?? L10n.string("common.unknown", fallback: "Unknown")
         let createdAt = Date()
-        let data = try await Task.detached(priority: .userInitiated) {
-            try PortableBackupCodec.encode(
+        try await Task.detached(priority: .userInitiated) {
+            let data = try PortableBackupCodec.encode(
                 configuration: configuration,
                 history: history,
                 playbackSkipRules: playbackSkipRules,
@@ -16045,8 +16212,8 @@ final class AppState: ObservableObject {
                 appBuild: appBuild,
                 createdAt: createdAt
             )
+            try Self.writePortableBackupData(data, to: url)
         }.value
-        try writePortableBackupData(data, to: url)
         return PortableBackupPreview(
             fileURL: url,
             createdAt: createdAt,
@@ -16061,13 +16228,17 @@ final class AppState: ObservableObject {
     func inspectPortableBackup(
         at url: URL
     ) async throws -> PortableBackupPreview {
-        let data = try readPortableBackupData(from: url)
+        guard !isBackupBusy else { throw AppError.configuration(L10n.string("settings.operation.busy", fallback: "Another operation is in progress. Wait for it to finish.")) }
+        isBackupBusy = true
+        backupOperationMessage = nil
+        defer { isBackupBusy = false }
         let decoded = try await Task.detached(priority: .userInitiated) {
-            try PortableBackupCodec.decode(data)
+            let data = try Self.readPortableBackupData(from: url)
+            let decoded = try PortableBackupCodec.decode(data)
+            _ = try Self.configurationContent(for: decoded.payload.configuration.storedConfiguration)
+            return decoded
         }.value
-        _ = try Self.configurationContent(
-            for: decoded.payload.configuration.storedConfiguration
-        )
+        try Task.checkCancellation()
         return PortableBackupPreview(
             fileURL: url,
             createdAt: decoded.manifest.createdAt,
@@ -16082,6 +16253,10 @@ final class AppState: ObservableObject {
     func importPortableBackup(
         from url: URL
     ) async throws -> PortableBackupImportSummary {
+        guard !isBackupBusy else { throw AppError.configuration(L10n.string("settings.operation.busy", fallback: "Another operation is in progress. Wait for it to finish.")) }
+        isBackupBusy = true
+        backupOperationMessage = nil
+        defer { isBackupBusy = false }
         guard let environment else {
             throw AppError.configuration(L10n.string("app.environment.not-initialized", fallback: "The app environment has not been initialized"))
         }
@@ -16102,13 +16277,13 @@ final class AppState: ObservableObject {
                 configurationImportOperationID = nil
             }
         }
-        let data = try readPortableBackupData(from: url)
         let decoded = try await Task.detached(priority: .userInitiated) {
-            try PortableBackupCodec.decode(data)
+            let data = try Self.readPortableBackupData(from: url)
+            let decoded = try PortableBackupCodec.decode(data)
+            _ = try Self.configurationContent(for: decoded.payload.configuration.storedConfiguration)
+            return decoded
         }.value
-        _ = try Self.configurationContent(
-            for: decoded.payload.configuration.storedConfiguration
-        )
+        try Task.checkCancellation()
 
         // Drain accepted favorite mutations before the recovery snapshot. New
         // mutations are blocked by configurationImportOperationID.
@@ -16117,6 +16292,7 @@ final class AppState: ObservableObject {
         // A failed or unwanted merge must always have a user-owned recovery
         // point. This backup is written before the database transaction.
         let safetyBackupURL = try await createPreImportSafetyBackup()
+        try Task.checkCancellation()
         guard configurationImportOperationID == operationID else {
             throw CancellationError()
         }
@@ -16128,6 +16304,7 @@ final class AppState: ObservableObject {
             }
         }
         await favoriteMutationTask?.value
+        try Task.checkCancellation()
         let result = try await environment.database
             .restoreConfigurationAndHistory(
                 configuration: decoded.payload.configuration.storedConfiguration,
@@ -16194,9 +16371,7 @@ final class AppState: ObservableObject {
 
         cancelActiveCloudAuthorizationInteraction(nextIdentity: nil)
         resetSearchForConfigurationChange()
-        configurationRefreshSessionID = UUID()
-        configurationRefreshTask?.cancel()
-        configurationRefreshTask = nil
+        invalidateConfigurationRefresh()
         configurations = result.configurations
         activeConfigurationRecord = result.configuration
         activeXtreamCredentials = try? await xtreamCredentials(
@@ -16264,31 +16439,33 @@ final class AppState: ObservableObject {
         }.value
         let directory = environment.directories.applicationSupport
             .appendingPathComponent("Backups", isDirectory: true)
-        do {
-            try FileManager.default.createDirectory(
-                at: directory,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            let formatter = DateFormatter()
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
-            let url = directory.appendingPathComponent(
-                "BeforeImport-\(formatter.string(from: Date())).okvideobackup"
-            )
-            try writePortableBackupData(data, to: url)
-            try pruneSafetyBackups(in: directory, keeping: 5)
-            return url
-        } catch let error as AppError {
-            throw error
-        } catch {
-            throw AppError.filesystem(
-                L10n.string("backup.safety-create.failed", fallback: "Unable to create a safety backup before import: %@", error.localizedDescription)
-            )
-        }
+        return try await Task.detached(priority: .utility) {
+            do {
+                try FileManager.default.createDirectory(
+                    at: directory,
+                    withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700]
+                )
+                let formatter = DateFormatter()
+                formatter.locale = Locale(identifier: "en_US_POSIX")
+                formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
+                let url = directory.appendingPathComponent(
+                    "BeforeImport-\(formatter.string(from: Date())).okvideobackup"
+                )
+                try Self.writePortableBackupData(data, to: url)
+                try Self.pruneSafetyBackups(in: directory, keeping: 5)
+                return url
+            } catch let error as AppError {
+                throw error
+            } catch {
+                throw AppError.filesystem(
+                    L10n.string("backup.safety-create.failed", fallback: "Unable to create a safety backup before import: %@", error.localizedDescription)
+                )
+            }
+        }.value
     }
 
-    private func pruneSafetyBackups(
+    nonisolated private static func pruneSafetyBackups(
         in directory: URL,
         keeping limit: Int
     ) throws {
@@ -16314,7 +16491,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func readPortableBackupData(from url: URL) throws -> Data {
+    nonisolated private static func readPortableBackupData(from url: URL) throws -> Data {
         let didAccess = url.startAccessingSecurityScopedResource()
         defer {
             if didAccess {
@@ -16343,10 +16520,12 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func writePortableBackupData(
+    nonisolated private static func writePortableBackupData(
         _ data: Data,
         to url: URL
     ) throws {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         do {
             try data.write(to: url, options: [.atomic])
             try FileManager.default.setAttributes(
@@ -16687,11 +16866,20 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func clearPosterCache() async -> Bool {
-        guard let repository = environment?.imageRepository else { return false }
+        guard !isClearingPosterCache else { return false }
+        isClearingPosterCache = true
+        posterCacheOperationMessage = nil
+        defer { isClearingPosterCache = false }
+        guard let repository = environment?.imageRepository else {
+            posterCacheOperationMessage = L10n.string("settings.organized.cache.failed", fallback: "Unable to clear the image cache. Try again.")
+            return false
+        }
         do {
             try await repository.clear()
+            posterCacheOperationMessage = L10n.string("settings.organized.cache.cleared", fallback: "Image cache cleared.")
             return true
         } catch {
+            posterCacheOperationMessage = L10n.string("settings.organized.cache.failed", fallback: "Unable to clear the image cache. Try again.")
             show(error, title: L10n.string("settings.poster-cache.clear.failed", fallback: "Unable to Clear Poster Cache"))
             return false
         }
@@ -16754,6 +16942,11 @@ final class AppState: ObservableObject {
     }
 
     func exportDiagnostics(to url: URL) async throws {
+        guard !isExportingDiagnostics else { throw AppError.configuration(L10n.string("settings.operation.busy", fallback: "Another operation is in progress. Wait for it to finish.")) }
+        isExportingDiagnostics = true
+        diagnosticsExportMessage = nil
+        diagnosticsExportURL = nil
+        defer { isExportingDiagnostics = false }
         let sites = visibleSites.map { site -> [String: Any] in
             let api: String
             if let parsed = URL(string: site.api), parsed.scheme != nil {
@@ -16822,16 +17015,19 @@ final class AppState: ObservableObject {
             report["androidRuntimeSelection"] = LogRedactor.json(object)
         }
         do {
-            let data = try JSONSerialization.data(
-                withJSONObject: report,
-                options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-            )
-            try data.write(to: url, options: [.atomic])
-            try FileManager.default.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: url.path
-            )
+            let snapshot = report
+            try await Task.detached(priority: .utility) {
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                let data = try JSONSerialization.data(withJSONObject: snapshot,
+                    options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+                try data.write(to: url, options: [.atomic])
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            }.value
+            diagnosticsExportURL = url
+            diagnosticsExportMessage = L10n.string("settings.diagnostics.saved", fallback: "Diagnostics saved: %@", url.lastPathComponent)
         } catch {
+            diagnosticsExportMessage = L10n.string("diagnostics.export.failed.title", fallback: "Diagnostics Export Failed")
             throw AppError.filesystem(
                 L10n.string(
                     "diagnostics.export.failed",
@@ -16856,12 +17052,14 @@ final class AppState: ObservableObject {
 #endif
         let finalHistoryWrite = playbackHistoryWrite(position: playerSnapshot.position, duration: playerSnapshot.duration)
         isShutdownRequested = true
+        invalidateAndroidRuntimeCheck()
         pictureInPicture.end()
         liveHLSPreparationTask?.task.cancel()
         liveHLSPreparationTask = nil
         playbackDisplaySleep.setSuspended(true)
         importedIdentityGeneration?.invalidate()
         importedIdentityMapping = nil
+        for id in Array(liveSourceRefreshTasks.keys) { invalidateLiveSourceRefresh(id) }
         for task in importedRefreshDownloads.values { task.cancel() }
         importedRefreshDownloads.removeAll()
         epgRefreshTask?.cancel()
@@ -17811,12 +18009,17 @@ final class AppState: ObservableObject {
     }
 
     func togglePlayerHardwareDecoding() async {
-        let value = !playerHardwareDecoding
+        await setPlayerHardwareDecoding(!playerHardwareDecoding)
+    }
+
+    func setPlayerHardwareDecoding(_ enabled: Bool) async {
+        guard let player = environment?.player else { return }
+        playerHardwareDecoding = enabled
         do {
-            try await environment?.player.setHardwareDecoding(enabled: value)
-            playerHardwareDecoding = value
+            try await player.setHardwareDecoding(enabled: enabled)
         } catch {
-            show(error, title: L10n.string("player.hardware-decoding.failed", fallback: "Unable to Change Hardware Decoding"), target: .player)
+            // Keep the saved intent visible; report failure to apply it now.
+            show(error, title: L10n.string("player.hardware-decoding.failed", fallback: "Unable to Change Hardware Decoding"), target: .browser)
         }
     }
 
@@ -18045,22 +18248,64 @@ final class AppState: ObservableObject {
         return "\(version) (\(build))"
     }
 
-    func refreshAndroidRuntimeStatus() async {
-        guard !isAndroidRuntimeBusy else { return }
-        guard let environment else {
-            androidRuntimeStatus = .unavailable(
-                L10n.string("android.runtime.environment-uninitialized", fallback: "The application environment has not finished initializing.")
-            )
+    private func invalidateAndroidRuntimeCheck() {
+        androidRuntimeCheckID = UUID()
+        androidRuntimeCheckTask?.cancel()
+        androidRuntimeCheckTask = nil
+        isCheckingAndroidRuntime = false
+        androidRuntimeCheckMessage = nil
+    }
+
+    func refreshAndroidRuntimeStatus(reportCompletion: Bool = true) async {
+        guard !isAndroidRuntimeBusy, !isShutdownRequested else { return }
+        if let task = androidRuntimeCheckTask {
+            androidRuntimeCheckReportsResult = androidRuntimeCheckReportsResult || reportCompletion
+            await task.value
             return
         }
-        androidRuntimeModeSnapshot = await environment
-            .androidRuntimeModeCoordinator.refresh()
-        androidRuntimeStatus = await environment.androidDexBridge.runtimeStatus()
-        _ = try? await environment.androidRuntimeManager.refresh()
+        let id = UUID()
+        androidRuntimeCheckID = id
+        androidRuntimeCheckReportsResult = reportCompletion
+        isCheckingAndroidRuntime = true
+        androidRuntimeCheckMessage = nil
+        let statusRevision = androidRuntimeStatusRevision
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.androidRuntimeCheckID == id {
+                    self.androidRuntimeCheckTask = nil
+                    self.isCheckingAndroidRuntime = false
+                }
+            }
+            let mode: AndroidRuntimeModeSnapshot
+            let status: AndroidRuntimeStatus
+            if let loader = self.settingsRuntimeStatusLoader {
+                (mode, status) = await loader()
+            } else if let environment = self.environment {
+                mode = await environment.androidRuntimeModeCoordinator.refresh()
+                status = await environment.androidDexBridge.runtimeStatus()
+                _ = try? await environment.androidRuntimeManager.refresh()
+            } else {
+                mode = .initial
+                status = .unavailable(L10n.string("android.runtime.environment-uninitialized", fallback: "The application environment has not finished initializing."))
+            }
+            guard !Task.isCancelled, !self.isShutdownRequested, !self.isAndroidRuntimeBusy,
+                  self.androidRuntimeCheckID == id else { return }
+            self.androidRuntimeModeSnapshot = mode
+            // A live progress event received during the check is newer evidence.
+            if self.androidRuntimeStatusRevision == statusRevision { self.androidRuntimeStatus = status }
+            if self.androidRuntimeCheckReportsResult {
+                self.androidRuntimeCheckMessage = L10n.string("settings.operation.checked", fallback: "Check completed")
+            }
+        }
+        androidRuntimeCheckTask = task
+        await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
     }
 
     func showManagedRuntimeInstaller() async {
         guard let environment, !isAndroidRuntimeBusy else { return }
+        isAndroidRuntimeBusy = true
+        defer { isAndroidRuntimeBusy = false }
         do {
             try await environment.androidRuntimeManager.presentInstallOffer()
             isAndroidRuntimeInstallSheetPresented = true
@@ -18071,6 +18316,8 @@ final class AppState: ObservableObject {
 
     func installManagedRuntime(acceptingLicenses: Bool) async {
         guard let environment, !isAndroidRuntimeBusy else { return }
+        isAndroidRuntimeBusy = true
+        defer { isAndroidRuntimeBusy = false }
         do {
             try await environment.androidRuntimeManager.installDefault(
                 acceptingLicenses: acceptingLicenses
@@ -18092,6 +18339,8 @@ final class AppState: ObservableObject {
 
     func repairManagedRuntime(acceptingLicenses: Bool) async {
         guard let environment, !isAndroidRuntimeBusy else { return }
+        isAndroidRuntimeBusy = true
+        defer { isAndroidRuntimeBusy = false }
         if androidRuntimeStatus.isRunning {
             androidRuntimeStatus = await environment.androidDexBridge.stopRuntime()
         }
@@ -18121,6 +18370,8 @@ final class AppState: ObservableObject {
 
     func chooseAndroidSDK() async {
         guard let environment, !isAndroidRuntimeBusy else { return }
+        isAndroidRuntimeBusy = true
+        defer { isAndroidRuntimeBusy = false }
         while true {
             let panel = NSOpenPanel()
             panel.title = L10n.string("android.sdk.choose.title", fallback: "Choose Android SDK")
@@ -18180,6 +18431,8 @@ final class AppState: ObservableObject {
 
     func useConfiguredExternalAndroidRuntime() async {
         guard let environment, !isAndroidRuntimeBusy else { return }
+        isAndroidRuntimeBusy = true
+        defer { isAndroidRuntimeBusy = false }
         do {
             androidRuntimeModeSnapshot = try await environment
                 .androidRuntimeModeCoordinator.useConfiguredExternalSDK()
@@ -18193,12 +18446,15 @@ final class AppState: ObservableObject {
 
     func useManagedAndroidRuntime() async {
         guard let environment, !isAndroidRuntimeBusy else { return }
+        isAndroidRuntimeBusy = true
+        defer { isAndroidRuntimeBusy = false }
         do {
             androidRuntimeModeSnapshot = try await environment
                 .androidRuntimeModeCoordinator.useManagedRuntime()
             _ = try? await environment.androidRuntimeManager.refresh()
             if !androidRuntimeModeSnapshot.managedRuntimeUsable {
-                await showManagedRuntimeInstaller()
+                try await environment.androidRuntimeManager.presentInstallOffer()
+                isAndroidRuntimeInstallSheetPresented = true
             }
         } catch {
             show(error, title: L10n.string("android.runtime.switch.failed", fallback: "Unable to Switch Android Runtime"))
@@ -19702,9 +19958,7 @@ final class AppState: ObservableObject {
     }
 
     private func loadActiveConfigurationContent() throws {
-        configurationRefreshSessionID = UUID()
-        configurationRefreshTask?.cancel()
-        configurationRefreshTask = nil
+        invalidateConfigurationRefresh()
         guard let record = activeConfigurationRecord else {
             lastAutomaticConfigurationRefreshAttemptAt = nil
             activeConfiguration = nil
@@ -19723,7 +19977,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    static func configurationContent(
+    nonisolated static func configurationContent(
         for record: StoredConfiguration
     ) throws -> FongMiConfiguration {
         guard record.sourceKind == .xtream else {
@@ -19774,30 +20028,14 @@ final class AppState: ObservableObject {
     private func loadConfiguration(
         _ source: ConfigurationSource
     ) async throws -> LoadedConfiguration {
+        if let settingsConfigurationLoader { return try await settingsConfigurationLoader.load(source) }
         guard let environment else {
-            throw AppError.configuration(
-                L10n.string("app.environment.uninitialized", fallback: "The application environment has not been initialized.")
-            )
+            throw AppError.configuration(L10n.string("app.environment.uninitialized", fallback: "The application environment has not been initialized."))
         }
-        if case .remote(let url) = source,
-           NodeBundleRuntimeService.supports(url) {
-            do {
-                let loaded = try await environment.nodeBundleRuntime
-                    .loadConfiguration(
-                        from: url,
-                        configurationID: activeConfigurationRecord?.id
-                    )
-                activeNodeRuntimeEndpoint = loaded.baseURL
-                nodeRuntimeUnavailableReason = ""
-                return loaded
-            } catch {
-                activeNodeRuntimeEndpoint = nil
-                nodeRuntimeUnavailableReason = L10n.string(
-                    "node.runtime.failed.user-facing",
-                    fallback: "Node Runtime is unavailable. Export diagnostics for details."
-                )
-                throw error
-            }
+        if case .remote(let url) = source, NodeBundleRuntimeService.supports(url) {
+            // Only the owning refresh may publish runtime metadata after loading.
+            return try await environment.nodeBundleRuntime.loadConfiguration(
+                from: url, configurationID: activeConfigurationRecord?.id)
         }
         return try await environment.configurationLoader.load(source)
     }
@@ -21223,19 +21461,21 @@ final class AppState: ObservableObject {
     /// Drafts reach persistence and the EPG lifecycle only on explicit submission.
     @discardableResult
     func saveEPGPreferences(_ draft: EPGPreferences) async -> Bool {
-        guard !isSavingEPGPreferences, let environment else { return false }
+        guard !isSavingEPGPreferences, let database = environment?.database ?? liveReferenceStore else { return false }
         isSavingEPGPreferences = true
         defer { isSavingEPGPreferences = false }
         do {
             let validated = try draft.validated()
-            try await environment.database.saveEPGPreferences(validated)
+            try await database.saveEPGPreferences(validated)
             await applyEPGPreferences(validated)
             return true
         } catch {
             // Neither URL validation nor transport/storage errors expose token-bearing input.
             presentedError = UserFacingError(
                 title: L10n.string("settings.epg.save-failed", fallback: "Unable to Save Programme Settings"),
-                message: L10n.string("settings.epg.invalid-url", fallback: "Enter a valid HTTP or HTTPS XMLTV address and try again. Your previous settings have been kept."))
+                message: error is EPGPreferenceError
+                    ? L10n.string("settings.epg.invalid-url", fallback: "Enter a valid HTTP or HTTPS XMLTV address and try again. Your previous settings have been kept.")
+                    : L10n.string("settings.epg.storage-failed", fallback: "Programme settings could not be saved. Check available disk space and permissions, then try again. Your previous settings have been kept."))
             return false
         }
     }

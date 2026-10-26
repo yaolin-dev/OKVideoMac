@@ -588,6 +588,20 @@ struct HomeCategoryNavigationPartition: Equatable, Sendable {
 enum HomeCategoryNavigationLayoutPolicy {
     static let recommendationID = "__home-recommendations__"
 
+    // UI identity must not share a namespace with opaque provider category IDs.
+    static func navigationID(for categoryID: String) -> String {
+        "__home-category__:" + categoryID
+    }
+
+    static func items(categories: [VideoCategory], showsRecommendations: Bool) -> [BrowseCategoryNavigationItem] {
+        let recommendation: [BrowseCategoryNavigationItem] = showsRecommendations
+            ? [.init(id: recommendationID, title: L10n.string("home.recommended", fallback: "Recommended"), categoryID: nil)]
+            : []
+        return recommendation + VideoCategory.normalized(categories).map {
+            .init(id: navigationID(for: $0.id), title: $0.name, categoryID: $0.id)
+        }
+    }
+
     static func partition(
         candidates: [HomeCategoryNavigationCandidate],
         selectedID: String?,
@@ -665,20 +679,11 @@ private struct HomeCategoryNavigation: View {
     let onSelect: (String?) -> Void
 
     private var items: [Item] {
-        let recommendations = showsRecommendations
-            ? [Item(
-                id: HomeCategoryNavigationLayoutPolicy.recommendationID,
-                title: L10n.string("home.recommended", fallback: "Recommended"),
-                categoryID: nil
-            )]
-            : []
-        return recommendations + categories.map {
-            Item(id: $0.id, title: $0.name, categoryID: $0.id)
-        }
+        HomeCategoryNavigationLayoutPolicy.items(categories: categories, showsRecommendations: showsRecommendations)
     }
 
     private var selectedID: String? {
-        if let selectedCategoryID { return selectedCategoryID }
+        if let selectedCategoryID { return HomeCategoryNavigationLayoutPolicy.navigationID(for: selectedCategoryID) }
         return isRecommendationSelected && showsRecommendations
             ? HomeCategoryNavigationLayoutPolicy.recommendationID
             : nil

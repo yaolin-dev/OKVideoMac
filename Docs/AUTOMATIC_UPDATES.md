@@ -1,5 +1,9 @@
 # Automatic updates
 
+## 0.9.0 stable feed preparation
+
+0.9.0 (155) retains the existing signing identity, notary profile, stable HTTPS feed and Sparkle public key. This release must independently pass the existing gates; its final result is recorded in [0.9.0 verification](RELEASE_VALIDATION_0.9.0.md).
+
 ## Published 0.8.7
 
 The stable latest feed offers 0.8.7 (140), above Build 139, retaining the existing HTTPS feed, public key and pinned Sparkle. All 16 public assets, latest feed bytes, XML signature and final downloaded DMG EdDSA signature pass. This does not claim a new complete Sparkle update-installation cycle. See [formal verification](RELEASE_VALIDATION_0.8.7.md).

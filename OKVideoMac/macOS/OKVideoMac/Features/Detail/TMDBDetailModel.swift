@@ -93,10 +93,12 @@ final class TMDBDetailModel: ObservableObject {
     private var searchGeneration = UUID()
     private var seasonGeneration = UUID()
 
-    // Page structure is independent of transport readiness. These states only
-    // describe the data currently displayed, never a navigation gate.
+    // The caller freezes an eligible layout at entry. Later link updates do
+    // not change this page; explicit presentation choices may change it.
     @Published private(set) var pageMode: TMDBPageMode = .source
-    @Published private(set) var usesUnifiedLayout = true
+    @Published private(set) var usesUnifiedLayout = false
+    @Published private(set) var networkRequestsSuspended = false
+    var hasStartedEntry: Bool { entryManaged }
     @Published private(set) var isPreparing = false
     @Published private(set) var isAwaitingSourceIdentity = false
     private var resolutionGeneration = UUID()
@@ -115,13 +117,14 @@ final class TMDBDetailModel: ObservableObject {
 
     func beginEntry(repository: TMDBRepository?, key: String?, summary: VideoSummary,
                     availability: TMDBAvailability, startedAt: TimeInterval = ProcessInfo.processInfo.systemUptime,
-                    enabled: Bool = true, budget: TimeInterval = 15, preserveNavigation: Bool = false, policy: TMDBMatchPolicy = .strict) {
+                    enabled: Bool, budget: TimeInterval = 15, preserveNavigation: Bool = false, policy: TMDBMatchPolicy = .strict) {
         cancel()
         matchPolicy = policy
         if policy == .strict && binding?.isRelaxed == true {
             selection = nil; binding = nil; season = nil; loadedSeasons = [:]; displayedHeroURL = nil
         }
         entryManaged = true
+        networkRequestsSuspended = !enabled
         if !preserveNavigation {
             navigationID = UUID(); selection = nil; season = nil; loadedSeasons = [:]; binding = nil; displayedHeroURL = nil
             imageConfiguration = nil
@@ -162,7 +165,7 @@ final class TMDBDetailModel: ObservableObject {
     }
 
     func receive(detail: VideoDetail, key: String?) {
-        guard entryManaged, usesUnifiedLayout, !originalRequested,
+        guard entryManaged, usesUnifiedLayout, !originalRequested, !networkRequestsSuspended,
               key == self.key, repository != nil, key != nil else { return }
         let value = TMDBMatchInput(detail: detail, fallbackSummary: entrySummary)
         NSLog("[TMDB] source-identity site=%@ title=%@ year=%@ type=%@ cast=%d conflict=%@", detail.summary.siteName, detail.summary.title,
@@ -185,7 +188,7 @@ final class TMDBDetailModel: ObservableObject {
     }
 
     private func prepareMetadata(_ value: TMDBMatchInput, persistBinding: Bool) {
-        guard let repository, let key else { return }
+        guard !networkRequestsSuspended, let repository, let key else { return }
         resolutionGeneration = UUID()
         let request = resolutionGeneration, token = generation, budget = preparationBudget, policy = matchPolicy
         isPreparing = true; isAwaitingSourceIdentity = false
@@ -237,12 +240,12 @@ final class TMDBDetailModel: ObservableObject {
 
     /// Global appearance choice is independent of saved movie/season bindings.
     /// Synchronous cancellation prevents a late metadata request changing it back.
-    func setPresentationEnabled(_ enabled: Bool, detail: VideoDetail) {
-        if enabled { retryEnhanced(detail: detail) }
+    func setPresentationEnabled(_ enabled: Bool, detail: VideoDetail?) {
+        if enabled, let detail { retryEnhanced(detail: detail) }
         else {
             cancel()
             selection = nil; season = nil; candidates = []
-            usesUnifiedLayout = false; pageMode = .source; originalRequested = false
+            usesUnifiedLayout = false; networkRequestsSuspended = true; pageMode = .source; originalRequested = false
             if entryManaged { logEntry("settings-original") }
         }
     }
@@ -250,20 +253,20 @@ final class TMDBDetailModel: ObservableObject {
     func setMatchPolicy(_ policy: TMDBMatchPolicy, detail: VideoDetail) {
         guard matchPolicy != policy else { return }
         matchPolicy = policy
-        guard usesUnifiedLayout, !originalRequested else { return }
+        guard usesUnifiedLayout, !originalRequested, !networkRequestsSuspended else { return }
         retryEnhanced(detail: detail)
     }
 
-    func retryEnhanced(detail: VideoDetail, forceNetworkCheck: Bool = false) {
+    func retryEnhanced(detail: VideoDetail) {
         guard let availability else { return }
-        if forceNetworkCheck { Task { await TMDBNetworkRuntime.shared.checkConnections() } }
         beginEntry(repository: repository, key: key, summary: detail.summary,
-                   availability: availability, preserveNavigation: true, policy: matchPolicy)
+                   availability: availability, enabled: true, preserveNavigation: true, policy: matchPolicy)
         receive(detail: detail, key: key)
     }
 
     func load(repository: TMDBRepository?, key: String?, input: TMDBMatchInput, budget: TimeInterval = 15, policy: TMDBMatchPolicy = .strict) async {
         entryManaged = false
+        usesUnifiedLayout = true; networkRequestsSuspended = false
         let changed = self.key != key || self.input != input || matchPolicy != policy
         matchPolicy = policy
         generation = UUID(); searchGeneration = UUID(); seasonGeneration = UUID()
@@ -283,7 +286,7 @@ final class TMDBDetailModel: ObservableObject {
     }
 
     func loadSeason(source: PlaySource?, category: String?) async {
-        guard !Task.isCancelled else { return }
+        guard !networkRequestsSuspended, !Task.isCancelled else { return }
         seasonRequestSource = source
         seasonRequestCategory = category
         seasonGeneration = UUID()
@@ -406,7 +409,7 @@ final class TMDBDetailModel: ObservableObject {
     }
 
     func loadImageConfiguration() async {
-        guard let repository, selection != nil else { return }
+        guard !networkRequestsSuspended, let repository, selection != nil else { return }
         let token = generation
         if let configuration = try? await repository.imageConfiguration(), generation == token, !Task.isCancelled {
             imageConfiguration = configuration
@@ -414,7 +417,7 @@ final class TMDBDetailModel: ObservableObject {
     }
 
     func search(_ query: String, type: TMDBMediaType?) async {
-        guard let repository else { return }
+        guard !networkRequestsSuspended, let repository else { return }
         searchGeneration = UUID()
         let token = searchGeneration
         actionError = nil; isSearching = true
@@ -432,7 +435,7 @@ final class TMDBDetailModel: ObservableObject {
     }
 
     func choose(_ candidate: TMDBCandidate) async -> Bool {
-        guard let repository, let key, let input else { return false }
+        guard !networkRequestsSuspended, let repository, let key, let input else { return false }
         generation = UUID()
         let token = generation
         isChoosing = true; isPreparing = false; isAwaitingSourceIdentity = false; actionError = nil
@@ -475,9 +478,16 @@ final class TMDBDetailModel: ObservableObject {
         } catch { actionError = L10n.string("tmdb.choice.failed", fallback: "Unable to load or save this match. Try again later.") }
     }
 
-    func cancel() {
-        mappingSourceIdentities.removeAll()
-        invalidateEpisodeMapping()
+    func suspendNetworkRequests() {
+        networkRequestsSuspended = true
+        cancel(preservingPresentation: true)
+    }
+
+    func cancel(preservingPresentation: Bool = false) {
+        if !preservingPresentation {
+            mappingSourceIdentities.removeAll()
+            invalidateEpisodeMapping()
+        }
         seasonTask?.cancel(); seasonTask = nil; seasonRequestSource = nil
         for task in entryTasks { task.cancel() }; entryTasks = []
         generation = UUID(); searchGeneration = UUID(); seasonGeneration = UUID()
@@ -546,14 +556,14 @@ extension Notification.Name {
     static let tmdbSessionDidChange = Notification.Name("OKVideoMac.TMDB.sessionDidChange")
 }
 
-@MainActor protocol TMDBCredentialStoring {
-    func load() throws -> TMDBCredential?
-    func save(_ value: TMDBCredential) throws
-    func delete() throws
+protocol TMDBCredentialStoring: Sendable {
+    func load() async throws -> TMDBCredential?
+    func save(_ value: TMDBCredential) async throws
+    func delete() async throws
 }
 
 struct TMDBKeychainError: Error { let status: OSStatus }
-@MainActor struct KeychainTMDBCredentialStore: TMDBCredentialStoring {
+struct KeychainTMDBCredentialStore: TMDBCredentialStoring {
     let service: String
     init(service: String = "com.okvideomac.OKVideoMac.tmdb.direct.v1") { self.service = service }
     private var query: [String: Any] {
@@ -589,7 +599,7 @@ struct TMDBKeychainError: Error { let status: OSStatus }
 @MainActor
 final class TMDBNetworkRuntime: ObservableObject {
     static let shared: TMDBNetworkRuntime = {
-#if DEBUG
+#if DEBUG || OKVIDEO_PERFORMANCE_TEST
         // The hosted test App must never read the customer's production key.
         if AppEnvironment.isXCTestHost(environment: ProcessInfo.processInfo.environment) {
             return TMDBNetworkRuntime(credentials: TMDBTestCredentialStore())
@@ -602,8 +612,19 @@ final class TMDBNetworkRuntime: ObservableObject {
     let service: TMDBObservedService
     private(set) var prober: TMDBLinkProber
     @Published private(set) var credentialKind: TMDBCredential.Kind?
+    @Published private(set) var preference: TMDBPresentationPreference
+    @Published private(set) var isChangingNetwork = false
+    private var networkRevision = UUID()
+    private var warmTask: Task<Void, Never>?
+    private var networkChangeTask: Task<Void, Never>?
+    private var minimumLinkGeneration = 0
     @Published private(set) var enabled: Bool
     @Published private(set) var busy = false
+    @Published private(set) var canCancelOperation = false
+    @Published private(set) var isLoadingCredential = true
+    private var credentialLoadTask: Task<Void, Never>?
+    private var linksTask: Task<Void, Never>?
+    private var linksExpiryTask: Task<Void, Never>?
     @Published private(set) var message: String?
     @Published private(set) var links: TMDBAvailabilitySnapshot?
     private var credential: TMDBCredential?
@@ -620,17 +641,60 @@ final class TMDBNetworkRuntime: ObservableObject {
          transport: HTTPClient = URLSessionHTTPClient.isolatedEphemeral(reusesBoundedConnections: true)) {
         let credentials = credentials ?? KeychainTMDBCredentialStore()
         self.credentials = credentials; self.defaults = defaults; self.transport = transport
+        preference = TMDBPresentationPreference.load(defaults: defaults)
         let isEnabled = defaults.object(forKey: "tmdb.direct.enabled") as? Bool != false
         enabled = isEnabled
-        var saved: TMDBCredential?, failed = false
-        do { saved = try credentials.load() } catch { failed = true }
-        credential = saved; credentialKind = saved?.kind
-        let client = TMDBClient(credential: isEnabled ? saved : nil, httpClient: transport)
+        // Security.framework may wait for the user. Explicit detached work
+        // also covers synchronous witnesses of the async storage protocol.
+        let client = TMDBClient(credential: nil, httpClient: transport)
         self.client = client
         service = TMDBObservedService(base: client, availability: availability)
-        prober = TMDBLinkProber(availability: availability, metadata: client)
-        if failed { message = Self.text("keychain-error", "Unable to access the credential in Keychain. Try saving it again.") }
+        prober = TMDBLinkProber(availability: availability, metadata: client, images: transport)
+        let availability = self.availability
+        linksTask = Task { [weak self] in
+            for await snapshot in await availability.updates() {
+                guard let self, !Task.isCancelled else { break }
+                if !self.isChangingNetwork, snapshot.generation >= self.minimumLinkGeneration { self.acceptLinks(snapshot) }
+            }
+        }
+        busy = true
+        credentialLoadTask = Task { [weak self] in
+            guard let self else { return }
+            await availability.setMetadataRequestsEnabled(false)
+            do {
+                let saved = try await Task.detached(priority: .userInitiated) {
+                    try await credentials.load()
+                }.value
+                self.credential = saved; self.credentialKind = saved?.kind
+                await client.updateCredential(self.enabled ? saved : nil)
+                await availability.setMetadataRequestsEnabled(self.enabled && saved != nil && self.preference == .automatic)
+            } catch {
+                self.message = Self.text("keychain-error", "Unable to access the credential in Keychain. Try saving it again.")
+            }
+            self.busy = false
+            self.isLoadingCredential = false
+            self.credentialLoadTask = nil
+            if self.configured { self.warm() }
+        }
     }
+    deinit { linksTask?.cancel(); linksExpiryTask?.cancel(); credentialLoadTask?.cancel(); warmTask?.cancel(); networkChangeTask?.cancel(); monitor.cancel() }
+    private func acceptLinks(_ snapshot: TMDBAvailabilitySnapshot) {
+        links = snapshot
+        linksExpiryTask?.cancel(); linksExpiryTask = nil
+        let now = ProcessInfo.processInfo.systemUptime
+        guard let expiry = [snapshot.metadata, snapshot.images]
+            .filter({ $0.state == .available && $0.validUntil > now }).map(\.validUntil).min() else { return }
+        let revision = networkRevision
+        linksExpiryTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: UInt64(min(3600, max(0.001, expiry - now)) * 1_000_000_000)) }
+            catch { return }
+            guard let self, !Task.isCancelled, self.networkRevision == revision else { return }
+            let fresh = await self.availability.snapshot()
+            guard !Task.isCancelled, self.networkRevision == revision else { return }
+            self.acceptLinks(fresh)
+        }
+    }
+    func prepare() async { await credentialLoadTask?.value }
     private static func text(_ key: String, _ fallback: String) -> String { L10n.string("tmdb.direct." + key, fallback: fallback) }
     func register(_ repository: TMDBRepository) {
         repositories.removeAll { $0.value == nil }
@@ -653,19 +717,29 @@ final class TMDBNetworkRuntime: ObservableObject {
             SCDynamicStoreSetNotificationKeys(store, ["State:/Network/Global/Proxies"] as CFArray, nil)
             SCDynamicStoreSetDispatchQueue(store, DispatchQueue.main)
         }
+        warm()
     }
-    private func replaceSession() async {
+    @discardableResult private func replaceSession() async -> Bool {
+        invalidateNetworkPresentation()
+        let revision = networkRevision
         NotificationCenter.default.post(name: .tmdbSessionWillChange, object: self)
+        await availability.setMetadataRequestsEnabled(false)
         await client.updateCredential(nil)
         for repository in repositories.compactMap(\.value) { await repository.resetNetworkSession() }
         await client.updateCredential(enabled ? credential : nil)
         await availability.networkChanged()
-        links = await availability.snapshot()
+        await availability.setMetadataRequestsEnabled(enabled && credential != nil && preference == .automatic)
+        let snapshot = await availability.snapshot()
+        guard revision == networkRevision else { return false }
+        minimumLinkGeneration = snapshot.generation
+        links = snapshot; isChangingNetwork = false
         NotificationCenter.default.post(name: .tmdbSessionDidChange, object: self)
+        return true
     }
     @discardableResult func validateAndSave(kind: TMDBCredential.Kind, value: String) async -> Bool {
-        guard !busy else { return false }; busy = true; message = nil
-        defer { busy = false }
+        await prepare()
+        guard !busy, !Task.isCancelled else { return false }; busy = true; canCancelOperation = true; message = nil
+        defer { busy = false; canCancelOperation = false }
         do {
             let candidate = try TMDBCredential(kind: kind, value: value)
             let health = await availability.snapshot().metadata
@@ -673,20 +747,33 @@ final class TMDBNetworkRuntime: ObservableObject {
                 message = Self.text("rate-limit", "TMDB is limiting requests. Wait before trying again.")
                 return false
             }
+            let validatedRoute = networkRevision
+            let networkDeadline = ProcessInfo.processInfo.systemUptime + 15
             let checker = TMDBClient(credential: candidate, httpClient: transport, timeout: 6)
             _ = try await checker.imageConfiguration()
             try Task.checkCancellation()
             // Do not replace a working in-memory session if Keychain persistence fails.
-            try credentials.save(candidate)
+            canCancelOperation = false
+            let storage = credentials
+            try await Task.detached(priority: .userInitiated) {
+                try await storage.save(candidate)
+            }.value
             credential = candidate; credentialKind = candidate.kind
             enabled = true; defaults.set(true, forKey: "tmdb.direct.enabled")
-            await replaceSession()
-            await availability.finish(availability.ticket(.metadata), outcome: .success)
+            let sameRoute = validatedRoute == networkRevision
+            let replaced = await replaceSession()
+            if sameRoute && replaced { await availability.finish(availability.ticket(.metadata), outcome: .success) }
             links = await availability.snapshot()
-            message = Self.text("saved", "Credential verified and saved in Keychain. TMDB requests now connect directly.")
+            message = Self.text("saved-checking-images", "Credential saved. Checking the image connection…")
+            // Saving is committed; cancellation now only stops the link check.
+            canCancelOperation = true
+            await runConnectionCheck(force: false, credentialSaved: true, deadline: networkDeadline)
             return true
         } catch {
-            if TMDBLinkOutcome.error(error) == .cancelled { return false }
+            if TMDBLinkOutcome.error(error) == .cancelled {
+                message = L10n.string("settings.operation.cancelled", fallback: "Cancelled; previous data kept")
+                return false
+            }
             if case .failure(.rateLimited, let delay) = TMDBLinkOutcome.error(error) {
                 await availability.finish(availability.ticket(.metadata), outcome: .failure(.rateLimited, retryAfter: delay))
             }
@@ -695,37 +782,136 @@ final class TMDBNetworkRuntime: ObservableObject {
         }
     }
     func deleteCredential() async {
-        guard !busy else { return }; busy = true; defer { busy = false }
+        await prepare()
+        guard !busy, !Task.isCancelled else { return }; busy = true; defer { busy = false }
         do {
-            try credentials.delete()
+            let storage = credentials
+            try await Task.detached(priority: .userInitiated) {
+                try await storage.delete()
+            }.value
             credential = nil; credentialKind = nil
             await replaceSession()
             message = Self.text("deleted", "Credential removed. Available cached information and source playback remain usable.")
         } catch { message = Self.failureMessage(error) }
     }
     func setEnabled(_ value: Bool) async {
-        guard !busy, enabled != value else { return }; busy = true; defer { busy = false }
+        await prepare()
+        guard !busy, !Task.isCancelled, enabled != value else { return }; busy = true; defer { busy = false }
         enabled = value; defaults.set(value, forKey: "tmdb.direct.enabled")
         await replaceSession(); message = nil
+        if value { busy = false; warm() }
     }
+    var presentationDecision: TMDBPresentationDecision {
+        if preference == .automatic, enabled, credential != nil, !isLoadingCredential, busy || isChangingNetwork { return .checking }
+        return .evaluate(preference: preference, enabled: enabled, loadingCredential: isLoadingCredential,
+                  hasCredential: credential != nil, links: isChangingNetwork || busy ? nil : links)
+    }
+
+    /// Snapshot evaluation is synchronous so opening source details never waits
+    /// for Keychain or network. Policy also checks the evidence expiry timestamp.
+    func decisionForEntry() -> TMDBPresentationDecision {
+        let decision = presentationDecision
+        warm()
+        return decision
+    }
+
+    func setPreference(_ value: TMDBPresentationPreference) {
+        guard preference != value else { return }
+        preference = value; defaults.set(value.rawValue, forKey: TMDBPresentationPreference.key)
+        // Both directions update the observed-request permission before probing.
+        changed()
+    }
+
     func checkConnections() async {
-        guard !busy else { return }
+        await prepare()
+        // A network transition is short asynchronous work. Accept the user's
+        // check now; runConnectionCheck joins it before issuing new probes.
+        guard !busy, !Task.isCancelled else { return }
         guard enabled, credential != nil else {
             message = Self.text("missing", "Enable the service and save your TMDB credential first."); return
         }
-        busy = true; message = nil; defer { busy = false }
-        await prober.warm(force: true)
+        busy = true; canCancelOperation = true; message = nil
+        defer { busy = false; canCancelOperation = false }
+        await runConnectionCheck(force: true, credentialSaved: false)
+    }
+
+    private func runConnectionCheck(force: Bool, credentialSaved: Bool,
+                                    deadline: TimeInterval = ProcessInfo.processInfo.systemUptime + 15) async {
+        await networkChangeTask?.value
+        guard !Task.isCancelled else {
+            message = credentialSaved
+                ? Self.text("saved-check-cancelled", "Credential saved. Connection check cancelled; source details remain available.")
+                : Self.text("check-cancelled", "Connection check cancelled.")
+            return
+        }
+        guard !isChangingNetwork else { return }
+        guard ProcessInfo.processInfo.systemUptime < deadline else {
+            message = Self.text("check-timeout", "The connection check timed out. Try again later."); return
+        }
+        let revision = networkRevision
+        await prober.warm(force: force)
         repeat {
+            guard revision == networkRevision else {
+                message = Self.text("check-route-changed", "Network changed. The connection will be checked again."); return
+            }
             links = await availability.snapshot()
             if links?.metadata.checking != true && links?.images.checking != true { break }
             do { try await Task.sleep(nanoseconds: 100_000_000) } catch { break }
-        } while !Task.isCancelled
+        } while !Task.isCancelled && ProcessInfo.processInfo.systemUptime < deadline
+        guard revision == networkRevision else { return }
+        if Task.isCancelled {
+            await availability.cancelProbes(); links = await availability.snapshot()
+            message = credentialSaved
+                ? Self.text("saved-check-cancelled", "Credential saved. Connection check cancelled; source details remain available.")
+                : Self.text("check-cancelled", "Connection check cancelled.")
+        } else if links?.metadata.checking == true || links?.images.checking == true {
+            await availability.cancelProbes(); links = await availability.snapshot()
+            message = Self.text("check-timeout", "The connection check timed out. Try again later.")
+        } else if links?.ready == true {
+            message = Self.text("check-ready", "API and images connected. Automatic mode will use TMDB on the next detail page.")
+        } else {
+            message = credentialSaved
+                ? Self.text("saved-links-unavailable", "Credential saved, but the connection is not ready. Automatic mode will keep using source details.")
+                : Self.text("check-unavailable", "The connection is not ready. Automatic mode will keep using source details.")
+        }
     }
+
     func warm() {
-        guard enabled, credential != nil, UserDefaults.standard.object(forKey: "detail.tmdb.enabled") as? Bool != false else { return }
-        Task { await prober.warm() }
+        guard !Task.isCancelled, !busy, !isChangingNetwork, enabled, credential != nil, preference == .automatic, warmTask == nil else { return }
+        let revision = networkRevision
+        warmTask = Task { [weak self] in
+            guard let self else { return }
+            defer { if self.networkRevision == revision { self.warmTask = nil } }
+            guard !Task.isCancelled, self.networkRevision == revision,
+                  self.enabled, self.preference == .automatic else { return }
+            await self.prober.warm()
+        }
     }
-    private func changed() { Task { await availability.networkChanged(); links = await availability.snapshot() } }
+
+    private func invalidateNetworkPresentation() {
+        networkRevision = UUID(); links = nil; isChangingNetwork = true
+        linksExpiryTask?.cancel(); linksExpiryTask = nil
+        warmTask?.cancel(); warmTask = nil
+        networkChangeTask?.cancel(); networkChangeTask = nil
+    }
+
+    func changed() {
+        invalidateNetworkPresentation()
+        let revision = networkRevision
+        NotificationCenter.default.post(name: .tmdbSessionWillChange, object: self)
+        networkChangeTask = Task { [weak self] in
+            guard let self else { return }
+            await self.availability.setMetadataRequestsEnabled(self.enabled && self.credential != nil && self.preference == .automatic)
+            await self.availability.networkChanged()
+            for repository in self.repositories.compactMap(\.value) { await repository.resetNetworkSession() }
+            guard !Task.isCancelled, self.networkRevision == revision else { return }
+            let snapshot = await self.availability.snapshot()
+            guard !Task.isCancelled, self.networkRevision == revision else { return }
+            self.minimumLinkGeneration = snapshot.generation
+            self.links = snapshot; self.isChangingNetwork = false
+            self.warm()
+        }
+    }
     private static func failureMessage(_ error: Error) -> String {
         if error is TMDBKeychainError { return text("keychain-error", "Unable to access the credential in Keychain. Try saving it again.") }
         if error as? TMDBError == .invalidCredential { return text("invalid-format", "Paste only the API Read Access Token or API Key, without a Bearer prefix or URL.") }
@@ -829,10 +1015,15 @@ extension EnvironmentValues {
                 case .search:
                     try await state.searchRelatedWork(page, refresh: refresh)
                 case .detail:
+                    let decision = state.tmdbRuntime.decisionForEntry()
                     let detail = try await state.loadRelatedWork(page.source, configurationID: page.configurationID)
                     try Task.checkCancellation(); page.detail = detail
-                    page.metadata.beginEntry(repository: state.tmdbRepository, key: state.relatedTMDBKey(for: detail), summary: detail.summary,
-                        availability: TMDBNetworkRuntime.shared.availability, enabled: UserDefaults.standard.object(forKey: "detail.tmdb.enabled") as? Bool != false, preserveNavigation: refresh, policy: TMDBMatchingPreferences.policy())
+                    if !refresh || !page.metadata.hasStartedEntry {
+                        page.metadata.beginEntry(repository: state.tmdbRepository, key: state.relatedTMDBKey(for: detail), summary: detail.summary,
+                            availability: state.tmdbRuntime.availability,
+                            enabled: decision.usesTMDB && state.tmdbRuntime.presentationDecision.usesTMDB,
+                            policy: TMDBMatchingPreferences.policy())
+                    }
                     page.metadata.receive(detail: detail, key: state.relatedTMDBKey(for: detail))
                 }
                 page.revision &+= 1
@@ -862,7 +1053,7 @@ extension EnvironmentValues {
     }
 }
 
-#if DEBUG
+#if DEBUG || OKVIDEO_PERFORMANCE_TEST
 @MainActor private final class TMDBTestCredentialStore: TMDBCredentialStoring {
     private var value: TMDBCredential?
     func load() throws -> TMDBCredential? { value }

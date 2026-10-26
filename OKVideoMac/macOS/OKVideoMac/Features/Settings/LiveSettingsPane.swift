@@ -53,6 +53,7 @@ private struct EPGSettingsSection: View {
                     Button(SettingsL10n.string("settings.organized.common.edit", "Edit…")) { editingURL = true }
                 }
                 if let errorMessage { Text(errorMessage).font(.caption).foregroundStyle(.red) }
+                if state.isSavingEPGPreferences { ProgressView().controlSize(.small) }
             }.padding(12).disabled(state.isSavingEPGPreferences)
         }.settingsAnchor("epg")
         .sheet(isPresented: $editingURL) { DefaultEPGEditor() }
@@ -72,6 +73,9 @@ private struct DefaultEPGEditor: View {
                 subtitle: SettingsL10n.string("settings.epg.default-help", "HTTP/HTTPS XMLTV or XMLTV.gz. Used only when an automatic source has no embedded EPG. Changes take effect after saving."))
             TextField("https://example.com/guide.xml.gz", text: $url).textFieldStyle(.roundedBorder)
             if let errorMessage { Text(errorMessage).font(.caption).foregroundStyle(.red) }
+            if state.isSavingEPGPreferences {
+                HStack { ProgressView().controlSize(.small); Text(SettingsL10n.string("settings.operation.saving", "Saving…")) }.font(.caption)
+            }
             HStack {
                 Button(SettingsL10n.string("settings.organized.epg.default.clear", "Clear Address")) { url = "" }
                 Spacer()
@@ -131,6 +135,9 @@ private struct SourceEPGSettingsSheet: View {
             Text(SettingsL10n.string("settings.epg.automatic-help", "Automatic: embedded M3U EPG → global default → none. The app-wide EPG switch applies to all sources."))
                 .font(.caption).foregroundStyle(.secondary)
             if let errorMessage { Text(errorMessage).font(.caption).foregroundStyle(.red) }
+            if state.isSavingEPGPreferences {
+                HStack { ProgressView().controlSize(.small); Text(SettingsL10n.string("settings.operation.saving", "Saving…")) }.font(.caption)
+            }
             HStack {
                 Button(SettingsL10n.string("settings.common.cancel", "Cancel")) {
                     if hasChanges { discard = true } else { dismiss() }
@@ -138,7 +145,7 @@ private struct SourceEPGSettingsSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Spacer()
                 Button(SettingsL10n.string("settings.epg.save", "Save")) { save() }
-                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(.defaultAction).disabled(!hasChanges)
             }
         }
         .padding(24).frame(width: 480)
@@ -299,6 +306,9 @@ struct LiveSourceSettingsPane: View {
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 Text(epgSummary(source.id)).font(.caption).foregroundStyle(.secondary)
+                if let message = state.liveSourceRefreshMessages[source.id] {
+                    Text(message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                }
                 LiveSourceValidationStatusObserver(activity: state.liveValidationActivity, sourceID: source.id) { status in
                     liveSourceValidationStatus(status)
                 }
@@ -309,14 +319,18 @@ struct LiveSourceSettingsPane: View {
             }
             .disabled(state.isSavingEPGPreferences)
             if source.sourceKind == .remote {
-                Button {
-                    Task { await state.refreshLiveSource(source.id) }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
+                if state.refreshingLiveSourceIDs.contains(source.id) {
+                    AppActivityIndicator(size: .small)
+                    Button(SettingsL10n.string("settings.common.cancel", "Cancel")) {
+                        state.cancelLiveSourceRefresh(source.id)
+                    }.disabled(state.committingLiveSourceRefreshIDs.contains(source.id))
+                } else {
+                    Button { Task { await state.refreshLiveSource(source.id) } } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(SettingsL10n.string("settings.live.refresh.help", "Refresh Live TV Source"))
                 }
-                .buttonStyle(.borderless)
-                .disabled(state.isLoading)
-                .help(SettingsL10n.string("settings.live.refresh.help", "Refresh Live TV Source"))
             }
             Button(role: .destructive) {
                 pendingDelete = source

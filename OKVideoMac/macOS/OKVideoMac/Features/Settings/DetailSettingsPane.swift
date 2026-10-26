@@ -6,19 +6,30 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct DetailSettingsPane: View {
+    @ObservedObject var runtime: TMDBNetworkRuntime = .shared
     var body: some View {
         SettingsPage(title: SettingsPane.details.title,
             subtitle: SettingsL10n.string("settings.organized.details.subtitle", "Presentation, metadata connection, and matching rules")) {
             SettingsSectionTitle(SettingsL10n.string("settings.organized.details.presentation", "Presentation"))
             SettingsCard {
-                SettingsControlRow(icon: "film", color: .secondary,
-                    title: L10n.string("detail.presentation.title", fallback: "Detail Page Style"),
-                    subtitle: SettingsL10n.string("settings.organized.details.style.help", "Automatically saved and applied to detail pages.")) {
-                    DetailPresentationPicker()
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text(L10n.string("detail.presentation.title", fallback: "Detail Page Style"))
+                        Spacer(minLength: 16)
+                        DetailPresentationPicker(runtime: runtime)
+                    }
+                    Text(L10n.string("detail.presentation.automatic-help", fallback: "Use original details until a saved credential and both TMDB connections are ready."))
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(TMDBPresentationStatus.title(runtime.presentationDecision))
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("settings.detail-presentation-status")
                 }
+                .frame(maxWidth: .infinity, alignment: .leading).padding(12)
             }.settingsAnchor("detail-style")
             SettingsSectionTitle(SettingsL10n.string("settings.organized.tmdb.connection", "TMDB Connection"))
-            SettingsCard { TMDBConnectionSummary() }.settingsAnchor("tmdb-connection")
+            SettingsCard { TMDBConnectionSummary(runtime: runtime) }.settingsAnchor("tmdb-connection")
             SettingsSectionTitle(SettingsL10n.string("settings.organized.tmdb.matching", "Matching Rules"))
             SettingsCard { TMDBRelaxedMatchingSetting() }.settingsAnchor("matching")
         }
@@ -26,7 +37,7 @@ struct DetailSettingsPane: View {
 }
 
 private struct TMDBConnectionSummary: View {
-    @ObservedObject private var runtime = TMDBNetworkRuntime.shared
+    @ObservedObject var runtime: TMDBNetworkRuntime = .shared
     @State private var showingEditor = false
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -54,10 +65,10 @@ private struct TMDBConnectionSummary: View {
                     ? SettingsL10n.string("settings.organized.tmdb.configure", "Configure…")
                     : SettingsL10n.string("settings.organized.tmdb.manage", "Manage…")) { showingEditor = true }
             }
-            Text(SettingsL10n.string("settings.organized.tmdb.scope", "This connection supplies artwork and information. It does not change your detail page style."))
+            Text(SettingsL10n.string("settings.organized.tmdb.scope", "Automatic selection uses TMDB only when the API and image connections are ready. The current page keeps its layout."))
                 .font(.caption).foregroundStyle(.secondary)
         }.padding(12)
-        .sheet(isPresented: $showingEditor) { TMDBDirectSettings() }
+        .sheet(isPresented: $showingEditor) { TMDBDirectSettings(runtime: runtime) }
     }
 }
 
@@ -65,6 +76,7 @@ enum TMDBConnectionStatus {
     static func title(_ link: TMDBAvailabilitySnapshot.Link) -> String {
         func text(_ key: String, _ fallback: String) -> String { L10n.string("tmdb.direct." + key, fallback: fallback) }
         if link.checking { return text("checking", "Checking…") }
+        if link.state == .available, link.validUntil <= ProcessInfo.processInfo.systemUptime { return text("unknown", "Not checked") }
         switch link.state {
         case .available: return text("available", "Connected")
         case .unknown: return text("unknown", "Not checked")
@@ -80,15 +92,38 @@ enum TMDBConnectionStatus {
     }
 }
 
-/// Uses the established key so existing choices survive the clearer settings UI.
-struct DetailPresentationPicker: View {
-    @AppStorage("detail.tmdb.enabled") private var tmdbEnabled = true
-    var body: some View {
-        Picker(L10n.string("detail.presentation.title", fallback: "Detail Page Style"), selection: $tmdbEnabled) {
-            Text(L10n.string("detail.presentation.tmdb", fallback: "TMDB Details")).tag(true)
-            Text(L10n.string("detail.presentation.original", fallback: "Original Details")).tag(false)
+enum TMDBPresentationStatus {
+    static func title(_ decision: TMDBPresentationDecision) -> String {
+        switch decision {
+        case .originalPreference:
+            return L10n.string("detail.presentation.status-original", fallback: "Always using original details, as selected.")
+        case .serviceDisabled:
+            return L10n.string("detail.presentation.status-disabled", fallback: "Using original details: the TMDB connection is off.")
+        case .loadingCredential:
+            return L10n.string("detail.presentation.status-loading", fallback: "Using original details while reading the credential.")
+        case .missingCredential:
+            return L10n.string("detail.presentation.status-missing", fallback: "Using original details: no TMDB credential is configured.")
+        case .unchecked:
+            return L10n.string("detail.presentation.status-unchecked", fallback: "Using original details until both connections are verified.")
+        case .checking:
+            return L10n.string("detail.presentation.status-checking", fallback: "Using original details while checking the connection.")
+        case .connectionUnavailable:
+            return L10n.string("detail.presentation.status-unavailable", fallback: "Using original details: the API or image connection is unavailable.")
+        case .ready:
+            return L10n.string("detail.presentation.status-ready", fallback: "TMDB is ready. Automatic selection applies on the next detail page.")
         }
-        .labelsHidden().pickerStyle(.segmented).frame(width: 270)
+    }
+}
+
+struct DetailPresentationPicker: View {
+    @ObservedObject var runtime: TMDBNetworkRuntime = .shared
+    var body: some View {
+        Picker(L10n.string("detail.presentation.title", fallback: "Detail Page Style"),
+            selection: Binding(get: { runtime.preference }, set: { runtime.setPreference($0) })) {
+            Text(L10n.string("detail.presentation.automatic", fallback: "Automatic (Recommended)")).tag(TMDBPresentationPreference.automatic)
+            Text(L10n.string("detail.presentation.always-original", fallback: "Always Original")).tag(TMDBPresentationPreference.original)
+        }
+        .labelsHidden().pickerStyle(.menu).frame(width: 200)
         .accessibilityIdentifier("settings.detail-presentation")
     }
 }
@@ -123,7 +158,7 @@ struct TMDBRelaxedMatchingSetting: View {
 }
 private struct TMDBDirectSettings: View {
     @Environment(\.dismiss) private var dismiss
-    @ObservedObject private var runtime = TMDBNetworkRuntime.shared
+    @ObservedObject var runtime: TMDBNetworkRuntime = .shared
     @State private var kind = TMDBCredential.Kind.readAccessToken
     @State private var value = ""
     @State private var operation: Task<Void, Never>?
@@ -140,25 +175,33 @@ private struct TMDBDirectSettings: View {
                 Picker(text("credential-type", "Credential type"), selection: $kind) {
                     Text("API Read Access Token").tag(TMDBCredential.Kind.readAccessToken)
                     Text("API Key (v3)").tag(TMDBCredential.Kind.apiKey)
-                }.frame(maxWidth: 380)
+                }.disabled(runtime.busy).frame(maxWidth: 380)
                 Spacer(minLength: 0)
                 Link(text("apply", "Get a TMDB credential"), destination: URL(string: "https://www.themoviedb.org/settings/api")!)
             }
             SecureField(runtime.credentialKind == nil ? text("paste", "Paste your credential") : text("replace", "A credential is saved. Paste here to replace it."), text: $value)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("tmdb.direct.credential")
+                .disabled(runtime.busy)
             HStack {
                 Button(text("save", "Verify & Save")) {
                     operation = Task { if await runtime.validateAndSave(kind: kind, value: value) { value = "" } }
-                }.disabled(value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }.disabled(runtime.busy || value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Button(text("check", "Check API & Images")) { operation = Task { await runtime.checkConnections() } }
-                    .disabled(runtime.credentialKind == nil || !runtime.enabled)
+                    .disabled(runtime.busy || runtime.credentialKind == nil || !runtime.enabled)
                 Button(text("delete", "Delete Credential"), role: .destructive) { confirmDelete = true }
-                    .disabled(runtime.credentialKind == nil)
+                    .disabled(runtime.busy || runtime.credentialKind == nil)
                 if runtime.busy { ProgressView().controlSize(.small) }
+                if runtime.canCancelOperation && operation != nil {
+                    Button(SettingsL10n.string("settings.common.cancel", "Cancel")) { operation?.cancel() }
+                }
             }
-            Text(runtime.credentialKind == nil ? text("not-configured", "Not configured · source playback remains available") : text("configured", "Saved in Keychain · connects directly to TMDB"))
+            Text(runtime.isLoadingCredential ? text("loading-credential", "Reading the credential from Keychain…") : runtime.credentialKind == nil ? text("not-configured", "Not configured · source playback remains available") : text("configured", "Saved in Keychain · connects directly to TMDB"))
                 .font(.caption).foregroundStyle(.secondary)
+            if runtime.busy && !runtime.canCancelOperation && !runtime.isLoadingCredential {
+                Text(text("finishing", "Finishing the credential change; closing this window will let it complete."))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if let message = runtime.message { Text(message).font(.caption).fixedSize(horizontal: false, vertical: true).textSelection(.enabled) }
             if let links = runtime.links {
                 HStack(spacing: 24) {
@@ -170,15 +213,18 @@ private struct TMDBDirectSettings: View {
             HStack {
                 Spacer()
                 Button(SettingsL10n.string("settings.organized.common.done", "Done")) {
-                    if value.isEmpty { dismiss() } else { confirmDiscard = true }
+                    if value.isEmpty || (runtime.busy && !runtime.canCancelOperation) { dismiss() }
+                    else { confirmDiscard = true }
                 }.keyboardShortcut(.cancelAction)
             }
         }
         .padding(24).frame(width: 590)
-        .disabled(runtime.busy)
-        .interactiveDismissDisabled(runtime.busy || !value.isEmpty)
+        .interactiveDismissDisabled(!value.isEmpty)
         .onAppear { if let saved = runtime.credentialKind { kind = saved } }
-        .onDisappear { operation?.cancel(); value = "" }
+        .onChange(of: runtime.credentialKind) { saved in
+            if value.isEmpty, let saved { kind = saved }
+        }
+        .onDisappear { if runtime.canCancelOperation { operation?.cancel() }; value = "" }
         .alert(SettingsL10n.string("settings.organized.tmdb.delete.title", "Delete TMDB Credential?"), isPresented: $confirmDelete) {
             Button(SettingsL10n.string("settings.common.cancel", "Cancel"), role: .cancel) {}
             Button(text("delete", "Delete Credential"), role: .destructive) {

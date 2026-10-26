@@ -1,6 +1,30 @@
 import XCTest
 @testable import OKVideoCore
 
+final class CategoryIdentityRegressionTests: XCTestCase {
+    func testProviderHomeKeepsFirstDuplicateCategoryAndDropsBlankIDs() throws {
+        let site = SiteConfiguration(key: "duplicate-fixture", name: "Fixture", type: 3, api: "csp_Fixture")
+        let payload = #"{"class":[{"type_id":"movie","type_name":"First"},{"type_id":"movie","type_name":"Duplicate"},{"type_id":" ","type_name":"Blank"},{"type_id":"series","type_name":"Series"}]}"#
+        let home = try SpiderResponseMapper.home(.string(payload), homeVideoValue: nil, site: site, baseURL: nil)
+        XCTAssertEqual(home.categories.map(\.id), ["movie", "series"])
+        XCTAssertEqual(home.categories.map(\.name), ["First", "Series"])
+    }
+
+    func testLegacyCachedDuplicatesPreserveFirstCompletePayloadAndOpaqueIDs() throws {
+        let first = VideoCategory(id: "action", name: "Configure", filters: [
+            VideoFilter(id: "mode", name: "Mode", options: [.init(name: "First", value: "1")])
+        ], contentKind: .action)
+        var legacy = SiteHome(categories: [], recommendations: [])
+        // Simulate a snapshot persisted before normalization existed.
+        legacy.categories = [first, .init(id: "action", name: "Duplicate", contentKind: .media),
+                             .init(id: "", name: "Blank"), .init(id: " action ", name: "Opaque")]
+        let restored = try JSONDecoder().decode(SiteHome.self, from: JSONEncoder().encode(legacy))
+        XCTAssertEqual(restored.categories, [first, .init(id: " action ", name: "Opaque")])
+        XCTAssertEqual(SiteHome(categories: legacy.categories, recommendations: []).categories, restored.categories)
+        XCTAssertEqual(try JSONDecoder().decode(SiteHome.self, from: JSONEncoder().encode(restored)), restored)
+    }
+}
+
 final class CategoryPaginationTests: XCTestCase {
     private let site = SiteConfiguration(key: "fixture", name: "Fixture", type: 3, api: "csp_Fixture")
     private func page(_ json: String, requested: Int = 2) throws -> VideoPage {

@@ -13,6 +13,76 @@ import OKVideoCore
 import OKVideoPersistence
 @testable import OKVideoMac
 
+@MainActor
+final class CategoryCrashRegressionTests: XCTestCase {
+    func testNativeControlToleratesDuplicateIDsAndRoutesFirstPayload() throws {
+        _ = NSApplication.shared
+        let view = NativeBrowseCategoryNavigation(frame: NSRect(x: 0, y: 0, width: 900, height: 48))
+        var selection: String?
+        view.configure(items: [
+            .init(id: "same", title: "First", selectionValue: "first"),
+            .init(id: "same", title: "Duplicate", selectionValue: "wrong"),
+            .init(id: "next", title: "Next", selectionValue: "next")
+        ], selectedID: "same") { selection = $0 }
+        view.layoutSubtreeIfNeeded()
+        XCTAssertEqual(view.partition.visibleIDs, ["same", "next"])
+        XCTAssertEqual(view.segments.segmentCount, 2)
+        XCTAssertEqual(view.segments.label(forSegment: 0), "First")
+        view.segments.selectedSegment = 0
+        XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(view.segments.action), to: view.segments.target, from: view.segments))
+        XCTAssertEqual(selection, "first")
+        view.frame.size.width = 120
+        view.needsLayout = true
+        view.layoutSubtreeIfNeeded()
+        let choices = view.makeOverflowMenu().items.compactMap { $0.representedObject as? String }
+        XCTAssertEqual(choices.count, Set(choices).count)
+    }
+
+    func testProviderIDCannotCollideWithRecommendationAndSelectionKeepsWireID() throws {
+        _ = NSApplication.shared
+        let collision = HomeCategoryNavigationLayoutPolicy.recommendationID
+        let categories = [VideoCategory(id: collision, name: "Provider category"),
+                          .init(id: "movie", name: "Movie"), .init(id: "movie", name: "Duplicate")]
+        let items = HomeCategoryNavigationLayoutPolicy.items(categories: categories, showsRecommendations: true)
+        XCTAssertEqual(items.count, 3)
+        XCTAssertEqual(Set(items.map(\.id)).count, 3)
+        let view = NativeBrowseCategoryNavigation(frame: NSRect(x: 0, y: 0, width: 1000, height: 48))
+        var selected: String? = "unset"
+        view.configure(items: items, selectedID: HomeCategoryNavigationLayoutPolicy.navigationID(for: collision)) { selected = $0 }
+        view.layoutSubtreeIfNeeded()
+        XCTAssertEqual(view.segments.selectedSegment, 1)
+        XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(view.segments.action), to: view.segments.target, from: view.segments))
+        XCTAssertEqual(selected, collision, "Provider requests must retain the original opaque ID")
+        view.segments.selectedSegment = 0
+        XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(view.segments.action), to: view.segments.target, from: view.segments))
+        XCTAssertNil(selected, "The recommendation is a separate route even when a provider uses its UI sentinel")
+    }
+
+    func testSwitchingSourcesReplacesTitlesSelectionAndAction() throws {
+        _ = NSApplication.shared
+        let view = NativeBrowseCategoryNavigation(frame: NSRect(x: 0, y: 0, width: 1000, height: 48))
+        var oldCalls = 0
+        var newSelection: String?
+        let first = HomeCategoryNavigationLayoutPolicy.items(categories: [.init(id: "shared", name: "Old"), .init(id: "old", name: "Removed")], showsRecommendations: true)
+        view.configure(items: first, selectedID: HomeCategoryNavigationLayoutPolicy.navigationID(for: "old")) { _ in oldCalls += 1 }
+        view.layoutSubtreeIfNeeded()
+        let second = HomeCategoryNavigationLayoutPolicy.items(categories: [.init(id: "shared", name: "New"), .init(id: "shared", name: "Duplicate")], showsRecommendations: false)
+        view.configure(items: second, selectedID: HomeCategoryNavigationLayoutPolicy.navigationID(for: "shared")) { newSelection = $0 }
+        view.layoutSubtreeIfNeeded()
+        XCTAssertEqual(view.partition.visibleIDs, second.map(\.id))
+        XCTAssertEqual(view.segments.label(forSegment: 0), "New")
+        XCTAssertEqual(view.segments.selectedSegment, 0)
+        XCTAssertTrue(view.more.isHidden)
+        XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(view.segments.action), to: view.segments.target, from: view.segments))
+        XCTAssertEqual(newSelection, "shared")
+        XCTAssertEqual(oldCalls, 0)
+        view.configure(items: [], selectedID: nil) { _ in }
+        view.layoutSubtreeIfNeeded()
+        XCTAssertTrue(view.partition.visibleIDs.isEmpty)
+        XCTAssertEqual(view.segments.segmentCount, 0)
+    }
+}
+
 final class BilibiliPlaybackFixTests: XCTestCase {
     func testDASHSeekAlignsBothStreamsWithoutChangingOtherDemuxers() {
         for format in ["dash", "DASH"] {
@@ -33248,7 +33318,8 @@ final class CompactBrowse118Tests: XCTestCase {
             let visible = card.subviews.compactMap { $0 as? NSTextField }.filter { !$0.isHidden }
             XCTAssertTrue(visible.allSatisfy { $0.frame.maxY <= card.bounds.height })
             XCTAssertTrue(visible.contains { $0.stringValue == (search ? "2026 · 来源 A" : remark) })
-            XCTAssertTrue(card.toolTip?.contains(item.title) == true)
+            XCTAssertNil(card.toolTip, "Hints belong to truncated title text, not the whole poster")
+            XCTAssertTrue(card.accessibilityLabel()?.contains(item.title) == true)
         }
         let bitmap = try XCTUnwrap(canvas.bitmapImageRepForCachingDisplay(in: canvas.bounds))
         canvas.cacheDisplay(in: canvas.bounds, to: bitmap)

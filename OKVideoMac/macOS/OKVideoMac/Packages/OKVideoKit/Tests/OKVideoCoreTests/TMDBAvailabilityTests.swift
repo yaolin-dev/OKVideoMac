@@ -159,3 +159,19 @@ extension TMDBAvailabilityTests {
         XCTAssertTrue(reset)
     }
 }
+
+extension TMDBAvailabilityTests {
+    func testDisablingMetadataKeepsPublicProviderArtworkAvailable() async throws {
+        let health = TMDBAvailability(), transport = ImageProbeTransport()
+        await health.setMetadataRequestsEnabled(false)
+        let allowed = await health.requestAllowed(.metadata)
+        XCTAssertFalse(allowed)
+        let client = TMDBObservedImageClient(base: transport, availability: health)
+        _ = try await client.send(.init(url: TMDBClient.imageURL(path: "/fixture.jpg", size: "w92")!))
+        let requests = await transport.requests
+        XCTAssertEqual(requests.count, 1, "Provider posters on the public CDN must not require a metadata credential")
+        await health.setMetadataRequestsEnabled(true)
+        let restored = await health.requestAllowed(.metadata)
+        XCTAssertTrue(restored)
+    }
+}

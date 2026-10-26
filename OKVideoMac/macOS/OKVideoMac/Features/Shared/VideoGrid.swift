@@ -979,15 +979,19 @@ final class NativeBrowseCategoryNavigation: NSView {
 
     func configure(items: [BrowseCategoryNavigationItem], selectedID: String?,
                    onSelect: @escaping (String?) -> Void) {
+        // Also defend the shared native control: search/custom navigation can
+        // reach it without going through SiteHome's provider normalization.
+        var seen = Set<String>()
+        let items = items.filter { seen.insert($0.id).inserted }
         self.onSelect = onSelect
         guard self.items != items || self.selectedID != selectedID else { return }
         if self.items != items {
             self.items = items
-            contentWidths = Dictionary(uniqueKeysWithValues: items.map {
-                ($0.id, max(62, ceil(($0.title as NSString).size(withAttributes: [
+            contentWidths = items.reduce(into: [:]) { widths, item in
+                widths[item.id] = max(62, ceil((item.title as NSString).size(withAttributes: [
                     .font: segments.font ?? NSFont.systemFont(ofSize: 13)
-                ]).width) + 28))
-            })
+                ]).width) + 28)
+            }
             // Measure the system's endcaps/separators; don't assume the custom
             // SwiftUI chrome's inset applies to NSSegmentedControl.
             let probe = NSSegmentedControl(labels: ["", ""], trackingMode: .selectOne, target: nil, action: nil)
@@ -1022,7 +1026,7 @@ final class NativeBrowseCategoryNavigation: NSView {
         let hasMore = !partition.hiddenIDs.isEmpty
         segments.isHidden = partition.visibleIDs.isEmpty
         more.isHidden = !hasMore
-        if renderedIDs != partition.visibleIDs {
+        if renderedIDs != partition.visibleIDs || segments.segmentCount != partition.visibleIDs.count {
             renderedIDs = partition.visibleIDs
             segments.segmentCount = renderedIDs.count
             for (index, id) in renderedIDs.enumerated() {
@@ -1161,16 +1165,12 @@ private final class PosterNativeCategoryHeaderView: NSView {
         filterDocument.subviews.forEach { $0.removeFromSuperview() }
         filterIDs.removeAll(keepingCapacity: true)
         guard let key else { return }
-        var categories = key.categories.map {
-            BrowseCategoryNavigationItem(id: $0.id, title: $0.name, categoryID: $0.id)
-        }
-        if key.showsRecommendations {
-            categories.insert(.init(id: HomeCategoryNavigationLayoutPolicy.recommendationID,
-                title: L10n.string("home.recommended", fallback: "Recommended"), categoryID: nil), at: 0)
-        }
+        let categories = HomeCategoryNavigationLayoutPolicy.items(
+            categories: key.categories, showsRecommendations: key.showsRecommendations)
         tabs.configure(items: key.navigationItems ?? categories,
             selectedID: key.navigationItems != nil ? key.navigationSelectedID :
-                (key.selectedCategoryID ?? (key.showsRecommendations ? HomeCategoryNavigationLayoutPolicy.recommendationID : nil)),
+                (key.selectedCategoryID.map { HomeCategoryNavigationLayoutPolicy.navigationID(for: $0) }
+                    ?? (key.showsRecommendations ? HomeCategoryNavigationLayoutPolicy.recommendationID : nil)),
             onSelect: { [weak self] in self?.categoryAction($0) })
         var filterX: CGFloat = 0
         for token in tokens {

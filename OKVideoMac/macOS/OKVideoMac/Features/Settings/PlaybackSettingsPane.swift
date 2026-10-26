@@ -22,7 +22,7 @@ struct PlaybackSettingsPane: View {
                 ) {
                     Toggle(SettingsL10n.string("settings.playback.hardware-decoding.title", "Hardware Decoding"), isOn: Binding(get: { state.playerHardwareDecoding }, set: { enabled in
                         guard enabled != state.playerHardwareDecoding else { return }
-                        Task { await state.togglePlayerHardwareDecoding() }
+                        Task { await state.setPlayerHardwareDecoding(enabled) }
                     })).labelsHidden().toggleStyle(.switch)
                 }
 

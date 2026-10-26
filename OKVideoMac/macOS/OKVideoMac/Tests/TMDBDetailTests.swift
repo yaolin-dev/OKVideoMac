@@ -2,6 +2,7 @@ import XCTest
 import AppKit
 import SwiftUI
 import OKVideoCore
+import OKVideoPersistence
 @testable import OKVideoMac
 
 @MainActor final class TMDBDetailTests: XCTestCase {
@@ -141,7 +142,7 @@ import OKVideoCore
         let detail = try SpiderResponseMapper.detail(payload, site: .init(key: "tvbox", name: "TVBox", type: 3, api: "csp_Test"), baseURL: nil)
         let service = TMDBDetailService(includesCast: true)
         let model = TMDBDetailModel()
-        model.beginEntry(repository: TMDBRepository(client: service), key: "tvbox-space-cast", summary: detail.summary, availability: TMDBAvailability())
+        model.beginEntry(repository: TMDBRepository(client: service), key: "tvbox-space-cast", summary: detail.summary, availability: TMDBAvailability(), enabled: true)
         let navigation = model.navigationID
         model.receive(detail: detail, key: "tvbox-space-cast")
         for _ in 0..<200 {
@@ -162,7 +163,7 @@ import OKVideoCore
         _ = try await repository.resolve(key: "a", input: .init(detail: detail))
         await health.finish(health.ticket(.images), outcome: .failure(.network))
         let model = TMDBDetailModel()
-        model.beginEntry(repository: repository, key: "a", summary: detail.summary, availability: health)
+        model.beginEntry(repository: repository, key: "a", summary: detail.summary, availability: health, enabled: true)
         model.receive(detail: detail, key: "a")
         try await Task.sleep(nanoseconds: 80_000_000)
         XCTAssertEqual(model.pageMode, .enhanced)
@@ -175,7 +176,7 @@ import OKVideoCore
         let full = Self.detail(), model = TMDBDetailModel()
         var sparse = full; sparse.summary.year = nil; sparse.summary.categoryName = nil
         let repository = TMDBRepository(client: TMDBDetailService())
-        model.beginEntry(repository: repository, key: "sparse", summary: full.summary, availability: TMDBAvailability())
+        model.beginEntry(repository: repository, key: "sparse", summary: full.summary, availability: TMDBAvailability(), enabled: true)
         let navigation = model.navigationID
         model.receive(detail: sparse, key: "sparse")
         for _ in 0..<200 {
@@ -187,7 +188,7 @@ import OKVideoCore
         XCTAssertEqual(model.navigationID, navigation)
         model.cancel()
         // A subsequent unrelated entry cannot inherit the preceding card's year.
-        model.beginEntry(repository: repository, key: "other", summary: sparse.summary, availability: TMDBAvailability())
+        model.beginEntry(repository: repository, key: "other", summary: sparse.summary, availability: TMDBAvailability(), enabled: true)
         model.receive(detail: sparse, key: "other")
         for _ in 0..<200 {
             if !model.isPreparing { break }
@@ -202,7 +203,7 @@ import OKVideoCore
         let service = TMDBDeferredDetailService()
         let repository = TMDBRepository(client: service)
         model.beginEntry(repository: repository, key: "a", summary: detail.summary,
-                         availability: TMDBAvailability(), budget: 10)
+                         availability: TMDBAvailability(), enabled: true, budget: 10)
         let navigation = model.navigationID
         model.receive(detail: detail, key: "a")
         XCTAssertEqual(model.pageMode, .source)
@@ -236,7 +237,7 @@ import OKVideoCore
         _ = try await repository.resolve(key: "a", input: .init(detail: detail))
         date.addTimeInterval(86400 * 8)
         await service.setFailure(true)
-        model.beginEntry(repository: repository, key: "a", summary: detail.summary, availability: TMDBAvailability())
+        model.beginEntry(repository: repository, key: "a", summary: detail.summary, availability: TMDBAvailability(), enabled: true)
         model.receive(detail: detail, key: "a")
         try await Task.sleep(nanoseconds: 80_000_000)
         XCTAssertEqual(model.selection?.reference.id, 1)
@@ -248,13 +249,13 @@ import OKVideoCore
     func testLeavingAndReturningJoinsPreparationWithoutSwitchingOtherPage() async throws {
         let repository = TMDBRepository(client: TMDBDetailService(delay: 150_000_000))
         let detail = Self.detail(), model = TMDBDetailModel(), health = TMDBAvailability()
-        model.beginEntry(repository: repository, key: "a", summary: detail.summary, availability: health)
+        model.beginEntry(repository: repository, key: "a", summary: detail.summary, availability: health, enabled: true)
         model.receive(detail: detail, key: "a")
         try await Task.sleep(nanoseconds: 30_000_000)
         model.beginEntry(repository: nil, key: "b", summary: detail.summary, availability: health, enabled: false)
         try await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertNil(model.selection)
-        model.beginEntry(repository: repository, key: "a", summary: detail.summary, availability: health)
+        model.beginEntry(repository: repository, key: "a", summary: detail.summary, availability: health, enabled: true)
         model.receive(detail: detail, key: "a")
         try await Task.sleep(nanoseconds: 60_000_000)
         XCTAssertEqual(model.selection?.reference.id, 1)
@@ -264,7 +265,7 @@ import OKVideoCore
     func testOriginalChoiceCannotBeOverwrittenByBackgroundPreparation() async throws {
         let detail = Self.detail(), model = TMDBDetailModel()
         model.beginEntry(repository: TMDBRepository(client: TMDBDetailService(delay: 150_000_000)),
-                         key: "a", summary: detail.summary, availability: TMDBAvailability())
+                         key: "a", summary: detail.summary, availability: TMDBAvailability(), enabled: true)
         model.receive(detail: detail, key: "a")
         try await Task.sleep(nanoseconds: 20_000_000)
         await model.useOriginal()
@@ -370,39 +371,42 @@ import OKVideoCore
         let suite = "TMDBDetailTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
+        let runtime = TMDBNetworkRuntime(credentials: TMDBMemoryCredentialStore(try TMDBCredential(kind: .apiKey, value: "fixture")),
+            defaults: defaults, transport: TMDBPolicyTransport())
+        await runtime.checkConnections()
         let detail = Self.detail(), model = TMDBDetailModel()
         let repository = TMDBRepository(client: TMDBDetailService(delay: 80_000_000))
-        model.beginEntry(repository: repository, key: "preference", summary: detail.summary, availability: TMDBAvailability())
+        model.beginEntry(repository: repository, key: "preference", summary: detail.summary, availability: runtime.availability,
+            enabled: runtime.decisionForEntry().usesTMDB)
         model.receive(detail: detail, key: "preference")
         let navigation = model.navigationID
         let host = NSHostingView(rootView: VStack {
-            DetailPresentationPicker()
-            DetailView(detail: detail, metadata: model).environmentObject(AppState(environment: nil))
+            DetailPresentationPicker(runtime: runtime)
+            DetailView(detail: detail, metadata: model, runtime: runtime).environmentObject(AppState(environment: nil, tmdbRuntime: runtime))
         }.defaultAppStorage(defaults))
         let window = NSWindow(contentRect: .init(x: -2000, y: -2000, width: 1000, height: 1000), styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = host
         defer { model.cancel(); window.close() }
         try await Task.sleep(nanoseconds: 20_000_000)
-        defaults.set(false, forKey: "detail.tmdb.enabled")
+        runtime.setPreference(.original)
         try await Task.sleep(nanoseconds: 250_000_000)
         XCTAssertFalse(model.usesUnifiedLayout)
         XCTAssertNil(model.selection, "A late metadata response must not override Original")
         XCTAssertEqual(model.navigationID, navigation)
-        XCTAssertEqual(UserDefaults(suiteName: suite)?.object(forKey: "detail.tmdb.enabled") as? Bool, false)
-        // Re-enter using the saved choice, as AppState does after navigation/relaunch.
-        model.beginEntry(repository: repository, key: "preference", summary: detail.summary, availability: TMDBAvailability(), enabled: defaults.bool(forKey: "detail.tmdb.enabled"))
-        model.receive(detail: detail, key: "preference")
+        XCTAssertEqual(TMDBPresentationPreference.load(defaults: defaults), .original)
+        model.beginEntry(repository: repository, key: "preference", summary: detail.summary, availability: runtime.availability,
+            enabled: runtime.decisionForEntry().usesTMDB)
         XCTAssertFalse(model.usesUnifiedLayout)
-        defaults.set(true, forKey: "detail.tmdb.enabled")
-        for _ in 0..<100 {
-            if model.selection != nil { break }
-            try await Task.sleep(nanoseconds: 10_000_000)
-        }
-        XCTAssertTrue(model.usesUnifiedLayout); XCTAssertNotNil(model.selection)
+        runtime.setPreference(.automatic)
+        try await waitUntil { runtime.presentationDecision.usesTMDB }
+        XCTAssertFalse(model.usesUnifiedLayout, "Background readiness must not change the current page")
+        model.setPresentationEnabled(runtime.decisionForEntry().usesTMDB, detail: detail)
+        try await waitUntil { model.selection != nil }
+        XCTAssertTrue(model.usesUnifiedLayout)
         XCTAssertEqual(detail.playSources[0].episodes[0].url, "opaque:1")
         let offline = TMDBDetailModel()
         offline.setPresentationEnabled(false, detail: detail)
-        XCTAssertFalse(offline.usesUnifiedLayout, "Original must work without a metadata repository")
+        XCTAssertFalse(offline.usesUnifiedLayout)
     }
 
     func testNativeEpisodeSingleDoubleClickAndKeyboardUseExactSourceResource() throws {
@@ -601,7 +605,7 @@ import OKVideoCore
         let work = try decoder.decode(TMDBWork.self, from: Data(#"{"id":1,"title":"测试电影","release_date":"2023-01-01","overview":"已核验的影片简介","vote_average":8.2,"vote_count":500,"backdrop_path":"/unavailable.jpg"}"#.utf8))
         let repository = TMDBRepository(client: TMDBRenderService(work: work, episodes: try decoder.decode(TMDBSeason.self, from: Data(#"{"season_number":1,"episodes":[]}"#.utf8))))
         let model = TMDBDetailModel(), detail = Self.detail()
-        model.beginEntry(repository: repository, key: "parallel", summary: detail.summary, availability: TMDBAvailability())
+        model.beginEntry(repository: repository, key: "parallel", summary: detail.summary, availability: TMDBAvailability(), enabled: true)
         let navigation = model.navigationID
         defer { model.cancel() }
         try await waitUntil { model.selection != nil && !model.isPreparing }
@@ -625,7 +629,10 @@ import OKVideoCore
         XCTAssertTrue(preview.isEnabled, "Stream loading must not redact or disable the synopsis")
         let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
         host.cacheDisplay(in: host.bounds, to: bitmap)
-        try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: URL(fileURLWithPath: "/private/tmp/OKVideoMac-TMDB-Decoupled-20261020/Validation/metadata-ready-streams-pending.png"))
+        let output = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("OKVideoMac-TMDB154-Preview")
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+            .write(to: output.appendingPathComponent("metadata-ready-streams-pending.png"))
 
         model.receive(detail: detail, key: "parallel")
         try await waitUntil { !model.isPreparing }
@@ -640,7 +647,7 @@ import OKVideoCore
         detail.summary.categoryName = "剧情 悬疑"
         detail.actors = "甲演员 乙演员 丙演员"
         let repository = TMDBRepository(client: TMDBDetailService(includesCast: true)), model = TMDBDetailModel()
-        model.beginEntry(repository: repository, key: "sparse-cast", summary: detail.summary, availability: TMDBAvailability())
+        model.beginEntry(repository: repository, key: "sparse-cast", summary: detail.summary, availability: TMDBAvailability(), enabled: true)
         defer { model.cancel() }
         try await waitUntil { model.isAwaitingSourceIdentity }
         XCTAssertNil(model.selection)
@@ -659,7 +666,7 @@ import OKVideoCore
         let repository = TMDBRepository(client: TMDBRenderService(work: work, episodes: try decoder.decode(TMDBSeason.self, from: Data(#"{"season_number":1,"episodes":[]}"#.utf8))))
         let model = TMDBDetailModel()
         var detail = Self.detail()
-        model.beginEntry(repository: repository, key: "director", summary: detail.summary, availability: TMDBAvailability())
+        model.beginEntry(repository: repository, key: "director", summary: detail.summary, availability: TMDBAvailability(), enabled: true)
         defer { model.cancel() }
         try await waitUntil { model.selection != nil }
         detail.director = "乙导演"
@@ -674,7 +681,7 @@ import OKVideoCore
     func testChangedYearRemovesEarlyPreview() async throws {
         let repository = TMDBRepository(client: TMDBDetailService()), model = TMDBDetailModel()
         var detail = Self.detail()
-        model.beginEntry(repository: repository, key: "changed-year", summary: detail.summary, availability: TMDBAvailability())
+        model.beginEntry(repository: repository, key: "changed-year", summary: detail.summary, availability: TMDBAvailability(), enabled: true)
         defer { model.cancel() }
         try await waitUntil { model.selection != nil }
         detail.summary.year = "2024"
@@ -690,7 +697,7 @@ import OKVideoCore
         let model = TMDBDetailModel(), detail = Self.detail()
         let service = TMDBDeferredDetailService(), repository = TMDBRepository(client: service)
         // No coupling to source page state or episode resources on TMDB failure.
-        model.beginEntry(repository: repository, key: "failed-tmdb", summary: detail.summary, availability: TMDBAvailability())
+        model.beginEntry(repository: repository, key: "failed-tmdb", summary: detail.summary, availability: TMDBAvailability(), enabled: true)
         model.receive(detail: detail, key: "failed-tmdb")
         defer { model.cancel() }
         XCTAssertTrue(model.isPreparing)
@@ -717,7 +724,7 @@ import OKVideoCore
     func testDetailedInputDuringPreviewCannotLoseBindingPromotion() async throws {
         let service = TMDBDeferredDetailService(), repository = TMDBRepository(client: service)
         let model = TMDBDetailModel(), detail = Self.detail()
-        model.beginEntry(repository: repository, key: "promote", summary: detail.summary, availability: TMDBAvailability())
+        model.beginEntry(repository: repository, key: "promote", summary: detail.summary, availability: TMDBAvailability(), enabled: true)
         defer { model.cancel() }
         for _ in 0..<200 {
             if await service.started { break }
@@ -735,7 +742,7 @@ import OKVideoCore
         for leavePage in [false, true] {
             let service = TMDBDeferredDetailService(), repository = TMDBRepository(client: service)
             let model = TMDBDetailModel(), detail = Self.detail()
-            model.beginEntry(repository: repository, key: "preview", summary: detail.summary, availability: TMDBAvailability())
+            model.beginEntry(repository: repository, key: "preview", summary: detail.summary, availability: TMDBAvailability(), enabled: true)
             for _ in 0..<200 {
                 if await service.started { break }
                 try await Task.sleep(nanoseconds: 10_000_000)
@@ -839,7 +846,7 @@ import OKVideoCore
             let client = TMDBSeasonIdentityProbe(multiple: explicit)
             let model = TMDBDetailModel()
             let summary = VideoSummary(siteKey: "s", siteName: "Site", videoID: "id", title: explicit ? "测试剧 第二季" : "测试剧", year: "2026", categoryName: "电视剧")
-            model.beginEntry(repository: TMDBRepository(client: client), key: "k", summary: summary, availability: TMDBAvailability())
+            model.beginEntry(repository: TMDBRepository(client: client), key: "k", summary: summary, availability: TMDBAvailability(), enabled: true)
             defer { model.cancel() }
             for _ in 0..<100 { if model.season != nil { break }; try await Task.sleep(nanoseconds: 10_000_000) }
             let number = explicit ? 2 : 1
@@ -882,7 +889,7 @@ import OKVideoCore
         let source = PlaySource(name: "线路一", episodes: (1...54).map { PlayEpisode(name: String($0), url: "opaque:\($0)") })
         let detail = VideoDetail(summary: .init(siteKey: "fixture", siteName: "Fixture", videoID: "langyabang", title: "琅琊榜 第一季", year: "2015", categoryName: "电视剧"), playSources: [source])
         let model = TMDBDetailModel()
-        model.beginEntry(repository: TMDBRepository(client: TMDBRenderService(work: work, episodes: season)), key: "langyabang", summary: detail.summary, availability: TMDBAvailability())
+        model.beginEntry(repository: TMDBRepository(client: TMDBRenderService(work: work, episodes: season)), key: "langyabang", summary: detail.summary, availability: TMDBAvailability(), enabled: true)
         let navigation = model.navigationID
         let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 8, bitsPerPixel: 32))
         for x in 0..<2 { for y in 0..<2 { bitmap.setColor(.blue, atX: x, y: y) } }
@@ -1175,8 +1182,12 @@ private struct TMDBSearchProvider: SiteProvider {
         let window = NSWindow(contentRect: .init(x: 100, y: 100, width: 1100, height: 700),
                               styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentViewController = splitController
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.regular)
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.makeKeyAndOrderFront(nil)
-        defer { window.close() }
+        defer { window.close(); NSApp.setActivationPolicy(previousPolicy) }
         try await Task.sleep(nanoseconds: 250_000_000)
         let views = descendants(try XCTUnwrap(window.contentView))
         let controller = try XCTUnwrap(views.compactMap { ($0 as? NSSplitView)?.delegate as? BrowserRootSplitController }.first)
@@ -1184,9 +1195,14 @@ private struct TMDBSearchProvider: SiteProvider {
         controller.splitViewItems[0].isCollapsed = true
         window.contentView?.layoutSubtreeIfNeeded()
         XCTAssertTrue(controller.splitViewItems[0].isCollapsed)
+        NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-        for _ in 0..<20 where NSApp.keyWindow !== window { try await Task.sleep(nanoseconds: 100_000_000) }
+        window.orderFrontRegardless()
+        for _ in 0..<40 where NSApp.keyWindow !== window {
+            window.makeKey()
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
         XCTAssertTrue(NSApp.keyWindow === window, "The command must target the active test window")
         state.focusGlobalSearch()
         try await Task.sleep(nanoseconds: 250_000_000)
@@ -1323,12 +1339,14 @@ extension TMDBDetailTests {
 
     func testDirectSaveDisableEnableDeleteAndRestartUseOneCredentialSession() async throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "TMDB-direct-test-" + UUID().uuidString))
+        defaults.set(TMDBPresentationPreference.original.rawValue, forKey: TMDBPresentationPreference.key)
         let store = TMDBMemoryCredentialStore(nil), transport = TMDBSettingsTransport()
         let runtime = TMDBNetworkRuntime(credentials: store, defaults: defaults, transport: transport)
         let saved = await runtime.validateAndSave(kind: .apiKey, value: "customer-key")
         XCTAssertTrue(saved); XCTAssertEqual(runtime.credentialKind, .apiKey)
-        _ = try await runtime.service.imageConfiguration()
+        _ = try await runtime.client.imageConfiguration()
         let restarted = TMDBNetworkRuntime(credentials: store, defaults: defaults, transport: transport)
+        await restarted.prepare()
         _ = try await restarted.client.imageConfiguration()
         await runtime.setEnabled(false)
         do { _ = try await runtime.client.imageConfiguration(); XCTFail() } catch { XCTAssertEqual(error as? TMDBError, .credentialMissing) }
@@ -1337,7 +1355,7 @@ extension TMDBDetailTests {
         await runtime.deleteCredential()
         XCTAssertNil(store.value); XCTAssertNil(runtime.credentialKind)
         do { _ = try await runtime.client.imageConfiguration(); XCTFail() } catch { XCTAssertEqual(error as? TMDBError, .credentialMissing) }
-        let requests = await transport.requests
+        let requests = await transport.requests.filter { $0.url.host == "api.themoviedb.org" }
         XCTAssertEqual(requests.count, 4)
         XCTAssertTrue(requests.allSatisfy { $0.url.host == "api.themoviedb.org" && $0.headers["Authorization"] == nil })
         XCTAssertFalse(defaults.dictionaryRepresentation().values.contains { String(describing: $0).contains("customer-key") })
@@ -1422,7 +1440,7 @@ extension TMDBDetailTests {
         let chosen = await model.choose(try XCTUnwrap(model.candidates.first))
         XCTAssertTrue(chosen); XCTAssertFalse(model.needsMatchConfirmation); XCTAssertEqual(model.binding?.manual, true)
         XCTAssertEqual(model.selection?.reference.id, 1550223)
-        model.beginEntry(repository: nil, key: nil, summary: .init(siteKey: "s", siteName: "S", videoID: "other", title: "Other"), availability: TMDBAvailability())
+        model.beginEntry(repository: nil, key: nil, summary: .init(siteKey: "s", siteName: "S", videoID: "other", title: "Other"), availability: TMDBAvailability(), enabled: true)
         XCTAssertFalse(model.needsMatchConfirmation); XCTAssertTrue(model.candidates.isEmpty); XCTAssertNil(model.selection)
         model.cancel()
     }
@@ -1440,6 +1458,7 @@ extension TMDBDetailTests {
         for width in [500.0, 900.0, 1600.0] {
             let model = TMDBDetailModel(), store = TMDBRepository(client: TMDBRenderService(work: work, episodes: season))
             let state = AppState(environment: nil)
+            model.beginEntry(repository: nil, key: nil, summary: detail.summary, availability: TMDBAvailability(), enabled: true)
             let host = NSHostingView(rootView: DetailView(detail: detail, metadata: model).environmentObject(state))
             let window = NSWindow(contentRect: .init(x: -3000, y: -3000, width: width, height: 1100), styleMask: [.titled], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false; window.contentView = host
@@ -1483,7 +1502,7 @@ extension TMDBDetailTests {
     func testRelaxedTitleOnlyEntryDoesNotWaitForSourceAndSurvivesMissingDirectorTranslation() async throws {
         let model = TMDBDetailModel(), store = TMDBRepository(client: TMDBRelaxedUIProbe())
         let card = VideoSummary(siteKey: "wogg", siteName: "玩偶哥哥", videoID: "remaining", title: "余光珍爱")
-        model.beginEntry(repository: store, key: "a", summary: card, availability: TMDBAvailability(), policy: .relaxed)
+        model.beginEntry(repository: store, key: "a", summary: card, availability: TMDBAvailability(), enabled: true, policy: .relaxed)
         defer { model.cancel() }
         try await waitUntil { model.selection != nil && !model.isPreparing }
         XCTAssertEqual(model.selection?.reference.id, 1550223); XCTAssertFalse(model.isAwaitingSourceIdentity)
@@ -1505,7 +1524,7 @@ extension TMDBDetailTests {
     func testRelaxedPreviewIsRemovedByExplicitSourceConflict() async throws {
         let model = TMDBDetailModel(), store = TMDBRepository(client: TMDBRelaxedUIProbe())
         let card = VideoSummary(siteKey: "s", siteName: "S", videoID: "1", title: "余光珍爱")
-        model.beginEntry(repository: store, key: "a", summary: card, availability: TMDBAvailability(), policy: .relaxed)
+        model.beginEntry(repository: store, key: "a", summary: card, availability: TMDBAvailability(), enabled: true, policy: .relaxed)
         defer { model.cancel() }
         try await waitUntil { model.selection != nil }
         var summary = card; summary.year = "2024"
@@ -1517,7 +1536,7 @@ extension TMDBDetailTests {
     func testDisablingRelaxedDuringPendingRequestCannotPublishLateResult() async throws {
         let service = TMDBRelaxedUIProbe(delay: 100_000_000), store = TMDBRepository(client: service), model = TMDBDetailModel()
         let detail = VideoDetail(summary: .init(siteKey: "s", siteName: "S", videoID: "1", title: "余光珍爱"))
-        model.beginEntry(repository: store, key: "a", summary: detail.summary, availability: TMDBAvailability(), policy: .relaxed)
+        model.beginEntry(repository: store, key: "a", summary: detail.summary, availability: TMDBAvailability(), enabled: true, policy: .relaxed)
         defer { model.cancel() }
         while await !service.started { await Task.yield() }
         model.setMatchPolicy(.strict, detail: detail)
@@ -1531,6 +1550,7 @@ extension TMDBDetailTests {
         if let output { try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true) }
         for width in [500.0, 900.0, 1600.0] {
             let model = TMDBDetailModel(), store = TMDBRepository(client: TMDBRelaxedUIProbe()), state = AppState(environment: nil)
+            model.beginEntry(repository: nil, key: nil, summary: detail.summary, availability: TMDBAvailability(), enabled: true)
             let host = NSHostingView(rootView: DetailView(detail: detail, metadata: model).environmentObject(state))
             let window = NSWindow(contentRect: .init(x: -3000, y: -3000, width: width, height: 1100), styleMask: [.titled], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false; window.contentView = host
@@ -1545,7 +1565,7 @@ extension TMDBDetailTests {
                 return preview.convert(preview.bounds, to: host)
             }
             let before = try await measured("source")
-            model.beginEntry(repository: store, key: "a", summary: detail.summary, availability: TMDBAvailability(), policy: .relaxed)
+            model.beginEntry(repository: store, key: "a", summary: detail.summary, availability: TMDBAvailability(), enabled: true, policy: .relaxed)
             model.receive(detail: detail, key: "a")
             try await waitUntil { model.selection != nil && !model.isPreparing }
             let enabled = try await measured("enabled")
@@ -1589,8 +1609,11 @@ private actor TMDBRelaxedUIProbe: TMDBServing {
                 }
             }.frame(maxWidth: .infinity)
         }.frame(width: 260).padding(24).background(Color(white: 0.65)))
-        let window = NSWindow(contentRect: .init(x: -2200, y: -2200, width: 308, height: 140), styleMask: [.titled], backing: .buffered, defer: false)
-        let other = NSWindow(contentRect: .init(x: -2600, y: -2200, width: 100, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
+        // Focus is a WindowServer interaction: use an on-screen window and
+        // activate after ordering it, rather than relying on off-screen focus.
+        let origin = NSScreen.main?.visibleFrame.origin ?? .zero
+        let window = NSWindow(contentRect: .init(x: origin.x + 40, y: origin.y + 40, width: 308, height: 140), styleMask: [.titled], backing: .buffered, defer: false)
+        let other = NSWindow(contentRect: .init(x: origin.x + 370, y: origin.y + 40, width: 100, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; other.isReleasedWhenClosed = false
         window.contentView = host
         let previousPolicy = NSApp.activationPolicy()
@@ -1602,8 +1625,16 @@ private actor TMDBRelaxedUIProbe: TMDBServing {
             var samples = [NSColor]()
             for active in [true, false] {
                 if active { window.makeKeyAndOrderFront(nil) } else { other.makeKeyAndOrderFront(nil) }
-                try await Task.sleep(nanoseconds: 200_000_000)
-                XCTAssertEqual(window.isKeyWindow, active)
+                NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+                NSApp.activate(ignoringOtherApps: true)
+                for _ in 0..<100 {
+                    if window.isKeyWindow == active { break }
+                    try await Task.sleep(nanoseconds: 10_000_000)
+                }
+                if active && !NSApp.isActive {
+                    throw XCTSkip("WindowServer did not grant foreground activation to the test host; active-window rendering requires a foreground session")
+                }
+                XCTAssertEqual(window.isKeyWindow, active, "appActive=\(NSApp.isActive), canBecomeKey=\(window.canBecomeKey), visible=\(window.isVisible)")
                 host.layoutSubtreeIfNeeded(); host.displayIfNeeded()
                 let play = try XCTUnwrap(BrowserKeyboardView.descendants(of: host).compactMap { $0 as? NSButton }.first { $0.accessibilityIdentifier() == "focus-play" })
                 let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
@@ -1970,4 +2001,255 @@ private struct TMDBPolishKeyboardHarness: View {
         let calls = await probe.paths
         XCTAssertEqual(calls.count, 1, "Pressure must preserve the validated disk cache")
     }
+}
+
+@MainActor final class TMDBPresentationRuntimeTests: XCTestCase {
+    private func runtime(original: Bool = false, credential: Bool = true) async throws -> (TMDBNetworkRuntime, TMDBPolicyTransport, TMDBMemoryCredentialStore) {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "TMDB-presentation-\(UUID())"))
+        if original { defaults.set(false, forKey: TMDBPresentationPreference.legacyKey) }
+        let store = TMDBMemoryCredentialStore(credential ? try TMDBCredential(kind: .apiKey, value: "test-only") : nil)
+        let transport = TMDBPolicyTransport()
+        let runtime = TMDBNetworkRuntime(credentials: store, defaults: defaults, transport: transport)
+        await runtime.prepare()
+        return (runtime, transport, store)
+    }
+    private func wait(_ condition: () -> Bool) async throws {
+        for _ in 0..<1000 { if condition() { return }; try await Task.sleep(nanoseconds: 1_000_000) }
+        XCTFail("Condition did not settle")
+    }
+    func testEntryReturnsOriginalImmediatelyThenBothLinksEnableNextEntry() async throws {
+        let (runtime, transport, _) = try await runtime()
+        let start = ProcessInfo.processInfo.systemUptime
+        XCTAssertFalse(runtime.decisionForEntry().usesTMDB)
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 0.05)
+        try await wait { runtime.presentationDecision.usesTMDB }
+        XCTAssertTrue(runtime.decisionForEntry().usesTMDB)
+        for _ in 0..<10 { runtime.warm() }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        let count = await transport.count
+        XCTAssertEqual(count, 2, "Repeated entry must reuse fresh API and image evidence")
+    }
+    func testMissingCredentialAndExplicitOriginalDoNotAutomaticallyProbe() async throws {
+        for configuration in [(false, true), (true, false)] {
+            let (runtime, transport, _) = try await runtime(original: configuration.0, credential: configuration.1)
+            if !configuration.0 { await runtime.deleteCredential() }
+            XCTAssertFalse(runtime.decisionForEntry().usesTMDB)
+            try await Task.sleep(nanoseconds: 30_000_000)
+            let count = await transport.count; XCTAssertEqual(count, 0)
+        }
+    }
+    func testExplicitOriginalWithSavedCredentialWinsAndAutomaticCanRecover() async throws {
+        let (runtime, transport, _) = try await runtime(original: true)
+        XCTAssertEqual(runtime.decisionForEntry(), .originalPreference)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        let count = await transport.count; XCTAssertEqual(count, 0)
+        runtime.setPreference(.automatic)
+        try await wait { runtime.presentationDecision.usesTMDB }
+        _ = try await runtime.service.imageConfiguration()
+        runtime.setPreference(.original)
+        XCTAssertEqual(runtime.decisionForEntry(), .originalPreference)
+        try await wait { !runtime.isChangingNetwork }
+    }
+    func testSaveWithBrokenImagesKeepsCredentialButDoesNotEnableLayout() async throws {
+        let (runtime, transport, store) = try await runtime(credential: false)
+        await transport.setImageStatus(503)
+        let saved = await runtime.validateAndSave(kind: .apiKey, value: "new-test-key")
+        XCTAssertTrue(saved); XCTAssertNotNil(store.value)
+        XCTAssertEqual(runtime.links?.metadata.state, .available)
+        XCTAssertEqual(runtime.links?.images.state, .unavailable)
+        XCTAssertFalse(runtime.presentationDecision.usesTMDB)
+        XCTAssertFalse(runtime.busy)
+        await transport.setImageStatus(200)
+        await runtime.checkConnections()
+        XCTAssertTrue(runtime.presentationDecision.usesTMDB)
+    }
+    func testNetworkChangeAndDisableInvalidateReadinessBeforeAwaiting() async throws {
+        let (runtime, transport, _) = try await runtime()
+        await runtime.checkConnections()
+        XCTAssertTrue(runtime.presentationDecision.usesTMDB)
+        await transport.setImageStatus(503)
+        runtime.changed()
+        XCTAssertFalse(runtime.decisionForEntry().usesTMDB)
+        try await wait { runtime.links?.images.state == .unavailable }
+        await runtime.setEnabled(false)
+        XCTAssertEqual(runtime.decisionForEntry(), .serviceDisabled)
+    }
+    func testRejectedReplacementPreservesPreviouslyReadyCredential() async throws {
+        let (runtime, transport, store) = try await runtime()
+        await runtime.checkConnections()
+        let initial = store.value
+        await transport.setAPIStatus(401)
+        let saved = await runtime.validateAndSave(kind: .apiKey, value: "rejected")
+        XCTAssertFalse(saved); XCTAssertEqual(store.value, initial)
+        XCTAssertTrue(runtime.presentationDecision.usesTMDB)
+    }
+    func testCancelledImageCheckStopsProbeAndRetainsCommittedCredential() async throws {
+        let (runtime, transport, store) = try await runtime(credential: false)
+        await transport.setSuspendImages(true)
+        let task = Task { await runtime.validateAndSave(kind: .apiKey, value: "committed") }
+        try await wait { runtime.links?.images.checking == true }
+        task.cancel()
+        let saved = await task.value
+        XCTAssertTrue(saved); XCTAssertNotNil(store.value)
+        XCTAssertFalse(runtime.busy); XCTAssertFalse(runtime.links?.images.checking == true)
+        XCTAssertFalse(runtime.presentationDecision.usesTMDB)
+        for _ in 0..<1000 { if await transport.cancelledImages > 0 { break }; await Task.yield() }
+        let cancelled = await transport.cancelledImages; XCTAssertEqual(cancelled, 1)
+    }
+}
+
+private actor TMDBPolicyTransport: HTTPClient {
+    private var apiStatus = 200, imageStatus = 200
+    private var suspendImages = false
+    private(set) var count = 0
+    private(set) var cancelledImages = 0
+    func setAPIStatus(_ value: Int) { apiStatus = value }
+    func setImageStatus(_ value: Int) { imageStatus = value }
+    func setSuspendImages(_ value: Bool) { suspendImages = value }
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        count += 1
+        let image = request.url.host == "image.tmdb.org"
+        if image && suspendImages {
+            do { try await Task.sleep(nanoseconds: 60_000_000_000) }
+            catch { cancelledImages += 1; throw error }
+        }
+        let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")!
+        return .init(url: request.url, statusCode: image ? imageStatus : apiStatus, headers: [:],
+                     body: image ? png : Data(#"{"images":{"still_sizes":["w300"]}}"#.utf8))
+    }
+}
+
+extension TMDBPresentationRuntimeTests {
+    func testSettingsMenuPersistsAndConnectionStatesFitNarrowAndWidePanes() async throws {
+        let (runtime, transport, _) = try await runtime(credential: false)
+        let state = AppState(environment: nil, tmdbRuntime: runtime)
+        let output = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("OKVideoMac-TMDB154-Preview")
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        for width in [480.0, 920.0] {
+            let host = NSHostingView(rootView: DetailSettingsPane(runtime: runtime)
+                .environmentObject(state).environmentObject(state.settingsNavigation))
+            let window = NSWindow(contentRect: .init(x: -3000, y: -3000, width: width, height: 760),
+                styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false; window.contentView = host
+            defer { window.close() }
+            try await Task.sleep(nanoseconds: 80_000_000)
+            host.layoutSubtreeIfNeeded()
+            let picker = try XCTUnwrap(BrowserKeyboardView.descendants(of: host).compactMap { $0 as? NSPopUpButton }.first)
+            func capture(_ name: String) async throws {
+                try await Task.sleep(nanoseconds: 80_000_000); host.layoutSubtreeIfNeeded()
+                let frame = picker.convert(picker.bounds, to: host)
+                XCTAssertGreaterThanOrEqual(frame.minX, 0)
+                XCTAssertLessThanOrEqual(frame.maxX, width)
+                let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                    .write(to: output.appendingPathComponent("settings-\(Int(width))-\(name).png"))
+            }
+            await runtime.deleteCredential()
+            await runtime.setEnabled(true)
+            XCTAssertEqual(runtime.presentationDecision, .missingCredential)
+            try await capture("missing")
+            let menu = try XCTUnwrap(picker.menu)
+            XCTAssertNotNil(menu.item(at: 1)?.action)
+            menu.performActionForItem(at: 1)
+            XCTAssertEqual(runtime.preference, .original)
+            XCTAssertEqual(runtime.presentationDecision, .originalPreference)
+            try await capture("original")
+            XCTAssertNotNil(menu.item(at: 0)?.action)
+            menu.performActionForItem(at: 0)
+            XCTAssertEqual(runtime.preference, .automatic)
+            await transport.setImageStatus(200)
+            let saved = await runtime.validateAndSave(kind: .apiKey, value: "preview-fixture-only")
+            XCTAssertTrue(saved); XCTAssertEqual(runtime.presentationDecision, .ready)
+            try await capture("ready")
+            await transport.setImageStatus(503)
+            runtime.changed()
+            await runtime.checkConnections()
+            XCTAssertEqual(runtime.presentationDecision, .connectionUnavailable)
+            try await capture("unavailable")
+            await runtime.setEnabled(false)
+            XCTAssertEqual(runtime.presentationDecision, .serviceDisabled)
+            try await capture("disabled")
+        }
+    }
+
+    func testMainEntryUsesOriginalUntilReadyAndNeverChangesMountedLayoutAutomatically() async throws {
+        let (runtime, transport, _) = try await runtime()
+        let provider = TMDBEntryProvider()
+        let state = AppState(environment: nil, initialProviders: [provider.site.key: provider], tmdbRuntime: runtime)
+        await state.loadDetail(provider.summary("one"))
+        XCTAssertFalse(state.tmdbDetailModel.usesUnifiedLayout)
+        XCTAssertNotNil(state.selectedDetail)
+        await runtime.checkConnections()
+        XCTAssertTrue(runtime.presentationDecision.usesTMDB)
+        XCTAssertFalse(state.tmdbDetailModel.usesUnifiedLayout)
+        await state.loadDetail(provider.summary("two"))
+        XCTAssertTrue(state.tmdbDetailModel.usesUnifiedLayout)
+        let navigation = state.tmdbDetailModel.navigationID
+        await transport.setImageStatus(503)
+        runtime.changed()
+        XCTAssertTrue(state.tmdbDetailModel.usesUnifiedLayout, "Current TMDB layout must survive route changes")
+        XCTAssertTrue(state.tmdbDetailModel.networkRequestsSuspended)
+        XCTAssertEqual(state.tmdbDetailModel.navigationID, navigation)
+        await state.loadDetail(provider.summary("three"))
+        XCTAssertFalse(state.tmdbDetailModel.usesUnifiedLayout)
+    }
+
+    func testRelatedEntryUsesTheSamePolicyAndRefreshDoesNotPromoteOriginal() async throws {
+        let (runtime, _, _) = try await runtime()
+        let provider = TMDBEntryProvider()
+        let state = AppState(environment: nil, initialProviders: [provider.site.key: provider], tmdbRuntime: runtime)
+        let configuration = StoredConfiguration(name: "TMDB Fixture", sourceKind: .pasted,
+            rawData: Data(#"{"sites":[{"key":"entry","name":"Entry","type":1,"api":"https://fixture.invalid"}]}"#.utf8), isActive: true)
+        try state.setSettingsConfigurationsForTesting([configuration])
+        let browser = TMDBRelatedBrowser()
+        let original = TMDBRelatedPage(kind: .detail, title: "One", source: provider.summary("one"), configurationID: configuration.id)
+        browser.load(original, state: state)
+        await original.task?.value
+        XCTAssertNotNil(original.detail); XCTAssertFalse(original.metadata.usesUnifiedLayout)
+        await runtime.checkConnections()
+        browser.load(original, state: state, refresh: true)
+        await original.task?.value
+        XCTAssertFalse(original.metadata.usesUnifiedLayout)
+        let enhanced = TMDBRelatedPage(kind: .detail, title: "Two", source: provider.summary("two"), configurationID: configuration.id)
+        browser.load(enhanced, state: state)
+        await enhanced.task?.value
+        XCTAssertNotNil(enhanced.detail); XCTAssertTrue(enhanced.metadata.usesUnifiedLayout)
+        runtime.setPreference(.original)
+        let next = TMDBRelatedPage(kind: .detail, title: "Three", source: provider.summary("three"), configurationID: configuration.id)
+        browser.load(next, state: state)
+        await next.task?.value
+        XCTAssertFalse(next.metadata.usesUnifiedLayout)
+    }
+
+    func testSuspendingCurrentPageRetainsVerifiedMetadataAndNavigation() async throws {
+        let detail = TMDBDetailTests.detail(), model = TMDBDetailModel()
+        let repository = TMDBRepository(client: TMDBDetailService())
+        model.beginEntry(repository: repository, key: "freeze", summary: detail.summary, availability: TMDBAvailability(), enabled: true)
+        model.receive(detail: detail, key: "freeze")
+        try await wait { model.selection != nil && !model.isPreparing }
+        let selected = model.selection, navigation = model.navigationID
+        model.suspendNetworkRequests()
+        XCTAssertTrue(model.usesUnifiedLayout)
+        XCTAssertEqual(model.selection, selected)
+        XCTAssertEqual(model.navigationID, navigation)
+        model.receive(detail: detail, key: "freeze")
+        XCTAssertFalse(model.isPreparing)
+        model.setPresentationEnabled(false, detail: detail)
+        XCTAssertFalse(model.usesUnifiedLayout)
+        XCTAssertEqual(model.navigationID, navigation)
+    }
+}
+
+private struct TMDBEntryProvider: SiteProvider {
+    let site = SiteConfiguration(key: "entry", name: "Entry", type: 1, api: "https://fixture.invalid")
+    var capability: SiteCapability { .standardJSON }
+    func summary(_ id: String) -> VideoSummary { .init(siteKey: site.key, siteName: site.name, videoID: id, title: "Fixture \(id)") }
+    func home() async throws -> SiteHome { .init(categories: [], recommendations: []) }
+    func category(id: String, page: Int, filters: [String: String]) async throws -> VideoPage { throw TMDBError.invalidInput }
+    func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage { throw TMDBError.invalidInput }
+    func detail(id: String) async throws -> VideoDetail {
+        .init(summary: summary(id), synopsis: "Source information", playSources: [.init(name: "Line A", episodes: [.init(name: "Episode 1", url: "opaque:1"), .init(name: "Episode 2", url: "opaque:2")])])
+    }
+    func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult { throw TMDBError.invalidInput }
 }

@@ -1018,6 +1018,7 @@ final class MPVPlayerClient: PlayerClient {
         renderControlMode: MPVRenderControlMode = .configured(),
         compatibilityPolicy: PlaybackCompatibilityPolicy = .existing,
         audioPreference: PlaybackAudioPreference = .init(),
+        hardwareDecoding: Bool = true,
         mediaProxyResolver: @escaping @Sendable (ResolvedMedia) -> MediaProxyDecision? = {
             PlayerMediaNetworkPolicy.decision(for: $0)
         }
@@ -1072,7 +1073,7 @@ final class MPVPlayerClient: PlayerClient {
             try setOption("keep-open", value: "yes", client: created)
             try setOption("sid", value: "no", client: created)
             try setOption("vo", value: "libmpv", client: created)
-            try setOption("hwdec", value: "auto-safe", client: created)
+            try setOption("hwdec", value: hardwareDecoding ? "auto-safe" : "no", client: created)
             for option in performanceProfile.mpvOptions {
                 try setOption(option.name, value: option.value, client: created)
             }
@@ -3203,9 +3204,17 @@ final class PlayerLifecycleController {
     private var rememberedSubtitleBorderSize: Double = 3
     private var rememberedAudioDelay: TimeInterval = 0
     private var rememberedAspectRatio: String?
-    private var rememberedHardwareDecoding = true
+    static let hardwareDecodingKey = "player.hardwareDecoding"
+    private let hardwareDefaults: UserDefaults?
+    private(set) var rememberedHardwareDecoding: Bool
+    private var hardwareRevision: UInt64 = 0
+    private var hardwareApplication: Task<Void, Error>?
+    var hardwareCommandSuspensionForTesting: (() async throws -> Void)?
 
-    init(mode: PlayerTeardownMode = .configured(), audioPreferences: PlaybackAudioPreferenceStore? = nil) {
+    init(mode: PlayerTeardownMode = .configured(), audioPreferences: PlaybackAudioPreferenceStore? = nil,
+         hardwareDefaults: UserDefaults? = nil) {
+        self.hardwareDefaults = hardwareDefaults
+        rememberedHardwareDecoding = hardwareDefaults?.object(forKey: Self.hardwareDecodingKey) as? Bool ?? true
         self.mode = mode
         self.audioPreferences = audioPreferences ?? PlaybackAudioPreferenceStore()
         var captured: AsyncStream<PlayerEvent>.Continuation!
@@ -3215,7 +3224,7 @@ final class PlayerLifecycleController {
         continuation = captured
 
         do {
-            let player = try MPVPlayerClient(teardownMode: mode, audioPreference: self.audioPreference)
+            let player = try MPVPlayerClient(teardownMode: mode, audioPreference: self.audioPreference, hardwareDecoding: rememberedHardwareDecoding)
             currentClient = player
             startForwardingEvents(from: player)
         } catch {
@@ -3605,8 +3614,33 @@ final class PlayerLifecycleController {
     }
 
     func setHardwareDecoding(enabled: Bool) async throws {
-        rememberedHardwareDecoding = enabled
-        try await requireClient().setHardwareDecoding(enabled: enabled)
+        if rememberedHardwareDecoding != enabled {
+            rememberedHardwareDecoding = enabled
+            hardwareRevision &+= 1
+            hardwareDefaults?.set(enabled, forKey: Self.hardwareDecodingKey)
+        }
+        // Saving intent is valid even after the native client has been destroyed.
+        // One worker applies the latest choice; an older completion cannot win.
+        if let hardwareApplication { try await hardwareApplication.value; return }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.hardwareApplication = nil }
+            while !self.isShuttingDown, let player = self.currentClient {
+                let revision = self.hardwareRevision
+                let enabled = self.rememberedHardwareDecoding
+                do {
+                    try await self.hardwareCommandSuspensionForTesting?()
+                    try await player.setHardwareDecoding(enabled: enabled)
+                } catch {
+                    if self.isShuttingDown { return }
+                    if self.currentClient !== player || self.hardwareRevision != revision { continue }
+                    throw error
+                }
+                if self.currentClient === player && self.hardwareRevision == revision { return }
+            }
+        }
+        hardwareApplication = task
+        try await task.value
     }
 
     func screenshot(to url: URL) async throws {
@@ -3770,9 +3804,11 @@ final class PlayerLifecycleController {
         try await player.setSubtitleBorderSize(rememberedSubtitleBorderSize)
         try await player.setAudioDelay(rememberedAudioDelay)
         try await player.setAspectRatio(rememberedAspectRatio)
-        try await player.setHardwareDecoding(
-            enabled: rememberedHardwareDecoding
-        )
+        while true {
+            let revision = hardwareRevision
+            try await player.setHardwareDecoding(enabled: rememberedHardwareDecoding)
+            if revision == hardwareRevision { break }
+        }
     }
 }
 

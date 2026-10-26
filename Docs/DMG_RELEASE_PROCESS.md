@@ -1,5 +1,9 @@
 # DMG Release Process
 
+## 0.9.0 publication preparation
+
+0.9.0 (155) retains the existing signing identity, notary profile, stable HTTPS feed and Sparkle public key. This release must independently pass the existing gates; its final result is recorded in [0.9.0 verification](RELEASE_VALIDATION_0.9.0.md).
+
 ## Published 0.8.7
 
 当前正式版本为 0.8.7（Build 140），tag 固定 `8208c1ea6db514cb35bbd32bbed8a15ade06cb03`。Developer ID、Hardened Runtime、Apple Accepted `7fdc4022-c334-4d22-b702-a71103687b49`、DMG／安装 App staple、Gatekeeper、安装和16项公开资产均通过。DMG SHA-256 `c7edf4f13db98098d5872e3bed04a611ef42c58e53167e46e9a4551fb5d34204`；见[正式验证](RELEASE_VALIDATION_0.8.7.md)。

@@ -9,31 +9,26 @@ struct DataSettingsPane: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var navigation: SettingsNavigationState
     @State private var posterCacheSize = SettingsL10n.string("settings.cache.calculating", "Calculating…")
-    @State private var pendingBackupImport: PortableBackupPreview?
-    @State private var isBackupBusy = false
-    @State private var backupOperationMessage: String?
     @State private var pendingHistoryDeletion: [HistoryRecord]?
     @State private var historyDeletionName = ""
-    @State private var cacheMessage: String?
     @State private var pendingRetention: Int?
-    @State private var isClearingCache = false
     private let diagnostics = AppLaunchSession.current?.diagnostics
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Picker(SettingsL10n.string("settings.organized.data.sections", "Data Categories"), selection: $navigation.dataTab) {
                 ForEach(SettingsDataTab.allCases) { tab in Text(tab.title).tag(tab) }
-            }.labelsHidden().pickerStyle(.segmented).disabled(isBackupBusy).frame(maxWidth: 440).padding(.horizontal, 32).padding(.top, 4).padding(.bottom, 12)
+            }.labelsHidden().pickerStyle(.segmented).disabled(state.isBackupBusy).frame(maxWidth: 440).padding(.horizontal, 32).padding(.top, 4).padding(.bottom, 12)
             switch navigation.dataTab {
             case .privacy: privacySettings
             case .storage: cacheSettings
             case .backup: backupSettings
             }
         }
-        .sheet(item: $pendingBackupImport) { preview in
+        .sheet(item: $state.pendingBackupImport) { preview in
             PortableBackupImportPreviewSheet(preview: preview,
-                cancel: { pendingBackupImport = nil },
-                confirm: { pendingBackupImport = nil; importPortableBackup(from: preview.fileURL) })
+                cancel: { state.pendingBackupImport = nil },
+                confirm: { state.pendingBackupImport = nil; importPortableBackup(from: preview.fileURL) })
                 .frame(width: 560, height: 440)
         }
         .alert(SettingsL10n.string("settings.organized.history.clear.title", "Clear Watch History?"), isPresented: Binding(get: { pendingHistoryDeletion != nil }, set: { if !$0 { pendingHistoryDeletion = nil } })) {
@@ -137,21 +132,16 @@ struct DataSettingsPane: View {
                             .foregroundColor(.secondary)
                             .monospacedDigit()
                         Button(SettingsL10n.string("settings.organized.cache.clear", "Clear Image Cache")) {
-                            isClearingCache = true; cacheMessage = nil
                             Task {
-                                let cleared = await state.clearPosterCache()
+                                _ = await state.clearPosterCache()
                                 await refreshCacheSize()
-                                cacheMessage = cleared
-                                    ? SettingsL10n.string("settings.organized.cache.cleared", "Image cache cleared.")
-                                    : SettingsL10n.string("settings.organized.cache.failed", "Unable to clear the image cache. Try again.")
-                                isClearingCache = false
                             }
-                        }.disabled(isClearingCache)
-                        if isClearingCache { ProgressView().controlSize(.small) }
+                        }.disabled(state.isClearingPosterCache)
+                        if state.isClearingPosterCache { ProgressView().controlSize(.small) }
                     }
                 }
             }.settingsAnchor("image-cache")
-            if let cacheMessage { Text(cacheMessage).font(.caption).foregroundStyle(.secondary) }
+            if let cacheMessage = state.posterCacheOperationMessage { Text(cacheMessage).font(.caption).foregroundStyle(.secondary) }
 
             SettingsCard {
                 SettingsControlRow(icon: "externaldrive", color: .secondary,
@@ -232,7 +222,7 @@ struct DataSettingsPane: View {
                         exportPortableBackup()
                     }
                     .disabled(
-                        isBackupBusy || state.activeConfigurationRecord == nil
+                        state.isBackupBusy || state.activeConfigurationRecord == nil
                     )
                 }
                 SettingsDivider()
@@ -245,27 +235,27 @@ struct DataSettingsPane: View {
                     Button(SettingsL10n.string("settings.backup.choose", "Choose Backup…")) {
                         choosePortableBackup()
                     }
-                    .disabled(isBackupBusy)
+                    .disabled(state.isBackupBusy)
                 }
             }.settingsAnchor("backup")
 
             Text(SettingsL10n.string("settings.organized.backup.not-whole-app", "This is a configuration backup, not a complete backup of the application."))
                 .font(.caption).foregroundStyle(.secondary)
 
-            if isBackupBusy || backupOperationMessage != nil {
+            if state.isBackupBusy || state.backupOperationMessage != nil {
                 SettingsSectionTitle(SettingsL10n.string("settings.common.status", "Status"))
                 SettingsCard {
                     HStack(spacing: 10) {
-                        if isBackupBusy {
+                        if state.isBackupBusy {
                             AppActivityIndicator(size: .small)
                         } else {
                             Image(systemName: "checkmark.circle.fill")
                                 .foregroundColor(.green)
                         }
                         Text(
-                            isBackupBusy
+                            state.isBackupBusy
                                 ? SettingsL10n.string("settings.backup.processing", "Validating and processing the backup…")
-                                : backupOperationMessage ?? ""
+                                : state.backupOperationMessage ?? ""
                         )
                         .foregroundColor(.secondary)
                         Spacer()
@@ -331,25 +321,25 @@ struct DataSettingsPane: View {
     }
 
     private func exportPortableBackup() {
+        guard !state.isBackupBusy else { return }
         guard let record = state.activeConfigurationRecord else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.okVideoBackup]
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = portableBackupFileName(for: record.name)
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        isBackupBusy = true
-        backupOperationMessage = nil
+        state.backupOperationMessage = nil
         Task { @MainActor in
-            defer { isBackupBusy = false }
             do {
                 let preview = try await state.exportPortableBackup(to: url)
-                backupOperationMessage = SettingsL10n.string(
+                state.backupOperationMessage = SettingsL10n.string(
                     "settings.backup.export.success",
                     "Exported “%@” with %d history items.",
                     preview.configurationName,
                     preview.historyCount
                 ) + " · " + SettingsL10n.string("settings.organized.backup.favorites.count", "%d favorites", preview.favoriteCount)
             } catch {
+                state.backupOperationMessage = RuntimeUserFacingMessageMapper.message(for: error)
                 state.presentedError = UserFacingError(
                     title: SettingsL10n.string("settings.backup.export.failed", "Backup Export Failed"),
                     message: RuntimeUserFacingMessageMapper.message(for: error)
@@ -359,6 +349,7 @@ struct DataSettingsPane: View {
     }
 
     private func choosePortableBackup() {
+        guard !state.isBackupBusy else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.okVideoBackup]
         panel.canChooseFiles = true
@@ -366,15 +357,14 @@ struct DataSettingsPane: View {
         panel.allowsMultipleSelection = false
         panel.prompt = SettingsL10n.string("settings.backup.validate", "Validate Backup")
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        isBackupBusy = true
-        backupOperationMessage = nil
+        state.backupOperationMessage = nil
         Task { @MainActor in
-            defer { isBackupBusy = false }
             do {
-                pendingBackupImport = try await state.inspectPortableBackup(
+                state.pendingBackupImport = try await state.inspectPortableBackup(
                     at: url
                 )
             } catch {
+                state.backupOperationMessage = RuntimeUserFacingMessageMapper.message(for: error)
                 state.presentedError = UserFacingError(
                     title: SettingsL10n.string("settings.backup.read.failed", "Unable to Read Backup"),
                     message: RuntimeUserFacingMessageMapper.message(for: error)
@@ -384,16 +374,15 @@ struct DataSettingsPane: View {
     }
 
     private func importPortableBackup(from url: URL) {
-        isBackupBusy = true
-        backupOperationMessage = nil
+        guard !state.isBackupBusy else { return }
+        state.backupOperationMessage = nil
         Task { @MainActor in
-            defer { isBackupBusy = false }
             do {
                 let summary = try await state.importPortableBackup(from: url)
                 let safetyText = summary.safetyBackupURL == nil
                     ? ""
                     : SettingsL10n.string("settings.backup.restore.safety-suffix", " Your previous data was saved as a safety backup.")
-                backupOperationMessage = SettingsL10n.string(
+                state.backupOperationMessage = SettingsL10n.string(
                     "settings.backup.restore.success",
                     "Restored “%@”. Checked %d history items and added or updated %d.%@",
                     summary.configurationName,
@@ -402,6 +391,7 @@ struct DataSettingsPane: View {
                     safetyText
                 )
             } catch {
+                state.backupOperationMessage = RuntimeUserFacingMessageMapper.message(for: error)
                 state.presentedError = UserFacingError(
                     title: SettingsL10n.string("settings.backup.restore.failed", "Backup Restore Failed"),
                     message: RuntimeUserFacingMessageMapper.message(for: error)

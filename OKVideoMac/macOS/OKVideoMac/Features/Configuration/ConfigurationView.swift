@@ -171,10 +171,16 @@ struct ConfigurationView: View {
                     subtitle: L10n.string("providers.current.subtitle", fallback: "%@ · Used for the video home page and search", ConfigurationPresentationKind.resolve(active).rawValue)
                 ) {
                     if active.sourceKind == .remote {
-                        Button(L10n.string("providers.update", fallback: "Update")) {
-                            Task { await state.refreshActiveConfiguration() }
+                        if state.refreshingConfigurationID == active.id {
+                            ProgressView().controlSize(.small)
+                            Button(L10n.string("common.cancel", fallback: "Cancel")) { state.cancelConfigurationRefresh() }
+                                .disabled(state.isCommittingConfigurationRefresh)
+                        } else {
+                            Button(L10n.string("providers.update", fallback: "Update")) {
+                                Task { await state.refreshActiveConfiguration() }
+                            }
+                            .disabled(state.isSwitchingConfiguration)
                         }
-                        .disabled(state.isLoading)
                     }
                     Button(L10n.string("providers.details", fallback: "Details")) { sheet = .details(active) }
                     Menu {
@@ -186,6 +192,10 @@ struct ConfigurationView: View {
                     .accessibilityLabel(L10n.string("providers.more", fallback: "More Actions"))
                 }
             }
+        }
+
+        if let message = state.configurationRefreshMessage {
+            Text(message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
         }
 
         if let editSearchScope {
@@ -421,6 +431,7 @@ private struct ProviderDetailsSheet: View {
 }
 
 private struct XtreamProviderEditorSheet: View {
+    private enum Operation { case testing, saving }
     private enum OperationStatus: Equatable {
         case success(String)
         case failure(String)
@@ -435,6 +446,7 @@ private struct XtreamProviderEditorSheet: View {
     @State private var username = ""
     @State private var password = ""
     @State private var operationTask: Task<Void, Never>?
+    @State private var operation: Operation?
     @State private var status: OperationStatus?
 
     init(
@@ -519,7 +531,7 @@ private struct XtreamProviderEditorSheet: View {
                     SecureField("", text: $password)
                         .textContentType(.password)
                 }
-            }
+            }.disabled(isBusy)
 
             Text(
                 record == nil
@@ -558,11 +570,11 @@ private struct XtreamProviderEditorSheet: View {
                     operationTask?.cancel()
                     operationTask = nil
                     isPresented = false
-                }
+                }.disabled(operation == .saving && state.isCommittingXtreamProvider)
                 Button {
                     testConnection()
                 } label: {
-                    if isBusy {
+                    if operation == .testing {
                         HStack(spacing: 6) {
                             AppActivityIndicator(size: .small)
                             Text(L10n.string("xtream.testing", fallback: "Testing"))
@@ -580,7 +592,14 @@ private struct XtreamProviderEditorSheet: View {
                 Button {
                     save()
                 } label: {
-                    Text(record == nil ? L10n.string("providers.add-use", fallback: "Add and Use") : L10n.string("common.save", fallback: "Save"))
+                    if operation == .saving {
+                        HStack(spacing: 6) {
+                            AppActivityIndicator(size: .small)
+                            Text(SettingsL10n.string("settings.operation.saving", "Saving…"))
+                        }
+                    } else {
+                        Text(record == nil ? L10n.string("providers.add-use", fallback: "Add and Use") : L10n.string("common.save", fallback: "Save"))
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
@@ -589,8 +608,12 @@ private struct XtreamProviderEditorSheet: View {
         }
         .padding(22)
         .interactiveDismissDisabled(isBusy)
+        .onChange(of: displayName) { _ in status = nil }
+        .onChange(of: serverURL) { _ in status = nil }
+        .onChange(of: username) { _ in status = nil }
+        .onChange(of: password) { _ in status = nil }
         .onDisappear {
-            operationTask?.cancel()
+            if !state.isCommittingXtreamProvider { operationTask?.cancel() }
             operationTask = nil
         }
     }
@@ -627,7 +650,9 @@ private struct XtreamProviderEditorSheet: View {
     private func testConnection() {
         guard operationTask == nil else { return }
         status = nil
+        operation = .testing
         operationTask = Task {
+            defer { operationTask = nil; operation = nil }
             do {
                 let account = try await state.testXtreamProviderConnection(
                     serverURL: serverURL,
@@ -666,7 +691,9 @@ private struct XtreamProviderEditorSheet: View {
     private func save() {
         guard operationTask == nil else { return }
         status = nil
+        operation = .saving
         operationTask = Task {
+            defer { operationTask = nil; operation = nil }
             let succeeded = await state.saveXtreamProvider(
                 id: record?.id,
                 displayName: displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

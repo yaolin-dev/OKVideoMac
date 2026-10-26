@@ -26,7 +26,7 @@ struct CompatibilitySettingsPane: View {
                     subtitle: managedRuntimeDetail
                 ) {
                     HStack(spacing: 8) {
-                        if state.managedRuntimeInstallationState.isBusy {
+                        if state.isAndroidRuntimeBusy || state.managedRuntimeInstallationState.isBusy {
                             if let progress = state
                                 .managedRuntimeInstallationState.progress {
                                 ProgressView(value: progress, total: 1)
@@ -49,7 +49,7 @@ struct CompatibilitySettingsPane: View {
                         }
                         .buttonStyle(.bordered)
                         .disabled(
-                            state.managedRuntimeInstallationState.isBusy
+                            state.isAndroidRuntimeBusy || state.managedRuntimeInstallationState.isBusy
                                 || state.androidRuntimeStatus.isRunning
                         )
                     }
@@ -112,7 +112,7 @@ struct CompatibilitySettingsPane: View {
                     subtitle: managedRuntimeDetail
                 ) {
                     HStack(spacing: 8) {
-                        if state.managedRuntimeInstallationState.isBusy {
+                        if state.isAndroidRuntimeBusy || state.managedRuntimeInstallationState.isBusy {
                             if let progress = state
                                 .managedRuntimeInstallationState.progress {
                                 ProgressView(value: progress, total: 1)
@@ -242,14 +242,29 @@ struct CompatibilitySettingsPane: View {
                 ) {
                     Button(SettingsL10n.string("settings.common.export", "Export…")) {
                         exportDiagnostics()
-                    }
+                    }.disabled(state.isExportingDiagnostics)
+                    if state.isExportingDiagnostics { ProgressView().controlSize(.small) }
+                }
+                if let message = state.diagnosticsExportMessage {
+                    HStack {
+                        Text(message).font(.caption).foregroundStyle(.secondary)
+                        if let url = state.diagnosticsExportURL {
+                            Button(SettingsL10n.string("settings.diagnostics.reveal", "Show in Finder")) {
+                                NSWorkspace.shared.activateFileViewerSelecting([url])
+                            }
+                        }
+                    }.padding(.horizontal, 16).padding(.bottom, 12)
                 }
                 SettingsDivider()
                 SettingsControlRow(icon: "checkmark.circle", color: .secondary,
                     title: SettingsL10n.string("settings.organized.runtime.check", "Check Runtime"),
                     subtitle: SettingsL10n.string("settings.organized.runtime.check.help", "Refresh the current environment status without starting playback.")) {
+                    if state.isCheckingAndroidRuntime { ProgressView().controlSize(.small) }
                     Button(SettingsL10n.string("settings.common.check", "Check")) { Task { await state.refreshAndroidRuntimeStatus() } }
-                        .disabled(state.isAndroidRuntimeBusy)
+                        .disabled(state.isAndroidRuntimeBusy || state.isCheckingAndroidRuntime)
+                }
+                if let message = state.androidRuntimeCheckMessage {
+                    Text(message).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 16).padding(.bottom, 12)
                 }
                 SettingsDivider()
                 SettingsControlRow(icon: "hand.raised", color: .secondary,
@@ -268,8 +283,9 @@ struct CompatibilitySettingsPane: View {
         .task {
             await state.refreshAndroidStorage()
             while !Task.isCancelled {
-                await state.refreshAndroidRuntimeStatus()
-                do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { break }
+                await state.refreshAndroidRuntimeStatus(reportCompletion: false)
+                // Startup/install progress already arrives through dedicated observers.
+                do { try await Task.sleep(nanoseconds: 15_000_000_000) } catch { break }
             }
         }
     }
@@ -432,6 +448,7 @@ struct CompatibilitySettingsPane: View {
     }
 
     private func exportDiagnostics() {
+        guard !state.isExportingDiagnostics else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
         panel.canCreateDirectories = true

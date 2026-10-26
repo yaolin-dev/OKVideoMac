@@ -93,6 +93,8 @@ public struct HTTPRequest: Equatable, Sendable {
     public var headers: HTTPHeaders
     public var body: Data?
     public var timeout: TimeInterval
+    /// Wall-clock network budget shared by all attempts and retry delays.
+    public var totalTimeout: TimeInterval?
     public var maximumResponseBytes: Int
     /// When set, the URLSession transport stops receiving as soon as this many
     /// bytes are exceeded. `nil` deliberately retains the established buffered
@@ -115,6 +117,7 @@ public struct HTTPRequest: Equatable, Sendable {
         headers: HTTPHeaders = [:],
         body: Data? = nil,
         timeout: TimeInterval = 30,
+        totalTimeout: TimeInterval? = nil,
         maximumResponseBytes: Int = 16 * 1_024 * 1_024,
         earlyResponseLimitBytes: Int? = nil,
         maximumRedirects: Int = 10,
@@ -128,6 +131,7 @@ public struct HTTPRequest: Equatable, Sendable {
         self.headers = headers
         self.body = body
         self.timeout = timeout
+        self.totalTimeout = totalTimeout.map { $0.isFinite ? max(0.001, min(3600, $0)) : 30 }
         self.maximumResponseBytes = maximumResponseBytes
         self.earlyResponseLimitBytes = earlyResponseLimitBytes.map {
             max(1, $0)

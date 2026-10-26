@@ -121,7 +121,7 @@ public actor TMDBClient: TMDBServing {
         var headers = ["Accept": "application/json"]
         if let token = credential.bearerToken { headers["Authorization"] = "Bearer " + token }
         let request = HTTPRequest(url: url, headers: HTTPHeaders(headers),
-            timeout: timeout, maximumResponseBytes: 5 * 1024 * 1024, earlyResponseLimitBytes: 5 * 1024 * 1024,
+            timeout: timeout, totalTimeout: timeout, maximumResponseBytes: 5 * 1024 * 1024, earlyResponseLimitBytes: 5 * 1024 * 1024,
             maximumRedirects: 0, redirectPolicy: .sameOriginNoDowngrade, retryPolicy: .none, allowsNonSuccessfulStatus: true)
         let id = UUID(), transport = httpClient
         let task = Task { try await transport.send(request) }

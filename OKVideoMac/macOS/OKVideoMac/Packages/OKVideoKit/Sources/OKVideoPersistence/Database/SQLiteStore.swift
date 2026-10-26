@@ -415,6 +415,19 @@ public actor SQLiteStore:
         return primaryResult == SQLITE_CORRUPT || primaryResult == SQLITE_NOTADB
     }
 
+    /// A refresh updates content only. It cannot create a deleted row, change
+    /// activation, or overwrite a newer publication accepted while downloading.
+    public func refreshActiveConfiguration(_ configuration: StoredConfiguration, expectedUpdatedAt: Date) throws -> Bool {
+        try Task.checkCancellation()
+        try connection.execute("""
+            UPDATE configurations SET base_url=?,raw_data=?,updated_at=?
+            WHERE id=? AND is_active=1 AND updated_at=?
+            """, bindings: [.optional(configuration.baseURL?.absoluteString), .blob(configuration.rawData),
+                .double(configuration.updatedAt.timeIntervalSince1970), .text(configuration.id.uuidString),
+                .double(expectedUpdatedAt.timeIntervalSince1970)])
+        return connection.lastChangedRowCount() == 1
+    }
+
     public func saveConfiguration(_ configuration: StoredConfiguration) throws {
         try connection.transaction {
             try writeConfiguration(configuration)
@@ -629,6 +642,17 @@ public actor SQLiteStore:
                 .double(source.updatedAt.timeIntervalSince1970)
             ]
         )
+    }
+
+    /// Refresh never creates a missing source. A delete accepted while the
+    /// download was in flight remains authoritative, even across actor hops.
+    public func refreshExistingLiveSource(_ source: StoredLiveSource) throws -> Bool {
+        guard !importedIdentityAcceptanceEnabled else { throw ImportedExecutionError.blocked }
+        let values = sourceBindings(source)
+        try connection.execute("""
+            UPDATE live_sources SET name=?,source_kind=?,source_value=?,base_url=?,raw_data=?,updated_at=? WHERE id=?
+            """, bindings: Array(values.dropFirst()) + [values[0]])
+        return connection.lastChangedRowCount() == 1
     }
 
     public func createLiveSource(_ source: StoredLiveSource) throws {

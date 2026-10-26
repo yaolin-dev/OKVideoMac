@@ -46,6 +46,7 @@ public struct TMDBAvailabilitySnapshot: Sendable {
         public let checking: Bool
         public let failure: TMDBFailure?
         public let retryAt: TimeInterval
+        public let validUntil: TimeInterval
     }
     public let generation: Int
     public let metadata: Link
@@ -73,6 +74,8 @@ public actor TMDBAvailability {
     private var records: [TMDBLink: Record] = [:]
     private var generation = 0
     private var serial = 0
+    private var metadataRequestsEnabled = true
+    private var observers: [UUID: AsyncStream<TMDBAvailabilitySnapshot>.Continuation] = [:]
     private let now: @Sendable () -> TimeInterval
     public init(now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) { self.now = now }
 
@@ -80,21 +83,38 @@ public actor TMDBAvailability {
         func value(_ link: TMDBLink) -> TMDBAvailabilitySnapshot.Link {
             let record = records[link] ?? Record()
             let state: TMDBLinkState = record.retryAt > now() ? .unavailable : record.successUntil > now() ? .available : .unknown
-            return .init(state: state, checking: record.probe != nil, failure: record.failure, retryAt: record.retryAt)
+            return .init(state: state, checking: record.probe != nil, failure: record.failure, retryAt: record.retryAt, validUntil: record.successUntil)
         }
         return .init(generation: generation, metadata: value(.metadata), images: value(.images))
     }
+    public func updates() -> AsyncStream<TMDBAvailabilitySnapshot> {
+        let id = UUID()
+        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            observers[id] = continuation
+            continuation.yield(snapshot())
+            continuation.onTermination = { [weak self] _ in
+                Task { await self?.removeObserver(id) }
+            }
+        }
+    }
+    private func removeObserver(_ id: UUID) { observers[id] = nil }
+    private func publish() {
+        let value = snapshot()
+        for observer in observers.values { observer.yield(value) }
+    }
+
     public func ticket(_ link: TMDBLink) -> Ticket {
         serial += 1
         return Ticket(link: link, generation: generation, serial: serial)
     }
-    public func requestAllowed(_ link: TMDBLink) -> Bool { (records[link]?.retryAt ?? 0) <= now() }
+    public func setMetadataRequestsEnabled(_ enabled: Bool) { metadataRequestsEnabled = enabled }
+    public func requestAllowed(_ link: TMDBLink) -> Bool { (link == .images || metadataRequestsEnabled) && (records[link]?.retryAt ?? 0) <= now() }
 
     public func finish(_ ticket: Ticket, outcome: TMDBLinkOutcome) {
         guard ticket.generation == generation else { return }
         var record = records[ticket.link] ?? Record()
         if record.probe?.0 == ticket.serial { record.probe = nil }
-        defer { records[ticket.link] = record }
+        defer { records[ticket.link] = record; publish() }
         guard ticket.serial >= record.acceptedSerial else { return }
         switch outcome {
         case .cancelled: return
@@ -116,7 +136,7 @@ public actor TMDBAvailability {
     /// One probe per link. Starting a refresh preserves valid success evidence.
     public func probe(_ link: TMDBLink, force: Bool = false, operation: @escaping @Sendable () async -> TMDBLinkOutcome) {
         var record = records[link] ?? Record()
-        guard record.probe == nil else { return }
+        guard !Task.isCancelled, record.probe == nil else { return }
         if !force, record.nextProbeAt > now() { return }
         if record.retryAt > now(), !force || record.failure == .rateLimited { return }
         if !force, record.successUntil > now() { return }
@@ -127,6 +147,19 @@ public actor TMDBAvailability {
             await self?.finish(ticket, outcome: outcome)
         }
         record.probe = (ticket.serial, task); records[link] = record
+        publish()
+    }
+
+    /// Cancelling a check does not erase successful evidence or server backoff.
+    /// Late completions from the cancelled probes cannot publish success.
+    public func cancelProbes() {
+        for link in TMDBLink.allCases {
+            guard var record = records[link], let probe = record.probe else { continue }
+            probe.1.cancel(); record.probe = nil
+            serial += 1; record.acceptedSerial = serial
+            records[link] = record
+        }
+        publish()
     }
 
     public func networkChanged() {
@@ -141,6 +174,7 @@ public actor TMDBAvailability {
             }
             records[link] = fresh
         }
+        publish()
     }
 }
 

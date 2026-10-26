@@ -11,8 +11,9 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
 ## 当前版本
 
-- 当前发布候选：0.8.7（Build 151），仅本地直播画面滚动与窗口缩放验收，未公开发布或公证。
-- 本地 source release index：`OKVideoMac-0.8.7-build151-SOURCE_RELEASE_INDEX.json`。
+- 当前发布候选：0.9.0（Build 155），汇总设置、TMDB、DASH、直播预览、弹幕及稳定性修复，正式发布验证中。
+- 本轮 source release index：`OKVideoMac-0.9.0-build155-SOURCE_RELEASE_INDEX.json`。
+- 目标 tag：`v0.9.0`；见[0.9.0 发布说明](../Docs/RELEASE_NOTES_0.9.0.md)和[发布就绪](../Docs/RELEASE_READINESS_0.9.0.md)。
 - 设置保留使用偏好、内容来源、应用管理三组分类，采用原生列表和紧凑分组展示；主侧栏搜索随点播、直播、收藏、历史、设置切换范围。
 - 以下为既有公开 Build 140 的发布身份与历史结果。
 
@@ -33,7 +34,7 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 - 搜索框有文字时第一次 Esc 只清空并保持焦点，空框再次 Esc 才退出搜索
 - 0.6.0 历史另行执行的 4 项真实 Android 生命周期测试与 API 35 隔离矩阵通过；
   本轮正式收口不把这些历史实机结果冒充为重跑结果
-- 本轮完整测试与正式发布门禁见[发布就绪记录](../Docs/RELEASE_READINESS_0.8.7.md)；稳定更新保留既有 HTTPS feed 与用户确认流程，见[自动更新](../Docs/AUTOMATIC_UPDATES.md)。
+- 本轮完整测试与正式发布门禁见[发布就绪记录](../Docs/RELEASE_READINESS_0.9.0.md)；稳定更新保留既有 HTTPS feed 与用户确认流程，见[自动更新](../Docs/AUTOMATIC_UPDATES.md)。
 
 ## 0.8.7 正式发布
 

@@ -62,7 +62,8 @@ struct AppEnvironment {
         }
         let player = PlayerLifecycleController(
             mode: PlayerTeardownMode.configured(),
-            audioPreferences: PlaybackAudioPreferenceStore(defaults: .standard)
+            audioPreferences: PlaybackAudioPreferenceStore(defaults: .standard),
+            hardwareDefaults: .standard
         )
         let androidRuntimeManager = try AndroidManagedRuntimeManager.live(
             applicationSupportDirectory: directories.applicationSupport

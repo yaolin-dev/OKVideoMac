@@ -1,6 +1,6 @@
 # OKVideoMac
 
-The current release candidate is **0.8.7 (Build 151)** for local acceptance of viewport-independent danmaku speed, continuous resizing and restored Live TV logo sizing. It retains the existing Settings and detail presentation. Build 151 has not been published or notarized; the stable Build 140 release below is unchanged.
+The current release candidate is **0.9.0 (Build 155)** with reorganized Settings, conditional TMDB details, DASH, live previews and playback/stability repairs. See [release notes](Docs/RELEASE_NOTES_0.9.0.md) and [readiness](Docs/RELEASE_READINESS_0.9.0.md). Formal publication checks are in progress.
 
 The latest stable release is **0.8.7 (Build 140)**, covering live catch-up, native Picture in Picture, playback information, startup/player controls and history/detail fixes. Developer ID, Apple Accepted, staple, Gatekeeper, installation and all 16 public asset checks passed. See [release notes](Docs/RELEASE_NOTES_0.8.7.md) and [formal verification](Docs/RELEASE_VALIDATION_0.8.7.md).
 

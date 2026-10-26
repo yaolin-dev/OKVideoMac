@@ -45,6 +45,16 @@ public struct VideoCategory: Codable, Equatable, Hashable, Identifiable, Sendabl
     public var resolvedContentKind: VideoContentKind {
         contentKind ?? .media
     }
+
+    /// Provider IDs are opaque. Keep the first complete payload for each ID,
+    /// in provider order, rather than mixing filters or actions from duplicates.
+    public static func normalized(_ categories: [VideoCategory]) -> [VideoCategory] {
+        var seen = Set<String>()
+        return categories.filter {
+            !$0.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && seen.insert($0.id).inserted
+        }
+    }
 }
 
 public struct VideoFilter: Codable, Equatable, Hashable, Identifiable, Sendable {
@@ -514,7 +524,7 @@ public struct SiteHome: Codable, Equatable, Sendable {
         recommendations: [VideoSummary],
         actionItems: [SiteActionItem] = []
     ) {
-        self.categories = categories
+        self.categories = VideoCategory.normalized(categories)
         self.recommendations = recommendations
         self.actionItems = actionItems
     }
@@ -527,7 +537,7 @@ public struct SiteHome: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        categories = try values.decode([VideoCategory].self, forKey: .categories)
+        categories = VideoCategory.normalized(try values.decode([VideoCategory].self, forKey: .categories))
         recommendations = try values.decode(
             [VideoSummary].self,
             forKey: .recommendations

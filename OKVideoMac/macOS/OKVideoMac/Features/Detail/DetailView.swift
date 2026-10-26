@@ -196,7 +196,7 @@ struct DetailView: View {
     @State private var isPreparingEpisodes = false
     @State private var showsAllActors = false
     @State private var showsFullSynopsis = false
-    @AppStorage("detail.tmdb.enabled") private var tmdbEnabled = true
+    @ObservedObject private var tmdbRuntime: TMDBNetworkRuntime
     @AppStorage(TMDBMatchingPreferences.key) private var relaxedMatching = false
     @StateObject private var tmdb: TMDBDetailModel
     @State private var showsMatchSheet = false
@@ -206,13 +206,14 @@ struct DetailView: View {
     @State private var lastTMDBPlayTime: TimeInterval = -.infinity
     private let injectedMetadata: Bool
 
-    init(detail: VideoDetail, metadata: TMDBDetailModel? = nil) {
+    init(detail: VideoDetail, metadata: TMDBDetailModel? = nil, runtime: TMDBNetworkRuntime? = nil) {
         self.detail = detail
+        tmdbRuntime = runtime ?? .shared
         injectedMetadata = metadata != nil
         _tmdb = StateObject(wrappedValue: metadata ?? TMDBDetailModel())
     }
 
-    private var usesTMDBLayout: Bool { tmdbEnabled && tmdb.usesUnifiedLayout }
+    private var usesTMDBLayout: Bool { tmdbRuntime.preference != .original && tmdb.usesUnifiedLayout }
 
     var body: some View {
         GeometryReader { viewport in
@@ -273,15 +274,16 @@ struct DetailView: View {
         }
         .background(AppSurfacePalette.background, ignoresSafeAreaEdges: [.horizontal, .bottom])
         .background(TMDBSynopsisPresenter(synopsis: $synopsis))
-        .onReceive(NotificationCenter.default.publisher(for: .tmdbSessionWillChange)) { _ in tmdb.cancel() }
-        .onReceive(NotificationCenter.default.publisher(for: .tmdbSessionDidChange)) { _ in
-            if tmdbEnabled { tmdb.retryEnhanced(detail: detail) }
+        .onReceive(NotificationCenter.default.publisher(for: .tmdbSessionWillChange, object: tmdbRuntime)) { _ in
+            if tmdbRuntime.preference == .original { tmdb.setPresentationEnabled(false, detail: detail) }
+            else { tmdb.suspendNetworkRequests() }
         }
         .onChange(of: relaxedMatching) { enabled in
             tmdb.setMatchPolicy(enabled ? .relaxed : .strict, detail: detail)
         }
-        .onChange(of: tmdbEnabled) { enabled in
-            tmdb.setPresentationEnabled(enabled, detail: detail)
+        .onChange(of: tmdbRuntime.preference) { preference in
+            if preference == .original { tmdb.setPresentationEnabled(false, detail: detail) }
+            else if tmdbRuntime.decisionForEntry().usesTMDB { tmdb.setPresentationEnabled(true, detail: detail) }
         }
         .task(id: "\(tmdb.selection?.id ?? ""):\(selectedSourceIndex):\(state.detailRevision):\(tmdb.binding?.seasons.description ?? "")") {
             await tmdb.loadSeason(source: selectedSource, category: detail.summary.categoryName)
@@ -296,8 +298,13 @@ struct DetailView: View {
         }
         .onAppear {
             tmdb.setMatchPolicy(relaxedMatching ? .relaxed : .strict, detail: detail)
-            if !tmdbEnabled || !tmdb.usesUnifiedLayout && !tmdb.originalRequested {
-                tmdb.setPresentationEnabled(tmdbEnabled, detail: detail)
+            if tmdbRuntime.preference == .original {
+                tmdb.setPresentationEnabled(false, detail: detail)
+            } else if !injectedMetadata && !tmdb.hasStartedEntry {
+                tmdb.beginEntry(repository: state.tmdbRepository, key: state.tmdbSourceKey(for: detail), summary: detail.summary,
+                    availability: tmdbRuntime.availability, enabled: tmdbRuntime.decisionForEntry().usesTMDB,
+                    policy: TMDBMatchingPreferences.policy())
+                tmdb.receive(detail: detail, key: state.tmdbSourceKey(for: detail))
             }
             performInitialSelection()
             // Report after SwiftUI has mounted the real detail tree and the
@@ -347,7 +354,7 @@ struct DetailView: View {
                 .help(
                     primaryEpisode == nil
                         ? L10n.string("detail.no-playable-episode", fallback: "No playable episodes")
-                        : L10n.string("detail.play-first", fallback: "Play the first available episode")
+                        : L10n.string("detail.presentation.play-selection", fallback: "Play the selected episode")
                 )
                 DetailFavoriteButton(detail: detail)
                     .buttonStyle(.bordered)
@@ -364,20 +371,51 @@ struct DetailView: View {
             items.append(.action(L10n.string(.commonCancel)) { state.cancelFavoriteRepair() })
             items.append(.separator)
         }
-        if !tmdbEnabled {
-            items.append(.action(L10n.string("tmdb.enable", fallback: "Enable TMDB Details")) { tmdbEnabled = true })
+        let eligible = tmdbRuntime.presentationDecision.usesTMDB
+        if tmdbRuntime.preference == .original {
+            items.append(.action(L10n.string("detail.presentation.enable-automatic", fallback: "Enable Automatic Selection")) {
+                tmdbRuntime.setPreference(.automatic)
+            })
+        }
+        if !eligible {
+            items.append(.status(TMDBPresentationStatus.title(tmdbRuntime.presentationDecision)))
         } else {
+            if !usesTMDBLayout {
+                items.append(.action(L10n.string("detail.presentation.use-tmdb-here", fallback: "Use TMDB on This Page")) {
+                    guard tmdbRuntime.decisionForEntry().usesTMDB else { return }
+                    tmdb.setPresentationEnabled(true, detail: detail)
+                })
+            }
             if tmdb.binding?.isRelaxed == true {
                 items.append(.status(L10n.string("tmdb.match.relaxed.status", fallback: "Matched using the unique title")))
             }
             items.append(.action(tmdb.needsMatchConfirmation ? L10n.string("tmdb.match.confirm", fallback: "Review TMDB Match…") : L10n.string("tmdb.match.title", fallback: "Match Movie or Series"),
-                enabled: state.tmdbRepository != nil || injectedMetadata) { showsMatchSheet = true })
-            items.append(.action("重新检测 TMDB 网络") { Task { await TMDBNetworkRuntime.shared.checkConnections() } })
-            items.append(.action("刷新影片资料") { tmdb.retryEnhanced(detail: detail) })
-            if tmdb.selection != nil || !tmdb.candidates.isEmpty {
-                items.append(.action(L10n.string("tmdb.original", fallback: "Use Original Details")) { Task { await tmdb.useOriginal() } })
+                enabled: state.tmdbRepository != nil || injectedMetadata) {
+                    guard tmdbRuntime.decisionForEntry().usesTMDB else { return }
+                    if tmdb.networkRequestsSuspended { tmdb.setPresentationEnabled(true, detail: detail) }
+                    showsMatchSheet = true
+                })
+            if usesTMDBLayout {
+                items.append(.action(L10n.string("detail.presentation.refresh", fallback: "Refresh TMDB Information")) {
+                    guard tmdbRuntime.decisionForEntry().usesTMDB else { return }
+                    tmdb.setPresentationEnabled(true, detail: detail)
+                })
             }
         }
+        if tmdbRuntime.credentialKind != nil && tmdbRuntime.enabled {
+            items.append(.action(L10n.string("tmdb.direct.check", fallback: "Check API & Images"), enabled: !tmdbRuntime.busy && !tmdbRuntime.isChangingNetwork) {
+                Task { await tmdbRuntime.checkConnections() }
+            })
+        }
+        if usesTMDBLayout {
+            items.append(.action(L10n.string("tmdb.original", fallback: "Use Original Details")) {
+                tmdb.setPresentationEnabled(false, detail: detail)
+                Task { await tmdb.useOriginal() }
+            })
+        }
+        items.append(.action(L10n.string("detail.presentation.settings", fallback: "TMDB Settings…")) {
+            state.selectedSettingsPane = .details; state.selectSection(.settings)
+        })
         return items
     }
 
@@ -804,7 +842,6 @@ struct DetailView: View {
     }
 
     private var primaryEpisode: PlayEpisode? {
-        guard usesTMDBLayout else { return selectedSource?.episodes.first }
         guard let source = selectedSource else { return nil }
         // Read once, before scanning. The source identity normalizes every URL;
         // evaluating it inside first(where:) previously made this quadratic.

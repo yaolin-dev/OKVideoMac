@@ -30,7 +30,9 @@ public struct ConfigurationLoader {
             let request = HTTPRequest(
                 url: url,
                 timeout: 20,
+                totalTimeout: 20,
                 maximumResponseBytes: ConfigurationParser.maximumConfigurationSize,
+                earlyResponseLimitBytes: ConfigurationParser.maximumConfigurationSize,
                 maximumRedirects: 10,
                 retryPolicy: .standard
             )

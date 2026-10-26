@@ -18,6 +18,25 @@ final class CrashDiagnosticsTests: XCTestCase {
         XCTAssertEqual(event.dist, "1")
     }
 
+    func testSerializedEventKeepsOriginalReleaseAndBuildWithoutPrivateFields() throws {
+        // Exercise the SDK serializer, not just the Event object's properties.
+        // The report predates this app build; uploading it must retain its version.
+        let serialized = SentryUploadWorker.event(record()).serialize()
+        let wire = try JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: serialized)) as! [String: Any]
+        XCTAssertEqual(wire["release"] as? String, "com.okvideomac.OKVideoMac@0.1.0+1")
+        XCTAssertEqual(wire["dist"] as? String, "1")
+        let debugMeta = try XCTUnwrap(wire["debug_meta"] as? [String: Any])
+        let images = try XCTUnwrap(debugMeta["images"] as? [[String: Any]])
+        XCTAssertEqual(images.count, 1)
+        let debugID = try XCTUnwrap(images.first?["debug_id"] as? String)
+        XCTAssertEqual(UUID(uuidString: debugID), UUID(uuidString: "12345678-1234-1234-1234-123456789ABC"))
+        let contexts = try XCTUnwrap(wire["contexts"] as? [String: Any])
+        XCTAssertEqual(Set(contexts.keys), ["os", "device"])
+        for key in ["user", "request", "breadcrumbs", "extra", "message"] {
+            XCTAssertNil(wire[key], "Unexpected private field: \(key)")
+        }
+    }
+
     func testFreshStoreDeniesUpload() throws {
         let r=root();defer { try? FileManager.default.removeItem(at:r) }
         let s=try ReportStore(root:r);XCTAssertFalse(s.consent);XCTAssertTrue(try s.records().isEmpty)

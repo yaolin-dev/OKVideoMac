@@ -17,16 +17,22 @@ public struct TMDBLinkProber {
         self.availability = availability; self.metadata = metadata; self.images = images; paths = Array(imagePaths.prefix(2))
     }
     public func warm(force: Bool = false) async {
+        guard !Task.isCancelled else { return }
         await availability.probe(.metadata, force: force) {
-            do { _ = try await metadata.imageConfiguration(); return .success }
+            do {
+                let budget = TMDBRequestBudget(deadline: ProcessInfo.processInfo.systemUptime + 6)
+                _ = try await budget.perform { try await metadata.imageConfiguration() }
+                return .success
+            }
             catch { return .error(error) }
         }
+        guard !Task.isCancelled else { return }
         await availability.probe(.images, force: force) {
             for path in paths {
                 if Task.isCancelled { return .cancelled }
                 guard let url = TMDBClient.imageURL(path: path, size: "w92") else { continue }
                 do {
-                    let response = try await images.send(HTTPRequest(url: url, headers: ["Cache-Control": "no-cache"], timeout: 6, maximumResponseBytes: 512 * 1024, earlyResponseLimitBytes: 512 * 1024, maximumRedirects: 0, retryPolicy: .none, allowsNonSuccessfulStatus: true))
+                    let response = try await images.send(HTTPRequest(url: url, headers: ["Cache-Control": "no-cache"], timeout: 6, totalTimeout: 6, maximumResponseBytes: 512 * 1024, earlyResponseLimitBytes: 512 * 1024, maximumRedirects: 0, retryPolicy: .none, allowsNonSuccessfulStatus: true))
                     if Task.isCancelled { return .cancelled }
                     if response.statusCode == 404 { continue }
                     guard (200..<300).contains(response.statusCode) else { return .status(response.statusCode, retryAfter: TMDBClient.retryAfter(response.headers["Retry-After"])) }
@@ -65,7 +71,7 @@ public struct TMDBObservedImageClient: HTTPClient {
             catch {
                 guard TMDBLinkOutcome.error(error) == .failure(.network), !Task.isCancelled else { throw error }
                 try await Task.sleep(nanoseconds: 300_000_000)
-                response = try await base.send(request)
+                        response = try await base.send(request)
             }
             try Task.checkCancellation()
             guard (200..<300).contains(response.statusCode) else {
