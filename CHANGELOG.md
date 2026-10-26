@@ -12,7 +12,7 @@ No additional changes beyond 0.9.0.
 - Preserve visible live preview frames through scrolling, resizing and cache eviction; prioritize visible work with at most three independent captures, source quotas and scoped progress.
 - Keep danmaku motion stable across window sizes, bound glyph preparation and preserve tracks during resize. Add real Android startup stages and truncated-text tooltips.
 - Reject duplicate/empty provider category identities before native navigation; clear stale empty controls and preserve original request IDs.
-- Preserve original crash release/build/UUID metadata during delayed uploads. Android Bridge is 0.3.50 / 62. User reports successful macOS 27.0.1 testing; formal test/signing/notarization/publication results are recorded separately.
+- Preserve original crash release/build/UUID metadata during delayed uploads. Android Bridge is 0.3.50 / 62. User reports successful macOS 27.0.1 testing; formal tests, Developer ID/Hardened Runtime, Apple Accepted, staple, Gatekeeper, installation and all 16 public asset checks passed; see [verification](Docs/RELEASE_VALIDATION_0.9.0.md).
 
 ## [0.8.7] - 2026-10-17
 

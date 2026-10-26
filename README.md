@@ -1,10 +1,6 @@
 # OKVideoMac
 
-The current release candidate is **0.9.0 (Build 155)** with reorganized Settings, conditional TMDB details, DASH, live previews and playback/stability repairs. See [release notes](Docs/RELEASE_NOTES_0.9.0.md) and [readiness](Docs/RELEASE_READINESS_0.9.0.md). Formal publication checks are in progress.
-
-The latest stable release is **0.8.7 (Build 140)**, covering live catch-up, native Picture in Picture, playback information, startup/player controls and history/detail fixes. Developer ID, Apple Accepted, staple, Gatekeeper, installation and all 16 public asset checks passed. See [release notes](Docs/RELEASE_NOTES_0.8.7.md) and [formal verification](Docs/RELEASE_VALIDATION_0.8.7.md).
-
-**0.8.4 (Build 137)** fixes the SwiftUI/AppKit toolbar ownership path associated with the 0.8.3 startup crash. The user confirmed successful macOS 27.0.1 testing; see [release notes](Docs/RELEASE_NOTES_0.8.4.md) and [formal verification](Docs/RELEASE_VALIDATION_0.8.4.md).
+The latest stable release is **0.9.0 (Build 155)** with reorganized Settings, conditional TMDB details, DASH, live previews and playback/stability repairs. Developer ID, Hardened Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, installation and all 16 public asset checks passed. See [release notes](Docs/RELEASE_NOTES_0.9.0.md) and [formal verification](Docs/RELEASE_VALIDATION_0.9.0.md).
 
 English | [简体中文](README_zh-CN.md)
 
@@ -19,7 +15,7 @@ selected TVBox/CatVod/CatPaw-style providers, and libmpv playback.**
 Built with Swift and SwiftUI/AppKit. Android is an optional compatibility layer
 for selected Java/Dex providers.
 
-The latest stable release is **0.8.7 (Build 140)**, Developer ID signed and Apple-notarized.
+The latest stable release is **0.9.0 (Build 155)**, Developer ID signed and Apple-notarized.
 
 **Native macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · Multi-provider Search · QuickJS/Node Spiders**
 
@@ -27,15 +23,25 @@ The latest stable release is **0.8.7 (Build 140)**, Developer ID signed and Appl
 
 ### [Download the latest stable release →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-**0.8.7 (Build 140)** · macOS 12.0+ · Apple Silicon (`arm64`) only.
+**0.9.0 (Build 155)** · macOS 12.0+ · Apple Silicon (`arm64`) only.
 
-Download the Developer ID signed and Apple-notarized [v0.8.7 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.8.7/OKVideoMac-0.8.7.dmg). Stapling, Gatekeeper, final DMG and fresh-install smoke checks passed.
+Download the Developer ID signed and Apple-notarized [v0.9.0 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.9.0/OKVideoMac-0.9.0.dmg). Stapling, Gatekeeper, final DMG and fresh-install smoke checks passed.
 
 Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to disable Gatekeeper or SIP. Checksums, release notes, source archives, SBOMs and notices accompany the release.
 
 > OKVideoMac is a player and provider client. It does not include third-party video sources, accounts, cookies, parsing services or DRM keys.
 
-## New in 0.8.7
+## New in 0.9.0
+
+- Searchable Settings with progress, cancellation and clear results for source refresh, compatibility, cache, backup and diagnostics operations.
+- Original source details by default. Automatic TMDB details require a saved credential and working API/image connections; a compact native selector retains an explicit Original choice.
+- DASH with pinned FFmpeg/libxml2, restricted Android media routing and more reliable Bilibili seeking/resume.
+- Cached, quota-aware live previews with visible-channel priority; stable danmaku motion through window resizing and clearer Android startup stages.
+- Duplicate/empty category crash protection, truncated-text tooltips and original crash version/build/UUID preservation.
+
+See [release notes](Docs/RELEASE_NOTES_0.9.0.md), [changelog](CHANGELOG.md) and [verification](Docs/RELEASE_VALIDATION_0.9.0.md). TMDB and source playback depend on credentials, network and server support. The historical macOS 12.5.1 SwiftUI sheet crash remains unconfirmed on that system.
+
+## 0.8.7 history
 
 - Programme-aware catch-up for supported M3U/TVBox/FongMi sources and Native Xtream archives, date EPG and return to live.
 - Native Picture in Picture, responsive player controls, playback information in Settings and a native startup shell.

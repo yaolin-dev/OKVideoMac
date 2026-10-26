@@ -1,8 +1,8 @@
 # Immutable Corresponding-Source Release Process
 
-## 0.9.0 release preparation
+## Published 0.9.0 identity
 
-Version 0.9.0 (155) uses the exact clean main commit and existing distribution pipeline. Expected public DMG `OKVideoMac-0.9.0.dmg`, internal archive `OKVideoMac-0.9.0-macOS-arm64.zip`, and source index `OKVideoMac-0.9.0-build155-SOURCE_RELEASE_INDEX.json`. Final accepted/stapled files, sources, licenses, APK, SBOMs, notes and signed feed are published together after all gates pass. See [readiness](RELEASE_READINESS_0.9.0.md).
+Release `v0.9.0` pins exact clean main commit `4a69c5905cbb1717f86c84e7ac7f6b9d56956cdb`, rebuilt by the existing distribution pipeline. The Accepted/stapled public DMG is `OKVideoMac-0.9.0.dmg`; `OKVideoMac-0.9.0-macOS-arm64.zip` remains internal. Index `OKVideoMac-0.9.0-build155-SOURCE_RELEASE_INDEX.json`, source and third-party source archives, licences, APK, SBOMs, notes and signed feed bind this release. All 16 public assets passed draft and anonymous download SHA-256 checks against local files and GitHub digests. See [formal verification](RELEASE_VALIDATION_0.9.0.md). Documentation commits after publication preserve the tag, binary, signed feed and build-time source/notes snapshots.
 
 ## Earlier local candidates
 

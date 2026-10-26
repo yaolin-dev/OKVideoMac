@@ -1,12 +1,12 @@
 # Automatic updates
 
-## 0.9.0 stable feed preparation
+## Published 0.9.0
 
-0.9.0 (155) retains the existing signing identity, notary profile, stable HTTPS feed and Sparkle public key. This release must independently pass the existing gates; its final result is recorded in [0.9.0 verification](RELEASE_VALIDATION_0.9.0.md).
+The stable latest feed offers **0.9.0 (155)**, above all earlier public builds. The existing HTTPS feed, Sparkle public key and pinned 2.10.0 tools are unchanged. All 16 draft and anonymous public downloads match local SHA-256 and GitHub digests; latest feed bytes, XML signature and the final downloaded DMG EdDSA signature pass. The public DMG also passes staple, codesign, Gatekeeper and disk-image verification. This does not claim a new complete Sparkle update-installation cycle. See [formal verification](RELEASE_VALIDATION_0.9.0.md).
 
 ## Published 0.8.7
 
-The stable latest feed offers 0.8.7 (140), above Build 139, retaining the existing HTTPS feed, public key and pinned Sparkle. All 16 public assets, latest feed bytes, XML signature and final downloaded DMG EdDSA signature pass. This does not claim a new complete Sparkle update-installation cycle. See [formal verification](RELEASE_VALIDATION_0.8.7.md).
+At 0.8.7 publication, the stable latest feed offered 0.8.7 (140), above Build 139, retaining the existing HTTPS feed, public key and pinned Sparkle. All 16 public assets, latest feed bytes, XML signature and final downloaded DMG EdDSA signature pass. This does not claim a new complete Sparkle update-installation cycle. See [formal verification](RELEASE_VALIDATION_0.8.7.md).
 
 ## Published 0.8.6
 
@@ -69,7 +69,7 @@ use the existing `Scripts/package-app.sh`. Packaging prepares the pinned runtime
 again and supplies its exact path to Xcode. The Release path signs all nested
 Sparkle executables, nested app/XPC bundles, and the framework inside out. SBOM,
 checksum, source binding, architecture, minimum OS, signature and entitlement
-checks still apply. The approved inventory is an exact set of 36 paths, including the two static diagnostics resource stubs. It replaces the previous numeric 29-object assertion. Extra, missing or substituted paths fail.
+checks still apply. The approved inventory is the exact set of 38 paths in `ThirdParty/approved-macho-paths.json`, including the two static diagnostics resource stubs and the current native DASH dependencies. It replaces the previous numeric 29-object assertion. Extra, missing or substituted paths fail.
 
 Optional `OKVIDEOMAC_UPDATE_CONFIG` names a plist with `SUFeedURL`,
 `SUPublicEDKey` (base64 32-byte Ed25519 public key), and `OKUpdateChannel`.

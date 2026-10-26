@@ -1,12 +1,12 @@
 # DMG Release Process
 
-## 0.9.0 publication preparation
+## Published 0.9.0
 
-0.9.0 (155) retains the existing signing identity, notary profile, stable HTTPS feed and Sparkle public key. This release must independently pass the existing gates; its final result is recorded in [0.9.0 verification](RELEASE_VALIDATION_0.9.0.md).
+当前正式版本为 0.9.0（Build 155），tag `v0.9.0` 固定 `4a69c5905cbb1717f86c84e7ac7f6b9d56956cdb`。通过现有干净 main distribution 流水线重建，Developer ID、38 项精确 Mach-O 清单／Hardened Runtime、Apple **Accepted** `433a4265-e3e9-4711-b25f-e82d9775ed03`、DMG／App staple、Gatekeeper、安装和全部 16 项草稿／公开资产下载核验均通过。DMG SHA-256 `e4aae1e3adb038ac48ff0a7228fab1c828977e1d23317fdbad85df8224dbc013`；见[正式验证](RELEASE_VALIDATION_0.9.0.md)。内部 ZIP 不作为公开下载，后续文档提交保留 tag 与已签名资产不变。
 
 ## Published 0.8.7
 
-当前正式版本为 0.8.7（Build 140），tag 固定 `8208c1ea6db514cb35bbd32bbed8a15ade06cb03`。Developer ID、Hardened Runtime、Apple Accepted `7fdc4022-c334-4d22-b702-a71103687b49`、DMG／安装 App staple、Gatekeeper、安装和16项公开资产均通过。DMG SHA-256 `c7edf4f13db98098d5872e3bed04a611ef42c58e53167e46e9a4551fb5d34204`；见[正式验证](RELEASE_VALIDATION_0.8.7.md)。
+历史正式版本为 0.8.7（Build 140），tag 固定 `8208c1ea6db514cb35bbd32bbed8a15ade06cb03`。Developer ID、Hardened Runtime、Apple Accepted `7fdc4022-c334-4d22-b702-a71103687b49`、DMG／安装 App staple、Gatekeeper、安装和16项公开资产均通过。DMG SHA-256 `c7edf4f13db98098d5872e3bed04a611ef42c58e53167e46e9a4551fb5d34204`；见[正式验证](RELEASE_VALIDATION_0.8.7.md)。
 
 ## Published 0.8.6
 

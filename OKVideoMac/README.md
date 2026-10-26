@@ -2,7 +2,7 @@
 
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于
 原生 Xtream、M3U/XMLTV、配置格式和运行时，而不是简单以 TVBox、FongMi、MiraPlay 或 CatPawOpen
-等生态名称判断。最新稳定版本为 **0.8.7（Build 140）**，支持
+等生态名称判断。最新稳定版本为 **0.9.0（Build 155）**，支持
 **arm64**，最低系统为 **macOS 12.0**。公开二进制通过 Developer ID 签名、Apple 公证、
 Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
@@ -11,16 +11,13 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
 ## 当前版本
 
-- 当前发布候选：0.9.0（Build 155），汇总设置、TMDB、DASH、直播预览、弹幕及稳定性修复，正式发布验证中。
-- 本轮 source release index：`OKVideoMac-0.9.0-build155-SOURCE_RELEASE_INDEX.json`。
-- 目标 tag：`v0.9.0`；见[0.9.0 发布说明](../Docs/RELEASE_NOTES_0.9.0.md)和[发布就绪](../Docs/RELEASE_READINESS_0.9.0.md)。
+- 当前稳定版本：0.9.0（Build 155），包含设置、TMDB、DASH、直播预览、弹幕及稳定性修复。
+- Tag：`v0.9.0`，固定 release commit `4a69c5905cbb1717f86c84e7ac7f6b9d56956cdb`。
+- source release index：`OKVideoMac-0.9.0-build155-SOURCE_RELEASE_INDEX.json`。
+- Developer ID、Hardened Runtime、Apple Accepted、staple、Gatekeeper、安装及 16 项公开资产核验通过。
+- 见[发布说明](../Docs/RELEASE_NOTES_0.9.0.md)、[发布就绪](../Docs/RELEASE_READINESS_0.9.0.md)与[正式验证](../Docs/RELEASE_VALIDATION_0.9.0.md)。
 - 设置保留使用偏好、内容来源、应用管理三组分类，采用原生列表和紧凑分组展示；主侧栏搜索随点播、直播、收藏、历史、设置切换范围。
-- 以下为既有公开 Build 140 的发布身份与历史结果。
-
-- 当前稳定版本：0.8.7（Build 140）
-- Tag：`v0.8.7`，固定 release commit `8208c1ea6db514cb35bbd32bbed8a15ade06cb03`。
-- source release index：`OKVideoMac-0.8.7-build140-SOURCE_RELEASE_INDEX.json`。
-- 本轮包含直播回放、原生画中画、播放信息、启动／播放器界面和历史／详情修复。见[发布说明](../Docs/RELEASE_NOTES_0.8.7.md)与[发布就绪](../Docs/RELEASE_READINESS_0.8.7.md)。
+- 默认原详情；保存有效 TMDB 凭据且 API／图片连接就绪后才自动使用 TMDB。
 - 最低系统：macOS 12.0
 - 支持架构：Apple Silicon / arm64
 - 播放历史与收藏保留配置、站点和稳定媒体身份；旧记录经过迁移后仍可准确恢复，

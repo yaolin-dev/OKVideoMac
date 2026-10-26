@@ -4,9 +4,9 @@
 
 用户已确认本轮候选在 macOS 27.0.1 实机正常；本机为 macOS 14.8.9／Xcode 16.2。版本按用户指定提升为 0.9.0，Build 从已使用的 154 顺序递增为 155。
 
-当前处于正式发布验证阶段，尚未宣称本版本签名、公证或公开发布通过。重新执行完整 Release App XCTest、Core／Persistence、Android／Node 及源码发布门禁；结果在正式验证记录中逐项补录。
+本轮已完成正式发布：Release App XCTest、Core／Persistence、Android／Node、源码发布门禁、Developer ID／Hardened Runtime、Apple Accepted、staple、Gatekeeper、安装及全部 16 项公开资产核验通过。准确提交、Apple submission、资产 SHA-256 与已知边界见[正式验证记录](RELEASE_VALIDATION_0.9.0.md)。下文保留测试阶段的失败审查与验证范围。
 
-现有 package-app.sh 要求准确的干净 Git 提交。因此代码测试通过后先建立仅本地的 main 候选提交，再从该提交完成 distribution／notarize 流水线。全部正式验证通过后才推送 main、创建 v0.9.0 与公开 GitHub Release。
+现有 package-app.sh 要求准确的干净 Git 提交。代码测试通过后先建立本地 main 提交 `4a69c5905cbb1717f86c84e7ac7f6b9d56956cdb`，再从该提交完成 distribution／notarize 流水线。全部正式产物验证通过后快进推送 main 与 annotated tag `v0.9.0`，草稿 16 项下载核对通过后公开 Release；后续公开下载与更新源验证亦通过。
 
 必须保留失败轮次，修复相关问题后复验；不使用本地 acceptance 包代替正式构建。凭据复用现有 Keychain 与仓库外属主专用配置，符号和测试产物存放于发布工作区外层。
 

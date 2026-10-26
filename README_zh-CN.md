@@ -1,10 +1,6 @@
 # OKVideoMac
 
-当前发布候选为 **0.9.0（Build 155）**，包含设置重整、按条件启用 TMDB 详情、DASH、直播预览及播放与稳定性修复。见[发布说明](Docs/RELEASE_NOTES_0.9.0.md)和[发布就绪](Docs/RELEASE_READINESS_0.9.0.md)。正式发布验证正在进行。
-
-当前稳定版本为 **0.8.7（Build 140）**，包含直播回放、原生画中画、播放信息、启动／播放器界面以及历史与详情修复。Developer ID、Apple Accepted、staple、Gatekeeper、安装和全部16项公开资产核验通过。见[发布说明](Docs/RELEASE_NOTES_0.8.7.md)与[正式验证](Docs/RELEASE_VALIDATION_0.8.7.md)。
-
-**0.8.4（Build 137）**修复与 0.8.3 启动崩溃相关的工具栏归属路径，用户已确认 macOS 27.0.1 实机测试正常。见[发布说明](Docs/RELEASE_NOTES_0.8.4.md)和[正式验证](Docs/RELEASE_VALIDATION_0.8.4.md)。
+当前稳定版本为 **0.9.0（Build 155）**，包含设置重整、按条件启用 TMDB 详情、DASH、直播预览及播放与稳定性修复。Developer ID、Hardened Runtime、Apple Notarization **Accepted**、staple、Gatekeeper、安装和全部 16 项公开资产核验通过。见[发布说明](Docs/RELEASE_NOTES_0.9.0.md)和[正式验证](Docs/RELEASE_VALIDATION_0.9.0.md)。
 
 [English](README.md) | 简体中文
 
@@ -19,7 +15,7 @@
 使用 Swift 和 SwiftUI/AppKit 构建。Android 是部分 Java/Dex Provider 按需使用的
 可选兼容层。
 
-最新稳定版本为 **0.8.7（Build 140）**，已完成 Developer ID 签名和 Apple 公证。
+最新稳定版本为 **0.9.0（Build 155）**，已完成 Developer ID 签名和 Apple 公证。
 
 **原生 macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · 多站搜索 · QuickJS/Node Spider**
 
@@ -27,15 +23,25 @@
 
 ### [下载最新稳定版本 →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-**0.8.7（Build 140）** · macOS 12.0+ · 仅支持 Apple Silicon（arm64）。
+**0.9.0（Build 155）** · macOS 12.0+ · 仅支持 Apple Silicon（arm64）。
 
-下载已签名、公证的 [v0.8.7 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.8.7/OKVideoMac-0.8.7.dmg)，Staple、Gatekeeper、最终 DMG 与全新安装 smoke 均通过。
+下载已签名、公证的 [v0.9.0 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.9.0/OKVideoMac-0.9.0.dmg)，Staple、Gatekeeper、最终 DMG 与全新安装 smoke 均通过。
 
 打开 DMG，将 `OKVideoMac.app` 拖入 Applications，无需关闭 Gatekeeper 或 SIP。校验和、发布说明、源码、许可证、SBOM 随发布提供。
 
 > 本项目是播放器与源客户端，不内置第三方内容源、账号、Cookie、解析服务或 DRM 密钥。
 
-## 0.8.7 新增与修复
+## 0.9.0 新增与修复
+
+- 设置支持内容搜索；片源／直播更新、兼容检查、缓存、备份和诊断操作提供进度、取消与明确结果。
+- 默认使用原详情；仅保存有效凭据且 API／图片连接就绪时自动启用 TMDB。紧凑原生选择器保留“始终使用原详情”，切换时保留选集。
+- 增加固定 FFmpeg／libxml2 的 DASH 支持、受限 Android 媒体转交，并修复 B 站定位、重试与续播归属。
+- 直播预览复用缓存、优先可见频道并遵守来源额度；弹幕缩放后保持运动轨迹，Android 启动显示真实准备阶段。
+- 防护重复／空分类身份导致的崩溃，完善截断文字提示，并保留崩溃发生时的原始版本、Build 与 UUID。
+
+详见[发布说明](Docs/RELEASE_NOTES_0.9.0.md)、[更新日志](CHANGELOG.md)和[正式验证](Docs/RELEASE_VALIDATION_0.9.0.md)。TMDB 与播放仍取决于凭据、网络和服务端；macOS 12.5.1 历史 SwiftUI 弹窗崩溃尚缺同系统复现，本轮不宣称修复。
+
+## 0.8.7 历史新增与修复
 
 - 支持所声明 M3U／TVBox／FongMi 回放规则、日期式节目表与 Native Xtream 归档，提供节目进度、下一档可回放节目及返回直播。
 - 增加原生画中画、统一的自适应播放器控制栏、设置中的播放信息，以及原生启动占位界面。
