@@ -71,3 +71,41 @@ def write_junit(path, result: dict, name: str) -> None:
             ET.SubElement(node, 'skipped', message=case['reason'])
     ET.indent(suite)
     ET.ElementTree(suite).write(path, encoding='utf-8', xml_declaration=True)
+
+
+def node_results(text: str, filename: str, exit_code: int) -> dict:
+    """Node 22 JUnit includes aggregate counters in XML comments."""
+    if exit_code:
+        raise InvalidResults(f"Node test process exited with {exit_code}")
+    root = ET.fromstring(text)
+    if root.tag != 'testsuites':
+        raise InvalidResults('Missing Node JUnit root')
+    cases = list(root.iter('testcase'))
+    names = [case.get('name', '') for case in cases]
+    if not cases or any(not name or name.replace('\\', '/').split('/')[-1] == filename for name in names):
+        raise InvalidResults('No actual Node test cases; file-level execution is insufficient')
+    if len(names) != len(set(names)):
+        raise InvalidResults('Duplicate Node test names within one file')
+    if any(list(root.iter(tag)) for tag in ('failure', 'error', 'skipped')):
+        raise InvalidResults('Node reported a failure, error or skipped test')
+    counters = {}
+    for name in ('tests', 'suites', 'pass', 'fail', 'cancelled', 'skipped', 'todo'):
+        values = re.findall(r'<!--\s*' + name + r' (\d+)\s*-->', text)
+        if len(values) != 1:
+            raise InvalidResults(f'Missing or duplicate Node aggregate: {name}')
+        counters[name] = int(values[0])
+    # test(..., t => t.test(...)) parents are testsuite elements too, but count
+    # as tests. Only describe() containers are excluded by the suites counter.
+    containers = list(root.iter('testsuite'))
+    if not 0 <= counters['suites'] <= len(containers):
+        raise InvalidResults('Node suite counter disagrees with JUnit containers')
+    for suite in containers:
+        if not len(suite) or any(int(suite.get(key, '0')) for key in ('failures', 'errors', 'skipped', 'disabled')):
+            raise InvalidResults('Empty or unsuccessful Node test suite')
+        if int(suite.get('tests', '-1')) != len(suite.findall('testcase')) + len(suite.findall('testsuite')):
+            raise InvalidResults('Node suite child count disagrees with JUnit cases')
+    total = len(cases) + len(containers) - counters['suites']
+    if counters != dict(tests=total, suites=counters['suites'], **{'pass': total}, fail=0, cancelled=0, skipped=0, todo=0):
+        raise InvalidResults('Node aggregate disagrees with complete successful cases')
+    return dict(total=total, passed=total, skipped=0, failed=0, leafCases=len(cases),
+                suiteContainers=len(containers), describeSuites=counters['suites'], cases=names)
