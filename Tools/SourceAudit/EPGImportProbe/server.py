@@ -46,5 +46,8 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == '__main__':
     p = argparse.ArgumentParser(); p.add_argument('root', type=Path); a = p.parse_args()
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler); server.root = a.root.resolve()
-    (server.root / 'port').write_text(str(server.server_port))
+    # Existence is the parent's readiness signal: publish only a complete value.
+    pending_port = server.root / 'port.pending'
+    pending_port.write_text(str(server.server_port))
+    pending_port.replace(server.root / 'port')
     server.serve_forever()
