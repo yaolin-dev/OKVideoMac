@@ -20,6 +20,27 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def validate_generated_test_configuration(project):
+    objects = project['objects']
+    targets = [item for item in objects.values()
+               if item.get('isa') == 'PBXNativeTarget' and item.get('name') == 'OKVideoMacTests']
+    if len(targets) != 1:
+        raise ValueError('Expected exactly one generated App test target')
+    configurations = objects[targets[0]['buildConfigurationList']]['buildConfigurations']
+    result = []
+    for identity in configurations:
+        configuration = objects[identity]
+        settings = configuration['buildSettings']
+        if (settings.get('PRODUCT_NAME') != 'OKVideoMacTests'
+                or settings.get('BUNDLE_LOADER') != '$(TEST_HOST)'
+                or settings.get('TEST_HOST') != '$(BUILT_PRODUCTS_DIR)/OKVideoMac.app/Contents/MacOS/OKVideoMac'):
+            raise ValueError('Generated test host configuration is incomplete; verify the pinned XcodeGen SettingPresets installation')
+        result.append(configuration['name'])
+    if set(result) != {'Debug', 'Release'} or len(result) != 2:
+        raise ValueError('Both generated test configurations must be validated')
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--work-dir', type=Path, required=True)
@@ -72,6 +93,9 @@ def main():
         sparkle = args.dependencies / 'Sparkle'
         run('prepare-sparkle', [sys.executable, project / 'Scripts/prepare-sparkle.py', '--output', sparkle])
         run('generate-project', [args.xcodegen, 'generate', '--spec', project / 'project.yml', '--project', project])
+        generated = json.loads(subprocess.check_output(['plutil', '-convert', 'json', '-o', '-',
+            project / 'OKVideoMac.xcodeproj/project.pbxproj'], text=True))
+        report['generatedTestConfigurations'] = validate_generated_test_configuration(generated)
         derived = args.work_dir / 'DerivedData'
         run('build-app', ['xcodebuild', '-project', project / 'OKVideoMac.xcodeproj', '-scheme', 'OKVideoMac',
             '-configuration', 'Release', '-sdk', 'macosx', '-destination', 'generic/platform=macOS', '-jobs', '2',

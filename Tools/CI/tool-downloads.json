@@ -21,7 +21,20 @@
         "url": "https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip",
         "sha256": "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806",
         "member": "xcodegen/bin/xcodegen",
-        "format": "zip"
+        "format": "zip",
+        "bundle": {
+          "prefix": "xcodegen",
+          "executable": "bin/xcodegen",
+          "requiredFiles": [
+            "bin/xcodegen",
+            "share/xcodegen/SettingPresets/base.yml",
+            "share/xcodegen/SettingPresets/Configs/debug.yml",
+            "share/xcodegen/SettingPresets/Configs/release.yml",
+            "share/xcodegen/SettingPresets/Platforms/macOS.yml",
+            "share/xcodegen/SettingPresets/Products/bundle.unit-test.yml",
+            "share/xcodegen/SettingPresets/Product_Platform/bundle.unit-test_macOS.yml"
+          ]
+        }
       }
     }
   }

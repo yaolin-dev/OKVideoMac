@@ -25,8 +25,8 @@ test name and reason in [core-allowed-skips.json](../Tools/CI/core-allowed-skips
 They cover existing opt-in/live/resource/worker paths; they are not passed tests.
 Empty suites, unexplained skips, missing completions, duplicates, test process
 errors and contradictory totals fail the check. Other test suites allow no skips.
-The 44 CI validator tests exercise malformed reports, missing work, failure,
-cancellation, skipped jobs, and Python fixture errors.
+The 51 CI validator tests exercise malformed reports, missing work, failure,
+cancellation, skipped jobs, Python fixture errors, complete tool installation and generated test-host configuration.
 
 Static checks parse tracked Python, JavaScript, shell and JSON inputs, run actionlint,
 require full commit SHA pins for Actions, reject workflow secret references and
@@ -43,6 +43,10 @@ branch-protection rule; repository protection settings were not changed.
 - Python 3.13.15, Node 22.23.0 and Temurin JDK 17.0.19+10 are selected explicitly.
 - actionlint 1.7.12 and XcodeGen 2.46.0 downloads must match the official archive
   SHA-256 values in [tool-downloads.json](../Tools/CI/tool-downloads.json).
+  XcodeGen must retain its official `bin/` and `share/xcodegen/SettingPresets/` layout.
+  The downloaded launcher executes the verified binary beside those resources;
+  version equality alone is insufficient. Before compilation, the App job validates
+  both generated test configurations, including `BUNDLE_LOADER` and `TEST_HOST`.
 - Android keeps Gradle 8.9, AGP 8.7.3, SDK platform 35 and build-tools 34.0.0 with
   the existing wrapper checksum and dependency locks. It does not load signing inputs.
 - Android/App builds copy only tracked regular files to a new directory outside
