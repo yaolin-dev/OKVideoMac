@@ -2,7 +2,7 @@
 
 ## 0.9.1 release candidate
 
-The local validation candidate uses `OKVideoMac-0.9.1.dmg`, `OKVideoMac-0.9.1-macOS-arm64.zip`, and `OKVideoMac-0.9.1-build180-SOURCE_RELEASE_INDEX.json`. Earlier local candidates used captured source snapshots. The formal release must be rebuilt from the exact clean main commit with package-app.sh --mode distribution --notarize --crash-config FILE, using the existing signing, source, SBOM, updater and publication gates. Local acceptance packages are not public release assets.
+The local validation candidate uses `OKVideoMac-0.9.1.dmg`, `OKVideoMac-0.9.1-macOS-arm64.zip`, and `OKVideoMac-0.9.1-build181-SOURCE_RELEASE_INDEX.json`. Earlier local candidates used captured source snapshots. The formal release must be rebuilt from the exact clean main commit with package-app.sh --mode distribution --notarize --crash-config FILE, using the existing signing, source, SBOM, updater and publication gates. Local acceptance packages are not public release assets.
 
 ## Published 0.9.0 identity
 
