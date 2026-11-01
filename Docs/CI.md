@@ -45,7 +45,7 @@ branch-protection rule; repository protection settings were not changed.
 
 ## Toolchain and isolation
 
-- macOS 14 arm64 runners select Xcode 16.2 / Swift 6.0.3. Linux jobs use Ubuntu 24.04.
+- macOS 15 arm64 runners select the same Xcode 16.2 / Swift 6.0.3. Linux jobs use Ubuntu 24.04.
 - Python 3.13.15, Node 22.23.0 and Temurin JDK 17.0.19+10 are selected explicitly.
 - actionlint 1.7.12 and XcodeGen 2.46.0 downloads must match the official archive
   SHA-256 values in [tool-downloads.json](../Tools/CI/tool-downloads.json).
@@ -71,6 +71,18 @@ relevant input hashes; only successful jobs on a `main` push save caches. Tests
 still run after a cache hit. Android explicitly reruns tasks without build-cache
 results. Toolchain/dependency upgrades must update the corresponding pins and
 verification evidence together.
+
+The November 1 publication-documentation runs on macOS 14 were cancelled before
+their Mac jobs started because of GitHub's scheduled image brownout. The
+[official retirement notice](https://github.com/actions/runner-images/issues/13518)
+sets November 2, 2026 as the removal date. Main now selects `macos-15`; its
+[official arm64 image inventory](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-arm64-Readme.md)
+still includes Xcode 16.2. The App and Core cache namespaces include `macos15`
+to prevent restoring older host caches. Test contracts, exact skip rules, tool
+versions and distribution/signing gates are unchanged. Cancelled jobs supply no
+test evidence and are not counted as passed. The successful release-commit runs
+above remain evidence for the immutable 0.9.1 binary; subsequent main CI validates
+the hosted-runner migration independently.
 
 ## Local commands
 

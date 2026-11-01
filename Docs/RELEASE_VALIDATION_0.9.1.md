@@ -37,6 +37,7 @@
 - 原生面板采用仅测试编译启用的透明几何标记定位真实控件并发送鼠标事件；桌面焦点阻断在用户解锁后完整复验，不计为通过或跳过。
 - 完成后的像素断言以 250 ms 有界等待接收 SwiftUI 下一帧；位置误差限制及等待阶段检查未放宽。独立原生位置和解码帧仍核对。
 - 媒体测试副本改在隔离构建目录签名，避开 File Provider 的 Finder 元数据；APK 工具超时保留原报告并重跑完整逻辑组。未弱化签名、公证或测试完成判定。
+- 公开后的文档提交遇到 GitHub macOS 14 计划停机，Mac 任务未启动即取消，未计为通过。[官方公告](https://github.com/actions/runner-images/issues/13518)说明该镜像于 2026-11-02 退役。后续 main 的 CI 改用仍包含 Xcode 16.2 的 macOS 15 arm64 镜像，并隔离 App/Core 旧宿主缓存；发布提交已成功的 CI、App 实现、版本、tag 和公证产物保持不变。迁移后的独立 CI 状态见 [CI 指南](CI.md)及工作流运行记录，不以旧结果代替。
 - 第三方真实网盘长时表现、HDR/4K60、macOS 12.5.1 历史 SwiftUI 弹窗及第三方符号／native provenance 边界继续保留。Android 依赖既有 Kotlin lint 元数据诊断仍被记录；Release 构建与 JVM 测试实际成功。不宣称新增完整 Sparkle 更新安装周期。
 
 ## 不可变公开资产
