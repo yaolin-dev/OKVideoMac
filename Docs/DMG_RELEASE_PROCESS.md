@@ -1,8 +1,12 @@
 # DMG Release Process
 
+## Published 0.9.1
+
+当前正式版本为 0.9.1（Build 182），tag `v0.9.1` 固定 `e9acb58a0017dc9989de3bc4347d0c0ffd39be6c`。Apple Notarization **Accepted** `73ea0575-e9a1-4dc2-84b6-86962f0543ce`；DMG/App staple、签名、Gatekeeper、安装及 16 项公开资产校验通过。最终 DMG SHA-256 `4f751e26ed97e36444733202edd68817f66a9b4b424cc7e2266ddb2831626780`；见[正式验证](RELEASE_VALIDATION_0.9.1.md)。
+
 ## Published 0.9.0
 
-当前正式版本为 0.9.0（Build 155），tag `v0.9.0` 固定 `4a69c5905cbb1717f86c84e7ac7f6b9d56956cdb`。通过现有干净 main distribution 流水线重建，Developer ID、38 项精确 Mach-O 清单／Hardened Runtime、Apple **Accepted** `433a4265-e3e9-4711-b25f-e82d9775ed03`、DMG／App staple、Gatekeeper、安装和全部 16 项草稿／公开资产下载核验均通过。DMG SHA-256 `e4aae1e3adb038ac48ff0a7228fab1c828977e1d23317fdbad85df8224dbc013`；见[正式验证](RELEASE_VALIDATION_0.9.0.md)。内部 ZIP 不作为公开下载，后续文档提交保留 tag 与已签名资产不变。
+历史正式版本为 0.9.0（Build 155），tag `v0.9.0` 固定 `4a69c5905cbb1717f86c84e7ac7f6b9d56956cdb`。通过现有干净 main distribution 流水线重建，Developer ID、38 项精确 Mach-O 清单／Hardened Runtime、Apple **Accepted** `433a4265-e3e9-4711-b25f-e82d9775ed03`、DMG／App staple、Gatekeeper、安装和全部 16 项草稿／公开资产下载核验均通过。DMG SHA-256 `e4aae1e3adb038ac48ff0a7228fab1c828977e1d23317fdbad85df8224dbc013`；见[正式验证](RELEASE_VALIDATION_0.9.0.md)。内部 ZIP 不作为公开下载，后续文档提交保留 tag 与已签名资产不变。
 
 ## Published 0.8.7
 

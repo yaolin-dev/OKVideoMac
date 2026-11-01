@@ -16,7 +16,7 @@ fixtures, not installation of the CI toolchain.
 | Node | All six `*.test.js` suites selected by `run_node.py`, using the Node test runner | 72 passed, no skips |
 | Offline audits and static checks | SourceAudit synthetic tests, crash configuration tests, tiny Mach-O/dSYM symbol gates, CI validator tests, static checks | 52 audit tests (including 7 native launcher cases), 15 crash configuration tests, 7 symbol cases; no skips |
 | Android Release JVM and unsigned bridge | Existing locked Gradle Release build and JVM tests in a fresh source copy; verify APK is unsigned | 65 JVM tests, no skips; compile-only APK |
-| Main App Release compile and critical flows | Verify unsigned App/helpers, then build an isolated ad-hoc signed Release test host and execute the logical user-flow contract | Three executables plus exact test identities from `Tools/CI/critical-user-flows.json`; zero allowed skips |
+| Main App Release compile and critical flows | Verify unsigned App/helpers, then build an isolated ad-hoc signed Release test host and execute the logical user-flow contract | Three executables and 102 critical tests passed; exact identities from `Tools/CI/critical-user-flows.json`; zero skips |
 | CI required | Aggregate the five job groups, including both Core matrix results | Only exact `success` for every group is accepted |
 
 Counts describe the checked baseline, not a target used to suppress new tests.
@@ -27,6 +27,12 @@ Empty suites, unexplained skips, missing completions, duplicates, test process
 errors and contradictory totals fail the check. Other test suites allow no skips.
 The 51 CI validator tests exercise malformed reports, missing work, failure,
 cancellation, skipped jobs, Python fixture errors, complete tool installation and generated test-host configuration.
+
+The published `v0.9.1` tag pins `e9acb58a0017dc9989de3bc4347d0c0ffd39be6c`.
+Both the [candidate run](https://github.com/yaolin-dev/OKVideoMac/actions/runs/41308881387)
+and [main run](https://github.com/yaolin-dev/OKVideoMac/actions/runs/41312795609)
+passed for that exact commit. Signing, notarization and final public download
+verification are recorded separately in [release validation](RELEASE_VALIDATION_0.9.1.md).
 
 Static checks parse tracked Python, JavaScript, shell and JSON inputs, run actionlint,
 require full commit SHA pins for Actions, reject workflow secret references and
@@ -224,5 +230,6 @@ proof for later changes.
 - Developer ID, Hardened Runtime, Apple Accepted notarization, staple, Gatekeeper,
   installation and public artifact/source integrity remain required by the
   [formal release process](SOURCE_RELEASE_PROCESS.md). CI success is not release
-  approval. These CI/test/documentation changes leave App 0.9.0 / Build 155 and its
-  existing signed release assets unchanged.
+  approval. App 0.9.1 / Build 182 separately passed these distribution gates; see
+  [formal validation](RELEASE_VALIDATION_0.9.1.md). Later documentation-only commits
+  preserve the tag, build-time source snapshot and signed assets.

@@ -1,8 +1,6 @@
 # OKVideoMac
 
-The current release candidate is **0.9.1 (Build 182)**. Resource-based history recovery; stable TMDB matching; 20-way search with local source ordering and automatic scroll loading; EPG cleanup and timestamp caching; lighter playback controls; scoped media proxy settings; and request-scoped Quark/CatPaw seek recovery. See [release notes](Docs/RELEASE_NOTES_0.9.1.md). Formal signing, notarization and publication are tracked in the release readiness record.
-
-The latest stable release is **0.9.0 (Build 155)** with reorganized Settings, conditional TMDB details, DASH, live previews and playback/stability repairs. Developer ID, Hardened Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, installation and all 16 public asset checks passed. See [release notes](Docs/RELEASE_NOTES_0.9.0.md) and [formal verification](Docs/RELEASE_VALIDATION_0.9.0.md).
+The latest stable release is **0.9.1 (Build 182)** with cloud-drive seek recovery, original-resource history, stable TMDB matching, 20-way search, EPG cleanup and lighter playback controls. Developer ID, Hardened Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, installation and all 16 public asset checks passed. See [release notes](Docs/RELEASE_NOTES_0.9.1.md) and [formal verification](Docs/RELEASE_VALIDATION_0.9.1.md).
 
 English | [简体中文](README_zh-CN.md)
 
@@ -18,7 +16,7 @@ selected TVBox/CatVod/CatPaw-style providers, and libmpv playback.**
 Built with Swift and SwiftUI/AppKit. Android is an optional compatibility layer
 for selected Java/Dex providers.
 
-The latest stable release is **0.9.0 (Build 155)**, Developer ID signed and Apple-notarized.
+The latest stable release is **0.9.1 (Build 182)**, Developer ID signed and Apple-notarized.
 
 **Native macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · Multi-provider Search · QuickJS/Node Spiders**
 
@@ -26,9 +24,9 @@ The latest stable release is **0.9.0 (Build 155)**, Developer ID signed and Appl
 
 ### [Download the latest stable release →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-**0.9.0 (Build 155)** · macOS 12.0+ · Apple Silicon (`arm64`) only.
+**0.9.1 (Build 182)** · macOS 12.0+ · Apple Silicon (`arm64`) only.
 
-Download the Developer ID signed and Apple-notarized [v0.9.0 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.9.0/OKVideoMac-0.9.0.dmg). Stapling, Gatekeeper, final DMG and fresh-install smoke checks passed.
+Download the Developer ID signed and Apple-notarized [v0.9.1 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.9.1/OKVideoMac-0.9.1.dmg). Stapling, Gatekeeper, final DMG and fresh-install smoke checks passed.
 
 Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to disable Gatekeeper or SIP. Checksums, release notes, source archives, SBOMs and notices accompany the release.
 
@@ -43,7 +41,7 @@ Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to disab
 - Add a media system-proxy preference, lightweight transport icons, bounded seek diagnostics and cancellation of stale cloud-drive reads.
 - Keep the Quark original-file buffering profile; adapt the pinned CatPaw Quark/UC/Ali download helper without changing other source packages.
 
-## New in 0.9.0
+## 0.9.0 history
 
 - Searchable Settings with progress, cancellation and clear results for source refresh, compatibility, cache, backup and diagnostics operations.
 - Original source details by default. Automatic TMDB details require a saved credential and working API/image connections; a compact native selector retains an explicit Original choice.

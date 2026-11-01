@@ -1,8 +1,6 @@
 # OKVideoMac
 
-当前发布候选为 **0.9.1（Build 182）**：包含原始资源历史恢复、TMDB 匹配保留、20 并发搜索与下拉自动加载、EPG 回收及时间解析优化、轻量播放控制、媒体系统代理设置，以及夸克和已适配 CatPaw 源的旧请求取消。详见[发布说明](Docs/RELEASE_NOTES_0.9.1.md)；正式签名、公证与公开状态以发布验证记录为准。
-
-当前稳定版本为 **0.9.0（Build 155）**，包含设置重整、按条件启用 TMDB 详情、DASH、直播预览及播放与稳定性修复。Developer ID、Hardened Runtime、Apple Notarization **Accepted**、staple、Gatekeeper、安装和全部 16 项公开资产核验通过。见[发布说明](Docs/RELEASE_NOTES_0.9.0.md)和[正式验证](Docs/RELEASE_VALIDATION_0.9.0.md)。
+最新稳定版本为 **0.9.1（Build 182）**，包含网盘快进、原始资源历史恢复、TMDB 匹配保留、20 并发搜索、EPG 回收和轻量播放控制。Developer ID、Hardened Runtime、Apple Notarization **Accepted**、staple、Gatekeeper、安装及全部 16 项公开资产核验通过。见[发布说明](Docs/RELEASE_NOTES_0.9.1.md)和[正式验证](Docs/RELEASE_VALIDATION_0.9.1.md)。
 
 [English](README.md) | 简体中文
 
@@ -18,7 +16,7 @@
 使用 Swift 和 SwiftUI/AppKit 构建。Android 是部分 Java/Dex Provider 按需使用的
 可选兼容层。
 
-最新稳定版本为 **0.9.0（Build 155）**，已完成 Developer ID 签名和 Apple 公证。
+最新稳定版本为 **0.9.1（Build 182）**，已完成 Developer ID 签名和 Apple 公证。
 
 **原生 macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · 多站搜索 · QuickJS/Node Spider**
 
@@ -26,15 +24,26 @@
 
 ### [下载最新稳定版本 →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-**0.9.0（Build 155）** · macOS 12.0+ · 仅支持 Apple Silicon（arm64）。
+**0.9.1（Build 182）** · macOS 12.0+ · 仅支持 Apple Silicon（arm64）。
 
-下载已签名、公证的 [v0.9.0 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.9.0/OKVideoMac-0.9.0.dmg)，Staple、Gatekeeper、最终 DMG 与全新安装 smoke 均通过。
+下载已签名、公证的 [v0.9.1 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.9.1/OKVideoMac-0.9.1.dmg)，Staple、Gatekeeper、最终 DMG 与全新安装 smoke 均通过。
 
 打开 DMG，将 `OKVideoMac.app` 拖入 Applications，无需关闭 Gatekeeper 或 SIP。校验和、发布说明、源码、许可证、SBOM 随发布提供。
 
 > 本项目是播放器与源客户端，不内置第三方内容源、账号、Cookie、解析服务或 DRM 密钥。
 
-## 0.9.0 新增与修复
+## 0.9.1 新增与修复
+
+- 按原始资源身份重新获取有效播放参数并恢复历史；失败或取消时保留进度。
+- TMDB 详情补全后保留正确匹配；演员作品与首页共用搜索结果界面，优先调度可见海报。
+- 搜索总并发及 Node／QuickJS／Android 分组上限均为 20；使用有界本地统计排序，下拉时自动加载后续结果。
+- 持续分批回收废弃 EPG 数据，缓存重复时间戳；播放时减少不必要的主界面、图片和节目单工作。
+- 新增媒体系统代理设置、轻量播放图标、有界快进诊断和失效网盘读取取消。
+- 保留夸克原文件缓冲策略；适配固定 CatPaw 源包的夸克／UC／阿里分段下载，不统一改变其他源的缓冲设置。
+
+详见[发布说明](Docs/RELEASE_NOTES_0.9.1.md)、[更新日志](CHANGELOG.md)和[正式验证](Docs/RELEASE_VALIDATION_0.9.1.md)。第三方源的实际速度取决于账号、网络与服务端，不承诺统一加速比例。
+
+## 0.9.0 历史新增与修复
 
 - 设置支持内容搜索；片源／直播更新、兼容检查、缓存、备份和诊断操作提供进度、取消与明确结果。
 - 默认使用原详情；仅保存有效凭据且 API／图片连接就绪时自动启用 TMDB。紧凑原生选择器保留“始终使用原详情”，切换时保留选集。

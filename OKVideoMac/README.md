@@ -1,13 +1,13 @@
 # OKVideoMac
 
-- 当前发布候选：0.9.1（Build 182），仅本地验收，尚未公开发布。
-- 目标 tag：`v0.9.1`，尚未创建；正式源码与产物以干净 main 提交及 source release index 绑定。
-- 本地 source release index：`OKVideoMac-0.9.1-build182-SOURCE_RELEASE_INDEX.json`。
-- 本轮说明见[发布说明](../Docs/RELEASE_NOTES_0.9.1.md)和[验收记录](../Docs/RELEASE_READINESS_0.9.1.md)。
+- 当前稳定版本：0.9.1（Build 182），已正式公开发布。
+- Tag：`v0.9.1`，固定准确 main 提交 `e9acb58a0017dc9989de3bc4347d0c0ffd39be6c`。
+- source release index：`OKVideoMac-0.9.1-build182-SOURCE_RELEASE_INDEX.json`。
+- 见[发布说明](../Docs/RELEASE_NOTES_0.9.1.md)及[正式验证](../Docs/RELEASE_VALIDATION_0.9.1.md)。
 
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于
 原生 Xtream、M3U/XMLTV、配置格式和运行时，而不是简单以 TVBox、FongMi、MiraPlay 或 CatPawOpen
-等生态名称判断。最新稳定版本为 **0.9.0（Build 155）**，支持
+等生态名称判断。最新稳定版本为 **0.9.1（Build 182）**，支持
 **arm64**，最低系统为 **macOS 12.0**。公开二进制通过 Developer ID 签名、Apple 公证、
 Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
@@ -16,11 +16,11 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
 ## 当前版本
 
-- 当前稳定版本：0.9.0（Build 155），包含设置、TMDB、DASH、直播预览、弹幕及稳定性修复。
-- Tag：`v0.9.0`，固定 release commit `4a69c5905cbb1717f86c84e7ac7f6b9d56956cdb`。
-- source release index：`OKVideoMac-0.9.0-build155-SOURCE_RELEASE_INDEX.json`。
+- 当前稳定版本：0.9.1（Build 182）
+- Tag：`v0.9.1`，固定 release commit `e9acb58a0017dc9989de3bc4347d0c0ffd39be6c`。
+- source release index：`OKVideoMac-0.9.1-build182-SOURCE_RELEASE_INDEX.json`。
 - Developer ID、Hardened Runtime、Apple Accepted、staple、Gatekeeper、安装及 16 项公开资产核验通过。
-- 见[发布说明](../Docs/RELEASE_NOTES_0.9.0.md)、[发布就绪](../Docs/RELEASE_READINESS_0.9.0.md)与[正式验证](../Docs/RELEASE_VALIDATION_0.9.0.md)。
+- 见[发布说明](../Docs/RELEASE_NOTES_0.9.1.md)和[正式验证](../Docs/RELEASE_VALIDATION_0.9.1.md)。
 - 设置保留使用偏好、内容来源、应用管理三组分类，采用原生列表和紧凑分组展示；主侧栏搜索随点播、直播、收藏、历史、设置切换范围。
 - 默认原详情；保存有效 TMDB 凭据且 API／图片连接就绪后才自动使用 TMDB。
 - 最低系统：macOS 12.0
@@ -36,7 +36,7 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 - 搜索框有文字时第一次 Esc 只清空并保持焦点，空框再次 Esc 才退出搜索
 - 0.6.0 历史另行执行的 4 项真实 Android 生命周期测试与 API 35 隔离矩阵通过；
   本轮正式收口不把这些历史实机结果冒充为重跑结果
-- 本轮完整测试与正式发布门禁见[发布就绪记录](../Docs/RELEASE_READINESS_0.9.0.md)；稳定更新保留既有 HTTPS feed 与用户确认流程，见[自动更新](../Docs/AUTOMATIC_UPDATES.md)。
+- 本轮完整测试与正式发布门禁见[发布就绪记录](../Docs/RELEASE_READINESS_0.9.1.md)；稳定更新保留既有 HTTPS feed 与用户确认流程，见[自动更新](../Docs/AUTOMATIC_UPDATES.md)。
 
 ## 0.8.7 正式发布
 

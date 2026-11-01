@@ -17,6 +17,7 @@
 - Use lightweight playback icons and consistent toolbar hover feedback; dismiss player panels on outside clicks and retain source/track/history controls.
 - Align Android Bridge host and APK versions at 0.3.54 (66), enforce the package contract and preserve authorization continuity.
 - Add credential-free CI for Core/Persistence Debug and Release, Node, offline/static, Android JVM and isolated App Release critical flows, with pinned tools and strict report validation. Pin the XCTest product/module names and all transitive C module maps and search paths explicitly so fresh Release test builds receive the required module maps without duplicating host package linkage; include module maps in reusable-build fingerprints. Install the complete SHA-verified XcodeGen distribution, including SettingPresets, and reject incomplete generated host settings before compilation.
+- Release **0.9.1 / Build 182** passed local Release/native regression and exact-commit GitHub CI, Developer ID / Hardened Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, desktop installation, and all 16 draft/public asset download checks. The stable feed and downloaded DMG signatures were independently verified. See [formal verification](Docs/RELEASE_VALIDATION_0.9.1.md) for checksums, failure handling and remaining limits.
 
 ## [0.9.0] - 2026-10-26
 
