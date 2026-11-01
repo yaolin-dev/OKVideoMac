@@ -338,12 +338,15 @@ Managed Runtime 安装与 Android Emulator Session 分开；安装和 Session �
 
 ## 发布完整性
 
-0.8.5 / Build 138 的正式 DMG、签名、公证、安装和 16 个公开资产通过核验，tag `v0.8.5` 固定 `b7fd9026bfee95d2d815dbb39e985225c3004e67`；见[正式验证](Docs/RELEASE_VALIDATION_0.8.5.md)。旧版本资产与 tag 保持不变。
+0.9.1 / Build 182 的正式 DMG、Developer ID／Hardened Runtime、Apple Notarization **Accepted**、staple、Gatekeeper、安装和全部 16 个公开资产通过核验。tag `v0.9.1` 固定 `e9acb58a0017dc9989de3bc4347d0c0ffd39be6c`；见[正式验证及 SHA-256](Docs/RELEASE_VALIDATION_0.9.1.md)。后续文档提交保留 tag、签名产物和构建时源码快照。
 
 ## 文档
 
-- [0.8.4 发布说明](Docs/RELEASE_NOTES_0.8.4.md)
-- [0.8.4 正式验证](Docs/RELEASE_VALIDATION_0.8.4.md)
+- [0.9.1 发布说明](Docs/RELEASE_NOTES_0.9.1.md)
+- [0.9.1 正式验证及校验和](Docs/RELEASE_VALIDATION_0.9.1.md)
+- [发布就绪记录](Docs/RELEASE_READINESS_0.9.1.md)
+- [对应源码发布流程](Docs/SOURCE_RELEASE_PROCESS.md)
+- [CI 与测试范围](Docs/CI.md)
 - [自动更新说明](Docs/AUTOMATIC_UPDATES.md)
 
 - [详细项目文档](OKVideoMac/README.md)

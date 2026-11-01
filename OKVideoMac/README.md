@@ -194,22 +194,22 @@ Android Compatibility 分类显示组件、缓存、用户数据和备份，并�
 
 ## 安装
 
-最新正式版本为 0.8.4（Build 137），已完成 Apple 公证。安装步骤：
+最新正式版本为 0.9.1（Build 182），已完成 Apple 公证。安装步骤：
 
-1. 只从本仓库 [v0.8.4 GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.4) 下载 macOS arm64 发布包；
-2. 打开 `OKVideoMac-0.8.4.dmg`；
+1. 只从本仓库 [v0.9.1 GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.9.1) 下载 macOS arm64 发布包；
+2. 打开 `OKVideoMac-0.9.1.dmg`；
 3. 将 `OKVideoMac.app` 移入 `/Applications`；
 4. 从 Applications 或 Finder 正常启动。
 
 不要使用来源不明或无法与本仓库发布哈希对应的第三方二进制。
 
-0.8.4（Build 137）的 DMG 与 Source Release 绑定到 tag `v0.8.4` 指向的 exact
+0.9.1（Build 182）的 DMG 与 Source Release 绑定到 tag `v0.9.1` 指向的 exact
 commit。最终公证并 Staple 后的 DMG SHA-256 由 GitHub Release 同名 `.sha256`
 文件提供。
 
 ### Gatekeeper 与 macOS 安全
 
-0.8.4（Build 137）正式 DMG 使用 Developer ID Application: Yao Lin
+0.9.1（Build 182）正式 DMG 使用 Developer ID Application: Yao Lin
 （KGG363ABK9）签名，启用 Hardened Runtime，并通过 Apple notarization、staple
 和 Gatekeeper 验证。安装和运行不需要关闭任何 macOS 安全机制。
 
@@ -344,27 +344,27 @@ Git tag 指向的 exact release commit 才是项目源码基准；不要把移�
 `master` 或 `latest` 当作对应源码。正式 Release 应同时提供并由统一
 `SHA256SUMS` 绑定：
 
-- source release index：`OKVideoMac-0.8.4-build137-SOURCE_RELEASE_INDEX.json`；
+- source release index：`OKVideoMac-0.9.1-build182-SOURCE_RELEASE_INDEX.json`；
 - binary-to-source mapping：
   [`Docs/BINARY_SOURCE_MAPPING.md`](../Docs/BINARY_SOURCE_MAPPING.md)；
 - binary/source manifest：
-  `OKVideoMac-0.8.4-build137-SOURCE_RELEASE_MANIFEST.json`；
-- hashes：`OKVideoMac-0.8.4-build137-SHA256SUMS`；
+  `OKVideoMac-0.9.1-build182-SOURCE_RELEASE_MANIFEST.json`；
+- hashes：`OKVideoMac-0.9.1-build182-SHA256SUMS`；
 - macOS SPDX / CycloneDX：`OKVideoMac-macOS.spdx.json`、
   `OKVideoMac-macOS.cdx.json`；
 - Android SPDX / CycloneDX：`OKVideoMac-Android.spdx.json`、
   `OKVideoMac-Android.cdx.json`；
-- exact APK：`OKVideoMac-0.8.4-AndroidDexBridge-release.apk`；
-- exact project source：`OKVideoMac-0.8.4-build137-source.tar.gz`；
+- exact APK：`OKVideoMac-0.9.1-AndroidDexBridge-release.apk`；
+- exact project source：`OKVideoMac-0.9.1-build182-source.tar.gz`；
 - third-party source package：
-  `OKVideoMac-0.8.4-build137-third-party-source.tar.gz`；
-- license package：`OKVideoMac-0.8.4-build137-licenses.tar.gz`；
-- macOS artifact：`OKVideoMac-0.8.4.dmg`；
+  `OKVideoMac-0.9.1-build182-third-party-source.tar.gz`；
+- license package：`OKVideoMac-0.9.1-build182-licenses.tar.gz`；
+- macOS artifact：`OKVideoMac-0.9.1.dmg`；
 - stable update feed：`appcast.xml`，签名绑定固定版本 DMG。
 
-Tag `v0.8.4` 已在最终干净 release commit 完成正式分发门禁后创建，并固定该提交。
+Tag `v0.9.1` 已在最终干净 release commit 完成正式分发门禁后创建，并固定该提交。
 本地验收快照不是正式 commit 身份；0.7.3 的已发布二进制、源码/发布说明快照与哈希保持不变。
-0.8.4 Build 137 文件清单与生成规则见
+0.9.1 Build 182 文件清单与生成规则见
 [`Docs/SOURCE_RELEASE_PROCESS.md`](../Docs/SOURCE_RELEASE_PROCESS.md)。Build 62/63
 发布准备阶段的历史工程状态保留在
 [Historical Build 62 Release Readiness Record](../Docs/IMMUTABLE_RELEASE_READINESS.md)。

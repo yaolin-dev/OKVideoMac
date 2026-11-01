@@ -376,12 +376,15 @@ checks; a local Debug compile is not a public release artifact.
 
 ## Release integrity
 
-The 0.8.5 / Build 138 DMG passed Release packaging, Developer ID, Apple Accepted, staple, Gatekeeper, installation and 16 public asset checks. Tag `v0.8.5` pins `b7fd9026bfee95d2d815dbb39e985225c3004e67`. See [verification](Docs/RELEASE_VALIDATION_0.8.5.md). Historical signed assets and tags remain unchanged.
+The 0.9.1 / Build 182 DMG passed Release packaging, Developer ID / Hardened Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, installation and all 16 public asset checks. Tag `v0.9.1` pins `e9acb58a0017dc9989de3bc4347d0c0ffd39be6c`. See [verification and SHA-256](Docs/RELEASE_VALIDATION_0.9.1.md). Later documentation commits preserve the tag, signed assets and build-time source snapshot.
 
 ## Documentation
 
-- [0.8.4 release notes](Docs/RELEASE_NOTES_0.8.4.md)
-- [0.8.4 release verification](Docs/RELEASE_VALIDATION_0.8.4.md)
+- [0.9.1 release notes](Docs/RELEASE_NOTES_0.9.1.md)
+- [0.9.1 release verification and checksums](Docs/RELEASE_VALIDATION_0.9.1.md)
+- [Release readiness](Docs/RELEASE_READINESS_0.9.1.md)
+- [Corresponding-source release process](Docs/SOURCE_RELEASE_PROCESS.md)
+- [CI and test coverage](Docs/CI.md)
 - [Automatic updates](Docs/AUTOMATIC_UPDATES.md)
 
 - [Detailed project documentation](OKVideoMac/README.md)

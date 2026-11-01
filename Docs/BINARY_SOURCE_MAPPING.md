@@ -1,4 +1,26 @@
-# OKVideoMac 0.8.0 (Build 130) Binary → Source Mapping
+# OKVideoMac Binary → Source Mapping
+
+## Published 0.9.1 (Build 182)
+
+The current release is pinned by `v0.9.1` to
+`e9acb58a0017dc9989de3bc4347d0c0ffd39be6c`. The public DMG,
+`OKVideoMac-0.9.1.dmg`, is hash-bound to the corresponding project source,
+third-party source, licenses, exact APK and SBOMs by
+`OKVideoMac-0.9.1-build182-SOURCE_RELEASE_MANIFEST.json` and
+`OKVideoMac-0.9.1-build182-SOURCE_RELEASE_INDEX.json`.
+The internal ZIP remains the binary identity carrier, not a public user download.
+All 16 public assets passed draft and anonymous download SHA-256 checks. See
+[release validation](RELEASE_VALIDATION_0.9.1.md) for the exact hashes and
+[source release process](SOURCE_RELEASE_PROCESS.md) for the complete asset set.
+
+The generated release manifest and lock files are authoritative for current
+component versions, hashes, patches and provenance. The 0.8.0 component table
+below is historical evidence; it does not describe later additions such as DASH,
+diagnostics SDKs or the current executable inventory. Previously recorded native
+provenance limitations remain explicit; no full bit-for-bit reproduction is claimed.
+Documentation-only commits do not change the release tag, binary or source archives.
+
+## Historical 0.8.0 (Build 130) mapping
 
 This document maps the notarized 0.8.0 (Build 130) release to source commit
 `b049b381db52b5bbbeec9cf58bf54a5bd50a4f39`, pinned by `v0.8.0`. The generated
