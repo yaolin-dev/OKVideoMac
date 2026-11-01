@@ -16,7 +16,7 @@
 - Add bounded numeric seek diagnostics, maintain 512 MiB poster disk storage, and retain source-scoped live-picture refresh with stop/retry and playback coordination.
 - Use lightweight playback icons and consistent toolbar hover feedback; dismiss player panels on outside clicks and retain source/track/history controls.
 - Align Android Bridge host and APK versions at 0.3.54 (66), enforce the package contract and preserve authorization continuity.
-- Add credential-free CI for Core/Persistence Debug and Release, Node, offline/static, Android JVM and isolated App Release critical flows, with pinned tools and strict report validation.
+- Add credential-free CI for Core/Persistence Debug and Release, Node, offline/static, Android JVM and isolated App Release critical flows, with pinned tools and strict report validation. Pin the XCTest product and module names explicitly for fresh Release test builds.
 
 ## [0.9.0] - 2026-10-26
 

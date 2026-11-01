@@ -18393,7 +18393,7 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testAndroidBridgeContractMatchesBundledAPKGradleAndHealth() throws {
+    func testAndroidBridgeContractMatchesBundledAPKGradleAndHealth() async throws {
         let apk = try XCTUnwrap(
             Bundle.main.url(
                 forResource: "AndroidDexBridge-release",
@@ -18401,7 +18401,7 @@ final class OKVideoMacTests: XCTestCase {
             ),
             "测试宿主必须包含实际交付的 Android Bridge APK"
         )
-        let badging = try androidAAPTBadging(for: apk)
+        let badging = try await androidAAPTBadging(for: apk)
         let packageLine = try XCTUnwrap(
             badging.split(whereSeparator: \.isNewline)
                 .map(String.init)
@@ -18457,7 +18457,7 @@ final class OKVideoMacTests: XCTestCase {
         return URL(fileURLWithPath: path)
     }
 
-    private func androidAAPTBadging(for apk: URL) throws -> String {
+    private func androidAAPTBadging(for apk: URL) async throws -> String {
         let environment = ProcessInfo.processInfo.environment
         let roots = [
             environment["ANDROID_SDK_ROOT"],
@@ -18483,17 +18483,35 @@ final class OKVideoMacTests: XCTestCase {
             "验证实际 APK 版本需要 Android SDK build-tools/aapt"
         )
         let process = Process()
-        let output = Pipe()
+        let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("aapt-badging-\(UUID().uuidString).log")
+        FileManager.default.createFile(atPath: outputURL.path, contents: nil)
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        let output = try FileHandle(forWritingTo: outputURL)
+        defer { try? output.close() }
         process.executableURL = executable
         process.arguments = ["dump", "badging", apk.path]
+        // SDK tools must not inherit XCTest's injected runtime libraries.
+        process.environment = environment.filter { !$0.key.hasPrefix("DYLD_") && !$0.key.hasPrefix("XCTest") }
         process.standardOutput = output
         process.standardError = output
         try process.run()
-        // aapt badging can exceed the pipe buffer. Drain while the child is
-        // running; waiting first can deadlock the complete Xcode test suite.
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        let text = String(decoding: data, as: UTF8.self)
+        // Yield the test executor while waiting for termination; synchronous
+        // pipe EOF/waitUntilExit can stall Foundation's process notifications.
+        let deadline = ProcessInfo.processInfo.systemUptime + 15
+        while process.isRunning {
+            if Task.isCancelled || ProcessInfo.processInfo.systemUptime >= deadline {
+                process.terminate()
+                for _ in 0..<20 where process.isRunning {
+                    try? await Task.sleep(nanoseconds: 25_000_000)
+                }
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+                throw NSError(domain: "APKContractTool", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "aapt did not finish within its bounded deadline"])
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try output.close()
+        let text = try String(contentsOf: outputURL, encoding: .utf8)
         XCTAssertEqual(process.terminationStatus, 0, text)
         return text
     }
