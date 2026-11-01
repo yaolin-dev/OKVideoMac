@@ -51,7 +51,7 @@ def source_fingerprint(project):
     for folder in ['App', 'Features', 'Engines', 'Player', 'Tests', 'Packages', 'Supporting', 'Resources']:
         files.extend(p for p in (project / folder).rglob('*') if p.is_file()
                      and not any(part.startswith('.') for part in p.relative_to(project).parts)
-                     and p.suffix in {'.swift', '.m', '.h', '.xcstrings', '.plist', '.entitlements'})
+                     and p.suffix in {'.swift', '.m', '.h', '.modulemap', '.xcstrings', '.plist', '.entitlements'})
     digest = hashlib.sha256()
     for path in sorted(set(files)):
         digest.update(str(path.relative_to(project)).encode() + b'\0')

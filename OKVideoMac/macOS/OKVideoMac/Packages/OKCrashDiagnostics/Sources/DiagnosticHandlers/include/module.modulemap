@@ -1,0 +1,4 @@
+module DiagnosticHandlers {
+    umbrella header "DiagnosticHandlers.h"
+    export *
+}

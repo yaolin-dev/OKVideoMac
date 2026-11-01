@@ -23,7 +23,7 @@ settings:
     CLANG_ENABLE_MODULES: true
     MARKETING_VERSION: 0.9.1
     OKVIDEOMAC_APP_BUNDLE_IDENTIFIER: com.okvideomac.OKVideoMac
-    CURRENT_PROJECT_VERSION: 181
+    CURRENT_PROJECT_VERSION: 182
     OKVIDEOMAC_SPARKLE_ROOT: $(SRCROOT)/Vendor/Build/Sparkle
     OKVIDEOMAC_CRASH_REPORT_DSN: ""
     OKVIDEOMAC_UPDATE_FEED_URL: ""
@@ -290,13 +290,14 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.okvideomac.OKVideoMacTests
         PRODUCT_NAME: OKVideoMacTests
         PRODUCT_MODULE_NAME: OKVideoMacTests
-        # Host-linked Swift modules expose these system C imports. Keep their
+        # Host-linked Swift modules expose these C imports. Keep their
         # module maps visible in a fresh test build without linking the host's
         # static Swift Package products into the test bundle a second time.
         SWIFT_INCLUDE_PATHS:
           - $(inherited)
           - $(SRCROOT)/Packages/OKVideoKit/Sources/CZlib
           - $(SRCROOT)/Packages/OKVideoKit/Sources/CSQLite
+          - $(SRCROOT)/Packages/OKCrashDiagnostics/Sources/DiagnosticHandlers/include
         GENERATE_INFOPLIST_FILE: true
 
 schemes:

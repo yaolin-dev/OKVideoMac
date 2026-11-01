@@ -68,6 +68,13 @@ class AppRegressionReportTests(unittest.TestCase):
             (project / 'Build').mkdir()
             (project / 'Build/Generated.swift').write_text('build output')
             self.assertEqual(third, source_fingerprint(project))
+            module = project / 'Packages/Fixture/include/module.modulemap'
+            module.parent.mkdir(parents=True)
+            module.write_text('module Fixture { export * }')
+            fourth = source_fingerprint(project)
+            self.assertNotEqual(third, fourth)
+            module.write_text('module ChangedFixture { export * }')
+            self.assertNotEqual(fourth, source_fingerprint(project))
 
     def testPublicOrCachedDifferentHostIsRejectedBeforeLaunch(self):
         info = {'CFBundleIdentifier': 'com.okvideomac.OKVideoMac.regression'}

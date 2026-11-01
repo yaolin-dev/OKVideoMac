@@ -1,6 +1,6 @@
-# OKVideoMac 0.9.1（Build 181）Release Notes
+# OKVideoMac 0.9.1（Build 182）Release Notes
 
-本版汇总 0.9.0 之后的播放、历史、搜索、TMDB、直播节目单和资源调度修复。Build 181 显式固定测试目标的产品名、Swift 模块名及系统 C 模块搜索路径，修复全新 CI 宿主的模块名和 CZlib 模块映射缺失；APK 核验使用隔离环境、异步等待和有界子进程超时。
+本版汇总 0.9.0 之后的播放、历史、搜索、TMDB、直播节目单和资源调度修复。Build 182 显式固定测试目标的产品名、Swift 模块名及完整 C 模块映射/搜索路径，修复全新 CI 宿主的模块名及 CZlib/CSQLite/DiagnosticHandlers 模块可见性问题；APK 核验使用隔离环境、异步等待和有界子进程超时。
 
 ## 播放与网盘
 
